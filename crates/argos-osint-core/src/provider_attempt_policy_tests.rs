@@ -200,7 +200,7 @@ async fn reasoning_effort_reaches_the_wire_with_reserve() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unsupported_option_is_learned_and_resent_once() {
+async fn unsupported_option_is_learned_and_proposed_as_recovery() {
     let reject = Reply::Json(
         400,
         r#"{"error":{"message":"Invalid value for reasoning_effort: 'medium' is not supported"}}"#
@@ -212,18 +212,28 @@ async fn unsupported_option_is_learned_and_resent_once() {
         "nvidia",
         "nvidia/nemotron-3-ultra-550b-a55b",
     );
+    // One transport call is exactly one HTTP request: no hidden resend.
+    let report = send(&secret, &policy(ReasoningEffort::Efficient)).await;
+    assert!(report.outcome.is_err());
+    assert_eq!(server.hits(), 1);
+    assert!(report
+        .recovery
+        .as_deref()
+        .is_some_and(|r| r.contains("reasoning_effort=medium")));
+    assert!(report
+        .policy_diagnostics
+        .iter()
+        .any(|d| d.contains("reasoning_effort=medium rejected")));
+    // The executor's recovery dispatch recompiles without the value.
     let report = send(&secret, &policy(ReasoningEffort::Efficient)).await;
     assert!(report.outcome.is_ok(), "{:?}", report.outcome.err());
+    assert!(report.recovery.is_none());
     assert_eq!(server.hits(), 2);
     let requests = server.requests.lock().unwrap().clone();
     assert_eq!(body_of(&requests[0])["reasoning_effort"], "medium");
     let resent = body_of(&requests[1]);
     assert!(resent.get("reasoning_effort").is_none());
     assert!(resent.get("max_tokens").is_some(), "ceiling never removed");
-    assert!(report
-        .policy_diagnostics
-        .iter()
-        .any(|d| d.contains("reasoning_effort=medium rejected")));
     // The next dispatch skips that value before sending, but the field's
     // other valid values remain usable.
     let report = send(&secret, &policy(ReasoningEffort::Efficient)).await;
@@ -257,6 +267,7 @@ async fn unrelated_400_is_not_retried() {
     )
     .await;
     assert!(report.outcome.is_err());
+    assert!(report.recovery.is_none(), "unknown 400 proposes nothing");
     assert_eq!(server.hits(), 1);
 }
 

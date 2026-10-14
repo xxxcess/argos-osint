@@ -191,3 +191,41 @@ Native Nvidia or Google fields are never sent through OpenRouter, and no tempera
 | `models/gemini-3.8-flash` | Google native schema; thinking `low` minimum |
 | `models/gemma-4-26b-a4b-it` | Google native; local JSON validation; `minimal`/`high` thinking |
 | Nvidia Super / Ultra / Lightning / DeepSeek | Hosted chat; effort data as above; locally validated JSON |
+
+## Operation wire budget and bounded recovery
+
+One transport call sends exactly one HTTP request. When a provider rejects an optional `field=value` it names (for example `response_format=json_schema`), `provider_attempt` learns that value for the route and returns a typed recovery proposal. It never resends. The executor (`provider_chain::execute_with_context`) decides whether the operation's budget allows a recompiled dispatch. It applies no backoff, because the request itself changes. An unknown 400 gets no proposal and is not guessed to be transient.
+
+Interactive operations (an open Intel brief, brief-owned cleanup and fidelity) run under `WireBudget::INTERACTIVE`:
+
+- every eligible route keeps its reserved initial dispatch;
+- at most two dispatches go to any one route, and only the primary gets a transient retry (one);
+- output repair and unsupported-option recovery draw from a shared allowance of two extra dispatches.
+
+A four-route chain therefore sends at most six requests. Other callers keep the ordinary 4/3 retry policy. Each dispatch receives a `DispatchContext` that carries its admission queue time, the backoff it actually waited (shorter when cancelled) and its wire index. Admission polling counts as queue time and is never recorded as retry backoff. Attempt rows record the real backoff in `wait_ms`, along with prompt and completion tokens whenever the adapter reports usage. Reasoning tokens, visible tokens and cost go into the attempt telemetry.
+
+At stage admission, each route's capabilities are resolved once (`provider_capabilities::admit`). Admission also starts a coalesced 24-hour background catalog refresh when the cached entry is missing or stale. The snapshot's digest is stored in the attempt's `declaration_json` (`capability_digests`). A refresh that finishes mid-operation cannot change an in-flight request. Only observed rejections, which can only narrow what is sent, are merged in for a recovery recompile.
+
+## Stage budget table
+
+`request_policy::StageBudget` rows (spec §5). The answer target is the total ceiling when thinking is off. Thinking and visible output share the thinking ceiling, and no hidden reserve is added.
+
+| Operation | Answer target | Ceiling with thinking | Reasoning |
+| --- | --- | --- | --- |
+| Cleanup chat fallback | 512 | 2048 (mandatory thinking) | Off |
+| Claims | 2048 | 4096 | Off (Flash: `low`) |
+| Extraction fidelity | 1024 | 3072 | Off |
+| Inferences | 3072 | 4096 with an enforced 1024 reasoning budget, otherwise 6144 | Efficient (NU `medium`, Flash `low`) |
+| Inference support | 1024 | 3072 | Off |
+| Links | 1536 | 3584 | Off |
+
+Jev gets no chat parameters. Claims, Inferences and Links send their `brief_contracts` schema as the response contract: a strict schema where confirmed, otherwise the forced `submit_result` output tool, otherwise JSON mode or validated text. The compact limits sentence goes into the prompt. Output-tool arguments are validated exactly like content.
+
+## Canonical Jev decisions
+
+`BlockDecisions` (cleanup) and `FidelityDecisions` (brief fidelity) build a canonical `DecisionContract` and `DecisionState` and compile through `investigation::decisions::compile_native`. State stays minimal: empty sections are omitted, and each item is addressed by field path, for example ``items.item_0``. Contracts are validated before any network access. A malformed contract fails with zero requests.
+
+- Choice: an option map of 2–255 options. The winning probability is `probabilities[choice]` and confidence is kept separately. Confidence never stands in for probability.
+- Noul: optional `{true,false}` descriptions. `noul` is P(yes); a "no" answer carries 1 − p.
+- Score: an ordered array of 2–10 level descriptions, with no range or option object. The native probability-weighted level is zero-based. It maps linearly onto the application scale `min..=max` and is kept fractional (`score_value`). It is rounded only for the legacy display (`score`).
+- Answer types, distribution keys, bounds and sums are all validated. Chat fallbacks return validated labels with no fabricated probabilities, and `ContractAdapter::parse_chat_as` reports the structured mode that actually ran.

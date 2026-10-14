@@ -74,6 +74,8 @@ struct Seen {
     system: String,
     tokens: u32,
     reasoning: crate::request_policy::ReasoningEffort,
+    budget: crate::request_policy::StageBudget,
+    contract: Option<crate::provider_adapters::ResponseContract>,
 }
 
 #[derive(Default)]
@@ -213,6 +215,8 @@ impl StageBackend for Mock {
                 system: request.system.clone(),
                 tokens: request.completion_tokens,
                 reasoning: request.reasoning,
+                budget: request.budget,
+                contract: request.contract.clone(),
             });
             if self.hang.contains(&request.stage) {
                 loop {
@@ -300,13 +304,36 @@ async fn one_chain_ordered_dispatch_scoped_inputs_and_no_repeat_requests() {
         seen.iter().map(|s| s.tokens).collect::<Vec<_>>(),
         [2048, 3072, 1536]
     );
-    // §2 request policy: extraction/linking low effort, inference default.
+    // §5 stage budget table: Claims/Links thinking off, Inferences efficient.
     {
-        use crate::request_policy::ReasoningEffort::{Default, Low};
+        use crate::request_policy::ReasoningEffort::{Efficient, Off};
         assert_eq!(
             seen.iter().map(|s| s.reasoning).collect::<Vec<_>>(),
-            [Low, Default, Low]
+            [Off, Efficient, Off]
         );
+        assert_eq!(
+            seen.iter()
+                .map(|s| (s.budget.answer, s.budget.thinking))
+                .collect::<Vec<_>>(),
+            [(2048, 4096), (3072, 6144), (1536, 3584)]
+        );
+        assert_eq!(seen[1].budget.reasoning_budget, Some(1024));
+        assert_eq!(seen[1].budget.budgeted_ceiling, Some(4096));
+    }
+    // Every generation stage carries its authoritative schema, and the
+    // compact limit text rides in the prompt.
+    for (s, name) in seen
+        .iter()
+        .zip(["brief_claims", "brief_inferences", "brief_leads"])
+    {
+        match &s.contract {
+            Some(crate::provider_adapters::ResponseContract::GeneratedJson {
+                name: n,
+                schema: Some(_),
+            }) => assert_eq!(n, name),
+            other => panic!("{name}: missing schema contract {other:?}"),
+        }
+        assert!(s.system.contains(" Limits: "), "{name} limits text");
     }
     // Claims: title/description only.
     assert!(seen[0].user.contains("Unions denied"));

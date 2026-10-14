@@ -155,3 +155,54 @@ fn cache_round_trips_through_app_state_and_coalesces_refreshes() {
     end_refresh(&key);
     forget_memory_cache();
 }
+
+#[test]
+fn admission_snapshot_is_immune_to_a_later_refresh_but_takes_observed_rejections() {
+    let base = "https://snapshot.example/api/v1";
+    let secret = crate::secrets::ProviderSecret {
+        kind: "openrouter".into(),
+        model: "snap/model:free".into(),
+        base_url: base.into(),
+        api_key: Some("fixture-only".into()),
+        stt_model: None,
+        device: None,
+    };
+    let snapshot = admit(&secret, None);
+    let before = snapshot.digest();
+    // A background refresh lands mid-operation.
+    let key = cache_key(
+        AdapterId::OpenRouter,
+        base,
+        ApiDialect::Chat,
+        "snap/model:free",
+        None,
+    );
+    store_cached(
+        None,
+        &key,
+        &CachedEvidence {
+            evidence: CatalogEvidence {
+                supported_parameters: vec!["response_format".into(), "structured_outputs".into()],
+                ..CatalogEvidence::default()
+            },
+            fetched_at: 2_000,
+        },
+    )
+    .unwrap();
+    assert_eq!(snapshot.digest(), before, "in-flight snapshot unchanged");
+    assert_ne!(
+        admit(&secret, None).digest(),
+        before,
+        "next admission sees it"
+    );
+    // Observed rejections still narrow the snapshot for recovery.
+    learn_rejection(
+        AdapterId::OpenRouter,
+        base,
+        "snap/model:free",
+        "response_format",
+        "json_object",
+    );
+    let narrowed = with_observed(snapshot, base, "snap/model:free");
+    assert!(narrowed.is_rejected("response_format", "json_object"));
+}

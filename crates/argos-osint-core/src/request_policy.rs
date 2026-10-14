@@ -51,6 +51,10 @@ pub struct RequestPolicy {
     /// budget field. Advisory unless the endpoint enforces it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_budget: Option<u32>,
+    /// Tighter total ceiling used only when `reasoning_budget` is sent to an
+    /// endpoint that enforces it (spec §5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budgeted_ceiling: Option<u32>,
     /// Ask for JSON output (strict schema / output tool / JSON mode, as the
     /// selected model supports).
     pub json_object: bool,
@@ -112,3 +116,55 @@ pub fn rejected_options(
         })
         .collect()
 }
+
+/// One row of the stage budget table (spec §5). Thinking and visible output
+/// share the total ceiling; no hidden reserve is added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StageBudget {
+    /// Visible answer target = total ceiling when thinking is off.
+    pub answer: u32,
+    /// Total ceiling when the model thinks (mandatory or requested).
+    pub thinking: u32,
+    pub reasoning: ReasoningEffort,
+    pub reasoning_budget: Option<u32>,
+    pub budgeted_ceiling: Option<u32>,
+}
+
+impl StageBudget {
+    const fn new(answer: u32, thinking: u32, reasoning: ReasoningEffort) -> Self {
+        Self {
+            answer,
+            thinking,
+            reasoning,
+            reasoning_budget: None,
+            budgeted_ceiling: None,
+        }
+    }
+
+    /// The request policy for this stage.
+    pub fn policy(&self, json_object: bool) -> RequestPolicy {
+        RequestPolicy {
+            max_output_tokens: Some(self.answer),
+            thinking_ceiling: Some(self.thinking),
+            reasoning_budget: self.reasoning_budget,
+            budgeted_ceiling: self.budgeted_ceiling,
+            json_object,
+            reasoning: self.reasoning,
+        }
+    }
+}
+
+/// Stage budget table (spec §5). Off means "no thinking" where the model can
+/// disable it; mandatory-thinking models (Flash: `low`) use `thinking`.
+pub const CLEANUP_FALLBACK_BUDGET: StageBudget = StageBudget::new(512, 2048, ReasoningEffort::Off);
+pub const CLAIMS_BUDGET: StageBudget = StageBudget::new(2048, 4096, ReasoningEffort::Off);
+pub const FIDELITY_BUDGET: StageBudget = StageBudget::new(1024, 3072, ReasoningEffort::Off);
+pub const INFERENCES_BUDGET: StageBudget = StageBudget {
+    answer: 3072,
+    thinking: 6144,
+    reasoning: ReasoningEffort::Efficient,
+    reasoning_budget: Some(1024),
+    budgeted_ceiling: Some(4096),
+};
+pub const SUPPORT_BUDGET: StageBudget = StageBudget::new(1024, 3072, ReasoningEffort::Off);
+pub const LINKS_BUDGET: StageBudget = StageBudget::new(1536, 3584, ReasoningEffort::Off);

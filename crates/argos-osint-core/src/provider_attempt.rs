@@ -153,6 +153,22 @@ pub struct AttemptReport {
     pub policy_diagnostics: Vec<String>,
     /// Compiled adapter/dialect/structured mode/ceilings actually requested.
     pub effective: Option<crate::provider_adapters::EffectivePolicy>,
+    /// Typed recovery proposal (spec §7): the provider rejected a specific
+    /// optional `field=value`; it was learned, and a recompile from the same
+    /// contract would differ. The *executor* decides whether its wire budget
+    /// allows that dispatch — this attempt never resends on its own.
+    pub recovery: Option<String>,
+}
+
+/// Admission-time options for one wire request.
+#[derive(Clone, Copy, Default)]
+pub struct AttemptSpec<'a> {
+    pub observer: Option<&'a (dyn Fn(&str) + Send + Sync)>,
+    pub progress: Option<&'a ProgressFn>,
+    pub contract: Option<&'a crate::provider_adapters::ResponseContract>,
+    /// Capability snapshot captured at stage admission; observed rejections
+    /// are merged on top. `None` resolves at call time.
+    pub caps: Option<&'a crate::provider_capabilities::ResolvedCapabilities>,
 }
 
 /// Is this connection served by a subprocess rather than HTTP?
@@ -265,6 +281,38 @@ async fn attempt_options(
     policy: &RequestPolicy,
     contract: Option<&crate::provider_adapters::ResponseContract>,
 ) -> AttemptReport {
+    attempt_spec(
+        secret,
+        messages,
+        transport,
+        deadlines,
+        policy,
+        AttemptSpec {
+            observer,
+            progress,
+            contract,
+            caps: None,
+        },
+    )
+    .await
+}
+
+/// One wire request with an explicit admission spec. Exactly one HTTP
+/// request is sent; recovery is reported, never performed here.
+pub async fn attempt_spec(
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    transport: Transport,
+    deadlines: Deadlines,
+    policy: &RequestPolicy,
+    spec: AttemptSpec<'_>,
+) -> AttemptReport {
+    let AttemptSpec {
+        observer,
+        progress,
+        contract,
+        caps,
+    } = spec;
     let started = Instant::now();
     let kind = provider::effective_kind(secret);
     let endpoint = format!(
@@ -308,6 +356,7 @@ async fn attempt_options(
                 vec!["unsupported-policy:subscription transport".into()]
             },
             effective: None,
+            recovery: None,
         };
     }
     let fallback_contract = crate::provider_adapters::ResponseContract::from_policy(policy);
@@ -316,6 +365,7 @@ async fn attempt_options(
     let mut stream_state = StreamState::default();
     let mut policy_diagnostics = Vec::new();
     let mut effective = None;
+    let mut recovery = None;
     let mut endpoint = endpoint;
     let outcome = run(
         secret,
@@ -332,6 +382,8 @@ async fn attempt_options(
         contract,
         &mut policy_diagnostics,
         &mut effective,
+        caps,
+        &mut recovery,
     )
     .await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -350,6 +402,7 @@ async fn attempt_options(
             f
         }),
         policy_diagnostics,
+        recovery,
     }
 }
 
@@ -369,6 +422,8 @@ async fn run(
     contract: &crate::provider_adapters::ResponseContract,
     diagnostics: &mut Vec<String>,
     effective: &mut Option<crate::provider_adapters::EffectivePolicy>,
+    admitted: Option<&crate::provider_capabilities::ResolvedCapabilities>,
+    recovery: &mut Option<String>,
 ) -> Result<Completion, ProviderFailure> {
     use crate::provider_adapters as adapters;
     let kind = provider::effective_kind(secret);
@@ -378,67 +433,69 @@ async fn run(
         .map_err(|e| {
             ProviderFailure::from_error(Stage::Configuration, Category::Configuration, &e)
         })?;
-    // Phase-1 compatibility: one scoped recovery after a rejected optional
-    // option (learned by field AND value), recompiled from the same contract.
-    // The contextual executor takes this over with an explicit wire budget.
-    let mut resent = false;
-    loop {
-        let caps = crate::provider_capabilities::for_secret(secret);
-        // Compile before any network access: a decision-only or non-text
-        // target fails here with zero dispatched requests.
-        let compiled = adapters::compile(
-            secret,
-            &adapters::OperationRequest {
-                messages,
-                tools: &[],
-                contract,
-                policy,
-                stream: transport == Transport::Stream,
-            },
-            &caps,
-        )
-        .map_err(|e| e.into_failure(&kind, &secret.model))?;
-        *endpoint = compiled.endpoint.clone();
-        diagnostics.extend(compiled.effective.diagnostics.iter().cloned());
-        *effective = Some(compiled.effective.clone());
-        let result = send_once(
-            &client, secret, &compiled, transport, deadlines, started, first_ms, state, observer,
-            progress,
-        )
-        .await;
-        match result {
-            Err(f) if !resent && matches!(f.http_status, Some(400 | 422)) => {
-                let message = format!(
-                    "{} {} {}",
-                    f.message,
-                    f.provider_message.as_deref().unwrap_or(""),
-                    f.provider_code.as_deref().unwrap_or("")
+    let caps = match admitted {
+        Some(snapshot) => crate::provider_capabilities::with_observed(
+            snapshot.clone(),
+            &secret.base_url,
+            &secret.model,
+        ),
+        None => crate::provider_capabilities::for_secret(secret),
+    };
+    // Compile before any network access: a decision-only or non-text
+    // target fails here with zero dispatched requests.
+    let compiled = adapters::compile(
+        secret,
+        &adapters::OperationRequest {
+            messages,
+            tools: &[],
+            contract,
+            policy,
+            stream: transport == Transport::Stream,
+        },
+        &caps,
+    )
+    .map_err(|e| e.into_failure(&kind, &secret.model))?;
+    *endpoint = compiled.endpoint.clone();
+    diagnostics.extend(compiled.effective.diagnostics.iter().cloned());
+    *effective = Some(compiled.effective.clone());
+    let result = send_once(
+        &client, secret, &compiled, transport, deadlines, started, first_ms, state, observer,
+        progress,
+    )
+    .await;
+    if let Err(f) = &result {
+        if matches!(f.http_status, Some(400 | 422)) {
+            let message = format!(
+                "{} {} {}",
+                f.message,
+                f.provider_message.as_deref().unwrap_or(""),
+                f.provider_code.as_deref().unwrap_or("")
+            );
+            let rejected =
+                crate::request_policy::rejected_options(&compiled.effective.sent, &message);
+            // Unknown 400: no proposal, no speculative resend.
+            let mut learned = Vec::new();
+            for i in rejected {
+                let o = &compiled.effective.sent[i];
+                crate::provider_capabilities::learn_rejection(
+                    compiled.adapter,
+                    &secret.base_url,
+                    &secret.model,
+                    &o.field,
+                    &o.value,
                 );
-                let rejected =
-                    crate::request_policy::rejected_options(&compiled.effective.sent, &message);
-                if rejected.is_empty() {
-                    // Unknown 400: no speculative same-route resend.
-                    return Err(f);
-                }
-                for i in rejected {
-                    let o = &compiled.effective.sent[i];
-                    crate::provider_capabilities::learn_rejection(
-                        compiled.adapter,
-                        &secret.base_url,
-                        &secret.model,
-                        &o.field,
-                        &o.value,
-                    );
-                    diagnostics.push(format!(
-                        "unsupported-policy:{}={} rejected; resent without it",
-                        o.field, o.value
-                    ));
-                }
-                resent = true;
+                diagnostics.push(format!(
+                    "unsupported-policy:{}={} rejected; recovery proposed",
+                    o.field, o.value
+                ));
+                learned.push(format!("{}={}", o.field, o.value));
             }
-            other => return other,
+            if !learned.is_empty() {
+                *recovery = Some(format!("unsupported option {}", learned.join(", ")));
+            }
         }
     }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -100,6 +100,11 @@ pub struct DispatchError {
     pub cancelled: bool,
     pub disposition: RetryDisposition,
     pub failure: Option<crate::provider_diag::ProviderFailure>,
+    /// Typed recovery proposal (spec §7): the dispatch may be recompiled and
+    /// sent once more on the same route *without backoff* (unsupported-option
+    /// recovery or one output repair). It overrides `disposition` but always
+    /// consumes the operation wire budget.
+    pub recovery: Option<String>,
 }
 
 impl DispatchError {
@@ -110,11 +115,18 @@ impl DispatchError {
             cancelled: false,
             disposition: RetryDisposition::RetryRoute,
             failure: None,
+            recovery: None,
         }
     }
 
     pub fn with_retry_after(mut self, duration: Duration) -> Self {
         self.retry_after = Some(duration);
+        self
+    }
+
+    /// Mark this failure as recoverable on the same route (see `recovery`).
+    pub fn with_recovery(mut self, reason: impl Into<String>) -> Self {
+        self.recovery = Some(reason.into());
         self
     }
 
@@ -125,6 +137,7 @@ impl DispatchError {
             cancelled: true,
             disposition: RetryDisposition::Stop,
             failure: None,
+            recovery: None,
         }
     }
 
@@ -163,8 +176,52 @@ impl DispatchError {
             cancelled,
             disposition,
             failure: Some(f),
+            recovery: None,
         }
     }
+}
+
+/// Operation-scoped wire budget (spec §7). Every route keeps its reserved
+/// initial dispatch; extra dispatches (one primary transient retry, output
+/// repair, unsupported-option recovery) draw from one shared allowance and
+/// never exceed `per_route_max` on a route. A 4-route chain therefore sends
+/// at most `4 + shared_extra` = 6 requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WireBudget {
+    pub per_route_max: u32,
+    pub primary_transient_retries: u32,
+    pub shared_extra: u32,
+}
+
+impl WireBudget {
+    /// Interactive brief operations.
+    pub const INTERACTIVE: Self = Self {
+        per_route_max: 2,
+        primary_transient_retries: 1,
+        shared_extra: 2,
+    };
+
+    pub fn max_dispatches(&self, routes: u32) -> u32 {
+        routes + self.shared_extra
+    }
+}
+
+/// Per-dispatch context handed to contextual dispatchers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DispatchContext {
+    pub route_index: usize,
+    /// 1-based attempt on this route.
+    pub attempt: u32,
+    /// 1-based wire dispatch across the operation.
+    pub wire_dispatch: u32,
+    /// Set when this dispatch carries a recovery proposal from the previous one.
+    pub recovery: Option<String>,
+    /// Admission queue time for this dispatch (slot polling), never backoff.
+    pub queue_ms: u64,
+    /// Retry backoff actually slept before this dispatch.
+    pub backoff_ms: u64,
+    /// When this dispatch started waiting for admission.
+    pub queued_at: String,
 }
 
 /// Clock / cancel / admission options.
@@ -181,6 +238,8 @@ pub struct ExecuteOptions {
     /// User-waiting work (e.g. an open Intel brief): takes freed slots ahead
     /// of background callers on the same account, within the same limit.
     pub interactive: bool,
+    /// Operation wire budget; replaces `attempt_limit` when set.
+    pub wire_budget: Option<WireBudget>,
 }
 
 impl ExecuteOptions {
@@ -225,13 +284,22 @@ fn cancelled(opts: &ExecuteOptions) -> bool {
         .is_some_and(|c| c.load(Ordering::Relaxed))
 }
 
+/// Backoff sleep: recorded as a retry wait.
 async fn sleep_recorded(opts: &ExecuteOptions, wait: Duration) -> bool {
     if let Some(slot) = &opts.recorded_waits {
         if let Ok(mut v) = slot.lock() {
             v.push(wait);
         }
     }
+    sleep_unrecorded(opts, wait).await
+}
+
+/// Admission polling: queue time, never recorded as backoff.
+async fn sleep_unrecorded(opts: &ExecuteOptions, wait: Duration) -> bool {
     if opts.instant || wait.is_zero() {
+        if opts.instant && !wait.is_zero() {
+            tokio::task::yield_now().await;
+        }
         return cancelled(opts);
     }
     cancellable_sleep(wait, opts.cancel.as_ref()).await
@@ -282,6 +350,21 @@ where
     F: FnMut(usize, &Route) -> Fut,
     Fut: Future<Output = Result<T, DispatchError>>,
 {
+    execute_with_context(routes, |ctx, route| dispatch(ctx.route_index, route), opts).await
+}
+
+/// Contextual executor: like [`execute`] but each dispatch receives its
+/// [`DispatchContext`] (queue/backoff clocks, recovery proposal) and the
+/// operation [`WireBudget`] bounds every wire request when set.
+pub async fn execute_with_context<T, F, Fut>(
+    routes: &[Route],
+    mut dispatch: F,
+    opts: ExecuteOptions,
+) -> ChainReport<T>
+where
+    F: FnMut(DispatchContext, &Route) -> Fut,
+    Fut: Future<Output = Result<T, DispatchError>>,
+{
     let mut report = ChainReport {
         value: None,
         blocked: false,
@@ -308,6 +391,8 @@ where
         return report;
     }
 
+    let mut extra_used = 0u32;
+    let mut primary_transient_used = 0u32;
     let mut any_dispatchable = false;
     for (route_index, route) in routes.iter().enumerate() {
         if cancelled(&opts) {
@@ -327,10 +412,15 @@ where
             continue;
         }
         any_dispatchable = true;
-        let limit = opts
-            .attempt_limit
-            .unwrap_or_else(|| route_attempt_limit(route_index as u32));
+        let limit = match opts.wire_budget {
+            Some(b) => b.per_route_max,
+            None => opts
+                .attempt_limit
+                .unwrap_or_else(|| route_attempt_limit(route_index as u32)),
+        };
         let mut attempt = 0u32;
+        let mut recovery: Option<String> = None;
+        let mut backoff = Duration::ZERO;
         let admission_key = route
             .admission_key
             .as_deref()
@@ -343,6 +433,8 @@ where
                 report.cancelled = true;
                 break;
             }
+            let queued_at = stamp();
+            let queue_start = std::time::Instant::now();
             let guard = if admission_key.is_empty() {
                 None
             } else {
@@ -359,7 +451,7 @@ where
                     {
                         break Some(g);
                     }
-                    if sleep_recorded(&opts, Duration::from_millis(50)).await {
+                    if sleep_unrecorded(&opts, Duration::from_millis(50)).await {
                         report.cancelled = true;
                         break None;
                     }
@@ -370,7 +462,17 @@ where
             }
             attempt += 1;
             report.requests += 1;
-            let dispatch_fut = dispatch(route_index, route);
+            let ctx = DispatchContext {
+                route_index,
+                attempt,
+                wire_dispatch: report.requests,
+                recovery: recovery.take(),
+                queue_ms: queue_start.elapsed().as_millis() as u64,
+                backoff_ms: backoff.as_millis() as u64,
+                queued_at,
+            };
+            backoff = Duration::ZERO;
+            let dispatch_fut = dispatch(ctx, route);
             let result = match &opts.cancel {
                 None => dispatch_fut.await,
                 Some(cancel_flag) => {
@@ -381,7 +483,7 @@ where
                 }
             };
             drop(guard);
-            match result {
+            let err = match result {
                 Ok(value) => {
                     report.terminal_failure = None;
                     report.history.push(AttemptRecord {
@@ -398,70 +500,76 @@ where
                     report.effective_model = route.model.clone();
                     return report;
                 }
-                Err(err) if err.cancelled || err.disposition == RetryDisposition::Stop => {
-                    report.terminal_failure = err.failure.clone();
-                    report.stopped = true;
-                    let is_cancel = err.cancelled;
-                    report.history.push(AttemptRecord {
-                        at: stamp(),
-                        route_index: route_index as u32,
-                        attempt,
-                        model: route.model.clone(),
-                        dispatched: true,
-                        outcome: if is_cancel {
-                            "cancel".into()
-                        } else {
-                            "fail".into()
-                        },
-                        reason: err.message,
-                    });
-                    if is_cancel {
-                        report.cancelled = true;
-                    }
-                    return report;
+                Err(err) => err,
+            };
+            report.terminal_failure = err.failure.clone();
+            let stop = err.cancelled
+                || (err.recovery.is_none() && err.disposition == RetryDisposition::Stop);
+            report.history.push(AttemptRecord {
+                at: stamp(),
+                route_index: route_index as u32,
+                attempt,
+                model: route.model.clone(),
+                dispatched: true,
+                outcome: if err.cancelled {
+                    "cancel".into()
+                } else {
+                    "fail".into()
+                },
+                reason: err.message.clone(),
+            });
+            if stop {
+                report.stopped = true;
+                if err.cancelled {
+                    report.cancelled = true;
                 }
-                Err(err) if err.disposition == RetryDisposition::NextRoute => {
-                    report.terminal_failure = err.failure.clone();
-                    report.history.push(AttemptRecord {
-                        at: stamp(),
-                        route_index: route_index as u32,
-                        attempt,
-                        model: route.model.clone(),
-                        dispatched: true,
-                        outcome: "fail".into(),
-                        reason: err.message,
-                    });
+                return report;
+            }
+            let is_recovery = err.recovery.is_some();
+            if !is_recovery && err.disposition == RetryDisposition::NextRoute {
+                break;
+            }
+            if attempt >= limit {
+                break;
+            }
+            if let Some(b) = opts.wire_budget {
+                let transient_ok =
+                    route_index == 0 && primary_transient_used < b.primary_transient_retries;
+                if extra_used >= b.shared_extra || !(is_recovery || transient_ok) {
                     break;
                 }
-                Err(err) => {
-                    report.terminal_failure = err.failure.clone();
-                    report.history.push(AttemptRecord {
-                        at: stamp(),
-                        route_index: route_index as u32,
-                        attempt,
-                        model: route.model.clone(),
-                        dispatched: true,
-                        outcome: "fail".into(),
-                        reason: err.message,
-                    });
-                    if attempt >= limit {
-                        break;
-                    }
-                    let Some(base) = wait_before_retry(route_index as u32, attempt) else {
-                        break;
-                    };
-                    let wait = err.retry_after.filter(|d| *d > base).unwrap_or(base);
-                    if !opts.instant {
-                        if let Some(extra) = err.retry_after {
-                            tasks::note_shared_rate_limit(admission_key, extra);
-                        }
-                    }
-                    report.waits.push(wait);
-                    if sleep_recorded(&opts, wait).await {
-                        report.cancelled = true;
-                        break;
-                    }
+                extra_used += 1;
+                if !is_recovery {
+                    primary_transient_used += 1;
                 }
+            }
+            if is_recovery {
+                // Recompiled resend: no backoff, the request itself changes.
+                recovery = err.recovery;
+                continue;
+            }
+            let Some(base) = wait_before_retry(route_index as u32, attempt) else {
+                break;
+            };
+            let wait = err.retry_after.filter(|d| *d > base).unwrap_or(base);
+            if !opts.instant {
+                if let Some(extra) = err.retry_after {
+                    tasks::note_shared_rate_limit(admission_key, extra);
+                }
+            }
+            let slept = std::time::Instant::now();
+            let was_cancelled = sleep_recorded(&opts, wait).await;
+            // Record what was actually waited (shorter when cancelled).
+            let actual = if opts.instant {
+                wait
+            } else {
+                slept.elapsed().min(wait)
+            };
+            report.waits.push(actual);
+            backoff = actual;
+            if was_cancelled {
+                report.cancelled = true;
+                break;
             }
         }
         if report.cancelled {
@@ -730,5 +838,104 @@ mod tests {
         assert_eq!(out.waits[0], Duration::from_secs(45));
         assert_eq!(out.waits[1], Duration::from_secs(45));
         assert_eq!(out.waits[2], Duration::from_secs(45));
+    }
+
+    fn budgeted() -> ExecuteOptions {
+        ExecuteOptions {
+            wire_budget: Some(WireBudget::INTERACTIVE),
+            ..ExecuteOptions::for_tests()
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_budget_bounds_a_four_route_chain_to_six_dispatches() {
+        // Every failure proposes recovery: the shared allowance caps extras.
+        let out = execute(
+            &routes(4),
+            |_i, _r| async {
+                Err(DispatchError::new("bad").with_recovery("repair")) as Result<(), _>
+            },
+            budgeted(),
+        )
+        .await;
+        assert_eq!(out.requests, 6);
+        assert_eq!(WireBudget::INTERACTIVE.max_dispatches(4), 6);
+        // Every route kept its reserved initial dispatch.
+        for r in 0..4u32 {
+            assert!(out
+                .history
+                .iter()
+                .any(|h| h.route_index == r && h.dispatched));
+        }
+        assert!(out.waits.is_empty(), "recovery never sleeps");
+    }
+
+    #[tokio::test]
+    async fn wire_budget_allows_one_primary_transient_retry_only() {
+        let out = execute(
+            &routes(2),
+            |_i, _r| async { Err(DispatchError::new("503")) as Result<(), _> },
+            budgeted(),
+        )
+        .await;
+        // primary: initial + 1 transient retry; fallback: initial only.
+        assert_eq!(out.requests, 3);
+        assert_eq!(out.waits, vec![Duration::from_secs(10)]);
+    }
+
+    #[tokio::test]
+    async fn recovery_overrides_stop_and_reports_context() {
+        let seen = Mutex::new(Vec::new());
+        let out = execute_with_context(
+            &routes(1),
+            |ctx, _r| {
+                seen.lock().unwrap().push(ctx.clone());
+                async move {
+                    if ctx.attempt == 1 {
+                        let mut e = DispatchError::new("400 unsupported");
+                        e.disposition = RetryDisposition::Stop;
+                        Err(e.with_recovery("unsupported option"))
+                    } else {
+                        Ok(ctx.recovery.clone())
+                    }
+                }
+            },
+            budgeted(),
+        )
+        .await;
+        assert_eq!(out.requests, 2);
+        assert_eq!(out.value, Some(Some("unsupported option".to_string())));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[1].wire_dispatch, 2);
+        assert_eq!(seen[1].backoff_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn admission_polling_is_not_recorded_as_backoff() {
+        let key = format!("queue-test-{}", std::process::id());
+        let mut held = Vec::new();
+        while let Some(g) = AdmissionGuard::try_enter_class(&key, false) {
+            held.push(g);
+        }
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let mut rs = routes(1);
+        rs[0].admission_key = Some(key.clone());
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            drop(held);
+        });
+        let out = execute(
+            &rs,
+            |_i, _r| async { Ok(()) },
+            ExecuteOptions {
+                recorded_waits: Some(recorded.clone()),
+                ..ExecuteOptions::for_tests()
+            },
+        )
+        .await;
+        release.join().unwrap();
+        assert_eq!(out.requests, 1);
+        assert!(recorded.lock().unwrap().is_empty());
+        assert!(out.waits.is_empty());
     }
 }

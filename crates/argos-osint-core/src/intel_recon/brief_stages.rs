@@ -66,6 +66,10 @@ pub struct StageRequest {
     /// Operation key for `defaults.operation_overrides`.
     pub operation_key: &'static str,
     pub validator: Validator,
+    /// Stage budget-table row (spec §5).
+    pub budget: crate::request_policy::StageBudget,
+    /// Authoritative output schema (strict schema / output tool / JSON mode).
+    pub contract: Option<crate::provider_adapters::ResponseContract>,
 }
 
 /// Provider/retrieval boundary for stage execution (runtime or test double).
@@ -238,6 +242,13 @@ fn empty_reason(value: &Value) -> Result<String> {
 
 pub fn metadata_sentences(article: &AtlasArticleRow) -> Vec<Sentence> {
     super::sentence_index::metadata_wire(&article.title, &article.description)
+}
+
+/// Deterministic ID order for schema enums (stable request bodies).
+fn sorted_ids(ids: &HashSet<String>) -> Vec<&str> {
+    let mut out: Vec<&str> = ids.iter().map(String::as_str).collect();
+    out.sort_unstable();
+    out
 }
 
 pub fn claims_user(article: &AtlasArticleRow) -> String {
@@ -782,12 +793,19 @@ async fn execute(
                     task_id: claimed.id.clone(),
                     stage: claimed.operation.clone(),
                     role: "claim_assessor",
-                    system: format!("{CLAIMS_PROMPT}{STRICT_JSON}{CLAIMS_SHAPE}"),
+                    system: format!(
+                        "{CLAIMS_PROMPT}{}{STRICT_JSON}{CLAIMS_SHAPE}",
+                        super::brief_contracts::claims_limits()
+                    ),
                     user: claims_user(&article),
                     completion_tokens: CLAIMS_TOKENS,
-                    reasoning: crate::request_policy::ReasoningEffort::Low,
+                    reasoning: crate::request_policy::CLAIMS_BUDGET.reasoning,
                     operation_key: crate::provider::OP_CLAIMS_GENERATE,
                     validator,
+                    budget: crate::request_policy::CLAIMS_BUDGET,
+                    contract: Some(super::brief_contracts::claims_contract(
+                        &meta.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+                    )),
                 },
             )
             .await?;
@@ -829,7 +847,10 @@ async fn execute(
                 .flatten()
                 .filter_map(|c| c["id"].as_str().map(str::to_string))
                 .collect();
-            let system = format!("{INFERENCES_PROMPT}{STRICT_JSON}{INFERENCES_SHAPE}");
+            let system = format!(
+                "{INFERENCES_PROMPT}{}{STRICT_JSON}{INFERENCES_SHAPE}",
+                super::brief_contracts::inferences_limits()
+            );
             let mut windows = request_windows(&all, &system, &claims, REQUEST_WINDOW_BYTES);
             // Oversized stories may read actor-focused packets (measured path,
             // opt-in). Fidelity below still reviews against the whole body.
@@ -881,9 +902,14 @@ async fn execute(
                         system: system.clone(),
                         user: inferences_user(&claims, window, &carried),
                         completion_tokens: INFERENCES_TOKENS,
-                        reasoning: crate::request_policy::ReasoningEffort::Default,
+                        reasoning: crate::request_policy::INFERENCES_BUDGET.reasoning,
                         operation_key: crate::provider::OP_INFERENCES_GENERATE,
                         validator,
+                        budget: crate::request_policy::INFERENCES_BUDGET,
+                        contract: Some(super::brief_contracts::inferences_contract(
+                            &sorted_ids(&claim_ids),
+                            &window.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+                        )),
                     },
                 )
                 .await?;
@@ -962,12 +988,24 @@ async fn execute(
                     task_id: claimed.id.clone(),
                     stage: claimed.operation.clone(),
                     role: "synthesis",
-                    system: format!("{LINKS_PROMPT}{STRICT_JSON}{LEADS_SHAPE}"),
+                    system: format!(
+                        "{LINKS_PROMPT}{}{STRICT_JSON}{LEADS_SHAPE}",
+                        super::brief_contracts::leads_limits()
+                    ),
                     user: links_user(&inferences, &candidates),
                     completion_tokens: LINKS_TOKENS,
-                    reasoning: crate::request_policy::ReasoningEffort::Low,
+                    reasoning: crate::request_policy::LINKS_BUDGET.reasoning,
                     operation_key: crate::provider::OP_LINKS_GENERATE,
                     validator,
+                    budget: crate::request_policy::LINKS_BUDGET,
+                    contract: Some(super::brief_contracts::leads_contract(
+                        &candidates.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+                        &sorted_ids(&inference_ids),
+                        &candidates
+                            .iter()
+                            .flat_map(|c| c.sentences.iter().map(|s| s.id.as_str()))
+                            .collect::<Vec<_>>(),
+                    )),
                 },
             )
             .await?;
@@ -1509,8 +1547,14 @@ impl StageBackend for RuntimeBackend {
             let mut scope =
                 crate::recon::model_exec::OperationScope::new(&operation_id, mode.role())
                     .with_task(task_id)
-                    .with_completion_tokens(super::brief_fidelity::FIDELITY_TOKENS)
-                    .with_reasoning(crate::request_policy::ReasoningEffort::Low)
+                    .with_budget(match mode {
+                        super::brief_fidelity::FidelityMode::Extraction => {
+                            crate::request_policy::FIDELITY_BUDGET
+                        }
+                        super::brief_fidelity::FidelityMode::Support => {
+                            crate::request_policy::SUPPORT_BUDGET
+                        }
+                    })
                     .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision)
                     .with_interactive();
             if let Some(key) = mode.operation_key() {
@@ -1567,14 +1611,17 @@ impl StageBackend for RuntimeBackend {
                 request.task_id,
                 crate::nlp::cache::hash(&request.user)
             );
-            let scope = crate::recon::model_exec::OperationScope::new(&operation_id, request.role)
-                .with_task(&request.task_id)
-                .with_insight_contract()
-                .with_completion_tokens(request.completion_tokens)
-                .with_reasoning(request.reasoning)
-                .with_operation(request.operation_key)
-                .with_format(crate::recon::model_exec::ResponseFormat::GeneratedJson)
-                .with_interactive();
+            let mut scope =
+                crate::recon::model_exec::OperationScope::new(&operation_id, request.role)
+                    .with_task(&request.task_id)
+                    .with_insight_contract()
+                    .with_budget(request.budget)
+                    .with_operation(request.operation_key)
+                    .with_format(crate::recon::model_exec::ResponseFormat::GeneratedJson)
+                    .with_interactive();
+            if let Some(contract) = request.contract.clone() {
+                scope = scope.with_contract(contract);
+            }
             let messages = [
                 crate::provider::ChatMessage {
                     role: "system".into(),

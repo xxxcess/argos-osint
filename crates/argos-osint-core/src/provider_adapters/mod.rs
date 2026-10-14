@@ -595,7 +595,17 @@ fn compile_chat(
             nvidia::apply_reasoning(&mut body, req.policy, caps, &mut sent, &mut diags)
         }
     };
-    let ceiling = total_ceiling(req.policy, plan.thinking_on, caps);
+    let (budget, budget_kind) = budget_fields(&mut body, req.policy, caps, &plan, &mut sent);
+    // A *confirmed* (enforced) reasoning budget lets the stage use its
+    // tighter budgeted ceiling (spec §5: Inferences 4096 with a hard 1024
+    // budget, otherwise the thinking ceiling).
+    let ceiling = match (budget_kind.as_deref(), req.policy.budgeted_ceiling) {
+        (Some("hard"), Some(tight)) if plan.thinking_on => Some(
+            caps.max_output_tokens
+                .map_or(tight, |limit| tight.min(limit)),
+        ),
+        _ => total_ceiling(req.policy, plan.thinking_on, caps),
+    };
     if let Some(tokens) = ceiling {
         match output_limit_field(&kind) {
             Some(field) if !caps.is_rejected(field, "*") => {
@@ -605,7 +615,6 @@ fn compile_chat(
             None => diags.push("unsupported-policy:max_output_tokens".into()),
         }
     }
-    let (budget, budget_kind) = budget_fields(&mut body, req.policy, caps, &plan, &mut sent);
     if caps.adapter == AdapterId::OpenRouter && !sent.is_empty() {
         // Never let the gateway silently ignore a requested capability.
         body["provider"] = json!({"require_parameters": true});

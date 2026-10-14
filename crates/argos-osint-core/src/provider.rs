@@ -1339,12 +1339,12 @@ pub struct DecisionAnswer {
 }
 
 impl DecisionAnswer {
-    /// Probability of the chosen option, else the reported confidence.
+    /// Native probability of the chosen option. Confidence (a summary of
+    /// the distribution's shape) is never substituted for it.
     pub fn choice_probability(&self) -> Option<f64> {
         self.choice
             .as_ref()
             .and_then(|choice| self.probabilities.get(choice).copied())
-            .or(self.confidence)
     }
 
     /// Whether the probability distribution is mathematically valid within numeric tolerance.

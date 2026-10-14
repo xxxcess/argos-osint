@@ -35,5 +35,6 @@
         <text x="620.0" y="172" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="13" font-weight="600" fill="#2d3142">Synthesis</text>
         <text x="620.0" y="190" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">assessed inference</text>
         <text x="400" y="276" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#7a8399">Claim Assessor inherits Synthesis; explicit routes and ordered fallbacks take precedence.</text>
+        <text x="400" y="292" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="9" fill="#eb6c36">Each dispatch compiles per adapter from a capability snapshot taken at admission; interactive operations send ≤ routes + 2 requests.</text>
 
       </svg>

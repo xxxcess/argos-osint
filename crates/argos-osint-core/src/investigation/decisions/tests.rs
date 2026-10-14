@@ -312,3 +312,129 @@ fn test_resolve_adapter_kinds() {
         assert_eq!(resolve_adapter(model, provider), want, "{model}");
     }
 }
+
+fn native(answers: serde_json::Value) -> DecisionsResponse {
+    serde_json::from_value(json!({"id":"d","model":"typesafe/jev-1.13","answers":answers})).unwrap()
+}
+
+#[test]
+fn score_compiles_ordered_levels_and_maps_fractional_values_to_the_application_scale() {
+    use super::contracts::{DecisionContract, QuestionSpec};
+    let contract = DecisionContract::new(
+        "claim_assessor",
+        "condition",
+        "v1",
+        [],
+        [QuestionSpec::score(
+            "condition",
+            "Which level best describes `listing.description`?",
+            1,
+            5,
+            ["broken", "worn", "good", "like new", "new"],
+        )],
+    );
+    contract.validate().unwrap();
+    let (_, questions) = compile_native(&contract, &json!({}));
+    let q = &questions["condition"];
+    assert_eq!(q["type"], "score");
+    assert_eq!(q["criteria"].as_array().unwrap().len(), 5);
+    assert!(q.get("range").is_none(), "no range, no option object");
+    // Zero-based 1.5 on five levels → 1 + 1.5 = 2.5 on the 1..5 scale.
+    let parsed = parse_native_response(
+        &native(
+            json!({"condition":{"type":"score","score":1.5,"confidence":0.4,
+            "probabilities":{"0":0.0,"1":0.5,"2":0.5,"3":0.0,"4":0.0}}}),
+        ),
+        &contract,
+    )
+    .unwrap();
+    let a = &parsed.answers["condition"];
+    assert_eq!(a.score_value, Some(2.5));
+    assert_eq!(a.score, Some(3), "legacy display rounding only");
+    assert_eq!(a.confidence, Some(0.4));
+    // Out-of-range level and unknown distribution keys are rejected.
+    assert!(parse_native_response(
+        &native(json!({"condition":{"type":"score","score":4.5}})),
+        &contract
+    )
+    .is_err());
+    assert!(parse_native_response(
+        &native(json!({"condition":{"type":"score","score":1.0,"probabilities":{"9":1.0}}})),
+        &contract
+    )
+    .is_err());
+    // 2–10 levels only.
+    let bad = QuestionSpec::score("s", "x", 0, 10, (0..11).map(|i| i.to_string()));
+    assert!(bad.validate().is_err());
+}
+
+#[test]
+fn noul_no_carries_one_minus_p_and_choice_probability_is_not_confidence() {
+    use super::contracts::{DecisionContract, QuestionSpec};
+    let contract = DecisionContract::new(
+        "claim_assessor",
+        "mixed",
+        "v1",
+        [],
+        [
+            QuestionSpec::noul_with("holds", "Does it hold?", "It holds.", "It does not."),
+            QuestionSpec::choice("pick", "Pick", [("a", "A"), ("b", "B")], "b"),
+        ],
+    );
+    let (_, questions) = compile_native(&contract, &json!({}));
+    assert_eq!(questions["holds"]["criteria"]["true"], "It holds.");
+    let parsed = parse_native_response(
+        &native(json!({
+            "holds":{"type":"noul","noul":0.2},
+            "pick":{"type":"choice","choice":"a","confidence":0.3,"probabilities":{"a":0.6,"b":0.4}}
+        })),
+        &contract,
+    )
+    .unwrap();
+    let holds = &parsed.answers["holds"];
+    assert_eq!(holds.label, "no");
+    assert_eq!(holds.noul, Some(0.2));
+    assert!((holds.probability.unwrap() - 0.8).abs() < 1e-9);
+    let pick = &parsed.answers["pick"];
+    assert_eq!(pick.probability, Some(0.6));
+    assert_eq!(pick.confidence, Some(0.3));
+    // Without a distribution there is no winning probability, never confidence.
+    let parsed = parse_native_response(
+        &native(json!({
+            "holds":{"type":"noul","noul":0.9},
+            "pick":{"type":"choice","choice":"a","confidence":0.3}
+        })),
+        &contract,
+    )
+    .unwrap();
+    assert_eq!(parsed.answers["pick"].probability, None);
+    // Wrong answer type is rejected.
+    assert!(parse_native_response(
+        &native(
+            json!({"holds":{"type":"choice","choice":"a"},"pick":{"type":"choice","choice":"a"}})
+        ),
+        &contract
+    )
+    .is_err());
+}
+
+#[test]
+fn chat_fallback_reports_its_actual_kind_without_probabilities() {
+    use super::ContractAdapter;
+    use crate::recon::model_exec::DecisionsAdapter;
+    let contract = template_claim_relation();
+    let state = DecisionState::new();
+    let adapter = ContractAdapter {
+        contract: &contract,
+        state: &state,
+    };
+    let parsed = adapter
+        .parse_chat_as(
+            r#"{"answers":{"claim_relation":{"label":"mentions_only"}}}"#,
+            DecisionAdapterKind::JsonMode,
+        )
+        .unwrap();
+    assert_eq!(parsed.adapter_used, DecisionAdapterKind::JsonMode);
+    let a = &parsed.answers["claim_relation"];
+    assert!(a.probability.is_none() && a.confidence.is_none() && a.probabilities.is_empty());
+}

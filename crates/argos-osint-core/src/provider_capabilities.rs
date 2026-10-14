@@ -781,6 +781,67 @@ pub fn for_secret(secret: &crate::secrets::ProviderSecret) -> ResolvedCapabiliti
     resolve(AdapterId::for_kind(&kind), &secret.base_url, &secret.model)
 }
 
+/// Merge the current observed rejections into an admission snapshot.
+/// Rejections only ever narrow what is sent, so a recovery recompile may
+/// use them while catalog evidence stays frozen at admission.
+pub fn with_observed(
+    mut caps: ResolvedCapabilities,
+    base_url: &str,
+    model: &str,
+) -> ResolvedCapabilities {
+    if let Some(set) = observed()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&route_key(caps.adapter, base_url, model)).cloned())
+    {
+        if !set.is_empty() {
+            caps.rejected.extend(set);
+            if !caps.provenance.sources.iter().any(|s| s == "observed") {
+                caps.provenance.sources.push("observed".into());
+            }
+        }
+    }
+    caps
+}
+
+static BACKGROUND_REFRESH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(!cfg!(test));
+
+/// Enable/disable the background catalog refresh (tests keep it off so a
+/// mock server only ever sees operation requests).
+pub fn set_background_refresh(enabled: bool) {
+    BACKGROUND_REFRESH.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Stage admission (spec §1): request a coalesced background refresh when
+/// the cache is missing/stale, then resolve one immutable snapshot. The
+/// snapshot (and its digest) is what the whole operation compiles from, so a
+/// refresh finishing mid-operation can never change an in-flight request.
+pub fn admit(
+    secret: &crate::secrets::ProviderSecret,
+    home: Option<&std::path::Path>,
+) -> ResolvedCapabilities {
+    if BACKGROUND_REFRESH.load(std::sync::atomic::Ordering::SeqCst) {
+        refresh_in_background(
+            home.map(std::path::Path::to_path_buf),
+            secret.clone(),
+            chrono::Utc::now().timestamp(),
+        );
+    }
+    let kind = crate::provider::effective_kind(secret);
+    let adapter = AdapterId::for_kind(&kind);
+    let dialect = crate::provider_adapters::default_dialect(adapter, &secret.base_url);
+    let key = cache_key(adapter, &secret.base_url, dialect, &secret.model, None);
+    let store = home.and_then(|h| crate::store::Store::open(h).ok());
+    let evidence = cached(store.as_ref(), &key);
+    resolve_with(
+        adapter,
+        &secret.base_url,
+        &secret.model,
+        evidence.as_ref().map(|c| (&c.evidence, c.fetched_at)),
+    )
+}
+
 #[cfg(test)]
 #[path = "provider_capabilities_tests.rs"]
 mod tests;

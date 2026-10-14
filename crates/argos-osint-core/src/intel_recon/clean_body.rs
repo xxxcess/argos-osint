@@ -622,8 +622,7 @@ impl BlockDecider for RuntimeDecider<'_> {
                 batch.first().map(|b| b.id).unwrap_or(0)
             );
             let scope = crate::recon::model_exec::OperationScope::new(&operation_id, "classifier")
-                .with_completion_tokens(CLEANUP_TOKENS)
-                .with_reasoning(crate::request_policy::ReasoningEffort::Low)
+                .with_budget(crate::request_policy::CLEANUP_FALLBACK_BUDGET)
                 .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision);
             // Brief-owned cleanup is user-waiting work.
             let scope = if self.runtime.job_id.starts_with("intel-brief:") {

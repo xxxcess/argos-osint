@@ -652,3 +652,45 @@ fn model_swaps_recompile_the_same_contract_without_stage_changes() {
             .capability_digest
     );
 }
+
+#[test]
+fn inference_budget_row_uses_the_tight_ceiling_only_for_an_enforced_budget() {
+    let policy = crate::request_policy::INFERENCES_BUDGET.policy(true);
+    // NU documents an advisory budget field: the thinking ceiling applies.
+    let advisory = compile_for(NU.0, NU.1, &json_contract(), &policy).unwrap();
+    assert_eq!(advisory.body["reasoning_budget"], 1024);
+    assert_eq!(advisory.body["max_tokens"], 6144);
+    // An endpoint that enforces the budget gets the 4096 budgeted ceiling.
+    let s = secret(NU.0, NU.1);
+    let mut caps = caps_mod::for_secret(&s);
+    caps.reasoning.budget_enforced = true;
+    let m = msgs();
+    let hard = compile(
+        &s,
+        &OperationRequest {
+            messages: &m,
+            tools: &[],
+            contract: &json_contract(),
+            policy: &policy,
+            stream: false,
+        },
+        &caps,
+    )
+    .unwrap();
+    assert_eq!(hard.body["max_tokens"], 4096);
+    assert_eq!(hard.effective.budget_kind.as_deref(), Some("hard"));
+    // Thinking off (no reasoning control): the 3072 answer target.
+    let off = crate::request_policy::RequestPolicy {
+        reasoning: crate::request_policy::ReasoningEffort::Off,
+        ..policy
+    };
+    let r = compile_for(NU.0, NU.1, &json_contract(), &off).unwrap();
+    assert_eq!(r.body["max_tokens"], 3072);
+    // Claims row: 2048 off, 4096 on mandatory-thinking Flash.
+    let claims = crate::request_policy::CLAIMS_BUDGET.policy(true);
+    let f = compile_for(F.0, F.1, &json_contract(), &claims).unwrap();
+    assert_eq!(f.body["generationConfig"]["maxOutputTokens"], 4096);
+    let n = compile_for(NU.0, NU.1, &json_contract(), &claims).unwrap();
+    assert_eq!(n.body["max_tokens"], 2048);
+    assert_eq!(n.body["reasoning_effort"], "none");
+}

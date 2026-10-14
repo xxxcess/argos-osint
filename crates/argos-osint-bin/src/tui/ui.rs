@@ -3927,7 +3927,17 @@ fn provider_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
                 return Some(Target::Field(role.model_field()));
             }
             if contains(models[3], x, y) {
-                return Some(Target::Button(role.save_button()));
+                let save = button_areas(models[3], 4);
+                for (area, id) in save.into_iter().zip([
+                    role.save_button(),
+                    ButtonId::BriefOpCycle,
+                    ButtonId::BriefOpSave,
+                    ButtonId::BriefOpReset,
+                ]) {
+                    if contains(area, x, y) {
+                        return Some(Target::Button(id));
+                    }
+                }
             }
             if contains(models[4], x, y) {
                 let fallbacks = app
@@ -6727,7 +6737,25 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
             let save = role.save_button();
             draw_field(frame, app, provider, " Provider ", models[1]);
             draw_field(frame, app, model, " Model ", models[2]);
-            draw_button(frame, app, save, "Save default", models[3]);
+            // Save the role default, or edit one Brief operation's override
+            // with the same Provider/Model fields.
+            let save_row = button_areas(models[3], 4);
+            draw_button(frame, app, save, "Save default", save_row[0]);
+            draw_button(
+                frame,
+                app,
+                ButtonId::BriefOpCycle,
+                &format!("Op: {} ▸", app.selected_brief_op().1),
+                save_row[1],
+            );
+            draw_button(
+                frame,
+                app,
+                ButtonId::BriefOpSave,
+                "Save for op",
+                save_row[2],
+            );
+            draw_button(frame, app, ButtonId::BriefOpReset, "Reset op", save_row[3]);
             draw_fallbacks_list(frame, app, models[4]);
             let actions = button_areas(models[5], 5);
             draw_button(
@@ -8713,11 +8741,16 @@ fn legacy_brief_task_lines(
 /// headers, global Jobs and Logs. Only the active row spins.
 fn brief_stage_lines(app: &App, lines: &mut Vec<Line<'static>>) {
     let stages = &app.intel_brief_stages;
-    let current = stages
-        .iter()
-        .position(|s| s.state != "completed")
-        .map(|i| format!("Step {}/{} · {}", i + 1, stages.len(), stages[i].label))
-        .unwrap_or_else(|| format!("Step {0}/{0} · Complete", stages.len()));
+    // Summarise from the real dependency rows: independent roots run
+    // together, so there is no single "current step".
+    let current = if stages.iter().all(|s| s.state == "completed") {
+        format!("Brief · Complete · {0}/{0} completed", stages.len())
+    } else {
+        format!(
+            "Brief · {}",
+            intel_recon::brief_pipeline::chain_summary(stages)
+        )
+    };
     lines.push(Line::from(Span::styled(
         current,
         theme::text().add_modifier(Modifier::BOLD),
@@ -8736,7 +8769,9 @@ fn brief_stage_lines(app: &App, lines: &mut Vec<Line<'static>>) {
             theme::text()
         };
         let (head, note) = match stage.row.split_once(" · ") {
-            Some((head, rest)) if head == "Queued" || head == "Failed" => {
+            Some((head, rest))
+                if head == "Queued" || head == "Failed" || head == "Completed with warnings" =>
+            {
                 (head.to_string(), Some(rest.to_string()))
             }
             _ => (stage.row.clone(), None),

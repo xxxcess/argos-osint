@@ -280,16 +280,32 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
         "Brief operations",
         theme::accent().add_modifier(Modifier::BOLD),
     )));
-    for row in brief_operation_rows(&app.settings.defaults) {
-        let style = if row.role == sel_info.meta.role.settings_key() {
+    let (selected_key, _, _) = app.selected_brief_op();
+    let rows = brief_operation_rows(&app.settings.defaults);
+    for row in &rows {
+        let marker = if row.key == selected_key { "▸" } else { " " };
+        let style = if row.key == selected_key {
+            theme::accent()
+        } else if row.role == sel_info.meta.role.settings_key() {
             theme::text()
         } else {
             theme::dim()
         };
-        details_lines.push(Line::from(Span::styled(row.render(), style)));
+        details_lines.push(Line::from(Span::styled(
+            format!("{marker}{}", &row.render()[1..]),
+            style,
+        )));
+    }
+    if let Some(row) = rows.iter().find(|r| r.key == selected_key) {
+        for line in operation_evidence(row) {
+            details_lines.push(Line::from(Span::styled(
+                format!("    {line}"),
+                theme::dim(),
+            )));
+        }
     }
     details_lines.push(Line::from(Span::styled(
-        "Apply/Reset fast preset links Claims and Links to Summarization; unset inherits.",
+        "Op ▸ selects; Save for op / Reset op edit it; fast preset links Claims and Links to Summarization.",
         theme::dim(),
     )));
 
@@ -333,6 +349,47 @@ impl BriefOperationRow {
         };
         format!("  {:<18} {target}  {source}", self.label)
     }
+}
+
+/// Response contract of a Brief operation (spec §3 compatibility basis).
+pub fn operation_contract(key: &str) -> &'static str {
+    if key == provider::OP_INFERENCES_ASSESS {
+        "bounded_decision (fidelity labels)"
+    } else {
+        "generated_json (intel-brief-v2 schema)"
+    }
+}
+
+/// Assignment source, response contract and adapter evidence for one row.
+pub fn operation_evidence(row: &BriefOperationRow) -> Vec<String> {
+    let source = if let Some(role) = &row.linked {
+        format!("Source: linked to {role} (fast preset)")
+    } else if row.overridden {
+        "Source: explicit operation override".to_string()
+    } else {
+        format!("Source: inherited from {}", row.role)
+    };
+    let mut out = vec![source, format!("Contract: {}", operation_contract(row.key))];
+    if row.provider.is_empty() || row.model.is_empty() {
+        out.push("Adapter: unset — configure the role or an override".into());
+        return out;
+    }
+    use argos_osint_core::provider_capabilities as caps;
+    let adapter = caps::AdapterId::for_kind(&provider::normalize_kind(&row.provider));
+    let resolved = caps::resolve(adapter, "", &row.model);
+    out.push(format!(
+        "Adapter: {} · strict schema {} · JSON mode {} · tools {}",
+        adapter.as_str(),
+        resolved.strict_schema.as_str(),
+        resolved.json_mode.as_str(),
+        resolved.tools.as_str()
+    ));
+    let mut evidence = format!("Evidence: {}", resolved.provenance.sources.join(" → "));
+    if let Some(profile) = &resolved.provenance.profile {
+        evidence.push_str(&format!(" ({profile})"));
+    }
+    out.push(evidence);
+    out
 }
 
 pub fn brief_operation_rows(defaults: &provider::RoleDefaults) -> Vec<BriefOperationRow> {

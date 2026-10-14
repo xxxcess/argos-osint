@@ -696,9 +696,12 @@ async fn retried_task_epoch_keeps_prior_attempts_and_records_usage() {
     let settings = synthesis_chain(("openrouter", "fixture/epoch-model"), &[]);
     let cancel = Arc::new(AtomicBool::new(false));
     for epoch in [3_i64, 4] {
-        let scope = OperationScope::new("epoch-op", "synthesis")
+        // Operation ids carry the lease epoch; the generation is the job's.
+        let op = format!("epoch-op:e{epoch}");
+        let scope = OperationScope::new(&op, "synthesis")
             .with_task("task-e")
             .with_task_epoch(epoch)
+            .with_generation(1)
             .with_insight_contract()
             .with_format(ResponseFormat::GeneratedJson);
         execute_chat(
@@ -722,7 +725,7 @@ async fn retried_task_epoch_keeps_prior_attempts_and_records_usage() {
         .prepare(
             "SELECT generation, outcome, prompt_tokens, reasoning_tokens, reported_cost_usd,
                     policy_diagnostics_json, first_output_ms IS NOT NULL OR response_headers_ms IS NOT NULL
-             FROM recon_model_attempts WHERE operation_id='epoch-op' ORDER BY generation",
+             FROM recon_model_attempts WHERE operation_id LIKE 'epoch-op:e%' ORDER BY operation_id",
         )
         .unwrap();
     type Row = (
@@ -750,7 +753,7 @@ async fn retried_task_epoch_keeps_prior_attempts_and_records_usage() {
         .map(Result::unwrap)
         .collect();
     assert_eq!(rows.len(), 2, "epoch 3's attempt row was not overwritten");
-    assert_eq!((rows[0].0, rows[1].0), (3, 4));
+    assert_eq!((rows[0].0, rows[1].0), (1, 1), "generation is the job's");
     assert!(rows
         .iter()
         .all(|r| r.1 == "ok" && r.2 == Some(40) && r.3 == Some(5)));
@@ -760,7 +763,7 @@ async fn retried_task_epoch_keeps_prior_attempts_and_records_usage() {
     let epoch: Option<i64> = store
         .conn
         .query_row(
-            "SELECT task_epoch FROM recon_model_operations WHERE id='epoch-op'",
+            "SELECT task_epoch FROM recon_model_operations WHERE id='epoch-op:e4'",
             [],
             |r| r.get(0),
         )

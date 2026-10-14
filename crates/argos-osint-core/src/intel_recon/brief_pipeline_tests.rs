@@ -24,6 +24,7 @@ fn inputs(rev: &str) -> BriefInputs {
         role_snapshot: "{}".into(),
         title: "Ferry suspension".into(),
         stage_revisions: vec![],
+        metadata: Default::default(),
     }
 }
 fn state(store: &Store, id: &str) -> String {
@@ -42,110 +43,258 @@ fn rows(store: &Store, job: &str) -> Vec<String> {
         .collect()
 }
 
+fn count(store: &Store, sql: &str, job: &str) -> i64 {
+    store.conn.query_row(sql, [job], |r| r.get(0)).unwrap()
+}
+fn commit(store: &Store, c: &tasks::ClaimedTask, output: &str, items: usize) {
+    let reason = if items == 0 {
+        "no matching articles"
+    } else {
+        ""
+    };
+    assert!(commit_stage(&store.conn, c, output, items, reason, &now()).unwrap());
+}
+
+/// Admission is idempotent, both roots dispatch together, and the join binds
+/// Inferences exactly once to both root output hashes in either commit order.
 #[test]
 fn repeated_admission_creates_one_chain_and_stages_dispatch_strictly_in_order() {
-    let store = seeded();
-    let job = ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap();
-    // Visits / reopen / body-ready / recovery all attach to the same chain.
-    for _ in 0..4 {
+    for body_first in [true, false] {
+        let store = seeded();
+        let job = ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap();
+        // Visits / reopen / body-ready / recovery all attach to the same chain.
+        for _ in 0..4 {
+            assert_eq!(
+                ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap(),
+                job
+            );
+        }
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM argos_tasks WHERE job_id=?1",
+                &job
+            ),
+            4,
+            "all four rows exist immediately"
+        );
+        assert_eq!(
+            rows(&store, &job),
+            [
+                "Queued",
+                "Queued",
+                "Queued · after Full article, Claims",
+                "Queued · after Inferences"
+            ]
+        );
+        // Unrelated drainers never see brief stages.
+        assert!(
+            tasks::claim_next_in(&store.conn, &[], "generic", 120, &now())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            tasks::claim_next_in(&store.conn, &[tasks::POOL_LLM], "llm", 120, &now())
+                .unwrap()
+                .is_none()
+        );
+        // Both independent roots are claimable at once; nothing else is.
+        let a = claim_stage(&store.conn, "w1", 120, &now())
+            .unwrap()
+            .unwrap();
+        let b = claim_stage(&store.conn, "w2", 120, &now())
+            .unwrap()
+            .unwrap();
+        let mut roots = [a.operation.clone(), b.operation.clone()];
+        roots.sort();
+        assert_eq!(roots, ["intel_brief_body", "intel_brief_claims"]);
+        assert!(claim_stage(&store.conn, "w3", 120, &now())
+            .unwrap()
+            .is_none());
+        let views = stage_views(&store.conn, &job).unwrap();
+        assert_eq!(views.iter().filter(|v| v.active).count(), 2);
+        assert!(chain_summary(&views).starts_with("2 running · 0/4 completed"));
+        let (first, second) = if (a.operation == "intel_brief_body") == body_first {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        commit(
+            &store,
+            &first,
+            &format!("{{\"stage\":\"{}\"}}", first.operation),
+            2,
+        );
+        // Inferences is claimed zero times until both roots commit.
+        assert!(claim_stage(&store.conn, "w3", 120, &now())
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM argos_tasks WHERE job_id=?1 AND input_hash<>''",
+                &job
+            ),
+            2,
+            "descendants stay unbound until the join"
+        );
+        commit(
+            &store,
+            &second,
+            &format!("{{\"stage\":\"{}\"}}", second.operation),
+            2,
+        );
+        let inf = claim_stage(&store.conn, "w", 120, &now()).unwrap().unwrap();
+        assert_eq!(inf.operation, "intel_brief_inferences");
+        assert!(claim_stage(&store.conn, "w2", 120, &now())
+            .unwrap()
+            .is_none());
+        // The join names both prerequisite tasks and their committed hashes.
+        let input_ref: String = store
+            .conn
+            .query_row(
+                "SELECT input_ref FROM argos_tasks WHERE id=?1",
+                [&inf.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let bound: serde_json::Value = serde_json::from_str(&input_ref).unwrap();
+        for (key, op) in [
+            ("body", "intel_brief_body"),
+            ("claims", "intel_brief_claims"),
+        ] {
+            let hash: String = store
+                .conn
+                .query_row(
+                    "SELECT output_hash FROM intel_brief_stage_outputs WHERE task_id=?1",
+                    [task_id(&job, op)],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(bound[key]["task_id"], task_id(&job, op));
+            assert_eq!(bound[key]["output_hash"], hash.as_str());
+        }
+        // A second bind is a compare-and-set no-op.
+        let before: String = store
+            .conn
+            .query_row(
+                "SELECT input_hash FROM argos_tasks WHERE id=?1",
+                [&inf.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let tx = store.conn.unchecked_transaction().unwrap();
+        bind_ready(&tx, &job, &[], &now()).unwrap();
+        tx.commit().unwrap();
+        let after: String = store
+            .conn
+            .query_row(
+                "SELECT input_hash FROM argos_tasks WHERE id=?1",
+                [&inf.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, after);
+        commit(&store, &inf, "{\"stage\":\"inferences\"}", 2);
+        let links = claim_stage(&store.conn, "w", 120, &now()).unwrap().unwrap();
+        assert_eq!(links.operation, "intel_brief_links");
+        commit(&store, &links, "{}", 0);
+        assert!(claim_stage(&store.conn, "w", 120, &now())
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            rows(&store, &job),
+            [
+                "Completed · 2 items",
+                "Completed · 2 items",
+                "Completed · 2 items",
+                "Completed · no matching articles"
+            ]
+        );
+        // Completed unchanged visit: same chain, nothing claimable (zero requests).
         assert_eq!(
             ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap(),
             job
         );
+        assert!(claim_stage(&store.conn, "w", 120, &now())
+            .unwrap()
+            .is_none());
     }
-    let count: i64 = store
+}
+
+/// A failed root blocks only its descendants; retry re-runs the failed
+/// branch alone and the join then proceeds.
+#[test]
+fn failed_root_blocks_only_descendants_and_retry_reruns_only_it() {
+    let store = seeded();
+    let job = ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap();
+    let a = claim_stage(&store.conn, "w1", 120, &now())
+        .unwrap()
+        .unwrap();
+    let b = claim_stage(&store.conn, "w2", 120, &now())
+        .unwrap()
+        .unwrap();
+    let (body, claims) = if a.operation == "intel_brief_body" {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    store.conn.execute("UPDATE argos_tasks SET state='failed',error_message='acquisition incomplete',lease_owner='',lease_until='' WHERE id=?1", [&body.id]).unwrap();
+    tasks::refresh_job_state(&store.conn, &job, &now()).unwrap();
+    // The sibling still commits after the failure.
+    commit(&store, &claims, "{}", 1);
+    assert_eq!(
+        rows(&store, &job),
+        [
+            "Failed · acquisition incomplete",
+            "Completed · 1 item",
+            "Queued · blocked by Full article",
+            "Queued · blocked by Full article"
+        ]
+    );
+    assert!(claim_stage(&store.conn, "w", 120, &now())
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        retry_stage(&store.conn, &job, &now()).unwrap(),
+        Some(body.id.clone())
+    );
+    assert_eq!(state(&store, &claims.id), "completed");
+    let again = claim_stage(&store.conn, "w", 120, &now()).unwrap().unwrap();
+    assert_eq!(again.operation, "intel_brief_body");
+    commit(&store, &again, "{}", 1);
+    let inf = claim_stage(&store.conn, "w", 120, &now()).unwrap().unwrap();
+    assert_eq!(inf.operation, "intel_brief_inferences");
+}
+
+/// An active v1 (serial) chain is fenced and replaced by a v2 generation.
+#[test]
+fn v1_chain_is_fenced_and_cut_over_to_a_new_v2_generation() {
+    let store = seeded();
+    let old = ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE intel_brief_runs SET contract=?2 WHERE job_id=?1",
+            [&old, CONTRACT_V1],
+        )
+        .unwrap();
+    let stale = claim_stage(&store.conn, "w", 120, &now()).unwrap().unwrap();
+    let new = ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap();
+    assert_ne!(new, old);
+    // The in-flight v1 worker cannot publish into the fenced run.
+    assert!(!commit_stage(&store.conn, &stale, "{}", 1, "", &now()).unwrap());
+    let next = claim_stage(&store.conn, "w", 120, &now()).unwrap().unwrap();
+    assert_eq!(next.job_id, new);
+    let contract: String = store
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM argos_tasks WHERE job_id=?1",
-            [&job],
+            "SELECT contract FROM intel_brief_runs WHERE job_id=?1",
+            [&new],
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(count, 4, "all four rows exist immediately");
-    assert_eq!(
-        rows(&store, &job),
-        [
-            "Queued",
-            "Queued · after Full article",
-            "Queued · after Claims",
-            "Queued · after Inferences"
-        ]
-    );
-    // Unrelated drainers never see brief stages.
-    assert!(
-        tasks::claim_next_in(&store.conn, &[], "generic", 120, &now())
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        tasks::claim_next_in(&store.conn, &[tasks::POOL_LLM], "llm", 120, &now())
-            .unwrap()
-            .is_none()
-    );
-    let mut order = Vec::new();
-    for _ in 0..4 {
-        let claimed = claim_stage(&store.conn, "w", 120, &now()).unwrap().unwrap();
-        // Exactly one active stage: nothing else is claimable meanwhile.
-        assert!(claim_stage(&store.conn, "w2", 120, &now())
-            .unwrap()
-            .is_none());
-        let views = stage_views(&store.conn, &job).unwrap();
-        assert_eq!(views.iter().filter(|v| v.active).count(), 1);
-        order.push(claimed.operation.clone());
-        let items = if claimed.operation == "intel_brief_links" {
-            0
-        } else {
-            2
-        };
-        let reason = if items == 0 {
-            "no matching articles"
-        } else {
-            ""
-        };
-        assert!(commit_stage(
-            &store.conn,
-            &claimed,
-            &format!("{{\"stage\":\"{}\"}}", claimed.operation),
-            items,
-            reason,
-            &now()
-        )
-        .unwrap());
-    }
-    assert_eq!(
-        order,
-        STAGES
-            .iter()
-            .map(|(op, _)| op.to_string())
-            .collect::<Vec<_>>()
-    );
-    assert!(claim_stage(&store.conn, "w", 120, &now())
-        .unwrap()
-        .is_none());
-    assert_eq!(
-        rows(&store, &job),
-        [
-            "Completed · 2 items",
-            "Completed · 2 items",
-            "Completed · 2 items",
-            "Completed · no matching articles"
-        ]
-    );
-    // Successor inputs are bound to the predecessor's committed hash.
-    let (bound, hash): (String, String) = store.conn.query_row(
-        "SELECT t.input_hash,o.output_hash FROM argos_tasks t JOIN intel_brief_stage_outputs o ON o.task_id=?2 WHERE t.id=?1",
-        [task_id(&job, "intel_brief_claims"), task_id(&job, "intel_brief_body")],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).unwrap();
-    assert_eq!(bound, hash);
-    // Completed unchanged visit: same chain, nothing claimable (zero requests).
-    assert_eq!(
-        ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap(),
-        job
-    );
-    assert!(claim_stage(&store.conn, "w", 120, &now())
-        .unwrap()
-        .is_none());
+    assert_eq!(contract, CONTRACT);
 }
 
 #[test]
@@ -379,5 +528,6 @@ fn overlapping_drainers_never_double_claim_a_stage() {
         .map(|h| h.join().unwrap())
         .filter(|c| *c)
         .count();
-    assert_eq!(claimed, 1);
+    // Exactly the two independent roots, never a duplicate or a descendant.
+    assert_eq!(claimed, 2);
 }

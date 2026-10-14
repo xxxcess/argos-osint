@@ -222,12 +222,12 @@ impl<'a> OperationScope<'a> {
         self
     }
 
-    /// Bind the operation to a task lease epoch. The epoch is also the
-    /// attempt generation, so a retried task never overwrites the prior
-    /// epoch's immutable attempt rows.
+    /// Bind the operation to a task lease epoch (ownership/telemetry). The
+    /// caller also puts the epoch in the operation id
+    /// (`{task_id}:e{epoch}:...`), so a retried execution writes new attempt
+    /// rows and prior rows stay immutable.
     pub fn with_task_epoch(mut self, epoch: i64) -> Self {
         self.task_epoch = Some(epoch);
-        self.generation = u32::try_from(epoch.max(0)).unwrap_or(u32::MAX);
         self
     }
 

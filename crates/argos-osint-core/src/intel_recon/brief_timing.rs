@@ -155,21 +155,6 @@ fn ready_at(conn: &Connection, task: &str) -> Result<String> {
         .unwrap_or_default())
 }
 
-/// Current lease epoch of a task (the epoch its live worker holds).
-pub fn lease_epoch(db_path: &Path, task_id: &str) -> Option<i64> {
-    let store = Store::open(db_path).ok()?;
-    store
-        .conn
-        .query_row(
-            "SELECT lease_epoch FROM argos_tasks WHERE id=?1",
-            [task_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
-}
-
 /// Build the timing record for a finished stage.
 pub fn collect(
     conn: &Connection,
@@ -205,7 +190,6 @@ pub fn collect(
          FROM recon_model_attempts a JOIN recon_model_operations o ON o.id=a.operation_id
          WHERE o.task_id=?1
            AND (o.task_epoch = ?3 OR (o.task_epoch IS NULL AND a.started_at >= ?2))
-           AND (o.task_epoch IS NULL OR a.generation = ?3)
          ORDER BY a.started_at, a.attempt",
     )?;
     // Current epoch only: a retried task never folds the previous lease's

@@ -615,15 +615,19 @@ impl BlockDecider for RuntimeDecider<'_> {
                 blocks: batch,
                 context,
             };
-            let operation_id = format!(
-                "{}:clean-body:{}:{}",
-                self.runtime.job_id,
-                self.url,
-                batch.first().map(|b| b.id).unwrap_or(0)
-            );
+            let payload = format!("{}:{}", self.url, batch.first().map(|b| b.id).unwrap_or(0));
+            // Brief-owned cleanup attaches to the Body task and its epoch.
+            let operation_id = match &self.runtime.stage {
+                Some(ctx) => ctx.operation_id("cleanup", &payload),
+                None => format!("{}:clean-body:{payload}", self.runtime.job_id),
+            };
             let scope = crate::recon::model_exec::OperationScope::new(&operation_id, "classifier")
                 .with_budget(crate::request_policy::CLEANUP_FALLBACK_BUDGET)
                 .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision);
+            let scope = match &self.runtime.stage {
+                Some(ctx) => ctx.scope(scope),
+                None => scope,
+            };
             // Brief-owned cleanup is user-waiting work.
             let scope = if self.runtime.job_id.starts_with("intel-brief:") {
                 scope.with_interactive()

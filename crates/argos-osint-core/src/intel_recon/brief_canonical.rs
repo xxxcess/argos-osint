@@ -220,7 +220,7 @@ pub fn prepare(
             attributed_to: c["attributed_to"].as_str().unwrap_or("").into(),
             temporal_scope: c["time"].as_str().unwrap_or("").into(),
             evidence_refs: span_refs(c, "evidence", &meta_ev.reference, meta_offset),
-            extraction_scope: format!("{}:metadata", super::brief_pipeline::CONTRACT),
+            extraction_scope: format!("{}:metadata", super::brief_pipeline::CANONICAL_CONTRACT),
             assessment: faithful(),
             support_receipts: vec![],
         });
@@ -315,7 +315,7 @@ pub fn publish_on(
                 input.snapshot.generation =
                     insight_persist::advance_generation(tx, "article", article_id, now)?;
                 input.snapshot.key = crate::nlp::cache::key(&serde_json::json!([
-                    super::brief_pipeline::CONTRACT,
+                    super::brief_pipeline::CANONICAL_CONTRACT,
                     input.snapshot.source_refs,
                     snapshot_hash
                 ]));

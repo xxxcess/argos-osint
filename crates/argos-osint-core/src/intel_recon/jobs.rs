@@ -386,6 +386,7 @@ pub fn start_report_worker(
     let db_path = db_path.to_path_buf();
     let job = register_canonical(&db_path, &job_id, &article_title, cancel.clone());
     let runtime = JobRuntime {
+        stage: None,
         db_path,
         job_id,
         article_title,

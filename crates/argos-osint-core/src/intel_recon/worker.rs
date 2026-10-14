@@ -22,6 +22,9 @@ use super::synthesize::{save_section, synthesize_section_with_runtime, SectionSy
 
 #[derive(Clone)]
 pub struct JobRuntime {
+    /// Owning brief stage execution, when this runtime serves a Body task
+    /// (cleanup attempts attach to that task and epoch).
+    pub stage: Option<super::brief_stages::StageContext>,
     pub db_path: PathBuf,
     pub job_id: String,
     pub article_title: String,

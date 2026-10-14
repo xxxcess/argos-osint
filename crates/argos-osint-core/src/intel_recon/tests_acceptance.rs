@@ -645,6 +645,7 @@ mod acceptance {
         )
         .unwrap();
         let runtime = JobRuntime {
+            stage: None,
             db_path: db.clone(),
             job_id: job.id.clone(),
             article_title: art.title.clone(),

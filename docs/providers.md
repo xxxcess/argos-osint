@@ -236,6 +236,8 @@ Jev gets no chat parameters. Claims, Inferences and Links send their `brief_cont
 
 The **Brief fast preset** (Defaults → *Apply fast preset* / *Reset fast preset*) points `intel_brief_claims.generate` and `intel_brief_links.generate` at Summarization. Their logical roles do not change, and Inference support and bounded gates keep their configured routes. The preset ships unset. Reset removes only the preset's own references and leaves any explicit assignment you set on those operations.
 
+**Editing one operation.** On Defaults, *Op ▸* selects a Brief operation (Claims, Inferences, Inference support, Links). *Save for op* stores the current Provider/Model fields as that operation's explicit override; *Reset op* removes it so the operation inherits its logical role again. The details panel lists every operation with its source (inherited / explicit override / linked by the fast preset), its response contract (`generated_json` for the generation steps, `bounded_decision` for Inference support) and its adapter with capability evidence (strict schema, JSON mode, tools, and the provenance chain such as `conservative → profile`). A changed route moves only that operation's node revision; the next visit re-runs that node and whatever depends on its output.
+
 Portable profile documents (`config_transfer`) gain **schema 2** (`docs/schemas/profile-config-v2.schema.json`). It adds two fields, both rejected under schema 1:
 - override role references;
 - an optional route `account_id`: the internal account-map key, validated against a `providers[]` entry of the same provider kind.

@@ -956,9 +956,16 @@ fn claim_with(
            -- Dependencies: every predecessor must have committed.
            AND NOT EXISTS(SELECT 1 FROM argos_task_dependencies d JOIN argos_tasks p ON p.id=d.depends_on
                           WHERE d.task_id=argos_tasks.id AND p.state<>'completed')
-           -- At most one active stage per dependent chain (job generation).
+           -- Brief chains: independent roots (no prerequisites) may run
+           -- together — at most the two v2 roots — while any dependent stage
+           -- stays exclusive. A legacy v1 chain has a single root, so it
+           -- keeps one active stage.
            AND NOT (pool='{POOL_INTEL_BRIEF}' AND EXISTS(SELECT 1 FROM argos_tasks o
-                    WHERE o.job_id=argos_tasks.job_id AND o.id<>argos_tasks.id AND o.state='running'))
+                    WHERE o.job_id=argos_tasks.job_id AND o.id<>argos_tasks.id AND o.state='running'
+                      AND (EXISTS(SELECT 1 FROM argos_task_dependencies d WHERE d.task_id=argos_tasks.id)
+                           OR EXISTS(SELECT 1 FROM argos_task_dependencies d WHERE d.task_id=o.id))))
+           -- A brief stage never dispatches from an unbound (partial) input.
+           AND (pool<>'{POOL_INTEL_BRIEF}' OR input_hash<>'')
          RETURNING id, job_id, operation, lease_epoch, attempts, max_attempts,
                    input_ref, input_hash, source_revision, created_at, retry_since, queue_ms"
     );
@@ -1428,8 +1435,16 @@ pub fn refresh_job_state(conn: &Connection, job_id: &str, now: &str) -> Result<(
         i64,
         i64,
     ) = conn.query_row(
-        "SELECT COUNT(*),
-                SUM(state='running'), SUM(state='queued'), SUM(state='retry_scheduled'),
+        // A queued task behind a failed prerequisite (transitively) can
+        // never run until explicit Retry, so it does not keep the job
+        // "queued": the job settles once independent work finishes.
+        "WITH RECURSIVE blocked(id) AS (
+               SELECT d.task_id FROM argos_task_dependencies d JOIN argos_tasks p ON p.id=d.depends_on
+                WHERE p.job_id=?1 AND p.state='failed'
+               UNION SELECT d.task_id FROM argos_task_dependencies d JOIN blocked b ON d.depends_on=b.id)
+         SELECT COUNT(*),
+                SUM(state='running'), SUM(state='queued' AND id NOT IN (SELECT id FROM blocked)),
+                SUM(state='retry_scheduled'),
                 SUM(state='paused'), SUM(state='completed'), SUM(state IN ('failed')),
                 SUM(state IN ('cancelled','superseded'))
              FROM argos_tasks WHERE job_id=?1",

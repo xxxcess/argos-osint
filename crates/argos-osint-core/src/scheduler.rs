@@ -396,8 +396,9 @@ impl WorkerPool {
         Self { stop }
     }
 
-    /// Dedicated Intel brief stage runner. A multi-thread runtime keeps the
-    /// lease heartbeat independent of blocking SQLite work in a stage.
+    /// Dedicated Intel brief stage runner: a bounded two-slot drainer
+    /// dispatches ready stages onto separate Tokio tasks. The multi-thread
+    /// runtime keeps lease heartbeats independent of blocking SQLite work.
     pub fn spawn_intel_brief_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
@@ -413,14 +414,19 @@ impl WorkerPool {
                 };
                 let config = crate::intel_recon::brief_stages::ExecConfig::default();
                 while !flag.load(Ordering::Acquire) {
-                    let mut backend =
-                        crate::intel_recon::brief_stages::RuntimeBackend::load(&db_path);
-                    let _ = runtime.block_on(crate::intel_recon::brief_stages::drain(
+                    // Two stage slots: the independent v2 roots really run
+                    // together, each with its own backend and connections.
+                    let db = db_path.clone();
+                    let _ = runtime.block_on(crate::intel_recon::brief_stages::drain_parallel(
                         &db_path,
                         &format!("{owner}:intel-brief"),
-                        &mut backend,
+                        move || {
+                            Box::new(crate::intel_recon::brief_stages::RuntimeBackend::load(&db))
+                                as Box<dyn crate::intel_recon::brief_stages::StageBackend + Send>
+                        },
                         &flag,
                         &config,
+                        crate::intel_recon::brief_stages::STAGE_SLOTS,
                     ));
                     std::thread::sleep(Duration::from_millis(750));
                 }

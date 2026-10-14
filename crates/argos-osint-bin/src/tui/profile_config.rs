@@ -19,7 +19,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use argos_osint_core::config_transfer::{
-    self, ConfigurationSnapshot, ImportPlan, ProfileConfig, QuotaSettingsFile, SCHEMA_VERSION,
+    self, ConfigurationSnapshot, ImportPlan, ProfileConfig, QuotaSettingsFile,
 };
 use argos_osint_core::paths;
 use argos_osint_core::provider::SettingsFile;
@@ -328,7 +328,8 @@ impl ConfigView {
         self.export_confirm = false;
         self.exported = Some(document.clone());
         self.export_status = Some(format!(
-            "Exported schema v{SCHEMA_VERSION} to {}",
+            "Exported schema v{} to {}",
+            document.schema_version,
             path.display()
         ));
         self.export_error = None;

@@ -77,6 +77,8 @@ pub struct OperationScope<'a> {
     pub budget: Option<crate::request_policy::StageBudget>,
     /// Authoritative response contract (schema for strict/native/output tool).
     pub contract: Option<crate::provider_adapters::ResponseContract>,
+    /// Lease epoch of the owning task (schema 41); `None` outside tasks.
+    pub task_epoch: Option<i64>,
 }
 
 /// Declared response format (spec §3). `BoundedDecision` may use native Jev
@@ -123,6 +125,7 @@ impl<'a> OperationScope<'a> {
             interactive: false,
             budget: None,
             contract: None,
+            task_epoch: None,
         }
     }
 
@@ -216,6 +219,15 @@ impl<'a> OperationScope<'a> {
 
     pub fn with_task(mut self, task_id: &'a str) -> Self {
         self.task_id = Some(task_id);
+        self
+    }
+
+    /// Bind the operation to a task lease epoch. The epoch is also the
+    /// attempt generation, so a retried task never overwrites the prior
+    /// epoch's immutable attempt rows.
+    pub fn with_task_epoch(mut self, epoch: i64) -> Self {
+        self.task_epoch = Some(epoch);
+        self.generation = u32::try_from(epoch.max(0)).unwrap_or(u32::MAX);
         self
     }
 
@@ -637,6 +649,18 @@ pub struct AttemptTimings {
     pub completion_tokens: Option<i64>,
     /// Whether the streamed response ran to its end.
     pub stream_completed: i64,
+    /// Reported reasoning/visible tokens and USD cost (schema 41); `None`
+    /// means the provider did not report it, never zero.
+    pub reasoning_tokens: Option<i64>,
+    pub visible_tokens: Option<i64>,
+    pub reported_cost_usd: Option<f64>,
+    /// Wire marks relative to `sent_at` (schema 41); `None` when not observed.
+    pub response_headers_ms: Option<i64>,
+    pub first_reasoning_ms: Option<i64>,
+    pub first_output_ms: Option<i64>,
+    pub stream_completion_ms: Option<i64>,
+    /// Request-policy diagnostics (dropped/rewritten fields), JSON array.
+    pub policy_diagnostics: Vec<String>,
     queued_instant: Option<Instant>,
     sent_instant: Option<Instant>,
     first_response_instant: Option<Instant>,
@@ -689,6 +713,30 @@ impl AttemptTimings {
         }
     }
 
+    /// Reported reasoning/visible tokens and cost, never estimated.
+    pub fn extended_usage(&mut self, usage: Option<&crate::provider::Usage>) {
+        let Some(u) = usage else { return };
+        self.reasoning_tokens = u
+            .reasoning_tokens
+            .map(|v| v as i64)
+            .or(self.reasoning_tokens);
+        self.visible_tokens = u.visible_tokens.map(|v| v as i64).or(self.visible_tokens);
+        self.reported_cost_usd = u.cost_usd.or(self.reported_cost_usd);
+    }
+
+    /// Convert observed wire marks into offsets from the send instant.
+    pub fn wire_marks(&mut self, marks: &WireMarks) {
+        let Some(sent) = self.sent_instant else {
+            return;
+        };
+        let rel =
+            |at: Option<Instant>| at.map(|a| a.saturating_duration_since(sent).as_millis() as i64);
+        self.response_headers_ms = rel(marks.headers);
+        self.first_reasoning_ms = rel(marks.first_reasoning);
+        self.stream_completion_ms = rel(marks.stream_complete);
+        self.first_output_ms = rel(marks.first_output);
+    }
+
     /// Freeze the measured durations at the end of the attempt.
     pub fn finish(&mut self, elapsed_ms: u64, stream_completed: bool) {
         self.elapsed_ms = i64::try_from(elapsed_ms).unwrap_or(i64::MAX);
@@ -701,6 +749,41 @@ impl AttemptTimings {
             _ => self.reported_ttfb_ms.unwrap_or_default(),
         };
         self.stream_completed = i64::from(stream_completed);
+    }
+}
+
+/// Instants observed from `AttemptProgress` during one wire attempt.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WireMarks {
+    pub headers: Option<Instant>,
+    pub first_reasoning: Option<Instant>,
+    pub first_output: Option<Instant>,
+    pub stream_complete: Option<Instant>,
+}
+
+impl WireMarks {
+    pub fn observe(&mut self, progress: &provider_attempt::AttemptProgress, at: Instant) {
+        use provider_attempt::AttemptProgress as P;
+        match progress {
+            P::HeadersReceived { .. } => {
+                self.headers.get_or_insert(at);
+            }
+            P::Receiving {
+                answer_chars,
+                reasoning_chars,
+            } => {
+                if *reasoning_chars > 0 {
+                    self.first_reasoning.get_or_insert(at);
+                }
+                if *answer_chars > 0 {
+                    self.first_output.get_or_insert(at);
+                }
+            }
+            P::StreamComplete { .. } => {
+                self.stream_complete.get_or_insert(at);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -960,6 +1043,7 @@ fn finish_attempt(
         usage.and_then(|u| u.prompt_tokens).map(|v| v as i64),
         usage.and_then(|u| u.completion_tokens).map(|v| v as i64),
     );
+    timings.extended_usage(usage);
     timings.finish(elapsed_ms, stream_completed);
     if let Err(error) = record_attempt_finish(db_path, attempt_id, outcome, timings) {
         if facts.strict_persistence {
@@ -986,10 +1070,11 @@ pub fn ensure_operation(
     let store = Store::open(db_path)?;
     let now = now_rfc3339();
     store.conn.execute(
-        "INSERT INTO recon_model_operations (id, run_id, task_id, role, generation, status, draft, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?7)
+        "INSERT INTO recon_model_operations (id, run_id, task_id, role, generation, status, draft, created_at, updated_at, task_epoch)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
            generation = excluded.generation,
+           task_epoch = COALESCE(excluded.task_epoch, recon_model_operations.task_epoch),
            status = 'running',
            draft = CASE WHEN excluded.draft != '' THEN excluded.draft ELSE recon_model_operations.draft END,
            updated_at = excluded.updated_at",
@@ -1001,6 +1086,7 @@ pub fn ensure_operation(
             scope.generation,
             draft,
             now,
+            scope.task_epoch,
         ],
     )?;
     Ok(())
@@ -1115,7 +1201,15 @@ fn record_attempt_finish(
            ttfb_ms = ?16,
            prompt_tokens = ?17,
            completion_tokens = ?18,
-           stream_completed = ?19
+           stream_completed = ?19,
+           reasoning_tokens = ?21,
+           visible_tokens = ?22,
+           reported_cost_usd = ?23,
+           response_headers_ms = ?24,
+           first_reasoning_ms = ?25,
+           first_output_ms = ?26,
+           stream_completion_ms = ?27,
+           policy_diagnostics_json = ?28
          WHERE id = ?20",
         rusqlite::params![
             outcome.outcome,
@@ -1138,6 +1232,14 @@ fn record_attempt_finish(
             timings.completion_tokens,
             timings.stream_completed,
             attempt_id,
+            timings.reasoning_tokens,
+            timings.visible_tokens,
+            timings.reported_cost_usd,
+            timings.response_headers_ms,
+            timings.first_reasoning_ms,
+            timings.first_output_ms,
+            timings.stream_completion_ms,
+            serde_json::to_string(&timings.policy_diagnostics).unwrap_or_else(|_| "[]".into()),
         ],
     )?;
     Ok(())
@@ -1363,19 +1465,29 @@ where
             };
 
             timings.sent();
-            let progress_sink = on_event_step.clone().map(|sink| {
+            let marks: Arc<std::sync::Mutex<WireMarks>> = Arc::default();
+            let progress_sink = {
+                let sink = on_event_step.clone();
+                let marks = marks.clone();
                 let op_id = op_id.clone();
                 let model = route_cloned.model.clone();
-                Arc::new(move |progress: provider_attempt::AttemptProgress| {
-                    sink(ModelExecEvent::Progress {
-                        operation_id: op_id.clone(),
-                        attempt: attempt_num,
-                        route_index: route_idx as u32,
-                        model: model.clone(),
-                        progress,
-                    })
-                }) as Arc<provider_attempt::ProgressFn>
-            });
+                Some(
+                    Arc::new(move |progress: provider_attempt::AttemptProgress| {
+                        if let Ok(mut m) = marks.lock() {
+                            m.observe(&progress, Instant::now());
+                        }
+                        if let Some(sink) = &sink {
+                            sink(ModelExecEvent::Progress {
+                                operation_id: op_id.clone(),
+                                attempt: attempt_num,
+                                route_index: route_idx as u32,
+                                model: model.clone(),
+                                progress,
+                            })
+                        }
+                    }) as Arc<provider_attempt::ProgressFn>,
+                )
+            };
             let rep = if insight_contract {
                 let deadlines = if transport == Transport::Stream {
                     Deadlines::insight_stream()
@@ -1412,6 +1524,15 @@ where
                     timings.first_response(at, *instant);
                 }
             }
+            if let Ok(mut m) = marks.lock() {
+                // The observer sees the first answer delta exactly; the
+                // throttled `Receiving` mark is only a fallback.
+                if timings.first_response_instant.is_some() {
+                    m.first_output = timings.first_response_instant;
+                }
+                timings.wire_marks(&m);
+            }
+            timings.policy_diagnostics = rep.policy_diagnostics.clone();
             let elapsed_ms = start_t.elapsed().as_millis() as u64;
             let partial = streamed_acc.lock().map(|s| s.clone()).unwrap_or_default();
             if !partial.is_empty() {

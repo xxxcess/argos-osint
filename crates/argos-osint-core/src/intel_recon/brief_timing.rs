@@ -60,6 +60,9 @@ pub struct StageTiming {
     /// Distinct `provider/model` routes that were dispatched.
     pub routes: Vec<String>,
     pub outcome: String,
+    /// Lease epoch of the execution this row describes (schema 41).
+    #[serde(default)]
+    pub task_epoch: Option<i64>,
 }
 
 /// Per-stage phase accumulator. Scoped to the stage's future with
@@ -152,6 +155,21 @@ fn ready_at(conn: &Connection, task: &str) -> Result<String> {
         .unwrap_or_default())
 }
 
+/// Current lease epoch of a task (the epoch its live worker holds).
+pub fn lease_epoch(db_path: &Path, task_id: &str) -> Option<i64> {
+    let store = Store::open(db_path).ok()?;
+    store
+        .conn
+        .query_row(
+            "SELECT lease_epoch FROM argos_tasks WHERE id=?1",
+            [task_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+}
+
 /// Build the timing record for a finished stage.
 pub fn collect(
     conn: &Connection,
@@ -178,27 +196,35 @@ pub fn collect(
         persistence_ms: persistence.as_millis() as i64,
         total_ms: total.as_millis() as i64,
         outcome: outcome.to_string(),
+        task_epoch: Some(claimed.epoch),
         ..Default::default()
     };
     let mut stmt = conn.prepare(
         "SELECT a.provider, a.model, a.dispatched, a.outcome, a.queue_ms, a.wait_ms,
                 a.elapsed_ms, a.ttfb_ms
          FROM recon_model_attempts a JOIN recon_model_operations o ON o.id=a.operation_id
-         WHERE o.task_id=?1 AND a.started_at >= ?2
+         WHERE o.task_id=?1
+           AND (o.task_epoch = ?3 OR (o.task_epoch IS NULL AND a.started_at >= ?2))
+           AND (o.task_epoch IS NULL OR a.generation = ?3)
          ORDER BY a.started_at, a.attempt",
     )?;
-    let rows = stmt.query_map(params![claimed.id, claimed.started_at], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, i64>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, i64>(4)?,
-            r.get::<_, i64>(5)?,
-            r.get::<_, i64>(6)?,
-            r.get::<_, i64>(7)?,
-        ))
-    })?;
+    // Current epoch only: a retried task never folds the previous lease's
+    // attempts into this execution's timing row.
+    let rows = stmt.query_map(
+        params![claimed.id, claimed.started_at, claimed.epoch],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+            ))
+        },
+    )?;
     let mut first_set = false;
     for row in rows {
         let (provider, model, dispatched, outcome, queue, wait, elapsed, ttfb) = row?;
@@ -230,8 +256,8 @@ pub fn persist(conn: &Connection, t: &StageTiming, at: &str) -> Result<()> {
         "INSERT INTO intel_brief_stage_timings
          (task_id, job_id, operation, queue_ms, local_ms, admission_ms, first_output_ms,
           headers_ms, generation_ms, fidelity_ms, backoff_ms, persistence_ms, total_ms, attempts,
-          routes_json, outcome, recorded_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+          routes_json, outcome, recorded_at, task_epoch)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
          ON CONFLICT(task_id) DO UPDATE SET
           queue_ms=excluded.queue_ms, local_ms=excluded.local_ms,
           admission_ms=excluded.admission_ms, first_output_ms=excluded.first_output_ms,
@@ -240,7 +266,7 @@ pub fn persist(conn: &Connection, t: &StageTiming, at: &str) -> Result<()> {
           backoff_ms=excluded.backoff_ms, persistence_ms=excluded.persistence_ms,
           total_ms=excluded.total_ms, attempts=excluded.attempts,
           routes_json=excluded.routes_json, outcome=excluded.outcome,
-          recorded_at=excluded.recorded_at",
+          recorded_at=excluded.recorded_at, task_epoch=excluded.task_epoch",
         params![
             t.task_id,
             t.job_id,
@@ -258,7 +284,8 @@ pub fn persist(conn: &Connection, t: &StageTiming, at: &str) -> Result<()> {
             t.attempts,
             serde_json::to_string(&t.routes)?,
             t.outcome,
-            at
+            at,
+            t.task_epoch
         ],
     )?;
     Ok(())
@@ -269,7 +296,7 @@ pub fn for_job(conn: &Connection, job_id: &str) -> Result<Vec<StageTiming>> {
     let mut stmt = conn.prepare(
         "SELECT task_id, job_id, operation, queue_ms, local_ms, admission_ms, first_output_ms,
                 headers_ms, generation_ms, fidelity_ms, backoff_ms, persistence_ms, total_ms, attempts,
-                routes_json, outcome
+                routes_json, outcome, task_epoch
          FROM intel_brief_stage_timings WHERE job_id=?1 ORDER BY recorded_at",
     )?;
     let rows = stmt.query_map([job_id], |r| {
@@ -290,6 +317,7 @@ pub fn for_job(conn: &Connection, job_id: &str) -> Result<Vec<StageTiming>> {
             attempts: r.get(13)?,
             routes: serde_json::from_str(&r.get::<_, String>(14)?).unwrap_or_default(),
             outcome: r.get(15)?,
+            task_epoch: r.get(16)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)

@@ -3951,9 +3951,12 @@ fn provider_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
                 }
             }
             if contains(models[5], x, y) {
-                let buttons = button_areas(models[5], 4);
+                let buttons = button_areas(models[5], 5);
                 if contains(buttons[0], x, y) {
                     return Some(Target::Button(ButtonId::AddFallback));
+                }
+                if contains(buttons[4], x, y) {
+                    return Some(Target::Button(ButtonId::BriefFastPreset));
                 }
                 if contains(buttons[1], x, y) {
                     return Some(Target::Button(ButtonId::DeleteFallback));
@@ -6726,7 +6729,7 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
             draw_field(frame, app, model, " Model ", models[2]);
             draw_button(frame, app, save, "Save default", models[3]);
             draw_fallbacks_list(frame, app, models[4]);
-            let actions = button_areas(models[5], 4);
+            let actions = button_areas(models[5], 5);
             draw_button(
                 frame,
                 app,
@@ -6748,6 +6751,17 @@ fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
                 ButtonId::MoveFallbackDown,
                 "Move down",
                 actions[3],
+            );
+            draw_button(
+                frame,
+                app,
+                ButtonId::BriefFastPreset,
+                if app.settings.defaults.fast_preset_applied() {
+                    "Reset fast preset"
+                } else {
+                    "Apply fast preset"
+                },
+                actions[4],
             );
             let note = "Tried top to bottom after primary retries. Primary: 4 attempts (10s/20s/30s). Each fallback: 3 attempts (10s/20s).";
             if models[6].height >= 8 {

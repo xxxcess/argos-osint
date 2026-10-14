@@ -1560,6 +1560,9 @@ impl StageBackend for RuntimeBackend {
             if let Some(key) = mode.operation_key() {
                 scope = scope.with_operation(key);
             }
+            if let Some(epoch) = super::brief_timing::lease_epoch(&self.db_path, task_id) {
+                scope = scope.with_task_epoch(epoch);
+            }
             let (labels, _) = crate::recon::model_exec::execute_decisions_or_chat(
                 &self.auth,
                 &self.settings,
@@ -1621,6 +1624,9 @@ impl StageBackend for RuntimeBackend {
                     .with_interactive();
             if let Some(contract) = request.contract.clone() {
                 scope = scope.with_contract(contract);
+            }
+            if let Some(epoch) = super::brief_timing::lease_epoch(&self.db_path, &request.task_id) {
+                scope = scope.with_task_epoch(epoch);
             }
             let messages = [
                 crate::provider::ChatMessage {

@@ -486,7 +486,7 @@ pub struct RoleDefaults {
     /// [`BRIEF_OPERATIONS`]. Unset or empty entries inherit their logical
     /// role chain; role semantics and source scope never change.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub operation_overrides: std::collections::BTreeMap<String, ModelAssignment>,
+    pub operation_overrides: std::collections::BTreeMap<String, OperationOverride>,
     /// Measured oversized-story path (spec §2): Inferences read actor-focused
     /// passage packets instead of every body window. Off until the held-out
     /// quality comparison clears it; the full-body path stays the default.
@@ -498,6 +498,104 @@ pub const OP_CLAIMS_GENERATE: &str = "intel_brief_claims.generate";
 pub const OP_INFERENCES_GENERATE: &str = "intel_brief_inferences.generate";
 pub const OP_LINKS_GENERATE: &str = "intel_brief_links.generate";
 pub const OP_INFERENCES_ASSESS: &str = "intel_brief_inferences.assess";
+
+/// The operator's nine canonical role keys (spec §2). Only these may be the
+/// target of an operation override's `route_role` reference.
+pub const CANONICAL_ROLE_KEYS: [&str; 9] = [
+    "recon",
+    "tool_picker",
+    "synthesis",
+    "classifier",
+    "summarization",
+    "evidence_curator",
+    "entity_resolver",
+    "claim_assessor",
+    "investigation_controller",
+];
+
+/// A deny-unknown-fields reference to a role's route chain
+/// (`{"route_role":"summarization"}`). It resolves the named role directly
+/// and so follows that role's future model swaps without copied IDs.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RouteRoleRef {
+    pub route_role: String,
+}
+
+/// One operation override: either an explicit assignment or a reference to a
+/// canonical role's chain. Mixed objects (a `route_role` beside assignment
+/// fields) are rejected rather than silently picking one shape.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum OperationOverride {
+    Route(RouteRoleRef),
+    Assignment(ModelAssignment),
+}
+
+impl From<ModelAssignment> for OperationOverride {
+    fn from(a: ModelAssignment) -> Self {
+        Self::Assignment(a)
+    }
+}
+
+impl OperationOverride {
+    pub fn role(role: &str) -> Self {
+        Self::Route(RouteRoleRef {
+            route_role: role.to_string(),
+        })
+    }
+
+    /// The referenced role, for a reference override.
+    pub fn route_role(&self) -> Option<&str> {
+        match self {
+            Self::Route(r) => Some(&r.route_role),
+            Self::Assignment(_) => None,
+        }
+    }
+
+    pub fn assignment(&self) -> Option<&ModelAssignment> {
+        match self {
+            Self::Assignment(a) => Some(a),
+            Self::Route(_) => None,
+        }
+    }
+
+    /// Shape check shared by TOML load, typed validation and import: a
+    /// reference must name a canonical role (never an operation key).
+    pub fn check(&self) -> Result<(), String> {
+        match self {
+            Self::Route(r) if CANONICAL_ROLE_KEYS.contains(&r.route_role.as_str()) => Ok(()),
+            Self::Route(r) if operation_role(&r.route_role).is_some() => {
+                Err("route_role cannot reference another operation".into())
+            }
+            Self::Route(_) => Err("route_role must name a canonical role key".into()),
+            Self::Assignment(_) => Ok(()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OperationOverride {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = serde_json::Value::deserialize(d)?;
+        if value.get("route_role").is_some() {
+            let r: RouteRoleRef = serde_json::from_value(value).map_err(|_| {
+                D::Error::custom(
+                    "an operation override is either an assignment or {route_role}, not both",
+                )
+            })?;
+            let o = Self::Route(r);
+            o.check().map_err(D::Error::custom)?;
+            return Ok(o);
+        }
+        serde_json::from_value(value)
+            .map(Self::Assignment)
+            .map_err(D::Error::custom)
+    }
+}
+
+/// Operations the Brief fast preset links to the Summarization chain.
+pub const FAST_PRESET_OPERATIONS: [&str; 2] = [OP_CLAIMS_GENERATE, OP_LINKS_GENERATE];
 
 /// Overridable brief operations: (key, label, inherited logical role).
 pub const BRIEF_OPERATIONS: [(&str, &str, &str); 4] = [
@@ -707,18 +805,64 @@ impl RoleDefaults {
         operation: Option<&str>,
         role: &str,
     ) -> (ModelAssignment, bool) {
-        if let Some(a) = operation
-            .and_then(|k| self.operation_overrides.get(k))
-            .filter(|a| !a.provider.trim().is_empty() || !a.model.trim().is_empty())
-        {
-            return (a.clone(), true);
+        match operation.and_then(|k| self.operation_overrides.get(k)) {
+            Some(OperationOverride::Assignment(a))
+                if !a.provider.trim().is_empty() || !a.model.trim().is_empty() =>
+            {
+                return (a.clone(), true);
+            }
+            // A reference resolves the named role's current chain directly;
+            // it never chains through another operation.
+            Some(OperationOverride::Route(r))
+                if CANONICAL_ROLE_KEYS.contains(&r.route_role.as_str()) =>
+            {
+                return (self.resolve_role(&r.route_role).0, true);
+            }
+            _ => {}
         }
         (self.resolve_role(role).0, false)
     }
 
-    /// Clear one operation override (back to role inheritance).
+    /// Clear one operation override (back to role inheritance). The
+    /// referenced role, if any, is never touched.
     pub fn reset_operation(&mut self, operation: &str) -> bool {
         self.operation_overrides.remove(operation).is_some()
+    }
+
+    /// Apply the Brief fast preset: Claims.generate and Links.generate
+    /// reference the Summarization chain. Logical roles stay unchanged.
+    pub fn apply_fast_preset(&mut self) {
+        for key in FAST_PRESET_OPERATIONS {
+            self.operation_overrides
+                .insert(key.to_string(), OperationOverride::role("summarization"));
+        }
+    }
+
+    /// Remove only the preset's own references; explicit assignments the
+    /// operator set on those operations are kept.
+    pub fn reset_fast_preset(&mut self) -> bool {
+        let mut changed = false;
+        for key in FAST_PRESET_OPERATIONS {
+            if self
+                .operation_overrides
+                .get(key)
+                .and_then(OperationOverride::route_role)
+                == Some("summarization")
+            {
+                self.operation_overrides.remove(key);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    pub fn fast_preset_applied(&self) -> bool {
+        FAST_PRESET_OPERATIONS.iter().all(|k| {
+            self.operation_overrides
+                .get(*k)
+                .and_then(OperationOverride::route_role)
+                == Some("summarization")
+        })
     }
 
     /// Seeds the default decision model if unset.

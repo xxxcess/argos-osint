@@ -92,7 +92,7 @@ Counts and histograms merge `telemetry_events` with `telemetry_hourly` / `teleme
 
 ## The portable configuration contract
 
-Profile > System > **Configs** exports and imports the schema-v1 document. The full JSON Schema is `docs/schemas/profile-config-v1.schema.json`; the DTOs are `crates/argos-osint-core/src/config_transfer.rs`. `SettingsFile` is never exposed wholesale: only the documented fields travel, so unrelated settings, recon limits and local state cannot be overwritten by a foreign document.
+Profile > System > **Configs** exports and imports the portable document: schema 1 (`docs/schemas/profile-config-v1.schema.json`), or schema 2 (`docs/schemas/profile-config-v2.schema.json`) when operation-override role references or route `account_id`s are in use; the DTOs are `crates/argos-osint-core/src/config_transfer.rs`. `SettingsFile` is never exposed wholesale: only the documented fields travel, so unrelated settings, recon limits and local state cannot be overwritten by a foreign document.
 
 Root fields: `schema_version` (integer `1`), `providers`, `tool_credentials`, `model_roles`, `rate_limits`. `exported_at` is an optional informational RFC3339 timestamp and is never used to merge.
 

@@ -1139,7 +1139,8 @@ fn links_route_change_moves_only_the_links_revision() {
             provider: "openrouter".into(),
             model: "openai/gpt-4o-mini".into(),
             ..Default::default()
-        },
+        }
+        .into(),
     );
     let after = stage_revisions(&a, &s);
     assert_eq!(before[..3], after[..3]);
@@ -1151,7 +1152,8 @@ fn links_route_change_moves_only_the_links_revision() {
             provider: "openrouter".into(),
             model: "openai/gpt-4o".into(),
             ..Default::default()
-        },
+        }
+        .into(),
     );
     let claims = stage_revisions(&a, &s);
     assert_eq!(claims[0], after[0]);

@@ -78,6 +78,17 @@ impl AuthFile {
         })
     }
 
+    /// Store an account under its own map key. A key equal to the provider
+    /// kind behaves exactly like [`Self::set_account`].
+    pub fn set_account_keyed(&mut self, key: &str, secret: ProviderSecret) {
+        let kind = crate::provider::effective_kind(&secret);
+        if key.is_empty() || crate::provider::normalize_kind(key) == kind {
+            self.set_account(secret);
+        } else {
+            self.accounts.insert(key.to_string(), secret);
+        }
+    }
+
     pub fn set_account(&mut self, secret: ProviderSecret) {
         let kind = crate::provider::effective_kind(&secret);
         if let Some(legacy) = &self.text {

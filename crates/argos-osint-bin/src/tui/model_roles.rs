@@ -289,7 +289,7 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
         details_lines.push(Line::from(Span::styled(row.render(), style)));
     }
     details_lines.push(Line::from(Span::styled(
-        "Set via operation_overrides in config import; unset inherits.",
+        "Apply/Reset fast preset links Claims and Links to Summarization; unset inherits.",
         theme::dim(),
     )));
 
@@ -313,11 +313,15 @@ pub struct BriefOperationRow {
     pub provider: String,
     pub model: String,
     pub overridden: bool,
+    /// `route_role` of a linked (reference) override.
+    pub linked: Option<String>,
 }
 
 impl BriefOperationRow {
     pub fn render(&self) -> String {
-        let source = if self.overridden {
+        let source = if let Some(role) = &self.linked {
+            format!("→ {role} (linked)")
+        } else if self.overridden {
             "override".to_string()
         } else {
             format!("← {}", self.role)
@@ -343,6 +347,11 @@ pub fn brief_operation_rows(defaults: &provider::RoleDefaults) -> Vec<BriefOpera
                 provider: a.provider,
                 model: a.model,
                 overridden,
+                linked: defaults
+                    .operation_overrides
+                    .get(key)
+                    .and_then(provider::OperationOverride::route_role)
+                    .map(str::to_string),
             }
         })
         .collect()
@@ -363,7 +372,8 @@ mod brief_operation_tests {
                 provider: "google".into(),
                 model: "gemini-2.5-flash".into(),
                 ..Default::default()
-            },
+            }
+            .into(),
         );
         let rows = brief_operation_rows(&d);
         assert_eq!(rows.len(), provider::BRIEF_OPERATIONS.len());
@@ -379,5 +389,25 @@ mod brief_operation_tests {
             .unwrap();
         assert!(!inf.overridden);
         assert!(inf.render().contains("← synthesis"));
+    }
+
+    #[test]
+    fn fast_preset_rows_follow_summarization_and_reset_keeps_it() {
+        let mut d = provider::RoleDefaults::default();
+        d.summarization.provider = "openrouter".into();
+        d.summarization.model = "nvidia/nemotron-3-super-120b-a12b:free".into();
+        d.apply_fast_preset();
+        assert!(d.fast_preset_applied());
+        d.summarization.model = "google/gemma-4-31b-it:free".into();
+        let rows = brief_operation_rows(&d);
+        let claims = rows
+            .iter()
+            .find(|r| r.key == provider::OP_CLAIMS_GENERATE)
+            .unwrap();
+        assert_eq!(claims.model, "google/gemma-4-31b-it:free");
+        assert!(claims.render().contains("→ summarization (linked)"));
+        assert!(d.reset_fast_preset());
+        assert!(d.operation_overrides.is_empty());
+        assert_eq!(d.summarization.model, "google/gemma-4-31b-it:free");
     }
 }

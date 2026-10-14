@@ -547,6 +547,8 @@ pub enum ButtonId {
     DeleteFallback,
     MoveFallbackUp,
     MoveFallbackDown,
+    /// Apply or reset the Brief fast preset (Claims/Links → Summarization).
+    BriefFastPreset,
     FallbackItem(usize),
     FallbackPick(usize),
     FallbackTab(ProviderPage),
@@ -5605,9 +5607,12 @@ impl App {
     }
 
     pub fn fallback_incompatible(&self, model: &str) -> Option<&'static str> {
-        if matches!(
+        // Same contract rule as config import (spec §5): bounded-decision
+        // and mixed roles accept native decisions models; only the
+        // generation-only roles need every added route to complete chat.
+        if !matches!(
             self.defaults_role,
-            DefaultsRole::ToolPicker | DefaultsRole::Classifier
+            DefaultsRole::Recon | DefaultsRole::Synthesis | DefaultsRole::Summarization
         ) {
             return None;
         }
@@ -5626,6 +5631,23 @@ impl App {
         })
         .inspect(|_| {
             self.fallback_sel = self.fallback_sel.saturating_sub(1);
+        })
+    }
+
+    /// Apply the Brief fast preset, or reset it when applied. Reset removes
+    /// only the preset's references; Summarization itself is never changed.
+    pub fn toggle_fast_preset(&mut self) -> Result<String> {
+        let applied = self.settings.defaults.fast_preset_applied();
+        if applied {
+            self.settings.defaults.reset_fast_preset();
+        } else {
+            self.settings.defaults.apply_fast_preset();
+        }
+        self.save_settings()?;
+        Ok(if applied {
+            "Brief fast preset reset".into()
+        } else {
+            "Brief fast preset applied: Claims and Links follow Summarization".into()
         })
     }
 
@@ -7340,6 +7362,7 @@ impl App {
             ButtonId::DeleteFallback => self.delete_selected_fallback(),
             ButtonId::MoveFallbackUp => self.move_selected_fallback(-1),
             ButtonId::MoveFallbackDown => self.move_selected_fallback(1),
+            ButtonId::BriefFastPreset => self.toggle_fast_preset(),
             ButtonId::FallbackItem(index) => {
                 self.fallback_sel = index;
                 Ok(format!("Fallback {}", index + 1))
@@ -12806,6 +12829,38 @@ mod tests {
         }
     }
 
+    /// Defaults page with the Brief fast preset applied (phase 3).
+    /// `python3 scripts/tui_review.py capture --test dump_role_routing_screens --ignored ...`
+    #[test]
+    #[ignore]
+    fn dump_role_routing_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [(160, 50), (120, 40)] {
+            let mut app = app();
+            let d = &mut app.settings.defaults;
+            d.summarization.provider = "openrouter".into();
+            d.summarization.model = "nvidia/nemotron-3-super-120b-a12b:free".into();
+            d.claim_assessor.provider = "openrouter".into();
+            d.claim_assessor.model = "nvidia/nemotron-3-ultra-550b-a55b:free".into();
+            d.synthesis.provider = "openrouter".into();
+            d.synthesis.model = "nvidia/nemotron-3-ultra-550b-a55b:free".into();
+            d.apply_fast_preset();
+            app.select(ModuleId::Providers.index());
+            app.provider_page = ProviderPage::Defaults;
+            app.defaults_role = DefaultsRole::Summarization;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("defaults-fast-preset-{width}x{height}"),
+                width,
+                height,
+            );
+        }
+    }
+
     #[test]
     #[ignore]
     fn dump_brain_graph_screens() {
@@ -12823,7 +12878,8 @@ mod tests {
                     provider: "google".into(),
                     model: "gemini-2.5-flash".into(),
                     ..Default::default()
-                },
+                }
+                .into(),
             );
             app.select(ModuleId::Providers.index());
             app.provider_page = ProviderPage::Defaults;

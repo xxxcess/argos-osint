@@ -310,7 +310,8 @@ fn operation_override_routes_only_its_operation() {
             model: "openai/gpt-4o-mini".into(),
             fallbacks: vec![route("local", "fixture")],
             ..Default::default()
-        },
+        }
+        .into(),
     );
     let a = auth("http://127.0.0.1:9", Some("fixture-only"));
     let models = |settings: &SettingsFile, op: Option<&str>| -> Vec<String> {
@@ -358,7 +359,8 @@ async fn attempt_records_persist_the_dispatch_declaration() {
             provider: "local".into(),
             model: "links-model".into(),
             ..Default::default()
-        },
+        }
+        .into(),
     );
     let cancel = Arc::new(AtomicBool::new(false));
     let scope = OperationScope::new("decl-op", "synthesis")
@@ -623,4 +625,145 @@ async fn malformed_decision_contract_fails_before_network_access() {
     .unwrap();
     assert!(error.to_string().contains("2–10 ordered levels"), "{error}");
     assert_eq!(server.hits(), 0);
+}
+
+// §5 fast preset: a linked reference resolves Summarization's *current*
+// chain, so a later Summarization swap is followed without copied IDs; the
+// logical role (claim_assessor) is unchanged and Reset never edits the role.
+#[test]
+fn linked_reference_follows_summarization_changes() {
+    let mut settings = assessor(("local", "assessor"), &[]);
+    settings.defaults.summarization = ModelAssignment {
+        provider: "local".into(),
+        model: "super".into(),
+        fallbacks: vec![route("local", "flash")],
+        ..Default::default()
+    };
+    settings.defaults.apply_fast_preset();
+    let a = auth("http://127.0.0.1:9", Some("fixture-only"));
+    let models = |settings: &SettingsFile, op: &str, role: &str| -> Vec<String> {
+        resolve_operation_routes(&a, settings, role, Some(op))
+            .0
+            .into_iter()
+            .map(|r| r.model)
+            .collect()
+    };
+    assert_eq!(
+        models(&settings, provider::OP_CLAIMS_GENERATE, "claim_assessor"),
+        ["super", "flash"]
+    );
+    settings.defaults.summarization.model = "gemma".into();
+    assert_eq!(
+        models(&settings, provider::OP_CLAIMS_GENERATE, "claim_assessor"),
+        ["gemma", "flash"]
+    );
+    assert_eq!(
+        models(&settings, provider::OP_INFERENCES_ASSESS, "claim_assessor"),
+        ["assessor"],
+        "support checks keep their configured route"
+    );
+    assert!(settings.defaults.reset_fast_preset());
+    assert_eq!(
+        models(&settings, provider::OP_CLAIMS_GENERATE, "claim_assessor"),
+        ["assessor"]
+    );
+    assert_eq!(settings.defaults.summarization.model, "gemma");
+}
+
+// Migration 41: each task epoch is its own attempt generation; the prior
+// epoch's row is immutable, the operation records the actual epoch, and
+// reported usage lands in the new nullable counters (unreported stays NULL).
+#[tokio::test]
+async fn retried_task_epoch_keeps_prior_attempts_and_records_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("argos.db");
+    drop(Store::open(&db).unwrap());
+    let reply = |cost: Option<f64>| {
+        let mut usage = serde_json::json!({"prompt_tokens":40,"completion_tokens":12,
+            "completion_tokens_details":{"reasoning_tokens":5}});
+        if let Some(c) = cost {
+            usage["cost"] = c.into();
+        }
+        mock::Reply::Json(
+            200,
+            serde_json::json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{}"}}],
+                "usage":usage})
+            .to_string(),
+        )
+    };
+    let server = mock::serve(vec![reply(Some(0.0012)), reply(None)]).await;
+    let auth = auth(&server.base_url, Some("or-fixture"));
+    let settings = synthesis_chain(("openrouter", "fixture/epoch-model"), &[]);
+    let cancel = Arc::new(AtomicBool::new(false));
+    for epoch in [3_i64, 4] {
+        let scope = OperationScope::new("epoch-op", "synthesis")
+            .with_task("task-e")
+            .with_task_epoch(epoch)
+            .with_insight_contract()
+            .with_format(ResponseFormat::GeneratedJson);
+        execute_chat(
+            &auth,
+            &settings,
+            &scope,
+            &user("JSON"),
+            json_validator,
+            &cancel,
+            None,
+            None,
+            Some(&db),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let store = Store::open(&db).unwrap();
+    let mut stmt = store
+        .conn
+        .prepare(
+            "SELECT generation, outcome, prompt_tokens, reasoning_tokens, reported_cost_usd,
+                    policy_diagnostics_json, first_output_ms IS NOT NULL OR response_headers_ms IS NOT NULL
+             FROM recon_model_attempts WHERE operation_id='epoch-op' ORDER BY generation",
+        )
+        .unwrap();
+    type Row = (
+        i64,
+        String,
+        Option<i64>,
+        Option<i64>,
+        Option<f64>,
+        String,
+        bool,
+    );
+    let rows: Vec<Row> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows.len(), 2, "epoch 3's attempt row was not overwritten");
+    assert_eq!((rows[0].0, rows[1].0), (3, 4));
+    assert!(rows
+        .iter()
+        .all(|r| r.1 == "ok" && r.2 == Some(40) && r.3 == Some(5)));
+    assert_eq!(rows[0].4, Some(0.0012));
+    assert_eq!(rows[1].4, None, "unreported cost stays unknown");
+    assert!(serde_json::from_str::<Vec<String>>(&rows[0].5).is_ok());
+    let epoch: Option<i64> = store
+        .conn
+        .query_row(
+            "SELECT task_epoch FROM recon_model_operations WHERE id='epoch-op'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(epoch, Some(4));
 }

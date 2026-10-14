@@ -229,3 +229,37 @@ Jev gets no chat parameters. Claims, Inferences and Links send their `brief_cont
 - Noul: optional `{true,false}` descriptions. `noul` is P(yes); a "no" answer carries 1 − p.
 - Score: an ordered array of 2–10 level descriptions, with no range or option object. The native probability-weighted level is zero-based. It maps linearly onto the application scale `min..=max` and is kept fractional (`score_value`). It is rounded only for the legacy display (`score`).
 - Answer types, distribution keys, bounds and sums are all validated. Chat fallbacks return validated labels with no fabricated probabilities, and `ContractAdapter::parse_chat_as` reports the structured mode that actually ran.
+
+## Operation overrides, the Brief fast preset and portable schema 2
+
+`defaults.operation_overrides` values are an `OperationOverride` union: an ordinary `ModelAssignment`, or a deny-unknown-fields reference `{route_role = "summarization"}`. A reference resolves the named role's *current* chain in `RoleDefaults::resolve_operation`, so a later Summarization model swap is followed without copied IDs. Only the nine canonical role keys are valid targets. Operation keys, `decision_model`, unknown roles and mixed objects (a `route_role` beside assignment fields) are rejected when the TOML is parsed. `reset_operation` removes the key and never edits the referenced role.
+
+The **Brief fast preset** (Defaults → *Apply fast preset* / *Reset fast preset*) points `intel_brief_claims.generate` and `intel_brief_links.generate` at Summarization. Their logical roles do not change, and Inference support and bounded gates keep their configured routes. The preset ships unset. Reset removes only the preset's own references and leaves any explicit assignment you set on those operations.
+
+Portable profile documents (`config_transfer`) gain **schema 2** (`docs/schemas/profile-config-v2.schema.json`). It adds two fields, both rejected under schema 1:
+- override role references;
+- an optional route `account_id`: the internal account-map key, validated against a `providers[]` entry of the same provider kind.
+
+Export writes schema 1 unless either feature is used. Import keeps the document's account-map key instead of collapsing it onto the provider kind. No secret travels in routing fields.
+
+`check_role_compatibility` is contract-based and makes no network request:
+- Bounded-decision chains (Tool Picker, the decision roles, `*.assess`) accept native decisions models and chat models whose labels are validated locally, so Tool Picker J→N→F→NL is valid.
+- Generation chains (Recon, Synthesis, Summarization, `*.generate`) are rejected only when every route, fallbacks included, is a decisions model.
+- Unknown text models stay valid with conservative capabilities.
+- The TUI fallback picker applies the same rule.
+
+## Schema 41: per-attempt usage, wire timings and task epochs
+
+`provider_execution_schema::migrate` runs inside `ensure_schema`'s transaction (`user_version` 41). Each column is added only if it is missing, so fresh and reopened databases go through the same path.
+
+| Table | New columns |
+| --- | --- |
+| `recon_model_attempts` | `reasoning_tokens`, `visible_tokens`, `reported_cost_usd`, `response_headers_ms`, `first_reasoning_ms`, `first_output_ms`, `stream_completion_ms` (all nullable), `policy_diagnostics_json` (`'[]'`) |
+| `recon_model_operations` | nullable `task_epoch`, index `(task_id, task_epoch)` |
+| `intel_brief_stage_timings` | nullable `task_epoch` |
+
+Rules for the new columns:
+- Counters are written only when the provider reported them. Cost is recorded only when it is reported in USD. Rows from before migration 41 stay NULL (unknown), never zero.
+- Timings are measured from `sent_at`, using `AttemptProgress` marks (headers, first reasoning, stream complete). The first answer delta comes from the stream observer.
+- Brief stages bind each model operation to the task's lease epoch (`OperationScope::with_task_epoch`). The epoch is also the attempt generation, so a retried task writes new attempt rows and the previous epoch's rows stay immutable.
+- The stage-timing row stays the latest execution per task. It records that execution's epoch and aggregates only that epoch's attempts.

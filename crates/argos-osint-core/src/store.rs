@@ -43,7 +43,7 @@ pub struct GraphSummary {
 /// complete summary-result envelopes; existing facts are preserved unchanged.
 /// 37 adds the unified Brain graph (typed kinds, actors, endpoints) and brief
 /// stage timings; `atomic_claim` memories migrate to claim/inference in place.
-pub const SCHEMA_VERSION: i64 = 40;
+pub const SCHEMA_VERSION: i64 = 41;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -899,6 +899,12 @@ impl Store {
                 // Additive: Brain lifecycle guard triggers (TTL/delete safety).
                 crate::brain_schema::migrate(&self.conn)?;
                 self.conn.pragma_update(None, "user_version", 40)?;
+            }
+            if version < 41 {
+                // Additive: per-attempt usage/timing counters, policy
+                // diagnostics and task epochs (provider execution, spec §9).
+                crate::provider_execution_schema::migrate(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 41)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
@@ -3163,6 +3169,112 @@ mod tests {
             // Idempotent: reopening a repaired DB keeps the fingerprint row.
             let again = Store::open(&path).unwrap();
             assert!(brain_lance::fingerprint_matches(&again.conn).unwrap());
+        }
+
+        /// Migration 41 upgrades a populated schema-40 DB in place: IDs,
+        /// history and unrelated rows survive, new counters are NULL (unknown,
+        /// not zero), reopening is a no-op and the result matches a fresh DB.
+        #[test]
+        fn schema_41_upgrades_a_populated_schema_40_db_and_matches_fresh() {
+            use crate::provider_execution_schema::columns;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("argos.db");
+            let fresh = Store::memory().unwrap();
+            let tables = [
+                "recon_model_attempts",
+                "recon_model_operations",
+                "intel_brief_stage_timings",
+            ];
+            let fresh_cols: Vec<Vec<String>> =
+                tables.iter().map(|t| columns(&fresh.conn, t)).collect();
+            Store::open(&path)
+                .unwrap()
+                .add_memory("unrelated", "fact", false, src())
+                .unwrap();
+            {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch(
+                    "DROP INDEX recon_operations_task_epoch;
+                     ALTER TABLE recon_model_operations DROP COLUMN task_epoch;
+                     ALTER TABLE intel_brief_stage_timings DROP COLUMN task_epoch;
+                     ALTER TABLE recon_model_attempts DROP COLUMN reasoning_tokens;
+                     ALTER TABLE recon_model_attempts DROP COLUMN visible_tokens;
+                     ALTER TABLE recon_model_attempts DROP COLUMN reported_cost_usd;
+                     ALTER TABLE recon_model_attempts DROP COLUMN response_headers_ms;
+                     ALTER TABLE recon_model_attempts DROP COLUMN first_reasoning_ms;
+                     ALTER TABLE recon_model_attempts DROP COLUMN first_output_ms;
+                     ALTER TABLE recon_model_attempts DROP COLUMN stream_completion_ms;
+                     ALTER TABLE recon_model_attempts DROP COLUMN policy_diagnostics_json;
+                     INSERT INTO recon_model_operations (id, run_id, task_id, role, generation, status, draft, created_at, updated_at)
+                       VALUES ('op-40', 'run', 'task-40', 'summarization', 2, 'done', '', 't', 't');
+                     INSERT INTO recon_model_attempts (id, operation_id, generation, route_index, attempt, provider, account, model,
+                       transport, dispatched, outcome, queued_at, admitted_at, started_at, finished_at, prompt_tokens, ttfb_ms)
+                       VALUES ('att-40', 'op-40', 2, 0, 1, 'openrouter', 'a', 'm', 'chat', 1, 'ok', 't', 't', 't', 't', 17, 90);
+                     INSERT INTO intel_brief_stage_timings (task_id, job_id, operation, recorded_at)
+                       VALUES ('task-40', 'job', 'intel_brief.claims', 't');
+                     PRAGMA user_version=40;",
+                )
+                .unwrap();
+                assert!(!columns(&conn, "recon_model_attempts")
+                    .iter()
+                    .any(|c| c == "reasoning_tokens"));
+            }
+            for _ in 0..2 {
+                let store = Store::open(&path).unwrap();
+                assert_eq!(version(&store.conn), 41);
+                for (table, expected) in tables.iter().zip(&fresh_cols) {
+                    let mut got = columns(&store.conn, table);
+                    let mut want = expected.clone();
+                    got.sort();
+                    want.sort();
+                    assert_eq!(got, want, "{table} matches a fresh store");
+                }
+                let row: (String, i64, Option<i64>, Option<i64>, Option<f64>, Option<i64>, String, i64, i64) = store
+                    .conn
+                    .query_row(
+                        "SELECT id, generation, reasoning_tokens, visible_tokens, reported_cost_usd,
+                                first_output_ms, policy_diagnostics_json, prompt_tokens, ttfb_ms
+                         FROM recon_model_attempts WHERE operation_id='op-40'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    row,
+                    (
+                        "att-40".into(),
+                        2,
+                        None,
+                        None,
+                        None,
+                        None,
+                        "[]".into(),
+                        17,
+                        90
+                    )
+                );
+                let epochs: (Option<i64>, Option<i64>) = store
+                    .conn
+                    .query_row(
+                        "SELECT o.task_epoch, t.task_epoch FROM recon_model_operations o
+                         JOIN intel_brief_stage_timings t ON t.task_id=o.task_id WHERE o.id='op-40'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(epochs, (None, None), "old epochs stay unknown");
+                let indexed: i64 = store
+                    .conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_index_info('recon_operations_task_epoch')
+                         WHERE name IN ('task_id','task_epoch')",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(indexed, 2);
+                assert_eq!(store.list_memories().unwrap()[0].text, "unrelated");
+            }
         }
 
         #[test]

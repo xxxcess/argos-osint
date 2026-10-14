@@ -61,6 +61,7 @@ pub mod provider_attempt;
 pub mod provider_capabilities;
 pub mod provider_chain;
 pub mod provider_diag;
+pub mod provider_execution_schema;
 pub mod provider_metrics;
 pub mod provider_request;
 pub mod recon;

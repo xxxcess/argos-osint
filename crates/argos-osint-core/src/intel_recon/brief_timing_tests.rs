@@ -182,3 +182,53 @@ async fn sink_scenario() {
         "extracting claims · Claim Assessor · backing off 4s"
     );
 }
+
+/// Migration 41: a retried task aggregates only its current lease epoch,
+/// even when the stale epoch's attempts started after this claim.
+#[test]
+fn timing_aggregates_the_current_epoch_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("argos.db")).unwrap();
+    let c = &store.conn;
+    let started = "2026-10-13T10:00:00+00:00";
+    for (epoch, elapsed, provider) in [(1_i64, 9000, "stale"), (2, 1200, "live")] {
+        let op = format!("op-e{epoch}");
+        c.execute(
+            "INSERT INTO recon_model_operations(id,task_id,role,status,created_at,updated_at,generation,task_epoch) VALUES (?1,'task-ep','summarization','final',?2,?2,?3,?3)",
+            rusqlite::params![op, started, epoch],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO recon_model_attempts(id,operation_id,generation,route_index,attempt,provider,account,model,transport,dispatched,outcome,started_at,elapsed_ms) VALUES (?1,?2,?3,0,1,?4,'','m','stream',1,'ok','2026-10-13T10:00:05+00:00',?5)",
+            rusqlite::params![format!("a{epoch}"), op, epoch, provider, elapsed],
+        )
+        .unwrap();
+    }
+    let mut task = claimed("task-ep", started);
+    task.epoch = 2;
+    let t = collect(
+        c,
+        &task,
+        &StageClock::default(),
+        Duration::from_millis(2000),
+        Duration::ZERO,
+        "committed",
+    )
+    .unwrap();
+    assert_eq!((t.attempts, t.generation_ms), (1, 1200));
+    assert_eq!(t.routes, ["live/m"]);
+    assert_eq!(t.task_epoch, Some(2));
+    persist(c, &t, started).unwrap();
+    let epoch: Option<i64> = c
+        .query_row(
+            "SELECT task_epoch FROM intel_brief_stage_timings WHERE task_id='task-ep'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        epoch,
+        Some(2),
+        "the timing row records the latest execution's epoch"
+    );
+}

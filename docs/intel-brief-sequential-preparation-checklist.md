@@ -30,7 +30,7 @@ Legend: **done** / **partial** / **deferred**. Phases follow §7's order (1 task
 | 4 | Spec prompts, strict JSON, short IDs, Rust-resolved UTF-8 spans, local field/count limits | done | 3 |
 | 4 | Budgets 2048 / 3072 / 1536; cleanup 512; fidelity 1024 | done | 3 + 4b (fallback ceiling test in 5) |
 | 4 | Role routing and Jev capability skips via the shared executor | done (reused) | 3 |
-| 4 | Long bodies: ordered windows, ≤5 proposals carried and revised | done | 3 |
+| 4 | Long bodies: independent ~12KB body chunks, up to three in flight; exact + semantic dedup, ≤5 final inferences | done | 3 |
 | 4 | Stage 4 local shortlist (self excluded, URL + syndication dedupe, cap 12); local finish when there are no inferences or no candidates | done | 3 |
 | 4 | Lead gate: inference-specific overlap with the cited metadata + a named verification gap; country alone is not an overlap | done | 5 · `filter_leads` |
 | 4 | Claim-assessor fidelity batches in Stages 2/3, cached receipts, unfaithful items withheld | done | 4b |

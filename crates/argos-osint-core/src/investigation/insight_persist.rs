@@ -1412,6 +1412,46 @@ pub fn write_derivations(
                         )?;
                     }
                 }
+                if kind == "inference" {
+                    use crate::memory_metadata::{InferencePayload, MemoryPayload};
+                    let inference = output
+                        .inferences
+                        .iter()
+                        .find(|i| i.id == id)
+                        .expect("inference item came from output.inferences");
+                    let mut premises = Vec::new();
+                    for premise in &inference.premise_claim_ids {
+                        if let Some(memory) = tx.query_row(
+                            "SELECT memory_id FROM insight_derivations WHERE id=?1 AND status='assessed'",
+                            [format!("{snapshot_id}:{premise}")], |r| r.get::<_,Option<String>>(0)
+                        ).optional()?.flatten() { premises.push(memory); }
+                    }
+                    let prior: Option<String> = tx
+                        .query_row(
+                            "SELECT payload_json FROM memory_metadata WHERE memory_id=?1",
+                            [&mid],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    let actors = prior
+                        .and_then(|raw| serde_json::from_str::<MemoryPayload>(&raw).ok())
+                        .and_then(|payload| match payload {
+                            MemoryPayload::Inference(p) => Some(p.actors),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    let payload = MemoryPayload::Inference(InferencePayload {
+                        premise_claims: premises,
+                        actors,
+                        reasoning: inference.rationale.clone(),
+                        limitations: inference.limitations.join("; "),
+                        support_state: inference.assessment.fidelity.clone(),
+                        coverage_receipt: snapshot_id.into(),
+                    });
+                    // Publish typed metadata before enqueueing/indexing or
+                    // creating relationships to this canonical inference.
+                    tx.execute("INSERT INTO memory_metadata(memory_id,memory_kind,payload_json,payload_schema,revision,lifecycle,created_at,updated_at) VALUES(?1,'inference',?2,1,1,'active',?3,?3) ON CONFLICT(memory_id) DO UPDATE SET memory_kind='inference',payload_json=excluded.payload_json,payload_schema=1,lifecycle='active',revision=memory_metadata.revision+1,updated_at=excluded.updated_at WHERE memory_metadata.payload_json<>excluded.payload_json OR memory_metadata.memory_kind<>'inference' OR memory_metadata.lifecycle<>'active'",params![mid,serde_json::to_string(&payload)?,now])?;
+                }
                 crate::store::enqueue_memory_index_on(tx, std::slice::from_ref(&mid), None)?;
                 for reference in &refs {
                     let thread_id = if input.snapshot.owner_kind == "recon" {
@@ -1561,6 +1601,10 @@ pub fn reconcile_deleted_memories(conn: &Connection) -> Result<()> {
 pub fn reconcile_deleted_articles(conn: &Connection) -> Result<()> {
     conn.execute_batch("UPDATE insight_owner_state SET desired_generation=desired_generation+1,lifecycle='previous',last_error='origin article removed' WHERE owner_kind IN ('article','atlas') AND lifecycle<>'previous' AND NOT EXISTS (SELECT 1 FROM atlas_articles a WHERE a.article_id=insight_owner_state.owner_id);
         UPDATE insight_derivation_links SET status='origin_deleted' WHERE snapshot_id IN (SELECT active_snapshot_id FROM insight_owner_state WHERE last_error='origin article removed');")?;
+    crate::intel_recon::brief_canonical::retire_deleted_article_leads(
+        conn,
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
     Ok(())
 }
 

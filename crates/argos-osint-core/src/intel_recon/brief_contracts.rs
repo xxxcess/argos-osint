@@ -161,6 +161,16 @@ pub fn inferences_contract<S: AsRef<str>, T: AsRef<str>>(
     }
 }
 
+/// Selection preserves server-owned inference text and evidence verbatim.
+pub fn inference_selection_contract(ids: &[String]) -> ResponseContract {
+    ResponseContract::GeneratedJson {
+        name: "brief_inference_selection".into(),
+        // Keep the same provider-compatible array subset as evidence IDs.
+        // Count and uniqueness are enforced by the local selection validator.
+        schema: Some(object(json!({"selected_ids": id_array(ids, 1)}))),
+    }
+}
+
 pub fn leads_contract<S: AsRef<str>, T: AsRef<str>, U: AsRef<str>>(
     candidate_ids: &[S],
     inference_ids: &[T],

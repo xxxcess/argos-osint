@@ -96,6 +96,15 @@ fn outputs(article: &AtlasArticleRow) -> (Value, Value, Value) {
 
 /// Drive the chain to Stage 4 and commit it with prepared canonical inputs.
 fn complete_chain(store: &Store, article: &AtlasArticleRow, rev: &str) -> String {
+    complete_chain_with_leads(store, article, rev, &json!({"leads":[]}))
+}
+
+fn complete_chain_with_leads(
+    store: &Store,
+    article: &AtlasArticleRow,
+    rev: &str,
+    links: &Value,
+) -> String {
     let job = bp::ensure_chain(
         &store.conn,
         &BriefInputs {
@@ -124,7 +133,7 @@ fn complete_chain(store: &Store, article: &AtlasArticleRow, rev: &str) -> String
     assert!(bp::commit_stage_with(
         &store.conn,
         &c,
-        &json!({"leads":[]}).to_string(),
+        &links.to_string(),
         0,
         "no matching articles",
         &now(),
@@ -132,6 +141,151 @@ fn complete_chain(store: &Store, article: &AtlasArticleRow, rev: &str) -> String
     )
     .unwrap());
     job
+}
+
+#[test]
+fn brief_article_leads_enter_brain_as_tentative_related_and_retire_on_replacement() {
+    let (store, article) = fixture();
+    let mut candidate = article.clone();
+    candidate.id = "a2".into();
+    candidate.url = "https://example.test/a2".into();
+    candidate.title = "Insurance certificate expired before the suspension".into();
+    store.atlas_upsert_article(&candidate).unwrap();
+    let links = json!({"leads":[{"inference_id":"i1","article_id":"a2","article_run_id":"fixture",
+        "metadata_revision":"revision","why":"Potential matching insurance detail.",
+        "verification_needed":"Verify the cause before corroborating.","metadata_evidence":[]}]});
+    let job = complete_chain_with_leads(&store, &article, "r1", &links);
+    let state = index_state(&store.conn, &article.id).unwrap().unwrap();
+    assert_eq!(state.state, "indexed", "{state:?}");
+    let (id,payload):(String,String)=store.conn.query_row("SELECT memory_id,payload_json FROM memory_metadata WHERE memory_kind='related' AND lifecycle='active'",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    let payload: crate::memory_metadata::MemoryPayload = serde_json::from_str(&payload).unwrap();
+    let crate::memory_metadata::MemoryPayload::Related(lead) = payload else {
+        panic!("tentative Related expected")
+    };
+    assert!(lead.verification_gap.contains("Verify the cause"));
+    let claim_inference:i64=store.conn.query_row("SELECT COUNT(*) FROM insight_derivations WHERE snapshot_id=?1 AND memory_id IS NOT NULL",[&state.snapshot_id],|r|r.get(0)).unwrap();
+    assert_eq!(claim_inference, 2);
+    let crate::memory_metadata::EndpointRef::Memory { memory_id, kind } = lead.source else {
+        panic!("canonical inference endpoint expected")
+    };
+    assert_eq!(kind, crate::memory_metadata::MemoryKind::Inference);
+    let Some(crate::memory_metadata::MemoryPayload::Inference(inference)) =
+        store.memory_payload(&memory_id).unwrap()
+    else {
+        panic!("typed inference metadata must exist before reopening")
+    };
+    assert_eq!(inference.premise_claims.len(), 1);
+    assert!(inference.reasoning.contains("harbour master"));
+    let indexed: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM argos_index_changes WHERE record_id=?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(indexed > 0, "lead enqueued alongside claims/inferences");
+    refresh_cached_publication(&store, &article, &job).unwrap();
+    let count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM memory_metadata WHERE memory_kind='related'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "repeat publication is idempotent");
+    store
+        .conn
+        .execute(
+            "DELETE FROM intel_inference_article_leads WHERE article_id='a1'",
+            [],
+        )
+        .unwrap();
+    publish_leads(&store.conn, "a1", &state.snapshot_id, &now()).unwrap();
+    let lifecycle: String = store
+        .conn
+        .query_row(
+            "SELECT lifecycle FROM memory_metadata WHERE memory_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(lifecycle, "retired");
+}
+
+#[test]
+fn deleting_a_lead_owner_retires_its_related_record_even_when_endpoints_survive() {
+    use crate::memory_metadata::{EndpointRef, RelatedPayload};
+    let store = Store::memory().unwrap();
+    let source = EndpointRef::Source {
+        origin: "article".into(),
+        source_id: "retained".into(),
+        revision: "r1".into(),
+    };
+    let (id, _) = crate::brain_actors::write_related(
+        &store.conn,
+        &RelatedPayload {
+            source: source.clone(),
+            target: source,
+            shared_actors: vec![],
+            basis: "possible context".into(),
+            interpretation: "tentative".into(),
+            verification_gap: "check original".into(),
+            source_revisions: vec![],
+        },
+        &now(),
+    )
+    .unwrap();
+    store
+        .app_state_set(
+            "intel-brief-brain-leads:deleted-owner",
+            &json!([id]).to_string(),
+        )
+        .unwrap();
+    insight_persist::reconcile_deleted_articles(&store.conn).unwrap();
+    let lifecycle: String = store
+        .conn
+        .query_row(
+            "SELECT lifecycle FROM memory_metadata WHERE memory_id=?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(lifecycle, "retired");
+    assert!(
+        store.memory_payload(&id).unwrap().is_some(),
+        "historical record retained"
+    );
+}
+
+#[test]
+fn lead_index_failure_rolls_back_canonical_claims_inferences_and_outbox() {
+    let (store, article) = fixture();
+    let mut candidate = article.clone();
+    candidate.id = "a2".into();
+    candidate.url = "https://example.test/a2".into();
+    store.atlas_upsert_article(&candidate).unwrap();
+    store.conn.execute_batch("CREATE TRIGGER reject_brief_lead BEFORE INSERT ON memory_metadata WHEN NEW.memory_kind='related' BEGIN SELECT RAISE(ABORT,'fixture lead failure'); END;").unwrap();
+    let links = json!({"leads":[{"inference_id":"i1","article_id":"a2","article_run_id":"fixture",
+        "metadata_revision":"revision","why":"Potential insurance match.","verification_needed":"Verify cause.","metadata_evidence":[]}]});
+    let job = complete_chain_with_leads(&store, &article, "r1", &links);
+    let state = index_state(&store.conn, &article.id).unwrap().unwrap();
+    assert_eq!(state.state, "failed");
+    assert!(state.reason.contains("fixture lead failure"));
+    let count: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM insight_derivations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    let outbox: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM argos_index_changes", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(outbox, 0, "no partial Brain indexing");
+    assert!(footer(&store.conn, &article.id, &job, false)
+        .unwrap()
+        .starts_with("Published"));
 }
 
 #[test]
@@ -222,7 +376,7 @@ fn publication_policy_refresh_reuses_cached_stage_outputs_once() {
     let outputs = bp::stage_outputs(&store.conn, &job).unwrap();
     refresh_cached_publication(&store, &article, &job).unwrap();
     let state = index_state(&store.conn, &article.id).unwrap().unwrap();
-    assert_eq!(state.publication_version, 2);
+    assert_eq!(state.publication_version, 3);
     assert_eq!(state.state, "indexed");
     let snapshot = state.snapshot_id;
     refresh_cached_publication(&store, &article, &job).unwrap();

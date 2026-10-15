@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, ensure, Result};
+use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
@@ -25,6 +26,8 @@ use crate::tasks::{self, ClaimedTask};
 
 pub const CLAIMS_PROMPT: &str = "Extract only assertions explicitly stated in TITLE and DESCRIPTION. Preserve speaker, allegation or denial, uncertainty, and time. Produce up to six distinct claims, each at most 35 words. Cite its title/description sentence IDs. Do not add background knowledge, explanations, inferences, article-body claims, or article links. Source assertion does not mean verified fact. Return an empty array when no explicit claim is present.";
 pub const INFERENCES_PROMPT: &str = "Use the supplied claims as the questions to examine. Use only CLEAN_ARTICLE_BODY as evidence. Identify zero to five distinct conclusions that reasonably follow from its details; do not restate claims. For each, reference relevant claim IDs and precise body sentence IDs, explain the reasoning briefly, and label support as supported or conditional. Preserve corrections, denials, time, uncertainty, and counterevidence. Conditional conclusions must name the unresolved condition. Do not treat an allegation as established or infer intent, causation, or identity from coincidence. Reject conclusions without body support. Earlier claims are source assertions, not independent corroboration. Return no article links. Prefer an empty array to speculation.";
+const INFERENCE_DEDUP_PROMPT: &str = "Select up to five distinct inferences from INFERENCE_CANDIDATES. Treat paraphrases and conclusions with the same underlying meaning as duplicates, even when wording or citations differ. Keep the clearest, best-supported representative. Preserve materially different actors, time, conditions, negation, corrections and counterevidence; contradictory conclusions are not duplicates. Prefer informative conclusions over generic restatements. Select only supplied IDs; never rewrite, combine or invent an inference. Return strict JSON: {\"selected_ids\":[\"i1\"]}. Select at least one ID when candidates are present.";
+const INFERENCE_DEDUP_BATCH: usize = 12;
 pub const LINKS_PROMPT: &str = "Select up to five candidate article–inference pairs whose TITLE or DESCRIPTION contains a specific assertion or detail that could corroborate the inference. Shared names, country, or broad topic alone are insufficient. For each, return the candidate ID, inference ID, matching metadata sentence IDs, and a ≤40-word interpretation explaining the overlap and what still requires verification. Titles/descriptions establish a potential lead, not confirmed corroboration. Use only supplied candidates; invent no article, URL, body detail, or evidence. Return an empty array when no plausible match exists.";
 
 const STRICT_JSON: &str = " Return strict JSON only, with explicit arrays (empty arrays are valid). No tables, introductions, Markdown fences, or repeated input text.";
@@ -41,14 +44,19 @@ pub const MAX_CLAIMS: usize = 6;
 pub const MAX_INFERENCES: usize = 5;
 pub const MAX_LEADS: usize = 5;
 pub const MAX_CANDIDATES: usize = 12;
-/// Body bytes supplied in one Inferences request; longer bodies are covered
-/// by ordered windows within Stage 3, never truncated.
+/// Legacy raw-body window size for callers of [`body_windows`]. Interactive
+/// inference generation uses smaller serialized chunks below.
 pub const BODY_WINDOW_BYTES: usize = 48_000;
 /// Budget for one *serialized compiled* Stage-3 request (system + user
 /// message), spec §2: escaping and sentence-ID overhead count against it.
 pub const REQUEST_WINDOW_BYTES: usize = 56_000;
-/// Reserved for carried prior-window proposals (≤5 inferences).
+/// Shared packer headroom for legacy carried proposals (≤5 inferences).
+/// Concurrent inference chunks carry no proposals between requests.
 pub const CARRIED_RESERVE_BYTES: usize = 6_000;
+/// Target serialized body content per inference request (roughly 3k tokens
+/// for English prose). Whole sentences are retained even above the target.
+pub const INFERENCE_CHUNK_BYTES: usize = 12_000;
+pub const INFERENCE_CONCURRENCY: usize = 3;
 
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type Validator = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
@@ -162,9 +170,11 @@ pub trait StageBackend: Send {
     fn focused_oversized(&self) -> bool {
         false
     }
-    /// Generated JSON request; must honour `cancel`.
+    /// Generated JSON request; must honour `cancel`. The returned future owns
+    /// its dispatch state rather than borrowing the backend, allowing multiple
+    /// inference requests to be polled concurrently.
     fn generate<'a>(
-        &'a mut self,
+        &mut self,
         request: StageRequest,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<String>>;
@@ -543,6 +553,153 @@ pub fn request_windows(
     windows
 }
 
+/// Small independent chunks for low-latency generation. Preserve source order,
+/// global IDs and UTF-8 offsets; never truncate an oversized single sentence.
+fn inference_windows(body: &[Sentence], system: &str, claims: &Value) -> Vec<Vec<Sentence>> {
+    let fixed =
+        system.len() + inferences_user(claims, &[], &json!([])).len() + CARRIED_RESERVE_BYTES;
+    request_windows(
+        body,
+        system,
+        claims,
+        REQUEST_WINDOW_BYTES.min(fixed + INFERENCE_CHUNK_BYTES),
+    )
+}
+
+/// Round-robin proposals give each chunk a place in the final bounded set.
+/// IDs are reassigned before fidelity so independent `i1` outputs cannot alias.
+fn join_inferences(outputs: &[Value]) -> Value {
+    let mut items = Vec::new();
+    for rank in 0..MAX_INFERENCES {
+        for output in outputs {
+            if let Some(item) = output["inferences"].get(rank) {
+                let mut item = item.clone();
+                item["id"] = json!(format!("i{}", items.len() + 1));
+                items.push(item);
+            }
+        }
+    }
+    json!({"inferences": items, "empty_reason": if items.is_empty() { "no supported inferences" } else { "" }})
+}
+
+fn exact_dedup_inferences(out: &mut Value) {
+    let mut seen = HashSet::new();
+    let mut kept = Vec::new();
+    for item in out["inferences"].as_array().into_iter().flatten() {
+        // Identical wording with different conditions or counterevidence must
+        // reach semantic selection, rather than silently losing qualifiers.
+        let key = json!([
+            norm(str_field(item, "text")),
+            item["support"],
+            item["limitations"],
+            item["counterevidence_ids"]
+        ])
+        .to_string();
+        if seen.insert(key) {
+            let mut item = item.clone();
+            item["id"] = json!(format!("i{}", kept.len() + 1));
+            kept.push(item);
+        }
+    }
+    out["inferences"] = json!(kept);
+}
+
+fn validate_inference_selection(raw: &str, offered: &HashSet<String>) -> Result<Vec<String>> {
+    let value = strict_json(raw)?;
+    let selected = ids(&value, "selected_ids")?;
+    ensure!(
+        !selected.is_empty() && selected.len() <= MAX_INFERENCES,
+        "select one to five inferences"
+    );
+    let mut seen = HashSet::new();
+    for id in &selected {
+        ensure!(offered.contains(id), "unknown inference selection {id}");
+        ensure!(seen.insert(id), "duplicate inference selection {id}");
+    }
+    Ok(selected)
+}
+
+/// Bounded semantic selection sees candidate text/reasoning only, never the
+/// article body again. All returned IDs resolve to already validated objects.
+async fn dedup_inferences(
+    db_path: &Path,
+    backend: &mut dyn StageBackend,
+    ctx: &StageContext,
+    cancel: &Arc<AtomicBool>,
+    out: &mut Value,
+) -> Result<()> {
+    exact_dedup_inferences(out);
+    let candidates = out["inferences"].as_array().cloned().unwrap_or_default();
+    if candidates.len() < 2 {
+        return Ok(());
+    }
+    let mut selected: Vec<Value> = Vec::new();
+    let mut pending = candidates.into_iter();
+    loop {
+        let mut batch = selected;
+        batch.extend(pending.by_ref().take(INFERENCE_DEDUP_BATCH - batch.len()));
+        let offered: HashSet<String> = batch
+            .iter()
+            .filter_map(|i| i["id"].as_str().map(str::to_string))
+            .collect();
+        let allowed = offered.clone();
+        let validator: Validator = Arc::new(move |raw| {
+            validate_inference_selection(raw, &allowed)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        });
+        let compact: Vec<Value> = batch
+            .iter()
+            .map(|i| {
+                json!({
+                    "id": i["id"], "text": i["text"], "why": i["why"],
+                    "support": i["support"], "limitations": i["limitations"],
+                    "premise_claim_ids": i["premise_claim_ids"],
+                    "counterevidence_ids": i["counterevidence_ids"],
+                })
+            })
+            .collect();
+        let raw = generate(
+            db_path,
+            backend,
+            cancel,
+            StageRequest {
+                ctx: ctx.clone(),
+                task_id: ctx.task_id.clone(),
+                stage: "intel_brief_inferences".into(),
+                role: "synthesis",
+                system: INFERENCE_DEDUP_PROMPT.into(),
+                user: json!({"INFERENCE_CANDIDATES": compact}).to_string(),
+                completion_tokens: INFERENCES_TOKENS,
+                reasoning: crate::request_policy::INFERENCES_BUDGET.reasoning,
+                operation_key: crate::provider::OP_INFERENCES_GENERATE,
+                validator,
+                budget: crate::request_policy::INFERENCES_BUDGET,
+                contract: Some(super::brief_contracts::inference_selection_contract(
+                    &sorted_ids(&offered)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
+                )),
+            },
+        )
+        .await?;
+        let chosen = validate_inference_selection(&raw.to_string(), &offered)?;
+        selected = chosen
+            .iter()
+            .filter_map(|id| batch.iter().find(|i| i["id"].as_str() == Some(id)).cloned())
+            .collect();
+        if pending.len() == 0 {
+            break;
+        }
+    }
+    for (n, item) in selected.iter_mut().enumerate() {
+        item["id"] = json!(format!("i{}", n + 1));
+    }
+    out["inferences"] = json!(selected);
+    Ok(())
+}
+
 // ---------- Stage 4: Links ----------
 
 #[derive(Clone, Debug)]
@@ -787,23 +944,35 @@ fn activity(db_path: &Path, task: &str, label: &str) {
     }
 }
 
-async fn generate(
-    db_path: &Path,
+fn generate<'a>(
+    db_path: &'a Path,
     backend: &mut dyn StageBackend,
-    cancel: &Arc<AtomicBool>,
+    cancel: &'a Arc<AtomicBool>,
     request: StageRequest,
-) -> Result<Value> {
+) -> BoxFut<'a, Result<Value>> {
+    let dispatch = generate_unmeasured(db_path, backend, cancel, request);
+    Box::pin(super::brief_timing::timed(
+        super::brief_timing::Phase::Model,
+        dispatch,
+    ))
+}
+
+fn generate_unmeasured<'a>(
+    db_path: &'a Path,
+    backend: &mut dyn StageBackend,
+    cancel: &'a Arc<AtomicBool>,
+    request: StageRequest,
+) -> BoxFut<'a, Result<Value>> {
     let validator = request.validator.clone();
     let task = request.task_id.clone();
     activity(db_path, &task, "waiting for model");
-    let raw = super::brief_timing::timed(
-        super::brief_timing::Phase::Model,
-        backend.generate(request, cancel),
-    )
-    .await?;
-    activity(db_path, &task, "validating");
-    validator(&raw).map_err(|e| anyhow!("invalid stage output: {e}"))?;
-    strict_json(&raw)
+    let dispatch = backend.generate(request, cancel);
+    Box::pin(async move {
+        let raw = dispatch.await?;
+        activity(db_path, &task, "validating");
+        validator(&raw).map_err(|e| anyhow!("invalid stage output: {e}"))?;
+        strict_json(&raw)
+    })
 }
 
 /// Run one stage: Ok(value, items, empty_reason).
@@ -1006,43 +1175,59 @@ async fn execute(
                     }
                 }
             }
-            let mut carried = json!([]);
-            let mut covered: Vec<Sentence> = Vec::new();
-            let mut last = json!({"inferences":[],"empty_reason":"no supported inferences"});
-            for window in &windows {
-                let (cid, w, prior) = (claim_ids.clone(), window.clone(), covered.clone());
+            let selected = windows.concat();
+            windows = inference_windows(&selected, &system, &claims);
+            let request = |window: &[Sentence]| {
+                let (cid, w) = (claim_ids.clone(), window.to_vec());
                 let validator: Validator = Arc::new(move |raw| {
-                    validate_inferences(raw, &cid, &w, &prior)
+                    validate_inferences(raw, &cid, &w, &[])
                         .map(|_| ())
                         .map_err(|e| e.to_string())
                 });
-                let raw = generate(
-                    db_path,
-                    backend,
-                    cancel,
-                    StageRequest {
-                        ctx: ctx.clone(),
-                        task_id: claimed.id.clone(),
-                        stage: claimed.operation.clone(),
-                        role: "synthesis",
-                        system: system.clone(),
-                        user: inferences_user(&claims, window, &carried),
-                        completion_tokens: INFERENCES_TOKENS,
-                        reasoning: crate::request_policy::INFERENCES_BUDGET.reasoning,
-                        operation_key: crate::provider::OP_INFERENCES_GENERATE,
-                        validator,
-                        budget: crate::request_policy::INFERENCES_BUDGET,
-                        contract: Some(super::brief_contracts::inferences_contract(
-                            &sorted_ids(&claim_ids),
-                            &window.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
-                        )),
-                    },
-                )
-                .await?;
-                last = validate_inferences(&raw.to_string(), &claim_ids, window, &covered)?;
-                covered.extend(window.iter().cloned());
-                carried = json!(last["inferences"].as_array().into_iter().flatten().map(|i| json!({"id":i["id"],"text":i["text"],"body_evidence_ids":i["body_evidence_ids"],"support":i["support"]})).collect::<Vec<_>>());
-            }
+                StageRequest {
+                    ctx: ctx.clone(),
+                    task_id: claimed.id.clone(),
+                    stage: claimed.operation.clone(),
+                    role: "synthesis",
+                    system: system.clone(),
+                    user: inferences_user(&claims, window, &json!([])),
+                    completion_tokens: INFERENCES_TOKENS,
+                    reasoning: crate::request_policy::INFERENCES_BUDGET.reasoning,
+                    operation_key: crate::provider::OP_INFERENCES_GENERATE,
+                    validator,
+                    budget: crate::request_policy::INFERENCES_BUDGET,
+                    contract: Some(super::brief_contracts::inferences_contract(
+                        &sorted_ids(&claim_ids),
+                        &window.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+                    )),
+                }
+            };
+            let mut outputs = vec![Value::Null; windows.len()];
+            let mut pending = windows.iter().enumerate();
+            let mut running = FuturesUnordered::new();
+            // Model wall time covers the queue once, not the sum of overlapping
+            // requests; provider attempt durations remain separately aggregated.
+            super::brief_timing::timed(super::brief_timing::Phase::Model, async {
+                loop {
+                    while running.len() < INFERENCE_CONCURRENCY {
+                        let Some((n, window)) = pending.next() else {
+                            break;
+                        };
+                        let dispatch =
+                            generate_unmeasured(db_path, backend, cancel, request(window));
+                        running.push(dispatch.map(move |result| (n, result)).boxed());
+                    }
+                    let Some((n, result)) = running.next().await else {
+                        break;
+                    };
+                    let raw = result?;
+                    outputs[n] =
+                        validate_inferences(&raw.to_string(), &claim_ids, &windows[n], &[])?;
+                }
+                Ok::<(), anyhow::Error>(())
+            })
+            .await?;
+            let mut last = join_inferences(&outputs);
             let index: HashMap<&str, &Sentence> = all.iter().map(|s| (s.id.as_str(), s)).collect();
             apply_fidelity(
                 db_path,
@@ -1061,6 +1246,7 @@ async fn execute(
                 "no supported inferences",
             )
             .await?;
+            dedup_inferences(db_path, backend, &ctx, cancel, &mut last).await?;
             last["windows"] = json!(windows.len());
             last["path"] = json!(if focused.is_some() { "focused" } else { "full" });
             if let Some(set) = &focused {
@@ -1621,6 +1807,7 @@ where
 /// Production backend: Stage 1 reuses the body retrieval/cleanup path under
 /// the brief job; generated stages use the captured role chain with the
 /// per-stage completion ceiling.
+#[derive(Clone)]
 pub struct RuntimeBackend {
     pub db_path: PathBuf,
     pub keys: crate::osint::ProviderKeys,
@@ -1807,15 +1994,16 @@ impl StageBackend for RuntimeBackend {
     }
 
     fn generate<'a>(
-        &'a mut self,
+        &mut self,
         request: StageRequest,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<String>> {
+        let backend = self.clone();
         Box::pin(async move {
             let operation_id = request
                 .ctx
                 .operation_id(request.operation_key, &request.user);
-            let settings = request.ctx.routed(&self.settings);
+            let settings = request.ctx.routed(&backend.settings);
             let mut scope = request
                 .ctx
                 .scope(crate::recon::model_exec::OperationScope::new(
@@ -1846,20 +2034,20 @@ impl StageBackend for RuntimeBackend {
             ];
             let validator = request.validator.clone();
             let (text, _) = crate::recon::model_exec::execute_chat(
-                &self.auth,
+                &backend.auth,
                 &settings,
                 &scope,
                 &messages,
                 move |raw| validator(raw),
                 cancel,
                 Some(super::brief_timing::activity_sink(
-                    &self.db_path,
+                    &backend.db_path,
                     &request.task_id,
                     &request.stage,
                     request.role,
                 )),
                 None,
-                Some(self.db_path.as_path()),
+                Some(backend.db_path.as_path()),
                 true,
             )
             .await?;
@@ -1924,6 +2112,11 @@ pub fn stage_revisions(
         "contract": brief_pipeline::CONTRACT,
         "prompt": INFERENCES_PROMPT,
         "window": REQUEST_WINDOW_BYTES,
+        "dispatch": "bounded-chunks-concurrent-v1",
+        "chunk_bytes": INFERENCE_CHUNK_BYTES,
+        "concurrency": INFERENCE_CONCURRENCY,
+        "dedup_prompt": INFERENCE_DEDUP_PROMPT,
+        "dedup_batch": INFERENCE_DEDUP_BATCH,
         "generate": route(Some(OP_INFERENCES_GENERATE), "synthesis"),
         "assess": route(Some(OP_INFERENCES_ASSESS), "claim_assessor"),
         "assess_prompt": super::brief_fidelity::FIDELITY_PROMPT,

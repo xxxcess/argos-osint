@@ -55,6 +55,89 @@ pub fn index_state(conn: &Connection, article_id: &str) -> Result<Option<IndexSt
         .and_then(|json| serde_json::from_str(&json).ok()))
 }
 
+/// Brief Links are metadata leads, so Brain stores them as tentative Related
+/// memories, never as assessed corroboration. Run inside the publication
+/// savepoint after the canonical inference memories exist.
+fn publish_leads(conn: &Connection, article_id: &str, snapshot: &str, now: &str) -> Result<()> {
+    use crate::memory_metadata::{EndpointRef, MemoryKind, RelatedPayload};
+    let key = format!("intel-brief-brain-leads:{article_id}");
+    let previous: Vec<String> = conn
+        .query_row("SELECT value FROM app_state WHERE key=?1", [&key], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()?
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let mut statement = conn.prepare(
+        "SELECT d.memory_id,l.candidate_run_id,l.candidate_article_id,l.candidate_metadata_revision,l.interpretation,l.verification_needed,l.id
+         FROM intel_inference_article_leads l JOIN insight_derivations d
+         ON d.snapshot_id=?2 AND d.insight_kind='inference' AND d.status='assessed'
+         AND json_extract(d.item_json,'$.id')=l.inference_id
+         JOIN atlas_articles a ON a.run_id=l.candidate_run_id AND a.article_id=l.candidate_article_id
+         WHERE l.article_id=?1 AND d.memory_id IS NOT NULL ORDER BY l.id")?;
+    let rows = statement
+        .query_map(params![article_id, snapshot], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut current = Vec::new();
+    for (memory_id, run_id, candidate, revision, interpretation, gap, lead_id) in rows {
+        let payload = RelatedPayload {
+            source: EndpointRef::Memory {
+                memory_id,
+                kind: MemoryKind::Inference,
+            },
+            target: EndpointRef::Article {
+                run_id,
+                article_id: candidate,
+                revision: revision.clone(),
+            },
+            shared_actors: vec![],
+            basis: format!("intel-brief:{article_id}:metadata-lead"),
+            interpretation,
+            verification_gap: gap,
+            source_revisions: vec![revision, format!("intel-brief-lead:{lead_id}")],
+        };
+        let (id, _) = crate::brain_actors::write_related(conn, &payload, now)?;
+        crate::store::enqueue_memory_index_on(conn, std::slice::from_ref(&id), None)?;
+        current.push(id);
+    }
+    for id in previous.iter().filter(|id| !current.contains(id)) {
+        conn.execute(
+            "UPDATE memory_metadata SET lifecycle='retired',updated_at=?2 WHERE memory_id=?1",
+            params![id, now],
+        )?;
+        crate::store::enqueue_memory_index_on(conn, std::slice::from_ref(id), None)?;
+    }
+    conn.execute("INSERT INTO app_state(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![key,serde_json::to_string(&current)?])?;
+    Ok(())
+}
+
+/// A shared inference can survive its originating article. Retire that
+/// article's tentative leads independently of the inference endpoint's life.
+pub(crate) fn retire_deleted_article_leads(conn: &Connection, now: &str) -> Result<()> {
+    let mut statement=conn.prepare("SELECT DISTINCT m.memory_id FROM app_state s,json_each(CASE WHEN s.key LIKE 'intel-brief-brain-leads:%' THEN s.value ELSE '[]' END) j JOIN memory_metadata m ON m.memory_id=j.value WHERE s.key LIKE 'intel-brief-brain-leads:%' AND m.lifecycle='active' AND NOT EXISTS(SELECT 1 FROM atlas_articles a WHERE a.article_id=substr(s.key,length('intel-brief-brain-leads:')+1))")?;
+    let ids = statement
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in ids {
+        conn.execute(
+            "UPDATE memory_metadata SET lifecycle='retired',updated_at=?2 WHERE memory_id=?1",
+            params![id, now],
+        )?;
+        crate::store::enqueue_memory_index_on(conn, std::slice::from_ref(&id), None)?;
+    }
+    Ok(())
+}
+
 fn faithful() -> Assessment {
     Assessment {
         fidelity: "faithful".into(),
@@ -287,7 +370,7 @@ pub fn publish_on(
     now: &str,
 ) -> Result<IndexState> {
     let mut state = IndexState {
-        publication_version: 2,
+        publication_version: 3,
         job_id: job_id.into(),
         ..Default::default()
     };
@@ -327,7 +410,8 @@ pub fn publish_on(
                     "active",
                     now,
                     |tx, snapshot_id| {
-                        insight_persist::write_derivations(tx, snapshot_id, &input, &output, now)
+                        insight_persist::write_derivations(tx, snapshot_id, &input, &output, now)?;
+                        publish_leads(tx, article_id, snapshot_id, now)
                     },
                 )
             })();
@@ -362,7 +446,7 @@ pub fn refresh_cached_publication(
     job: &str,
 ) -> Result<()> {
     if index_state(&store.conn, &article.id)?
-        .is_some_and(|s| s.job_id == job && s.publication_version >= 2)
+        .is_some_and(|s| s.job_id == job && s.publication_version >= 3)
     {
         return Ok(());
     }

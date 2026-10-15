@@ -624,9 +624,9 @@
     "semantic_hash": ""
   },
   "docs/architecture.md": {
-    "mtime": 1792060487.9625425,
-    "seen": 1792061064.061297,
-    "ast_hash": "5a774a58719078245e52996e3482f413",
+    "mtime": 1792071480.328938,
+    "seen": 1792081641.7068212,
+    "ast_hash": "54d840fb8430b4069b15953b73c53fad",
     "semantic_hash": ""
   },
   "docs/atlas-memory-system-apps-checklist.md": {
@@ -888,9 +888,9 @@
     "semantic_hash": ""
   },
   "docs/concepts.md": {
-    "mtime": 1792060487.9088304,
-    "seen": 1792061064.061804,
-    "ast_hash": "53ab5b4798f42d735981756956d76699",
+    "mtime": 1792070443.1463928,
+    "seen": 1792081641.707204,
+    "ast_hash": "aac9036594ce7ca7fb954c262399eff7",
     "semantic_hash": ""
   },
   "docs/conventions.md": {
@@ -2160,9 +2160,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/investigation/insight_persist.rs": {
-    "mtime": 1791984956.1337678,
-    "seen": 1791985160.760888,
-    "ast_hash": "0d6b852af3cd2ea1e0e237cf28d2f396",
+    "mtime": 1792071543.6772547,
+    "seen": 1792081641.684073,
+    "ast_hash": "6febcd471c1df062a119f48df3aabdf7",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/investigation/insights.rs": {
@@ -2514,15 +2514,15 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_canonical.rs": {
-    "mtime": 1791982177.7677803,
-    "seen": 1791984543.444483,
-    "ast_hash": "5c7816a4b27bc0611722d4af6368f8a9",
+    "mtime": 1792071536.3482754,
+    "seen": 1792081641.679308,
+    "ast_hash": "61dc2b6528fe27783cd41457b3e5f103",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_canonical_tests.rs": {
-    "mtime": 1791984654.3678558,
-    "seen": 1791985160.7449632,
-    "ast_hash": "345feda80e5fe65db71f8b9cc78a65e6",
+    "mtime": 1792071542.761777,
+    "seen": 1792081641.679311,
+    "ast_hash": "8492ef14d4cc4b72fd812a2050853d27",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_fidelity.rs": {
@@ -2544,15 +2544,15 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_stages.rs": {
-    "mtime": 1791999472.989138,
-    "seen": 1792001012.194489,
-    "ast_hash": "103cb30bfc4587efe728b8ca3b37746d",
+    "mtime": 1792081356.3701634,
+    "seen": 1792081641.679678,
+    "ast_hash": "fe0291abebc243ef912351ccfd029fe7",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_stages_tests.rs": {
-    "mtime": 1791971400.6038613,
-    "seen": 1791984543.44453,
-    "ast_hash": "d68fdc796f83310a9ce8118a5a25c8d1",
+    "mtime": 1792071479.657157,
+    "seen": 1792081641.679681,
+    "ast_hash": "348a42d1d739459e3b0110087fd7cf5e",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/clean_body.rs": {
@@ -2568,21 +2568,21 @@
     "semantic_hash": ""
   },
   "docs/diagrams/intel-brief-chain.html": {
-    "mtime": 1791983924.5205421,
-    "seen": 1791984543.445931,
-    "ast_hash": "a409255ede5b6be8d947fd1628c1f45d",
+    "mtime": 1792070443.1511009,
+    "seen": 1792081641.7078788,
+    "ast_hash": "6cf08cdcabde27a1f5eaf850bd1fcb28",
     "semantic_hash": ""
   },
   "docs/intel-brief-sequential-preparation-checklist.md": {
-    "mtime": 1791907613.3315656,
-    "seen": 1791984543.446013,
-    "ast_hash": "88a088b4c30198705965cf1cee951904",
+    "mtime": 1792070443.1480284,
+    "seen": 1792081641.709394,
+    "ast_hash": "593bc765240f48058d1d1a6271213ff2",
     "semantic_hash": ""
   },
   "docs/diagrams/intel-brief-chain.svg": {
-    "mtime": 1791983924.5187123,
-    "seen": 1791984543.446176,
-    "ast_hash": "d388c28182cec0e7a5240268416e0dbe",
+    "mtime": 1792070443.1530237,
+    "seen": 1792081641.712512,
+    "ast_hash": "a41870547f8c7bd2dde46eb3fbd9e5fd",
     "semantic_hash": ""
   },
   "docs/screens/intel-progress-jobs/artifacts-3-claims-receiving-120x40-compare.png": {
@@ -2862,9 +2862,9 @@
     "semantic_hash": ""
   },
   "docs/brief-performance-unified-brain-graph-checklist.md": {
-    "mtime": 1791927655.9175918,
-    "seen": 1791984543.445887,
-    "ast_hash": "a18693a9106a7b4e65c9ba130736efed",
+    "mtime": 1792070443.1493928,
+    "seen": 1792081641.707202,
+    "ast_hash": "6abc48055ac777bc9ff1e873a15e9d49",
     "semantic_hash": ""
   },
   "docs/screens/brain-graph/p2-models-defaults-after-120x40.png": {
@@ -2958,15 +2958,15 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_contracts.rs": {
-    "mtime": 1791971400.5965004,
-    "seen": 1791984543.4444952,
-    "ast_hash": "b5bc2d1819000b1a7b360fb355bc747f",
+    "mtime": 1792081121.8471396,
+    "seen": 1792081641.679313,
+    "ast_hash": "52057634d9e0203c248c40f33da6b322",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_contracts_tests.rs": {
-    "mtime": 1791971400.5971391,
-    "seen": 1791984543.444501,
-    "ast_hash": "5c1fd6cc7f20a8add90e6079fc3cc052",
+    "mtime": 1792081125.5528586,
+    "seen": 1792081641.679316,
+    "ast_hash": "dcac48d29e4e9d689020bfdf03716319",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/provider_adapters/google.rs": {
@@ -3282,33 +3282,33 @@
     "semantic_hash": ""
   },
   "docs/topology-mapper.md": {
-    "mtime": 1792060562.5213578,
-    "seen": 1792061064.0660732,
-    "ast_hash": "d017f6c9ebca1ea500aa6352471ad7f5",
+    "mtime": 1792068223.5154166,
+    "seen": 1792081641.710804,
+    "ast_hash": "dc43106334b0e2cbc389f09cc9616f3d",
     "semantic_hash": ""
   },
   "docs/tui-verification-topology-2026-10-15.md": {
-    "mtime": 1792061896.5647738,
-    "seen": 1792061927.737904,
-    "ast_hash": "718103018b94151e445e0bdc52606d5b",
+    "mtime": 1792061941.52988,
+    "seen": 1792081641.711463,
+    "ast_hash": "12004b031e33c2a336b450c026023929",
     "semantic_hash": ""
   },
   "docs/screenshots/topology-2026-10-15/receipts.json": {
-    "mtime": 1792061726.8121562,
-    "seen": 1792061927.726869,
-    "ast_hash": "7905e794ffe5bd233fcf8bb94b5fdcb9",
+    "mtime": 1792061942.0446548,
+    "seen": 1792081641.700842,
+    "ast_hash": "8509d3a89d99f6e1f09bf4dbeb1f2f33",
     "semantic_hash": ""
   },
   ".planning/2026-10-15-topology-mapper/acceptance.md": {
-    "mtime": 1792061896.6261458,
-    "seen": 1792061927.730131,
-    "ast_hash": "58962051eed91223b3163f12afe8416f",
+    "mtime": 1792061941.5947165,
+    "seen": 1792081641.704334,
+    "ast_hash": "b184d13062beea980497caaefbfee62b",
     "semantic_hash": ""
   },
   ".planning/2026-10-15-topology-mapper/handoff.md": {
-    "mtime": 1792061896.680193,
-    "seen": 1792061927.730134,
-    "ast_hash": "7426b562617c2703128afdd36c66f900",
+    "mtime": 1792068223.580517,
+    "seen": 1792081641.704337,
+    "ast_hash": "4a279147b13ccb96ea303aced66c9436",
     "semantic_hash": ""
   },
   "docs/screenshots/topology-2026-10-15/brain-claim-split-60x18.png": {

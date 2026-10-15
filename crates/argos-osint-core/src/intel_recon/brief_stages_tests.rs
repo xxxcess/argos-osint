@@ -1,6 +1,7 @@
 use super::*;
 use crate::intel_recon::brief_pipeline::{ensure_chain, stage_views, BriefInputs};
 use crate::intel_recon::clean_body::clean_article;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 
 const TITLE: &str = "Ferry operator suspends Baltic route";
@@ -83,6 +84,11 @@ struct Seen {
 struct Mock {
     /// Both roots wait here: only a truly parallel drainer gets past it.
     barrier: Option<Arc<tokio::sync::Barrier>>,
+    inference_barrier: Option<Arc<tokio::sync::Barrier>>,
+    inference_started: Arc<AtomicUsize>,
+    inference_active: Arc<AtomicUsize>,
+    inference_peak: Arc<AtomicUsize>,
+    filter_inference_evidence: bool,
     body: Option<String>,
     complete: bool,
     prepared: usize,
@@ -130,6 +136,7 @@ impl Mock {
         );
         responses.insert("intel_brief_links".into(), vec![leads_ok()]);
         Mock {
+            filter_inference_evidence: true,
             body: Some(body),
             complete: true,
             responses,
@@ -210,12 +217,26 @@ impl StageBackend for Mock {
         Ok(self.related.clone())
     }
     fn generate<'a>(
-        &'a mut self,
+        &mut self,
         request: StageRequest,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<String>> {
+        let selection = request.user.contains("\"INFERENCE_CANDIDATES\"");
+        let response_key = if selection {
+            "inference_selection"
+        } else {
+            &request.stage
+        };
+        let response = self.responses.get_mut(response_key).map(|queue| {
+            if queue.len() > 1 {
+                queue.remove(0)
+            } else {
+                queue[0].clone()
+            }
+        });
+        let mock = self.clone();
         Box::pin(async move {
-            self.seen.lock().unwrap().push(Seen {
+            mock.seen.lock().unwrap().push(Seen {
                 stage: request.stage.clone(),
                 user: request.user.clone(),
                 system: request.system.clone(),
@@ -225,31 +246,65 @@ impl StageBackend for Mock {
                 contract: request.contract.clone(),
             });
             if request.stage == "intel_brief_claims" {
-                if let Some(b) = &self.barrier {
+                if let Some(b) = &mock.barrier {
                     b.wait().await;
                 }
             }
-            if self.hang.contains(&request.stage) {
+            struct Active(Arc<AtomicUsize>);
+            impl Drop for Active {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+            let _active = if request.stage == "intel_brief_inferences" && !selection {
+                let n = mock.inference_started.fetch_add(1, Ordering::AcqRel);
+                let active = mock.inference_active.fetch_add(1, Ordering::AcqRel) + 1;
+                mock.inference_peak.fetch_max(active, Ordering::AcqRel);
+                let guard = Active(mock.inference_active.clone());
+                if n < INFERENCE_CONCURRENCY {
+                    if let Some(b) = &mock.inference_barrier {
+                        b.wait().await;
+                    }
+                }
+                Some(guard)
+            } else {
+                None
+            };
+            if mock.hang.contains(&request.stage) {
                 loop {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                     let _ = cancel.load(Ordering::Acquire);
                 }
             }
-            if let Some(delay) = self.delay {
+            if let Some(delay) = mock.delay {
                 tokio::time::sleep(delay).await;
             }
-            if self.fail.contains(&request.stage) {
+            if mock.fail.contains(&request.stage) {
                 bail!("provider exhausted: server error");
             }
-            let queue = self
-                .responses
-                .get_mut(&request.stage)
-                .ok_or_else(|| anyhow!("no response"))?;
-            Ok(if queue.len() > 1 {
-                queue.remove(0)
-            } else {
-                queue[0].clone()
-            })
+            let response = response.ok_or_else(|| anyhow!("no response"))?;
+            if selection {
+                return Ok(response);
+            }
+            if mock.filter_inference_evidence && request.stage == "intel_brief_inferences" {
+                let user: Value = serde_json::from_str(&request.user)?;
+                let ids: HashSet<&str> = user["CLEAN_ARTICLE_BODY"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|s| s["id"].as_str())
+                    .collect();
+                let mut out: Value = serde_json::from_str(&response)?;
+                out["inferences"].as_array_mut().unwrap().retain(|i| {
+                    i["body_evidence_ids"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|id| ids.contains(id.as_str().unwrap()))
+                });
+                return Ok(out.to_string());
+            }
+            Ok(response)
         })
     }
 }
@@ -656,9 +711,9 @@ async fn stale_worker_output_is_fenced_after_epoch_change() {
     assert!(note.is_some_and(|n| n.contains("renewal failed")));
 }
 
-// Long bodies: ordered windows inside Stage 3, later windows revise, five total.
+// Long bodies: independent small chunks, three in flight, complete coverage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn long_body_is_fully_covered_by_ordered_windows() {
+async fn long_body_is_fully_covered_by_concurrent_chunks() {
     let db = db();
     let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
     let mut mock = Mock::happy();
@@ -668,23 +723,33 @@ async fn long_body_is_fully_covered_by_ordered_windows() {
     }
     long.push_str("\n\nFinal note: the operator later corrected its statement about the storm.");
     mock.body = Some(long);
+    mock.inference_barrier = Some(Arc::new(tokio::sync::Barrier::new(INFERENCE_CONCURRENCY)));
+    mock.delay = Some(Duration::from_millis(20));
     let one = r#"{"inferences":[{"id":"i1","text":"Inspection is extensive.","premise_claim_ids":["c1"],"body_evidence_ids":["b1"],"support":"supported","why":"Many berths were inspected.","limitations":[]}]}"#;
     mock.responses
         .insert("intel_brief_inferences".into(), vec![one.into()]);
     let cancel = Arc::new(AtomicBool::new(false));
-    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        drain(&db.path, "w1", &mut mock, &cancel, &cfg()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let windows: Vec<Seen> = mock
         .requests()
         .into_iter()
         .filter(|s| s.stage == "intel_brief_inferences")
         .collect();
-    assert!(windows.len() >= 2);
-    assert!(!windows[0].user.contains("PRIOR_WINDOW_PROPOSALS"));
-    assert!(windows[1..]
+    assert!(windows.len() > INFERENCE_CONCURRENCY);
+    assert!(windows
         .iter()
-        .all(|w| w.user.contains("PRIOR_WINDOW_PROPOSALS")));
+        .all(|w| !w.user.contains("PRIOR_WINDOW_PROPOSALS")));
+    assert_eq!(
+        mock.inference_peak.load(Ordering::Acquire),
+        INFERENCE_CONCURRENCY
+    );
+    assert_eq!(mock.inference_active.load(Ordering::Acquire), 0);
     assert!(windows
         .last()
         .unwrap()
@@ -692,11 +757,211 @@ async fn long_body_is_fully_covered_by_ordered_windows() {
         .contains("corrected its statement"));
     let store = Store::open(&db.path).unwrap();
     let inf = stage_output(&store, &job, "intel_brief_inferences").unwrap();
+    let body = stage_output(&store, &job, "intel_brief_body").unwrap();
+    let (original, _) = crate::intel_recon::sentence_index::body_sentences(&body);
+    let sent: Vec<String> = windows
+        .iter()
+        .flat_map(|w| {
+            let user: Value = serde_json::from_str(&w.user).unwrap();
+            let body = user["CLEAN_ARTICLE_BODY"].as_array().unwrap();
+            assert!(
+                body.iter().map(|s| s.to_string().len() + 1).sum::<usize>()
+                    <= INFERENCE_CHUNK_BYTES
+            );
+            body.iter()
+                .map(|s| s["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        original.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+        "every original sentence exactly once, in source order"
+    );
     assert_eq!(inf["windows"].as_u64().unwrap() as usize, windows.len());
     assert!(inf["inferences"].as_array().unwrap().len() <= MAX_INFERENCES);
 }
 
 // §8.2 validation.
+#[tokio::test]
+async fn semantic_dedup_selects_existing_objects_and_preserves_distinctions() {
+    let db = db();
+    let mut mock = Mock::default();
+    mock.responses.insert(
+        "inference_selection".into(),
+        vec![r#"{"selected_ids":["i1","i3"]}"#.into()],
+    );
+    let item = |id: &str, text: &str| {
+        json!({"id":id,"text":text,
+        "why":"The cited body supports this conclusion.","support":"conditional",
+        "limitations":["Cause remains unconfirmed"],"body_evidence_ids":["b17"],
+        "evidence":[{"start_byte":123,"end_byte":456}],"fidelity":"faithful"})
+    };
+    let original = item("old1", "The insurance lapse may have delayed reopening.");
+    let mut out = json!({"inferences":[original.clone(),
+        item("old2", "The insurance lapse may have delayed reopening!"),
+        item("old3", "Reopening could have been held up by expired insurance."),
+        item("old4", "Inspections may delay reopening even after insurance is renewed.") ]});
+    dedup_inferences(
+        &db.path,
+        &mut mock,
+        &StageContext::default(),
+        &Arc::new(AtomicBool::new(false)),
+        &mut out,
+    )
+    .await
+    .unwrap();
+    let kept = out["inferences"].as_array().unwrap();
+    assert_eq!(kept.len(), 2);
+    assert_eq!(kept[0]["text"], original["text"]);
+    assert_eq!(kept[0]["evidence"], original["evidence"]);
+    assert!(kept[1]["text"]
+        .as_str()
+        .unwrap()
+        .contains("even after insurance"));
+    assert_eq!(kept[1]["id"], "i2");
+    let seen = mock.requests();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].system.contains("same underlying meaning"));
+    assert!(seen[0]
+        .system
+        .contains("contradictory conclusions are not duplicates"));
+    assert!(!seen[0].user.contains("CLEAN_ARTICLE_BODY"));
+    let offered = HashSet::from(["i1".into(), "i2".into()]);
+    assert!(validate_inference_selection(r#"{"selected_ids":["invented"]}"#, &offered).is_err());
+    assert!(validate_inference_selection(r#"{"selected_ids":["i1","i1"]}"#, &offered).is_err());
+    assert!(validate_inference_selection(r#"{"selected_ids":[]}"#, &offered).is_err());
+}
+
+#[tokio::test]
+async fn semantic_dedup_is_bounded_and_visits_later_candidates() {
+    let db = db();
+    let mut mock = Mock::default();
+    mock.responses.insert(
+        "inference_selection".into(),
+        vec![
+            r#"{"selected_ids":["i12"]}"#.into(),
+            r#"{"selected_ids":["i12","i15"]}"#.into(),
+        ],
+    );
+    let mut out = json!({"inferences":(1..=15).map(|n|json!({"id":format!("old{n}"),
+        "text":format!("Distinct conclusion number {n}."),"why":"Original reason.","evidence":[{"id":format!("b{n}")}]})).collect::<Vec<_>>()});
+    dedup_inferences(
+        &db.path,
+        &mut mock,
+        &StageContext::default(),
+        &Arc::new(AtomicBool::new(false)),
+        &mut out,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        out["inferences"][1]["text"],
+        "Distinct conclusion number 15."
+    );
+    for seen in mock.requests() {
+        let user: Value = serde_json::from_str(&seen.user).unwrap();
+        assert!(user["INFERENCE_CANDIDATES"].as_array().unwrap().len() <= INFERENCE_DEDUP_BATCH);
+    }
+}
+
+#[test]
+fn exact_dedup_preserves_different_conditions_for_semantic_selection() {
+    let mut out = json!({"inferences":[
+        {"text":"The lapse delayed reopening.","support":"supported","limitations":[],"counterevidence_ids":[]},
+        {"text":"The lapse delayed reopening!","support":"supported","limitations":[],"counterevidence_ids":[]},
+        {"text":"The lapse delayed reopening.","support":"conditional","limitations":["Timing is disputed"],"counterevidence_ids":["b19"]}
+    ]});
+    exact_dedup_inferences(&mut out);
+    assert_eq!(out["inferences"].as_array().unwrap().len(), 2);
+    assert_eq!(out["inferences"][1]["counterevidence_ids"], json!(["b19"]));
+}
+
+#[test]
+fn inference_chunks_preserve_unicode_and_oversized_sentences() {
+    let body = sentences(
+        "b",
+        &format!(
+            "Zoë confirmed the finding. {}. Final correction.",
+            "界".repeat(INFERENCE_CHUNK_BYTES)
+        ),
+    );
+    let chunks = inference_windows(&body, INFERENCES_PROMPT, &json!({"claims":[]}));
+    assert_eq!(chunks.concat(), body);
+    assert_eq!(chunks.len(), 3);
+    assert_eq!(
+        inference_windows(&[], INFERENCES_PROMPT, &json!({})),
+        vec![Vec::<Sentence>::new()]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_chunk_failure_or_cancellation_drops_siblings_without_partial_commit() {
+    for cancel_stage in [false, true] {
+        let db = db();
+        let job =
+            ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+        let mut mock = Mock::happy();
+        mock.body = Some(story().repeat(50));
+        mock.inference_barrier = Some(Arc::new(tokio::sync::Barrier::new(INFERENCE_CONCURRENCY)));
+        if cancel_stage {
+            mock.hang.insert("intel_brief_inferences".into());
+        } else {
+            mock.fail.insert("intel_brief_inferences".into());
+        }
+        let active = mock.inference_active.clone();
+        let started = mock.inference_started.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = cancel.clone();
+        let path = db.path.clone();
+        let runner = tokio::spawn(async move {
+            let outcomes = drain(&path, "w1", &mut mock, &cancel, &cfg())
+                .await
+                .unwrap();
+            (outcomes, mock)
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while started.load(Ordering::Acquire) < INFERENCE_CONCURRENCY {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if cancel_stage {
+            stop.store(true, Ordering::Release);
+        }
+        let (outcomes, mut mock) = tokio::time::timeout(Duration::from_secs(5), runner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            active.load(Ordering::Acquire),
+            0,
+            "all in-flight chunks dropped"
+        );
+        let store = Store::open(&db.path).unwrap();
+        assert!(stage_output(&store, &job, "intel_brief_inferences").is_err());
+        assert!(stage_output(&store, &job, "intel_brief_links").is_err());
+        if !cancel_stage {
+            assert!(
+                matches!(outcomes.last(),Some(StageOutcome::Failed{operation,..}) if operation=="intel_brief_inferences")
+            );
+            assert_eq!(
+                started.load(Ordering::Acquire),
+                INFERENCE_CONCURRENCY,
+                "no further chunks after failure"
+            );
+            brief_pipeline::retry_stage(&store.conn, &job, &now()).unwrap();
+            mock.fail.clear();
+            drain(&db.path, "w2", &mut mock, &stop, &cfg())
+                .await
+                .unwrap();
+            assert!(stage_output(&store, &job, "intel_brief_inferences").is_ok());
+            assert_eq!(mock.prepared, 1, "roots reused on retry");
+        }
+    }
+}
+
 #[test]
 fn validators_reject_unknown_ids_overlong_duplicates_fences_links_and_sixth_inference() {
     let meta = metadata_sentences(&article("r", "a", TITLE, DESC, "u"));

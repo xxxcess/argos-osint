@@ -64,6 +64,17 @@ fn schemas_are_strict_objects_with_offered_ids() {
     let leads = leads_schema(&["r1"], &["i1"], &["r1.t1"]);
     let ok = json!({"leads":[{"article_id":"r1","inference_id":"i1","metadata_evidence_ids":["r1.t1"],"why":"w","verification_needed":"v"}],"empty_reason":""});
     validate(&leads, &ok).unwrap();
+    let crate::provider_adapters::ResponseContract::GeneratedJson {
+        schema: Some(selection),
+        ..
+    } = inference_selection_contract(&["i1".into(), "i2".into()])
+    else {
+        panic!("selection schema missing")
+    };
+    validate(&selection, &json!({"selected_ids":["i2"]})).unwrap();
+    assert!(validate(&selection, &json!({"selected_ids":["invented"]})).is_err());
+    assert!(validate(&selection, &json!({"selected_ids":[]})).is_err());
+    assert!(validate(&selection, &json!({"selected_ids":["i1"],"inferences":[]})).is_err());
 }
 
 #[test]

@@ -53,7 +53,7 @@ A binding is a typed value (`domain`, `handle`, `url`, …) with an evidence id.
 
 ## Intel brief jobs and historical reports
 
-A Focus Brief retrieves the full article and extracts Claims, joins both for Inferences, then finds Links. Its Jobs pane shows durable stage progress and publication/index status. Related beneath Full Article reflects retained ingest associations requiring at least two distinct shared entity mentions.
+A Focus Brief retrieves the full article and extracts Claims, joins both for Inferences using small body chunks (up to three concurrent requests), deduplicates repeated conclusions including paraphrases, then finds Links. Claims and inferences enter Brain after publication; article-link leads enter as tentative Related memories with verification gaps, through the same index outbox. Its Jobs pane shows durable stage progress and publication/index status. Related beneath Full Article reflects retained ingest associations requiring at least two distinct shared entity mentions.
 
 Article Recon report execution is retired. Historical `intel_report_jobs`, attempts, sections and provenance remain stored; admission, resume and retry reject new execution, and unfinished report jobs and descendants are cancelled and fenced. Historical reports do not take precedence over normal brief publication. Independent Recon investigations remain available.
 

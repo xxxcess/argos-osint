@@ -3002,6 +3002,12 @@ impl Service {
         let run = store
             .get_run(&run_id)?
             .ok_or_else(|| anyhow!("source run unavailable"))?;
+        ensure!(
+            store
+                .get_thread(&run.thread_id)?
+                .is_some_and(|thread| thread.recall_insights),
+            "Enable Recall for this investigation before retrying Brain insight extraction"
+        );
         let messages = store.list_messages(&run.thread_id)?;
         let answer = messages
             .iter()
@@ -4102,6 +4108,15 @@ impl Service {
         answer: &Message,
         evidence: &[(String, ToolResult)],
     ) -> Result<()> {
+        let store = Store::open(&self.db_path)?;
+        if store
+            .get_thread(&answer.thread_id)?
+            .is_none_or(|thread| !thread.recall_insights)
+        {
+            store.conn.execute("UPDATE extraction_jobs SET state='completed',error=NULL,updated_at=?1 WHERE answer_id=?2",params![now(),answer.id])?;
+            return Ok(());
+        }
+        drop(store);
         let packet:Vec<_>=evidence.iter().filter(|(_,r)|r.status=="completed").map(|(id,r)|json!({"id":id,"tool":r.tool_id,"source_url":r.source_url,"observations":packet_observation(&r.observations)})).collect();
         let prompt="Extract at most 5 concise atomic investigation claims supported by the evidence. Return JSON object {\"claims\":[{\"entity\":string,\"namespace\":string,\"predicate\":string,\"object\":string,\"topic\":string,\"claim\":string,\"classification\":\"fact\"|\"inference\",\"confidence\":number,\"evidence_ids\":[string]}]}. Do not extract generic advice, prompt text, or unsupported identity links. The entity is investigated, not the user. evidence_ids must be ids from Evidence. When the answer does not cite gathered evidence, infer which Evidence items support each claim, put those ids in evidence_ids, and set classification to inference.";
         let answer_view = crate::nlp::prepare_mode(
@@ -4167,6 +4182,16 @@ fn persist_claims(
     let tx = store.conn.transaction()?;
     let source_exists:i64=tx.query_row("SELECT COUNT(*) FROM recon_messages m JOIN recon_threads t ON t.id=m.thread_id WHERE m.id=?1 AND m.thread_id=?2 AND t.deleted=0",params![answer.id,answer.thread_id],|r|r.get(0))?;
     ensure!(source_exists == 1, "source answer or thread was deleted");
+    let enabled: bool = tx.query_row(
+        "SELECT recall_insights=1 FROM recon_threads WHERE id=?1 AND deleted=0",
+        [&answer.thread_id],
+        |r| r.get(0),
+    )?;
+    if !enabled {
+        tx.execute("UPDATE extraction_jobs SET state='completed',error=NULL,updated_at=?1 WHERE answer_id=?2",params![now(),answer.id])?;
+        tx.commit()?;
+        return Ok(());
+    }
     for claim_value in claims.iter().take(5) {
         let entity = claim_value
             .get("entity")
@@ -5301,6 +5326,7 @@ mod tests {
         let mut s = Store::memory().unwrap();
         let a = s.new_thread("A").unwrap();
         let b = s.new_thread("B").unwrap();
+        assert!(!a.recall_insights && !b.recall_insights);
         let answer_a = s
             .add_message(&a.id, "assistant", "Evidence answer", None)
             .unwrap();
@@ -5323,6 +5349,21 @@ mod tests {
         };
         let evidence = vec![("call-one".into(), result)];
         let claim = json!({"entity":"8.8.8.8","namespace":"ip","predicate":"registrant","object":"Example Org","topic":"ownership","claim":"Example Org is the listed registrant.","classification":"fact","confidence":0.8,"evidence_ids":["call-one"]});
+        // Default-off transcripts do not publish or enqueue index work.
+        persist_claims(&mut s, &answer_a, &evidence, std::slice::from_ref(&claim)).unwrap();
+        assert!(s.list_memories().unwrap().is_empty());
+        let queued: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM argos_index_changes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(queued, 0);
+        s.set_recall_insights(&a.id, true).unwrap();
+        persist_claims(&mut s, &answer_b, &evidence, std::slice::from_ref(&claim)).unwrap();
+        assert!(
+            s.list_memories().unwrap().is_empty(),
+            "opt-in is per transcript"
+        );
+        s.set_recall_insights(&b.id, true).unwrap();
         persist_claims(&mut s, &answer_a, &evidence, std::slice::from_ref(&claim)).unwrap();
         persist_claims(&mut s, &answer_a, &evidence, std::slice::from_ref(&claim)).unwrap();
         persist_claims(&mut s, &answer_b, &evidence, std::slice::from_ref(&claim)).unwrap();
@@ -5354,6 +5395,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut s = Store::open(&dir.path().join("argos.db")).unwrap();
         let thread = s.new_thread("A").unwrap();
+        s.set_recall_insights(&thread.id, true).unwrap();
         let user = s
             .add_message(&thread.id, "user", "Who owns 8.8.8.8?", None)
             .unwrap();

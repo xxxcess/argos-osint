@@ -1414,12 +1414,14 @@ pub(crate) fn interrupt_expired_leases_in(
 /// Service jobs (long-lived workers) keep their own state. Parent success
 /// requires every task to succeed; a mix of completed and failed is `partial`.
 pub fn refresh_job_state(conn: &Connection, job_id: &str, now: &str) -> Result<()> {
-    let kind: Option<String> = conn
-        .query_row("SELECT kind FROM argos_jobs WHERE id=?1", [job_id], |r| {
-            r.get(0)
-        })
+    let kind: Option<(String, bool)> = conn
+        .query_row(
+            "SELECT kind,cancel_requested FROM argos_jobs WHERE id=?1",
+            [job_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()?;
-    let Some(kind) = kind else {
+    let Some((kind, cancel_requested)) = kind else {
         return Ok(());
     };
     if kind == "service" {
@@ -1469,7 +1471,9 @@ pub fn refresh_job_state(conn: &Connection, job_id: &str, now: &str) -> Result<(
     if total == 0 {
         return Ok(());
     }
-    let state = if running > 0 {
+    let state = if cancel_requested {
+        "cancelled"
+    } else if running > 0 {
         "running"
     } else if retrying > 0 {
         "retry_scheduled"

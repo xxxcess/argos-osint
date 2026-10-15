@@ -62,6 +62,7 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 | [tui-database-responsiveness.md](tui-database-responsiveness.md) | Database/index path audit, background snapshot ownership and contention handling |
 | [tui-verification-responsiveness-2026-10-14.md](tui-verification-responsiveness-2026-10-14.md) | Scoped responsiveness visual, interaction and association verification |
 | [tui-verification-topology-2026-10-15.md](tui-verification-topology-2026-10-15.md) | Seeded Graph first mapper, Brain/Intel entries and targeted list density evidence |
+| [tui-verification-jobs-2026-10-15.md](tui-verification-jobs-2026-10-15.md) | Jobs status cleanup, stop/dequeue controls, service visibility and Recon Recall publication guards |
 | [investigation-harness.md](investigation-harness.md) | Unified investigation task graph |
 | [jev-decision-gates.md](jev-decision-gates.md) | Tool-picker decisions transport |
 

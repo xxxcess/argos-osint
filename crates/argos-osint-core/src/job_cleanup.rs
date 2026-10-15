@@ -192,58 +192,7 @@ fn cleanup_on(conn: &Connection, now: DateTime<Utc>) -> Result<CleanupCounts> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut counts = CleanupCounts::default();
-    for (id, state, run, operation) in rows {
-        let refreshes = conn.prepare("SELECT input_ref,role_snapshot FROM argos_tasks WHERE job_id=?1 AND operation='insight_refresh'")?.query_map([&id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        for (input, settings) in refreshes {
-            if let (Ok(mut input), Ok(settings)) = (
-                serde_json::from_str::<crate::investigation::insights::PipelineInput>(&input),
-                serde_json::from_str::<crate::provider::SettingsFile>(&settings),
-            ) {
-                input.snapshot.generation = 0;
-                let key = crate::investigation::insights::input_key(&input, &settings);
-                conn.execute("INSERT OR IGNORE INTO article_refresh_retirements(article_id,input_key,retired_at) VALUES(?1,?2,?3)",params![input.snapshot.owner_id,key,ts])?;
-            }
-        }
-        conn.execute("INSERT OR IGNORE INTO argos_job_retirements(job_id,retired_at,reason) VALUES(?1,?2,'expired or required owner deleted')",params![id,ts])?;
-        if matches!(
-            state.as_str(),
-            "running" | "queued" | "waiting" | "paused" | "blocked" | "retry_scheduled"
-        ) {
-            counts.stopped += 1;
-        }
-        conn.execute("UPDATE argos_tasks SET state='cancelled',lease_owner='',lease_until='',lease_epoch=lease_epoch+1,updated_at=?2 WHERE job_id=?1",params![id,ts])?;
-        // Keep canonical removals/upserts and rebind them to a fresh service.
-        conn.execute("UPDATE argos_index_changes SET task_id='',job_id='',state='pending',updated_at=?2 WHERE job_id=?1 AND state IN ('pending','running','blocked')",params![id,ts])?;
-        conn.execute("UPDATE insight_owner_state SET desired_generation=desired_generation+1,lifecycle='previous',last_error='analysis request expired',refresh_job_id='' WHERE refresh_job_id=?1",[&id])?;
-        if operation == "article_body" {
-            conn.execute("UPDATE article_bodies SET state='cancelled' WHERE article_id IN (SELECT owner_id FROM argos_job_owners WHERE job_id=?1 AND owner_kind='article') AND state IN ('queued','running')",[&id])?;
-        }
-        if operation == "intel_recon" {
-            conn.execute("INSERT OR IGNORE INTO argos_job_retirements(job_id,retired_at,reason) VALUES(?1,?2,'report execution retired')",params![run,ts])?;
-            conn.execute("UPDATE intel_report_jobs SET state='cancelled',stage='Job history expired',updated_at=?2 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled','partial')",params![run,ts])?;
-        }
-        if operation == "recon_investigation" {
-            conn.execute("UPDATE recon_runs SET state='cancelled',stage='Job history expired' WHERE id=?1 AND state NOT IN ('completed','failed','cancelled')",[&run])?;
-        }
-        conn.execute("DELETE FROM argos_attempts WHERE task_id IN (SELECT id FROM argos_tasks WHERE job_id=?1)",[&id])?;
-        conn.execute("DELETE FROM argos_tasks WHERE job_id=?1", [&id])?;
-        conn.execute("DELETE FROM argos_job_owners WHERE job_id=?1", [&id])?;
-        conn.execute("DELETE FROM argos_jobs WHERE id=?1", [&id])?;
-        counts.cleared += 1;
-        crate::job_registry::signal_retirement(&id);
-        let _ = crate::events::record_event(
-            conn,
-            &crate::events::NewEvent {
-                app: "jobs".into(),
-                event_type: "job_retired".into(),
-                severity: Some(crate::events::Severity::Info),
-                message: "Job history expired".into(),
-                job_id: id.clone(),
-                ..Default::default()
-            },
-        );
-    }
+    let mut counts = retire_rows(conn, rows, &ts, "expired or required owner deleted", false)?;
     // Legacy runtime history uses the same immutable start/creation deadline.
     // Completed bundles have no FK to these journals and remain readable.
     conn.execute("UPDATE intel_report_jobs SET started_at=COALESCE((SELECT stamp FROM (SELECT created_at AS stamp FROM intel_report_tasks WHERE job_id=intel_report_jobs.id UNION ALL SELECT created_at FROM intel_report_sections WHERE job_id=intel_report_jobs.id UNION ALL SELECT intel_report_jobs.finished_at) WHERE julianday(stamp) IS NOT NULL ORDER BY julianday(stamp) LIMIT 1),?1) WHERE julianday(started_at) IS NULL",[&ts])?;
@@ -261,6 +210,112 @@ fn cleanup_on(conn: &Connection, now: DateTime<Utc>) -> Result<CleanupCounts> {
         counts.cleared += conn.execute("DELETE FROM intel_report_jobs WHERE id=?1", [&id])?;
     }
     Ok(counts)
+}
+
+/// Shared journal removal; canonical results and index consistency survive.
+fn retire_rows(
+    conn: &Connection,
+    rows: Vec<(String, String, String, String)>,
+    ts: &str,
+    reason: &str,
+    manual: bool,
+) -> Result<CleanupCounts> {
+    let mut counts = CleanupCounts::default();
+    for (id, state, run, operation) in rows {
+        let refreshes = conn.prepare("SELECT input_ref,role_snapshot FROM argos_tasks WHERE job_id=?1 AND operation='insight_refresh'")?.query_map([&id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for (input, settings) in refreshes {
+            if let (Ok(mut input), Ok(settings)) = (
+                serde_json::from_str::<crate::investigation::insights::PipelineInput>(&input),
+                serde_json::from_str::<crate::provider::SettingsFile>(&settings),
+            ) {
+                input.snapshot.generation = 0;
+                let key = crate::investigation::insights::input_key(&input, &settings);
+                conn.execute("INSERT OR IGNORE INTO article_refresh_retirements(article_id,input_key,retired_at) VALUES(?1,?2,?3)",params![input.snapshot.owner_id,key,ts])?;
+            }
+        }
+        conn.execute("INSERT OR IGNORE INTO argos_job_retirements(job_id,retired_at,reason) VALUES(?1,?2,?3)",params![id,ts,reason])?;
+        if matches!(
+            state.as_str(),
+            "running" | "queued" | "waiting" | "paused" | "blocked" | "retry_scheduled"
+        ) {
+            counts.stopped += 1;
+        }
+        conn.execute("UPDATE argos_tasks SET state='cancelled',lease_owner='',lease_until='',lease_epoch=lease_epoch+1,updated_at=?2 WHERE job_id=?1",params![id,ts])?;
+        // Keep canonical removals/upserts and rebind them to a fresh service.
+        conn.execute("UPDATE argos_index_changes SET task_id='',job_id='',state='pending',updated_at=?2 WHERE job_id=?1 AND state IN ('pending','running','blocked')",params![id,ts])?;
+        if manual {
+            conn.execute(
+                "UPDATE insight_owner_state SET refresh_job_id='' WHERE refresh_job_id=?1",
+                [&id],
+            )?;
+        } else {
+            conn.execute("UPDATE insight_owner_state SET desired_generation=desired_generation+1,lifecycle='previous',last_error='analysis request expired',refresh_job_id='' WHERE refresh_job_id=?1",[&id])?;
+        }
+        if operation == "article_body" {
+            conn.execute("UPDATE article_bodies SET state='cancelled' WHERE article_id IN (SELECT owner_id FROM argos_job_owners WHERE job_id=?1 AND owner_kind='article') AND state IN ('queued','running')",[&id])?;
+        }
+        if operation == "intel_recon" {
+            conn.execute("INSERT OR IGNORE INTO argos_job_retirements(job_id,retired_at,reason) VALUES(?1,?2,'report execution retired')",params![run,ts])?;
+            conn.execute("UPDATE intel_report_jobs SET state='cancelled',stage='Job history expired',updated_at=?2 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled','partial')",params![run,ts])?;
+        }
+        if operation == "recon_investigation" {
+            conn.execute("UPDATE recon_runs SET state='cancelled',stage='Job history expired' WHERE id=?1 AND state NOT IN ('completed','failed','cancelled')",[&run])?;
+        }
+        conn.execute("DELETE FROM argos_attempts WHERE task_id IN (SELECT id FROM argos_tasks WHERE job_id=?1)",[&id])?;
+        conn.execute("DELETE FROM argos_tasks WHERE job_id=?1", [&id])?;
+        conn.execute("DELETE FROM argos_job_owners WHERE job_id=?1", [&id])?;
+        conn.execute("DELETE FROM argos_jobs WHERE id=?1", [&id])?;
+        counts.cleared += 1;
+        if !manual {
+            crate::job_registry::signal_retirement(&id);
+        }
+        let _ = crate::events::record_event(
+            conn,
+            &crate::events::NewEvent {
+                app: "jobs".into(),
+                event_type: "job_retired".into(),
+                severity: Some(crate::events::Severity::Info),
+                message: reason.into(),
+                job_id: id.clone(),
+                ..Default::default()
+            },
+        );
+    }
+    Ok(counts)
+}
+
+/// Stop durable work while retaining its journal. Lease epochs fence late
+/// completion/publication, including another process's in-flight work.
+pub(crate) fn stop_task_job(conn: &Connection, job: &str) -> Result<()> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let now = Utc::now().to_rfc3339();
+    let ids = tx.prepare("WITH RECURSIVE tree(id) AS (SELECT id FROM argos_jobs WHERE id=?1 AND kind<>'service' AND state IN ('running','queued','retry_scheduled') UNION SELECT j.id FROM argos_jobs j JOIN tree p ON j.parent_id=p.id WHERE j.kind<>'service') SELECT id FROM tree")?.query_map([job],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in &ids {
+        tx.execute("UPDATE argos_attempts SET finished_at=?2,outcome='cancelled',duration_ms=MAX(0,CAST((julianday(?2)-julianday(started_at))*86400000 AS INTEGER)) WHERE task_id IN (SELECT id FROM argos_tasks WHERE job_id=?1) AND finished_at=''",params![id,now])?;
+        tx.execute("UPDATE argos_tasks SET active_ms=active_ms+CASE WHEN state='running' THEN MAX(0,CAST((julianday(?2)-julianday(COALESCE((SELECT a.started_at FROM argos_attempts a WHERE a.task_id=argos_tasks.id ORDER BY a.attempt_number DESC LIMIT 1),started_at)))*86400000 AS INTEGER)) ELSE 0 END,state='cancelled',lease_epoch=lease_epoch+1,lease_owner='',lease_until='',finished_at=?2,updated_at=?2 WHERE job_id=?1 AND state IN ('running','queued','retry_scheduled','paused','blocked','waiting')",params![id,now])?;
+        tx.execute("UPDATE argos_jobs SET state='cancelled',cancel_requested=1,finished_at=?2,updated_at=?2,phase='Stopped by user' WHERE id=?1 AND state NOT IN ('completed','failed','partial','cancelled','superseded')",params![id,now])?;
+        tx.execute(
+            "UPDATE intel_brief_runs SET state='cancelled',updated_at=?2 WHERE job_id=?1 AND state='active'",
+            params![id, now],
+        )?;
+        tx.execute("UPDATE argos_index_changes SET task_id='',job_id='',state='pending',updated_at=?2 WHERE job_id=?1 AND state IN ('pending','running','blocked')",params![id,now])?;
+        crate::tasks::refresh_job_state(&tx, id, &now)?;
+        crate::events::record_event(
+            &tx,
+            &crate::events::NewEvent {
+                app: "jobs".into(),
+                event_type: "job.cancel_requested".into(),
+                message: "Stopped by user".into(),
+                job_id: id.clone(),
+                ..Default::default()
+            },
+        )?;
+    }
+    tx.commit()?;
+    for id in ids {
+        crate::job_registry::signal_retirement(&id);
+    }
+    Ok(())
 }
 
 fn retain_completed_result(conn: &Connection, job: &str) -> Result<()> {
@@ -353,6 +408,66 @@ fn retain_completed_result(conn: &Connection, job: &str) -> Result<()> {
 }
 
 impl crate::store::Store {
+    /// Clear one terminal status cohort globally. Never remove a service or a
+    /// tree with running descendants; selection and deletion share a write lock.
+    pub fn clear_jobs_by_status(
+        &self,
+        status: crate::jobs_view::JobStatusFilter,
+    ) -> Result<CleanupCounts> {
+        use crate::jobs_view::JobStatusFilter;
+        ensure!(
+            matches!(
+                status,
+                JobStatusFilter::Completed | JobStatusFilter::Stopped | JobStatusFilter::Failed
+            ),
+            "Choose Completed, Stopped, or Failed history"
+        );
+        let mut total = CleanupCounts::default();
+        loop {
+            let tx = rusqlite::Transaction::new_unchecked(
+                &self.conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let states = status
+                .states()
+                .iter()
+                .map(|s| format!("'{s}'"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("WITH RECURSIVE roots(id) AS (
+                SELECT j.id FROM argos_jobs j WHERE j.parent_id='' AND j.kind<>'service' AND j.state IN ({states})
+                AND NOT EXISTS(WITH RECURSIVE descendants(id) AS (SELECT j.id UNION SELECT c.id FROM argos_jobs c JOIN descendants d ON c.parent_id=d.id) SELECT 1 FROM argos_jobs c JOIN descendants d ON c.id=d.id WHERE c.state='running' OR c.kind='service' OR EXISTS(SELECT 1 FROM argos_tasks t WHERE t.job_id=c.id AND t.state='running'))
+                ORDER BY j.created_at,j.id LIMIT {BATCH}),
+                tree(id) AS (SELECT id FROM roots UNION SELECT c.id FROM argos_jobs c JOIN tree p ON c.parent_id=p.id)
+                SELECT j.id,j.state,j.run_ref,j.operation FROM argos_jobs j JOIN tree t ON t.id=j.id");
+            let rows = tx
+                .prepare(&sql)?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let ids = rows
+                .iter()
+                .map(|row: &(String, String, String, String)| row.0.clone())
+                .collect::<Vec<_>>();
+            let batch = retire_rows(
+                &tx,
+                rows,
+                &Utc::now().to_rfc3339(),
+                "Job history cleared by status",
+                true,
+            )?;
+            tx.commit()?;
+            for id in ids {
+                crate::job_registry::signal_retirement(&id);
+            }
+            total.cleared += batch.cleared;
+            total.stopped += batch.stopped;
+            if batch.cleared == 0 {
+                break;
+            }
+        }
+        Ok(total)
+    }
+
     pub fn clear_old_jobs(&self) -> Result<CleanupCounts> {
         let now = Utc::now();
         let mut total = CleanupCounts::default();
@@ -373,6 +488,184 @@ mod tests {
     use super::*;
     use crate::store::Store;
     use crate::tasks::{self, JobMeta, NewJob, NewTask};
+
+    #[test]
+    fn status_cleanup_is_global_separate_atomic_and_preserves_running_trees_and_data() {
+        use crate::jobs_view::JobStatusFilter as Status;
+        let store = Store::memory().unwrap();
+        let now = Utc::now().to_rfc3339();
+        for (id, state, parent) in [
+            ("done", "completed", ""),
+            ("stopped", "cancelled", ""),
+            ("superseded", "superseded", ""),
+            ("failed", "failed", ""),
+            ("partial", "partial", ""),
+            ("live-child", "running", "partial"),
+            ("active", "running", ""),
+            ("queued", "queued", ""),
+        ] {
+            job(&store.conn, id, &now, parent, "");
+            store
+                .conn
+                .execute(
+                    "UPDATE argos_jobs SET state=?2 WHERE id=?1",
+                    params![id, state],
+                )
+                .unwrap();
+        }
+        tasks::ensure_service_job(&store.conn, "service", "brain", "Worker", &now).unwrap();
+        let work = tasks::enqueue_index_work(
+            &store.conn,
+            "memory",
+            "retained",
+            "r1",
+            "hash",
+            "index_upsert",
+            Some("done"),
+            &now,
+        )
+        .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE argos_jobs SET state='completed' WHERE id='done'",
+                [],
+            )
+            .unwrap();
+        store.conn.execute("INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES('retained','Published fact','investigation',0,?1,?2)",params![now,serde_json::to_string(&crate::brain::MemorySource {app:"fixture".into(),conversation_id:"fixture".into(),message_id:None,reference:None}).unwrap()]).unwrap();
+        store.conn.execute_batch("CREATE TRIGGER fail_clear BEFORE DELETE ON argos_jobs WHEN OLD.id='done' BEGIN SELECT RAISE(ABORT,'fixture rollback'); END;").unwrap();
+        assert!(store.clear_jobs_by_status(Status::Completed).is_err());
+        assert!(!retired(&store.conn, "done").unwrap());
+        assert!(store.get_job("done").unwrap().is_some());
+        store.conn.execute_batch("DROP TRIGGER fail_clear").unwrap();
+        assert_eq!(
+            store
+                .clear_jobs_by_status(Status::Completed)
+                .unwrap()
+                .cleared,
+            1
+        );
+        assert!(store.get_memory("retained").unwrap().is_some());
+        let pending: (String, String) = store
+            .conn
+            .query_row(
+                "SELECT job_id,state FROM argos_index_changes WHERE seq=?1",
+                [work.seq],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(pending, (String::new(), "pending".into()));
+        assert_eq!(
+            store.clear_jobs_by_status(Status::Stopped).unwrap().cleared,
+            2
+        );
+        assert_eq!(
+            store.clear_jobs_by_status(Status::Failed).unwrap().cleared,
+            1
+        );
+        for id in ["partial", "live-child", "active", "queued", "service"] {
+            assert!(store.get_job(id).unwrap().is_some(), "{id} must survive");
+        }
+        assert!(store.clear_jobs_by_status(Status::Active).is_err());
+        assert_eq!(
+            store.clear_jobs_by_status(Status::Failed).unwrap().cleared,
+            0
+        );
+    }
+
+    #[test]
+    fn stop_dequeues_or_fences_running_work_and_retains_history() {
+        use crate::job_registry::CancelRequest;
+        for running in [false, true] {
+            let store = Store::memory().unwrap();
+            let now = Utc::now().to_rfc3339();
+            job(&store.conn, "work", &now, "", "");
+            tasks::enqueue_task(
+                &store.conn,
+                &NewTask {
+                    id: "task".into(),
+                    job_id: "work".into(),
+                    operation: "summarization".into(),
+                    dedupe_key: String::new(),
+                    priority: 1,
+                    input_ref: String::new(),
+                    input_hash: String::new(),
+                    source_revision: String::new(),
+                    role_snapshot: String::new(),
+                    max_attempts: 3,
+                },
+                &now,
+            )
+            .unwrap();
+            let claim = if running {
+                tasks::claim_task(&store.conn, "task", "worker", 120, &now).unwrap()
+            } else {
+                None
+            };
+            // Independent jobs must keep their queue entries and live leases.
+            for id in ["other-running", "other-queued"] {
+                job(&store.conn, id, &now, "", "");
+                tasks::enqueue_task(
+                    &store.conn,
+                    &NewTask {
+                        id: id.into(),
+                        job_id: id.into(),
+                        operation: "summarization".into(),
+                        dedupe_key: String::new(),
+                        priority: 1,
+                        input_ref: String::new(),
+                        input_hash: String::new(),
+                        source_revision: String::new(),
+                        role_snapshot: String::new(),
+                        max_attempts: 3,
+                    },
+                    &now,
+                )
+                .unwrap();
+            }
+            let other_claim =
+                tasks::claim_task(&store.conn, "other-running", "other-worker", 120, &now)
+                    .unwrap()
+                    .unwrap();
+            assert!(store.get_job("work").unwrap().unwrap().cancellable);
+            assert_eq!(
+                store.request_job_cancel("work").unwrap(),
+                CancelRequest::Requested
+            );
+            assert!(
+                store.get_job("work").unwrap().is_some(),
+                "stopped history retained"
+            );
+            assert!(tasks::claim_task(&store.conn, "task", "other", 120, &now)
+                .unwrap()
+                .is_none());
+            if let Some(claim) = claim {
+                assert!(!tasks::complete_claimed(&store.conn, &claim, "late", &now).unwrap());
+            }
+            tasks::refresh_job_state(&store.conn, "work", &now).unwrap();
+            assert_eq!(store.get_job("work").unwrap().unwrap().state, "cancelled");
+            for (id, state) in [("other-running", "running"), ("other-queued", "queued")] {
+                let other = store.get_job(id).unwrap().unwrap();
+                assert_eq!(other.state, state);
+                assert!(!other.cancel_requested);
+            }
+            assert!(tasks::complete_claimed(&store.conn, &other_claim, "ok", &now).unwrap());
+            assert!(
+                tasks::claim_task(&store.conn, "other-queued", "next", 120, &now)
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(
+                store.request_job_cancel("work").unwrap(),
+                CancelRequest::NotRunning
+            );
+            tasks::ensure_service_job(&store.conn, "service", "brain", "Worker", &now).unwrap();
+            assert_eq!(
+                store.request_job_cancel("service").unwrap(),
+                CancelRequest::NotCancellable
+            );
+        }
+    }
 
     #[test]
     fn article_report_retirement_cancels_only_execution_and_fences_late_writes() {

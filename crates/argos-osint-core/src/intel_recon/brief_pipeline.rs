@@ -102,7 +102,7 @@ pub fn ensure_chain(conn: &Connection, inputs: &BriefInputs, now: &str) -> Resul
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let active: Option<(String, String, String, String)> = tx
         .query_row(
-            "SELECT job_id,input_revision,state,contract FROM intel_brief_runs WHERE article_id=?1 AND state IN ('active','completed','failed') ORDER BY generation DESC LIMIT 1",
+            "SELECT job_id,input_revision,state,contract FROM intel_brief_runs WHERE article_id=?1 AND state IN ('active','completed','failed','cancelled') ORDER BY generation DESC LIMIT 1",
             [&inputs.article_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )

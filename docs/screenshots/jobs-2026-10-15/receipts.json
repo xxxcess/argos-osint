@@ -1,0 +1,182 @@
+{
+  "created_utc": "2026-10-15T17:36:13.839376+00:00",
+  "git_head": "339eca5a15f93e8267317eb95157750591946779",
+  "tracked_diff_sha256": "d44be1a79e69e20d9a45c9a41f3c80311724add43a0262f554ef0838d380810d",
+  "command": [
+    "cargo",
+    "test",
+    "--target-dir",
+    "/Users/successndalama/Desktop/xxxcess/repos/argos-osint/target/agents",
+    "-p",
+    "argos-osint-bin",
+    "--locked",
+    "--no-default-features",
+    "jobs_status_controls_and_service_screens"
+  ],
+  "ARGOS_EMBED": "unset",
+  "CARGO_TARGET_DIR": "/Users/successndalama/Desktop/xxxcess/repos/argos-osint/target/agents",
+  "font": "/System/Library/Fonts/Supplemental/Courier New.ttf",
+  "wide_font": "/System/Library/Fonts/Hiragino Sans GB.ttc",
+  "pillow_version": "12.3.0",
+  "python_version": "3.10.10 (main, Mar 21 2023, 13:41:39) [Clang 14.0.6 ]",
+  "renderer_sha256": "59c25e43b6edcc74aaf63f742ed620fc8218700a5a40e676f22fbe33407df36f",
+  "selection": {
+    "test": "jobs_status_controls_and_service_screens",
+    "include": [
+      "jobs-*"
+    ],
+    "sizes": [],
+    "all": false,
+    "reason": "Jobs status clearing, stop/dequeue, compact controls, service explanation and loading/empty/retained-error/help states"
+  },
+  "visual_review": "All 16 PNGs inspected with image viewer; controls, responsive layout, service text, retained-error/loading/empty and help states passed. See docs/tui-verification-jobs-2026-10-15.md.",
+  "interaction_review": "Passed jobs_status_controls_and_service_screens and full workspace action/data tests (1289 passed, 18 ignored).",
+  "reference_comparison": "No supplied approved image reference; compared against maintained TUI design/component contracts.",
+  "live_providers": "not exercised",
+  "test_exit_code": 0,
+  "artifact_count": 16,
+  "source_sha256": {
+    "crates/argos-osint-bin/src/tui/app.rs": "913f4a1ba1e43279cd7293fa16bca261d4e63c3cebb3b99a365a862f4e054773",
+    "crates/argos-osint-bin/src/tui/commands.rs": "c777e8a54c729452d69b3b35b33bfa1f905bf61547d5489dab4979aed24892dd",
+    "crates/argos-osint-bin/src/tui/jobs.rs": "fee8238bfafa5554575d41c4c7d6b5e9c851be2e8ef34c664d7e67847104da7a",
+    "crates/argos-osint-bin/src/tui/ui.rs": "c018403f3b6669e661121561d24c60f4fb2e49db867cdb7ce390a7770e832ae2",
+    "crates/argos-osint-core/src/intel_recon/brief_pipeline.rs": "0f7767f8082ec09e505361100350c01cde70a013de07b60850a656845913d605",
+    "crates/argos-osint-core/src/intel_recon/brief_pipeline_tests.rs": "00fcb7f028f8b58d96246134bce0562db79b53726a36b5ff5f9b90e48d294b97",
+    "crates/argos-osint-core/src/investigation/insight_persist.rs": "a3ccb0e9fa476dde2d345a91739c3a742406e58631150d16e9c750992733843c",
+    "crates/argos-osint-core/src/job_cleanup.rs": "0abc23d956779af300fe2a3005b90d998742cfdb92f150e81ead9cc4fad49fbb",
+    "crates/argos-osint-core/src/jobs_view.rs": "b44bca09d802780d758c2c7c7bd97de6c85177d8d8a5da5d9c09030ec0241687",
+    "crates/argos-osint-core/src/recon.rs": "4a6e5727f6536b32a06f61ff0696e87375159fafd8b961c4f099b9d6283a72a7",
+    "crates/argos-osint-core/src/scheduler.rs": "5dce97775404ab6212cef1a957ba41917e403d1dac64749285f3d2db47633c20",
+    "crates/argos-osint-core/src/tasks.rs": "279d3748880f195fadf4e6c0971329e5cb191d70133fe35d02f790c03e0044d4"
+  },
+  "fixtures": [
+    {
+      "name": "jobs-empty-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "220e49dcdae78010c78387edf48052b0647fda813384b6077077e68fc07e430d",
+      "png_sha256": "077c1732e8a2024d015501ffacbf6a1211f0d603cc065197ea523c4cdaece950",
+      "retained": false
+    },
+    {
+      "name": "jobs-error-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "c68d05c42cc301126d94a4a5ee0729e9dd67c35ac59c8034aadcbbff7194636e",
+      "png_sha256": "ab8d787f1fd99eb26553092e80ca5028b01274523ee5c18289244001ffd46590",
+      "retained": true
+    },
+    {
+      "name": "jobs-help-60x18",
+      "width": 60,
+      "height": 18,
+      "cells_sha256": "eced45488495de486cd4f6ff457a6f2f858151eea0d2131abc359b04b2f7d309",
+      "png_sha256": "b27ad15f9bca756934e87c027184cc4847e3ede65d045ccb55c89a6a424adff1",
+      "retained": true
+    },
+    {
+      "name": "jobs-help-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "8621a86d0689396fd25d991f69a8f481dd31cfd515654e1284c12859d91c202b",
+      "png_sha256": "f662f214844958fbec70fc3c2c1a8a5f473545c5509247a5d3135f9c5ce6ee40",
+      "retained": false
+    },
+    {
+      "name": "jobs-loading-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "a159ed78df87754872e1cf8ed3bfefd57c8ae3cd2f461e123dfc34a642ef3c1b",
+      "png_sha256": "6e18b91055f9d5a282b65b90163f510c799350bdb52d7aa56267e41dd2e0a416",
+      "retained": false
+    },
+    {
+      "name": "jobs-queued-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "77ad75bb1832d3ed8d39c5cd78588ca7f0e6d4d23a1f3afddb5b1fb332d0513f",
+      "png_sha256": "cdc9433effecf046519e10dfaf3fa02c513864b28a420fc5d16840f7d4a02164",
+      "retained": true
+    },
+    {
+      "name": "jobs-retry_scheduled-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "ffe7fe4537b378780848734e12670b039c1dd79b688cb562889a0bc0f32057d1",
+      "png_sha256": "a6d4c3cc37d1b48c413bbda83b99fb27be1e4ad5c4d435fc97c2125c903301ac",
+      "retained": false
+    },
+    {
+      "name": "jobs-running-100x32",
+      "width": 100,
+      "height": 32,
+      "cells_sha256": "249c76acbbd6f840d258f2fd6231d5ed80c5883567f566d2f4f61f1c69075ab4",
+      "png_sha256": "5b7d85aa1e48b5cc5f3def30b6e74035f5220f3870356dee23dd4193ff05fdf7",
+      "retained": false
+    },
+    {
+      "name": "jobs-running-120x40",
+      "width": 120,
+      "height": 40,
+      "cells_sha256": "0800c23ce7d1015f418123031732b573e5af5c6c6b103e18d0c0b62e3a7a4a5d",
+      "png_sha256": "8658147067399b7da14b84abf0b328d87169d9c73dceb2fe4da71e4bb697dc7c",
+      "retained": false
+    },
+    {
+      "name": "jobs-running-160x50",
+      "width": 160,
+      "height": 50,
+      "cells_sha256": "6abc41866c3672b5412a1c4e03fc7cf76189dd1d8533be07f4452e91ac68eeaf",
+      "png_sha256": "c5afdc372251b4c0dccd82431df36a78e768598f1f04dd7976ea8a1bdf92e8cf",
+      "retained": true
+    },
+    {
+      "name": "jobs-running-40x20",
+      "width": 40,
+      "height": 20,
+      "cells_sha256": "dc63edb26777efa99c3d7cf2431b025797f1308c61d281f850b6e6e7e5af4df8",
+      "png_sha256": "a1b3a24c932386d3ae169f2f1620816c32a02bcf6d4789d38939d802f7cdc9f2",
+      "retained": true
+    },
+    {
+      "name": "jobs-running-60x18",
+      "width": 60,
+      "height": 18,
+      "cells_sha256": "94b7f84a1d169b599193055c3172a412cf1e4a49e9780bc27bafe341d491e6e6",
+      "png_sha256": "b6796ad89203fb213106e2e9ac50244769a2a9cd799132f25eec6ea097cd1827",
+      "retained": true
+    },
+    {
+      "name": "jobs-running-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "de5bdd46e44d4ea645c77117faf08a293c68b15a34d46c973db7e85d3d8c6aa5",
+      "png_sha256": "364395b8a5ce2b25b02003d708cae60b68c40fce840d74381bb3566924cd4d57",
+      "retained": false
+    },
+    {
+      "name": "jobs-service-160x50",
+      "width": 160,
+      "height": 50,
+      "cells_sha256": "ce62d76bb4a265840b8b623d50a173bd61eb34ff90dd058df2158a0a62ec23b1",
+      "png_sha256": "a35c65e7463ff4d86582e77597e74034f8b94685531666c850de5efcc1ea08a4",
+      "retained": false
+    },
+    {
+      "name": "jobs-service-60x18",
+      "width": 60,
+      "height": 18,
+      "cells_sha256": "18daafe6667a7dd2f2e7739575b448b8aed08a0058e6f7e2a9701007e7f4e9e4",
+      "png_sha256": "170242bdff0804b5e9612e74dc705d229a0b012b1384838f67d91120b11f6542",
+      "retained": true
+    },
+    {
+      "name": "jobs-service-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "2651df62e99576287b2b09ecd4b8d9e60b315006e447e55eb23020a924c86845",
+      "png_sha256": "59f868ce99c33a1c99e363d8bc4631387a7614760001059ceec98b8dcac054d5",
+      "retained": false
+    }
+  ]
+}

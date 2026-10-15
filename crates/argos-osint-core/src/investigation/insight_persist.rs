@@ -1224,6 +1224,15 @@ pub fn write_derivations(
     output: &PipelineOutput,
     now: &str,
 ) -> Result<()> {
+    // A queued refresh captures old settings. Recheck the transcript's live
+    // opt-in under the publication transaction before any Brain/index writes.
+    let save_insights = input.save_insights
+        && (input.snapshot.owner_kind != "recon"
+            || (input.recall_enabled
+                && tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM recon_runs r JOIN recon_threads t ON t.id=r.thread_id WHERE r.id=?1 AND t.deleted=0 AND t.recall_insights=1)",
+                    [&input.snapshot.owner_id], |r| r.get::<_,bool>(0),
+                )?));
     if input.snapshot.owner_kind == "article" {
         retire_article_associations(tx, &input.snapshot.owner_id, output)?;
     }
@@ -1280,7 +1289,7 @@ pub fn write_derivations(
         let mut memory_id = None;
         let faithful = serde_json::from_str::<super::insights::Assessment>(&assessment)?.faithful()
             && !refs.is_empty();
-        if input.save_insights && faithful {
+        if save_insights && faithful {
             let owned_tombstone = |owners: Vec<String>| {
                 owners.is_empty()
                     || owners.contains(&input.snapshot.owner_id)
@@ -1509,7 +1518,9 @@ pub fn write_derivations(
     if input.snapshot.owner_kind == "article" {
         crate::job_cleanup::cleanup_batch(tx, chrono::Utc::now())?;
     }
-    crate::store::bump_memories_changed(tx)?;
+    if save_insights {
+        crate::store::bump_memories_changed(tx)?;
+    }
     Ok(())
 }
 
@@ -1839,8 +1850,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn canonical_derivations_preserve_user_edits_and_scoped_tombstones() {
+    fn canonical_fixture() -> (crate::store::Store, PipelineInput, PipelineOutput) {
         use super::super::insights::{Assessment, EvidenceLocation, EvidenceRef, SourceClaim};
         let store = crate::store::Store::memory().unwrap();
         let text = "Acme denied opening in 2020.";
@@ -1894,7 +1904,7 @@ mod tests {
             claims: vec![claim],
             ..Default::default()
         };
-        let mut input = PipelineInput {
+        let input = PipelineInput {
             snapshot: super::super::insights::snapshot("fixture", "owner", 1, &[]),
             evidence: vec![],
             objective: "fixture".into(),
@@ -1903,6 +1913,12 @@ mod tests {
             save_insights: true,
             recall_enabled: false,
         };
+        (store, input, output)
+    }
+
+    #[test]
+    fn canonical_derivations_preserve_user_edits_and_scoped_tombstones() {
+        let (store, mut input, output) = canonical_fixture();
         let publish = |id: &str, input: &PipelineInput| {
             let tx = store.conn.unchecked_transaction().unwrap();
             tx.execute("INSERT INTO insight_snapshots(id,owner_kind,owner_id,generation,input_key,inputs_json,entities_json,coverage_json,readiness_json,contract_version,policy_version,created_at) VALUES(?1,?2,?3,?4,?1,'{}','[]','[]','{}','fixture','fixture','fixture')",params![id,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation]).unwrap();
@@ -1945,6 +1961,86 @@ mod tests {
         assert!(
             store.get_memory(&mid).unwrap().is_some(),
             "an independent owner was globally suppressed"
+        );
+    }
+
+    #[test]
+    fn recon_publication_rechecks_live_transcript_opt_in_before_brain_and_index_writes() {
+        let (store, mut input, mut output) = canonical_fixture();
+        let thread = store.new_thread("Default off").unwrap();
+        let other = store.new_thread("Other transcript").unwrap();
+        assert!(!thread.recall_insights && !other.recall_insights);
+        let question = store
+            .add_message(&thread.id, "user", "Investigate", None)
+            .unwrap();
+        let run = store
+            .new_run(&thread.id, &question.id, "fixture", "fixture")
+            .unwrap();
+        input.snapshot.owner_kind = "recon".into();
+        input.snapshot.owner_id = run.id;
+        input.surface = "recon".into();
+        // Simulate queued work that captured an earlier on setting.
+        input.save_insights = true;
+        input.recall_enabled = true;
+        output.inferences.push(super::super::insights::Inference {
+            id: "inference-fixture".into(),
+            text: "Acme's denial leaves the opening unconfirmed.".into(),
+            entity_refs: vec![output.entities[0].id.clone()],
+            premise_claim_ids: vec![output.claims[0].id.clone()],
+            evidence_refs: output.claims[0].evidence_refs.clone(),
+            rationale: "The source denies opening.".into(),
+            limitations: vec!["No independent confirmation".into()],
+            assessment: output.claims[0].assessment.clone(),
+            snapshot_key: String::new(),
+        });
+        let publish = |id: &str| {
+            let tx = store.conn.unchecked_transaction().unwrap();
+            tx.execute("INSERT INTO insight_snapshots(id,owner_kind,owner_id,generation,input_key,inputs_json,entities_json,coverage_json,readiness_json,contract_version,policy_version,created_at) VALUES(?1,'recon',?2,1,?1,'{}','[]','[]','{}','fixture','fixture','fixture')",params![id,input.snapshot.owner_id]).unwrap();
+            write_derivations(&tx, id, &input, &output, "fixture").unwrap();
+            tx.commit().unwrap();
+        };
+        let index_count = || {
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM argos_index_changes", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        publish("default-off");
+        assert!(store.list_memories().unwrap().is_empty());
+        assert_eq!(index_count(), 0);
+        store.set_recall_insights(&other.id, true).unwrap();
+        publish("other-on");
+        assert!(
+            store.list_memories().unwrap().is_empty(),
+            "opt-in cannot leak across transcripts"
+        );
+        store.set_recall_insights(&thread.id, true).unwrap();
+        publish("enabled");
+        assert_eq!(
+            store.list_memories().unwrap().len(),
+            2,
+            "claim and inference published"
+        );
+        let indexed = index_count();
+        assert!(indexed > 0);
+        store.set_recall_insights(&thread.id, false).unwrap();
+        publish("disabled-after-queue");
+        assert_eq!(
+            index_count(),
+            indexed,
+            "no fresh index writes after disabling"
+        );
+        let associated:i64=store.conn.query_row("SELECT COUNT(*) FROM insight_derivations WHERE snapshot_id='disabled-after-queue' AND memory_id IS NOT NULL",[],|r|r.get(0)).unwrap();
+        assert_eq!(
+            associated, 0,
+            "local analysis has no Brain memory association"
+        );
+        assert_eq!(
+            store.list_memories().unwrap().len(),
+            2,
+            "earlier opted-in memories retained"
         );
     }
 

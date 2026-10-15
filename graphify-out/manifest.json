@@ -30,9 +30,9 @@
     "semantic_hash": "769b9d268d68d2b876cb64cebcc855f9"
   },
   "crates/argos-osint-bin/src/tui/app.rs": {
-    "mtime": 1792060502.7219765,
-    "seen": 1792061064.009612,
-    "ast_hash": "d532c01d74938eba9951d24e2c9371b5",
+    "mtime": 1792086344.807879,
+    "seen": 1792086512.0199559,
+    "ast_hash": "c500c2fd8d2161873bc87eb14a6fbd57",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/brain_detail.rs": {
@@ -48,9 +48,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/jobs.rs": {
-    "mtime": 1792015960.0252507,
-    "seen": 1792016302.59632,
-    "ast_hash": "d65d6838e1e27db44f354b425d825342",
+    "mtime": 1792083768.41764,
+    "seen": 1792083950.8911989,
+    "ast_hash": "8e848c3747084a39b935dfdb150302ee",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/land.rs": {
@@ -102,9 +102,9 @@
     "semantic_hash": "28c3293556d4f43b0d509e809b8629dd"
   },
   "crates/argos-osint-bin/src/tui/ui.rs": {
-    "mtime": 1792060200.8639023,
-    "seen": 1792060401.0411909,
-    "ast_hash": "89c34de3a28e5ca7f0bfe9509fba4ef9",
+    "mtime": 1792082990.3124151,
+    "seen": 1792083950.900723,
+    "ast_hash": "7cd7dc865a309a602c29051562d49b75",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/Cargo.toml": {
@@ -300,9 +300,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/jobs_view.rs": {
-    "mtime": 1791907613.3115861,
-    "seen": 1791984543.4448268,
-    "ast_hash": "ed7eba114a29ceeb02e5c1f78487237b",
+    "mtime": 1792083714.176068,
+    "seen": 1792083950.9557078,
+    "ast_hash": "cd039224b79e2cf9cc8c5960f6c92e62",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/lib.rs": {
@@ -384,9 +384,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/recon.rs": {
-    "mtime": 1791981172.894292,
-    "seen": 1791984543.445122,
-    "ast_hash": "128b7964a7a14ec7f1b314d180e84fb5",
+    "mtime": 1792083698.0597842,
+    "seen": 1792083950.981675,
+    "ast_hash": "e8857feb072783ffe815e61345194671",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/recon/brain_resources.rs": {
@@ -456,9 +456,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/scheduler.rs": {
-    "mtime": 1792042282.6511228,
-    "seen": 1792048269.435797,
-    "ast_hash": "f4e6ebef898e917e9cbb4c72761e9ba8",
+    "mtime": 1792083175.4921339,
+    "seen": 1792083950.992842,
+    "ast_hash": "17922fb0d344444d20c5c65485b2899f",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/secrets.rs": {
@@ -504,9 +504,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/tasks.rs": {
-    "mtime": 1792042171.8279452,
-    "seen": 1792048269.436427,
-    "ast_hash": "50d23178d95f67b3ed2afa55f9790224",
+    "mtime": 1792083225.7598207,
+    "seen": 1792083950.9970188,
+    "ast_hash": "1239ec5f141ed65bcab45e4cf2f00f09",
     "semantic_hash": ""
   },
   "scripts/render_tui_cells.py": {
@@ -624,9 +624,9 @@
     "semantic_hash": ""
   },
   "docs/architecture.md": {
-    "mtime": 1792071480.328938,
-    "seen": 1792081641.7068212,
-    "ast_hash": "54d840fb8430b4069b15953b73c53fad",
+    "mtime": 1792083333.7505195,
+    "seen": 1792083951.142549,
+    "ast_hash": "3dbb837339d5bfa4ab24b72d7163ec25",
     "semantic_hash": ""
   },
   "docs/atlas-memory-system-apps-checklist.md": {
@@ -654,9 +654,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/commands.rs": {
-    "mtime": 1791980026.9965951,
-    "seen": 1791984543.444104,
-    "ast_hash": "8092ff5337888a24aa8aacc6e2aa73a5",
+    "mtime": 1792082990.305407,
+    "seen": 1792083950.889438,
+    "ast_hash": "1ada44fff0732473e87568264172106c",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/recon_parts.rs": {
@@ -882,9 +882,9 @@
     "semantic_hash": ""
   },
   "docs/README.md": {
-    "mtime": 1792060676.599067,
-    "seen": 1792061064.061294,
-    "ast_hash": "08cbe1434b8639b64a5d1d15d87a8a3a",
+    "mtime": 1792084679.5869036,
+    "seen": 1792085969.387566,
+    "ast_hash": "e5ad92aa58f8ae3a8f78a047e2627bde",
     "semantic_hash": ""
   },
   "docs/concepts.md": {
@@ -942,9 +942,9 @@
     "semantic_hash": ""
   },
   "docs/diagrams/jobs-lifecycle.html": {
-    "mtime": 1791839739.3413303,
-    "seen": 1791984543.445952,
-    "ast_hash": "3d46d49be4e264a6d75635cf49b19ae1",
+    "mtime": 1792083333.7550461,
+    "seen": 1792083951.150248,
+    "ast_hash": "d3f6d033942226302519ab99033a82ca",
     "semantic_hash": ""
   },
   "docs/diagrams/model-roles.html": {
@@ -972,9 +972,9 @@
     "semantic_hash": ""
   },
   "docs/diagrams/recon-turn.html": {
-    "mtime": 1791888080.364278,
-    "seen": 1791984543.445985,
-    "ast_hash": "91a25dea746d3edef09b55f7c61df863",
+    "mtime": 1792083609.216006,
+    "seen": 1792083951.152108,
+    "ast_hash": "43f5e5f7639484acb75b4e967c7e6765",
     "semantic_hash": ""
   },
   "docs/diagrams/schema-core.html": {
@@ -1002,9 +1002,9 @@
     "semantic_hash": ""
   },
   "docs/usage.md": {
-    "mtime": 1792058329.9749618,
-    "seen": 1792060401.1341069,
-    "ast_hash": "1ef9b04cb664e6f325b8912048fe8837",
+    "mtime": 1792083389.480372,
+    "seen": 1792083951.1651251,
+    "ast_hash": "45529aad60d1cb0a705cef1b4db050ae",
     "semantic_hash": ""
   },
   "docs/diagrams/agent-graphify.svg": {
@@ -1044,9 +1044,9 @@
     "semantic_hash": ""
   },
   "docs/diagrams/jobs-lifecycle.svg": {
-    "mtime": 1791838626.6439354,
-    "seen": 1791984543.446198,
-    "ast_hash": "1e9450d445dd2f87f337d34bc068cded",
+    "mtime": 1792083333.756961,
+    "seen": 1792083951.1705651,
+    "ast_hash": "52f8fcd9fce05e1e0c2d7e0708b96676",
     "semantic_hash": ""
   },
   "docs/diagrams/model-roles.svg": {
@@ -1074,9 +1074,9 @@
     "semantic_hash": ""
   },
   "docs/diagrams/recon-turn.svg": {
-    "mtime": 1791888080.3655858,
-    "seen": 1791984543.4462311,
-    "ast_hash": "b03729fe3772ea5dfdb72e5b26897c83",
+    "mtime": 1792083609.2169857,
+    "seen": 1792083951.172904,
+    "ast_hash": "d15cf115fc61bb4f8c87a2ff3204fe5d",
     "semantic_hash": ""
   },
   "docs/diagrams/schema-core.svg": {
@@ -1614,9 +1614,9 @@
     "semantic_hash": ""
   },
   "docs/tui-components.md": {
-    "mtime": 1792059438.4868813,
-    "seen": 1792060401.132948,
-    "ast_hash": "18319efc26cf8847af02e69a84cb3d7b",
+    "mtime": 1792083333.752852,
+    "seen": 1792083951.161014,
+    "ast_hash": "c1340873616dc579bb68d1229728c31a",
     "semantic_hash": ""
   },
   "docs/tui-design-spec.md": {
@@ -2160,9 +2160,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/investigation/insight_persist.rs": {
-    "mtime": 1792071543.6772547,
-    "seen": 1792081641.684073,
-    "ast_hash": "6febcd471c1df062a119f48df3aabdf7",
+    "mtime": 1792083268.9791868,
+    "seen": 1792083950.949867,
+    "ast_hash": "9cf9db779d6a80b58f1249b5b1858324",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/investigation/insights.rs": {
@@ -2214,9 +2214,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/job_cleanup.rs": {
-    "mtime": 1791987769.3584096,
-    "seen": 1791988031.80125,
-    "ast_hash": "ad8a7570465e2ff40a0709ccda8069f6",
+    "mtime": 1792086348.089727,
+    "seen": 1792086512.0909,
+    "ast_hash": "dc39bf75d079a822c43a7396e6e11512",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/investigation/insight_assessment.rs": {
@@ -2532,15 +2532,15 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_pipeline.rs": {
-    "mtime": 1791971400.5993824,
-    "seen": 1791984543.444512,
-    "ast_hash": "5312545854dd8b322a02cae73769cce7",
+    "mtime": 1792083114.5685284,
+    "seen": 1792083950.931963,
+    "ast_hash": "2cf5171f89573e87fb4ff18053211bdc",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_pipeline_tests.rs": {
-    "mtime": 1791971400.6008248,
-    "seen": 1791984543.4445179,
-    "ast_hash": "79c99605b969a75344d5d69989f9d982",
+    "mtime": 1792083408.0603838,
+    "seen": 1792083950.931972,
+    "ast_hash": "297a2029d927010c2c60e12557aa3dc0",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_stages.rs": {
@@ -3357,6 +3357,60 @@
     "mtime": 1792061726.7543643,
     "seen": 1792061927.754102,
     "ast_hash": "3996b6212a62dc5cd9b4f30bc65e8267",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/jobs-2026-10-15/receipts.json": {
+    "mtime": 1792085915.5708904,
+    "seen": 1792085969.360692,
+    "ast_hash": "fc6bc267bbc390df76cf01198ceaee71",
+    "semantic_hash": ""
+  },
+  "docs/tui-verification-jobs-2026-10-15.md": {
+    "mtime": 1792086434.0395923,
+    "seen": 1792086512.229774,
+    "ast_hash": "534759c70e19abef79a5939d1f63a4ec",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/jobs-2026-10-15/jobs-error-80x24.png": {
+    "mtime": 1792085783.2558062,
+    "seen": 1792085969.480073,
+    "ast_hash": "570203d4f47eef7dd589d142aa92a801",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/jobs-2026-10-15/jobs-help-60x18.png": {
+    "mtime": 1792085783.3509724,
+    "seen": 1792085969.480077,
+    "ast_hash": "91801f54787d0ee94e4f61c256210319",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/jobs-2026-10-15/jobs-queued-80x24.png": {
+    "mtime": 1792085783.6703386,
+    "seen": 1792085969.48008,
+    "ast_hash": "3046e5483d19173c40ccc3c6c507c574",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/jobs-2026-10-15/jobs-running-160x50.png": {
+    "mtime": 1792085784.450571,
+    "seen": 1792085969.480083,
+    "ast_hash": "b3aec5c2266758318672d0ea28bf7bc4",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/jobs-2026-10-15/jobs-running-40x20.png": {
+    "mtime": 1792085784.5268483,
+    "seen": 1792085969.480086,
+    "ast_hash": "94e329f81535df42538ee945e445cc9e",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/jobs-2026-10-15/jobs-running-60x18.png": {
+    "mtime": 1792085784.6191113,
+    "seen": 1792085969.4800901,
+    "ast_hash": "fa354dff7c9b35e84b075259b505d632",
+    "semantic_hash": ""
+  },
+  "docs/screenshots/jobs-2026-10-15/jobs-service-60x18.png": {
+    "mtime": 1792085785.1374085,
+    "seen": 1792085969.480094,
+    "ast_hash": "0fc5ffceefa8e134e8909c130ae5bf20",
     "semantic_hash": ""
   }
 }

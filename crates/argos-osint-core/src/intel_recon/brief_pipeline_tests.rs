@@ -55,6 +55,29 @@ fn commit(store: &Store, c: &tasks::ClaimedTask, output: &str, items: usize) {
     assert!(commit_stage(&store.conn, c, output, items, reason, &now()).unwrap());
 }
 
+#[test]
+fn stopped_brief_stays_stopped_on_visit_and_only_reload_admits_new_work() {
+    let store = seeded();
+    let job = ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap();
+    let claimed = claim_stage(&store.conn, "worker", 120, &now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.request_job_cancel(&job).unwrap(),
+        crate::job_registry::CancelRequest::Requested
+    );
+    assert!(!commit_stage(&store.conn, &claimed, "{}", 0, "", &now()).unwrap());
+    assert_eq!(
+        ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap(),
+        job
+    );
+    assert!(claim_stage(&store.conn, "worker", 120, &now())
+        .unwrap()
+        .is_none());
+    let reloaded = ensure_chain(&store.conn, &inputs("r1:reload:fixture"), &now()).unwrap();
+    assert_ne!(reloaded, job);
+}
+
 /// Admission is idempotent, both roots dispatch together, and the join binds
 /// Inferences exactly once to both root output hashes in either commit order.
 #[test]

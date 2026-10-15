@@ -24,15 +24,17 @@ pub enum JobStatusFilter {
     Retrying,
     Failed,
     Completed,
+    Stopped,
 }
 
 impl JobStatusFilter {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::All,
         Self::Active,
         Self::Retrying,
         Self::Failed,
         Self::Completed,
+        Self::Stopped,
     ];
 
     pub fn label(self) -> &'static str {
@@ -42,16 +44,18 @@ impl JobStatusFilter {
             Self::Retrying => "Retrying",
             Self::Failed => "Failed",
             Self::Completed => "Completed",
+            Self::Stopped => "Stopped",
         }
     }
 
-    fn states(self) -> &'static [&'static str] {
+    pub(crate) fn states(self) -> &'static [&'static str] {
         match self {
             Self::All => &[],
             Self::Active => &["running", "queued", "retry_scheduled"],
             Self::Retrying => &["retry_scheduled"],
-            Self::Failed => &["failed", "partial", "cancelled"],
+            Self::Failed => &["failed", "partial"],
             Self::Completed => &["completed"],
+            Self::Stopped => &["cancelled", "superseded"],
         }
     }
 }
@@ -139,7 +143,7 @@ impl JobRow {
             "completed" => "completed",
             "partial" => "partial",
             "failed" => "failed",
-            "cancelled" => "cancelled",
+            "cancelled" => "stopped",
             "superseded" => "superseded",
             "blocked" => "blocked",
             _ => "unknown",
@@ -292,7 +296,8 @@ const JOB_COLUMNS: &str =
         WHERE t.job_id = j.id),
     IFNULL((SELECT MIN(a.started_at) FROM argos_attempts a JOIN argos_tasks t ON t.id = a.task_id
         WHERE t.job_id = j.id AND a.finished_at = ''), ''),
-    j.active_since, j.cancel_requested, j.cancellable";
+    j.active_since, j.cancel_requested,
+    (j.kind<>'service' AND (j.cancellable OR EXISTS(SELECT 1 FROM argos_tasks t WHERE t.job_id=j.id)))";
 
 fn job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
     Ok(JobRow {
@@ -569,6 +574,9 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
 /// summary work). Completed tasks are untouched, so successful work is never
 /// repeated. Returns how many tasks were requeued.
 pub fn retry_failed_tasks(conn: &Connection, id: &str) -> Result<usize> {
+    if get_job(conn, id)?.is_none_or(|job| job.cancel_requested) {
+        return Ok(0);
+    }
     let now = chrono::Utc::now().to_rfc3339();
     let mut n = conn.execute(
         &format!(
@@ -689,9 +697,29 @@ impl Store {
         job_apps(&self.conn)
     }
 
-    /// Jobs → Cancel: cooperative stop request (see [`crate::job_registry::request_cancel`]).
+    /// Jobs → Stop: dequeue/fence durable work, or request cooperative
+    /// cancellation from its registered owner. Service loops are excluded.
     pub fn request_job_cancel(&self, id: &str) -> Result<crate::job_registry::CancelRequest> {
-        crate::job_registry::request_cancel(&self.conn, id)
+        let Some(job) = self.get_job(id)? else {
+            return Ok(crate::job_registry::CancelRequest::Missing);
+        };
+        if job.is_service() {
+            return Ok(crate::job_registry::CancelRequest::NotCancellable);
+        }
+        if !job.is_active() {
+            return Ok(crate::job_registry::CancelRequest::NotRunning);
+        }
+        let has_tasks: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM argos_tasks WHERE job_id=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if has_tasks {
+            crate::job_cleanup::stop_task_job(&self.conn, id)?;
+            Ok(crate::job_registry::CancelRequest::Requested)
+        } else {
+            crate::job_registry::request_cancel(&self.conn, id)
+        }
     }
 
     /// Register a user-visible job before launching its work (idempotent).

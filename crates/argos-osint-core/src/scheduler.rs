@@ -296,6 +296,17 @@ impl WorkerPool {
                         continue;
                     }
                     let now = chrono::Utc::now().to_rfc3339();
+                    if idle_loops.is_multiple_of(60) {
+                        if let Ok(service) = tasks::ensure_service_job(
+                            &conn,
+                            tasks::INDEX_SERVICE_JOB,
+                            "brain",
+                            "Local index worker",
+                            &now,
+                        ) {
+                            let _ = tasks::refresh_job_state(&conn, &service, &now);
+                        }
+                    }
                     let _ = tasks::retire_atlas_insight_work(&conn, &now);
                     let _ = tasks::interrupt_expired_leases(&conn, &now);
                     if let Ok(store) = crate::store::Store::open_index_worker(&db_path) {

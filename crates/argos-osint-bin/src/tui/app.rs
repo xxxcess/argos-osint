@@ -650,7 +650,9 @@ pub enum ButtonId {
     JobsRetry,
     JobsCancel,
     JobsOpenSource,
-    JobsClearOld,
+    JobsClearCompleted,
+    JobsClearStopped,
+    JobsClearFailed,
     LogsLevel,
     LogsApp,
     LogsFollow,
@@ -2838,6 +2840,9 @@ impl App {
             "jobs-logs" => self.activate_button(ButtonId::JobsViewLogs),
             "jobs-retry" => self.activate_button(ButtonId::JobsRetry),
             "jobs-cancel" => self.activate_button(ButtonId::JobsCancel),
+            "jobs-clear-completed" => self.activate_button(ButtonId::JobsClearCompleted),
+            "jobs-clear-stopped" => self.activate_button(ButtonId::JobsClearStopped),
+            "jobs-clear-failed" => self.activate_button(ButtonId::JobsClearFailed),
             "jobs-source" => self.activate_button(ButtonId::JobsOpenSource),
             "jobs-status" => self.activate_button(ButtonId::JobsStatus),
             "jobs-app" => self.activate_button(ButtonId::JobsApp),
@@ -5240,6 +5245,8 @@ impl App {
             }
             WorkEvent::JobsCleared { outcome } => {
                 self.jobs_clearing = false;
+                self.jobs.scroll = 0;
+                self.jobs.detail_scroll = 0;
                 self.status =
                     outcome.unwrap_or_else(|error| format!("Could not clear jobs: {error}"));
                 self.reload_jobs();
@@ -8811,7 +8818,7 @@ impl App {
                 self.reload_jobs();
                 requested.map(|outcome| match outcome {
                     CancelRequest::Requested => {
-                        "Cancel requested · the job stops at its next safe point".into()
+                        "Stop requested · the job stops at its next safe point".into()
                     }
                     CancelRequest::NotCancellable => "This job cannot be cancelled safely".into(),
                     CancelRequest::NotRunning => "This job is not running".into(),
@@ -8819,7 +8826,15 @@ impl App {
                 })
             }
             ButtonId::JobsOpenSource => self.open_job_source(),
-            ButtonId::JobsClearOld => {
+            ButtonId::JobsClearCompleted
+            | ButtonId::JobsClearStopped
+            | ButtonId::JobsClearFailed => {
+                use argos_osint_core::jobs_view::JobStatusFilter;
+                let status = match button {
+                    ButtonId::JobsClearCompleted => JobStatusFilter::Completed,
+                    ButtonId::JobsClearStopped => JobStatusFilter::Stopped,
+                    _ => JobStatusFilter::Failed,
+                };
                 if let Some(db) = self.background_db.clone() {
                     if self.jobs_clearing {
                         self.status = "Jobs cleanup is already in progress".into();
@@ -8829,7 +8844,7 @@ impl App {
                     let tx = self.work_tx.clone();
                     std::thread::spawn(move || {
                         let outcome = Store::open_light(&db)
-                            .and_then(|store| store.clear_old_jobs())
+                            .and_then(|store| store.clear_jobs_by_status(status))
                             .map(|counts| {
                                 format!(
                                     "Cleared {} jobs · stopped {}",
@@ -8839,10 +8854,11 @@ impl App {
                             .map_err(|e| e.to_string());
                         let _ = tx.send(WorkEvent::JobsCleared { outcome });
                     });
-                    self.status = "Clearing old jobs…".into();
+                    self.status =
+                        format!("Clearing {} job history…", status.label().to_lowercase());
                     return;
                 }
-                let result = self.store.clear_old_jobs().map(|counts| {
+                let result = self.store.clear_jobs_by_status(status).map(|counts| {
                     format!(
                         "Cleared {} jobs · stopped {}",
                         counts.cleared, counts.stopped
@@ -8853,7 +8869,7 @@ impl App {
                 self.reload_jobs();
                 self.refresh_intel_briefing();
                 self.sync_intel_brief_task_ui();
-                self.set_focus(Target::Button(ButtonId::JobsClearOld));
+                self.set_focus(Target::Button(button));
                 result
             }
             ButtonId::LogsLevel => {
@@ -13484,7 +13500,7 @@ mod tests {
             text.contains("Run WHOIS lookup") && text.contains("Explain claim path"),
             "{text}"
         );
-        assert!(text.contains("Cancel"), "{text}");
+        assert!(text.contains("Stop job"), "{text}");
         assert!(
             app.jobs
                 .selected()
@@ -13499,14 +13515,14 @@ mod tests {
             stop.load(Ordering::Relaxed),
             "the tool's own stop flag is set"
         );
-        assert!(app.status.contains("Cancel requested"), "{}", app.status);
+        assert!(app.status.contains("Stop requested"), "{}", app.status);
         assert_eq!(
             app.jobs.selected().unwrap().state,
             "running",
             "not cancelled until it stops"
         );
         let text = buffer_text(&render(&mut app, 140, 40));
-        assert!(text.contains("Cancelling…"), "{text}");
+        assert!(text.contains("Stopping…"), "{text}");
         assert!(!app.jobs.can_cancel(), "no second Cancel");
 
         // The operation observes the flag and stops: cancelled, not failed.
@@ -13529,6 +13545,224 @@ mod tests {
             .unwrap();
         assert!(!summary_row.cancellable);
         super::super::tracked::testing::use_db(None);
+    }
+
+    #[test]
+    fn jobs_status_controls_and_service_screens() {
+        use argos_osint_core::jobs_view::{JobDetail, JobRow, JobStatusFilter};
+        let mut app = app();
+        for (id, state) in [
+            ("running", "running"),
+            ("completed", "completed"),
+            ("stopped", "cancelled"),
+            ("failed", "failed"),
+        ] {
+            register(&app, id, "brain", &format!("Fixture {id} job"));
+            app.store
+                .set_job_progress(id, state, "fixture", 0, None, "")
+                .unwrap();
+        }
+        app.store
+            .fixture_task_attempt("running", "running-task", "summarization", 90, None)
+            .unwrap();
+        app.select(ModuleId::Jobs.index());
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        let clears = [
+            ButtonId::JobsClearCompleted,
+            ButtonId::JobsClearStopped,
+            ButtonId::JobsClearFailed,
+        ];
+        for (width, height) in [
+            (160, 50),
+            (120, 40),
+            (100, 32),
+            (80, 24),
+            (60, 18),
+            (40, 20),
+        ] {
+            let buffer = render(&mut app, width, height);
+            let text = buffer_text(&buffer);
+            for label in [
+                "Clear completed",
+                "Clear stopped",
+                "Clear failed",
+                "Stop job",
+            ] {
+                assert!(
+                    text.contains(label),
+                    "{width}x{height}: missing {label}\n{text}"
+                );
+            }
+            assert!(!text.contains("Clear old jobs"));
+            let order = super::super::ui::focus_order(&app);
+            for button in clears.into_iter().chain([ButtonId::JobsCancel]) {
+                let target = Target::Button(button);
+                assert!(
+                    order.contains(&target),
+                    "unreachable {button:?} at {width}x{height}"
+                );
+                let rect = app
+                    .layout
+                    .borrow()
+                    .entries
+                    .iter()
+                    .find(|e| e.target == target)
+                    .unwrap()
+                    .rect;
+                assert_eq!(
+                    super::super::ui::hit_test(&app, rect.x, rect.y),
+                    Some(target)
+                );
+            }
+            if let Some(dir) = &dir {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("jobs-running-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+        }
+        let running = app.jobs.selected().unwrap().clone();
+        for state in ["queued", "retry_scheduled"] {
+            let mut job = running.clone();
+            job.state = state.into();
+            app.jobs.rows = vec![job.clone()];
+            app.jobs.sel = 0;
+            app.jobs.detail = Some(JobDetail {
+                job,
+                ..Default::default()
+            });
+            let text = buffer_text(&render(&mut app, 80, 24));
+            assert!(app.jobs.can_cancel() && text.contains("Stop job"));
+            if let Some(dir) = &dir {
+                dump_cells(&mut app, dir, &format!("jobs-{state}-80x24"), 80, 24);
+            }
+        }
+        let service = JobRow {
+            id: "service".into(),
+            kind: "service".into(),
+            app: "brain".into(),
+            title: "Summary flush worker".into(),
+            state: "running".into(),
+            ..Default::default()
+        };
+        app.jobs.rows = vec![service.clone()];
+        app.jobs.sel = 0;
+        app.jobs.detail = Some(JobDetail {
+            job: service,
+            ..Default::default()
+        });
+        app.jobs.detail_open = true;
+        for (width, height) in [(160, 50), (80, 24), (60, 18)] {
+            let text = buffer_text(&render(&mut app, width, height));
+            assert!(!app.jobs.can_cancel() && !text.contains("Stop job"));
+            assert!(text.contains("Long-lived service"));
+            if let Some(dir) = &dir {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("jobs-service-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+        }
+        app.jobs = Default::default();
+        for state in ["loading", "empty", "error"] {
+            app.jobs.loaded = state != "loading";
+            app.jobs.error = (state == "error").then(|| "Fixture retained read failure".into());
+            if state == "error" {
+                app.jobs.rows = vec![running.clone()];
+            }
+            if let Some(dir) = &dir {
+                dump_cells(&mut app, dir, &format!("jobs-{state}-80x24"), 80, 24);
+            }
+        }
+        app.jobs.reload(&app.store);
+        app.overlay = Overlay::Help;
+        for (width, height) in [(80, 24), (60, 18)] {
+            if let Some(dir) = &dir {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("jobs-help-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+        }
+        app.overlay = Overlay::None;
+        app.screen = Rect::new(0, 0, 160, 50);
+        for (button, id) in clears.into_iter().zip(["completed", "stopped", "failed"]) {
+            click(&mut app, Target::Button(button));
+            assert!(app.store.get_job(id).unwrap().is_none());
+            assert!(app.store.get_job("running").unwrap().is_some());
+        }
+        click(&mut app, Target::Button(ButtonId::JobsCancel));
+        assert_eq!(
+            app.store.get_job("running").unwrap().unwrap().state,
+            "cancelled"
+        );
+        app.jobs.status = JobStatusFilter::Stopped;
+        app.reload_jobs();
+        assert_eq!(app.jobs.rows.len(), 1);
+        assert_eq!(app.jobs.rows[0].id, "running");
+        click(&mut app, Target::Button(ButtonId::JobsClearStopped));
+        assert!(app.jobs.rows.is_empty() && app.jobs.detail.is_none());
+    }
+
+    #[test]
+    fn jobs_stop_targets_selected_job_only() {
+        for keyboard in [false, true] {
+            for selected_state in ["running", "queued", "retry_scheduled"] {
+                let mut app = app();
+                app.screen = Rect::new(0, 0, 160, 50);
+                for (id, state) in [
+                    ("other-running", "running"),
+                    ("selected", selected_state),
+                    ("other-queued", "queued"),
+                ] {
+                    register(&app, id, "brain", id);
+                    app.store
+                        .fixture_task_attempt(id, &format!("{id}-task"), "summarization", 90, None)
+                        .unwrap();
+                    app.store
+                        .set_job_progress(id, state, "fixture", 0, None, "")
+                        .unwrap();
+                }
+                app.select(ModuleId::Jobs.index());
+                let selected = app
+                    .jobs
+                    .rows
+                    .iter()
+                    .position(|job| job.id == "selected")
+                    .unwrap();
+                click(&mut app, Target::JobRow(selected));
+                // A refresh must retain the selected identity, independent of row order.
+                app.reload_jobs();
+                assert_eq!(app.jobs.selected().unwrap().id, "selected");
+                if keyboard {
+                    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+                } else {
+                    click(&mut app, Target::Button(ButtonId::JobsCancel));
+                }
+                assert_eq!(
+                    app.store.get_job("selected").unwrap().unwrap().state,
+                    "cancelled"
+                );
+                for (id, state) in [("other-running", "running"), ("other-queued", "queued")] {
+                    let job = app.store.get_job(id).unwrap().unwrap();
+                    assert_eq!(job.state, state);
+                    assert!(!job.cancel_requested);
+                    assert_eq!(
+                        app.store.job_detail(id, 40).unwrap().unwrap().tasks[0].state,
+                        "running"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -19654,27 +19888,31 @@ mod tests {
         }
         app.module = Some(ModuleId::Jobs);
         app.jobs.reload(&app.store);
-        app.set_focus(Target::Button(ButtonId::JobsClearOld));
+        app.set_focus(Target::Button(ButtonId::JobsClearCompleted));
         for (width, height) in [(160, 50), (80, 24), (60, 18)] {
             let buffer = render(&mut app, width, height);
-            assert!(buffer_text(&buffer).contains("Clear old jobs"));
+            assert!(buffer_text(&buffer).contains("Clear completed"));
             let target = app
                 .layout
                 .borrow()
                 .entries
                 .iter()
-                .find(|entry| entry.target == Target::Button(ButtonId::JobsClearOld))
+                .find(|entry| entry.target == Target::Button(ButtonId::JobsClearCompleted))
                 .unwrap()
                 .rect;
             assert_eq!(
-                super::super::ui::hit_test(&app, target.x + 1, target.y + 1),
-                Some(Target::Button(ButtonId::JobsClearOld))
+                super::super::ui::hit_test(
+                    &app,
+                    target.x + target.width / 2,
+                    target.y + target.height / 2
+                ),
+                Some(Target::Button(ButtonId::JobsClearCompleted))
             );
             if let Some(dir) = &dir {
                 dump_cells(
                     &mut app,
                     dir,
-                    &format!("jobs-clear-old-{width}x{height}"),
+                    &format!("jobs-clear-status-{width}x{height}"),
                     width,
                     height,
                 );

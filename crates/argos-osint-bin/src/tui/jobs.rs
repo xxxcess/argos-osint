@@ -175,16 +175,18 @@ impl JobsView {
     }
 
     pub fn can_retry(&self) -> bool {
-        self.detail.as_ref().is_some_and(|d| d.retryable > 0)
+        self.detail
+            .as_ref()
+            .is_some_and(|d| d.retryable > 0 && !d.job.cancel_requested)
     }
 
-    /// Cancel is offered only for running jobs that declared it safe and
-    /// have not already been asked to stop.
+    /// Stop is offered for supported running, queued or retry-scheduled work
+    /// that has not already been asked to stop.
     pub fn can_cancel(&self) -> bool {
         self.selected().is_some_and(|job| {
             job.cancellable
                 && !job.cancel_requested
-                && matches!(job.state.as_str(), "running" | "queued")
+                && matches!(job.state.as_str(), "running" | "queued" | "retry_scheduled")
         })
     }
 }
@@ -193,6 +195,7 @@ pub struct JobsAreas {
     pub summary: Rect,
     pub search: Rect,
     pub actions: Rect,
+    pub action_height: u16,
     /// Zero-sized when the narrow detail replaces it.
     pub table: Rect,
     /// Zero-sized when narrow and the detail is closed.
@@ -200,6 +203,7 @@ pub struct JobsAreas {
 }
 
 pub fn areas(body: Rect, view: &JobsView) -> JobsAreas {
+    let action_height = if body.height < 24 { 1 } else { ACTION_H };
     let summary_h = 1.min(body.height);
     let search_h = FIELD_H.min(body.height.saturating_sub(summary_h));
     let ids = buttons(view, true);
@@ -211,11 +215,11 @@ pub fn areas(body: Rect, view: &JobsView) -> JobsAreas {
     let virtual_rects = super::components::wrapped_action_rects(
         Rect::new(0, 0, body.width, u16::MAX),
         &refs,
-        ACTION_H,
+        action_height,
     );
     let required = virtual_rects
         .last()
-        .map_or(ACTION_H, |r| r.y.saturating_add(r.height));
+        .map_or(action_height, |r| r.y.saturating_add(r.height));
     let actions_h = required.min(body.height.saturating_sub(summary_h + search_h));
     let rest_y = body.y + summary_h + search_h + actions_h;
     let rest_h = body.height.saturating_sub(summary_h + search_h + actions_h);
@@ -267,6 +271,7 @@ pub fn areas(body: Rect, view: &JobsView) -> JobsAreas {
         summary: at(0, summary_h),
         search: at(summary_h, search_h),
         actions: at(summary_h + search_h, actions_h),
+        action_height,
         table,
         detail,
     }
@@ -278,7 +283,9 @@ pub fn buttons(view: &JobsView, can_open_source: bool) -> Vec<ButtonId> {
     let mut out = vec![
         ButtonId::JobsStatus,
         ButtonId::JobsApp,
-        ButtonId::JobsClearOld,
+        ButtonId::JobsClearCompleted,
+        ButtonId::JobsClearStopped,
+        ButtonId::JobsClearFailed,
     ];
     if view.selected().is_some() {
         out.push(ButtonId::JobsViewLogs);
@@ -323,14 +330,16 @@ fn button_label(view: &JobsView, button: ButtonId) -> String {
             "Retry failed"
         }
         .into(),
-        ButtonId::JobsCancel => "Cancel".into(),
-        ButtonId::JobsClearOld => "Clear old jobs".into(),
+        ButtonId::JobsCancel => "Stop job".into(),
+        ButtonId::JobsClearCompleted => "Clear completed".into(),
+        ButtonId::JobsClearStopped => "Clear stopped".into(),
+        ButtonId::JobsClearFailed => "Clear failed".into(),
         ButtonId::JobsOpenSource => "Open source".into(),
         _ => String::new(),
     }
 }
 
-fn action_geometry(area: Rect, view: &JobsView, ids: &[ButtonId]) -> Vec<Rect> {
+fn action_geometry(area: Rect, view: &JobsView, ids: &[ButtonId], height: u16) -> Vec<Rect> {
     let labels = ids
         .iter()
         .map(|id| button_label(view, *id))
@@ -338,7 +347,7 @@ fn action_geometry(area: Rect, view: &JobsView, ids: &[ButtonId]) -> Vec<Rect> {
     super::components::wrapped_action_rects(
         area,
         &labels.iter().map(String::as_str).collect::<Vec<_>>(),
-        ACTION_H,
+        height,
     )
 }
 
@@ -509,11 +518,19 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
     if !job.operation.is_empty() {
         lines.push(format!("Operation: {}", job.operation));
     }
+    if job.is_service() {
+        lines.push(
+            "Long-lived service · stays available while Argos runs, including when idle.".into(),
+        );
+        lines.push(
+            "Elapsed is service age; individual tasks and attempts below show actual work.".into(),
+        );
+    }
     for progress in &detail.insight_progress {
         lines.extend(progress.lines());
     }
     if job.cancel_requested && matches!(job.state.as_str(), "running" | "queued") {
-        lines.push("Cancelling… (stops at the next safe point)".into());
+        lines.push("Stopping… (stops at the next safe point)".into());
     }
     let progress = progress(job);
     if !progress.is_empty() {
@@ -697,7 +714,10 @@ pub fn draw(frame: &mut Frame, app: &App, body: Rect, can_open_source: bool) {
     );
     draw_field(frame, app, FieldId::JobsSearch, "filter", a.search);
     let ids = buttons(view, can_open_source);
-    for (button, rect) in ids.iter().zip(action_geometry(a.actions, view, &ids)) {
+    for (button, rect) in ids
+        .iter()
+        .zip(action_geometry(a.actions, view, &ids, a.action_height))
+    {
         draw_button_state(
             frame,
             app,
@@ -812,7 +832,7 @@ pub fn hit(app: &App, body: Rect, x: u16, y: u16, can_open_source: bool) -> Opti
         let ids = buttons(view, can_open_source);
         return ids
             .iter()
-            .zip(action_geometry(a.actions, view, &ids))
+            .zip(action_geometry(a.actions, view, &ids, a.action_height))
             .find(|(_, rect)| contains(*rect, x, y))
             .map(|(button, _)| Target::Button(*button));
     }

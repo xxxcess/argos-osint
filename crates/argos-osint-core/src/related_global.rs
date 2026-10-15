@@ -402,12 +402,12 @@ impl Store {
             exclude: BTreeSet::new(),
             rows: BTreeMap::new(),
         };
-        for (kind, run, id, _) in actors::mentions(&self.conn, &canonical)? {
+        for (kind, run, id, revision) in actors::mentions(&self.conn, &canonical)? {
             if kind == "article" {
                 let Some(article) = self.atlas_article(&run, &id)? else {
                     continue;
                 };
-                if !self.has_ingest_actor_association(&article, &actors::normalize_alias(&name))? {
+                if !revision.is_empty() && revision != crate::atlas_metadata::input_hash(&article) {
                     continue;
                 }
                 c.add(&run, &id, format!("mentions {name}"), true)?;

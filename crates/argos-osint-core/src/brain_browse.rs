@@ -45,7 +45,6 @@ pub(crate) struct BrowseContext {
     pub(crate) claims: Vec<Memory>,
     pub(crate) typed_actors: BTreeMap<String, BTreeSet<String>>,
     pub(crate) claim_origins: BTreeMap<String, Associations>,
-    pub(crate) ingest: BTreeMap<(String, String), BTreeSet<String>>,
 }
 
 impl ActorGroup {
@@ -81,7 +80,7 @@ impl Store {
 
     pub fn actor_groups(&self) -> Result<Vec<ActorGroup>> {
         let mut groups: BTreeMap<String, ActorGroup> = BTreeMap::new();
-        let mut stmt = self.conn.prepare("SELECT a.actor_id FROM brain_actors a JOIN memories m ON m.id=a.actor_id JOIN memory_metadata t ON t.memory_id=m.id WHERE t.lifecycle IN ('active','redirected') ORDER BY a.actor_id")?;
+        let mut stmt = self.conn.prepare("SELECT a.actor_id FROM brain_actors a JOIN memories m ON m.id=a.actor_id JOIN memory_metadata t ON t.memory_id=m.id WHERE t.lifecycle='active' AND a.actor_id NOT IN(SELECT from_actor FROM brain_actor_redirects) ORDER BY a.actor_id")?;
         let ids = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -292,7 +291,6 @@ impl Store {
             claims,
             typed_actors,
             claim_origins,
-            ingest: self.ingest_actor_associations()?,
         })
     }
 
@@ -305,7 +303,11 @@ impl Store {
         let mut scoped = Vec::new();
         for group in all {
             let assoc = self.actor_group_associations(&group)?;
-            if assoc.articles.iter().any(|a| a.article.run_id == cycle) {
+            if assoc
+                .articles
+                .iter()
+                .any(|a| a.occurrences.iter().any(|(run, _, _)| run == cycle))
+            {
                 scoped.push(group);
             }
         }
@@ -322,7 +324,17 @@ impl Store {
         let Some(cycle) = cycle else {
             return Ok(assoc);
         };
-        assoc.articles.retain(|a| a.article.run_id == cycle);
+        assoc
+            .articles
+            .retain(|a| a.occurrences.iter().any(|(run, _, _)| run == cycle));
+        for association in &mut assoc.articles {
+            association.occurrences.retain(|(run, _, _)| run == cycle);
+            if let Some((run, id, _)) = association.occurrences.first() {
+                if let Some(article) = self.atlas_article(run, id)? {
+                    association.article = article;
+                }
+            }
+        }
         Ok(assoc)
     }
 
@@ -349,7 +361,9 @@ impl Store {
                     claims.insert(memory);
                 }
             }
-            for (kind, scope, origin, revision) in actors::mentions(&self.conn, id)? {
+            // ActorGroup already contains every redirected member. Expanding
+            // each family again makes large merged groups quadratic.
+            for (kind, scope, origin, revision) in actors::direct_mentions(&self.conn, id)? {
                 if kind == "article" {
                     origins.insert((scope, origin, revision));
                 } else if kind == "thread" {
@@ -378,25 +392,9 @@ impl Store {
             }
         }
         out.threads = threads.into_iter().collect();
-        // Qualify exact occurrences before URL deduplication; a stale duplicate
-        // must neither hide a live occurrence nor inherit its association.
-        let mut eligible = BTreeSet::new();
-        for (run, id, revision) in origins {
-            let Some(article) = self.atlas_article(&run, &id)? else {
-                continue;
-            };
-            if !revision.is_empty() && revision != crate::atlas_metadata::input_hash(&article) {
-                continue;
-            }
-            if context
-                .ingest
-                .get(&(run.clone(), id.clone()))
-                .is_some_and(|names| names.contains(&group.name_key))
-            {
-                eligible.insert((run, id, revision));
-            }
-        }
-        out.articles = self.association_articles(eligible)?;
+        // A direct mention is sufficient. Related's two-entity overlap rule
+        // applies to article suggestions, never to an actor's own sources.
+        out.articles = self.association_articles(origins)?;
         Ok(out)
     }
 

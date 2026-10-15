@@ -157,3 +157,47 @@ BEGIN
        AND memory_id IN (SELECT memory_id FROM brain_memory_endpoints
                           WHERE endpoint_kind = 'memory' AND ref_id = OLD.id);
 END;
+
+-- Schema 42: direct-article lifecycle and cached actor identity assessments.
+CREATE TABLE IF NOT EXISTS brain_actor_dedup_receipts (
+    pair_key TEXT PRIMARY KEY,
+    input_hash TEXT NOT NULL,
+    decision TEXT NOT NULL DEFAULT 'pending',
+    lease_owner TEXT NOT NULL DEFAULT '',
+    lease_until TEXT NOT NULL DEFAULT '',
+    receipt_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS brain_article_deleted
+AFTER DELETE ON atlas_articles
+BEGIN
+    DELETE FROM brain_actor_mentions WHERE origin_kind='article'
+      AND origin_scope=OLD.run_id AND origin_id=OLD.article_id;
+    UPDATE memory_metadata SET lifecycle='retired'
+      WHERE memory_kind IN ('link','related') AND memory_id IN (
+        SELECT memory_id FROM brain_memory_endpoints WHERE endpoint_kind='article'
+          AND origin=OLD.run_id AND ref_id=OLD.article_id);
+    DELETE FROM atlas_article_index WHERE run_id=OLD.run_id AND article_id=OLD.article_id;
+    DELETE FROM brain_backfill_receipts WHERE source='atlas_articles'
+      AND unit_id=OLD.run_id||'/'||OLD.article_id;
+    INSERT INTO app_state(key,value) VALUES('memories_changed_seq','1')
+      ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT);
+END;
+
+CREATE TRIGGER IF NOT EXISTS brain_article_changed
+AFTER UPDATE ON atlas_articles
+WHEN OLD.title<>NEW.title OR OLD.description<>NEW.description OR OLD.url<>NEW.url
+ OR OLD.source_domain<>NEW.source_domain OR OLD.source_name<>NEW.source_name
+BEGIN
+    DELETE FROM brain_actor_mentions WHERE origin_kind='article'
+      AND origin_scope=OLD.run_id AND origin_id=OLD.article_id;
+    UPDATE memory_metadata SET lifecycle='retired'
+      WHERE memory_kind IN ('link','related') AND memory_id IN (
+        SELECT memory_id FROM brain_memory_endpoints WHERE endpoint_kind='article'
+          AND origin=OLD.run_id AND ref_id=OLD.article_id);
+    DELETE FROM atlas_article_index WHERE run_id=OLD.run_id AND article_id=OLD.article_id;
+    DELETE FROM brain_backfill_receipts WHERE source='atlas_articles'
+      AND unit_id=OLD.run_id||'/'||OLD.article_id;
+    INSERT INTO app_state(key,value) VALUES('memories_changed_seq','1')
+      ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT);
+END;

@@ -86,12 +86,7 @@ pub fn article_actors(article: &AtlasArticleRow, metadata: &ArticleMetadata) -> 
         }
         // Normalize spelling, not aliases. Typed names from this packet share
         // only article-local identity; cross-source identity requires assessment.
-        let key = mention
-            .original_text
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase();
+        let key = crate::brain_actors::normalize_alias(&mention.original_text);
         let id = format!(
             "actor:{}:{}",
             article.id,
@@ -108,7 +103,7 @@ pub fn article_actors(article: &AtlasArticleRow, metadata: &ArticleMetadata) -> 
             actors.push(ArticleActor {
                 id,
                 type_hint: kind.into(),
-                display_name: mention.original_text.clone(),
+                display_name: crate::brain_actors::normalize_name(&mention.original_text),
                 spellings: vec![mention.original_text.clone()],
                 mentions: vec![mention.clone()],
             });

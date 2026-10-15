@@ -26,7 +26,7 @@ use crate::memory_metadata::{
 
 /// Identity/index contract version (folded into recall-cache and Links
 /// dependency identity).
-pub const IDENTITY_INDEX_VERSION: &str = "brain-actors-v1";
+pub const IDENTITY_INDEX_VERSION: &str = "brain-actors-v2-possessive";
 pub const PAYLOAD_SCHEMA: i64 = 1;
 /// Bounded materialized Related records per newly indexed article.
 pub const RELATED_PER_ARTICLE: usize = 20;
@@ -40,9 +40,29 @@ pub const LINK_RELATIONS: &[&str] = &[
     "derived_from",
 ];
 
-/// Lower-cased, punctuation-free, whitespace-collapsed alias key.
+/// Strip terminal English possessives, preserving internal apostrophes.
+/// Original spellings and spans remain in source mention evidence.
+pub fn normalize_name(text: &str) -> String {
+    let name = text.trim().trim_matches(['"', '“', '”']);
+    let lower = name.to_lowercase();
+    let name = ["'s", "’s", "ʼs"]
+        .iter()
+        .find_map(|suffix| {
+            lower
+                .ends_with(suffix)
+                .then(|| &name[..name.len() - suffix.len()])
+        })
+        .unwrap_or(name);
+    name.trim_end_matches(['\'', '’', 'ʼ'])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Candidate comparison key; equality across sources is not identity.
 pub fn normalize_alias(text: &str) -> String {
-    text.chars()
+    normalize_name(text)
+        .chars()
         .map(|c| {
             if c.is_alphanumeric() {
                 c.to_lowercase().next().unwrap_or(c)
@@ -201,7 +221,6 @@ pub fn candidates(
          JOIN brain_actors a ON a.actor_id=al.actor_id
          WHERE al.normalized=?1 AND al.alias_type='name'
            AND (?2='' OR a.subtype=?2)
-           AND a.actor_id NOT IN (SELECT from_actor FROM brain_actor_redirects)
          ORDER BY a.actor_id",
     )?;
     let rows = stmt
@@ -209,7 +228,11 @@ pub fn candidates(
             r.get::<_, String>(0)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    let canonical = rows
+        .into_iter()
+        .map(|id| resolve(conn, &id))
+        .collect::<Result<std::collections::BTreeSet<_>>>()?;
+    Ok(canonical.into_iter().collect())
 }
 
 fn text_of(payload: &MemoryPayload) -> String {
@@ -259,6 +282,7 @@ fn upsert_memory(
             kind.as_str()
         );
         if stored == &payload_json {
+            activate(conn, id, now)?;
             return Ok(false);
         }
     }
@@ -312,7 +336,12 @@ fn add_alias(
 /// for a model; consequential ambiguity is surfaced through `candidates`.
 /// Returns the binding and the memory IDs whose index state changed.
 pub fn bind(conn: &Connection, req: &BindRequest<'_>, now: &str) -> Result<(Binding, Vec<String>)> {
-    let name = req.name.trim();
+    let cleaned = if trusted_identifier_subtype(req.subtype) {
+        req.name.trim().to_string()
+    } else {
+        normalize_name(req.name)
+    };
+    let name = cleaned.as_str();
     ensure!(!name.is_empty(), "actor name is empty");
     let subtype = req.subtype;
     let others = |conn: &Connection, keep: &str| -> Result<Vec<String>> {
@@ -335,6 +364,7 @@ pub fn bind(conn: &Connection, req: &BindRequest<'_>, now: &str) -> Result<(Bind
             let row =
                 actor(conn, &id)?.ok_or_else(|| anyhow::anyhow!("dangling actor ref {id}"))?;
             add_alias(conn, &id, name, "name", &req.provenance)?;
+            activate(conn, &id, now)?;
             return Ok((
                 Binding {
                     candidates: others(conn, &id)?,
@@ -368,6 +398,7 @@ pub fn bind(conn: &Connection, req: &BindRequest<'_>, now: &str) -> Result<(Bind
                 let id = owners[0].clone();
                 add_alias(conn, &id, name, "name", &req.provenance)?;
                 link_external(conn, req, &id, now)?;
+                activate(conn, &id, now)?;
                 return Ok((
                     Binding {
                         candidates: others(conn, &id)?,
@@ -382,6 +413,37 @@ pub fn bind(conn: &Connection, req: &BindRequest<'_>, now: &str) -> Result<(Bind
         }
     }
     // 3. Deterministic source-scoped provisional actor.
+    // Historical IDs may predate spelling normalization. Reuse the sole
+    // compatible source-local alias rather than manufacturing another ID.
+    let scoped = candidates(conn, name, Some(subtype))?
+        .into_iter()
+        .filter_map(|id| match actor(conn, &id) {
+            Ok(Some(row))
+                if row.scope_key == req.scope
+                    && (!trusted_identifier_subtype(subtype)
+                        || req.identifiers.iter().all(|s| s.trim().is_empty())) =>
+            {
+                Some(Ok((id, row.identity_state)))
+            }
+            Err(error) => Some(Err(error)),
+            _ => None,
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if let [(id, state)] = scoped.as_slice() {
+        add_alias(conn, id, name, "name", &req.provenance)?;
+        link_external(conn, req, id, now)?;
+        activate(conn, id, now)?;
+        return Ok((
+            Binding {
+                actor_id: id.clone(),
+                created: false,
+                state: *state,
+                basis: "scoped",
+                candidates: others(conn, id)?,
+            },
+            vec![],
+        ));
+    }
     let trusted: Vec<String> = if trusted_identifier_subtype(subtype) {
         req.identifiers
             .iter()
@@ -426,6 +488,7 @@ pub fn bind(conn: &Connection, req: &BindRequest<'_>, now: &str) -> Result<(Bind
     }
     add_alias(conn, &canonical, name, "name", &req.provenance)?;
     link_external(conn, req, &canonical, now)?;
+    activate(conn, &canonical, now)?;
     let row = actor(conn, &canonical)?.expect("actor just ensured");
     Ok((
         Binding {
@@ -437,6 +500,11 @@ pub fn bind(conn: &Connection, req: &BindRequest<'_>, now: &str) -> Result<(Bind
         },
         changed,
     ))
+}
+
+fn activate(conn: &Connection, id: &str, now: &str) -> Result<()> {
+    conn.execute("UPDATE memory_metadata SET lifecycle='active',updated_at=?2 WHERE memory_id=?1 AND lifecycle='retired'", params![id,now])?;
+    Ok(())
 }
 
 fn link_external(conn: &Connection, req: &BindRequest<'_>, id: &str, now: &str) -> Result<()> {
@@ -461,6 +529,9 @@ pub fn record_mention(
     spans: &Value,
     now: &str,
 ) -> Result<String> {
+    let canonical = resolve(conn, actor_id)?;
+    activate(conn, &canonical, now)?;
+    let actor_id = canonical.as_str();
     let id = hid(
         "mention",
         &[
@@ -745,10 +816,32 @@ pub fn merge(conn: &Connection, from: &str, to: &str, receipt: &Value, now: &str
         "UPDATE brain_actors SET identity_state='resolved', revision=revision+1, updated_at=?2 WHERE actor_id=?1",
         params![to, now],
     )?;
+    let payload: Option<String> = conn
+        .query_row(
+            "SELECT payload_json FROM memory_metadata WHERE memory_id=?1",
+            [&to],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(MemoryPayload::Actor(mut payload)) =
+        payload.and_then(|raw| serde_json::from_str(&raw).ok())
+    {
+        payload.identity_state = IdentityState::Resolved;
+        upsert_memory(
+            conn,
+            &to,
+            &MemoryPayload::Actor(payload),
+            "",
+            std::slice::from_ref(&to),
+            now,
+        )?;
+    }
+    activate(conn, &to, now)?;
     conn.execute(
         "UPDATE memory_metadata SET lifecycle='redirected', updated_at=?2 WHERE memory_id=?1",
         params![from, now],
     )?;
+    crate::store::bump_memories_changed(conn)?;
     Ok(())
 }
 
@@ -764,6 +857,7 @@ pub fn split(conn: &Connection, from: &str, now: &str) -> Result<()> {
     let Some(to) = to else {
         bail!("{from} is not merged")
     };
+    let to = resolve(conn, &to)?;
     conn.execute(
         "DELETE FROM brain_actor_redirects WHERE from_actor=?1",
         [from],
@@ -776,7 +870,33 @@ pub fn split(conn: &Connection, from: &str, now: &str) -> Result<()> {
         "UPDATE brain_actors SET revision=revision+1, updated_at=?2 WHERE actor_id IN (?1,?3)",
         params![from, now, to],
     )?;
+    // An analyst's explicit split must not be undone by the background job.
+    let mut pair = [from.to_string(), to];
+    pair.sort();
+    conn.execute("INSERT INTO brain_actor_dedup_receipts(pair_key,input_hash,decision,receipt_json,updated_at) VALUES(?1,'','separate',?2,?3) ON CONFLICT(pair_key) DO UPDATE SET decision='separate',receipt_json=excluded.receipt_json,lease_owner='',lease_until='',updated_at=excluded.updated_at",params![format!("{}:{}",pair[0],pair[1]),json!({"basis":"explicit split"}).to_string(),now])?;
+    crate::store::bump_memories_changed(conn)?;
     Ok(())
+}
+
+/// Explicit separations apply to both complete redirect families, even when
+/// either survivor subsequently changes through another assessed merge.
+pub(crate) fn separated_pairs(
+    conn: &Connection,
+) -> Result<std::collections::BTreeSet<(String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT pair_key FROM brain_actor_dedup_receipts WHERE decision='separate'")?;
+    let keys = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut pairs = std::collections::BTreeSet::new();
+    for key in keys {
+        if let Some((left, right)) = key.split_once(':') {
+            let mut ids = [resolve(conn, left)?, resolve(conn, right)?];
+            ids.sort();
+            pairs.insert((ids[0].clone(), ids[1].clone()));
+        }
+    }
+    Ok(pairs)
 }
 
 /// Every actor ID that reads as `actor_id` (itself plus merged-in IDs).
@@ -809,17 +929,49 @@ pub fn mentions(
     let ids = equivalent_ids(conn, actor_id)?;
     let mut out = Vec::new();
     for id in ids {
-        let mut stmt = conn.prepare(
-            "SELECT origin_kind,origin_scope,origin_id,origin_revision FROM brain_actor_mentions WHERE actor_id=?1 ORDER BY origin_scope,origin_id",
-        )?;
-        let rows = stmt
-            .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        out.extend(rows);
+        out.extend(direct_mentions(conn, &id)?);
     }
     out.sort();
     out.dedup();
     Ok(out)
+}
+
+/// Exact member contributions, for callers that already expanded the family.
+pub(crate) fn direct_mentions(
+    conn: &Connection,
+    id: &str,
+) -> Result<Vec<(String, String, String, String)>> {
+    let mut stmt=conn.prepare("SELECT origin_kind,origin_scope,origin_id,origin_revision FROM brain_actor_mentions WHERE actor_id=?1 ORDER BY origin_scope,origin_id")?;
+    let rows = stmt
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Reconcile ingest-only actors after replacement/deletion. A surviving
+/// mention, active claim/edge, analyst pin or merged member keeps the actor.
+pub fn reconcile_lifecycle(conn: &Connection, now: &str) -> Result<()> {
+    conn.execute(
+        "WITH RECURSIVE family(root,id) AS (
+           SELECT actor_id,actor_id FROM brain_actors
+             WHERE actor_id NOT IN (SELECT from_actor FROM brain_actor_redirects)
+           UNION ALL SELECT f.root,d.from_actor FROM family f JOIN brain_actor_redirects d ON d.to_actor=f.id
+         ), supported(root) AS (
+           SELECT DISTINCT f.root FROM family f WHERE
+             EXISTS(SELECT 1 FROM brain_actor_mentions m WHERE m.actor_id=f.id)
+             OR EXISTS(SELECT 1 FROM brain_memory_actor_refs r JOIN memory_metadata mm ON mm.memory_id=r.memory_id
+                       WHERE r.actor_id=f.id AND mm.lifecycle='active' AND r.memory_id<>f.id)
+             OR EXISTS(SELECT 1 FROM memories m WHERE m.id=f.id AND m.pinned=1)
+             OR EXISTS(SELECT 1 FROM insight_user_edits e WHERE e.memory_id=f.id)
+         )
+         UPDATE memory_metadata SET lifecycle=CASE WHEN memory_id IN (SELECT root FROM supported) THEN 'active' ELSE 'retired' END,
+           updated_at=?1
+         WHERE memory_kind='actor' AND lifecycle<>'redirected'
+           AND memory_id IN (SELECT actor_id FROM brain_actors WHERE scope_key LIKE 'atlas-article:%')
+           AND lifecycle<>CASE WHEN memory_id IN (SELECT root FROM supported) THEN 'active' ELSE 'retired' END",
+        [now],
+    )?;
+    Ok(())
 }
 
 /// Remove one origin's contributions (cycle deletion). Shared actors and
@@ -854,16 +1006,23 @@ pub fn retire_origin(
            SELECT memory_id FROM brain_memory_endpoints WHERE endpoint_kind=?1 AND origin=?2)",
         params![origin_kind, origin_scope, now],
     )?;
-    for actor_id in affected {
-        let alive: i64 = conn.query_row(
+    let roots = affected
+        .into_iter()
+        .map(|id| resolve(conn, &id))
+        .collect::<Result<std::collections::BTreeSet<_>>>()?;
+    for actor_id in roots {
+        let mut alive = 0i64;
+        for id in equivalent_ids(conn, &actor_id)? {
+            alive += conn.query_row(
             "SELECT (SELECT COUNT(*) FROM brain_actor_mentions WHERE actor_id=?1)
                   + (SELECT COUNT(*) FROM brain_memory_actor_refs r JOIN memory_metadata m ON m.memory_id=r.memory_id
                      WHERE r.actor_id=?1 AND m.lifecycle='active' AND r.memory_id<>?1)
-                  + (SELECT COUNT(*) FROM brain_actor_redirects WHERE to_actor=?1)
+                  + (SELECT COUNT(*) FROM insight_user_edits WHERE memory_id=?1)
                   + (SELECT COUNT(*) FROM memories WHERE id=?1 AND pinned=1)",
-            [&actor_id],
-            |r| r.get(0),
+            [&id],
+            |r| r.get::<_,i64>(0),
         )?;
+        }
         if alive == 0 {
             conn.execute(
                 "UPDATE memory_metadata SET lifecycle='retired', updated_at=?2 WHERE memory_id=?1",

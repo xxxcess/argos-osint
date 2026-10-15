@@ -25,6 +25,7 @@ pub mod atlas_metadata;
 pub mod atlas_recall_tests;
 pub mod atlas_work;
 pub mod brain;
+pub mod brain_actor_dedup;
 pub mod brain_actors;
 pub mod brain_backfill;
 pub mod brain_browse;

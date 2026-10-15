@@ -57,7 +57,7 @@ A Focus Brief retrieves the full article and extracts Claims, joins both for Inf
 
 Article Recon report execution is retired. Historical `intel_report_jobs`, attempts, sections and provenance remain stored; admission, resume and retry reject new execution, and unfinished report jobs and descendants are cancelled and fenced. Historical reports do not take precedence over normal brief publication. Independent Recon investigations remain available.
 
-Brain browsing exposes Claims and unique Actor-name groups without merging identities. Actor tabs show Claims, Recall-enabled Threads and ingest-associated Articles. Claim tabs show Actors and original Sources; provenance is independent of Related eligibility. Other memory kinds remain stored for recall and internal use.
+Brain browsing exposes Claims and unique Actor-name groups without merging identities. Actor tabs show Claims, Recall-enabled Threads and directly mentioned retained Articles. Claim tabs show Actors and original Sources; provenance is independent of Related eligibility. Other memory kinds remain stored for recall and internal use.
 
 ## Brain Memory Topology and Scope Analysis
 
@@ -98,3 +98,5 @@ An **insight snapshot** is immutable original evidence, entity bindings, stage c
 ## Related article leads
 
 Atlas collection-v1 uses only Classifier model calls and local/native metadata. Related article pairs represent exact compatible shared headline/description mentions with a category-qualified seed. They supply no corroboration or assessed graph edge; Intel Links remain evidence-grounded propositions. Publisher-based Initial confidence is a source prior, independent from evidence confidence. See [Atlas classification and Related articles](atlas-classification-and-related-articles.md).
+
+Actor spelling normalization removes terminal English possessives and collapses whitespace while retaining original mention spans. Source-scoped records remain provisional. Background identity maintenance repairs historical spelling variants locally and uses contextual Entity Resolver decisions for broader aliases; cross-source redirects require an explicit `same` assessment. Related article overlap remains independent of actor identity.

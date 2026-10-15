@@ -270,3 +270,5 @@ Rules for the new columns:
 - Timings are measured from `sent_at`, using `AttemptProgress` marks (headers, first reasoning, stream complete). The first answer delta comes from the stream observer.
 - Brief stages bind each model operation to the task's lease epoch (`OperationScope::with_task_epoch`). The epoch is also the attempt generation, so a retried task writes new attempt rows and the previous epoch's rows stay immutable.
 - The stage-timing row stays the latest execution per task. It records that execution's epoch and aggregates only that epoch's attempts.
+
+Brain Actor identity maintenance uses the existing Entity Resolver role for bounded identity decisions through the shared executor (native Decisions or chat). It processes a local name/acronym shortlist independently of Atlas cycles; absent configuration leaves local spelling repair active and makes no identity model requests. See [actor identity maintenance](architecture.md#actor-identity-maintenance).

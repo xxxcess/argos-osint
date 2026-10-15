@@ -147,3 +147,222 @@ fn collection_contracts_are_recognised_centrally() {
     assert_eq!(crate::atlas::phase_title(6), "Index actors and articles");
     assert_eq!(crate::atlas::phase_title(5), "Related article leads");
 }
+
+#[test]
+fn direct_actor_sources_count_without_related_pairs_and_follow_deletion_and_reingest() {
+    let store = Store::memory().unwrap();
+    seed(&store, "r", "a", "Trump's office responds", &["Trump's"]);
+    index_run(&store, "r", &|| false).unwrap();
+    let group = store.actor_group("trump").unwrap().unwrap();
+    let actor = &group.actor_ids[0];
+    assert_eq!(
+        store
+            .actor_group_associations(&group)
+            .unwrap()
+            .articles
+            .len(),
+        1
+    );
+    assert_eq!(store.actor_articles(actor, None, 20).unwrap().total, 1);
+    let row = store
+        .brain_browse_memories(None, "")
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == group.key())
+        .unwrap();
+    assert_eq!(row.category, "0 claims · 0 threads · 1 articles");
+    seed(&store, "s", "b", "Trump speaks", &["Trump"]);
+    index_run(&store, "s", &|| false).unwrap();
+    assert_eq!(
+        store
+            .actor_group_associations(&store.actor_group("trump").unwrap().unwrap())
+            .unwrap()
+            .articles
+            .len(),
+        2
+    );
+    store.atlas_delete_article("r", "a").unwrap();
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM brain_actor_mentions WHERE origin_scope='r'"
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM atlas_article_index WHERE run_id='r'"
+        ),
+        0
+    );
+    assert_eq!(
+        store
+            .actor_group_associations(&store.actor_group("trump").unwrap().unwrap())
+            .unwrap()
+            .articles
+            .len(),
+        1
+    );
+    store.atlas_delete_run("s").unwrap();
+    assert!(store.actor_group("trump").unwrap().is_none());
+    seed(&store, "r", "a", "Trump's office responds", &["Trump's"]);
+    index_run(&store, "r", &|| false).unwrap();
+    assert_eq!(
+        store
+            .actor_group_associations(&store.actor_group("trump").unwrap().unwrap())
+            .unwrap()
+            .articles
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn same_input_metadata_correction_replaces_mentions_and_retires_removed_actor() {
+    let store = Store::memory().unwrap();
+    seed(
+        &store,
+        "r",
+        "a",
+        "Jane Doe and Ann Lee meet",
+        &["Jane Doe", "Ann Lee"],
+    );
+    index_run(&store, "r", &|| false).unwrap();
+    // Same source hash, corrected NLP inventory.
+    seed(&store, "r", "a", "Jane Doe and Ann Lee meet", &["Jane Doe"]);
+    index_run(&store, "r", &|| false).unwrap();
+    assert!(store.actor_group("ann lee").unwrap().is_none());
+    assert_eq!(
+        store
+            .actor_group_associations(&store.actor_group("jane doe").unwrap().unwrap())
+            .unwrap()
+            .articles
+            .len(),
+        1
+    );
+    seed(&store, "r", "a", "Jane Doe and Ann Lee meet", &[]);
+    index_run(&store, "r", &|| false).unwrap();
+    assert!(store.actor_groups().unwrap().is_empty());
+}
+
+#[test]
+fn related_matching_counts_possessive_aliases_once_but_keeps_direct_articles() {
+    let store = Store::memory().unwrap();
+    for id in ["a", "b"] {
+        seed(
+            &store,
+            "r",
+            id,
+            "Trump and Trump's office responds",
+            &["Trump", "Trump's"],
+        );
+        let mut a = store.atlas_article("r", id).unwrap().unwrap();
+        a.category = "economic".into();
+        store.atlas_upsert_article(&a).unwrap();
+    }
+    assert_eq!(
+        crate::related_articles::build(&store, "r").unwrap(),
+        0,
+        "two spellings are one actor"
+    );
+    let a = store.atlas_article("r", "a").unwrap().unwrap();
+    let b = store.atlas_article("r", "b").unwrap().unwrap();
+    assert_eq!(
+        crate::related_articles::shared_entity_mentions(&store, &a, &b)
+            .unwrap()
+            .len(),
+        1
+    );
+    index_run(&store, "r", &|| false).unwrap();
+    assert_eq!(
+        store
+            .actor_group_associations(&store.actor_group("trump").unwrap().unwrap())
+            .unwrap()
+            .articles
+            .len(),
+        2
+    );
+    seed(
+        &store,
+        "r",
+        "a",
+        "Trump's office joins Acme",
+        &["Trump's", "Acme"],
+    );
+    seed(&store, "r", "b", "Trump visits Acme", &["Trump", "Acme"]);
+    for id in ["a", "b"] {
+        let mut a = store.atlas_article("r", id).unwrap().unwrap();
+        a.category = "economic".into();
+        store.atlas_upsert_article(&a).unwrap();
+    }
+    assert_eq!(
+        crate::related_articles::build(&store, "r").unwrap(),
+        1,
+        "possessives match but require another distinct entity"
+    );
+}
+
+#[test]
+fn duplicate_url_actor_sources_preserve_exact_cycle_scope() {
+    let store = Store::memory().unwrap();
+    for run in ["r", "s"] {
+        seed(&store, run, "same", "Ann speaks", &["Ann"]);
+        index_run(&store, run, &|| false).unwrap();
+    }
+    let group = store.actor_group("ann").unwrap().unwrap();
+    assert_eq!(
+        store
+            .actor_group_associations(&group)
+            .unwrap()
+            .articles
+            .len(),
+        1
+    );
+    for run in ["r", "s"] {
+        let a = store
+            .actor_group_associations_scoped(&group, Some(run))
+            .unwrap();
+        assert_eq!(a.articles.len(), 1);
+        assert_eq!(a.articles[0].article.run_id, run);
+        assert_eq!(a.articles[0].occurrences.len(), 1);
+        assert_eq!(store.actor_groups_scoped(Some(run)).unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn pruning_and_merged_survivors_keep_only_retained_actor_contributions() {
+    let store = Store::memory().unwrap();
+    for run in ["old", "keep"] {
+        seed(&store, run, run, "Jane Doe speaks", &["Jane Doe"]);
+        index_run(&store, run, &|| false).unwrap();
+    }
+    let group = store.actor_group("jane doe").unwrap().unwrap();
+    let a = &group.actor_ids[0];
+    let b = &group.actor_ids[1];
+    store
+        .merge_actors(b, a, &serde_json::json!({"assessed":true}))
+        .unwrap();
+    store
+        .conn
+        .execute_batch(
+            "UPDATE atlas_runs SET started_at='2000-01-01',state='completed' WHERE id='old'",
+        )
+        .unwrap();
+    store.atlas_prune_expired().unwrap();
+    let group = store.actor_group("jane doe").unwrap().unwrap();
+    assert_eq!(
+        store
+            .actor_group_associations(&group)
+            .unwrap()
+            .articles
+            .len(),
+        1
+    );
+    store.atlas_delete_run("keep").unwrap();
+    assert!(store.actor_group("jane doe").unwrap().is_none());
+    assert!(
+        store.get_memory(a).unwrap().is_some(),
+        "old IDs survive retirement"
+    );
+}

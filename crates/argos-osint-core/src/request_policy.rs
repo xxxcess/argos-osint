@@ -159,6 +159,8 @@ impl StageBudget {
 pub const CLEANUP_FALLBACK_BUDGET: StageBudget = StageBudget::new(512, 2048, ReasoningEffort::Off);
 pub const CLAIMS_BUDGET: StageBudget = StageBudget::new(2048, 4096, ReasoningEffort::Off);
 pub const FIDELITY_BUDGET: StageBudget = StageBudget::new(1024, 3072, ReasoningEffort::Off);
+/// One finite actor-identity label, independent of ingestion/extraction.
+pub const ACTOR_IDENTITY_BUDGET: StageBudget = StageBudget::new(128, 512, ReasoningEffort::Off);
 pub const INFERENCES_BUDGET: StageBudget = StageBudget {
     answer: 3072,
     thinking: 6144,

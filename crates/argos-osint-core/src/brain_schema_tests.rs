@@ -141,3 +141,51 @@ fn atomic_claims_migrate_to_claim_or_inference_preserving_ids() {
         assert!(crate::memory_metadata::MemoryKind::parse(&kind(&store, id).unwrap()).is_some());
     }
 }
+
+#[test]
+fn schema_41_upgrade_adds_actor_maintenance_without_changing_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("argos.db");
+    let s = Store::open(&path).unwrap();
+    let evidence = s
+        .add_memory(
+            "keep-evidence",
+            "fact",
+            false,
+            crate::brain::MemorySource {
+                app: "test".into(),
+                conversation_id: "migration".into(),
+                message_id: None,
+                reference: None,
+            },
+        )
+        .unwrap();
+    s.conn.execute_batch("DROP TABLE brain_actor_dedup_receipts; DROP TRIGGER brain_article_deleted; DROP TRIGGER brain_article_changed; CREATE TABLE user_extra(value TEXT); INSERT INTO user_extra VALUES('preserve'); PRAGMA user_version=41").unwrap();
+    drop(s);
+    let s = Store::open(&path).unwrap();
+    assert_eq!(s.get_memory(&evidence.id).unwrap(), Some(evidence));
+    assert_eq!(
+        s.conn
+            .query_row("SELECT value FROM user_extra", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        "preserve"
+    );
+    assert_eq!(
+        s.conn
+            .query_row("SELECT COUNT(*) FROM brain_actor_dedup_receipts", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    for trigger in ["brain_article_deleted", "brain_article_changed"] {
+        assert!(s
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1)",
+                [trigger],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap());
+    }
+}

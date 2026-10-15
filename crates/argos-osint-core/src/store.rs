@@ -43,7 +43,7 @@ pub struct GraphSummary {
 /// complete summary-result envelopes; existing facts are preserved unchanged.
 /// 37 adds the unified Brain graph (typed kinds, actors, endpoints) and brief
 /// stage timings; `atomic_claim` memories migrate to claim/inference in place.
-pub const SCHEMA_VERSION: i64 = 41;
+pub const SCHEMA_VERSION: i64 = 42;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -994,6 +994,10 @@ impl Store {
                 // diagnostics and task epochs (provider execution, spec §9).
                 crate::provider_execution_schema::migrate(&self.conn)?;
                 self.conn.pragma_update(None, "user_version", 41)?;
+            }
+            if version < 42 {
+                crate::brain_schema::migrate(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 42)?;
             }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
@@ -2066,6 +2070,7 @@ impl Store {
                 .conn
                 .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?
                 > 0;
+            crate::brain_actors::reconcile_lifecycle(&self.conn, &chrono::Utc::now().to_rfc3339())?;
             crate::job_cleanup::cleanup_batch(&self.conn, chrono::Utc::now())?;
             Ok(deleted)
         })();
@@ -2287,6 +2292,7 @@ impl Store {
                 params![run_id, article_id],
             )?;
             crate::investigation::insight_persist::reconcile_deleted_articles(&self.conn)?;
+            crate::brain_actors::reconcile_lifecycle(&self.conn, &chrono::Utc::now().to_rfc3339())?;
             crate::job_cleanup::cleanup_batch(&self.conn, chrono::Utc::now())?;
             Ok(())
         })();
@@ -2679,6 +2685,7 @@ impl Store {
             }
             crate::investigation::insight_persist::reconcile_deleted_articles(&self.conn)?;
             crate::job_cleanup::cleanup_batch(&self.conn, chrono::Utc::now())?;
+            crate::brain_actors::reconcile_lifecycle(&self.conn, &chrono::Utc::now().to_rfc3339())?;
             Ok(ids)
         })();
         match result {
@@ -3316,7 +3323,7 @@ mod tests {
             }
             for _ in 0..2 {
                 let store = Store::open(&path).unwrap();
-                assert_eq!(version(&store.conn), 41);
+                assert_eq!(version(&store.conn), SCHEMA_VERSION);
                 for (table, expected) in tables.iter().zip(&fresh_cols) {
                     let mut got = columns(&store.conn, table);
                     let mut want = expected.clone();

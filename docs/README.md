@@ -36,6 +36,7 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 | Atlas cycle | Process | [diagrams/atlas-pipeline.html](diagrams/atlas-pipeline.html) |
 | Historical Intel report (retired) | Data flow | [diagrams/intel-report.html](diagrams/intel-report.html) |
 | Brain browse projection | Data flow | [diagrams/brain-browse.html](diagrams/brain-browse.html) |
+| Actor identity maintenance | Process | [diagrams/actor-identity.html](diagrams/actor-identity.html) |
 | Brain memory topology and scope | Architecture | [diagrams/brain-topology.html](diagrams/brain-topology.html) |
 | Intel brief / historical report states | State machine | [diagrams/intel-job-states.html](diagrams/intel-job-states.html) |
 | Brain recall | Architecture | [diagrams/brain-recall.html](diagrams/brain-recall.html) |

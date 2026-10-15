@@ -121,7 +121,7 @@ pub async fn review_article_actors(
         let mut out = Vec::new();
         for e in candidate_entities {
             let trimmed = e.trim();
-            if !trimmed.is_empty() && set.insert(trimmed.to_ascii_lowercase()) {
+            if !trimmed.is_empty() && set.insert(trimmed.to_lowercase()) {
                 out.push(trimmed.to_string());
             }
         }
@@ -136,9 +136,7 @@ pub async fn review_article_actors(
         if let Ok(result) =
             model_review_actors(secret, article_title, article_brief, &unique_candidates).await
         {
-            if !result.actors.is_empty() {
-                return Ok(result);
-            }
+            return Ok(result);
         }
     }
 
@@ -213,10 +211,21 @@ fn parse_actor_review_response(
 
     let mut actors = Vec::new();
     let mut mapping = HashMap::new();
+    let mut reviewed = HashSet::new();
 
     for item in items {
         let orig_key = item.original.trim().to_ascii_lowercase();
-        let canonical = item.canonical.trim().to_string();
+        anyhow::ensure!(
+            original_candidates
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(&item.original)),
+            "unknown actor review candidate"
+        );
+        anyhow::ensure!(
+            reviewed.insert(orig_key.clone()),
+            "duplicate actor review candidate"
+        );
+        let canonical = crate::brain_actors::normalize_name(&item.canonical);
         if item.meaningful && is_meaningful_actor(&canonical) {
             if !actors
                 .iter()
@@ -233,11 +242,15 @@ fn parse_actor_review_response(
     // For any candidate that wasn't mentioned in the model output, check deterministic filter
     for cand in original_candidates {
         let key = cand.trim().to_ascii_lowercase();
-        if !mapping.contains_key(&key) && is_meaningful_actor(cand) {
-            if !actors.iter().any(|a: &String| a.eq_ignore_ascii_case(cand)) {
-                actors.push(cand.clone());
+        if !reviewed.contains(&key) && is_meaningful_actor(cand) {
+            let clean = crate::brain_actors::normalize_name(cand);
+            if !actors
+                .iter()
+                .any(|a: &String| a.eq_ignore_ascii_case(&clean))
+            {
+                actors.push(clean.clone());
             }
-            mapping.insert(key, cand.clone());
+            mapping.insert(key, clean);
         }
     }
 
@@ -249,7 +262,8 @@ fn deterministic_review_actors(candidates: &[String]) -> ActorReviewResult {
     let mut mapping = HashMap::new();
 
     for cand in candidates {
-        let trimmed = cand.trim();
+        let normalized = crate::brain_actors::normalize_name(cand);
+        let trimmed = normalized.as_str();
         if is_meaningful_actor(trimmed) {
             if !actors
                 .iter()
@@ -257,7 +271,7 @@ fn deterministic_review_actors(candidates: &[String]) -> ActorReviewResult {
             {
                 actors.push(trimmed.to_string());
             }
-            mapping.insert(trimmed.to_ascii_lowercase(), trimmed.to_string());
+            mapping.insert(cand.trim().to_ascii_lowercase(), trimmed.to_string());
         }
     }
 
@@ -351,5 +365,28 @@ mod tests {
         let res = parse_actor_review_response(resp, &cands).unwrap();
         assert_eq!(res.actors, vec!["Donald Trump".to_string()]);
         assert_eq!(res.mapping.get("trump"), Some(&"Donald Trump".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod normalization_regressions {
+    use super::*;
+    #[test]
+    fn rejected_named_candidates_are_not_reintroduced_and_possessives_deduplicate() {
+        let names = vec!["Trump".into(), "Trump's".into(), "South Africa’s".into()];
+        let fallback = deterministic_review_actors(&names);
+        assert_eq!(fallback.actors, vec!["Trump", "South Africa"]);
+        assert_eq!(fallback.mapping["trump's"], "Trump");
+        let rejected = parse_actor_review_response(
+            r#"{"actors":[{"original":"Trump","canonical":"","meaningful":false}]}"#,
+            &["Trump".into()],
+        )
+        .unwrap();
+        assert!(rejected.actors.is_empty());
+        assert!(parse_actor_review_response(
+            r#"{"actors":[{"original":"Invented","canonical":"Invented","meaningful":true}]}"#,
+            &["Trump".into()]
+        )
+        .is_err());
     }
 }

@@ -7,7 +7,7 @@ use anyhow::Result;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-pub const MATCH_VERSION: &str = "shared-headline-entities-v3-min-two-temporal";
+pub const MATCH_VERSION: &str = "shared-headline-entities-v4-possessive";
 pub const MIN_SHARED_ENTITIES: usize = 2;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RelatedArticle {
@@ -114,6 +114,10 @@ fn valid(article: &AtlasArticleRow, m: &ArticleMention) -> bool {
         && atlas_metadata::comparison_key(&m.original_text) == m.comparison_key
 }
 
+fn mention_key(mention: &ArticleMention) -> String {
+    atlas_metadata::comparison_key(&crate::brain_actors::normalize_name(&mention.original_text))
+}
+
 /// Distinct, span-backed names shared by two exact article occurrences.
 /// Repeated mentions of one name count once; metadata country/category fields
 /// never count. A retained typed anchor may match exact prospective text.
@@ -148,7 +152,7 @@ pub fn shared_entity_mentions(
             let target = articles[1 - side];
             if metadata[1 - side].as_ref().is_some_and(|m| {
                 m.mentions.iter().any(|other| {
-                    other.comparison_key == mention.comparison_key
+                    mention_key(other) == mention_key(mention)
                         && named(&other.type_hint)
                         && other.type_hint != mention.type_hint
                 })
@@ -157,14 +161,14 @@ pub fn shared_entity_mentions(
             }
             let found = find_exact(
                 &target.title,
-                &mention.comparison_key,
+                &mention_key(mention),
                 &mention.type_hint,
                 "title",
             )
             .or_else(|| {
                 find_exact(
                     &target.description,
-                    &mention.comparison_key,
+                    &mention_key(mention),
                     &mention.type_hint,
                     "description",
                 )
@@ -188,7 +192,7 @@ pub fn shared_entity_mentions(
                     m.mentions.iter().any(|other| {
                         named(&other.type_hint)
                             && other.field == found.field
-                            && other.comparison_key != mention.comparison_key
+                            && mention_key(other) != mention_key(mention)
                             && other.start_byte < found.end_byte
                             && found.start_byte < other.end_byte
                     })
@@ -196,7 +200,7 @@ pub fn shared_entity_mentions(
                     continue;
                 }
                 shared
-                    .entry(mention.comparison_key.clone())
+                    .entry(mention_key(mention))
                     .or_insert_with(|| mention.original_text.clone());
             }
         }
@@ -299,7 +303,7 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
                         && !atlas_metadata::temporal_person_mention(text, mention, &m.mentions)
                     {
                         anchors
-                            .entry((mention.type_hint.clone(), mention.comparison_key.clone()))
+                            .entry((mention.type_hint.clone(), mention_key(mention)))
                             .or_default()
                             .push((i, mention.clone()));
                     }
@@ -328,7 +332,7 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
             if metadata[i].as_ref().is_some_and(|m| {
                 m.mentions
                     .iter()
-                    .any(|m| m.comparison_key == key && named(&m.type_hint) && m.type_hint != kind)
+                    .any(|m| mention_key(m) == key && named(&m.type_hint) && m.type_hint != kind)
             }) {
                 continue;
             }
@@ -351,7 +355,7 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
                     metadata.mentions.iter().any(|other| {
                         named(&other.type_hint)
                             && other.field == m.field
-                            && other.comparison_key != m.comparison_key
+                            && mention_key(other) != mention_key(&m)
                             && other.start_byte < m.end_byte
                             && m.start_byte < other.end_byte
                     })
@@ -462,88 +466,6 @@ pub(crate) fn canonical_url(raw: &str) -> String {
         .unwrap_or_else(|_| raw.into())
 }
 impl Store {
-    /// Read-only projection of retained ingest pairs, evaluated once per pair
-    /// rather than once per actor. Keys identify exact article occurrences.
-    pub(crate) fn ingest_actor_associations(
-        &self,
-    ) -> Result<BTreeMap<(String, String), BTreeSet<String>>> {
-        let articles = self.atlas_recent_articles()?;
-        let lookup: BTreeMap<_, _> = articles
-            .iter()
-            .map(|a| ((a.run_id.clone(), a.id.clone()), a))
-            .collect();
-        let mut pairs = BTreeSet::new();
-        let mut stmt = self.conn.prepare("SELECT run_id,left_id,right_id,left_revision,right_revision,shared_json FROM atlas_related_articles")?;
-        let records = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-            ))
-        })?;
-        for row in records {
-            let (run, left, right, lr, rr, json) = row?;
-            let a = (run.clone(), left);
-            let b = (run, right);
-            let (Some(left), Some(right)) = (lookup.get(&a), lookup.get(&b)) else {
-                continue;
-            };
-            if revision(left) == lr && revision(right) == rr {
-                // Match the persisted-pair reader's corruption handling.
-                let _: Vec<SharedMention> = serde_json::from_str(&json)?;
-                pairs.insert(if a < b { (a, b) } else { (b, a) });
-            }
-        }
-        let mut stmt = self.conn.prepare("SELECT memory_id FROM memory_metadata WHERE memory_kind='related' AND lifecycle='active'")?;
-        for id in stmt.query_map([], |r| r.get::<_, String>(0))? {
-            let Some(crate::memory_metadata::MemoryPayload::Related(p)) =
-                self.memory_payload(&id?)?
-            else {
-                continue;
-            };
-            if !current_ingest_related(self, &p)? {
-                continue;
-            }
-            let crate::memory_metadata::EndpointRef::Article {
-                run_id: ar,
-                article_id: ai,
-                ..
-            } = p.source
-            else {
-                continue;
-            };
-            let crate::memory_metadata::EndpointRef::Article {
-                run_id: br,
-                article_id: bi,
-                ..
-            } = p.target
-            else {
-                continue;
-            };
-            let (a, b) = ((ar, ai), (br, bi));
-            pairs.insert(if a < b { (a, b) } else { (b, a) });
-        }
-        let mut out: BTreeMap<_, BTreeSet<String>> = BTreeMap::new();
-        for (a, b) in pairs {
-            let (Some(left), Some(right)) = (lookup.get(&a), lookup.get(&b)) else {
-                continue;
-            };
-            let shared = shared_entity_mentions(self, left, right)?;
-            if shared.len() < MIN_SHARED_ENTITIES {
-                continue;
-            }
-            let names: BTreeSet<_> = shared
-                .iter()
-                .map(|n| crate::brain_actors::normalize_alias(n))
-                .collect();
-            out.entry(a).or_default().extend(names.clone());
-            out.entry(b).or_default().extend(names);
-        }
-        Ok(out)
-    }
     /// Whether an occurrence participates in a retained ingest association
     /// containing this actor name and at least one other distinct entity.
     /// This checks stored pairs, never creates suggestions while browsing.

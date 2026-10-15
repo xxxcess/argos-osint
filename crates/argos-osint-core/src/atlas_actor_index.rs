@@ -128,6 +128,8 @@ pub fn index_run(store: &Store, run_id: &str, stop: &dyn Fn() -> bool) -> Result
                     }
                 }
             }
+            crate::brain_actors::reconcile_lifecycle(&store.conn, &now)?;
+            crate::store::bump_memories_changed(&store.conn)?;
             Ok(((), vec![]))
         })?;
     }

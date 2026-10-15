@@ -533,6 +533,7 @@ fn legacy_map(
 /// validated native title/description mentions, record mention receipts and
 /// observed `mentioned_in` Links, then bounded tentative Related records by
 /// candidate name (different provisional actors never become "same actor").
+/// The enclosing batch reconciles orphan actor lifecycle before committing.
 pub fn index_article(store: &Store, unit: &str, now: &str) -> Result<String> {
     let conn = &store.conn;
     let Some((run_id, article_id)) = unit.split_once('/') else {
@@ -548,12 +549,12 @@ pub fn index_article(store: &Store, unit: &str, now: &str) -> Result<String> {
         .unwrap_or_default();
     // Reindex: drop this occurrence's stale contributions first.
     conn.execute(
-        "DELETE FROM brain_actor_mentions WHERE origin_kind='article' AND origin_scope=?1 AND origin_id=?2 AND origin_revision<>?3",
-        params![run_id, article_id, revision],
+        "DELETE FROM brain_actor_mentions WHERE origin_kind='article' AND origin_scope=?1 AND origin_id=?2",
+        params![run_id, article_id],
     )?;
     conn.execute(
         "UPDATE memory_metadata SET lifecycle='retired', updated_at=?4 WHERE memory_kind IN ('link','related') AND memory_id IN
-           (SELECT memory_id FROM brain_memory_endpoints WHERE endpoint_kind='article' AND origin=?1 AND ref_id=?2 AND revision<>?3)",
+           (SELECT memory_id FROM brain_memory_endpoints WHERE endpoint_kind='article' AND origin=?1 AND ref_id=?2)",
         params![run_id, article_id, revision, now],
     )?;
     let Some(metadata) = metadata else {
@@ -703,6 +704,8 @@ impl Store {
                             }
                         }
                     }
+                    actors::reconcile_lifecycle(&self.conn, &now)?;
+                    crate::store::bump_memories_changed(&self.conn)?;
                     Ok(((), vec![]))
                 })?;
             }

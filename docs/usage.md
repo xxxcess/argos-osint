@@ -74,6 +74,16 @@ An Actor group collects all member and redirected identities for browsing withou
 
 Only Claim, Topic, Entity, Article and Source nodes are displayed. Graph focus and scrolling remain available; clicking or pressing Enter on a node does not navigate. Claims keep Graph above Related/Summary, stacking below 68 columns. Actor detail uses Graph 65% / Related 35% at 100×28 or larger, with reachable Graph/Related pages below that. Thread detections are recorded only with Recall enabled; later disabling Recall preserves earlier receipts.
 
+#### Brain Memory Topology
+
+Activate `[Map topology]` from any Claim or Actor detail nav strip, or select an Actor/Claim/Link from an Intel brief.
+
+- **Responsive Layout**: Desktop (≥132×32) uses a 3-panel split (Left Inspector 24%, Center Graph Canvas 55%, Right Navigation 21%). Compact mode (100–131 columns) uses a 2-panel Inspector + Canvas with a navigation drawer. Stacked mode (<100 columns or <32 rows) provides `[Graph] [Details] [Navigation]` panel tabs. Below 60×18 displays minimum terminal size guidance.
+- **Interactive Graph**: Centered seed root with 5 presentation kinds (Entity cyan circle, Claim green star, Topic violet diamond, Article teal box, Source hollow circle), connecting labeled edges (`concerns`, `mentioned_in`, `source`, `supports`, `premise`), anchored legend, and Scope findings.
+- **Navigation & Controls**: Arrow keys select nodes/edges; Enter inspects details and related items; `+`/`-` zooms; Shift+Arrows pans; `[Analyze scope]` triggers background scoped inference on `POOL_BRAIN_SCOPE`. 32-frame history stack restores previous positions on `[← Back]` or Esc.
+
+[![Brain memory topology](diagrams/brain-topology.svg)](diagrams/brain-topology.html)
+
 [![Brain browse projection](diagrams/brain-browse.svg)](diagrams/brain-browse.html)
 
 ### Atlas

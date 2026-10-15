@@ -152,6 +152,16 @@ pub enum IdentityState {
     Resolved,
 }
 
+impl IdentityState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IdentityState::Provisional => "provisional",
+            IdentityState::Ambiguous => "ambiguous",
+            IdentityState::Resolved => "resolved",
+        }
+    }
+}
+
 /// Endpoint of a Link/Related memory: a canonical Brain memory, or an exact
 /// Article/Source record (articles remain source records, not memories).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

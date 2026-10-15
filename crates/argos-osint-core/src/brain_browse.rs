@@ -9,7 +9,21 @@ use crate::memory_metadata::{MemoryKind, MemoryPayload};
 use crate::related_articles::canonical_url;
 use crate::store::{AtlasArticleRow, Store};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ArticleAssociation {
+    pub article: AtlasArticleRow,
+    pub occurrences: Vec<(String, String, String)>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Associations {
+    pub claims: Vec<Memory>,
+    pub actors: Vec<ActorGroup>,
+    pub threads: Vec<(String, String)>,
+    pub articles: Vec<ArticleAssociation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActorGroup {
     pub name_key: String,
     pub display_name: String,
@@ -27,24 +41,11 @@ pub enum BrowseRow {
 }
 
 #[derive(Clone, Debug)]
-pub struct ArticleAssociation {
-    pub article: AtlasArticleRow,
-    pub occurrences: Vec<(String, String, String)>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Associations {
-    pub claims: Vec<Memory>,
-    pub actors: Vec<ActorGroup>,
-    pub threads: Vec<(String, String)>,
-    pub articles: Vec<ArticleAssociation>,
-}
-
-struct BrowseContext {
-    claims: Vec<Memory>,
-    typed_actors: BTreeMap<String, BTreeSet<String>>,
-    claim_origins: BTreeMap<String, Associations>,
-    ingest: BTreeMap<(String, String), BTreeSet<String>>,
+pub(crate) struct BrowseContext {
+    pub(crate) claims: Vec<Memory>,
+    pub(crate) typed_actors: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) claim_origins: BTreeMap<String, Associations>,
+    pub(crate) ingest: BTreeMap<(String, String), BTreeSet<String>>,
 }
 
 impl ActorGroup {
@@ -250,7 +251,7 @@ impl Store {
         self.actor_group_associations_in(group, &self.browse_context()?)
     }
 
-    fn browse_context(&self) -> Result<BrowseContext> {
+    pub(crate) fn browse_context(&self) -> Result<BrowseContext> {
         let claims: Vec<_> = self
             .brain_browse(Some(MemoryKind::Claim), "")?
             .into_iter()
@@ -295,7 +296,37 @@ impl Store {
         })
     }
 
-    fn actor_group_associations_in(
+    /// Read actor groups scoped to an optional cycle run ID.
+    pub fn actor_groups_scoped(&self, cycle: Option<&str>) -> Result<Vec<ActorGroup>> {
+        let all = self.actor_groups()?;
+        let Some(cycle) = cycle else {
+            return Ok(all);
+        };
+        let mut scoped = Vec::new();
+        for group in all {
+            let assoc = self.actor_group_associations(&group)?;
+            if assoc.articles.iter().any(|a| a.article.run_id == cycle) {
+                scoped.push(group);
+            }
+        }
+        Ok(scoped)
+    }
+
+    /// Read associations for an actor group scoped to an optional cycle run ID.
+    pub fn actor_group_associations_scoped(
+        &self,
+        group: &ActorGroup,
+        cycle: Option<&str>,
+    ) -> Result<Associations> {
+        let mut assoc = self.actor_group_associations(group)?;
+        let Some(cycle) = cycle else {
+            return Ok(assoc);
+        };
+        assoc.articles.retain(|a| a.article.run_id == cycle);
+        Ok(assoc)
+    }
+
+    pub(crate) fn actor_group_associations_in(
         &self,
         group: &ActorGroup,
         context: &BrowseContext,
@@ -438,30 +469,44 @@ impl Store {
             edges: vec![],
         };
         for m in a.claims {
-            graph.nodes.push(node(m.id, GraphNodeKind::Finding, m.text));
-        }
-        for (id, title) in a.threads {
+            let nid = m.id.clone();
             graph
                 .nodes
-                .push(node(format!("thread:{id}"), GraphNodeKind::Source, title));
+                .push(node(nid.clone(), GraphNodeKind::Finding, m.text));
+            graph.edges.push(GraphEdge {
+                from: root.clone(),
+                to: nid.clone(),
+                kind: GraphEdgeKind::Link,
+                directive: Some("concerns".into()),
+                edge_id: Some(format!("edge:{root}:{nid}")),
+            });
+        }
+        for (id, title) in a.threads {
+            let nid = format!("thread:{id}");
+            graph
+                .nodes
+                .push(node(nid.clone(), GraphNodeKind::Source, title));
+            graph.edges.push(GraphEdge {
+                from: root.clone(),
+                to: nid.clone(),
+                kind: GraphEdgeKind::Link,
+                directive: Some("source".into()),
+                edge_id: Some(format!("edge:{root}:{nid}")),
+            });
         }
         for a in a.articles {
-            let mut n = node(
-                format!("article:{}/{}", a.article.run_id, a.article.id),
-                GraphNodeKind::Evidence,
-                a.article.title,
-            );
+            let nid = format!("article:{}/{}", a.article.run_id, a.article.id);
+            let mut n = node(nid.clone(), GraphNodeKind::Evidence, a.article.title);
             n.article_id = a.article.id;
             n.run_id = a.article.run_id;
             n.published_at = a.article.published_at;
             graph.nodes.push(n);
-        }
-        for n in &graph.nodes[1..] {
             graph.edges.push(GraphEdge {
                 from: root.clone(),
-                to: n.id.clone(),
+                to: nid.clone(),
                 kind: GraphEdgeKind::Link,
-                directive: Some("associated with".into()),
+                directive: Some("mentioned_in".into()),
+                edge_id: Some(format!("edge:{root}:{nid}")),
             });
         }
         graph

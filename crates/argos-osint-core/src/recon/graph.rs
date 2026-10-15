@@ -91,6 +91,35 @@ pub struct GraphEdge {
     pub kind: GraphEdgeKind,
     /// Directive id; for [`GraphEdgeKind::Link`] the Link relation.
     pub directive: Option<String>,
+    pub edge_id: Option<String>,
+}
+
+impl GraphEdge {
+    pub fn new(from: String, to: String, kind: GraphEdgeKind, directive: Option<String>) -> Self {
+        Self {
+            from,
+            to,
+            kind,
+            directive,
+            edge_id: None,
+        }
+    }
+
+    pub fn with_id(
+        from: String,
+        to: String,
+        kind: GraphEdgeKind,
+        directive: Option<String>,
+        edge_id: Option<String>,
+    ) -> Self {
+        Self {
+            from,
+            to,
+            kind,
+            directive,
+            edge_id,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -297,8 +326,42 @@ impl Store {
                             to: node,
                             kind: GraphEdgeKind::Link,
                             directive: Some(relation),
+                            edge_id: Some(link),
                         });
                         articles.push((run, article));
+                    }
+                }
+                for id in &ids {
+                    let mut stmt = self.conn.prepare(
+                        "SELECT m.id, m.text FROM brain_memory_actor_refs r
+                         JOIN memories m ON m.id = r.memory_id
+                         LEFT JOIN memory_metadata mm ON mm.memory_id = m.id
+                         WHERE r.actor_id = ?1 AND (mm.lifecycle IS NULL OR mm.lifecycle = 'active')
+                         ORDER BY m.pinned DESC, m.created_at DESC LIMIT 40",
+                    )?;
+                    let claim_rows = stmt
+                        .query_map([id], |r| {
+                            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    for (cid, ctext) in claim_rows {
+                        graph.node(GraphNode {
+                            id: cid.clone(),
+                            kind: GraphNodeKind::Finding,
+                            label: ctext.clone(),
+                            detail: ctext,
+                            tags: vec![],
+                            article_id: String::new(),
+                            run_id: String::new(),
+                            published_at: String::new(),
+                        });
+                        graph.edge(GraphEdge {
+                            from: actor.clone(),
+                            to: cid.clone(),
+                            kind: GraphEdgeKind::Concerns,
+                            directive: Some("concerns".into()),
+                            edge_id: Some(format!("edge:{actor}:{cid}")),
+                        });
                     }
                 }
                 for (run, article) in &articles {
@@ -314,20 +377,65 @@ impl Store {
                 }
             }
             "link" | "related" => {
-                let endpoint = |g: &mut GraphBuilder,
-                                e: &EndpointRef|
-                 -> anyhow::Result<Option<String>> {
-                    match e {
-                        EndpointRef::Memory { memory_id, .. } => {
-                            let canonical = crate::brain_actors::resolve(&self.conn, memory_id)?;
-                            Ok(Some(self.actor_node(g, &canonical)?))
+                let endpoint =
+                    |g: &mut GraphBuilder, e: &EndpointRef| -> anyhow::Result<Option<String>> {
+                        match e {
+                            EndpointRef::Memory { memory_id, .. } => {
+                                let mkind: Option<String> = self
+                                .conn
+                                .query_row(
+                                    "SELECT memory_kind FROM memory_metadata WHERE memory_id=?1",
+                                    [memory_id],
+                                    |r| r.get(0),
+                                )
+                                .optional()?;
+                                match mkind.as_deref() {
+                                    Some("actor") => {
+                                        let canonical =
+                                            crate::brain_actors::resolve(&self.conn, memory_id)?;
+                                        Ok(Some(self.actor_node(g, &canonical)?))
+                                    }
+                                    _ => {
+                                        if let Some(mem) = self.get_memory(memory_id)? {
+                                            let id = mem.id.clone();
+                                            g.node(GraphNode {
+                                                id: id.clone(),
+                                                kind: GraphNodeKind::Finding,
+                                                label: mem.text.clone(),
+                                                detail: mem.text,
+                                                tags: vec![],
+                                                article_id: String::new(),
+                                                run_id: String::new(),
+                                                published_at: String::new(),
+                                            });
+                                            Ok(Some(id))
+                                        } else {
+                                            Ok(None)
+                                        }
+                                    }
+                                }
+                            }
+                            EndpointRef::Article {
+                                run_id, article_id, ..
+                            } => self.article_node(g, run_id, article_id),
+                            EndpointRef::Source {
+                                origin, source_id, ..
+                            } => {
+                                let id = format!("source:{origin}:{source_id}");
+                                g.node(GraphNode {
+                                    id: id.clone(),
+                                    kind: GraphNodeKind::Source,
+                                    label: source_id.clone(),
+                                    detail: format!("{origin} {source_id}"),
+                                    tags: vec![],
+                                    article_id: String::new(),
+                                    run_id: String::new(),
+                                    published_at: String::new(),
+                                });
+                                Ok(Some(id))
+                            }
                         }
-                        EndpointRef::Article {
-                            run_id, article_id, ..
-                        } => self.article_node(g, run_id, article_id),
-                        EndpointRef::Source { .. } => Ok(None),
-                    }
-                };
+                    };
                 match self.memory_payload(memory_id)? {
                     Some(MemoryPayload::Link(p)) => {
                         if let (Some(a), Some(b)) = (
@@ -339,6 +447,7 @@ impl Store {
                                 to: b,
                                 kind: GraphEdgeKind::Link,
                                 directive: Some(p.relation),
+                                edge_id: Some(memory_id.into()),
                             });
                         }
                     }
@@ -383,6 +492,7 @@ impl Store {
                         to: b,
                         kind: GraphEdgeKind::Related,
                         directive: Some(p.basis),
+                        edge_id: Some(related),
                     });
                 }
             }
@@ -474,6 +584,7 @@ impl Store {
                     to: brief_node.clone(),
                     kind: GraphEdgeKind::Supports,
                     directive: None,
+                    edge_id: None,
                 });
             }
         }
@@ -562,6 +673,7 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
                 to: entity_id,
                 kind: GraphEdgeKind::Investigates,
                 directive: Some(directive.id.clone()),
+                edge_id: None,
             });
         }
     }
@@ -604,6 +716,7 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
         to: investigation,
         kind: GraphEdgeKind::DiscoveredIn,
         directive: None,
+        edge_id: None,
     });
     if let Some(entity_id) = claim_entity {
         graph.edge(GraphEdge {
@@ -611,6 +724,7 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
             to: entity_id,
             kind: GraphEdgeKind::Concerns,
             directive: None,
+            edge_id: None,
         });
     }
     if let Some(topic_id) = topic_id.clone() {
@@ -619,6 +733,7 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
             to: topic_id,
             kind: GraphEdgeKind::Concerns,
             directive: None,
+            edge_id: None,
         });
     }
 
@@ -645,6 +760,7 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
             to: format!("directive:{}", directive.id),
             kind: GraphEdgeKind::Answers,
             directive: Some(directive.id.clone()),
+            edge_id: None,
         });
         if let Some(topic_id) = topic_id.clone() {
             graph.edge(GraphEdge {
@@ -652,6 +768,7 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
                 to: topic_id,
                 kind: GraphEdgeKind::Investigates,
                 directive: Some(directive.id.clone()),
+                edge_id: None,
             });
         }
     }
@@ -700,12 +817,14 @@ pub fn build_memory_graph(insight: &InsightView, plans: &[Plan]) -> MemoryGraph 
                 GraphEdgeKind::Supports
             },
             directive: None,
+            edge_id: None,
         });
         graph.edge(GraphEdge {
             from: evidence,
             to: source_id,
             kind: GraphEdgeKind::DerivedFrom,
             directive: None,
+            edge_id: None,
         });
     }
 
@@ -771,6 +890,7 @@ pub fn build_claim_graph(
             to: entity_id,
             kind: GraphEdgeKind::Investigates,
             directive: Some("articles".into()),
+            edge_id: None,
         });
     }
     let topic = insight.topic.trim();
@@ -790,6 +910,7 @@ pub fn build_claim_graph(
             to: topic_id,
             kind: GraphEdgeKind::Investigates,
             directive: Some("articles".into()),
+            edge_id: None,
         });
     }
     let finding = graph.node(GraphNode {
@@ -814,6 +935,7 @@ pub fn build_claim_graph(
         to: directive.clone(),
         kind: GraphEdgeKind::Answers,
         directive: Some("articles".into()),
+        edge_id: None,
     });
     for source in &insight.sources {
         let article = source.run_id.as_deref().and_then(|run_id| {
@@ -886,12 +1008,14 @@ pub fn build_claim_graph(
                 GraphEdgeKind::Supports
             },
             directive: Some("articles".into()),
+            edge_id: None,
         });
         graph.edge(GraphEdge {
             from: evidence,
             to: source_id,
             kind: GraphEdgeKind::DerivedFrom,
             directive: None,
+            edge_id: None,
         });
     }
     MemoryGraph {
@@ -1104,6 +1228,30 @@ pub fn graph_brief(graph: &MemoryGraph) -> String {
             "Conclusion: {}",
             finding.detail.replace('\n', " | ")
         ));
+    }
+    if path.bands.is_empty() {
+        for node in &graph.nodes {
+            lines.push(format!("{}: {}", node.kind.label(), node.label));
+            let detail = node.detail.replace('\n', " | ");
+            if !detail.is_empty() && detail != node.label {
+                lines.push(format!("  {detail}"));
+            }
+        }
+        lines.push(String::new());
+        lines.push("Topology connections".into());
+        for edge in &graph.edges {
+            let from_node = graph.node(&edge.from);
+            let to_node = graph.node(&edge.to);
+            let from = from_node
+                .map(|node| node.label.as_str())
+                .unwrap_or(edge.from.as_str());
+            let to = to_node
+                .map(|node| node.label.as_str())
+                .unwrap_or(edge.to.as_str());
+            let verb = edge.directive.as_deref().unwrap_or(edge.kind.verb());
+            lines.push(format!("{from} {verb} {to}"));
+        }
+        return lines.join("\n");
     }
     for node in graph.nodes.iter().filter(|node| keep_node(node, chosen)) {
         lines.push(format!("{}: {}", node.kind.label(), node.label));

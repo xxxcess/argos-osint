@@ -3954,7 +3954,15 @@ fn recon_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
 }
 
 fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
+    if app.brain_list_mode == BrainListMode::Topology {
+        return app.layout.borrow().target_at(x, y);
+    }
     if app.brain_list_mode == BrainListMode::Graph {
+        if let Some(target) = app.layout.borrow().target_at(x, y) {
+            if target == Target::Button(ButtonId::BrainMapTopology) {
+                return Some(target);
+            }
+        }
         let areas = super::brain_detail::areas_for(app, body);
         if contains(areas.back, x, y) {
             return Some(Target::Button(ButtonId::BrainDetailBack));
@@ -5354,6 +5362,7 @@ fn header_detail(app: &App) -> String {
         Some(ModuleId::Brain) => match app.brain_list_mode {
             BrainListMode::List => "memories".into(),
             BrainListMode::Create => "new memory".into(),
+            BrainListMode::Topology => "topology".into(),
             BrainListMode::Graph => {
                 if let Some(title) = super::app::structural_title(app) {
                     title.trim().into()
@@ -6629,6 +6638,10 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
+    if app.brain_list_mode == BrainListMode::Topology {
+        super::topology::draw_topology(frame, app, area);
+        return;
+    }
     if app.brain_list_mode == BrainListMode::Graph {
         super::graph::draw(frame, app, area);
         return;

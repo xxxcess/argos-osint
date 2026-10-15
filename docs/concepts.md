@@ -59,6 +59,14 @@ Article Recon report execution is retired. Historical `intel_report_jobs`, attem
 
 Brain browsing exposes Claims and unique Actor-name groups without merging identities. Actor tabs show Claims, Recall-enabled Threads and ingest-associated Articles. Claim tabs show Actors and original Sources; provenance is independent of Related eligibility. Other memory kinds remain stored for recall and internal use.
 
+## Brain Memory Topology and Scope Analysis
+
+Brain Memory Topology projects typed memory seeds (`Actor`, `Claim`, `Article`, `Inference`, `Link`, `Related`) into an immutable snapshot bounded by depth (1..3) and cycle scope (`AllRetained` or `ThisCycle`).
+
+- **Presentation Nodes**: The graph maps memories to 5 canonical presentation kinds: Entity (ACCENT circle), Claim (GREEN star), Topic (SERIES diamond), Article (DIM dot), and Source (MUTED hollow circle). Claims are never miscast as Actors.
+- **Edges**: Endpoints connect typed nodes via explicit edge IDs (`EndpointRef::Source`, `EndpointRef::Article`, `EndpointRef::Memory`). Edges qualify relationships (`concerns`, `mentioned_in`, `source`, `supports`, `premise`, `possible context`).
+- **Scope Worker**: Async candidate evaluation runs on dedicated worker pool `POOL_BRAIN_SCOPE` (`brain_scope`) targeting `Surface::Scope`, persisting results atomically through `publish_snapshot_on` on lightweight SQLite readers without blocking LanceDB embeddings.
+
 ## Persistence
 
 - SQLite `~/.argos/argos.db` (`ARGOS_HOME`), `user_version` 26, additive migrations (v26 `recon_model_operations` / `recon_model_attempts`, Intel `lease_epoch`)

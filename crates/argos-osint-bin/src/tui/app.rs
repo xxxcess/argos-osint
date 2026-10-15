@@ -311,6 +311,7 @@ pub enum BrainListMode {
     List,
     Create,
     Graph,
+    Topology,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -656,6 +657,19 @@ pub enum ButtonId {
     RefreshHardware,
     ResumeSessionConfirm,
     ResumeSessionDismiss,
+    BrainMapTopology,
+    TopologyBack,
+    TopologyOpenMemory,
+    TopologyViewEvidence,
+    TopologyScopeAll,
+    TopologyScopeThis,
+    TopologyDepth1,
+    TopologyDepth2,
+    TopologyDepth3,
+    TopologyCenterSelected,
+    TopologyExpandNeighbors,
+    TopologyFitGraph,
+    TopologyAnalyzeScope,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -730,6 +744,10 @@ pub enum Target {
     IntelLeftColumn,
     IntelFullArticle,
     IntelPreview,
+    TopologyGraph,
+    TopologyNode(usize),
+    TopologyEdge(usize),
+    TopologyRelated(usize),
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
@@ -832,6 +850,10 @@ enum WorkEvent {
     BrainDetailLoaded {
         generation: u64,
         outcome: Result<Box<LoadedBrainDetail>, String>,
+    },
+    TopologyLoaded {
+        seed: argos_osint_core::brain_topology::TopologySeed,
+        outcome: Result<Box<argos_osint_core::brain_topology::TopologySnapshot>, String>,
     },
     BrainLoaded {
         generation: u64,
@@ -958,6 +980,19 @@ impl LayoutRegistry {
             scope: self.current_scope,
             scrollable: false,
         });
+    }
+
+    pub fn target_at(&self, x: u16, y: u16) -> Option<Target> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| {
+                x >= e.rect.x
+                    && x < e.rect.x + e.rect.width
+                    && y >= e.rect.y
+                    && y < e.rect.y + e.rect.height
+            })
+            .map(|e| e.target)
     }
 }
 
@@ -1246,6 +1281,8 @@ pub struct App {
     brain_graph_for: Option<String>,
     /// Open memory detail (graph, Related, Summary), independent of `memory_sel`.
     pub brain_detail: super::brain_detail::BrainDetail,
+    /// Brain Memory Topology interactive state.
+    pub topology_state: super::topology::TopologyState,
     /// Total saved memories, to explain an active Find filter.
     pub memory_total: usize,
     /// Last memory-list read failure; the previous list stays on screen.
@@ -1675,6 +1712,7 @@ impl App {
             related_scope: RelatedScope::default(),
             brain_graph_for: None,
             brain_detail: Default::default(),
+            topology_state: Default::default(),
             memory_total,
             memory_error: None,
             memories_loaded: false,
@@ -5534,6 +5572,22 @@ impl App {
                 self.on_brain_detail_loaded(generation, outcome);
                 true
             }
+            WorkEvent::TopologyLoaded { seed, outcome } => {
+                if self.topology_state.seed.as_ref() == Some(&seed) {
+                    match outcome {
+                        Ok(snap) => {
+                            self.topology_state.selected_node_id = Some(snap.root_id.clone());
+                            self.topology_state.snapshot = Some(*snap);
+                            self.status = "Brain Memory Topology".into();
+                        }
+                        Err(err) => {
+                            self.status = format!("Topology load error: {err}");
+                            self.push_log_detail("error", "Brain: topology snapshot failed", err);
+                        }
+                    }
+                }
+                true
+            }
             WorkEvent::BrainLoaded {
                 generation,
                 outcome,
@@ -6842,6 +6896,181 @@ impl App {
         })
     }
 
+    pub(crate) fn open_topology(&mut self, seed: argos_osint_core::brain_topology::TopologySeed) {
+        self.topology_state.push_history();
+        self.module = Some(ModuleId::Brain);
+        self.brain_list_mode = BrainListMode::Topology;
+        self.topology_state.seed = Some(seed.clone());
+        let options = argos_osint_core::brain_topology::TopologyOptions {
+            depth: self.topology_state.depth,
+            cycle_scope: self.topology_state.cycle_scope.clone(),
+            max_nodes: 100,
+            max_edges: 200,
+            continuation_token: None,
+        };
+
+        if let Some(db) = self.background_db.clone() {
+            let tx = self.work_tx.clone();
+            let seed_clone = seed.clone();
+            let options_clone = options.clone();
+            std::thread::spawn(move || {
+                let outcome = Store::open_light(&db)
+                    .and_then(|store| {
+                        store
+                            .topology_snapshot(&seed_clone, &options_clone)
+                            .map(Box::new)
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(WorkEvent::TopologyLoaded {
+                    seed: seed_clone,
+                    outcome,
+                });
+            });
+            self.status = "Loading Brain topology...".into();
+        } else if let Ok(snap) = self.store.topology_snapshot(&seed, &options) {
+            self.topology_state.selected_node_id = Some(snap.root_id.clone());
+            self.topology_state.snapshot = Some(snap);
+            self.status = "Brain Memory Topology".into();
+        } else {
+            self.status = "Loading Brain topology...".into();
+        }
+        self.set_focus(Target::Button(ButtonId::TopologyBack));
+    }
+
+    pub(crate) fn refresh_topology(&mut self) {
+        if let Some(seed) = self.topology_state.seed.clone() {
+            let options = argos_osint_core::brain_topology::TopologyOptions {
+                depth: self.topology_state.depth,
+                cycle_scope: self.topology_state.cycle_scope.clone(),
+                max_nodes: 100,
+                max_edges: 200,
+                continuation_token: None,
+            };
+            if let Ok(snap) = self.store.topology_snapshot(&seed, &options) {
+                self.topology_state.snapshot = Some(snap);
+            }
+        }
+    }
+
+    fn handle_topology_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::Backspace => {
+                self.activate_button(ButtonId::TopologyBack);
+                true
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.topology_state.zoom_percent = (self.topology_state.zoom_percent + 10).min(200);
+                true
+            }
+            KeyCode::Char('-') | KeyCode::Char('_') => {
+                self.topology_state.zoom_percent =
+                    self.topology_state.zoom_percent.saturating_sub(10).max(50);
+                true
+            }
+            KeyCode::Home => {
+                self.topology_state.pan = (0, 0);
+                self.topology_state.zoom_percent = 100;
+                true
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::F(5) => {
+                self.refresh_topology();
+                true
+            }
+            KeyCode::Tab => {
+                self.focus_next(false);
+                true
+            }
+            KeyCode::BackTab => {
+                self.focus_next(true);
+                true
+            }
+            KeyCode::Up => {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.topology_state.pan.1 = self.topology_state.pan.1.saturating_sub(2);
+                } else if self.focus == Target::TopologyRelated(self.topology_state.related_sel) {
+                    self.topology_state.related_sel =
+                        self.topology_state.related_sel.saturating_sub(1);
+                    self.set_focus(Target::TopologyRelated(self.topology_state.related_sel));
+                } else if let Some(snap) = &self.topology_state.snapshot {
+                    if !snap.nodes.is_empty() {
+                        let cur_idx = snap
+                            .nodes
+                            .iter()
+                            .position(|n| {
+                                Some(&n.id) == self.topology_state.selected_node_id.as_ref()
+                            })
+                            .unwrap_or(0);
+                        let next_idx = cur_idx.saturating_sub(1);
+                        self.topology_state.selected_node_id =
+                            Some(snap.nodes[next_idx].id.clone());
+                        self.set_focus(Target::TopologyNode(next_idx));
+                    }
+                }
+                true
+            }
+            KeyCode::Down => {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.topology_state.pan.1 = self.topology_state.pan.1.saturating_add(2);
+                } else if self.focus == Target::TopologyRelated(self.topology_state.related_sel) {
+                    let total = self
+                        .topology_state
+                        .snapshot
+                        .as_ref()
+                        .map(|s| s.associations.actors.len() + s.associations.claims.len())
+                        .unwrap_or(4);
+                    if total > 0 {
+                        self.topology_state.related_sel =
+                            (self.topology_state.related_sel + 1).min(total - 1);
+                        self.set_focus(Target::TopologyRelated(self.topology_state.related_sel));
+                    }
+                } else if let Some(snap) = &self.topology_state.snapshot {
+                    if !snap.nodes.is_empty() {
+                        let cur_idx = snap
+                            .nodes
+                            .iter()
+                            .position(|n| {
+                                Some(&n.id) == self.topology_state.selected_node_id.as_ref()
+                            })
+                            .unwrap_or(0);
+                        let next_idx = (cur_idx + 1).min(snap.nodes.len() - 1);
+                        self.topology_state.selected_node_id =
+                            Some(snap.nodes[next_idx].id.clone());
+                        self.set_focus(Target::TopologyNode(next_idx));
+                    }
+                }
+                true
+            }
+            KeyCode::Left => {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.topology_state.pan.0 = self.topology_state.pan.0.saturating_sub(4);
+                }
+                true
+            }
+            KeyCode::Right => {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.topology_state.pan.0 = self.topology_state.pan.0.saturating_add(4);
+                }
+                true
+            }
+            KeyCode::Enter => {
+                match self.focus {
+                    Target::Button(b) => {
+                        self.activate_button(b);
+                    }
+                    Target::TopologyRelated(idx) => {
+                        self.activate_target(Target::TopologyRelated(idx));
+                    }
+                    Target::TopologyNode(_) => {
+                        self.activate_button(ButtonId::TopologyOpenMemory);
+                    }
+                    _ => {}
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// One transition for every memory link (Brain list, Related, others).
     /// Fetches the destination by id, even when Find hides it. On failure the
     /// current view stays intact. Returns whether the detail opened.
@@ -7680,6 +7909,135 @@ impl App {
             ButtonId::IntelRelatedMore => self.more_related_articles(),
             ButtonId::BrainDetailBack => {
                 self.detail_back();
+                return;
+            }
+            ButtonId::BrainMapTopology => {
+                if let Some(id) = self.brain_detail.memory_id() {
+                    let seed = if id.starts_with("actor-group:") {
+                        let name_key = id.trim_start_matches("actor-group:").to_string();
+                        argos_osint_core::brain_topology::TopologySeed::ActorGroup {
+                            name_key,
+                            member_ids: Vec::new(),
+                        }
+                    } else if id.starts_with("actor:") {
+                        argos_osint_core::brain_topology::TopologySeed::Actor(id.to_string())
+                    } else {
+                        argos_osint_core::brain_topology::TopologySeed::Claim(id.to_string())
+                    };
+                    self.open_topology(seed);
+                }
+                return;
+            }
+            ButtonId::TopologyBack => {
+                if let Some(frame) = self.topology_state.pop_history() {
+                    self.topology_state.seed = Some(frame.seed.clone());
+                    self.topology_state.selected_node_id = frame.selected_node_id;
+                    self.topology_state.selected_edge_id = frame.selected_edge_id;
+                    self.topology_state.depth = frame.depth;
+                    self.topology_state.cycle_scope = frame.cycle_scope;
+                    self.topology_state.zoom_percent = frame.zoom_percent;
+                    self.topology_state.pan = frame.pan;
+                    self.topology_state.inspector_tab = frame.inspector_tab;
+                    self.topology_state.related_sel = frame.related_sel;
+                    self.refresh_topology();
+                } else if self.brain_detail.memory.is_some() {
+                    self.brain_list_mode = BrainListMode::Graph;
+                    self.set_focus(Target::Button(ButtonId::BrainDetailBack));
+                } else {
+                    self.brain_list_mode = BrainListMode::List;
+                    self.set_focus(Target::Memory(self.memory_sel));
+                }
+                return;
+            }
+            ButtonId::TopologyOpenMemory => {
+                if let Some(sel_id) = self.topology_state.selected_node_id.clone() {
+                    self.open_memory_detail(&sel_id);
+                }
+                return;
+            }
+            ButtonId::TopologyViewEvidence => {
+                self.topology_state.inspector_tab = if self.topology_state.inspector_tab == 0 {
+                    1
+                } else {
+                    0
+                };
+                return;
+            }
+            ButtonId::TopologyScopeAll => {
+                self.topology_state.cycle_scope =
+                    argos_osint_core::brain_topology::CycleScope::AllRetained;
+                self.refresh_topology();
+                return;
+            }
+            ButtonId::TopologyScopeThis => {
+                if let Some(cycle_id) = self.topology_state.current_cycle_id() {
+                    self.topology_state.cycle_scope =
+                        argos_osint_core::brain_topology::CycleScope::ThisCycle(cycle_id);
+                    self.refresh_topology();
+                }
+                return;
+            }
+            ButtonId::TopologyDepth1 => {
+                self.topology_state.depth = 1;
+                self.refresh_topology();
+                return;
+            }
+            ButtonId::TopologyDepth2 => {
+                self.topology_state.depth = 2;
+                self.refresh_topology();
+                return;
+            }
+            ButtonId::TopologyDepth3 => {
+                self.topology_state.depth = 3;
+                self.refresh_topology();
+                return;
+            }
+            ButtonId::TopologyCenterSelected => {
+                self.topology_state.center_selected();
+                return;
+            }
+            ButtonId::TopologyExpandNeighbors => {
+                self.topology_state.depth = (self.topology_state.depth + 1).min(3);
+                self.refresh_topology();
+                return;
+            }
+            ButtonId::TopologyFitGraph => {
+                self.topology_state.pan = (0, 0);
+                self.topology_state.zoom_percent = 100;
+                return;
+            }
+            ButtonId::TopologyAnalyzeScope => {
+                if let Some(seed) = self.topology_state.seed.clone() {
+                    let options = argos_osint_core::brain_topology::TopologyOptions {
+                        depth: self.topology_state.depth,
+                        cycle_scope: self.topology_state.cycle_scope.clone(),
+                        max_nodes: 100,
+                        max_edges: 200,
+                        continuation_token: None,
+                    };
+                    let payload = argos_osint_core::brain_scope::ScopeAnalysisPayload {
+                        seed,
+                        cycle_scope: self.topology_state.cycle_scope.clone(),
+                        depth: self.topology_state.depth,
+                        options,
+                    };
+                    let now = chrono::Utc::now().to_rfc3339();
+                    match argos_osint_core::brain_scope::enqueue_scope_analysis(
+                        self.store.connection(),
+                        &payload,
+                        &now,
+                    ) {
+                        Ok(task_id) => {
+                            self.topology_state.analyzing_scope = true;
+                            self.topology_state.scope_status = format!("Enqueued ({task_id})");
+                            self.status = format!("Enqueued scope analysis ({task_id})");
+                        }
+                        Err(e) => {
+                            self.topology_state.scope_status = format!("Failed: {e}");
+                            self.status = format!("Failed to analyze scope: {e}");
+                        }
+                    }
+                }
                 return;
             }
             ButtonId::Add => self.save_insight(),
@@ -8767,6 +9125,31 @@ impl App {
                 }
             }
             Target::DetailPath | Target::DetailSummary => self.set_focus(target),
+            Target::TopologyGraph => {
+                self.set_focus(Target::TopologyGraph);
+            }
+            Target::TopologyNode(index) => {
+                if let Some(snap) = &self.topology_state.snapshot {
+                    if let Some(node) = snap.nodes.get(index) {
+                        self.topology_state.selected_node_id = Some(node.id.clone());
+                        self.topology_state.selected_edge_id = None;
+                        self.set_focus(Target::TopologyNode(index));
+                    }
+                }
+            }
+            Target::TopologyEdge(index) => {
+                if let Some(snap) = &self.topology_state.snapshot {
+                    if let Some(edge) = snap.edges.get(index) {
+                        self.topology_state.selected_edge_id = Some(edge.id.clone());
+                        self.topology_state.selected_node_id = None;
+                        self.set_focus(Target::TopologyEdge(index));
+                    }
+                }
+            }
+            Target::TopologyRelated(index) => {
+                self.topology_state.related_sel = index;
+                self.set_focus(Target::TopologyRelated(index));
+            }
             Target::AtlasArticle(index) => {
                 if self.atlas_articles.is_empty() {
                     return;
@@ -9198,6 +9581,12 @@ impl App {
         if self.module == Some(ModuleId::System)
             && self.overlay == Overlay::None
             && super::profile::handle_key(self, key)
+        {
+            return true;
+        }
+        if self.module == Some(ModuleId::Brain)
+            && self.brain_list_mode == BrainListMode::Topology
+            && self.handle_topology_key(key)
         {
             return true;
         }
@@ -9820,6 +10209,10 @@ impl App {
                 self.esc_arm = Some(now);
                 self.status = "Press Esc again to clear the draft".into();
             }
+            return;
+        }
+        if self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Topology {
+            self.activate_button(ButtonId::TopologyBack);
             return;
         }
         if self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Graph {
@@ -11117,6 +11510,7 @@ mod tests {
             related_scope: RelatedScope::default(),
             brain_graph_for: None,
             brain_detail: Default::default(),
+            topology_state: Default::default(),
             memory_total: 0,
             memory_error: None,
             memories_loaded: true,
@@ -20300,5 +20694,60 @@ mod tests {
         assert_eq!(app.scrolls.chat, before);
         let text = buffer_text(&render(&mut app, 80, 24));
         assert!(text.contains("Jump to latest"));
+    }
+
+    #[test]
+    fn dump_brain_topology_screens() {
+        let mut initial_app = app();
+        initial_app.select(ModuleId::Brain.index());
+        initial_app.brain_list_mode = BrainListMode::Topology;
+        initial_app.topology_state.seed = Some(
+            argos_osint_core::brain_topology::TopologySeed::Actor("A-001".into()),
+        );
+        initial_app.topology_state.selected_node_id = Some("A-001".into());
+
+        let buf = render(&mut initial_app, 160, 50);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Brain Memory Topology"));
+        assert!(text.contains("Scoped relationships"));
+        assert!(text.contains("Northstar Labs"));
+
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [
+            (160, 50),
+            (120, 40),
+            (100, 32),
+            (80, 24),
+            (60, 18),
+            (50, 15),
+        ] {
+            let mut app = app();
+            app.select(ModuleId::Brain.index());
+            app.brain_list_mode = BrainListMode::Topology;
+            app.topology_state.seed = Some(argos_osint_core::brain_topology::TopologySeed::Actor(
+                "A-001".into(),
+            ));
+            app.topology_state.selected_node_id = Some("A-001".into());
+
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("topology-{width}x{height}"),
+                width,
+                height,
+            );
+
+            app.topology_state.inspector_tab = 1;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("topology-articles-{width}x{height}"),
+                width,
+                height,
+            );
+        }
     }
 }

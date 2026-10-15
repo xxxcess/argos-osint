@@ -18,6 +18,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Atlas classification-only cycle and Related leads | Process | [atlas-pipeline.html](diagrams/atlas-pipeline.html) | [atlas-pipeline.svg](diagrams/atlas-pipeline.svg) |
 | Historical Intel report (retired) | Data flow | [intel-report.html](diagrams/intel-report.html) | [intel-report.svg](diagrams/intel-report.svg) |
 | Brain browse projection | Data flow | [brain-browse.html](diagrams/brain-browse.html) | [brain-browse.svg](diagrams/brain-browse.svg) |
+| Brain memory topology and scope | Architecture | [brain-topology.html](diagrams/brain-topology.html) | [brain-topology.svg](diagrams/brain-topology.svg) |
 | Intel brief / historical report states | State machine | [intel-job-states.html](diagrams/intel-job-states.html) | [intel-job-states.svg](diagrams/intel-job-states.svg) |
 | Intel brief preparation | Process | [intel-brief-chain.html](diagrams/intel-brief-chain.html) | [intel-brief-chain.svg](diagrams/intel-brief-chain.svg) |
 | Brain recall | Architecture | [brain-recall.html](diagrams/brain-recall.html) | [brain-recall.svg](diagrams/brain-recall.svg) |

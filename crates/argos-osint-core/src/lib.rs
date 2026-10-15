@@ -33,6 +33,8 @@ pub mod brain_kinds;
 pub mod brain_lance;
 pub mod brain_query;
 pub mod brain_schema;
+pub mod brain_scope;
+pub mod brain_topology;
 pub mod config_commit;
 pub mod config_transfer;
 #[cfg(test)]

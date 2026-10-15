@@ -634,6 +634,28 @@ pub fn draw_nav(frame: &mut Frame, app: &App, areas: &DetailAreas, _claim: bool)
         Paragraph::new(Span::styled("‹ Back", back_style)),
         areas.back,
     );
+
+    let map_w = 15u16;
+    if areas.nav.width > areas.back.width + 30 + map_w {
+        let map_rect = Rect::new(
+            areas.nav.x + areas.nav.width.saturating_sub(map_w),
+            areas.nav.y,
+            map_w,
+            1,
+        );
+        app.layout
+            .borrow_mut()
+            .register(Target::Button(ButtonId::BrainMapTopology), map_rect);
+        let map_style = if app.focus == Target::Button(ButtonId::BrainMapTopology) {
+            theme::selected()
+        } else {
+            theme::accent()
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled("[Map topology]", map_style)),
+            map_rect,
+        );
+    }
 }
 
 /// The injected read failure, if any (always `None` outside tests).

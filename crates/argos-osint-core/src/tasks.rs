@@ -168,6 +168,8 @@ pub const POOL_ATLAS: &str = "atlas";
 /// Dedicated pool for dependent Intel brief preparation stages; never
 /// claimed by generic/legacy drainers.
 pub const POOL_INTEL_BRIEF: &str = "intel_brief";
+/// Dedicated pool for durable Brain topology scope analysis.
+pub const POOL_BRAIN_SCOPE: &str = "brain_scope";
 /// Worker crash/lease-expiry recoveries allowed per task before it fails as an
 /// infrastructure fault. Independent of provider attempts.
 pub const MAX_WORKER_RECOVERIES: i64 = 3;
@@ -209,6 +211,8 @@ pub fn pool_for_operation(operation: &str) -> &'static str {
         POOL_ATLAS
     } else if operation.starts_with("intel_brief_") {
         POOL_INTEL_BRIEF
+    } else if operation.starts_with("brain_scope") {
+        POOL_BRAIN_SCOPE
     } else {
         POOL_LLM
     }

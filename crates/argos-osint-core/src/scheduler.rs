@@ -376,7 +376,8 @@ impl WorkerPool {
             Self::spawn_summary_flush_drainer(db_path.clone(), owner.clone()),
             Self::spawn_insight_refresh_drainer(db_path.clone(), owner.clone()),
             Self::spawn_brain_backfill_drainer(db_path.clone(), owner.clone()),
-            Self::spawn_intel_brief_drainer(db_path, owner),
+            Self::spawn_intel_brief_drainer(db_path.clone(), owner.clone()),
+            Self::spawn_brain_scope_drainer(db_path, owner),
         ]
     }
 
@@ -474,6 +475,35 @@ impl WorkerPool {
                         );
                     }
                     std::thread::sleep(Duration::from_secs(2));
+                }
+            });
+        Self { stop }
+    }
+
+    /// Dedicated Brain topology scope analysis drainer: executes inferences
+    /// and link generation for enqueued scope tasks while elected.
+    pub fn spawn_brain_scope_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let _ = std::thread::Builder::new()
+            .name("argos-brain-scope".into())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                while !flag.load(Ordering::Acquire) {
+                    let elected = Connection::open(&db_path).ok().is_some_and(|conn| {
+                        try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
+                    });
+                    if elected {
+                        let _ = runtime.block_on(crate::brain_scope::drain_scope_tasks(
+                            &db_path, &owner, &flag,
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(750));
                 }
             });
         Self { stop }

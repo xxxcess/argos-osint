@@ -68,6 +68,22 @@ Intel Focus Brief keeps its center stack borderless and uses the shared clipped 
 
 The brief **Jobs** pane shows the dependency chain summary followed by one spaced record per stage (Full article, Claims, Inferences, Links). Active stages spin; Full Article and Claims may run together, then Inferences joins both and Links follows. Running rows name their activity: retrieving / cleaning, waiting for model, validating, or checking fidelity. Queued rows name their blocker; failed rows show a short reason. A **Publication / Index** footer follows: Pending, Published · Index pending / Indexed / Not indexed · reason / Index failed · reason, with historical reports excluded from precedence. Global Jobs shows the same `Stage · row` labels in stage order, and each committed stage logs `intel_brief.stage`. Content panes show completed checkpoints as soon as they commit, and they never inherit a parent failure: validated artifacts read "Validated · not published". Links render as **Potential corroboration**. Captures: `intel_sequential_stage_screens` at 160×50, 120×40, 100×32, 80×24, 60×18 and 40×12; images are in `docs/screens/intel-sequential/`.
 
+## Brain Memory Topology and GraphCanvas
+
+`topology_layout::TopologyLayoutResult` computes pure geometry for the 3-panel reactive topology view:
+- **Desktop (≥132×32)**: Left Inspector 24%, Center Graph Canvas 55%, Right Navigation 21%.
+- **Compact (100–131 columns)**: Left Inspector 28%, Center Graph Canvas 72%, Navigation drawer available.
+- **Stacked (<100 columns or <32 rows)**: Single full-width tabbed view with `[Graph] [Details] [Navigation]` panel tabs in the subheader.
+- **Tiny (<60×18 cells)**: Explicit minimum size guidance panel.
+
+`topology.rs` renders the interactive node-link graph:
+- **Presentation Nodes**: Entity (ACCENT cyan circle `●`), Claim (GREEN square `■`), Topic/Inference (SERIES violet diamond `◆`), Article (DIM box `□`), Source (MUTED circle `○`).
+- **Connecting Edges**: Assessed Links (`supports`, `concerns`, `source`, `mentioned_in`, `premise`) and tentative Related (`possible context`).
+- **Anchored Legend**: Fixed at the bottom of the canvas.
+- **Scope Findings**: Below legend, summarizing recorded links, cycle coverage, and gaps.
+- **Minimap**: Graph overview in the navigation drawer.
+- **List Spacing**: Inspector "Related to selection" records maintain `LIST_ITEM_GAP_ROWS = 1`.
+
 `components::ScrollPane` owns a `usize` offset. `scroll(delta, extent, viewport)` clamps it; `reveal(start, height, viewport)` brings focused content into view; `visible(lines, height)` slices before rendering, avoiding u16 Paragraph offsets. Dashboard, each panel and expanded detail keep independent state.
 
 ```rust,ignore

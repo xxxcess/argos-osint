@@ -24,6 +24,8 @@ mod related_articles;
 mod summary_card;
 mod theme;
 mod tool_catalog;
+pub mod topology;
+pub mod topology_layout;
 mod tracked;
 mod ui;
 

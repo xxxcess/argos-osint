@@ -455,6 +455,16 @@ Claim publication synchronizes typed actor refs and the reference table inside t
 
 Production browsing loads immutable snapshots on separate read-only connections. The list batches Claim selection, claim origins and retained ingest-pair eligibility; Actor Graph/Related/totals share one association snapshot. Find filters cached rows. Hidden Brain changes only invalidate its cache, and stale delivery cannot replace newer selection or navigation. Atlas history/pruning/deletion, Intel bulletin/brief/Related reads, Recon history/deletion, Jobs and Logs also keep bulk database work off the terminal event loop. The TUI control Store never attaches LanceDB; commits enqueue durable index work for the elected pool. See the [database responsiveness audit](tui-database-responsiveness.md).
 
+## Brain Memory Topology and Scope Analysis
+
+`Store::topology_snapshot` (`brain_topology.rs`) provides an immutable, depth-bounded (1..3) projection starting from any typed `TopologySeed` (`Actor`, `ActorGroup`, `Claim`, `Article`, `Inference`, `Link`, `Related`).
+
+- **Cycle Scoping & Bounds**: Supports `CycleScope::AllRetained` or `CycleScope::ThisCycle(id)`. Bounds depth and total nodes/edges with a deterministic continuation token to avoid query explosion.
+- **Node & Edge Classification**: Maps memories to 5 presentation kinds (Entity, Claim, Topic, Article, Source). Prevents claims from being miscast as actors. Generates explicit edge IDs and distinguishes recorded Links (`supports`, `concerns`, `mentioned_in`, `source`, `premise`) from tentative Related leads (`possible context`).
+- **Background Scope Analysis**: Async candidate proposal and link assessment executes on dedicated worker pool `POOL_BRAIN_SCOPE = "brain_scope"` (`scheduler.rs`, `tasks.rs`) targeting `Surface::Scope` (`insights.rs`). Publication uses `publish_snapshot_on` on lightweight SQLite connections (`Store::open_light`), eliminating LanceDB lock contention.
+
+[![Brain memory topology](diagrams/brain-topology.svg)](diagrams/brain-topology.html)
+
 ## Intel reports
 
 Article Recon report execution is historical. `create_report_job`, resume/retry and worker entry reject execution. Startup retirement revokes unfinished report and descendant leases, records durable retirement markers and signals workers. It preserves historical result bundles and provenance, leaves brief chains and article owner generations intact, and fences late report publication. Independent Recon investigations are unchanged.

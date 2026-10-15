@@ -479,12 +479,13 @@ pub async fn run_pipeline(
         "article" => Surface::Article,
         "recon" => Surface::Recon,
         "recon_report" => Surface::Report,
+        "scope" => Surface::Scope,
         _ => anyhow::bail!("unknown insight surface"),
     };
     let cap = match surface {
         Surface::Atlas => 1,
         Surface::Recon => RECON_CLAIM_LIMIT,
-        Surface::Article | Surface::Report => ARTICLE_CLAIM_LIMIT,
+        Surface::Article | Surface::Report | Surface::Scope => ARTICLE_CLAIM_LIMIT,
     };
     ensure!(
         input.surface != "article" || super::insight_persist::article_details_eligible(input),
@@ -1676,6 +1677,7 @@ pub enum Surface {
     Article,
     Recon,
     Report,
+    Scope,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Readiness {
@@ -1692,6 +1694,11 @@ pub fn readiness(
     claims: &[SourceClaim],
 ) -> Readiness {
     let mut out = Readiness::default();
+    if surface == Surface::Scope {
+        out.input_eligible = true;
+        out.publication_eligible = true;
+        return out;
+    }
     if surface == Surface::Atlas {
         out.gaps
             .push("Atlas ingestion permits attributed source claims only".into());

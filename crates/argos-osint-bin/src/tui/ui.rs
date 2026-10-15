@@ -648,7 +648,7 @@ pub(crate) fn home_layout_metrics(area: Rect) -> HomeLayoutMetrics {
 
     let box_h = if area.height >= 26 { 3 } else { 2 };
     let composer_total_h = box_h + 1; // box_h + 1 guidance (label removed)
-    let apps_h = if area.height < 32 { 9 } else { 19 }; // 1 heading + 4 apps + 1 gap + 1 heading + 5 apps
+    let apps_h = if area.height < 32 { 5 } else { 12 }; // dense app rows; retain group headings and section gap
 
     let (gap_title_to_composer, gap_composer_to_apps) =
         if area.height >= 34 { (2, 2) } else { (1, 1) };
@@ -726,7 +726,7 @@ pub(crate) fn home_rows(area: Rect, errors: usize) -> Vec<HomeRow> {
     }
     for (index, row) in app_rows.iter_mut().enumerate() {
         row.y = metrics.apps_y.saturating_add(if area.height < 32 {
-            (index / 2) as u16 * 2
+            (index / 2) as u16
         } else {
             index as u16
         });
@@ -746,10 +746,7 @@ fn home_group(rows: &mut Vec<HomeRow>, title: &'static str, modules: &[ModuleId]
         center: false,
         kind: HomeKind::Heading(title),
     });
-    for (index, module) in modules.iter().enumerate() {
-        if index > 0 {
-            rows.push(gap_row());
-        }
+    for module in modules {
         rows.push(HomeRow {
             y: 0,
             target: Some(module.index()),
@@ -2461,9 +2458,10 @@ pub(crate) fn reveal_spaced_lists(app: &mut App) {
     let body = chrome(app.screen, app).body;
     if app.module.is_none() && body.height < 32 {
         let metrics = home_layout_metrics(body);
-        let room = super::components::ListGeometry::capacity(
+        let room = super::components::ListGeometry::capacity_with_gap(
             body.bottom().saturating_sub(metrics.apps_y) as usize,
             1,
+            0,
         )
         .max(1);
         reveal_index(&mut app.scrolls.home, app.launcher_sel / 2, room);
@@ -2702,6 +2700,11 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
         nudge(&mut app.scrolls.popup, delta * 3, max);
         return;
     }
+    if app.module == Some(ModuleId::Brain) && app.brain_list_mode == BrainListMode::Topology {
+        let target = hit_test(app, x, y).unwrap_or(app.focus);
+        super::topology::scroll_topology(app, target, delta as isize * 3);
+        return;
+    }
     let body = chrome(app.screen, app).body;
     if app.module.is_none() {
         let index = app
@@ -2887,6 +2890,42 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
 }
 
 pub fn page(app: &mut App, direction: i32) {
+    if app.overlay == Overlay::None
+        && app.module == Some(ModuleId::Brain)
+        && app.brain_list_mode == BrainListMode::Topology
+    {
+        ensure_registered_layout(app);
+        let target = app.focus;
+        let registry = app.layout.borrow();
+        let room = if matches!(
+            target,
+            Target::TopologyRelated(_) | Target::TopologyRelationships
+        ) {
+            registry
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry.target, Target::TopologyRelated(_)))
+                .count()
+                .max(1)
+        } else {
+            let target = if matches!(
+                target,
+                Target::TopologyGraph | Target::TopologyNode(_) | Target::TopologyEdge(_)
+            ) {
+                Target::TopologyGraph
+            } else {
+                target
+            };
+            registry
+                .entries
+                .iter()
+                .find(|entry| entry.target == target)
+                .map_or(1, |entry| entry.rect.height.max(1) as usize)
+        };
+        drop(registry);
+        super::topology::scroll_topology(app, target, direction as isize * room as isize);
+        return;
+    }
     if app.overlay == Overlay::AddFallback {
         let rows = add_fallback_layout(active_popup_area(app, app.screen));
         let room =
@@ -2902,10 +2941,11 @@ pub fn page(app: &mut App, direction: i32) {
 
     if app.module.is_none() && app.overlay == Overlay::None {
         let body = chrome(app.screen, app).body;
-        let room = super::components::ListGeometry::capacity(
+        let room = super::components::ListGeometry::capacity_with_gap(
             body.bottom()
                 .saturating_sub(home_layout_metrics(body).apps_y) as usize,
             1,
+            0,
         )
         .max(1);
         let index = app
@@ -3112,7 +3152,12 @@ pub fn page(app: &mut App, direction: i32) {
                         nudge(&mut app.scrolls.intel_brief, direction * 6, stack_max);
                     }
                 }
-            } else if app.focus == Target::IntelLeftColumn {
+            } else if matches!(
+                app.focus,
+                Target::IntelLeftColumn
+                    | Target::IntelTopologyClaim(_)
+                    | Target::IntelTopologyActor(_)
+            ) {
                 let max = intel_extracted_scroll_max(app);
                 nudge(&mut app.scrolls.intel_extracted, direction * 6, max);
             } else if app.focus == Target::IntelFullArticle {
@@ -3380,11 +3425,12 @@ fn popup_max(app: &App) -> u16 {
 }
 
 fn atlas_feed_room(app: &App) -> usize {
-    super::components::ListGeometry::capacity(
+    super::components::ListGeometry::capacity_with_gap(
         inset(atlas_live_areas(app, chrome(app.screen, app).body).3)
             .height
             .max(1) as usize,
         1,
+        0,
     )
     .max(1)
 }
@@ -3461,11 +3507,12 @@ fn insights_scroll_max(app: &App) -> u16 {
 }
 
 fn atlas_runs_room(app: &App) -> usize {
-    super::components::ListGeometry::capacity(
+    super::components::ListGeometry::capacity_with_gap(
         inset(atlas_runs_areas(chrome(app.screen, app).body).3)
             .height
             .max(1) as usize,
         1,
+        0,
     )
     .max(1)
 }
@@ -3478,11 +3525,12 @@ fn atlas_cycle_stats_room(app: &App) -> usize {
 }
 
 fn atlas_news_room(app: &App) -> usize {
-    super::components::ListGeometry::capacity(
+    super::components::ListGeometry::capacity_with_gap(
         inset(atlas_news_areas(chrome(app.screen, app).body).2)
             .height
             .max(1) as usize,
         1,
+        0,
     )
     .max(1)
 }
@@ -3625,9 +3673,82 @@ fn run_delete_rect(popup: Rect) -> Rect {
     }
 }
 
+fn topology_geometry_stamp(state: &super::topology::TopologyState) -> String {
+    use argos_osint_core::brain_topology::CycleScope;
+    use std::hash::{Hash, Hasher};
+
+    // A snapshot's vector order owns its numeric targets. Include the complete
+    // geometry inputs, but omit full source passages and detail prose: their
+    // viewport is fixed and a publication's sequence identifies its revision.
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    let cycle = match &state.cycle_scope {
+        CycleScope::AllRetained => None,
+        CycleScope::ThisCycle(id) => Some(id.as_str()),
+    };
+    (
+        state.seed.as_ref().map(|seed| seed.key()),
+        state.depth,
+        cycle,
+        state.filters(),
+        state.zoom_percent,
+        state.pan,
+        &state.viewport_center_id,
+    )
+        .hash(&mut hash);
+    (
+        state.active_panel_tab,
+        state.inspector_tab,
+        state.inspector_scroll,
+        state.related_sel,
+        state.related_scroll,
+        &state.selected_node_id,
+        &state.selected_edge_id,
+        state.analyzing_scope,
+        &state.scope_status,
+    )
+        .hash(&mut hash);
+    state.snapshot.is_some().hash(&mut hash);
+    if let Some(snapshot) = &state.snapshot {
+        (
+            &snapshot.root_id,
+            &snapshot.root_label,
+            snapshot.root_kind.map(|kind| kind.label()),
+            snapshot.memory_changed_seq,
+            snapshot.nodes.len(),
+            snapshot.edges.len(),
+        )
+            .hash(&mut hash);
+        for node in &snapshot.nodes {
+            (
+                &node.id,
+                node.kind.label(),
+                node.min_hops,
+                &node.label,
+                &node.status,
+                node.is_root,
+                &node.revision,
+                &node.member_ids,
+            )
+                .hash(&mut hash);
+        }
+        for edge in &snapshot.edges {
+            (
+                &edge.id,
+                &edge.from,
+                &edge.to,
+                edge.kind.label(),
+                &edge.label,
+                &edge.status,
+            )
+                .hash(&mut hash);
+        }
+    }
+    format!("{:016x}", hash.finish())
+}
+
 fn geometry_stamp(app: &App) -> String {
     format!(
-        "{:?}|{:?}|{:?}|{:?}",
+        "{:?}|{:?}|{:?}|{:?}|{:?}",
         (
             app.module,
             &app.overlay,
@@ -3704,7 +3825,14 @@ fn geometry_stamp(app: &App) -> String {
             app.recon_context_enabled,
             app.profile.picker_selection,
             &app.profile.filter_edit
-        )
+        ),
+        (app.module == Some(ModuleId::Brain) && app.brain_list_mode == BrainListMode::Topology)
+            .then(|| (
+                topology_geometry_stamp(&app.topology_state),
+                app.topology_loading,
+                &app.topology_error,
+                &app.topology_origin_label,
+            )),
     )
 }
 fn ensure_registered_layout(app: &App) {
@@ -3818,7 +3946,27 @@ pub fn focus_order(app: &App) -> Vec<Target> {
         && app.intel_page == IntelPage::Briefing
         && app.overlay == Overlay::None
     {
-        let (_, center, _) = intel_briefing_areas(app, chrome(app.screen, app).body);
+        let (left, center, _) = intel_briefing_areas(app, chrome(app.screen, app).body);
+        if let Some(layout) = intel_extracted_layout(app, left) {
+            order.retain(|target| {
+                !matches!(
+                    target,
+                    Target::IntelTopologyClaim(_) | Target::IntelTopologyActor(_)
+                )
+            });
+            let at = order
+                .iter()
+                .position(|target| *target == Target::IntelLeftColumn)
+                .map_or(order.len(), |index| index + 1);
+            order.splice(
+                at..at,
+                layout
+                    .claim_records
+                    .iter()
+                    .chain(&layout.actor_records)
+                    .map(|(_, target)| *target),
+            );
+        }
         let target = Target::Button(ButtonId::RelatedScope);
         if center.width > 0 && !seen.contains(&target) {
             order.push(target);
@@ -3958,11 +4106,6 @@ fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
         return app.layout.borrow().target_at(x, y);
     }
     if app.brain_list_mode == BrainListMode::Graph {
-        if let Some(target) = app.layout.borrow().target_at(x, y) {
-            if target == Target::Button(ButtonId::BrainMapTopology) {
-                return Some(target);
-            }
-        }
         let areas = super::brain_detail::areas_for(app, body);
         if contains(areas.back, x, y) {
             return Some(Target::Button(ButtonId::BrainDetailBack));
@@ -5966,9 +6109,10 @@ pub(crate) fn draw_composer(
 fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
     if area.height < 32 {
         let metrics = home_layout_metrics(area);
-        let room = super::components::ListGeometry::capacity(
+        let room = super::components::ListGeometry::capacity_with_gap(
             area.bottom().saturating_sub(metrics.apps_y) as usize,
             1,
+            0,
         )
         .max(1);
         let start = app.scrolls.home as usize;
@@ -5982,7 +6126,7 @@ fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
             let width = area.width / 2;
             let rect = Rect::new(
                 area.x + (local % 2) as u16 * width,
-                metrics.apps_y + (local / 2) as u16 * 2,
+                metrics.apps_y + (local / 2) as u16,
                 width,
                 1,
             );
@@ -7545,7 +7689,15 @@ pub fn intel_list_room(app: &App) -> usize {
     if app.intel_page != IntelPage::Bulletin {
         return 1;
     }
-    list_room(intel_bulletin_areas(chrome(app.screen, app).body).4.height).max(1)
+    super::components::ListGeometry::capacity_with_gap(
+        intel_bulletin_areas(chrome(app.screen, app).body)
+            .4
+            .height
+            .saturating_sub(2) as usize,
+        1,
+        0,
+    )
+    .max(1)
 }
 
 fn intel_bulletin_areas(area: Rect) -> (Rect, Rect, Rect, Rect, Rect) {
@@ -7698,7 +7850,7 @@ fn draw_intel_bulletin(frame: &mut Frame, app: &App, area: Rect) {
         );
         return;
     }
-    let room = list_room(list.height).max(1);
+    let room = intel_list_room(app);
     let start = app.scrolls.intel_list as usize;
     let end = (start + room).min(app.intel_articles.len());
     let items: Vec<ListItem> = app.intel_articles[start..end]
@@ -7738,18 +7890,10 @@ fn draw_intel_bulletin(frame: &mut Frame, app: &App, area: Rect) {
     ) {
         app.layout.borrow_mut().register(
             Target::IntelArticle(app.scrolls.intel_list as usize + row),
-            Rect::new(
-                list_inner.x,
-                list_inner.y + row as u16 * 2,
-                list_inner.width,
-                1,
-            ),
+            Rect::new(list_inner.x, list_inner.y + row as u16, list_inner.width, 1),
         );
     }
-    frame.render_widget(
-        List::new(super::components::spaced(items, || ListItem::new(""))),
-        list_inner,
-    );
+    frame.render_widget(List::new(items), list_inner);
 }
 
 fn bulletin_image_preview(app: &App, area: Rect) -> (Rect, Rect) {
@@ -7943,13 +8087,14 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
                 detail.as_deref(),
             );
         } else {
-            draw_clipped_md_pane(
+            draw_intel_topology_records(
                 frame,
+                app,
                 left,
                 layout.claims,
                 " claims ",
                 &layout.claims_lines,
-                0,
+                &layout.claim_records,
             );
         }
         // 2. inferences
@@ -7973,13 +8118,14 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
             );
         }
         // Metadata Actors remain visible throughout analytical refresh.
-        draw_clipped_md_pane(
+        draw_intel_topology_records(
             frame,
+            app,
             left,
             layout.actors,
             &format!(" actors · {} ", layout.actor_count),
             &layout.actors_lines,
-            0,
+            &layout.actor_records,
         );
         // 4. links
         if layout.links_loading {
@@ -8551,6 +8697,77 @@ fn parse_extracted_md(text: &str, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
+struct IntelTopologyRows {
+    lines: Vec<Line<'static>>,
+    records: Vec<(std::ops::Range<usize>, Target)>,
+}
+
+/// Measure complete records before clipping. Gaps retain their normal background
+/// and never acquire the neighboring record's action.
+fn intel_topology_rows(
+    texts: impl IntoIterator<Item = String>,
+    width: usize,
+    target: fn(usize) -> Target,
+) -> IntelTopologyRows {
+    let measured: Vec<_> = texts
+        .into_iter()
+        .map(|text| {
+            super::components::measured_lines(
+                parse_extracted_md(&format!("- {text}"), width),
+                width.clamp(1, u16::MAX as usize) as u16,
+            )
+        })
+        .collect();
+    let geometry = super::components::ListGeometry::new(measured.iter().map(Vec::len));
+    let mut lines = Vec::with_capacity(geometry.extent);
+    let mut records = Vec::with_capacity(measured.len());
+    for (index, (range, record)) in geometry.items.into_iter().zip(measured).enumerate() {
+        lines.resize(range.start, Line::raw(""));
+        lines.extend(record);
+        records.push((range, target(index)));
+    }
+    IntelTopologyRows { lines, records }
+}
+
+fn draw_intel_topology_records(
+    frame: &mut Frame,
+    app: &App,
+    viewport: Rect,
+    area: AbsRect,
+    title: &str,
+    lines: &[Line<'static>],
+    records: &[(std::ops::Range<usize>, Target)],
+) {
+    draw_clipped_md_pane(frame, viewport, area, title, lines, 0);
+    for (range, target) in records {
+        let record = abs_rect(
+            area.x.saturating_add(1),
+            area.y + 1 + range.start.min(i32::MAX as usize) as i32,
+            area.width.saturating_sub(2),
+            range.len().min(u16::MAX as usize) as u16,
+        );
+        if let Some((visible, clip)) = intersect_abs(viewport, record) {
+            if app.focus == *target {
+                let selected: Vec<_> = lines
+                    .iter()
+                    .skip(range.start + clip as usize)
+                    .take(visible.height as usize)
+                    .cloned()
+                    .map(|mut line| {
+                        line.style = theme::selected();
+                        for span in &mut line.spans {
+                            span.style = theme::selected();
+                        }
+                        line
+                    })
+                    .collect();
+                frame.render_widget(Paragraph::new(selected).style(theme::selected()), visible);
+            }
+            app.layout.borrow_mut().register(*target, visible);
+        }
+    }
+}
+
 struct IntelExtractedLayout {
     confidence: AbsRect,
     claims: AbsRect,
@@ -8562,6 +8779,8 @@ struct IntelExtractedLayout {
     confidence_lines: Vec<Line<'static>>,
     inferences_lines: Vec<Line<'static>>,
     actors_lines: Vec<Line<'static>>,
+    claim_records: Vec<(std::ops::Range<usize>, Target)>,
+    actor_records: Vec<(std::ops::Range<usize>, Target)>,
     links_lines: Vec<Line<'static>>,
     claims_loading: bool,
     inferences_loading: bool,
@@ -8680,9 +8899,9 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
             }
         }
     }
-    let claims_lines = parse_extracted_md(&claims_md, inner_w);
+    let mut claims_lines = parse_extracted_md(&claims_md, inner_w);
     let inferences_lines = parse_extracted_md(&inferences_md, inner_w);
-    let actors_lines = parse_extracted_md(&actors_md, inner_w);
+    let mut actors_lines = parse_extracted_md(&actors_md, inner_w);
     let links_lines = parse_extracted_md(&links_md, inner_w);
     let insights_loading = intel_insights_loading(app);
     let (claims_loading, inferences_loading, links_loading) = if brief {
@@ -8697,6 +8916,77 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
                 || app.intel_links_reviewing.contains(&article.id),
         )
     };
+
+    let claim_entries = app.intel_topology_claim_entries();
+    let mut claim_records = Vec::new();
+    if !claims_loading && !claim_entries.is_empty() {
+        let mut rows = intel_topology_rows(
+            claim_entries.into_iter().map(|(_, text)| text),
+            inner_w,
+            Target::IntelTopologyClaim,
+        );
+        // Preserve the stage's lifecycle and Previous banner around retained
+        // actionable records, and keep withheld counts outside their hit ranges.
+        let stage = app
+            .intel_brief_stages
+            .iter()
+            .find(|s| s.operation == "intel_brief_claims");
+        let mut prefix = stage
+            .filter(|s| s.state != "completed")
+            .map(|s| parse_extracted_md(&format!("_{}_\n\n_Previous_", s.row), inner_w))
+            .unwrap_or_default();
+        if !prefix.is_empty() {
+            prefix.push(Line::raw(""));
+        }
+        let offset = prefix.len();
+        for (range, _) in &mut rows.records {
+            range.start += offset;
+            range.end += offset;
+        }
+        prefix.extend(rows.lines);
+        if let Some(withheld) = app
+            .intel_brief_outputs
+            .get("intel_brief_claims")
+            .and_then(|out| out["withheld"].as_u64())
+            .filter(|n| *n > 0)
+        {
+            prefix.push(Line::raw(""));
+            prefix.extend(parse_extracted_md(
+                &format!("_{withheld} withheld · not supported by cited text_"),
+                inner_w,
+            ));
+        }
+        claims_lines = prefix;
+        claim_records = rows.records;
+    }
+    let actor_entries = app.intel_topology_actor_entries();
+    let actor_count = actor_entries.len();
+    let mut actor_records = Vec::new();
+    if !actor_entries.is_empty() {
+        let rows = intel_topology_rows(
+            actor_entries.into_iter().map(|(actor_ref, name)| {
+                app.intel_actors
+                    .iter()
+                    .find(|actor| actor.id == actor_ref)
+                    .map(|actor| {
+                        format!(
+                            "{name} · {} · {}",
+                            actor.type_hint,
+                            if actor.mentions.is_empty() {
+                                "Grounded in current source"
+                            } else {
+                                "Mentioned in title/description"
+                            }
+                        )
+                    })
+                    .unwrap_or_else(|| format!("{name} · grounded in current source"))
+            }),
+            inner_w,
+            Target::IntelTopologyActor,
+        );
+        actors_lines = rows.lines;
+        actor_records = rows.records;
+    }
 
     let section_h = |lines_count: usize, loading: bool| -> u16 {
         let natural = (lines_count as u16).saturating_add(2);
@@ -8741,10 +9031,12 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
         claims_lines,
         inferences_lines,
         actors_lines,
+        claim_records,
+        actor_records,
         links_lines,
         claims_loading,
         inferences_loading,
-        actor_count: buckets.actors.len(),
+        actor_count,
         links_loading,
         phases,
         stack_scroll_max,
@@ -8783,6 +9075,39 @@ pub fn reveal_intel_related(app: &mut App, index: usize) {
             )
             .min(layout.stack_scroll_max);
     }
+}
+
+/// The same measured record ranges drive painting, pointer targets and keyboard
+/// reveal, including rows currently outside the extracted-column viewport.
+pub fn reveal_intel_topology_entry(app: &mut App, target: Target) {
+    let body = chrome(app.screen, app).body;
+    let (mut left, _, _) = intel_briefing_areas(app, body);
+    if left.width == 0 {
+        app.compact_pages[ModuleId::Intel.index()] = 0;
+        left = intel_briefing_areas(app, body).0;
+    }
+    let Some(layout) = intel_extracted_layout(app, left) else {
+        return;
+    };
+    let (area, records) = match target {
+        Target::IntelTopologyClaim(_) => (layout.claims, &layout.claim_records),
+        Target::IntelTopologyActor(_) => (layout.actors, &layout.actor_records),
+        _ => return,
+    };
+    let Some((range, _)) = records.iter().find(|(_, row_target)| *row_target == target) else {
+        return;
+    };
+    let effective_offset = app.scrolls.intel_extracted.min(layout.stack_scroll_max);
+    let start = (i64::from(area.y) - i64::from(left.y)
+        + i64::from(effective_offset)
+        + 1
+        + range.start as i64)
+        .max(0) as usize;
+    let mut pane = super::components::ScrollPane {
+        offset: effective_offset as usize,
+    };
+    pane.reveal(start, range.len(), left.height as usize);
+    app.scrolls.intel_extracted = pane.offset.min(layout.stack_scroll_max as usize) as u16;
 }
 
 fn draw_intel_related(frame: &mut Frame, app: &App, viewport: Rect, area: AbsRect) {
@@ -9895,7 +10220,7 @@ fn intel_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     }
     if in_pane(list, x, y) {
         let index = app.scrolls.intel_list as usize
-            + super::components::ListGeometry::fixed(app.intel_articles.len(), 1)
+            + super::components::ListGeometry::fixed_with_gap(app.intel_articles.len(), 1, 0)
                 .index_at((y - list.y - 1) as usize)?;
         if index < app.intel_articles.len() {
             return Some(Target::IntelArticle(index));
@@ -10024,12 +10349,12 @@ fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
     );
     draw_atlas_coverage(frame, app, insights);
     let rows = inset(feed);
-    for row in 0..super::components::ListGeometry::capacity(rows.height as usize, 1) {
+    for row in 0..super::components::ListGeometry::capacity_with_gap(rows.height as usize, 1, 0) {
         let index = app.scrolls.atlas_feed as usize + row;
         if index < app.atlas_feed.len() {
             app.layout.borrow_mut().register(
                 Target::AtlasFeed(index),
-                Rect::new(rows.x, rows.y + row as u16 * 2, rows.width, 1),
+                Rect::new(rows.x, rows.y + row as u16, rows.width, 1),
             );
         }
     }
@@ -10070,11 +10395,7 @@ fn draw_atlas_live(frame: &mut Frame, app: &App, area: Rect) {
             })
             .collect()
     };
-    frame.render_widget(
-        Paragraph::new(super::components::spaced(feed_lines, || Line::raw("")))
-            .block(pane(" headlines ")),
-        feed,
-    );
+    frame.render_widget(Paragraph::new(feed_lines).block(pane(" headlines ")), feed);
 }
 
 fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
@@ -10086,12 +10407,12 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
     draw_map_or_hold(frame, app, map);
     draw_atlas_cycle_stats(frame, app, stats);
     let rows = inset(cycles);
-    for row in 0..super::components::ListGeometry::capacity(rows.height as usize, 1) {
+    for row in 0..super::components::ListGeometry::capacity_with_gap(rows.height as usize, 1, 0) {
         let index = app.scrolls.atlas_runs as usize + row;
         if index < app.atlas_runs.len() {
             app.layout.borrow_mut().register(
                 Target::AtlasHistory(index),
-                Rect::new(rows.x, rows.y + row as u16 * 2, rows.width, 1),
+                Rect::new(rows.x, rows.y + row as u16, rows.width, 1),
             );
         }
     }
@@ -10109,11 +10430,7 @@ fn draw_atlas_runs(frame: &mut Frame, app: &App, area: Rect) {
             .map(|(index, run)| news_cycle_line(run, width, index == app.atlas_run_sel))
             .collect()
     };
-    frame.render_widget(
-        Paragraph::new(super::components::spaced(lines, || Line::raw("")))
-            .block(pane(" news cycle ")),
-        cycles,
-    );
+    frame.render_widget(Paragraph::new(lines).block(pane(" news cycle ")), cycles);
     let buttons = button_areas(actions, 3);
     let live = atlas_history_live_label(app);
     draw_button(frame, app, ButtonId::AtlasLive, &live, buttons[0]);
@@ -10257,12 +10574,12 @@ fn draw_atlas_news(frame: &mut Frame, app: &App, area: Rect) {
         );
     }
     let rows = inset(list);
-    for row in 0..super::components::ListGeometry::capacity(rows.height as usize, 1) {
+    for row in 0..super::components::ListGeometry::capacity_with_gap(rows.height as usize, 1, 0) {
         let index = app.scrolls.atlas_news as usize + row;
         if index < app.atlas_articles.len() {
             app.layout.borrow_mut().register(
                 Target::AtlasArticle(index),
-                Rect::new(rows.x, rows.y + row as u16 * 2, rows.width, 1),
+                Rect::new(rows.x, rows.y + row as u16, rows.width, 1),
             );
         }
     }
@@ -10291,10 +10608,7 @@ fn draw_atlas_news(frame: &mut Frame, app: &App, area: Rect) {
             })
             .collect()
     };
-    frame.render_widget(
-        Paragraph::new(super::components::spaced(lines, || Line::raw(""))).block(pane(" news ")),
-        list,
-    );
+    frame.render_widget(Paragraph::new(lines).block(pane(" news ")), list);
 }
 
 fn atlas_row_at(area: Rect, scroll: u16, y: u16) -> Option<usize> {
@@ -10306,7 +10620,7 @@ fn atlas_row_at(area: Rect, scroll: u16, y: u16) -> Option<usize> {
         return None;
     }
     let row = (y - inner.y) as usize;
-    (row.is_multiple_of(2)).then_some(scroll as usize + row / 2)
+    Some(scroll as usize + row)
 }
 
 fn atlas_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
@@ -10526,14 +10840,14 @@ fn memory_popup(app: &App, message_id: &str) -> String {
 fn help_text(app: &App) -> &'static str {
     match app.module {
         None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools · 8 Models · 9 Profile\nNumber keys switch apps when you are not typing in a field\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
-        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, extracted claims/inferences/context/links, and confidence\nRelated beneath Full Article reflects ingest associations with at least two shared entities\nJobs pane tracks focus-brief background progress\nEsc returns from briefing to bulletin, or from bulletin to home",
+        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, extracted claims/inferences/context/links, and confidence\nClick a claim or actor, or focus it and press Enter, to map its two-hop neighborhood\nTopology selection inspects; Recenter changes the seed; Back restores this brief\nRelated beneath Full Article reflects ingest associations with at least two shared entities\nJobs pane tracks focus-brief background progress\nEsc returns from briefing to bulletin, or from bulletin to home",
         Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 60 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 60 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, and Delete sit between the map and those panes. Resume continues retained collection/classification and native metadata. Coverage shows classifications, entities, publisher priors, and Related pairs. Atlas collects articles without creating Brain claim memories. When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon investigation\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between transcript and prompt\n↑↓ select a query, plan, evidence activity, or answer\n←→ or h/l fold the selected Plan or activity\nEnter toggles that fold · o inspects the captured source · f opens full text\n◉ brain opens memories used by Synthesis\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",
         Some(ModuleId::System) => "Profile\n\nTab / Shift+Tab traverse controls; Enter activates\nOverview / System / Configs · t switches analytics/host · x Configs\n0 Summary · 1–5 Intel/Recon/Atlas/Models/Tools · [ / ] apps\nTab reveals panels · Arrows select rows/buckets · Enter or m expands\nLeft/Right selects buckets · v chart/table · s sort · g provider fold · PageUp/PageDown or wheel scroll\np period · f six dimension filters · c clears filters\nPicker: type to search, Tab dimension, arrows select, Enter apply\nr refreshes statistics in Overview, hardware in System\nEsc restores grid or returns home · Ctrl+K commands",
         Some(ModuleId::Logs) => "Logs\n\nDurable events from every app and background worker, kept 24 hours\nThe header counts errors, warnings, and failures in the last hour\nFilter narrows by text. Level, App, and the job filter narrow further\n↑↓ select an event · Enter or click folds its detail\nf toggles live follow. Moving off the newest event pauses it\no or Open job shows the event's job in Jobs\nOpened from Jobs, Esc or Back to job returns there\nClear events removes events only; jobs, results, and memories stay\nCtrl+U/Ctrl+D and the wheel scroll the list",
         Some(ModuleId::Jobs) => "Jobs\n\nBackground work with timing, attempts, and errors\nActive work is listed first, then recent history, then service workers\nStatus and App filter the table. Filter matches title, id, operation, or error\n↑↓ select a job · Enter opens its detail (full screen when narrow)\nl or View logs opens Logs filtered to the job and its phases\nRetry failed requeues only failed index or summary tasks; completed work is kept\nOpen source jumps to the Atlas cycle or investigation when there is one\nUnknown historic timing shows Unavailable\nEsc closes the detail, then returns home",
-        Some(ModuleId::Brain) => "Brain\n\nKind cycles All → Claims → Actors. All contains Claims and unique Actor-name groups\nFind filters after actor names are grouped; grouping does not merge identities\nCreate saves a user-supplied, unassessed Claim. Pin/Delete apply to Claims\nEnter opens Claim detail or an Actor group\nClaims show a read-only graph above Related and Summary\nActor groups show Graph and Related side by side, or reachable compact pages\nGraphs display Claim, Topic, Entity, Article and Source nodes; nodes never navigate\nActor Related tabs: Claims / Threads / Articles. Claim tabs: Actors / Sources\nEach tab keeps its own selection and scroll. See more loads another page\nEnter or click a Related row opens its Claim, Actor group, Recon thread or exact Intel article\nActor Articles reflect ingest associations with at least two distinct shared entities\nClaim Sources preserve original provenance; investigation detections require Recall on\nEsc or Back restores the previous record, tab, row, offsets and focus across apps\nTab moves through reachable controls and panes; arrows, wheel and PageUp/PageDown scroll\nClaims keep their saved summary; Actor groups show local association totals\nEsc returns home from the list · ? opens this card",
+        Some(ModuleId::Brain) => "Brain\n\nKind cycles All → Claims → Actors. All contains Claims and unique Actor-name groups\nFind filters after actor names are grouped; grouping does not merge identities\nCreate saves a user-supplied, unassessed Claim. Pin/Delete apply to Claims\nEnter opens Claim detail or an Actor group\nClaims show a graph above Related and an independent Summary\nActor groups show Graph and Related side by side, or reachable compact pages\nClick the Claim path or Actor group graph, or focus it and press Enter, to map that exact record\nTopology selection inspects; Recenter changes the seed; Back restores the originating detail\nActor Related tabs: Claims / Threads / Articles. Claim tabs: Actors / Sources\nEach tab keeps its own selection and scroll. See more loads another page\nEnter or click a Related row opens its Claim, Actor group, Recon thread or exact Intel article\nActor Articles reflect ingest associations with at least two distinct shared entities\nClaim Sources preserve original provenance; investigation detections require Recall on\nEsc or Back restores the previous record, tab, row, offsets and focus across apps\nTab moves through reachable controls and panes; arrows, wheel and PageUp/PageDown scroll\nClaims keep their saved summary; Actor groups show local association totals\nEsc returns home from the list · ? opens this card",
         Some(ModuleId::Providers) => "Models\n\nEach account tab stores that provider only\nDefaults sets every role's primary model and ordered fallbacks\nFallbacks are tried top to bottom after primary retries (4 then 3 each)\nAdd fallback opens Google, Nvidia, or OpenRouter catalogs\nProvider and Model open the accounts and models that connection can use\n↑↓ choose · Enter selects · Esc closes the list\nEsc returns home · ? opens this card",
         _ => "Controls\n\nTab moves between fields and buttons\n1–9 switch apps when not typing in a field\nEnter activates the focused control\n↑↓ move through lists\nCtrl+U/Ctrl+D and the wheel scroll the pane under the pointer\nTyping works only in a focused field\nEsc returns home · ? opens this card",
     }
@@ -10971,10 +11285,10 @@ fn draw_palette(frame: &mut Frame, app: &App) {
     let mut rows = Vec::new();
     let mut group = "";
     for (index, item) in items.iter().enumerate() {
-        if index > 0 {
-            rows.push((None, String::new()));
-        }
         if group != item.category {
+            if !rows.is_empty() {
+                rows.push((None, String::new()));
+            }
             group = &item.category;
             rows.push((None, group.to_owned()));
         }
@@ -11116,6 +11430,150 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn topology_geometry_stamp_tracks_targets_and_snapshot_order() {
+        use super::super::topology::TopologyState;
+        use argos_osint_core::brain_topology::{
+            CycleScope, TopologyNode, TopologyNodeKind, TopologySeed, TopologySnapshot,
+        };
+
+        let baseline = TopologyState::default();
+        let original = topology_geometry_stamp(&baseline);
+        let mutations: [fn(&mut TopologyState); 14] = [
+            |s| s.seed = Some(TopologySeed::Claim("claim-a".into())),
+            |s| s.depth = 3,
+            |s| s.cycle_scope = CycleScope::ThisCycle("cycle-a".into()),
+            |s| s.filter_actor = false,
+            |s| s.zoom_percent = 150,
+            |s| s.pan = (4, 2),
+            |s| s.viewport_center_id = Some("claim-a".into()),
+            |s| s.active_panel_tab = 1,
+            |s| s.inspector_tab = 1,
+            |s| s.inspector_scroll = 8,
+            |s| s.related_scroll = 2,
+            |s| s.related_sel = 1,
+            |s| s.selected_node_id = Some("claim-a".into()),
+            |s| s.selected_edge_id = Some("edge-a".into()),
+        ];
+        for mutate in mutations {
+            let mut changed = baseline.clone();
+            mutate(&mut changed);
+            assert_ne!(topology_geometry_stamp(&changed), original);
+        }
+
+        let node = |id: &str| TopologyNode {
+            id: id.into(),
+            kind: TopologyNodeKind::Claim,
+            label: id.into(),
+            detail: String::new(),
+            subtype: String::new(),
+            status: String::new(),
+            is_root: false,
+            article_id: String::new(),
+            run_id: String::new(),
+            published_at: String::new(),
+            cycle: None,
+            member_ids: Vec::new(),
+            evidence_count: 0,
+            passages: Vec::new(),
+            min_hops: 0,
+            revision: String::new(),
+            predecessor: None,
+            topology_seed: None,
+        };
+        let mut changed = baseline;
+        changed.snapshot = Some(TopologySnapshot {
+            root_id: "claim-a".into(),
+            nodes: vec![node("claim-a"), node("claim-b")],
+            ..Default::default()
+        });
+        let ordered = topology_geometry_stamp(&changed);
+        changed.snapshot.as_mut().unwrap().nodes.reverse();
+        assert_ne!(topology_geometry_stamp(&changed), ordered);
+        let reordered = topology_geometry_stamp(&changed);
+        changed.snapshot.as_mut().unwrap().memory_changed_seq += 1;
+        assert_ne!(topology_geometry_stamp(&changed), reordered);
+        let revision = topology_geometry_stamp(&changed);
+        changed.snapshot.as_mut().unwrap().nodes[0].label = "Long changed node label".into();
+        assert_ne!(topology_geometry_stamp(&changed), revision);
+    }
+
+    #[test]
+    fn intel_topology_records_keep_wrapped_rows_and_gap_targets_separate() {
+        let rows = intel_topology_rows(
+            [
+                "東京 harbor authority awarded a long logistics contract".to_string(),
+                "Another retained claim".to_string(),
+            ],
+            18,
+            Target::IntelTopologyClaim,
+        );
+        assert_eq!(rows.records.len(), 2);
+        let (first, first_target) = &rows.records[0];
+        let (second, second_target) = &rows.records[1];
+        assert!(
+            first.len() > 1,
+            "a wrapped record must have one whole hit range"
+        );
+        assert_eq!(*first_target, Target::IntelTopologyClaim(0));
+        assert_eq!(*second_target, Target::IntelTopologyClaim(1));
+        assert_eq!(second.start, first.end + 1);
+        assert!(rows.lines[first.end].to_string().is_empty());
+        assert_eq!(rows.lines.len(), second.end);
+        let clipped = intersect_abs(
+            Rect::new(0, 5, 20, 3),
+            abs_rect(1, 4, 18, first.len() as u16),
+        )
+        .unwrap();
+        assert_eq!(clipped.0.y, 5);
+        assert_eq!(clipped.1, 1);
+    }
+
+    #[test]
+    fn intel_topology_records_preserve_wide_unicode_and_trailing_words() {
+        let text = "Harbor Ledger · reported: The Bay Authority awarded the harbor contract to Aster Logistics. Unicode 東京 keeps the complete wrapped record actionable.";
+        for width in [18, 33, 38, 58] {
+            let rows = intel_topology_rows([text.to_string()], width, Target::IntelTopologyClaim);
+            assert!(
+                rows.lines.iter().all(|line| line.width() <= width),
+                "every painted row must fit the terminal cells at width {width}"
+            );
+            let painted = rows
+                .lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(
+                painted.split_whitespace().collect::<Vec<_>>().join(" "),
+                format!("• {text}"),
+                "wrapping must retain each word of the actionable record"
+            );
+            assert_eq!(rows.records[0].0, 0..rows.lines.len());
+        }
+    }
+
+    #[test]
+    fn dense_atlas_pointer_rows_preserve_offsets_and_reject_borders() {
+        let area = Rect::new(4, 8, 30, 6);
+        assert_eq!(atlas_row_at(area, 10, 8), None);
+        for (row, y) in (9..13).enumerate() {
+            assert_eq!(atlas_row_at(area, 10, y), Some(10 + row));
+        }
+        assert_eq!(atlas_row_at(area, 10, 13), None);
+    }
+
+    #[test]
+    fn home_dense_items_keep_section_boundaries() {
+        let rows = home_rows(Rect::new(0, 0, 120, 40), 0);
+        let apps: Vec<_> = rows.iter().filter(|row| row.target.is_some()).collect();
+        assert_eq!(apps.len(), 9);
+        for pair in apps[..4].windows(2).chain(apps[4..].windows(2)) {
+            assert_eq!(pair[1].y, pair[0].y + 1);
+        }
+        assert_eq!(apps[4].y, apps[3].y + 3);
+    }
     use argos_osint_core::osint::ToolResult;
     use argos_osint_core::recon::{Binding, Call, Directive, PickRecord, PlanCall};
 
@@ -11490,7 +11948,7 @@ mod tests {
         let narrow_area = Rect::new(0, 0, 80, 24);
         let narrow_metrics = home_layout_metrics(narrow_area);
         let narrow_rows = home_rows(narrow_area, 0);
-        assert!(narrow_metrics.top_pad <= 4);
+        assert!(narrow_metrics.top_pad <= 6);
         let narrow_last_y = narrow_rows.last().map(|r| r.y).unwrap_or(0);
         let narrow_bottom_pad = narrow_area.height.saturating_sub(narrow_last_y + 1);
         assert!(

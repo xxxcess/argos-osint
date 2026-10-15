@@ -61,11 +61,15 @@ Brain browsing exposes Claims and unique Actor-name groups without merging ident
 
 ## Brain Memory Topology and Scope Analysis
 
-Brain Memory Topology projects typed memory seeds (`Actor`, `Claim`, `Article`, `Inference`, `Link`, `Related`) into an immutable snapshot bounded by depth (1..3) and cycle scope (`AllRetained` or `ThisCycle`).
+Brain topology is a seed-scoped read projection, defaulting to two hops (1..3)
+and all retained origins, with optional current-cycle scope. Brain claim/actor
+graphs and Intel Focus Brief claim/actor records supply exact typed identities.
+Selecting a record changes inspection; recentering changes the seed and saves
+history. Retained-source entries remain truthful when canonical indexing is absent.
 
-- **Presentation Nodes**: The graph maps memories to 5 canonical presentation kinds: Entity (ACCENT circle), Claim (GREEN star), Topic (SERIES diamond), Article (DIM dot), and Source (MUTED hollow circle). Claims are never miscast as Actors.
-- **Edges**: Endpoints connect typed nodes via explicit edge IDs (`EndpointRef::Source`, `EndpointRef::Article`, `EndpointRef::Memory`). Edges qualify relationships (`concerns`, `mentioned_in`, `source`, `supports`, `premise`, `possible context`).
-- **Scope Worker**: Async candidate evaluation runs on dedicated worker pool `POOL_BRAIN_SCOPE` (`brain_scope`) targeting `Surface::Scope`, persisting results atomically through `publish_snapshot_on` on lightweight SQLite readers without blocking LanceDB embeddings.
+- **Presentation nodes**: Actor, explicit ActorGroup, Claim, Inference, derived Topic, Article and Source. A Topic groups recorded topic/category attributes and is not a canonical Brain memory kind. Actor name groups do not assert shared identity; inference premises do not assert world truth.
+- **Edges**: Link/Related payloads use typed `EndpointRef::Source`, `EndpointRef::Article` and `EndpointRef::Memory` destinations. Snapshot edges carry stable IDs, endpoint node keys and qualified direction (`concerns`, `mentioned_in`, `source`, `supports`, `premise`, `possible context`). Derived mentions/topics retain their own recorded receipts.
+- **Scope Worker**: Explicit candidate evaluation runs on dedicated worker pool `POOL_BRAIN_SCOPE` (`brain_scope`). It uses a lightweight Store and separately persists validated inference memory/metadata and Links; it does not use atomic brief publication. Retained-source projections cannot become canonical premises through browsing.
 
 ## Persistence
 

@@ -1,0 +1,99 @@
+{
+  "baseline": "78dea7c0e2a645bbb70e4fc16407021bdd69c746",
+  "verification": "../../tui-verification-topology-2026-10-15.md",
+  "data": "Fictional deterministic TestBackend fixtures; no live-provider or native-terminal certification.",
+  "visual_review": "All 126 final selected PNGs inspected with an image-capable viewer.",
+  "font": "/System/Library/Fonts/Supplemental/Courier New.ttf",
+  "wide_font": "/System/Library/Fonts/Hiragino Sans GB.ttc",
+  "final_renderer_sha256": "59c25e43b6edcc74aaf63f742ed620fc8218700a5a40e676f22fbe33407df36f",
+  "unchanged_density_pngs": "All 54 images rerender identically after topology-only U+250A renderer correction.",
+  "code_sha256": {
+    "crates/argos-osint-bin/src/tui/app.rs": "9afd474780170e87d0f1e72139e37e332dfdfedb142c64802572c1e05d5dea4f",
+    "crates/argos-osint-bin/src/tui/brain_detail.rs": "a02e904b68e912f4cb28e227497147afb816a9d1fd3ecda7bd454ec1cfd7e2f9",
+    "crates/argos-osint-bin/src/tui/components.rs": "48d3e70eabcec743484b5b6066619cb3a459c02a22d89d9871c6e13635fe0668",
+    "crates/argos-osint-bin/src/tui/graph.rs": "754c211080191b486d0d3c16e1f77dd499d129e41e42ce0ee63ac7f16f1e3039",
+    "crates/argos-osint-bin/src/tui/topology.rs": "e739d9cf58587bdd9a3cbf929f3f0788989a30558cb0e9efe2d506436666de1e",
+    "crates/argos-osint-bin/src/tui/topology_layout.rs": "a4eabd0fc00d5d16eec1cf3e76d983fa11d001277530e9423af2e750f75290f4",
+    "crates/argos-osint-bin/src/tui/ui.rs": "909e5a56e1c0cf62f496db64e884e29651ccf9377f76588a7241e3aa4a533931",
+    "crates/argos-osint-core/src/brain_scope.rs": "f6706649ee1f3442d36548944f0983e67f495391d0f629d7e293c84ccc6181c5",
+    "crates/argos-osint-core/src/brain_topology.rs": "b0a4fd788ec767f9984b6e9d485289609c9b57aa3ccb65f81ae7bd161a850fa3",
+    "crates/argos-osint-core/src/brain_topology_query.rs": "57fedfa6e3e2963a28498f31cf457df03266a09755ac3e27deaea26a227a2e76",
+    "crates/argos-osint-core/src/brain_topology_tests.rs": "0dc60856e9a70ca04cd38b1733ef484c98af947f4c2066d44a43ffd0c87242a5",
+    "scripts/render_tui_cells.py": "59c25e43b6edcc74aaf63f742ed620fc8218700a5a40e676f22fbe33407df36f",
+    "scripts/tui_review.py": "104b5b161cffe9283d24a3461eb729ff61edfd1c7e11e693b0a9c05c9743027d"
+  },
+  "fixtures": [
+    {
+      "name": "topology-graph-160x50",
+      "width": 160,
+      "height": 50,
+      "cells_sha256": "cfeb5d03867f661c3b7f2521606d3bc51c22a7442c279f92f4c79126725b99fd",
+      "png_sha256": "2776a0a5e0c807ba1166a5d6532509d4568a04216d353ed5dda67f2f93f6c429",
+      "capture_test": "dump_brain_topology_screens",
+      "capture_renderer_sha256": "59c25e43b6edcc74aaf63f742ed620fc8218700a5a40e676f22fbe33407df36f"
+    },
+    {
+      "name": "topology-graph-120x40",
+      "width": 120,
+      "height": 40,
+      "cells_sha256": "41af9e9f460a3097175cf6b16df70edd1a3e1bfc99b4610decf7c45ed338afb9",
+      "png_sha256": "9b86213792e36147774d67c32d56c2bf9b06c461ff12d984cb42356009f6bba6",
+      "capture_test": "dump_brain_topology_screens",
+      "capture_renderer_sha256": "59c25e43b6edcc74aaf63f742ed620fc8218700a5a40e676f22fbe33407df36f"
+    },
+    {
+      "name": "topology-edge-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "8b204a59074bd7f78a3d61064769e6d85095a594dd3aeeb72697123783656180",
+      "png_sha256": "bd73462747461985cd8c8c65e6d3d4b965391086bfde6e500e06c5270a0912ce",
+      "capture_test": "dump_brain_topology_screens",
+      "capture_renderer_sha256": "59c25e43b6edcc74aaf63f742ed620fc8218700a5a40e676f22fbe33407df36f"
+    },
+    {
+      "name": "topology-controls-60x20",
+      "width": 60,
+      "height": 20,
+      "cells_sha256": "1d4554f31117db888cfa3075f4530fd449ca8405bbd117cd3d8182007f08fb58",
+      "png_sha256": "f4708ba76adb78843fa72b5ed00009bf1ed73574b7f8e34abac8015c702f5558",
+      "capture_test": "dump_brain_topology_screens",
+      "capture_renderer_sha256": "59c25e43b6edcc74aaf63f742ed620fc8218700a5a40e676f22fbe33407df36f"
+    },
+    {
+      "name": "intel-topology-claims-60x18",
+      "width": 60,
+      "height": 18,
+      "cells_sha256": "1299a4bfc8d396a531955e0e40493394b580250dd5eb5523141371a97cb8fbe9",
+      "png_sha256": "49be1cb0f02742811b02ed673b9d1e95868e72f7a797b1ed6005250e111fe093",
+      "capture_test": "dump_topology_density_and_entries_screens",
+      "capture_renderer_sha256": "840494ab9980e376870b2c05d7f17a4c5c23ae84b68b4c6a35d0a4d29ce09436"
+    },
+    {
+      "name": "density-home-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "1fc5fa22e1c2c906204173019012d185264d653b38680caad4cad16736e39e0d",
+      "png_sha256": "f6a82ab5e856b41d307bc41b424d8aea3a7db1e96dd95e63f7ad4c53c442e7b8",
+      "capture_test": "dump_topology_density_and_entries_screens",
+      "capture_renderer_sha256": "840494ab9980e376870b2c05d7f17a4c5c23ae84b68b4c6a35d0a4d29ce09436"
+    },
+    {
+      "name": "density-atlas-articles-80x24",
+      "width": 80,
+      "height": 24,
+      "cells_sha256": "3df51e4bf80d454eb0602adc53a933d4f028a58e4b68ee4584e963170dcbc0bc",
+      "png_sha256": "f2c90f2d2875e55ae5890cde21a3841d05c2035e90fb0dd1323e1fd0624cb66b",
+      "capture_test": "dump_topology_density_and_entries_screens",
+      "capture_renderer_sha256": "840494ab9980e376870b2c05d7f17a4c5c23ae84b68b4c6a35d0a4d29ce09436"
+    },
+    {
+      "name": "brain-claim-split-60x18",
+      "width": 60,
+      "height": 18,
+      "cells_sha256": "2ce341915d29c3adbfa09ef5b94f45f9b3d1421ca1cb2e1bf8a0ca984dfefd3a",
+      "png_sha256": "101533f54ab00ef1cb43a28aaea84f9da4020928ad504719ce9ea06e8010afe9",
+      "capture_test": "dump_brain_kind_screens",
+      "capture_renderer_sha256": "59c25e43b6edcc74aaf63f742ed620fc8218700a5a40e676f22fbe33407df36f"
+    }
+  ]
+}

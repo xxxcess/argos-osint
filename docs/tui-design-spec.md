@@ -28,7 +28,10 @@ Charts retain an 11-row minimum and tables 9 rows; scroll instead of squeezing. 
 
 ## Theme, data and interaction
 
-Separate complete list records with at least one blank terminal row. Keep wrapped
+Separate complete list records with one blank terminal row by default. Home app
+items, Ctrl+K command items, Atlas cycle/article lists and Intel category bulletin
+headlines use an explicit zero-gap density. Preserve section headings and section
+separation; every other consumer retains spaced records. Keep wrapped
 and expanded content together; gaps never count as records or activate adjacent
 items. Shared list geometry governs capacity, reveal and pointer mapping, without
 trailing overflow. Small panes retain gaps and scroll; charts and horizontal
@@ -55,7 +58,7 @@ The shared data/render separation, geometry, scrolling and measured input apply 
 | Recon | Transcript + 30% context at ≥110 columns; compact context page; measured composer | `ui.rs::draw_recon_chat`, `draw_recon_context`, `composer_height`; `recon_parts.rs` |
 | Intel | Three columns ≥132, two at 100–131, tabbed below 100 or short height; borderless center stack with bordered Full Article followed by Related; brief Jobs in context | `ui.rs::intel_briefing_areas`, `draw_intel_briefing`, `draw_clipped_md_pane` |
 | Atlas | Dashboard/table presets; compact Origins/Coverage/Headlines pages; preserve map | Atlas layout/draw functions; `atlas_table.rs`, `map.rs` |
-| Brain | Claims/Actor-name browse projection; Claim graph above Related/Summary (stack below 68); Actor Graph/Related 65%/35% at ≥100×28, compact pages below; Brain Memory Topology 3-panel reactive layout (Left 24%, Center 55%, Right 21% at ≥132×32; compact 2-panel at 100–131; stacked tabs at <100 or <32) | `brain_detail.rs`, `graph.rs`, `topology.rs`, `topology_layout.rs`, `ui.rs::draw_brain` |
+| Brain | Claims/Actor-name browse projection; Claim graph above Related/Summary (stack below 68); Actor Graph/Related 65%/35% at ≥100×28, compact pages below; topology Graph first: canvas left 65% / inspector right 35% at ≥132×32, 70%/30% at 100–131×≥32, Graph/Details/Controls pages below; minimum 60×18 | `brain_detail.rs`, `graph.rs`, `topology.rs`, `topology_layout.rs`, `ui.rs::draw_brain` |
 | Tools / Models | List + editor; compact pages; registered role list | `ui.rs::draw_osint`, `draw_providers`; `model_roles.rs` |
 | Jobs / Logs / System | Scrollable tables/details and reachable Host/Paths/Configs actions | `jobs.rs`, `logs.rs`, `profile.rs::draw_system_tab`, `profile_config.rs` |
 

@@ -162,12 +162,18 @@ pub async fn run_scope_analysis(
     let claim_nodes: Vec<_> = snapshot
         .nodes
         .iter()
-        .filter(|n| n.kind == TopologyNodeKind::Claim)
+        .filter(|n| {
+            n.kind == TopologyNodeKind::Claim
+                && matches!(&n.topology_seed,Some(TopologySeed::Claim(id)) if id==&n.id)
+        })
         .collect();
     let entity_nodes: Vec<_> = snapshot
         .nodes
         .iter()
-        .filter(|n| n.kind == TopologyNodeKind::Entity)
+        .filter(|n| {
+            n.kind == TopologyNodeKind::Entity
+                && matches!(&n.topology_seed,Some(TopologySeed::Actor(id)) if id==&n.id)
+        })
         .collect();
 
     let mut result = ScopeAnalysisResult::default();
@@ -189,6 +195,17 @@ pub async fn run_scope_analysis(
             .iter()
             .all(|cid| claim_nodes.iter().any(|cn| cn.id == *cid));
         if !valid_premises || inf.premise_claims.is_empty() {
+            continue;
+        }
+        let mut still_valid = true;
+        for premise in &inf.premise_claims {
+            still_valid &= store.is_browse_claim(premise)?;
+        }
+        for actor in &inf.actors {
+            still_valid &= entity_nodes.iter().any(|node| node.id == *actor)
+                && actors::actor(&store.conn, actor)?.is_some();
+        }
+        if !still_valid {
             continue;
         }
 
@@ -230,8 +247,9 @@ pub async fn run_scope_analysis(
 
         let payload_json = serde_json::to_string(&MemoryPayload::Inference(inf_payload))?;
         store.conn.execute(
-            "INSERT OR REPLACE INTO memory_metadata(memory_id, memory_kind, payload_json, updated_at)
-             VALUES (?1, 'inference', ?2, ?3)",
+            "INSERT INTO memory_metadata(memory_id,memory_kind,payload_json,payload_schema,revision,lifecycle,created_at,updated_at)
+             VALUES (?1,'inference',?2,1,1,'active',?3,?3)
+             ON CONFLICT(memory_id) DO UPDATE SET memory_kind='inference',payload_json=excluded.payload_json,payload_schema=1,revision=memory_metadata.revision+1,lifecycle='active',updated_at=excluded.updated_at",
             rusqlite::params![mem.id, payload_json, now],
         )?;
 
@@ -240,8 +258,14 @@ pub async fn run_scope_analysis(
     }
 
     // 3. brain_scope.links.generate & write
+    let link_nodes: Vec<_> = snapshot
+        .nodes
+        .iter()
+        .filter(|node| resolve_node_to_endpoint(&node.id, &snapshot.nodes).is_some())
+        .cloned()
+        .collect();
     let candidate_links = if let Some(sec) = secret {
-        match generate_links_with_model(sec, &snapshot.nodes).await {
+        match generate_links_with_model(sec, &link_nodes).await {
             Ok(links) if !links.is_empty() => links,
             _ => generate_links_deterministic(&claim_nodes, &entity_nodes),
         }
@@ -428,51 +452,54 @@ fn resolve_node_to_endpoint(
 ) -> Option<EndpointRef> {
     let node = nodes.iter().find(|n| n.id == node_id)?;
     match node.kind {
-        TopologyNodeKind::Claim => Some(EndpointRef::Memory {
-            memory_id: node.id.clone(),
-            kind: MemoryKind::Claim,
+        TopologyNodeKind::Claim => match &node.topology_seed {
+            Some(TopologySeed::Claim(id)) if id == &node.id => Some(EndpointRef::Memory {
+                memory_id: id.clone(),
+                kind: MemoryKind::Claim,
+            }),
+            _ => None,
+        },
+        TopologyNodeKind::Inference => node.topology_seed.as_ref().and_then(|seed| {
+            if let crate::brain_topology::TopologySeed::Inference(id) = seed {
+                Some(EndpointRef::Memory {
+                    memory_id: id.clone(),
+                    kind: MemoryKind::Inference,
+                })
+            } else {
+                None
+            }
         }),
-        TopologyNodeKind::Entity => {
-            // Pick member actor id if available
-            let aid = node.member_ids.first().cloned().unwrap_or_else(|| {
-                if let Some(rest) = node.id.strip_prefix("actor:") {
-                    rest.to_string()
-                } else {
-                    node.id.clone()
-                }
-            });
-            Some(EndpointRef::Memory {
-                memory_id: aid,
+        TopologyNodeKind::ActorGroup => None,
+        TopologyNodeKind::Entity => match &node.topology_seed {
+            Some(TopologySeed::Actor(id)) if id == &node.id => Some(EndpointRef::Memory {
+                memory_id: id.clone(),
                 kind: MemoryKind::Actor,
-            })
-        }
+            }),
+            _ => None,
+        },
         TopologyNodeKind::Article => {
             if !node.run_id.is_empty() && !node.article_id.is_empty() {
                 Some(EndpointRef::Article {
                     run_id: node.run_id.clone(),
                     article_id: node.article_id.clone(),
-                    revision: String::new(),
+                    revision: node.revision.clone(),
                 })
             } else {
                 None
             }
         }
-        TopologyNodeKind::Source => {
-            if let Some(rest) = node.id.strip_prefix("source:") {
-                let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    Some(EndpointRef::Source {
-                        origin: parts[0].to_string(),
-                        source_id: parts[1].to_string(),
-                        revision: String::new(),
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
+        TopologyNodeKind::Source => match &node.topology_seed {
+            Some(TopologySeed::Source {
+                origin,
+                source_id,
+                revision,
+            }) => Some(EndpointRef::Source {
+                origin: origin.clone(),
+                source_id: source_id.clone(),
+                revision: revision.clone(),
+            }),
+            _ => None,
+        },
         TopologyNodeKind::Topic => None,
     }
 }
@@ -572,3 +599,29 @@ pub async fn drain_scope_tasks(db_path: &Path, owner: &str, stop: &AtomicBool) -
 #[cfg(test)]
 #[path = "brain_scope_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod endpoint_projection_tests {
+    use super::*;
+
+    #[test]
+    fn source_endpoint_uses_typed_identity_and_exact_revision() {
+        let store = Store::memory().unwrap();
+        let seed = TopologySeed::Source {
+            origin: "evidence".into(),
+            source_id: "body:record@literal".into(),
+            revision: "revision:exact@1".into(),
+        };
+        let snapshot = store
+            .topology_snapshot(&seed, &TopologyOptions::default())
+            .unwrap();
+        assert_eq!(
+            resolve_node_to_endpoint(&snapshot.root_id, &snapshot.nodes),
+            Some(EndpointRef::Source {
+                origin: "evidence".into(),
+                source_id: "body:record@literal".into(),
+                revision: "revision:exact@1".into()
+            })
+        );
+    }
+}

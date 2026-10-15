@@ -85,7 +85,7 @@ def select_dumps(cells, patterns, sizes):
 def capture(args):
     # Preflight before running Cargo or creating an artifact directory.
     import PIL  # noqa: F401
-    from render_tui_cells import FONT
+    from render_tui_cells import FONT, WIDE_FONT
     if FONT is None:
         raise ValueError("No supported monospace font. Install DejaVu Sans Mono or Courier New.")
     output = args.output.resolve()
@@ -106,6 +106,7 @@ def capture(args):
                     ["git", "diff", "HEAD", "--binary"], cwd=ROOT)).hexdigest(),
                 "git_status": git("status", "--short"), "command": command,
                 "ARGOS_EMBED": "unset", "CARGO_TARGET_DIR": str(TARGET_DIR), "font": FONT,
+                "wide_font": WIDE_FONT,
                 "pillow_version": PIL.__version__, "python_version": sys.version,
                 "renderer_sha256": digest(ROOT / "scripts/render_tui_cells.py"),
                 "visual_review": "pending", "interaction_review": "not certified by capture",

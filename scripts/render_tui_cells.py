@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Render ratatui TestBackend cell dumps (JSON) to PNG."""
-import argparse, json, re, sys, pathlib, math
+import argparse, json, re, sys, pathlib, math, unicodedata
 from PIL import Image, ImageDraw, ImageFont
 FONT = next((p for p in (
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -10,6 +10,10 @@ BOLD = next((p for p in (
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
     "/System/Library/Fonts/Supplemental/Courier New Bold.ttf",
 ) if pathlib.Path(p).is_file()), FONT)
+WIDE_FONT = next((p for p in (
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+) if pathlib.Path(p).is_file()), None)
 SIZE = 16
 NAMED = {"Reset": None, "Black": (0,0,0), "Red": (205,49,49), "Green": (13,188,121), "Yellow": (229,229,16),
          "Blue": (36,114,200), "Magenta": (188,63,188), "Cyan": (17,168,205), "Gray": (204,204,204),
@@ -24,20 +28,29 @@ def color(raw, default):
 def render(src, dst):
     d = json.load(open(src))
     font, bold = ImageFont.truetype(FONT, SIZE), ImageFont.truetype(BOLD, SIZE)
+    wide = ImageFont.truetype(WIDE_FONT, SIZE) if WIDE_FONT else None
     l, t, r, b = font.getbbox("M"); cw = round(font.getlength("M")); ch = SIZE + 4
     pad = 12
     img = Image.new("RGB", (d["width"]*cw + 2*pad, d["height"]*ch + 2*pad), DEF_BG)
     dr = ImageDraw.Draw(img)
+    # Paint backgrounds first: a wide glyph spans the following continuation cell.
     for y, row in enumerate(d["cells"]):
         for x, c in enumerate(row):
             px, py = pad + x*cw, pad + y*ch
-            bg = color(c["bg"], DEF_BG); fg = color(c["fg"], DEF_FG)
-            dr.rectangle([px, py, px+cw-1, py+ch-1], fill=bg)
+            dr.rectangle([px, py, px+cw-1, py+ch-1], fill=color(c["bg"], DEF_BG))
+    for y, row in enumerate(d["cells"]):
+        for x, c in enumerate(row):
+            px, py = pad + x*cw, pad + y*ch
+            fg = color(c["fg"], DEF_FG)
             s = c["s"]
             if not s.strip(): continue
             # Box drawing: draw geometrically so lines join across cells.
             if box(dr, s, px, py, cw, ch, fg): continue
-            dr.text((px, py+1), s, font=bold if c["b"] else font, fill=fg)
+            if wide and any(unicodedata.east_asian_width(char) in ("W", "F") for char in s):
+                _, top, _, bottom = wide.getbbox(s)
+                dr.text((px, py + (ch - (bottom - top)) // 2 - top), s, font=wide, fill=fg)
+            else:
+                dr.text((px, py+1), s, font=bold if c["b"] else font, fill=fg)
             if c["u"]: dr.line([px, py+ch-2, px+cw-1, py+ch-2], fill=fg)
     img.save(dst)
 H = "─━═"; V = "│┃║"
@@ -55,9 +68,25 @@ def box(dr, s, px, py, cw, ch, fg):
                 dy = py + ch * (1 + 2 * row) // 8
                 dr.ellipse([dx - r, dy - r, dx + r, dy + r], fill=fg)
         return True
-    # Brain Claim/Topic glyphs are absent from some platform monospace fonts.
-    if s == "◆":
-        dr.polygon([(cx, py + 4), (px + cw - 2, cy), (cx, py + ch - 4), (px + 2, cy)], fill=fg)
+    # Brain Topic/Inference glyphs are absent from some platform monospace fonts.
+    if s in ("◆", "◇"):
+        points = [(cx, py + 4), (px + cw - 2, cy), (cx, py + ch - 4), (px + 2, cy)]
+        dr.polygon(points, fill=fg if s == "◆" else None, outline=fg)
+        return True
+    # Topology direction and tentative paths must remain legible in cell captures.
+    if s in ("▶", "◀"):
+        points = ([(px + 2, py + 4), (px + 2, py + ch - 4), (px + cw - 2, cy)]
+                  if s == "▶" else
+                  [(px + cw - 2, py + 4), (px + cw - 2, py + ch - 4), (px + 2, cy)])
+        dr.polygon(points, fill=fg)
+        return True
+    if s in ("┄", "┆", "┊"):
+        extent = cw if s == "┄" else ch
+        for start in range(0, extent, 4):
+            end = min(start + 1, extent - 1)
+            segment = ([px + start, cy, px + end, cy] if s == "┄" else
+                       [cx, py + start, cx, py + end])
+            dr.line(segment, fill=fg)
         return True
     if s == "★":
         points = []

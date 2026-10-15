@@ -14,6 +14,7 @@ Deep investigation: [architecture.md](architecture.md). Keys and roles: [provide
 | [providers.md](providers.md) | Model accounts (Defaults, OpenRouter, Google, Nvidia) and OSINT keys |
 | [profile-analytics-dashboard.md](profile-analytics-dashboard.md) | Profile's 20 primary views, simultaneous dashboard, shared layout/components and viewport acceptance |
 | [profile-dashboard-and-search.md](profile-dashboard-and-search.md) | Profile metric dictionary/history, portable configuration and named search engines |
+| [topology-mapper.md](topology-mapper.md) | Seeded Brain/Intel topology, Graph first layout, provenance, bounds and targeted list density |
 | [nlp-preprocessing.md](nlp-preprocessing.md) | Local NLP, immutable evidence, selection, cache and verification |
 | [concepts.md](concepts.md) | Glossary: apps vs IDs, roles, bindings, Intel jobs, schema |
 | [conventions.md](conventions.md) | TUI, schema, tests, agent scratch, planning files |
@@ -60,6 +61,7 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 | [ui-interaction-audit.md](ui-interaction-audit.md) | TUI surfaces, fields, focus, overflow |
 | [tui-database-responsiveness.md](tui-database-responsiveness.md) | Database/index path audit, background snapshot ownership and contention handling |
 | [tui-verification-responsiveness-2026-10-14.md](tui-verification-responsiveness-2026-10-14.md) | Scoped responsiveness visual, interaction and association verification |
+| [tui-verification-topology-2026-10-15.md](tui-verification-topology-2026-10-15.md) | Seeded Graph first mapper, Brain/Intel entries and targeted list density evidence |
 | [investigation-harness.md](investigation-harness.md) | Unified investigation task graph |
 | [jev-decision-gates.md](jev-decision-gates.md) | Tool-picker decisions transport |
 

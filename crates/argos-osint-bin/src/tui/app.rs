@@ -227,6 +227,18 @@ pub struct Scrolls {
     /// Vertical scroll offset for the Recon investigation context panel.
     pub recon_context: u16,
 }
+
+#[derive(Clone, Debug)]
+struct TopologyOrigin {
+    module: Option<ModuleId>,
+    brain_mode: BrainListMode,
+    intel_page: IntelPage,
+    article_id: Option<String>,
+    article_revision: Option<(String, String)>,
+    compact_pages: [usize; 9],
+    scrolls: Scrolls,
+    focus: Target,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ChoiceKind {
     Provider,
@@ -667,9 +679,11 @@ pub enum ButtonId {
     TopologyDepth2,
     TopologyDepth3,
     TopologyCenterSelected,
-    TopologyExpandNeighbors,
     TopologyFitGraph,
     TopologyAnalyzeScope,
+    TopologyRecenter,
+    TopologyZoomIn,
+    TopologyZoomOut,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -748,6 +762,14 @@ pub enum Target {
     TopologyNode(usize),
     TopologyEdge(usize),
     TopologyRelated(usize),
+    TopologyPanel(usize),
+    TopologyInspectorTab(usize),
+    TopologyFilter(usize),
+    TopologyEndpoint(usize),
+    TopologyInspector,
+    TopologyRelationships,
+    IntelTopologyClaim(usize),
+    IntelTopologyActor(usize),
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
@@ -852,6 +874,7 @@ enum WorkEvent {
         outcome: Result<Box<LoadedBrainDetail>, String>,
     },
     TopologyLoaded {
+        generation: u64,
         seed: argos_osint_core::brain_topology::TopologySeed,
         outcome: Result<Box<argos_osint_core::brain_topology::TopologySnapshot>, String>,
     },
@@ -1283,6 +1306,12 @@ pub struct App {
     pub brain_detail: super::brain_detail::BrainDetail,
     /// Brain Memory Topology interactive state.
     pub topology_state: super::topology::TopologyState,
+    topology_origin: Option<TopologyOrigin>,
+    topology_generation: u64,
+    topology_reading: bool,
+    pub(crate) topology_loading: bool,
+    pub(crate) topology_error: Option<String>,
+    pub(crate) topology_origin_label: String,
     /// Total saved memories, to explain an active Find filter.
     pub memory_total: usize,
     /// Last memory-list read failure; the previous list stays on screen.
@@ -1713,6 +1742,12 @@ impl App {
             brain_graph_for: None,
             brain_detail: Default::default(),
             topology_state: Default::default(),
+            topology_origin: None,
+            topology_generation: 0,
+            topology_reading: false,
+            topology_loading: false,
+            topology_error: None,
+            topology_origin_label: String::new(),
             memory_total,
             memory_error: None,
             memories_loaded: false,
@@ -3375,6 +3410,11 @@ impl App {
             }
         }
         self.focus = target;
+        if let (Some(ModuleId::Brain), BrainListMode::Topology, Target::TopologyRelated(index)) =
+            (self.module, self.brain_list_mode, target)
+        {
+            self.reveal_topology_related(index);
+        }
         match target {
             Target::App(index) if self.module.is_none() => self.launcher_sel = index,
             Target::Button(ButtonId::FallbackItem(index)) => self.fallback_sel = index,
@@ -3389,6 +3429,9 @@ impl App {
                 Target::IntelRelatedArticle(index) => {
                     self.intel_related.sel = index;
                     super::ui::reveal_intel_related(self, index);
+                }
+                Target::IntelTopologyClaim(_) | Target::IntelTopologyActor(_) => {
+                    super::ui::reveal_intel_topology_entry(self, target);
                 }
                 Target::Button(ButtonId::RelatedScope | ButtonId::IntelRelatedMore) => {
                     let index = self.intel_related.sel;
@@ -5572,16 +5615,61 @@ impl App {
                 self.on_brain_detail_loaded(generation, outcome);
                 true
             }
-            WorkEvent::TopologyLoaded { seed, outcome } => {
-                if self.topology_state.seed.as_ref() == Some(&seed) {
+            WorkEvent::TopologyLoaded {
+                generation,
+                seed,
+                outcome,
+            } => {
+                self.topology_reading = false;
+                if generation != self.topology_generation
+                    || self.topology_state.seed.as_ref() != Some(&seed)
+                {
+                    if self.module == Some(ModuleId::Brain)
+                        && self.brain_list_mode == BrainListMode::Topology
+                    {
+                        self.refresh_topology();
+                    }
+                    return true;
+                }
+                if generation == self.topology_generation
+                    && self.topology_state.seed.as_ref() == Some(&seed)
+                {
+                    let visible = self.module == Some(ModuleId::Brain)
+                        && self.brain_list_mode == BrainListMode::Topology;
+                    self.topology_loading = false;
                     match outcome {
                         Ok(snap) => {
-                            self.topology_state.selected_node_id = Some(snap.root_id.clone());
+                            let focus = self.topology_state.pending_focus.take().or_else(|| {
+                                super::topology::stable_focus(&self.topology_state, self.focus)
+                            });
+                            if !snap.nodes.iter().any(|node| {
+                                Some(&node.id) == self.topology_state.selected_node_id.as_ref()
+                            }) {
+                                self.topology_state.selected_node_id =
+                                    (!snap.root_id.is_empty()).then(|| snap.root_id.clone());
+                            }
+                            if !snap.edges.iter().any(|edge| {
+                                Some(&edge.id) == self.topology_state.selected_edge_id.as_ref()
+                            }) {
+                                self.topology_state.selected_edge_id = None;
+                            }
                             self.topology_state.snapshot = Some(*snap);
-                            self.status = "Brain Memory Topology".into();
+                            self.topology_error = None;
+                            self.layout.borrow_mut().view_stamp.clear();
+                            if visible {
+                                if let Some(target) = focus.and_then(|focus| {
+                                    super::topology::resolve_focus(&self.topology_state, focus)
+                                }) {
+                                    self.set_focus(target);
+                                }
+                                self.status = "Topology mapper".into();
+                            }
                         }
                         Err(err) => {
-                            self.status = format!("Topology load error: {err}");
+                            self.topology_error = Some(err.clone());
+                            if visible {
+                                self.status = format!("Topology load error: {err}");
+                            }
                             self.push_log_detail("error", "Brain: topology snapshot failed", err);
                         }
                     }
@@ -6897,48 +6985,71 @@ impl App {
     }
 
     pub(crate) fn open_topology(&mut self, seed: argos_osint_core::brain_topology::TopologySeed) {
-        self.topology_state.push_history();
+        let already_open =
+            self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Topology;
+        if already_open {
+            let focus = super::topology::stable_focus(&self.topology_state, self.focus);
+            self.topology_state.push_history();
+            if let Some(frame) = self.topology_state.history.last_mut() {
+                frame.focus = focus;
+            }
+        } else {
+            self.topology_origin_label = if self.module == Some(ModuleId::Intel) {
+                "Intel · Focus brief".into()
+            } else if self
+                .brain_detail
+                .memory_id()
+                .is_some_and(|id| id.starts_with("actor-group:"))
+            {
+                "Brain · actor group graph".into()
+            } else {
+                "Brain · claim path".into()
+            };
+            let origin_article = (self.module == Some(ModuleId::Intel))
+                .then(|| self.intel_articles.get(self.intel_sel))
+                .flatten();
+            self.topology_origin = Some(TopologyOrigin {
+                module: self.module,
+                brain_mode: self.brain_list_mode,
+                intel_page: self.intel_page,
+                article_id: origin_article.map(|a| a.id.clone()),
+                compact_pages: self.compact_pages,
+                scrolls: self.scrolls.clone(),
+                focus: self.focus,
+                article_revision: origin_article.map(|a| {
+                    (
+                        a.run_id.clone(),
+                        argos_osint_core::atlas_metadata::input_hash(a),
+                    )
+                }),
+            });
+            self.topology_state = Default::default();
+        }
         self.module = Some(ModuleId::Brain);
         self.brain_list_mode = BrainListMode::Topology;
-        self.topology_state.seed = Some(seed.clone());
-        let options = argos_osint_core::brain_topology::TopologyOptions {
-            depth: self.topology_state.depth,
-            cycle_scope: self.topology_state.cycle_scope.clone(),
-            max_nodes: 100,
-            max_edges: 200,
-            continuation_token: None,
-        };
-
-        if let Some(db) = self.background_db.clone() {
-            let tx = self.work_tx.clone();
-            let seed_clone = seed.clone();
-            let options_clone = options.clone();
-            std::thread::spawn(move || {
-                let outcome = Store::open_light(&db)
-                    .and_then(|store| {
-                        store
-                            .topology_snapshot(&seed_clone, &options_clone)
-                            .map(Box::new)
-                    })
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(WorkEvent::TopologyLoaded {
-                    seed: seed_clone,
-                    outcome,
-                });
-            });
-            self.status = "Loading Brain topology...".into();
-        } else if let Ok(snap) = self.store.topology_snapshot(&seed, &options) {
-            self.topology_state.selected_node_id = Some(snap.root_id.clone());
-            self.topology_state.snapshot = Some(snap);
-            self.status = "Brain Memory Topology".into();
-        } else {
-            self.status = "Loading Brain topology...".into();
-        }
+        self.topology_state.seed = Some(seed);
+        self.topology_state.snapshot = None;
+        self.topology_state.selected_node_id = None;
+        self.topology_state.selected_edge_id = None;
+        self.topology_state.pending_focus = None;
+        self.refresh_topology();
         self.set_focus(Target::Button(ButtonId::TopologyBack));
     }
 
     pub(crate) fn refresh_topology(&mut self) {
         if let Some(seed) = self.topology_state.seed.clone() {
+            self.topology_generation = self.topology_generation.wrapping_add(1);
+            let generation = self.topology_generation;
+            self.topology_loading = true;
+            self.topology_error = None;
+            self.status = if self.topology_state.snapshot.is_some() {
+                "Refreshing topology · previous snapshot retained".into()
+            } else {
+                "Loading topology…".into()
+            };
+            if self.topology_reading {
+                return;
+            }
             let options = argos_osint_core::brain_topology::TopologyOptions {
                 depth: self.topology_state.depth,
                 cycle_scope: self.topology_state.cycle_scope.clone(),
@@ -6946,9 +7057,270 @@ impl App {
                 max_edges: 200,
                 continuation_token: None,
             };
-            if let Ok(snap) = self.store.topology_snapshot(&seed, &options) {
-                self.topology_state.snapshot = Some(snap);
+            if let Some(db) = self.background_db.clone() {
+                self.topology_reading = true;
+                let tx = self.work_tx.clone();
+                std::thread::spawn(move || {
+                    let outcome = Store::open_light(&db)
+                        .and_then(|store| store.topology_snapshot(&seed, &options).map(Box::new))
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(WorkEvent::TopologyLoaded {
+                        generation,
+                        seed,
+                        outcome,
+                    });
+                });
+            } else {
+                // In-memory fixtures have no independent connection to dispatch.
+                let outcome = self
+                    .store
+                    .topology_snapshot(&seed, &options)
+                    .map(Box::new)
+                    .map_err(|e| e.to_string());
+                self.on_work_event(WorkEvent::TopologyLoaded {
+                    generation,
+                    seed,
+                    outcome,
+                });
             }
+        }
+    }
+
+    pub(crate) fn intel_topology_claim_entries(&self) -> Vec<(String, String)> {
+        if let Some(output) = self.intel_brief_outputs.get("intel_brief_claims") {
+            return output["claims"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|claim| {
+                    let id = claim["id"].as_str()?;
+                    let text = claim["text"].as_str()?;
+                    let who = claim["attributed_to"].as_str().unwrap_or("");
+                    let modality = claim["modality"].as_str().unwrap_or("");
+                    let head = [who, modality]
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    Some((
+                        id.to_string(),
+                        if head.is_empty() {
+                            text.to_string()
+                        } else {
+                            format!("{head}: {text}")
+                        },
+                    ))
+                })
+                .collect();
+        }
+        self.intel_claims
+            .iter()
+            .filter(|c| c.classification != "inference")
+            .map(|c| {
+                (
+                    c.fingerprint.clone(),
+                    if c.fingerprint.starts_with("v2:") {
+                        c.claim.clone()
+                    } else {
+                        format!("{} ({:.2})", c.claim, c.confidence)
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn intel_topology_actor_entries(&self) -> Vec<(String, String)> {
+        let mut entries: Vec<_> = self
+            .intel_actors
+            .iter()
+            .map(|actor| (actor.id.clone(), actor.display_name.clone()))
+            .collect();
+        for claim in &self.intel_claims {
+            if !claim.entity.trim().is_empty()
+                && !entries
+                    .iter()
+                    .any(|(_, name)| name.eq_ignore_ascii_case(&claim.entity))
+            {
+                entries.push((
+                    format!("claim-entity:{}", claim.fingerprint),
+                    claim.entity.clone(),
+                ));
+            }
+        }
+        entries
+    }
+
+    fn open_intel_topology(&mut self, index: usize, actor: bool) {
+        use argos_osint_core::brain_topology::TopologySeed;
+        let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
+            return;
+        };
+        let revision = argos_osint_core::atlas_metadata::input_hash(&article);
+        let seed = if actor {
+            let Some((actor_ref, name)) = self.intel_topology_actor_entries().get(index).cloned()
+            else {
+                return;
+            };
+            TopologySeed::RetainedActor {
+                run_id: article.run_id,
+                article_id: article.id,
+                revision,
+                actor_ref,
+                name,
+            }
+        } else {
+            let Some((local_id, text)) = self.intel_topology_claim_entries().get(index).cloned()
+            else {
+                return;
+            };
+            let text = self
+                .intel_brief_outputs
+                .get("intel_brief_claims")
+                .and_then(|out| out["claims"].as_array())
+                .and_then(|claims| {
+                    claims
+                        .iter()
+                        .find(|claim| claim["id"].as_str() == Some(&local_id))
+                })
+                .and_then(|claim| claim["text"].as_str())
+                .map(str::to_owned)
+                .or_else(|| {
+                    self.intel_claims
+                        .iter()
+                        .find(|claim| claim.fingerprint == local_id)
+                        .map(|claim| claim.claim.clone())
+                })
+                .unwrap_or(text);
+            TopologySeed::RetainedClaim {
+                run_id: article.run_id,
+                article_id: article.id,
+                revision,
+                local_id,
+                text,
+                job_id: self.intel_brief_job.clone().unwrap_or_default(),
+            }
+        };
+        self.open_topology(seed);
+    }
+
+    fn recenter_topology(&mut self) {
+        if let Some(id) = self.topology_state.selected_node_id.clone() {
+            self.recenter_topology_node(&id);
+        }
+    }
+
+    fn recenter_topology_node(&mut self, node_id: &str) {
+        use argos_osint_core::brain_topology::{TopologyNodeKind as K, TopologySeed as S};
+        let Some(node) = self
+            .topology_state
+            .snapshot
+            .as_ref()
+            .and_then(|snap| snap.nodes.iter().find(|node| node.id == node_id))
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(seed) = node.topology_seed.clone() {
+            self.open_topology(seed);
+            return;
+        }
+        let seed = match node.kind {
+            K::Claim => S::Claim(node.id),
+            K::Entity => S::Actor(node.member_ids.first().cloned().unwrap_or(node.id)),
+            K::ActorGroup => S::ActorGroup {
+                name_key: node.id.trim_start_matches("actor-group:").to_string(),
+                member_ids: node.member_ids,
+            },
+            K::Inference => S::Inference(node.id),
+            K::Article => S::Article {
+                run_id: node.run_id,
+                article_id: node.article_id,
+                revision: node.revision,
+                originating_memory: None,
+            },
+            K::Topic | K::Source => {
+                self.status = "This projection retains its source context; select a connected record to recenter".into();
+                return;
+            }
+        };
+        self.open_topology(seed);
+    }
+
+    fn reveal_topology_related(&mut self, index: usize) {
+        let count = super::topology::related_edge_indices(&self.topology_state).len();
+        let index = index.min(count.saturating_sub(1));
+        self.topology_state.related_sel = index;
+        // Rebuild from current state before testing visibility. Logical records
+        // beyond this page enter focus through the same measured list renderer.
+        let _ = super::ui::focus_order(self);
+        let visible = self
+            .layout
+            .borrow()
+            .entries
+            .iter()
+            .any(|entry| entry.target == Target::TopologyRelated(index));
+        if index < self.topology_state.related_scroll || !visible {
+            self.topology_state.related_scroll = index;
+            self.layout.borrow_mut().view_stamp.clear();
+        }
+    }
+
+    fn move_topology_row(&mut self, direction: isize) {
+        match self.focus {
+            Target::TopologyInspector => {
+                super::topology::scroll_topology(self, Target::TopologyInspector, direction);
+            }
+            Target::TopologyRelated(_) | Target::TopologyRelationships => {
+                let count = super::topology::related_edge_indices(&self.topology_state).len();
+                if count == 0 {
+                    return;
+                }
+                let index = match self.focus {
+                    Target::TopologyRelated(index) => {
+                        index.saturating_add_signed(direction).min(count - 1)
+                    }
+                    _ => 0,
+                };
+                self.set_focus(Target::TopologyRelated(index));
+            }
+            Target::TopologyGraph | Target::TopologyNode(_) | Target::TopologyEdge(_) => {
+                let Some(snapshot) = self.topology_state.snapshot.as_ref() else {
+                    return;
+                };
+                let eligible: Vec<_> = snapshot
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, node)| super::topology::node_visible(&self.topology_state, node))
+                    .map(|(index, _)| index)
+                    .collect();
+                if eligible.is_empty() {
+                    return;
+                }
+                let current = eligible
+                    .iter()
+                    .position(|index| {
+                        Some(&snapshot.nodes[*index].id)
+                            == self.topology_state.selected_node_id.as_ref()
+                    })
+                    .unwrap_or(0);
+                let index = eligible[current
+                    .saturating_add_signed(direction)
+                    .min(eligible.len() - 1)];
+                self.activate_target(Target::TopologyNode(index));
+                let _ = super::ui::focus_order(self);
+                let visible = self
+                    .layout
+                    .borrow()
+                    .entries
+                    .iter()
+                    .any(|entry| entry.target == Target::TopologyNode(index));
+                if !visible {
+                    self.topology_state.center_selected();
+                    self.layout.borrow_mut().view_stamp.clear();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -6970,10 +7342,19 @@ impl App {
             KeyCode::Home => {
                 self.topology_state.pan = (0, 0);
                 self.topology_state.zoom_percent = 100;
+                self.topology_state.viewport_center_id = None;
                 true
             }
             KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::F(5) => {
                 self.refresh_topology();
+                true
+            }
+            KeyCode::Char('c') => {
+                self.recenter_topology();
+                true
+            }
+            KeyCode::PageUp | KeyCode::PageDown => {
+                super::ui::page(self, if key.code == KeyCode::PageUp { -1 } else { 1 });
                 true
             }
             KeyCode::Tab => {
@@ -6987,84 +7368,45 @@ impl App {
             KeyCode::Up => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.topology_state.pan.1 = self.topology_state.pan.1.saturating_sub(2);
-                } else if self.focus == Target::TopologyRelated(self.topology_state.related_sel) {
-                    self.topology_state.related_sel =
-                        self.topology_state.related_sel.saturating_sub(1);
-                    self.set_focus(Target::TopologyRelated(self.topology_state.related_sel));
-                } else if let Some(snap) = &self.topology_state.snapshot {
-                    if !snap.nodes.is_empty() {
-                        let cur_idx = snap
-                            .nodes
-                            .iter()
-                            .position(|n| {
-                                Some(&n.id) == self.topology_state.selected_node_id.as_ref()
-                            })
-                            .unwrap_or(0);
-                        let next_idx = cur_idx.saturating_sub(1);
-                        self.topology_state.selected_node_id =
-                            Some(snap.nodes[next_idx].id.clone());
-                        self.set_focus(Target::TopologyNode(next_idx));
-                    }
+                } else {
+                    self.move_topology_row(-1);
                 }
                 true
             }
             KeyCode::Down => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.topology_state.pan.1 = self.topology_state.pan.1.saturating_add(2);
-                } else if self.focus == Target::TopologyRelated(self.topology_state.related_sel) {
-                    let total = self
-                        .topology_state
-                        .snapshot
-                        .as_ref()
-                        .map(|s| s.associations.actors.len() + s.associations.claims.len())
-                        .unwrap_or(4);
-                    if total > 0 {
-                        self.topology_state.related_sel =
-                            (self.topology_state.related_sel + 1).min(total - 1);
-                        self.set_focus(Target::TopologyRelated(self.topology_state.related_sel));
-                    }
-                } else if let Some(snap) = &self.topology_state.snapshot {
-                    if !snap.nodes.is_empty() {
-                        let cur_idx = snap
-                            .nodes
-                            .iter()
-                            .position(|n| {
-                                Some(&n.id) == self.topology_state.selected_node_id.as_ref()
-                            })
-                            .unwrap_or(0);
-                        let next_idx = (cur_idx + 1).min(snap.nodes.len() - 1);
-                        self.topology_state.selected_node_id =
-                            Some(snap.nodes[next_idx].id.clone());
-                        self.set_focus(Target::TopologyNode(next_idx));
-                    }
+                } else {
+                    self.move_topology_row(1);
                 }
                 true
             }
             KeyCode::Left => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.topology_state.pan.0 = self.topology_state.pan.0.saturating_sub(4);
+                } else if let Target::TopologyPanel(index) = self.focus {
+                    self.set_focus(Target::TopologyPanel(index.saturating_sub(1)));
+                } else if let Target::TopologyInspectorTab(index) = self.focus {
+                    self.set_focus(Target::TopologyInspectorTab(index.saturating_sub(1)));
+                } else {
+                    return false;
                 }
                 true
             }
             KeyCode::Right => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.topology_state.pan.0 = self.topology_state.pan.0.saturating_add(4);
+                } else if let Target::TopologyPanel(index) = self.focus {
+                    self.set_focus(Target::TopologyPanel((index + 1).min(2)));
+                } else if let Target::TopologyInspectorTab(index) = self.focus {
+                    self.set_focus(Target::TopologyInspectorTab((index + 1).min(1)));
+                } else {
+                    return false;
                 }
                 true
             }
-            KeyCode::Enter => {
-                match self.focus {
-                    Target::Button(b) => {
-                        self.activate_button(b);
-                    }
-                    Target::TopologyRelated(idx) => {
-                        self.activate_target(Target::TopologyRelated(idx));
-                    }
-                    Target::TopologyNode(_) => {
-                        self.activate_button(ButtonId::TopologyOpenMemory);
-                    }
-                    _ => {}
-                }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.activate_target(self.focus);
                 true
             }
             _ => false,
@@ -7152,7 +7494,7 @@ impl App {
                 app: "brain-actor-group".into(),
                 conversation_id: group.name_key,
                 message_id: None,
-                reference: None,
+                reference: serde_json::to_string(&group.actor_ids).ok(),
             },
         };
         self.show_detail(memory, graph, None);
@@ -7917,7 +8259,13 @@ impl App {
                         let name_key = id.trim_start_matches("actor-group:").to_string();
                         argos_osint_core::brain_topology::TopologySeed::ActorGroup {
                             name_key,
-                            member_ids: Vec::new(),
+                            member_ids: self
+                                .brain_detail
+                                .memory
+                                .as_ref()
+                                .and_then(|m| m.source.reference.as_deref())
+                                .and_then(|s| serde_json::from_str(s).ok())
+                                .unwrap_or_default(),
                         }
                     } else if id.starts_with("actor:") {
                         argos_osint_core::brain_topology::TopologySeed::Actor(id.to_string())
@@ -7930,16 +8278,55 @@ impl App {
             }
             ButtonId::TopologyBack => {
                 if let Some(frame) = self.topology_state.pop_history() {
-                    self.topology_state.seed = Some(frame.seed.clone());
-                    self.topology_state.selected_node_id = frame.selected_node_id;
-                    self.topology_state.selected_edge_id = frame.selected_edge_id;
-                    self.topology_state.depth = frame.depth;
-                    self.topology_state.cycle_scope = frame.cycle_scope;
-                    self.topology_state.zoom_percent = frame.zoom_percent;
-                    self.topology_state.pan = frame.pan;
-                    self.topology_state.inspector_tab = frame.inspector_tab;
-                    self.topology_state.related_sel = frame.related_sel;
+                    self.topology_state.restore_history(frame);
+                    self.topology_state.snapshot = None;
                     self.refresh_topology();
+                } else if let Some(origin) = self.topology_origin.take() {
+                    self.topology_generation = self.topology_generation.wrapping_add(1);
+                    self.topology_loading = false;
+                    self.module = origin.module;
+                    self.brain_list_mode = origin.brain_mode;
+                    self.intel_page = origin.intel_page;
+                    self.compact_pages = origin.compact_pages;
+                    self.scrolls = origin.scrolls;
+                    if let Some(id) = origin.article_id {
+                        if let Some(index) = self.intel_articles.iter().position(|a| a.id == id) {
+                            self.intel_sel = index;
+                        }
+                    }
+                    let unchanged =
+                        origin
+                            .article_revision
+                            .as_ref()
+                            .is_none_or(|(run, revision)| {
+                                self.intel_articles
+                                    .get(self.intel_sel)
+                                    .is_some_and(|article| {
+                                        &article.run_id == run
+                                            && argos_osint_core::atlas_metadata::input_hash(article)
+                                                == *revision
+                                    })
+                            });
+                    self.focus = origin.focus;
+                    self.status = if unchanged {
+                        "Returned to topology entry".into()
+                    } else {
+                        "Origin article changed or is unavailable · showing retained owner context"
+                            .into()
+                    };
+                    if !unchanged && self.module == Some(ModuleId::Intel) {
+                        self.intel_page = IntelPage::Bulletin;
+                        self.set_focus(Target::IntelArticle(self.intel_sel));
+                    } else if self.module == Some(ModuleId::Brain)
+                        && self.brain_list_mode == BrainListMode::Graph
+                    {
+                        if self.brain_detail.memory.is_some() {
+                            self.refresh_open_detail();
+                        } else {
+                            self.leave_brain_detail();
+                            self.status = "Origin memory is unavailable · returned to Brain".into();
+                        }
+                    }
                 } else if self.brain_detail.memory.is_some() {
                     self.brain_list_mode = BrainListMode::Graph;
                     self.set_focus(Target::Button(ButtonId::BrainDetailBack));
@@ -7949,23 +8336,49 @@ impl App {
                 }
                 return;
             }
+            ButtonId::TopologyRecenter => {
+                self.recenter_topology();
+                return;
+            }
+            ButtonId::TopologyZoomIn => {
+                self.topology_state.zoom_percent = (self.topology_state.zoom_percent + 10).min(200);
+                return;
+            }
+            ButtonId::TopologyZoomOut => {
+                self.topology_state.zoom_percent =
+                    self.topology_state.zoom_percent.saturating_sub(10).max(50);
+                return;
+            }
             ButtonId::TopologyOpenMemory => {
-                if let Some(sel_id) = self.topology_state.selected_node_id.clone() {
-                    self.open_memory_detail(&sel_id);
+                if let Some(node) = self.topology_state.snapshot.as_ref().and_then(|snap| {
+                    snap.nodes.iter().find(|node| {
+                        Some(&node.id) == self.topology_state.selected_node_id.as_ref()
+                    })
+                }) {
+                    self.overlay = Overlay::Block {
+                        title: format!("{} · {}", node.kind.label(), node.label),
+                        body: format!(
+                            "{}\n\nRecord: {}\nStatus: {}\nRevision: {}\n\n{}",
+                            node.detail,
+                            node.id,
+                            node.status,
+                            node.revision,
+                            node.passages.join("\n\n")
+                        ),
+                    };
+                    self.scrolls.popup = 0;
                 }
                 return;
             }
             ButtonId::TopologyViewEvidence => {
-                self.topology_state.inspector_tab = if self.topology_state.inspector_tab == 0 {
-                    1
-                } else {
-                    0
-                };
+                let next = usize::from(self.topology_state.inspector_tab == 0);
+                self.activate_target(Target::TopologyInspectorTab(next));
                 return;
             }
             ButtonId::TopologyScopeAll => {
                 self.topology_state.cycle_scope =
                     argos_osint_core::brain_topology::CycleScope::AllRetained;
+                self.topology_state.snapshot = None;
                 self.refresh_topology();
                 return;
             }
@@ -7973,22 +8386,26 @@ impl App {
                 if let Some(cycle_id) = self.topology_state.current_cycle_id() {
                     self.topology_state.cycle_scope =
                         argos_osint_core::brain_topology::CycleScope::ThisCycle(cycle_id);
+                    self.topology_state.snapshot = None;
                     self.refresh_topology();
                 }
                 return;
             }
             ButtonId::TopologyDepth1 => {
                 self.topology_state.depth = 1;
+                self.topology_state.snapshot = None;
                 self.refresh_topology();
                 return;
             }
             ButtonId::TopologyDepth2 => {
                 self.topology_state.depth = 2;
+                self.topology_state.snapshot = None;
                 self.refresh_topology();
                 return;
             }
             ButtonId::TopologyDepth3 => {
                 self.topology_state.depth = 3;
+                self.topology_state.snapshot = None;
                 self.refresh_topology();
                 return;
             }
@@ -7996,14 +8413,10 @@ impl App {
                 self.topology_state.center_selected();
                 return;
             }
-            ButtonId::TopologyExpandNeighbors => {
-                self.topology_state.depth = (self.topology_state.depth + 1).min(3);
-                self.refresh_topology();
-                return;
-            }
             ButtonId::TopologyFitGraph => {
                 self.topology_state.pan = (0, 0);
                 self.topology_state.zoom_percent = 100;
+                self.topology_state.viewport_center_id = None;
                 return;
             }
             ButtonId::TopologyAnalyzeScope => {
@@ -9124,15 +9537,110 @@ impl App {
                     self.open_selected_related();
                 }
             }
-            Target::DetailPath | Target::DetailSummary => self.set_focus(target),
+            Target::DetailPath => {
+                self.set_focus(target);
+                self.activate_button(ButtonId::BrainMapTopology);
+            }
+            Target::DetailSummary => self.set_focus(target),
+            Target::IntelTopologyClaim(index) => {
+                self.focus = target;
+                self.open_intel_topology(index, false);
+            }
+            Target::IntelTopologyActor(index) => {
+                self.focus = target;
+                self.open_intel_topology(index, true);
+            }
+            Target::TopologyPanel(index) => {
+                self.topology_state.active_panel_tab = index.min(2);
+                let mode = super::topology_layout::TopologyLayoutResult::compute(
+                    super::ui::body_rect(self),
+                )
+                .mode;
+                let focus = if index == 1
+                    && matches!(
+                        mode,
+                        super::topology_layout::TopologyResponsiveMode::Desktop
+                            | super::topology_layout::TopologyResponsiveMode::Compact
+                    ) {
+                    Target::TopologyInspector
+                } else {
+                    target
+                };
+                self.layout.borrow_mut().view_stamp.clear();
+                self.set_focus(focus);
+            }
+            Target::TopologyInspectorTab(index) => {
+                self.topology_state.inspector_tab = index.min(1);
+                self.topology_state.related_scroll = 0;
+                self.topology_state.related_sel = 0;
+                self.layout.borrow_mut().view_stamp.clear();
+                self.set_focus(target);
+            }
+            Target::TopologyFilter(index) => {
+                let filter = match index {
+                    0 => &mut self.topology_state.filter_actor,
+                    1 => &mut self.topology_state.filter_claim,
+                    2 => &mut self.topology_state.filter_inference,
+                    3 => &mut self.topology_state.filter_link,
+                    4 => &mut self.topology_state.filter_related,
+                    _ => &mut self.topology_state.filter_sources,
+                };
+                *filter = !*filter;
+                if let Some(snapshot) = &self.topology_state.snapshot {
+                    let hidden = snapshot
+                        .nodes
+                        .iter()
+                        .find(|node| {
+                            Some(&node.id) == self.topology_state.selected_node_id.as_ref()
+                        })
+                        .is_some_and(|node| {
+                            !super::topology::node_visible(&self.topology_state, node)
+                        });
+                    if hidden {
+                        self.topology_state.selected_node_id = Some(snapshot.root_id.clone());
+                        self.topology_state.selected_edge_id = None;
+                        self.topology_state.inspector_scroll = 0;
+                    }
+                }
+                self.topology_state.related_sel = 0;
+                self.topology_state.related_scroll = 0;
+                self.layout.borrow_mut().view_stamp.clear();
+                self.set_focus(target);
+            }
+            Target::TopologyEndpoint(index) => {
+                let endpoint = self
+                    .topology_state
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snap| {
+                        snap.edges.iter().find(|edge| {
+                            Some(&edge.id) == self.topology_state.selected_edge_id.as_ref()
+                        })
+                    })
+                    .map(|edge| {
+                        if index == 0 {
+                            edge.from.clone()
+                        } else {
+                            edge.to.clone()
+                        }
+                    });
+                if let Some(endpoint) = endpoint {
+                    self.focus = target;
+                    self.recenter_topology_node(&endpoint);
+                }
+            }
             Target::TopologyGraph => {
                 self.set_focus(Target::TopologyGraph);
             }
+            Target::TopologyInspector | Target::TopologyRelationships => self.set_focus(target),
             Target::TopologyNode(index) => {
                 if let Some(snap) = &self.topology_state.snapshot {
                     if let Some(node) = snap.nodes.get(index) {
                         self.topology_state.selected_node_id = Some(node.id.clone());
                         self.topology_state.selected_edge_id = None;
+                        self.topology_state.inspector_scroll = 0;
+                        self.topology_state.related_sel = 0;
+                        self.topology_state.related_scroll = 0;
                         self.set_focus(Target::TopologyNode(index));
                     }
                 }
@@ -9141,13 +9649,28 @@ impl App {
                 if let Some(snap) = &self.topology_state.snapshot {
                     if let Some(edge) = snap.edges.get(index) {
                         self.topology_state.selected_edge_id = Some(edge.id.clone());
-                        self.topology_state.selected_node_id = None;
+                        self.topology_state.inspector_scroll = 0;
                         self.set_focus(Target::TopologyEdge(index));
                     }
                 }
             }
             Target::TopologyRelated(index) => {
                 self.topology_state.related_sel = index;
+                if let Some(edge_index) =
+                    super::topology::related_edge_indices(&self.topology_state)
+                        .get(index)
+                        .copied()
+                {
+                    if let Some(edge) = self
+                        .topology_state
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snap| snap.edges.get(edge_index))
+                    {
+                        self.topology_state.selected_edge_id = Some(edge.id.clone());
+                        self.topology_state.inspector_scroll = 0;
+                    }
+                }
                 self.set_focus(Target::TopologyRelated(index));
             }
             Target::AtlasArticle(index) => {
@@ -9585,6 +10108,7 @@ impl App {
             return true;
         }
         if self.module == Some(ModuleId::Brain)
+            && self.overlay == Overlay::None
             && self.brain_list_mode == BrainListMode::Topology
             && self.handle_topology_key(key)
         {
@@ -11241,7 +11765,7 @@ fn load_brain_detail(store: &Store, id: &str) -> Result<LoadedBrainDetail> {
                 app: "brain-actor-group".into(),
                 conversation_id: g.name_key,
                 message_id: None,
-                reference: None,
+                reference: serde_json::to_string(&g.actor_ids).ok(),
             },
         };
         Ok(LoadedBrainDetail {
@@ -11511,6 +12035,12 @@ mod tests {
             brain_graph_for: None,
             brain_detail: Default::default(),
             topology_state: Default::default(),
+            topology_origin: None,
+            topology_generation: 0,
+            topology_reading: false,
+            topology_loading: false,
+            topology_error: None,
+            topology_origin_label: String::new(),
             memory_total: 0,
             memory_error: None,
             memories_loaded: true,
@@ -17132,9 +17662,9 @@ mod tests {
             edges: Vec::new(),
         };
         render(&mut app, 120, 42);
-        click(&mut app, Target::DetailPath);
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.module, Some(ModuleId::Brain), "graph never navigates");
+        // This test covers the explicit source article route. Graph activation
+        // is independently covered by the seeded topology entry tests.
+        app.set_focus(Target::DetailPath);
         app.open_claim_article("run-brain", "art-brain").unwrap();
         assert_eq!(app.module, Some(ModuleId::Intel));
         assert_eq!(app.intel_page, IntelPage::Briefing);
@@ -17565,13 +18095,20 @@ mod tests {
                 if targets.len() >= 2 {
                     let first = targets[0].rect;
                     let next = targets[1].rect;
-                    assert_eq!(next.y, first.bottom() + 1, "{module:?} at {width}x{height}");
-                    for x in first.x..first.right() {
-                        assert_eq!(buffer[(x, first.bottom())].symbol(), " ");
+                    let gap = usize::from(module != ModuleId::Intel) as u16;
+                    assert_eq!(
+                        next.y,
+                        first.bottom() + gap,
+                        "{module:?} at {width}x{height}"
+                    );
+                    if gap > 0 {
+                        for x in first.x..first.right() {
+                            assert_eq!(buffer[(x, first.bottom())].symbol(), " ");
+                        }
+                        let hit = super::super::ui::hit_test(&app, first.x, first.bottom());
+                        assert_ne!(hit, Some(targets[0].target));
+                        assert_ne!(hit, Some(targets[1].target));
                     }
-                    let hit = super::super::ui::hit_test(&app, first.x, first.bottom());
-                    assert_ne!(hit, Some(targets[0].target));
-                    assert_ne!(hit, Some(targets[1].target));
                 }
                 if module == ModuleId::Logs {
                     let lines =
@@ -20697,54 +21234,719 @@ mod tests {
     }
 
     #[test]
-    fn dump_brain_topology_screens() {
-        let mut initial_app = app();
-        initial_app.select(ModuleId::Brain.index());
-        initial_app.brain_list_mode = BrainListMode::Topology;
-        initial_app.topology_state.seed = Some(
-            argos_osint_core::brain_topology::TopologySeed::Actor("A-001".into()),
-        );
-        initial_app.topology_state.selected_node_id = Some("A-001".into());
-
-        let buf = render(&mut initial_app, 160, 50);
-        let text = buffer_text(&buf);
-        assert!(text.contains("Brain Memory Topology"));
-        assert!(text.contains("Scoped relationships"));
-        assert!(text.contains("Northstar Labs"));
-
-        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
-            return;
-        };
-        std::fs::create_dir_all(&dir).unwrap();
+    fn dump_topology_density_and_entries_screens() {
+        let directory = std::env::var("ARGOS_SCREEN_DIR").ok();
+        if let Some(dir) = &directory {
+            std::fs::create_dir_all(dir).unwrap();
+        }
         for (width, height) in [
             (160, 50),
             (120, 40),
             (100, 32),
             (80, 24),
             (60, 18),
-            (50, 15),
+            (40, 20),
         ] {
             let mut app = app();
-            app.select(ModuleId::Brain.index());
-            app.brain_list_mode = BrainListMode::Topology;
-            app.topology_state.seed = Some(argos_osint_core::brain_topology::TopologySeed::Actor(
-                "A-001".into(),
-            ));
-            app.topology_state.selected_node_id = Some("A-001".into());
+            let capture = |app: &mut App, name: &str| {
+                let buffer = render(app, width, height);
+                if let Some(dir) = &directory {
+                    dump_cells(app, dir, &format!("{name}-{width}x{height}"), width, height);
+                }
+                buffer
+            };
+            capture(&mut app, "density-home");
+            app.module = Some(ModuleId::Atlas);
+            app.palette_recent = [
+                "intel", "atlas", "brain", "recon", "jobs", "logs", "tools", "models",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+            app.open_palette();
+            capture(&mut app, "density-palette");
+            app.overlay = Overlay::None;
+            app.atlas_page = AtlasPage::Live;
+            app.compact_pages[ModuleId::Atlas.index()] = 2;
+            app.atlas_feed = (0..24)
+                .map(|i| atlas::FeedArticle {
+                    id: format!("article-{i}"),
+                    title: format!("Harbor and freight headline {i}"),
+                    description: "Retained source metadata".into(),
+                    url: format!("https://example.test/article/{i}"),
+                    country: "us".into(),
+                    source_name: "Harbor Ledger".into(),
+                    source_domain: "example.test".into(),
+                    author: String::new(),
+                    image_url: String::new(),
+                    published_at: "2026-10-15T12:00:00Z".into(),
+                    provider: "fixture".into(),
+                    temperature: 0.5,
+                    seen_at: "2026-10-15T12:00:00Z".into(),
+                    category: "economic".into(),
+                })
+                .collect();
+            capture(&mut app, "density-atlas-feed");
+            app.atlas_page = AtlasPage::Runs;
+            app.atlas_runs = (0..24)
+                .map(|i| AtlasRunRow {
+                    id: format!("cycle-{i}"),
+                    state: "completed".into(),
+                    phase: 5,
+                    cursor_json: "{}".into(),
+                    stats_json: "{}".into(),
+                    note: String::new(),
+                    started_at: "2026-10-15T12:00:00Z".into(),
+                    finished_at: "2026-10-15T12:01:00Z".into(),
+                })
+                .collect();
+            capture(&mut app, "density-atlas-cycles");
+            app.atlas_news = true;
+            app.atlas_news_run = "cycle-0".into();
+            app.atlas_articles = (0..24)
+                .map(|i| AtlasArticleRow {
+                    run_id: "cycle-0".into(),
+                    id: format!("article-{i}"),
+                    title: format!("Retained harbor article {i}"),
+                    source_name: "Harbor Ledger".into(),
+                    country: "us".into(),
+                    category: "economic".into(),
+                    published_at: "2026-10-15T12:00:00Z".into(),
+                    ..Default::default()
+                })
+                .collect();
+            capture(&mut app, "density-atlas-articles");
+            app.module = Some(ModuleId::Intel);
+            app.intel_articles = app.atlas_articles.clone();
+            app.intel_category = "economic".into();
+            app.intel_page = IntelPage::Bulletin;
+            let _ = capture(&mut app, "density-intel-bulletin");
+            let targets: Vec<_> = app
+                .layout
+                .borrow()
+                .entries
+                .iter()
+                .filter(|e| matches!(e.target, Target::IntelArticle(_)))
+                .cloned()
+                .collect();
+            if targets.len() > 1 {
+                assert_eq!(targets[1].rect.y, targets[0].rect.bottom());
+            }
+            app.intel_page = IntelPage::Briefing;
+            app.compact_pages[ModuleId::Intel.index()] = 0;
+            app.intel_brief_outputs.insert("intel_brief_claims".into(),serde_json::json!({"claims":[{"id":"c1","text":"The Bay Authority awarded the harbor contract to Aster Logistics. Unicode 東京 keeps the complete wrapped record actionable.","attributed_to":"Harbor Ledger","modality":"reported"},{"id":"c2","text":"Freight capacity declined in the latest report."}],"withheld":2}));
+            app.intel_actors = (0..12)
+                .map(|i| argos_osint_core::atlas_metadata::ArticleActor {
+                    id: format!("source-actor-{i}"),
+                    display_name: format!("Aster Logistics division {i}"),
+                    type_hint: "organization".into(),
+                    spellings: vec![],
+                    mentions: vec![],
+                })
+                .collect();
+            capture(&mut app, "intel-topology-claims");
+            app.intel_brief_outputs.clear();
+            capture(&mut app, "intel-topology-actors-no-claims");
+            app.set_focus(Target::IntelTopologyActor(11));
+            capture(&mut app, "intel-topology-actor-tail");
+        }
+    }
 
+    #[test]
+    fn topology_intel_claim_uses_raw_identity_and_clicked_origin() {
+        let mut app = app();
+        app.module = Some(ModuleId::Intel);
+        app.intel_page = IntelPage::Briefing;
+        app.intel_articles = vec![intel_brief_image_article("attributed-claim", "")];
+        app.intel_brief_outputs.insert("intel_brief_claims".into(), serde_json::json!({"claims":[{"id":"c1","text":"Exact publication text","attributed_to":"Aster Logistics","modality":"reported"}]}));
+        assert!(app.intel_topology_claim_entries()[0].1.contains("reported"));
+        app.focus = Target::IntelPreview;
+        app.activate_target(Target::IntelTopologyClaim(0));
+        assert!(
+            matches!(&app.topology_state.seed, Some(argos_osint_core::brain_topology::TopologySeed::RetainedClaim { text, local_id, .. }) if text == "Exact publication text" && local_id == "c1")
+        );
+        app.activate_button(ButtonId::TopologyBack);
+        assert_eq!(app.focus, Target::IntelTopologyClaim(0));
+    }
+
+    #[test]
+    fn topology_graph_wheel_and_pages_pan_the_same_canvas() {
+        let mut app = topology_fixture();
+        render(&mut app, 160, 50);
+        let rect = app
+            .layout
+            .borrow()
+            .entries
+            .iter()
+            .find(|entry| entry.target == Target::TopologyGraph)
+            .unwrap()
+            .rect;
+        let point = (rect.y..rect.bottom())
+            .flat_map(|y| (rect.x..rect.right()).map(move |x| (x, y)))
+            .find(|(x, y)| super::super::ui::hit_test(&app, *x, *y) == Some(Target::TopologyGraph))
+            .unwrap();
+        super::super::ui::scroll_at(&mut app, point.0, point.1, 1);
+        assert_eq!(app.topology_state.pan.1, -3);
+        app.set_focus(Target::TopologyGraph);
+        super::super::ui::page(&mut app, 1);
+        assert!(app.topology_state.pan.1 < -3);
+        app.activate_button(ButtonId::TopologyFitGraph);
+        assert_eq!(app.topology_state.pan, (0, 0));
+    }
+
+    fn topology_fixture() -> App {
+        use argos_osint_core::brain_topology::{
+            TopologyEdge, TopologyEdgeKind as E, TopologyNode, TopologyNodeKind as K, TopologySeed,
+            TopologySnapshot,
+        };
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        app.brain_list_mode = BrainListMode::Topology;
+        app.topology_origin_label = "Brain · claim path".into();
+        let seed = TopologySeed::Claim("c1".into());
+        let records = [
+            ("c1", K::Claim, "Harbor contract shifted", 0),
+            ("a1", K::Entity, "Aster Logistics", 1),
+            ("a2", K::Entity, "Bay Authority", 1),
+            ("t1", K::Topic, "Port procurement", 1),
+            ("r1", K::Article, "Tender report", 1),
+            ("i1", K::Inference, "Supplier exposure", 1),
+            ("r2", K::Article, "Freight review", 1),
+            ("s1", K::Source, "Harbor Ledger", 2),
+            ("c2", K::Claim, "Capacity fell 18%", 2),
+        ];
+        let nodes = records
+            .into_iter()
+            .map(|(id, kind, label, min_hops)| TopologyNode {
+                id: id.into(),
+                kind,
+                label: label.into(),
+                detail: format!(
+                    "{label}. Retained fictional fixture record with exact source revision."
+                ),
+                subtype: if kind == K::Topic {
+                    "derived article tag"
+                } else {
+                    "fixture"
+                }
+                .into(),
+                status: "retained".into(),
+                is_root: id == "c1",
+                article_id: if kind == K::Article {
+                    id.into()
+                } else {
+                    String::new()
+                },
+                run_id: "cycle-42".into(),
+                published_at: "2026-10-15T12:00:00Z".into(),
+                cycle: Some("cycle-42".into()),
+                member_ids: if kind == K::Entity {
+                    vec![id.into()]
+                } else {
+                    vec![]
+                },
+                evidence_count: 1,
+                passages: vec!["Exact retained source passage · revision demo-r7".into()],
+                min_hops,
+                revision: "demo-r7".into(),
+                predecessor: (id != "c1").then(|| "c1".into()),
+                topology_seed: None,
+            })
+            .collect::<Vec<_>>();
+        let edges = [
+            ("c1", "a1", E::Concerns, "concerns"),
+            ("c1", "a2", E::Concerns, "concerns"),
+            ("c1", "t1", E::Contains, "tagged"),
+            ("c1", "r1", E::Source, "sourced from"),
+            ("i1", "c1", E::Premise, "premise"),
+            ("c1", "r2", E::Related, "possible context"),
+            ("r1", "s1", E::Source, "published by"),
+            ("c2", "a1", E::Concerns, "concerns"),
+            ("c2", "r2", E::Source, "sourced from"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (from, to, kind, label))| TopologyEdge {
+            id: format!("edge-{i}"),
+            from: from.into(),
+            to: to.into(),
+            kind,
+            label: label.into(),
+            status: if kind == E::Related {
+                "tentative"
+            } else {
+                "recorded"
+            }
+            .into(),
+            member_ids: vec![],
+            receipts: vec!["Article revision demo-r7 · retained evidence".into()],
+            rationale: "Exact relationship receipt; no inferred identity or corroboration.".into(),
+        })
+        .collect::<Vec<_>>();
+        app.topology_state.seed = Some(seed.clone());
+        app.topology_state.selected_node_id = Some("c1".into());
+        app.topology_state.snapshot = Some(TopologySnapshot {
+            seed: Some(seed),
+            root_id: "c1".into(),
+            root_label: "Harbor contract shifted".into(),
+            root_kind: Some(K::Claim),
+            total_nodes: nodes.len(),
+            total_edges: edges.len(),
+            discovered_nodes: nodes.len(),
+            discovered_edges: edges.len(),
+            nodes,
+            edges,
+            exploration_exhausted: true,
+            ..Default::default()
+        });
+        app
+    }
+
+    #[test]
+    fn topology_keyboard_respects_filters_and_exits_edge_inspection() {
+        let mut app = topology_fixture();
+        render(&mut app, 160, 50);
+        app.topology_state.filter_actor = false;
+        app.topology_state.filter_inference = false;
+        app.topology_state.filter_sources = false;
+        app.activate_target(Target::TopologyEdge(0));
+        app.topology_state.inspector_scroll = 100;
+        app.handle_topology_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.topology_state.selected_node_id.as_deref(), Some("c2"));
+        assert!(app.topology_state.selected_edge_id.is_none());
+        assert_eq!(app.topology_state.inspector_scroll, 0);
+        let Target::TopologyNode(index) = app.focus else {
+            panic!("node focus required")
+        };
+        assert_eq!(
+            app.topology_state.snapshot.as_ref().unwrap().nodes[index].id,
+            "c2"
+        );
+        app.handle_topology_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.topology_state.selected_node_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn topology_relationship_arrows_and_pages_reveal_real_records() {
+        let mut app = topology_fixture();
+        render(&mut app, 80, 24);
+        app.activate_target(Target::TopologyPanel(1));
+        app.set_focus(Target::TopologyRelationships);
+        app.handle_topology_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.focus, Target::TopologyRelated(0));
+        let last = super::super::topology::related_edge_indices(&app.topology_state).len() - 1;
+        for _ in 0..last {
+            app.handle_topology_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(app.focus, Target::TopologyRelated(last));
+        assert!(app.topology_state.related_scroll > 0);
+        let _ = super::super::ui::focus_order(&app);
+        assert!(app
+            .layout
+            .borrow()
+            .entries
+            .iter()
+            .any(|entry| entry.target == app.focus));
+        app.set_focus(Target::TopologyRelationships);
+        for _ in 0..20 {
+            app.handle_topology_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        assert!(app.topology_state.related_scroll <= last);
+        for _ in 0..20 {
+            app.handle_topology_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        }
+        assert_eq!(app.topology_state.related_scroll, 0);
+        app.topology_state.inspector_scroll = 0;
+        app.set_focus(Target::TopologyGraph);
+        app.handle_topology_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.topology_state.inspector_scroll, 0);
+    }
+
+    #[test]
+    fn topology_tabs_keep_focus_separate_and_refresh_pointer_geometry_before_paint() {
+        let mut app = topology_fixture();
+        render(&mut app, 80, 24);
+        let node_rect = app
+            .layout
+            .borrow()
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.target, Target::TopologyNode(_)))
+            .unwrap()
+            .rect;
+        app.set_focus(Target::TopologyPanel(0));
+        app.handle_topology_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.focus, Target::TopologyPanel(1));
+        assert_eq!(app.topology_state.active_panel_tab, 0);
+        app.handle_topology_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.topology_state.active_panel_tab, 1);
+        assert!(!matches!(
+            super::super::ui::hit_test(&app, node_rect.x, node_rect.y),
+            Some(Target::TopologyNode(_))
+        ));
+        app.set_focus(Target::TopologyInspectorTab(0));
+        app.handle_topology_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.topology_state.inspector_tab, 0);
+        app.handle_topology_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.topology_state.inspector_tab, 1);
+        assert_eq!(app.topology_state.related_sel, 0);
+        render(&mut app, 160, 50);
+        app.activate_target(Target::TopologyPanel(1));
+        assert_eq!(app.focus, Target::TopologyInspector);
+    }
+
+    #[test]
+    fn topology_endpoint_history_preserves_edge_and_original_focus() {
+        let mut app = topology_fixture();
+        render(&mut app, 160, 50);
+        let original = app.topology_state.snapshot.as_ref().unwrap().clone();
+        app.activate_target(Target::TopologyEdge(0));
+        app.topology_state.active_panel_tab = 1;
+        app.topology_state.inspector_scroll = 4;
+        // The presentation fixture IDs need not exist in an independent store.
+        // Holding a background read lets the history restore be observed first.
+        app.topology_reading = true;
+        app.activate_target(Target::TopologyEndpoint(1));
+        let saved = app.topology_state.history.last().unwrap();
+        assert_eq!(saved.selected_edge_id.as_deref(), Some("edge-0"));
+        assert_eq!(saved.selected_node_id.as_deref(), Some("c1"));
+        assert!(matches!(
+            saved.focus,
+            Some(super::super::topology::TopologyFocus::Control(
+                Target::TopologyEndpoint(1)
+            ))
+        ));
+        app.activate_button(ButtonId::TopologyBack);
+        assert_eq!(
+            app.topology_state.selected_edge_id.as_deref(),
+            Some("edge-0")
+        );
+        assert_eq!(app.topology_state.active_panel_tab, 1);
+        assert_eq!(app.topology_state.inspector_scroll, 4);
+        assert!(matches!(
+            app.topology_state.pending_focus,
+            Some(super::super::topology::TopologyFocus::Control(
+                Target::TopologyEndpoint(1)
+            ))
+        ));
+        app.on_work_event(WorkEvent::TopologyLoaded {
+            generation: app.topology_generation,
+            seed: argos_osint_core::brain_topology::TopologySeed::Claim("c1".into()),
+            outcome: Ok(Box::new(original)),
+        });
+        assert_eq!(app.focus, Target::TopologyEndpoint(1));
+        assert_eq!(
+            app.topology_state.selected_edge_id.as_deref(),
+            Some("edge-0")
+        );
+    }
+
+    #[test]
+    fn topology_refresh_rebinds_stable_focus_and_preserves_other_app_status() {
+        use argos_osint_core::brain_topology::TopologySeed;
+        for edge_focus in [false, true] {
+            let mut app = topology_fixture();
+            render(&mut app, 160, 50);
+            app.activate_target(if edge_focus {
+                Target::TopologyEdge(0)
+            } else {
+                Target::TopologyNode(1)
+            });
+            let mut snapshot = app.topology_state.snapshot.as_ref().unwrap().clone();
+            snapshot.nodes.reverse();
+            snapshot.edges.reverse();
+            app.on_work_event(WorkEvent::TopologyLoaded {
+                generation: app.topology_generation,
+                seed: TopologySeed::Claim("c1".into()),
+                outcome: Ok(Box::new(snapshot)),
+            });
+            let snapshot = app.topology_state.snapshot.as_ref().unwrap();
+            match app.focus {
+                Target::TopologyNode(index) => assert_eq!(snapshot.nodes[index].id, "a1"),
+                Target::TopologyEdge(index) => assert_eq!(snapshot.edges[index].id, "edge-0"),
+                _ => panic!("stable graph focus required"),
+            }
+            let snapshot = snapshot.clone();
+            app.module = Some(ModuleId::Intel);
+            app.status = "Intel retained status".into();
+            app.on_work_event(WorkEvent::TopologyLoaded {
+                generation: app.topology_generation,
+                seed: TopologySeed::Claim("c1".into()),
+                outcome: Ok(Box::new(snapshot)),
+            });
+            assert_eq!(app.status, "Intel retained status");
+        }
+    }
+
+    #[test]
+    fn topology_rejects_obsolete_same_seed_request_options() {
+        use argos_osint_core::brain_topology::{TopologySeed, TopologySnapshot};
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        let claim = app
+            .store
+            .add_user_claim(
+                "Retained exact seed",
+                "fact",
+                MemorySource {
+                    app: "test".into(),
+                    conversation_id: "topology-race".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        let seed = TopologySeed::Claim(claim.id.clone());
+        app.open_topology(seed.clone());
+        let obsolete = app.topology_generation;
+        app.topology_state.depth = 3;
+        app.refresh_topology();
+        app.on_work_event(WorkEvent::TopologyLoaded {
+            generation: obsolete,
+            seed,
+            outcome: Ok(Box::new(TopologySnapshot::default())),
+        });
+        assert_eq!(
+            app.topology_state.snapshot.as_ref().unwrap().root_id,
+            claim.id
+        );
+        assert_eq!(app.topology_state.depth, 3);
+    }
+
+    #[test]
+    fn topology_entries_recenter_and_generation_are_scoped() {
+        use argos_osint_core::brain_topology::{TopologySeed, TopologySnapshot};
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        let claim = app
+            .store
+            .add_user_claim(
+                "Exact isolated claim",
+                "fact",
+                MemorySource {
+                    app: "test".into(),
+                    conversation_id: "topology".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        assert!(app.open_memory_detail(&claim.id));
+        app.scrolls.path = 7;
+        app.activate_target(Target::DetailPath);
+        assert_eq!(app.brain_list_mode, BrainListMode::Topology);
+        let snap = app.topology_state.snapshot.as_ref().unwrap();
+        assert_eq!(snap.root_id, claim.id);
+        assert_eq!(snap.nodes.len(), 1);
+        assert!(snap.edges.is_empty());
+        let generation = app.topology_generation;
+        let seed = TopologySeed::Claim(claim.id.clone());
+        app.topology_generation += 1;
+        app.module = Some(ModuleId::Intel); // obsolete completion cannot steal another app's status
+        app.status = "Intel context".into();
+        app.on_work_event(WorkEvent::TopologyLoaded {
+            generation,
+            seed,
+            outcome: Ok(Box::new(TopologySnapshot::default())),
+        });
+        assert_eq!(
+            app.topology_state.snapshot.as_ref().unwrap().root_id,
+            claim.id
+        );
+        assert_eq!(app.status, "Intel context");
+        app.module = Some(ModuleId::Brain);
+        app.activate_button(ButtonId::TopologyBack);
+        assert_eq!(app.brain_list_mode, BrainListMode::Graph);
+        assert_eq!(app.scrolls.path, 7);
+    }
+
+    #[test]
+    fn topology_intel_metadata_actor_entry_restores_brief() {
+        let mut app = app();
+        app.module = Some(ModuleId::Intel);
+        app.intel_page = IntelPage::Briefing;
+        app.intel_articles = vec![intel_brief_image_article("topology-article", "")];
+        app.intel_actors = vec![argos_osint_core::atlas_metadata::ArticleActor {
+            id: "source-local-actor".into(),
+            display_name: "Unindexed actor".into(),
+            type_hint: "organization".into(),
+            spellings: vec![],
+            mentions: vec![],
+        }];
+        app.scrolls.intel_extracted = 12;
+        app.focus = Target::IntelTopologyActor(0);
+        app.activate_target(Target::IntelTopologyActor(0));
+        assert_eq!(app.brain_list_mode, BrainListMode::Topology);
+        assert!(matches!(
+            app.topology_state.seed,
+            Some(argos_osint_core::brain_topology::TopologySeed::RetainedActor { .. })
+        ));
+        app.activate_button(ButtonId::TopologyBack);
+        assert_eq!(app.module, Some(ModuleId::Intel));
+        assert_eq!(app.intel_page, IntelPage::Briefing);
+        assert_eq!(app.scrolls.intel_extracted, 12);
+        assert_eq!(app.focus, Target::IntelTopologyActor(0));
+    }
+
+    #[test]
+    fn topology_back_checks_its_owner_and_handles_deleted_origin() {
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        app.intel_articles = vec![intel_brief_image_article("unrelated", "")];
+        let claim = app
+            .store
+            .add_user_claim(
+                "Origin claim",
+                "fact",
+                MemorySource {
+                    app: "test".into(),
+                    conversation_id: "origin".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        assert!(app.open_memory_detail(&claim.id));
+        app.activate_target(Target::DetailPath);
+        app.intel_articles.clear();
+        app.activate_button(ButtonId::TopologyBack);
+        assert_eq!(app.brain_list_mode, BrainListMode::Graph);
+        assert!(!app.status.contains("Origin article"));
+        app.activate_target(Target::DetailPath);
+        app.store.delete_memory(&claim.id).unwrap();
+        app.activate_button(ButtonId::TopologyBack);
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
+        assert!(app.brain_detail.memory.is_none());
+        assert!(app.status.contains("deleted"));
+
+        app.module = Some(ModuleId::Intel);
+        app.intel_page = IntelPage::Briefing;
+        app.intel_articles = vec![intel_brief_image_article("origin-article", "")];
+        app.open_topology(argos_osint_core::brain_topology::TopologySeed::Claim(
+            "missing".into(),
+        ));
+        app.intel_articles.clear();
+        app.activate_button(ButtonId::TopologyBack);
+        assert_eq!(app.intel_page, IntelPage::Bulletin);
+        assert!(app.status.contains("Origin article changed"));
+    }
+
+    #[test]
+    fn dump_brain_topology_screens() {
+        let mut initial_app = topology_fixture();
+        let text = buffer_text(&render(&mut initial_app, 160, 50));
+        assert!(text.contains("Topology mapper"));
+        assert!(text.contains("Harbor contract"));
+        assert!(!text.contains("Northstar Labs"));
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [
+            (160, 50),
+            (132, 40),
+            (131, 40),
+            (120, 40),
+            (100, 40),
+            (100, 34),
+            (100, 33),
+            (100, 32),
+            (80, 24),
+            (60, 20),
+            (60, 18),
+            (40, 20),
+        ] {
+            let mut app = topology_fixture();
             dump_cells(
                 &mut app,
                 &dir,
-                &format!("topology-{width}x{height}"),
+                &format!("topology-graph-{width}x{height}"),
                 width,
                 height,
             );
-
-            app.topology_state.inspector_tab = 1;
+            app.topology_state.active_panel_tab = 1;
+            app.topology_state.selected_edge_id = Some("edge-5".into());
             dump_cells(
                 &mut app,
                 &dir,
-                &format!("topology-articles-{width}x{height}"),
+                &format!("topology-edge-{width}x{height}"),
+                width,
+                height,
+            );
+            app.topology_state.active_panel_tab = 2;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("topology-controls-{width}x{height}"),
+                width,
+                height,
+            );
+            app.topology_state.snapshot = None;
+            app.topology_loading = true;
+            app.topology_state.active_panel_tab = 0;
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("topology-loading-{width}x{height}"),
+                width,
+                height,
+            );
+        }
+        for (width, height) in [(160, 50), (80, 24), (60, 18)] {
+            let mut isolated = topology_fixture();
+            let snapshot = isolated.topology_state.snapshot.as_mut().unwrap();
+            snapshot.nodes.retain(|node| node.is_root);
+            snapshot.edges.clear();
+            snapshot.total_nodes = 1;
+            snapshot.total_edges = 0;
+            snapshot.discovered_nodes = 1;
+            snapshot.discovered_edges = 0;
+            dump_cells(
+                &mut isolated,
+                &dir,
+                &format!("topology-isolated-{width}x{height}"),
+                width,
+                height,
+            );
+            let mut stale = topology_fixture();
+            stale.topology_error =
+                Some("Read failed · previous snapshot retained · r retries".into());
+            dump_cells(
+                &mut stale,
+                &dir,
+                &format!("topology-stale-{width}x{height}"),
+                width,
+                height,
+            );
+            stale.topology_state.snapshot = None;
+            stale.topology_error = Some("Read failed · snapshot unavailable · r retries".into());
+            dump_cells(
+                &mut stale,
+                &dir,
+                &format!("topology-error-{width}x{height}"),
+                width,
+                height,
+            );
+            let mut crowded = topology_fixture();
+            let snapshot = crowded.topology_state.snapshot.as_mut().unwrap();
+            for index in 0..24 {
+                let mut node = snapshot.nodes[1].clone();
+                node.id = format!("crowded-{index}");
+                node.label = format!("東京 Freight operator {index}");
+                let mut edge = snapshot.edges[0].clone();
+                edge.id = format!("crowded-edge-{index}");
+                edge.to = node.id.clone();
+                snapshot.nodes.push(node);
+                snapshot.edges.push(edge);
+            }
+            snapshot.total_nodes = snapshot.nodes.len();
+            snapshot.total_edges = snapshot.edges.len();
+            snapshot.discovered_nodes = snapshot.nodes.len();
+            snapshot.discovered_edges = snapshot.edges.len();
+            dump_cells(
+                &mut crowded,
+                &dir,
+                &format!("topology-crowded-{width}x{height}"),
                 width,
                 height,
             );

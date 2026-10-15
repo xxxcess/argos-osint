@@ -45,7 +45,7 @@ The general `components::detail_table` and `detail_records` helpers remain avail
 
 ## ScrollPane
 
-Logical records have one blank terminal row between complete items, with no
+Logical records have one blank terminal row between complete items by default, with no
 trailing gap. `components::LIST_ITEM_GAP_ROWS` and `ListGeometry` define content
 ranges, extent, capacity, title-first reveal and row-to-item mapping. Wrapped
 titles, supporting metadata and expanded details stay contiguous. Spacer rows
@@ -54,6 +54,13 @@ vertical strokes. Counts and selection indices remain logical. Single-line
 capacity is `(available_rows+1)/2`; two-line Brain capacity is
 `(available_rows+1)/3`. Home, roles and fallbacks keep independent offsets.
 Markdown display spacing leaves stored text, ordinary paragraphs and code intact.
+
+Explicit `ListGeometry::{with_gap,fixed_with_gap,capacity_with_gap}` consumers
+use zero gap only for Home app rows, command palette items, Atlas cycle/article
+lists and Intel category headlines. Their draw/capacity/reveal/hit geometry shares
+the same density. Section headings remain nonselectable and retain their section
+separation. Other lists, including Brain and topology relationships, keep the
+default gap. Dense extent sums record heights; a variable gap adds `gap*(N-1)`.
 
 Full article presentation derives from the selected article/current job snapshot.
 Nonempty committed Body Markdown supersedes legacy flags/messages and later stage
@@ -70,19 +77,28 @@ The brief **Jobs** pane shows the dependency chain summary followed by one space
 
 ## Brain Memory Topology and GraphCanvas
 
-`topology_layout::TopologyLayoutResult` computes pure geometry for the 3-panel reactive topology view:
-- **Desktop (≥132×32)**: Left Inspector 24%, Center Graph Canvas 55%, Right Navigation 21%.
-- **Compact (100–131 columns)**: Left Inspector 28%, Center Graph Canvas 72%, Navigation drawer available.
-- **Stacked (<100 columns or <32 rows)**: Single full-width tabbed view with `[Graph] [Details] [Navigation]` panel tabs in the subheader.
+`topology_layout::TopologyLayoutResult` computes pure geometry for the **Graph first** preset (dimensions refer to its available body):
+- **Desktop (≥132×32)**: GraphCanvas left 65%, TopologyInspector right 35%.
+- **Compact (100–131 columns, ≥32 rows)**: GraphCanvas 70%, TopologyInspector 30%.
+- **Stacked (<100 columns or <32 rows)**: Full-width `[Graph] [Details] [Controls]` TabBar pages.
 - **Tiny (<60×18 cells)**: Explicit minimum size guidance panel.
 
-`topology.rs` renders the interactive node-link graph:
-- **Presentation Nodes**: Entity (ACCENT cyan circle `●`), Claim (GREEN square `■`), Topic/Inference (SERIES violet diamond `◆`), Article (DIM box `□`), Source (MUTED circle `○`).
-- **Connecting Edges**: Assessed Links (`supports`, `concerns`, `source`, `mentioned_in`, `premise`) and tentative Related (`possible context`).
-- **Anchored Legend**: Fixed at the bottom of the canvas.
-- **Scope Findings**: Below legend, summarizing recorded links, cycle coverage, and gaps.
-- **Minimap**: Graph overview in the navigation drawer.
-- **List Spacing**: Inspector "Related to selection" records maintain `LIST_ITEM_GAP_ROWS = 1`.
+`topology.rs` renders only immutable scoped snapshot nodes, edges and receipts;
+no sample graph or evidence substitutes for loading, empty or failed data.
+GraphCanvas uses deterministic hop columns and cell-measured clipped targets
+shared by rendering, focus and pointer registration. Actor groups preserve
+member identity; Inference is visible; Topic is a recorded-attribute projection,
+not a new canonical memory kind. Glyphs/colors use existing theme tokens.
+
+Selection changes the inspector without changing the seed. Recenter (or `c`)
+uses the selected node's exact typed seed and pushes history. Relationships show
+true direction, status, rationale and receipts; Related remains tentative possible
+context. Inspector relationships retain one blank row and independent scrolling.
+Open record shows complete snapshot detail. Back restores history, then origin.
+Depth/scope/counts reflect state; Graph/Details/Controls separate focus from
+activation. Zoom/pan/center affect positions. Reset view clears the transform;
+crowded virtual hop columns support wheel/Page scrolling and Shift+Arrow pan. Legend and visible/omitted coverage stay
+below the canvas. Decorative minimaps and inert navigation drawers are omitted.
 
 `components::ScrollPane` owns a `usize` offset. `scroll(delta, extent, viewport)` clamps it; `reveal(start, height, viewport)` brings focused content into view; `visible(lines, height)` slices before rendering, avoiding u16 Paragraph offsets. Dashboard, each panel and expanded detail keep independent state.
 
@@ -166,7 +182,7 @@ Acceptance and reproducible capture: [tui-verification.md](tui-verification.md),
 
 `related_articles::ArticleRelatedView` supplies immutable bounded Related pages for Intel Focus Brief. It sits beneath Full Article in the middle column, with independent cursor/scroll, a focused border, wrapped titles, clipped geometry and anchored See more. Scope remains All retained cycles / This cycle. Drawing, focus, reveal and pointer targets share the center-stack layout. Stale or missing authoritative article revisions cannot open another row.
 
-Brain uses `brain_detail::RelatedTab` and typed `AssociationTarget` destinations. Actor groups expose Claims/Threads/Articles; claims expose Actors/Sources. Each tab preserves selection, scroll and page size. Loading, empty and retryable-error states never fall back to similarity. The first tab is the default; exact source revisions guard article navigation. Graphs have five presentation kinds, one Topic and no node hit targets. Actor totals are local; a single-member AI summary is never shown for a group. The Claim Summary remains independent.
+Brain uses `brain_detail::RelatedTab` and typed `AssociationTarget` destinations. Actor groups expose Claims/Threads/Articles; claims expose Actors/Sources. Each tab preserves selection, scroll and page size. Loading, empty and retryable-error states never fall back to similarity. The first tab is the default; exact source revisions guard article navigation. Claim-path and actor-group graph panes open their exact topology on activation. Intel extracted claims and actors retain measured per-record targets and source identity. Actor totals remain local; a single-member AI summary is never shown for a group. The Claim Summary remains independent.
 
 Related article eligibility requires **at least two distinct overlapping entity mentions** in the exact source/candidate headline or description. Repetitions and aliases of one normalized name count once; country/category fields do not count as mentions. Atlas ingest persists the association; Brain Actor Articles and Intel Related reflect those retained associations and recheck current revisions. A browse visit adds no name-only or canonical-actor suggestions. Original claim Sources preserve provenance independently. Investigation entity associations require Recall on; later disabling Recall preserves earlier receipts. The local match receipt is `shared-headline-entities-v3-min-two-temporal`; changing this policy invalidates only Related matching and the dependent Links shortlist, preserving compatible Body/Claims/Inferences and fidelity checkpoints.
 

@@ -80,6 +80,8 @@ fn inset(area: Rect) -> Rect {
 /// Only the current memory's path graph; Related lives in its own section.
 fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
     let width = area.width.saturating_sub(2) as usize;
+    let legend_h = legend_height(app, area);
+    let path_area = path_content(area, legend_h);
     let lines = if app.brain_graph.is_empty() {
         vec![PathLine {
             text: if claim {
@@ -91,7 +93,7 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
     } else {
         path_lines(&app.brain_graph)
     };
-    let lines = with_typed(&app.brain_typed, lines);
+    let lines = with_typed_for_height(&app.brain_typed, lines, path_area.height as usize);
     let widest = lines
         .iter()
         .map(|line| line.text.chars().count())
@@ -109,7 +111,6 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
         })
         .collect::<Vec<_>>();
     let inner = inset(area);
-    let legend_h = legend_height(app, area);
     let legend_area = Rect {
         x: inner.x,
         y: inner
@@ -118,7 +119,6 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
         width: inner.width,
         height: legend_h,
     };
-    let path_area = path_content(area, legend_h);
     let mut title = if let Some(kind) = super::app::structural_title(app) {
         kind
     } else if claim {
@@ -137,6 +137,7 @@ fn draw_path(frame: &mut Frame, app: &App, area: Rect, claim: bool) {
     if app.focus == Target::DetailPath {
         title.push_str("· focused ");
     }
+    title.push_str("· Enter maps ");
     app.layout.borrow_mut().register(Target::DetailPath, area);
     frame.render_widget(panel(&title), area);
     frame.render_widget(
@@ -275,6 +276,22 @@ pub(crate) fn with_typed(typed: &[String], lines: Vec<PathLine>) -> Vec<PathLine
     out
 }
 
+fn with_typed_for_height(
+    typed: &[String],
+    mut lines: Vec<PathLine>,
+    visible_rows: usize,
+) -> Vec<PathLine> {
+    if !typed.is_empty() && visible_rows <= typed.len().saturating_add(1) {
+        lines.push(PathLine {
+            text: String::new(),
+        });
+        lines.extend(typed.iter().cloned().map(|text| PathLine { text }));
+        lines
+    } else {
+        with_typed(typed, lines)
+    }
+}
+
 pub(crate) fn path_lines(graph: &MemoryGraph) -> Vec<PathLine> {
     let visible = |n: &&argos_osint_core::recon::GraphNode| {
         !matches!(
@@ -372,7 +389,39 @@ fn glyph(kind: GraphNodeKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::summary_lines;
+    use super::{summary_lines, with_typed_for_height, PathLine};
+
+    #[test]
+    fn compact_path_shows_graph_before_headers_that_fill_the_viewport() {
+        let typed = vec![
+            "Kind: Claim".into(),
+            "Assessment: unassessed".into(),
+            "Actors: 1".into(),
+        ];
+        for height in [0, 3, 4] {
+            let lines = with_typed_for_height(
+                &typed,
+                vec![PathLine {
+                    text: "Claim seed".into(),
+                }],
+                height,
+            );
+            assert_eq!(lines[0].text, "Claim seed");
+            assert_eq!(
+                lines[2..].iter().map(|line| &line.text).collect::<Vec<_>>(),
+                typed.iter().collect::<Vec<_>>()
+            );
+        }
+        let roomy = with_typed_for_height(
+            &typed,
+            vec![PathLine {
+                text: "Claim seed".into(),
+            }],
+            5,
+        );
+        assert_eq!(roomy[0].text, "Kind: Claim");
+        assert_eq!(roomy[4].text, "Claim seed");
+    }
 
     #[test]
     fn summary_markdown_is_parsed_before_it_is_drawn() {

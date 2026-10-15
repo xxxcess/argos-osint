@@ -449,7 +449,7 @@ ConfigLock::acquire()            # .argos-config.lock, heartbeat + stale takeove
 
 Direct associations union the actor-reference index, typed Claim payloads and locally repaired retained derivations, exact article mentions/observed endpoints, claim origins and opt-in thread detections. Claims and threads deduplicate by ID; articles deduplicate by canonical URL while retaining exact occurrence/revision receipts. Missing, deleted and stale origins are excluded. Actor Articles additionally require a retained ingest association with two distinct shared entities; Claim Sources retain original provenance. The graph covers the entire set; row paging does not cap graph coverage.
 
-Claim publication synchronizes typed actor refs and the reference table inside the publication transaction. Readable names come from retained entity labels, with canonical fallback; entity IDs remain separate. A versioned local backfill repairs machine ID spellings without overwriting analyst names and recovers referenced actors only from retained extraction/spans. Recall-off creates no new thread associations; earlier receipts survive until their origin is deleted or replaced. The browse graph projects five visible node kinds and has no navigation actions. Typed association rows own all cross-app navigation and Back restoration.
+Claim publication synchronizes typed actor refs and the reference table inside the publication transaction. Readable names come from retained entity labels, with canonical fallback; entity IDs remain separate. A versioned local backfill repairs machine ID spellings without overwriting analyst names and recovers referenced actors only from retained extraction/spans. Recall-off creates no new thread associations; earlier receipts survive until their origin is deleted or replaced. The browse graph projects five visible node kinds; activating its claim-path or actor-group pane opens the exact topology. Typed association rows own cross-app record navigation and Back restoration.
 
 [![Brain browse projection](diagrams/brain-browse.svg)](diagrams/brain-browse.html)
 
@@ -457,11 +457,20 @@ Production browsing loads immutable snapshots on separate read-only connections.
 
 ## Brain Memory Topology and Scope Analysis
 
-`Store::topology_snapshot` (`brain_topology.rs`) provides an immutable, depth-bounded (1..3) projection starting from any typed `TopologySeed` (`Actor`, `ActorGroup`, `Claim`, `Article`, `Inference`, `Link`, `Related`).
+`Store::topology_snapshot` (`brain_topology.rs`, `brain_topology_query.rs`) resolves
+typed canonical or exact retained-source entries into an immutable neighborhood.
+The default is two semantic hops (selectable 1..3). Brain graph panes preserve
+Claim/ActorGroup identity; Intel claims resolve through the matching publication
+job/local ID and derivation snapshot, and metadata actors through scoped retained
+references. Unindexed records retain source-scoped identity without writing data.
 
-- **Cycle Scoping & Bounds**: Supports `CycleScope::AllRetained` or `CycleScope::ThisCycle(id)`. Bounds depth and total nodes/edges with a deterministic continuation token to avoid query explosion.
-- **Node & Edge Classification**: Maps memories to 5 presentation kinds (Entity, Claim, Topic, Article, Source). Prevents claims from being miscast as actors. Generates explicit edge IDs and distinguishes recorded Links (`supports`, `concerns`, `mentioned_in`, `source`, `premise`) from tentative Related leads (`possible context`).
-- **Background Scope Analysis**: Async candidate proposal and link assessment executes on dedicated worker pool `POOL_BRAIN_SCOPE = "brain_scope"` (`scheduler.rs`, `tasks.rs`) targeting `Surface::Scope` (`insights.rs`). Publication uses `publish_snapshot_on` on lightweight SQLite connections (`Store::open_light`), eliminating LanceDB lock contention.
+- **Scope and bounds**: All retained/current-cycle scope uses recorded origins. Bounded adjacency traversal and output preserve root/path/edge endpoints and report discovered/omitted/unresolved coverage. Continuation is not implemented: incoming tokens are rejected and no pretend cursor is emitted.
+- **Nodes and relationships**: Exact Actors and explicit ActorGroups remain distinct. Claims, Inferences, derived recorded-attribute Topics, Articles and Sources carry exact recenter seeds and provenance. Direct mentions and evidence do not require similarity. Links retain direction/rationale/receipts; Related remains tentative. Publisher identity and duplicate occurrences do not establish independent corroboration.
+- **TUI delivery**: One background read at a time coalesces superseded requests. Generation/seed fences reject late loads; `Store::memories_changed_seq` supplies the mutation sequence. The canvas, inspector, relationship rows and counts render the same snapshot, with no database access during drawing. Shared pure geometry owns visible target rectangles. Selection inspects; explicit recenter pushes history; Back restores its origin.
+- **Background Scope Analysis**: Explicit candidate proposal and link assessment executes on dedicated worker pool `POOL_BRAIN_SCOPE = "brain_scope"` (`scheduler.rs`, `tasks.rs`). The worker uses `Store::open_light`, validates canonical premises/actors, writes inference memory and metadata, and writes qualified Links. These are separate writes rather than an atomic brief publication. Retained-source projections are not eligible canonical premises.
+
+The [topology mapper specification](topology-mapper.md) defines entry identity,
+responsive layout, interaction and coverage contracts.
 
 [![Brain memory topology](diagrams/brain-topology.svg)](diagrams/brain-topology.html)
 

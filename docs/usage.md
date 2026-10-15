@@ -72,15 +72,21 @@ Kind cycles **All → Claims → Actors → All**. All is exactly the union of v
 
 An Actor group collects all member and redirected identities for browsing without merging them. Its tabs are **Claims · Threads · Articles**; a Claim exposes **Actors · Sources**. Select a row with keyboard or mouse to open the claim, actor group, original Recon transcript or exact Intel article brief. Back/Esc restores the record, tab, selection, focus and independent offsets. Sources are direct retained origins; similar memories and tentative article leads are excluded. Lists show totals and See more; graphs cover the entire association set.
 
-Only Claim, Topic, Entity, Article and Source nodes are displayed. Graph focus and scrolling remain available; clicking or pressing Enter on a node does not navigate. Claims keep Graph above Related/Summary, stacking below 68 columns. Actor detail uses Graph 65% / Related 35% at 100×28 or larger, with reachable Graph/Related pages below that. Thread detections are recorded only with Recall enabled; later disabling Recall preserves earlier receipts.
+Compact detail graphs display Claim, Topic, Entity, Article and Source presentations. Focus and scrolling remain available; activating the claim-path or actor-group graph pane opens its exact topology. Claims keep Graph above Related/Summary, stacking below 68 columns. Actor detail uses Graph 65% / Related 35% at 100×28 or larger, with reachable Graph/Related pages below that. Thread detections are recorded only with Recall enabled; later disabling Recall preserves earlier receipts.
 
 #### Brain Memory Topology
 
-Activate `[Map topology]` from any Claim or Actor detail nav strip, or select an Actor/Claim/Link from an Intel brief.
+Activate a Brain claim-path or actor-group graph with Enter or a click. In an
+Intel Focus Brief, activate an individual claim or actor record. Each entry opens
+its own retained neighborhood at two hops; no global sample graph is substituted.
 
-- **Responsive Layout**: Desktop (≥132×32) uses a 3-panel split (Left Inspector 24%, Center Graph Canvas 55%, Right Navigation 21%). Compact mode (100–131 columns) uses a 2-panel Inspector + Canvas with a navigation drawer. Stacked mode (<100 columns or <32 rows) provides `[Graph] [Details] [Navigation]` panel tabs. Below 60×18 displays minimum terminal size guidance.
-- **Interactive Graph**: Centered seed root with 5 presentation kinds (Entity cyan circle, Claim green star, Topic violet diamond, Article teal box, Source hollow circle), connecting labeled edges (`concerns`, `mentioned_in`, `source`, `supports`, `premise`), anchored legend, and Scope findings.
-- **Navigation & Controls**: Arrow keys select nodes/edges; Enter inspects details and related items; `+`/`-` zooms; Shift+Arrows pans; `[Analyze scope]` triggers background scoped inference on `POOL_BRAIN_SCOPE`. 32-frame history stack restores previous positions on `[← Back]` or Esc.
+- **Layout**: Graph first puts the canvas left (65%) and inspector right (35%) in a body of at least 132×32 cells; 100–131 columns uses 70%/30%. Shorter/narrower bodies expose Graph / Details / Controls pages. Below 60×18 retain Back and a size notice.
+- **Inspection**: Select a node to inspect its complete record and spaced relationships. Select a relationship for true direction, rationale and exact receipts. Inferences and derived topics are visible; actor name groups preserve member identities. Tentative Related leads remain possible context.
+- **Navigation**: Recenter (or `c`) changes the seed; selection alone keeps it. Depth 1/2/3 and retained/current-cycle scope change the queried neighborhood. `+`/`-` zoom, Shift+Arrows pan and Reset view clears the transform. Crowded hop columns can be panned. Back/Esc restores topology history and then the Brain/Intel entry. Open record exposes full snapshot detail. Scope analysis remains an explicit separate action.
+
+Home app items, command palette commands, Atlas cycles/article lists and Intel
+category headline lists have no blank rows between records. Section boundaries
+and all other record spacing remain unchanged.
 
 [![Brain memory topology](diagrams/brain-topology.svg)](diagrams/brain-topology.html)
 

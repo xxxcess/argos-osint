@@ -11,11 +11,14 @@ pub struct ListGeometry {
 }
 impl ListGeometry {
     pub fn new(heights: impl IntoIterator<Item = usize>) -> Self {
+        Self::with_gap(heights, LIST_ITEM_GAP_ROWS)
+    }
+    pub fn with_gap(heights: impl IntoIterator<Item = usize>, gap: usize) -> Self {
         let mut items = Vec::new();
         let mut extent: usize = 0;
         for height in heights {
             if !items.is_empty() {
-                extent = extent.saturating_add(LIST_ITEM_GAP_ROWS);
+                extent = extent.saturating_add(gap);
             }
             let end = extent.saturating_add(height.max(1));
             items.push(extent..end);
@@ -26,8 +29,14 @@ impl ListGeometry {
     pub fn fixed(count: usize, height: usize) -> Self {
         Self::new(std::iter::repeat_n(height, count))
     }
+    pub fn fixed_with_gap(count: usize, height: usize, gap: usize) -> Self {
+        Self::with_gap(std::iter::repeat_n(height, count), gap)
+    }
     pub fn capacity(rows: usize, height: usize) -> usize {
-        rows.saturating_add(LIST_ITEM_GAP_ROWS) / height.max(1).saturating_add(LIST_ITEM_GAP_ROWS)
+        Self::capacity_with_gap(rows, height, LIST_ITEM_GAP_ROWS)
+    }
+    pub fn capacity_with_gap(rows: usize, height: usize, gap: usize) -> usize {
+        rows.saturating_add(gap) / height.max(1).saturating_add(gap)
     }
     pub fn index_at(&self, row: usize) -> Option<usize> {
         let index = self.items.partition_point(|item| item.end <= row);
@@ -465,6 +474,24 @@ pub fn measured_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dense_geometry_keeps_complete_records_and_spaced_defaults() {
+        let dense = ListGeometry::with_gap([1, 3, 2], 0);
+        assert_eq!(dense.items, vec![0..1, 1..4, 4..6]);
+        assert_eq!(dense.extent, 6);
+        assert_eq!(dense.index_at(3), Some(1));
+        assert_eq!(dense.index_at(4), Some(2));
+        assert_eq!(dense.index_at(6), None);
+        assert_eq!(dense.reveal(1, 0, 3), 1);
+        assert_eq!(dense.reveal(2, 0, 3), 3);
+        assert_eq!(ListGeometry::fixed_with_gap(0, 1, 0).extent, 0);
+        assert_eq!(ListGeometry::capacity_with_gap(5, 2, 0), 2);
+        assert_eq!(ListGeometry::capacity_with_gap(0, 1, 0), 0);
+        assert_eq!(ListGeometry::capacity_with_gap(4, 0, 0), 4);
+        assert_eq!(ListGeometry::new([1, 3, 2]).items, vec![0..1, 2..5, 6..8]);
+        assert_eq!(ListGeometry::fixed(3, 1).extent, 5);
+        assert_eq!(ListGeometry::capacity(5, 1), 3);
+    }
     #[test]
     fn list_geometry_maps_only_content_and_reveals_titles() {
         let geometry = ListGeometry::new([1, 2, 8]);

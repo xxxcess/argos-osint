@@ -1,8 +1,10 @@
-//! Pure geometry and layout computations for Brain Memory Topology (spec §2).
+//! Pure geometry for the seeded topology Graph first preset.
 //!
-//! Owns panel Rects for desktop (>=132x32), compact (100..131), stacked (<100 or <32),
-//! and tiny (<60x18) responsive modes. Pure geometry shared by drawing, focus, and mouse.
+//! Painting and target registration consume these same clipped rectangles. The
+//! virtual hop columns remain collision free when a crowded graph needs panning.
+use std::collections::BTreeMap;
 
+use argos_osint_core::brain_topology::TopologySnapshot;
 use ratatui::layout::Rect;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,382 +22,550 @@ pub struct TopologyLayoutResult {
     pub header: Rect,
     pub subheader: Rect,
     pub seed_tabs: Rect,
+    pub controls: Rect,
     pub content: Rect,
-    pub left_panel: Rect,
     pub inspector_details: Rect,
     pub inspector_related: Rect,
-    pub center_panel: Rect,
     pub graph_title: Rect,
     pub graph_canvas: Rect,
     pub graph_legend: Rect,
     pub scope_findings: Rect,
-    pub right_panel: Rect,
-    pub nav_scope: Rect,
-    pub nav_depth: Rect,
-    pub nav_actions: Rect,
-    pub nav_zoom: Rect,
-    pub nav_filters: Rect,
-    pub nav_analysis: Rect,
-    pub nav_minimap: Rect,
+    pub controls_page: Rect,
     pub footer: Rect,
 }
 
 impl TopologyLayoutResult {
     pub fn compute(area: Rect) -> Self {
-        if area.width < 60 || area.height < 18 {
-            return Self::tiny(area);
-        }
-
-        let header_height = 1u16;
-        let subheader_height = 1u16;
-        let tabs_height = 1u16;
-        let footer_height = 1u16;
-
-        let header = Rect::new(area.x, area.y, area.width, header_height);
-        let subheader = Rect::new(area.x, area.y + header_height, area.width, subheader_height);
-        let seed_tabs = Rect::new(
-            area.x,
-            area.y + header_height + subheader_height,
-            area.width,
-            tabs_height,
-        );
-
-        let top_offset = header_height + subheader_height + tabs_height;
-        let bottom_height = footer_height;
-        let content_height = area.height.saturating_sub(top_offset + bottom_height);
-
-        let content = Rect::new(area.x, area.y + top_offset, area.width, content_height);
-        let footer = Rect::new(
-            area.x,
-            area.y + area.height.saturating_sub(bottom_height),
-            area.width,
-            bottom_height,
-        );
-
-        if area.width >= 132 && area.height >= 32 {
-            Self::desktop(area, header, subheader, seed_tabs, content, footer)
-        } else if area.width >= 100 && area.height >= 28 {
-            Self::compact(area, header, subheader, seed_tabs, content, footer)
+        let mode = if area.width < 60 || area.height < 18 {
+            TopologyResponsiveMode::Tiny
+        } else if area.width >= 132 && area.height >= 32 {
+            TopologyResponsiveMode::Desktop
+        } else if area.width >= 100 && area.height >= 32 {
+            TopologyResponsiveMode::Compact
         } else {
-            Self::stacked(area, header, subheader, seed_tabs, content, footer)
-        }
-    }
-
-    fn desktop(
-        full: Rect,
-        header: Rect,
-        subheader: Rect,
-        seed_tabs: Rect,
-        content: Rect,
-        footer: Rect,
-    ) -> Self {
-        // Desktop: Left 24%, Center 55%, Right 21%
-        let left_w = (content.width as f32 * 0.24).round() as u16;
-        let right_w = (content.width as f32 * 0.21).round() as u16;
-        let center_w = content.width.saturating_sub(left_w + right_w);
-
-        let left_panel = Rect::new(content.x, content.y, left_w, content.height);
-        let center_panel = Rect::new(content.x + left_w, content.y, center_w, content.height);
-        let right_panel = Rect::new(
-            content.x + left_w + center_w,
-            content.y,
-            right_w,
-            content.height,
+            TopologyResponsiveMode::Stacked
+        };
+        let row = |offset| Rect::new(area.x, area.y + offset, area.width, 1);
+        let header = row(0);
+        let subheader = row(1);
+        let seed_tabs = row(2);
+        let controls = row(3);
+        let content = Rect::new(
+            area.x,
+            area.y + 4,
+            area.width,
+            area.height.saturating_sub(5),
         );
-
-        // Split Left panel: Inspector details (52%) and Related (48%)
-        let insp_details_h = (left_panel.height as f32 * 0.52).round() as u16;
-        let insp_rel_h = left_panel.height.saturating_sub(insp_details_h);
-        let inspector_details =
-            Rect::new(left_panel.x, left_panel.y, left_panel.width, insp_details_h);
+        let footer = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+        let split = matches!(
+            mode,
+            TopologyResponsiveMode::Desktop | TopologyResponsiveMode::Compact
+        );
+        let graph_width = if split {
+            (area.width as u32
+                * if mode == TopologyResponsiveMode::Desktop {
+                    65
+                } else {
+                    70
+                }
+                / 100) as u16
+        } else {
+            area.width
+        };
+        let graph = Rect::new(content.x, content.y, graph_width, content.height);
+        let inspector = if split {
+            Rect::new(
+                graph.right(),
+                content.y,
+                content.width.saturating_sub(graph_width),
+                content.height,
+            )
+        } else {
+            content
+        };
+        let detail_height = (inspector.height * 55 / 100)
+            .max(7)
+            .min(inspector.height.saturating_sub(5));
+        let inspector_details = Rect::new(inspector.x, inspector.y, inspector.width, detail_height);
         let inspector_related = Rect::new(
-            left_panel.x,
-            left_panel.y + insp_details_h,
-            left_panel.width,
-            insp_rel_h,
+            inspector.x,
+            inspector.y + detail_height,
+            inspector.width,
+            inspector.height.saturating_sub(detail_height),
         );
-
-        // Split Center panel: Title (1), Canvas (flex), Legend (3), Findings (5)
-        let findings_h = 5u16.min(center_panel.height.saturating_sub(10));
-        let legend_h = 3u16.min(center_panel.height.saturating_sub(findings_h + 5));
-        let title_h = 1u16;
-        let canvas_h = center_panel
+        let legend_height = 2;
+        let scope_height = 2;
+        let canvas_height = graph
             .height
-            .saturating_sub(title_h + legend_h + findings_h);
-
-        let graph_title = Rect::new(center_panel.x, center_panel.y, center_panel.width, title_h);
-        let graph_canvas = Rect::new(
-            center_panel.x,
-            center_panel.y + title_h,
-            center_panel.width,
-            canvas_h,
-        );
-        let graph_legend = Rect::new(
-            center_panel.x,
-            center_panel.y + title_h + canvas_h,
-            center_panel.width,
-            legend_h,
-        );
-        let scope_findings = Rect::new(
-            center_panel.x,
-            center_panel.y + title_h + canvas_h + legend_h,
-            center_panel.width,
-            findings_h,
-        );
-
-        // Split Right panel:
-        // Scope (3), Depth (3), Actions (3), Zoom (2), Filters (9), Analysis (3), Minimap (flex/rest)
-        let ry = right_panel.y;
-        let rw = right_panel.width;
-        let nav_scope = Rect::new(right_panel.x, ry, rw, 3);
-        let nav_depth = Rect::new(right_panel.x, ry + 3, rw, 3);
-        let nav_actions = Rect::new(right_panel.x, ry + 6, rw, 4);
-        let nav_zoom = Rect::new(right_panel.x, ry + 10, rw, 2);
-        let nav_filters = Rect::new(right_panel.x, ry + 12, rw, 9);
-        let nav_analysis = Rect::new(right_panel.x, ry + 21, rw, 3);
-        let minimap_y = ry + 24;
-        let minimap_h = right_panel.height.saturating_sub(24);
-        let nav_minimap = Rect::new(right_panel.x, minimap_y, rw, minimap_h);
-
+            .saturating_sub(1 + legend_height + scope_height);
         Self {
-            mode: TopologyResponsiveMode::Desktop,
-            full_area: full,
+            mode,
+            full_area: area,
             header,
             subheader,
             seed_tabs,
+            controls,
             content,
-            left_panel,
             inspector_details,
             inspector_related,
-            center_panel,
-            graph_title,
-            graph_canvas,
-            graph_legend,
-            scope_findings,
-            right_panel,
-            nav_scope,
-            nav_depth,
-            nav_actions,
-            nav_zoom,
-            nav_filters,
-            nav_analysis,
-            nav_minimap,
+            graph_title: Rect::new(graph.x, graph.y, graph.width, 1),
+            graph_canvas: Rect::new(graph.x, graph.y + 1, graph.width, canvas_height),
+            graph_legend: Rect::new(
+                graph.x,
+                graph.y + 1 + canvas_height,
+                graph.width,
+                legend_height,
+            ),
+            scope_findings: Rect::new(
+                graph.x,
+                graph.y + 1 + canvas_height + legend_height,
+                graph.width,
+                scope_height,
+            ),
+            controls_page: content,
             footer,
         }
     }
+}
 
-    fn compact(
-        full: Rect,
-        header: Rect,
-        subheader: Rect,
-        seed_tabs: Rect,
-        content: Rect,
-        footer: Rect,
-    ) -> Self {
-        // Compact: Left 28%, Center 72%, Right panel drawer
-        let left_w = (content.width as f32 * 0.28).round() as u16;
-        let center_w = content.width.saturating_sub(left_w);
+#[derive(Clone, Debug)]
+pub struct GraphNodePlacement {
+    pub index: usize,
+    /// Unclipped node bounds, retained to avoid painting a false border on clipping.
+    pub rect: Rect,
+    pub visible: Rect,
+}
 
-        let left_panel = Rect::new(content.x, content.y, left_w, content.height);
-        let center_panel = Rect::new(content.x + left_w, content.y, center_w, content.height);
-        let right_panel = Rect::new(content.x + content.width, content.y, 0, content.height);
+#[derive(Clone, Debug)]
+pub struct GraphEdgePlacement {
+    pub index: usize,
+    pub cells: Vec<(u16, u16, &'static str)>,
+    pub target: Rect,
+}
 
-        let insp_details_h = (left_panel.height as f32 * 0.50).round() as u16;
-        let insp_rel_h = left_panel.height.saturating_sub(insp_details_h);
-        let inspector_details =
-            Rect::new(left_panel.x, left_panel.y, left_panel.width, insp_details_h);
-        let inspector_related = Rect::new(
-            left_panel.x,
-            left_panel.y + insp_details_h,
-            left_panel.width,
-            insp_rel_h,
-        );
+#[derive(Clone, Debug, Default)]
+pub struct GraphGeometry {
+    pub nodes: Vec<GraphNodePlacement>,
+    pub edges: Vec<GraphEdgePlacement>,
+    pub outside_viewport: usize,
+}
 
-        let findings_h = 4u16;
-        let legend_h = 3u16;
-        let title_h = 1u16;
-        let canvas_h = center_panel
-            .height
-            .saturating_sub(title_h + legend_h + findings_h);
-
-        let graph_title = Rect::new(center_panel.x, center_panel.y, center_panel.width, title_h);
-        let graph_canvas = Rect::new(
-            center_panel.x,
-            center_panel.y + title_h,
-            center_panel.width,
-            canvas_h,
-        );
-        let graph_legend = Rect::new(
-            center_panel.x,
-            center_panel.y + title_h + canvas_h,
-            center_panel.width,
-            legend_h,
-        );
-        let scope_findings = Rect::new(
-            center_panel.x,
-            center_panel.y + title_h + canvas_h + legend_h,
-            center_panel.width,
-            findings_h,
-        );
-
-        Self {
-            mode: TopologyResponsiveMode::Compact,
-            full_area: full,
-            header,
-            subheader,
-            seed_tabs,
-            content,
-            left_panel,
-            inspector_details,
-            inspector_related,
-            center_panel,
-            graph_title,
-            graph_canvas,
-            graph_legend,
-            scope_findings,
-            right_panel,
-            nav_scope: Rect::default(),
-            nav_depth: Rect::default(),
-            nav_actions: Rect::default(),
-            nav_zoom: Rect::default(),
-            nav_filters: Rect::default(),
-            nav_analysis: Rect::default(),
-            nav_minimap: Rect::default(),
-            footer,
+/// Snapshot-only hop placement; vector indices always belong to this snapshot.
+pub fn graph_geometry(
+    area: Rect,
+    snapshot: &TopologySnapshot,
+    indices: &[usize],
+    zoom_percent: usize,
+    pan: (i16, i16),
+    center_id: Option<&str>,
+) -> GraphGeometry {
+    let mut result = GraphGeometry::default();
+    if area.width < 4 || area.height < 3 {
+        result.outside_viewport = indices.len();
+        return result;
+    }
+    let mut columns: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for &index in indices {
+        if let Some(node) = snapshot.nodes.get(index) {
+            columns.entry(node.min_hops).or_default().push(index);
         }
     }
-
-    fn stacked(
-        full: Rect,
-        header: Rect,
-        subheader: Rect,
-        seed_tabs: Rect,
-        content: Rect,
-        footer: Rect,
-    ) -> Self {
-        // Stacked: Single active view fills content
-        let left_panel = content;
-        let center_panel = content;
-        let right_panel = content;
-
-        let insp_details_h = content.height / 2;
-        let inspector_details = Rect::new(content.x, content.y, content.width, insp_details_h);
-        let inspector_related = Rect::new(
-            content.x,
-            content.y + insp_details_h,
-            content.width,
-            content.height.saturating_sub(insp_details_h),
-        );
-
-        let findings_h = 4u16;
-        let legend_h = 2u16;
-        let title_h = 1u16;
-        let canvas_h = content
-            .height
-            .saturating_sub(title_h + legend_h + findings_h);
-
-        let graph_title = Rect::new(content.x, content.y, content.width, title_h);
-        let graph_canvas = Rect::new(content.x, content.y + title_h, content.width, canvas_h);
-        let graph_legend = Rect::new(
-            content.x,
-            content.y + title_h + canvas_h,
-            content.width,
-            legend_h,
-        );
-        let scope_findings = Rect::new(
-            content.x,
-            content.y + title_h + canvas_h + legend_h,
-            content.width,
-            findings_h,
-        );
-
-        Self {
-            mode: TopologyResponsiveMode::Stacked,
-            full_area: full,
-            header,
-            subheader,
-            seed_tabs,
-            content,
-            left_panel,
-            inspector_details,
-            inspector_related,
-            center_panel,
-            graph_title,
-            graph_canvas,
-            graph_legend,
-            scope_findings,
-            right_panel,
-            nav_scope: Rect::new(content.x, content.y, content.width, 3),
-            nav_depth: Rect::new(content.x, content.y + 3, content.width, 3),
-            nav_actions: Rect::new(content.x, content.y + 6, content.width, 4),
-            nav_zoom: Rect::new(content.x, content.y + 10, content.width, 2),
-            nav_filters: Rect::new(content.x, content.y + 12, content.width, 9),
-            nav_analysis: Rect::new(content.x, content.y + 21, content.width, 3),
-            nav_minimap: Rect::default(),
-            footer,
+    for column in columns.values_mut() {
+        column.sort_by(|a, b| snapshot.nodes[*a].id.cmp(&snapshot.nodes[*b].id));
+    }
+    let column_count = columns.keys().next_back().copied().unwrap_or(0) + 1;
+    let base_node_width = ((area.width as usize).saturating_sub(2) / column_count.max(1))
+        .saturating_sub(4)
+        .clamp(10, 25)
+        .min(area.width as usize);
+    let zoom = zoom_percent.clamp(50, 200) as i32;
+    let busiest = columns.values().map(Vec::len).max().unwrap_or(1);
+    // A modest neighborhood should fit before demanding pan. Keep two text
+    // rows on medium screens, then use the existing glyph/label on short ones.
+    // Truly crowded columns retain virtual extent instead of crushing records.
+    let (base_node_height, gap) = if busiest <= 10 {
+        if busiest * 4 + busiest.saturating_sub(1) <= area.height as usize {
+            (4, 1)
+        } else if busiest * 2 + busiest.saturating_sub(1) <= area.height as usize {
+            (2, 1)
+        } else if busiest + busiest.saturating_sub(1) <= area.height as usize {
+            (1, 1)
+        } else {
+            (1, 0)
+        }
+    } else {
+        (4, 1)
+    };
+    let node_width = (base_node_width as i32 * zoom / 100)
+        .max(5)
+        .min(base_node_width as i32) as usize;
+    let node_height = (base_node_height * zoom / 100).clamp(1, base_node_height);
+    let vertical_zoom = if base_node_height == 1 && gap == 0 {
+        zoom.max(100)
+    } else {
+        zoom
+    };
+    let virtual_width = (area.width as i32).max(column_count as i32 * (base_node_width as i32 + 4));
+    let mut positions: BTreeMap<String, (usize, i32, i32)> = BTreeMap::new();
+    for (hop, column) in columns {
+        let base_x = if column_count == 1 {
+            (area.width as i32 - base_node_width as i32) / 2
+        } else {
+            1 + (virtual_width - base_node_width as i32 - 2) * hop as i32
+                / (column_count as i32 - 1)
+        };
+        let stack_height =
+            column.len() as i32 * base_node_height + column.len().saturating_sub(1) as i32 * gap;
+        let virtual_height = (area.height as i32).max(stack_height);
+        let margin = (virtual_height - stack_height) / 2;
+        for (slot, index) in column.iter().enumerate() {
+            let base_y = margin + slot as i32 * (base_node_height + gap)
+                - (virtual_height - area.height as i32) / 2;
+            let x = (base_x + base_node_width as i32 / 2 - area.width as i32 / 2) * zoom / 100
+                + area.width as i32 / 2
+                - node_width as i32 / 2;
+            let y = (base_y + base_node_height / 2 - area.height as i32 / 2) * vertical_zoom / 100
+                + area.height as i32 / 2
+                - node_height / 2;
+            positions.insert(snapshot.nodes[*index].id.clone(), (*index, x, y));
         }
     }
-
-    fn tiny(full: Rect) -> Self {
-        Self {
-            mode: TopologyResponsiveMode::Tiny,
-            full_area: full,
-            header: Rect::default(),
-            subheader: Rect::default(),
-            seed_tabs: Rect::default(),
-            content: full,
-            left_panel: Rect::default(),
-            inspector_details: Rect::default(),
-            inspector_related: Rect::default(),
-            center_panel: full,
-            graph_title: Rect::default(),
-            graph_canvas: full,
-            graph_legend: Rect::default(),
-            scope_findings: Rect::default(),
-            right_panel: Rect::default(),
-            nav_scope: Rect::default(),
-            nav_depth: Rect::default(),
-            nav_actions: Rect::default(),
-            nav_zoom: Rect::default(),
-            nav_filters: Rect::default(),
-            nav_analysis: Rect::default(),
-            nav_minimap: Rect::default(),
-            footer: Rect::default(),
-        }
+    let (center_x, center_y) = center_id
+        .and_then(|id| positions.get(id))
+        .map(|(_, x, y)| {
+            (
+                area.width as i32 / 2 - x - node_width as i32 / 2,
+                area.height as i32 / 2 - y - node_height / 2,
+            )
+        })
+        .unwrap_or((0, 0));
+    for (_, x, y) in positions.values_mut() {
+        *x += area.x as i32 + pan.0 as i32 + center_x;
+        *y += area.y as i32 + pan.1 as i32 + center_y;
     }
+    for &(index, x, y) in positions.values() {
+        // Negative coordinates cannot be represented by Rect. Partially clipped
+        // nodes at the top/left are omitted, so borders and targets stay honest.
+        if x < area.x as i32
+            || y < area.y as i32
+            || x + node_width as i32 > area.right() as i32
+            || y + node_height > area.bottom() as i32
+        {
+            result.outside_viewport += 1;
+            continue;
+        }
+        let rect = Rect::new(x as u16, y as u16, node_width as u16, node_height as u16);
+        result.nodes.push(GraphNodePlacement {
+            index,
+            rect,
+            visible: rect.intersection(area),
+        });
+    }
+    for (index, edge) in snapshot.edges.iter().enumerate() {
+        let endpoint_visible = |id: &str| {
+            result
+                .nodes
+                .iter()
+                .any(|placement| snapshot.nodes[placement.index].id == id)
+        };
+        if !endpoint_visible(&edge.from) || !endpoint_visible(&edge.to) {
+            continue;
+        }
+        let (Some(&(_, ax, ay)), Some(&(_, bx, by))) =
+            (positions.get(&edge.from), positions.get(&edge.to))
+        else {
+            continue;
+        };
+        let (start_x, end_x, direction) = if ax < bx {
+            (ax + node_width as i32, bx - 1, "▶")
+        } else if ax > bx {
+            (ax - 1, bx + node_width as i32, "◀")
+        } else if ax + node_width as i32 + 2 < area.right() as i32 {
+            (ax + node_width as i32, bx + node_width as i32, "◀")
+        } else {
+            (ax - 1, bx - 1, "▶")
+        };
+        let start_y = ay + node_height / 2;
+        let end_y = by + node_height / 2;
+        let middle_x = if ax == bx {
+            start_x + if direction == "◀" { 2 } else { -2 }
+        } else {
+            (start_x + end_x) / 2
+        };
+        let mut cells = Vec::new();
+        let mut add = |x: i32, y: i32, glyph| {
+            if x >= area.x as i32
+                && x < area.right() as i32
+                && y >= area.y as i32
+                && y < area.bottom() as i32
+            {
+                cells.push((x as u16, y as u16, glyph));
+            }
+        };
+        for x in start_x.min(middle_x)..=start_x.max(middle_x) {
+            add(x, start_y, "─");
+        }
+        for y in start_y.min(end_y)..=start_y.max(end_y) {
+            add(middle_x, y, "│");
+        }
+        for x in middle_x.min(end_x)..=middle_x.max(end_x) {
+            add(x, end_y, "─");
+        }
+        add(end_x, end_y, direction);
+        let target = if end_x >= area.x as i32
+            && end_x < area.right() as i32
+            && end_y >= area.y as i32
+            && end_y < area.bottom() as i32
+        {
+            Rect::new(end_x as u16, end_y as u16, 1, 1)
+        } else {
+            Rect::default()
+        };
+        result.edges.push(GraphEdgePlacement {
+            index,
+            cells,
+            target,
+        });
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argos_osint_core::brain_topology::{
+        TopologyEdge, TopologyEdgeKind, TopologyNode, TopologyNodeKind,
+    };
+
+    fn node(id: &str, hop: usize) -> TopologyNode {
+        TopologyNode {
+            id: id.into(),
+            kind: TopologyNodeKind::Claim,
+            label: format!("Long multilingual record {id} 東京"),
+            detail: String::new(),
+            subtype: String::new(),
+            status: "retained".into(),
+            is_root: hop == 0,
+            article_id: String::new(),
+            run_id: String::new(),
+            published_at: String::new(),
+            cycle: None,
+            member_ids: Vec::new(),
+            evidence_count: 0,
+            passages: Vec::new(),
+            min_hops: hop,
+            revision: String::new(),
+            predecessor: None,
+            topology_seed: None,
+        }
+    }
 
     #[test]
-    fn layout_desktop_proportions() {
-        let area = Rect::new(0, 0, 160, 50);
-        let l = TopologyLayoutResult::compute(area);
-        assert_eq!(l.mode, TopologyResponsiveMode::Desktop);
-        assert!(l.left_panel.width >= 35 && l.left_panel.width <= 42);
-        assert!(l.center_panel.width >= 80 && l.center_panel.width <= 92);
-        assert!(l.right_panel.width >= 30 && l.right_panel.width <= 36);
-        assert_eq!(
-            l.left_panel.width + l.center_panel.width + l.right_panel.width,
-            160
+    fn graph_first_breakpoints_and_ratio() {
+        for (width, height, expected) in [
+            (160, 50, TopologyResponsiveMode::Desktop),
+            (132, 32, TopologyResponsiveMode::Desktop),
+            (131, 32, TopologyResponsiveMode::Compact),
+            (100, 32, TopologyResponsiveMode::Compact),
+            (100, 31, TopologyResponsiveMode::Stacked),
+            (80, 24, TopologyResponsiveMode::Stacked),
+            (60, 18, TopologyResponsiveMode::Stacked),
+            (59, 18, TopologyResponsiveMode::Tiny),
+        ] {
+            let layout = TopologyLayoutResult::compute(Rect::new(3, 4, width, height));
+            assert_eq!(layout.mode, expected);
+            if matches!(
+                expected,
+                TopologyResponsiveMode::Desktop | TopologyResponsiveMode::Compact
+            ) {
+                assert_eq!(layout.graph_canvas.right(), layout.inspector_details.x);
+                assert_eq!(layout.inspector_details.right(), layout.content.right());
+                assert!(layout.graph_canvas.width >= width * 65 / 100);
+            }
+        }
+    }
+
+    #[test]
+    fn modest_neighborhood_adapts_without_hiding_nodes_or_colliding() {
+        let mut snapshot = TopologySnapshot::default();
+        snapshot.nodes.push(node("root", 0));
+        for slot in 0..6 {
+            snapshot.nodes.push(node(&format!("neighbor-{slot}"), 1));
+        }
+        snapshot
+            .nodes
+            .extend([node("second-a", 2), node("second-b", 2)]);
+        let indices: Vec<_> = (0..snapshot.nodes.len()).collect();
+        for (width, terminal_height) in [
+            (160, 50),
+            (132, 40),
+            (131, 40),
+            (120, 40),
+            (100, 40),
+            (100, 32),
+            (80, 24),
+            (60, 20),
+        ] {
+            let layout = TopologyLayoutResult::compute(Rect::new(0, 1, width, terminal_height - 2));
+            let canvas = layout.graph_canvas;
+            let area = Rect::new(
+                canvas.x + 1,
+                canvas.y + 1,
+                canvas.width - 2,
+                canvas.height - 2,
+            );
+            for zoom in [50, 75, 100] {
+                let geometry = graph_geometry(area, &snapshot, &indices, zoom, (0, 0), None);
+                assert_eq!(
+                    geometry.outside_viewport, 0,
+                    "{width}x{terminal_height} at{zoom}%"
+                );
+                for (index, placement) in geometry.nodes.iter().enumerate() {
+                    for other in geometry.nodes.iter().skip(index + 1) {
+                        assert!(placement.rect.intersection(other.rect).is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn offscreen_endpoints_do_not_leave_dangling_connectors() {
+        let mut snapshot = TopologySnapshot {
+            nodes: vec![node("root", 0)],
+            ..Default::default()
+        };
+        for slot in 0..20 {
+            let id = format!("neighbor-{slot:02}");
+            snapshot.nodes.push(node(&id, 1));
+            snapshot.edges.push(TopologyEdge {
+                id: format!("edge-{slot}"),
+                from: "root".into(),
+                to: id,
+                kind: TopologyEdgeKind::Concerns,
+                label: "concerns".into(),
+                status: "recorded".into(),
+                member_ids: Vec::new(),
+                receipts: Vec::new(),
+                rationale: String::new(),
+            });
+        }
+        let indices: Vec<_> = (0..snapshot.nodes.len()).collect();
+        let geometry = graph_geometry(
+            Rect::new(0, 0, 78, 10),
+            &snapshot,
+            &indices,
+            100,
+            (0, 0),
+            None,
         );
+        assert!(geometry.outside_viewport > 0);
+        assert_eq!(geometry.edges.len(), geometry.nodes.len() - 1);
+        for edge in geometry.edges {
+            let actual = &snapshot.edges[edge.index];
+            for id in [&actual.from, &actual.to] {
+                assert!(geometry
+                    .nodes
+                    .iter()
+                    .any(|placement| &snapshot.nodes[placement.index].id == id));
+            }
+        }
     }
 
     #[test]
-    fn layout_compact_collapses_right() {
-        let area = Rect::new(0, 0, 120, 40);
-        let l = TopologyLayoutResult::compute(area);
-        assert_eq!(l.mode, TopologyResponsiveMode::Compact);
-        assert_eq!(l.right_panel.width, 0);
-        assert_eq!(l.left_panel.width + l.center_panel.width, 120);
+    fn crowded_columns_never_collide_and_keep_indices_coherent() {
+        let mut snapshot = TopologySnapshot::default();
+        snapshot.nodes.push(node("root", 0));
+        for hop in 1..=3 {
+            for slot in 0..20 {
+                snapshot.nodes.push(node(&format!("{hop}-{slot:02}"), hop));
+            }
+        }
+        let indices: Vec<_> = (0..snapshot.nodes.len()).collect();
+        for zoom in [50, 75, 100, 150, 200] {
+            let area = Rect::new(2, 5, 58, 20);
+            let geometry = graph_geometry(area, &snapshot, &indices, zoom, (0, 0), None);
+            assert_eq!(
+                geometry.nodes.len() + geometry.outside_viewport,
+                indices.len()
+            );
+            for (index, placement) in geometry.nodes.iter().enumerate() {
+                assert!(placement.index < snapshot.nodes.len());
+                assert_eq!(placement.rect.intersection(area), placement.rect);
+                for other in geometry.nodes.iter().skip(index + 1) {
+                    assert!(placement.rect.intersection(other.rect).is_empty());
+                }
+            }
+        }
+        let geometry = graph_geometry(
+            Rect::new(2, 5, 58, 20),
+            &snapshot,
+            &indices,
+            100,
+            (0, 0),
+            None,
+        );
+        assert!(geometry
+            .nodes
+            .iter()
+            .any(|placement| snapshot.nodes[placement.index].is_root));
+        assert!(geometry.outside_viewport > 0);
     }
 
     #[test]
-    fn layout_tiny_under_threshold() {
-        let area = Rect::new(0, 0, 50, 15);
-        let l = TopologyLayoutResult::compute(area);
-        assert_eq!(l.mode, TopologyResponsiveMode::Tiny);
+    fn placement_is_stable_under_snapshot_reorder_and_transforms_are_real() {
+        let mut snapshot = TopologySnapshot {
+            nodes: vec![node("root", 0), node("b", 1), node("a", 1)],
+            ..Default::default()
+        };
+        let area = Rect::new(10, 4, 80, 30);
+        let indices = [0, 1, 2];
+        let positions = |snapshot: &TopologySnapshot| {
+            graph_geometry(area, snapshot, &indices, 100, (0, 0), None)
+                .nodes
+                .into_iter()
+                .map(|placement| (snapshot.nodes[placement.index].id.clone(), placement.rect))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let before = positions(&snapshot);
+        snapshot.nodes.reverse();
+        assert_eq!(before, positions(&snapshot));
+        let normal = graph_geometry(area, &snapshot, &indices, 100, (0, 0), None);
+        let panned = graph_geometry(area, &snapshot, &indices, 100, (3, 2), None);
+        let normal_root = normal
+            .nodes
+            .iter()
+            .find(|p| snapshot.nodes[p.index].is_root)
+            .unwrap();
+        let panned_root = panned
+            .nodes
+            .iter()
+            .find(|p| snapshot.nodes[p.index].is_root)
+            .unwrap();
+        assert_eq!(panned_root.rect.x, normal_root.rect.x + 3);
+        assert_eq!(panned_root.rect.y, normal_root.rect.y + 2);
+        let centered = graph_geometry(area, &snapshot, &indices, 150, (0, 0), Some("a"));
+        let selected = centered
+            .nodes
+            .iter()
+            .find(|p| snapshot.nodes[p.index].id == "a")
+            .unwrap();
+        assert_eq!(
+            selected.rect.x + selected.rect.width / 2,
+            area.x + area.width / 2
+        );
+        assert_eq!(
+            selected.rect.y + selected.rect.height / 2,
+            area.y + area.height / 2
+        );
+        assert_ne!(
+            normal_root.rect,
+            graph_geometry(area, &snapshot, &indices, 50, (0, 0), None)
+                .nodes
+                .iter()
+                .find(|p| snapshot.nodes[p.index].is_root)
+                .unwrap()
+                .rect
+        );
     }
 }

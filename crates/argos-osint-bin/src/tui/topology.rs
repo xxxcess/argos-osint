@@ -1,25 +1,83 @@
-//! Brain Memory Topology interactive view (spec §2 & mockup).
-//!
-//! Three-panel reactive topology mapper: Left inspector & related records,
-//! Central graph canvas with anchored legend & scope findings, Right navigation
-//! & controls with minimap.
-
+//! Seeded, immutable topology presentation in the Graph first preset.
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use argos_osint_core::brain_topology::{
-    CycleScope, TopologyNodeKind, TopologySeed, TopologySnapshot,
+    CycleScope, TopologyEdgeKind, TopologyNode, TopologyNodeKind, TopologySeed, TopologySnapshot,
 };
 
 use super::app::{App, ButtonId, Target};
-use super::theme::{self, panel, ACCENT, BG, BORDER, DIM, GREEN, MUTED, SERIES, TEXT, WARN};
-use super::topology_layout::{TopologyLayoutResult, TopologyResponsiveMode};
-use super::ui::draw_button;
+use super::components::{self, ListGeometry, ScrollPane};
+use super::theme::{self, panel, ACCENT, BG, BORDER, DIM, GREEN, MUTED, SERIES, WARN};
+use super::topology_layout::{graph_geometry, TopologyLayoutResult, TopologyResponsiveMode};
+use super::ui::{draw_button, draw_button_state};
 
 pub const TOPOLOGY_HISTORY_CAP: usize = 32;
+
+#[derive(Clone, Debug)]
+pub enum TopologyFocus {
+    Node(String),
+    Edge(String),
+    Relationship(String),
+    Control(Target),
+}
+
+pub fn stable_focus(state: &TopologyState, target: Target) -> Option<TopologyFocus> {
+    match target {
+        Target::TopologyNode(index) => state
+            .snapshot
+            .as_ref()?
+            .nodes
+            .get(index)
+            .map(|node| TopologyFocus::Node(node.id.clone())),
+        Target::TopologyEdge(index) => state
+            .snapshot
+            .as_ref()?
+            .edges
+            .get(index)
+            .map(|edge| TopologyFocus::Edge(edge.id.clone())),
+        Target::TopologyRelated(index) => {
+            let edge_index = *related_edge_indices(state).get(index)?;
+            state
+                .snapshot
+                .as_ref()?
+                .edges
+                .get(edge_index)
+                .map(|edge| TopologyFocus::Relationship(edge.id.clone()))
+        }
+        target => Some(TopologyFocus::Control(target)),
+    }
+}
+
+pub fn resolve_focus(state: &TopologyState, focus: TopologyFocus) -> Option<Target> {
+    match focus {
+        TopologyFocus::Node(id) => state
+            .snapshot
+            .as_ref()?
+            .nodes
+            .iter()
+            .position(|node| node.id == id && node_visible(state, node))
+            .map(Target::TopologyNode),
+        TopologyFocus::Edge(id) => state
+            .snapshot
+            .as_ref()?
+            .edges
+            .iter()
+            .position(|edge| edge.id == id && edge_visible(state, edge.kind))
+            .map(Target::TopologyEdge),
+        TopologyFocus::Relationship(id) => {
+            let snapshot = state.snapshot.as_ref()?;
+            related_edge_indices(state)
+                .iter()
+                .position(|index| snapshot.edges[*index].id == id)
+                .map(Target::TopologyRelated)
+        }
+        TopologyFocus::Control(target) => Some(target),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct TopologyHistoryFrame {
@@ -30,8 +88,14 @@ pub struct TopologyHistoryFrame {
     pub cycle_scope: CycleScope,
     pub zoom_percent: usize,
     pub pan: (i16, i16),
+    pub viewport_center_id: Option<String>,
+    pub active_panel_tab: usize,
     pub inspector_tab: usize,
+    pub inspector_scroll: usize,
     pub related_sel: usize,
+    pub related_scroll: usize,
+    pub filters: [bool; 6],
+    pub focus: Option<TopologyFocus>,
 }
 
 #[derive(Clone, Debug)]
@@ -50,13 +114,17 @@ pub struct TopologyState {
     pub filter_sources: bool,
     pub zoom_percent: usize,
     pub pan: (i16, i16),
+    pub viewport_center_id: Option<String>,
     pub active_panel_tab: usize,
     pub inspector_tab: usize,
+    pub inspector_scroll: usize,
     pub related_sel: usize,
+    /// Logical relationship record offset; detail prose has its own row offset.
     pub related_scroll: usize,
     pub analyzing_scope: bool,
     pub scope_status: String,
     pub history: Vec<TopologyHistoryFrame>,
+    pub pending_focus: Option<TopologyFocus>,
 }
 
 impl Default for TopologyState {
@@ -76,18 +144,43 @@ impl Default for TopologyState {
             filter_sources: true,
             zoom_percent: 100,
             pan: (0, 0),
+            viewport_center_id: None,
             active_panel_tab: 0,
             inspector_tab: 0,
+            inspector_scroll: 0,
             related_sel: 0,
             related_scroll: 0,
             analyzing_scope: false,
-            scope_status: "On demand • idle".into(),
+            scope_status: "On demand · idle".into(),
             history: Vec::new(),
+            pending_focus: None,
         }
     }
 }
 
 impl TopologyState {
+    pub fn filters(&self) -> [bool; 6] {
+        [
+            self.filter_actor,
+            self.filter_claim,
+            self.filter_inference,
+            self.filter_link,
+            self.filter_related,
+            self.filter_sources,
+        ]
+    }
+
+    pub fn set_filters(&mut self, filters: [bool; 6]) {
+        [
+            self.filter_actor,
+            self.filter_claim,
+            self.filter_inference,
+            self.filter_link,
+            self.filter_related,
+            self.filter_sources,
+        ] = filters;
+    }
+
     pub fn push_history(&mut self) {
         if let Some(seed) = &self.seed {
             if self.history.len() >= TOPOLOGY_HISTORY_CAP {
@@ -101,8 +194,14 @@ impl TopologyState {
                 cycle_scope: self.cycle_scope.clone(),
                 zoom_percent: self.zoom_percent,
                 pan: self.pan,
+                viewport_center_id: self.viewport_center_id.clone(),
+                active_panel_tab: self.active_panel_tab,
                 inspector_tab: self.inspector_tab,
+                inspector_scroll: self.inspector_scroll,
                 related_sel: self.related_sel,
+                related_scroll: self.related_scroll,
+                filters: self.filters(),
+                focus: None,
             });
         }
     }
@@ -111,1127 +210,1124 @@ impl TopologyState {
         self.history.pop()
     }
 
+    pub fn restore_history(&mut self, frame: TopologyHistoryFrame) {
+        self.seed = Some(frame.seed);
+        self.selected_node_id = frame.selected_node_id;
+        self.selected_edge_id = frame.selected_edge_id;
+        self.depth = frame.depth;
+        self.cycle_scope = frame.cycle_scope;
+        self.zoom_percent = frame.zoom_percent;
+        self.pan = frame.pan;
+        self.viewport_center_id = frame.viewport_center_id;
+        self.active_panel_tab = frame.active_panel_tab;
+        self.inspector_tab = frame.inspector_tab;
+        self.inspector_scroll = frame.inspector_scroll;
+        self.related_sel = frame.related_sel;
+        self.related_scroll = frame.related_scroll;
+        self.set_filters(frame.filters);
+        self.pending_focus = frame.focus;
+    }
+
     pub fn current_cycle_id(&self) -> Option<String> {
-        if let Some(snap) = &self.snapshot {
-            if let Some(sel_id) = &self.selected_node_id {
-                if let Some(node) = snap.nodes.iter().find(|n| &n.id == sel_id) {
-                    if let Some(c) = &node.cycle {
-                        return Some(c.clone());
-                    }
+        let snapshot = self.snapshot.as_ref()?;
+        self.selected_node_id
+            .as_ref()
+            .and_then(|id| snapshot.nodes.iter().find(|node| &node.id == id))
+            .and_then(|node| node.cycle.clone())
+            .or_else(|| {
+                snapshot
+                    .nodes
+                    .iter()
+                    .find(|node| node.is_root)
+                    .and_then(|node| node.cycle.clone())
+            })
+            .or_else(|| match self.seed.as_ref()? {
+                TopologySeed::Article { run_id, .. }
+                | TopologySeed::RetainedClaim { run_id, .. }
+                | TopologySeed::RetainedActor { run_id, .. } => {
+                    (!run_id.is_empty()).then(|| run_id.clone())
                 }
-            }
-            for node in &snap.nodes {
-                if let Some(c) = &node.cycle {
-                    return Some(c.clone());
-                }
-            }
-        }
-        None
+                _ => None,
+            })
     }
 
     pub fn center_selected(&mut self) {
         self.pan = (0, 0);
+        self.viewport_center_id = self.selected_node_id.clone();
+    }
+}
+
+pub fn node_visible(state: &TopologyState, node: &TopologyNode) -> bool {
+    node.is_root
+        || match node.kind {
+            TopologyNodeKind::Entity | TopologyNodeKind::ActorGroup => state.filter_actor,
+            TopologyNodeKind::Claim => state.filter_claim,
+            TopologyNodeKind::Inference | TopologyNodeKind::Topic => state.filter_inference,
+            TopologyNodeKind::Article | TopologyNodeKind::Source => state.filter_sources,
+        }
+}
+
+fn edge_visible(state: &TopologyState, kind: TopologyEdgeKind) -> bool {
+    match kind {
+        TopologyEdgeKind::Related => state.filter_related,
+        TopologyEdgeKind::Link => state.filter_link,
+        _ => true,
+    }
+}
+
+fn visible_endpoints(
+    state: &TopologyState,
+    snapshot: &TopologySnapshot,
+    from: &str,
+    to: &str,
+) -> bool {
+    [from, to].into_iter().all(|id| {
+        snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .is_some_and(|node| node_visible(state, node))
+    })
+}
+
+/// Ordered actual snapshot edge indices for the selected node's relationship list.
+pub fn related_edge_indices(state: &TopologyState) -> Vec<usize> {
+    let Some(snapshot) = &state.snapshot else {
+        return Vec::new();
+    };
+    let anchor = state
+        .selected_node_id
+        .as_deref()
+        .unwrap_or(&snapshot.root_id);
+    snapshot
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, edge)| {
+            (edge.from == anchor || edge.to == anchor)
+                && edge_visible(state, edge.kind)
+                && visible_endpoints(state, snapshot, &edge.from, &edge.to)
+                && (state.inspector_tab == 0
+                    || snapshot.nodes.iter().any(|node| {
+                        node.id
+                            == (if edge.from == anchor {
+                                &edge.to
+                            } else {
+                                &edge.from
+                            })
+                            .as_str()
+                            && matches!(
+                                node.kind,
+                                TopologyNodeKind::Article | TopologyNodeKind::Source
+                            )
+                    }))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Scroll exactly the immutable content measured by the most recent draw.
+pub fn scroll_topology(app: &mut App, target: Target, delta: isize) -> bool {
+    match target {
+        Target::TopologyGraph | Target::TopologyNode(_) | Target::TopologyEdge(_) => {
+            let delta = delta.clamp(i16::MIN as isize, i16::MAX as isize) as i16;
+            app.topology_state.pan.1 = app.topology_state.pan.1.saturating_sub(delta);
+            true
+        }
+        Target::TopologyInspector => {
+            let area = app
+                .layout
+                .borrow()
+                .entries
+                .iter()
+                .find(|entry| entry.target == Target::TopologyInspector)
+                .map(|entry| entry.rect);
+            if let (Some(area), Some(snapshot)) = (area, app.topology_state.snapshot.as_ref()) {
+                let lines = components::measured_lines(
+                    detail_lines(&app.topology_state, snapshot),
+                    area.width,
+                );
+                let mut pane = ScrollPane {
+                    offset: app.topology_state.inspector_scroll,
+                };
+                pane.scroll(delta, lines.len(), area.height as usize);
+                app.topology_state.inspector_scroll = pane.offset;
+            }
+            true
+        }
+        Target::TopologyRelated(_) | Target::TopologyRelationships => {
+            app.topology_state.related_scroll = app
+                .topology_state
+                .related_scroll
+                .saturating_add_signed(delta)
+                .min(
+                    related_edge_indices(&app.topology_state)
+                        .len()
+                        .saturating_sub(1),
+                );
+            true
+        }
+        _ => false,
     }
 }
 
 pub fn draw_topology(frame: &mut Frame, app: &App, area: Rect) {
     let layout = TopologyLayoutResult::compute(area);
     if layout.mode == TopologyResponsiveMode::Tiny {
-        draw_tiny_guidance(frame, area);
+        draw_button(
+            frame,
+            app,
+            ButtonId::TopologyBack,
+            "[← Back]",
+            Rect::new(area.x, area.y, area.width.min(9), area.height.min(1)),
+        );
+        let notice = Rect::new(
+            area.x,
+            area.y.saturating_add(1),
+            area.width,
+            area.height.saturating_sub(1),
+        );
+        frame.render_widget(
+            Paragraph::new(components::measured_lines(
+                vec![
+                    Line::styled("Topology mapper", theme::accent()),
+                    Line::raw(
+                    "Needs 60×18 content cells (60×20 terminal). Resize to inspect the neighborhood.",
+                    ),
+                ],
+                notice.width.saturating_sub(2),
+            ))
+            .block(panel(" Topology ")),
+            notice,
+        );
         return;
     }
-
-    // 1. Top breadcrumbs & subheader
     draw_top_bar(frame, app, &layout);
-
-    // 2. Main content panels
-    match layout.mode {
-        TopologyResponsiveMode::Desktop => {
-            draw_inspector(frame, app, &layout);
-            draw_graph_panel(frame, app, &layout);
-            draw_navigation(frame, app, &layout);
-        }
-        TopologyResponsiveMode::Compact => {
-            draw_inspector(frame, app, &layout);
-            draw_graph_panel(frame, app, &layout);
-        }
-        TopologyResponsiveMode::Stacked => match app.topology_state.active_panel_tab {
-            0 => draw_graph_panel(frame, app, &layout),
-            1 => draw_inspector(frame, app, &layout),
-            _ => draw_navigation(frame, app, &layout),
-        },
-        TopologyResponsiveMode::Tiny => {}
+    let split = matches!(
+        layout.mode,
+        TopologyResponsiveMode::Desktop | TopologyResponsiveMode::Compact
+    );
+    if app.topology_state.active_panel_tab == 2 {
+        draw_controls_page(frame, app, layout.controls_page);
+    } else if split {
+        draw_graph_panel(frame, app, &layout);
+        draw_inspector(frame, app, &layout);
+    } else if app.topology_state.active_panel_tab == 1 {
+        draw_inspector(frame, app, &layout);
+    } else {
+        draw_graph_panel(frame, app, &layout);
     }
-
-    // 3. Footer help line
-    draw_footer(frame, &layout);
-}
-
-fn draw_tiny_guidance(frame: &mut Frame, area: Rect) {
-    let msg = vec![
-        Line::from(Span::styled(
-            "Topology View",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "Terminal too small. Minimum viewport: 60×18 cells.",
-            Style::default().fg(MUTED),
-        )),
-        Line::from(Span::styled(
-            "Resize window to view interactive graph.",
-            Style::default().fg(DIM),
-        )),
-    ];
-    frame.render_widget(Paragraph::new(msg).block(panel(" Topology ")), area);
+    frame.render_widget(
+        Paragraph::new(components::clip_text(
+            "Tab focus · Enter inspect · r refresh · Esc back",
+            layout.footer.width as usize,
+        ))
+        .style(theme::muted()),
+        layout.footer,
+    );
 }
 
 fn draw_top_bar(frame: &mut Frame, app: &App, layout: &TopologyLayoutResult) {
-    // Row 1: Breadcrumbs
-    let root_label = app
-        .topology_state
-        .snapshot
-        .as_ref()
-        .map(|s| s.root_label.as_str())
-        .unwrap_or("Brain");
-    let crumbs = Line::from(vec![
-        Span::styled(
-            "ARGOS OSINT",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  │  ", Style::default().fg(BORDER)),
-        Span::styled(
-            format!("Brain / {root_label} / Topology"),
-            Style::default().fg(DIM),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(crumbs), layout.header);
-
-    // Row 2: Subheader with Back, Title, Root indicator, and Search
-    let back_btn_rect = Rect::new(layout.subheader.x, layout.subheader.y, 10, 1);
-    app.layout
-        .borrow_mut()
-        .register(Target::Button(ButtonId::TopologyBack), back_btn_rect);
-    let back_style = if app.focus == Target::Button(ButtonId::TopologyBack) {
-        theme::selected()
-    } else {
-        Style::default().fg(ACCENT)
-    };
+    let labels = ["[← Back] ", "Topology mapper"];
+    let rects = components::action_rects(layout.header, &labels);
+    draw_button(frame, app, ButtonId::TopologyBack, labels[0], rects[0]);
     frame.render_widget(
-        Paragraph::new(Span::styled("[← Back]", back_style)),
-        back_btn_rect,
+        Paragraph::new(labels[1]).style(theme::text().add_modifier(Modifier::BOLD)),
+        rects[1],
     );
-
-    let title_span = Span::styled(
-        " │ Brain Memory Topology",
-        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-    );
-    let title_rect = Rect::new(layout.subheader.x + 10, layout.subheader.y, 25, 1);
-    frame.render_widget(Paragraph::new(title_span), title_rect);
-
-    let root_id = app
-        .topology_state
+    let state = &app.topology_state;
+    let seed = state
         .snapshot
         .as_ref()
-        .map(|s| s.root_id.as_str())
-        .unwrap_or("A-001");
-    let root_info = format!("Root: {} {}  │  [ ⚲ Find memory... ]", root_id, root_label);
-    let info_span = Span::styled(root_info, Style::default().fg(MUTED));
-    let info_w = 45u16.min(layout.subheader.width.saturating_sub(35));
-    let info_rect = Rect::new(
-        layout.subheader.x + layout.subheader.width.saturating_sub(info_w),
-        layout.subheader.y,
-        info_w,
-        1,
+        .map(|snapshot| snapshot.root_label.clone())
+        .or_else(|| state.seed.as_ref().map(TopologySeed::display_label))
+        .unwrap_or_else(|| "No seed selected".into());
+    let origin = if app.topology_origin_label.is_empty() {
+        "Brain"
+    } else {
+        app.topology_origin_label.as_str()
+    };
+    let context = format!("Origin: {origin} · Seed: {seed}");
+    frame.render_widget(
+        Paragraph::new(components::clip_text(
+            &context,
+            layout.subheader.width as usize,
+        ))
+        .style(theme::muted()),
+        layout.subheader,
     );
-    frame.render_widget(Paragraph::new(info_span), info_rect);
-
-    // Row 3: Seed kind tabs and/or panel tabs in stacked mode
-    let mut tab_spans = Vec::new();
-    if layout.mode == TopologyResponsiveMode::Stacked {
-        let panel_tabs = ["[Graph]", "[Details]", "[Navigation]"];
-        for (i, label) in panel_tabs.iter().enumerate() {
-            if i > 0 {
-                tab_spans.push(Span::raw("  "));
-            }
-            let is_active = app.topology_state.active_panel_tab == i;
-            let style = if is_active {
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(MUTED)
-            };
-            let text = if is_active {
-                format!("[{} ●]", &label[1..label.len() - 1])
-            } else {
-                (*label).to_string()
-            };
-            tab_spans.push(Span::styled(text, style));
+    let tabs = ["Graph", "Details", "Controls"];
+    let reveal = match app.focus {
+        Target::TopologyPanel(index) => index,
+        _ => state.active_panel_tab,
+    };
+    for (index, rect) in components::tab_rects(layout.seed_tabs, &tabs, reveal)
+        .into_iter()
+        .enumerate()
+    {
+        if rect.width == 0 {
+            continue;
         }
-        tab_spans.push(Span::styled("   │   ", Style::default().fg(BORDER)));
+        let target = Target::TopologyPanel(index);
+        components::tab_button(
+            frame,
+            rect,
+            tabs[index],
+            state.active_panel_tab == index,
+            app.focus == target,
+        );
+        app.layout.borrow_mut().register(target, rect);
     }
-
-    let seed_kinds = ["[Actor ●]", "[Claim]", "[Inference]", "[Link]"];
-    for (i, label) in seed_kinds.iter().enumerate() {
-        if i > 0 || layout.mode == TopologyResponsiveMode::Stacked {
-            tab_spans.push(Span::raw("  "));
-        }
-        let style = if i == 0 {
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(MUTED)
-        };
-        tab_spans.push(Span::styled(*label, style));
-    }
-    frame.render_widget(Paragraph::new(Line::from(tab_spans)), layout.seed_tabs);
+    draw_scope_controls(frame, app, layout.controls);
 }
 
-fn draw_inspector(frame: &mut Frame, app: &App, layout: &TopologyLayoutResult) {
-    if layout.left_panel.width == 0 {
-        return;
-    }
-
-    // Top: Memory / Edge details
-    let block_title = if app.topology_state.selected_edge_id.is_some() {
-        "Memory details • Link"
-    } else {
-        "Memory details • Entity"
-    };
-
-    let mut details_lines = Vec::new();
-    if let Some(edge_id) = &app.topology_state.selected_edge_id {
-        let edge = app
-            .topology_state
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.edges.iter().find(|e| &e.id == edge_id));
-        let label = edge.map(|e| e.label.as_str()).unwrap_or("supports");
-        details_lines.push(Line::from(vec![
-            Span::styled("➔ ", Style::default().fg(ACCENT)),
-            Span::styled(
-                format!("{edge_id} • {label}"),
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+fn draw_scope_controls(frame: &mut Frame, app: &App, area: Rect) {
+    let state = &app.topology_state;
+    let labels: Vec<String> = (1..=3)
+        .map(|depth| {
+            format!(
+                "[{} hop{}{}] ",
+                depth,
+                if depth == 1 { "" } else { "s" },
+                if state.depth == depth { " ●" } else { "" }
+            )
+        })
+        .chain([
+            format!(
+                "[Retained{}] ",
+                if state.cycle_scope == CycleScope::AllRetained {
+                    " ●"
+                } else {
+                    ""
+                }
             ),
-        ]));
-        details_lines.push(Line::raw(""));
-        details_lines.push(Line::from(vec![
-            Span::styled("Kind:         ", Style::default().fg(MUTED)),
-            Span::styled("Link", Style::default().fg(TEXT)),
-        ]));
-        details_lines.push(Line::from(vec![
-            Span::styled("From:         ", Style::default().fg(MUTED)),
-            Span::styled(
-                edge.map(|e| e.from.as_str()).unwrap_or("C-112"),
-                Style::default().fg(TEXT),
+            format!(
+                "[Cycle{}]",
+                if matches!(state.cycle_scope, CycleScope::ThisCycle(_)) {
+                    " ●"
+                } else {
+                    ""
+                }
             ),
-        ]));
-        details_lines.push(Line::from(vec![
-            Span::styled("To:           ", Style::default().fg(MUTED)),
-            Span::styled(
-                edge.map(|e| e.to.as_str()).unwrap_or("C-104"),
-                Style::default().fg(TEXT),
-            ),
-        ]));
-        details_lines.push(Line::from(vec![
-            Span::styled("Status:       ", Style::default().fg(MUTED)),
-            Span::styled("assessed", Style::default().fg(GREEN)),
-        ]));
-        details_lines.push(Line::from(vec![
-            Span::styled("Actor:        ", Style::default().fg(MUTED)),
-            Span::styled("A-001 Northstar Labs", Style::default().fg(ACCENT)),
-        ]));
-        details_lines.push(Line::from(vec![
-            Span::styled("Evidence:     ", Style::default().fg(MUTED)),
-            Span::styled("2 original sources", Style::default().fg(TEXT)),
-        ]));
-        details_lines.push(Line::from(vec![
-            Span::styled("Source roots: ", Style::default().fg(MUTED)),
-            Span::styled("2", Style::default().fg(TEXT)),
-        ]));
-        details_lines.push(Line::raw(""));
-        details_lines.push(Line::styled("Source passage", Style::default().fg(MUTED)));
-        let rationale = edge
-            .map(|e| e.rationale.as_str())
-            .filter(|r| !r.is_empty())
-            .unwrap_or("\"The board approved the pilot.\"");
-        details_lines.push(Line::styled(
-            format!("\"{rationale}\""),
-            Style::default().fg(DIM),
-        ));
-        details_lines.push(Line::styled(
-            "Supply Review • 13 Oct 2026",
-            Style::default().fg(MUTED),
-        ));
-    } else {
-        // Node details
-        let node_id = app
-            .topology_state
-            .selected_node_id
-            .as_deref()
-            .unwrap_or("A-001");
-        let node = app
-            .topology_state
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.nodes.iter().find(|n| n.id == node_id));
-
-        let label = node.map(|n| n.label.as_str()).unwrap_or("Northstar Labs");
-        let kind = node.map(|n| n.kind.label()).unwrap_or("Entity");
-        let subtype = node.map(|n| n.subtype.as_str()).unwrap_or("organization");
-        let status = node.map(|n| n.status.as_str()).unwrap_or("resolved");
-
-        details_lines.push(Line::from(vec![
-            Span::styled("● ", Style::default().fg(ACCENT)),
-            Span::styled(
-                format!("{node_id} • {label}"),
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        details_lines.push(Line::raw(""));
-        details_lines.push(Line::from(vec![
-            Span::styled("Kind:         ", Style::default().fg(MUTED)),
-            Span::styled(kind, Style::default().fg(TEXT)),
-        ]));
-        details_lines.push(Line::from(vec![
-            Span::styled("Subtype:      ", Style::default().fg(MUTED)),
-            Span::styled(subtype, Style::default().fg(TEXT)),
-        ]));
-        details_lines.push(Line::from(vec![
-            Span::styled("Status:       ", Style::default().fg(MUTED)),
-            Span::styled(status, Style::default().fg(GREEN)),
-        ]));
-        details_lines.push(Line::from(vec![
-            Span::styled("Evidence:     ", Style::default().fg(MUTED)),
-            Span::styled("4 linked claims", Style::default().fg(TEXT)),
-        ]));
-        details_lines.push(Line::raw(""));
-        if let Some(n) = node {
-            if !n.passages.is_empty() {
-                details_lines.push(Line::styled("Passage", Style::default().fg(MUTED)));
-                details_lines.push(Line::styled(
-                    format!("\"{}\"", n.passages[0]),
-                    Style::default().fg(DIM),
-                ));
-            }
-        }
-    }
-
-    let p = Paragraph::new(details_lines).block(panel(block_title));
-    frame.render_widget(p, layout.inspector_details);
-
-    // Buttons at bottom of details
-    let btn_y = layout.inspector_details.y + layout.inspector_details.height.saturating_sub(2);
-    let btn1 = Rect::new(layout.inspector_details.x + 2, btn_y, 15, 1);
-    let btn2 = Rect::new(layout.inspector_details.x + 19, btn_y, 16, 1);
-    draw_button(
-        frame,
-        app,
-        ButtonId::TopologyOpenMemory,
-        "[Open memory]",
-        btn1,
-    );
-    draw_button(
-        frame,
-        app,
-        ButtonId::TopologyViewEvidence,
-        "[View evidence]",
-        btn2,
-    );
-
-    // Bottom: Related to selection
-    draw_related_to_selection(frame, app, layout.inspector_related);
-}
-
-fn draw_related_to_selection(frame: &mut Frame, app: &App, area: Rect) {
-    let mut lines = Vec::new();
-
-    // Tabs: [Memories ●]   [Articles]
-    let t1_style = if app.topology_state.inspector_tab == 0 {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(MUTED)
-    };
-    let t2_style = if app.topology_state.inspector_tab == 1 {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(MUTED)
-    };
-    lines.push(Line::from(vec![
-        Span::styled("[Memories ●]", t1_style),
-        Span::raw("   "),
-        Span::styled("[Articles]", t2_style),
-    ]));
-    lines.push(Line::raw(""));
-
-    // Spaced items list with LIST_ITEM_GAP_ROWS = 1
-    let items = [
-        ("■", GREEN, "C-104 • Pilot approved", "Claim"),
-        ("■", GREEN, "C-112 • Approval confirmed", "Claim"),
-        ("◆", SERIES[6], "I-027 • Supply-chain risk", "Inference"),
-        (
-            "☼",
-            WARN,
-            "RL-008 • Vendor article lead",
-            "Related • unverified",
-        ),
+        ])
+        .collect();
+    let refs: Vec<_> = labels.iter().map(String::as_str).collect();
+    let buttons = [
+        ButtonId::TopologyDepth1,
+        ButtonId::TopologyDepth2,
+        ButtonId::TopologyDepth3,
+        ButtonId::TopologyScopeAll,
+        ButtonId::TopologyScopeThis,
     ];
-
-    let skip = app.topology_state.related_scroll;
-    let start_y = area.y.saturating_add(3);
-    for (i, (glyph, color, title, subtitle)) in items.iter().skip(skip).enumerate() {
-        let actual_idx = i + skip;
-        let is_sel = app.topology_state.related_sel == actual_idx;
-        let title_style = if is_sel {
-            theme::selected()
-        } else {
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{glyph} "), Style::default().fg(*color)),
-            Span::styled(*title, title_style),
-            Span::styled("  >", Style::default().fg(MUTED)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(*subtitle, Style::default().fg(MUTED)),
-        ]));
-        // LIST_ITEM_GAP_ROWS = 1
-        lines.push(Line::raw(""));
-
-        let row_y = start_y + (i as u16) * 3;
-        if row_y + 1 < area.y + area.height {
-            let row_rect = Rect::new(area.x + 1, row_y, area.width.saturating_sub(2), 2);
-            app.layout
-                .borrow_mut()
-                .register(Target::TopologyRelated(actual_idx), row_rect);
+    for ((button, label), rect) in buttons
+        .into_iter()
+        .zip(&labels)
+        .zip(components::action_rects(area, &refs))
+    {
+        if rect.width > 0 {
+            draw_button(frame, app, button, label, rect);
         }
     }
+}
 
-    lines.push(Line::styled("See more ↓", Style::default().fg(ACCENT)));
+fn selected_node<'a>(
+    state: &TopologyState,
+    snapshot: &'a TopologySnapshot,
+) -> Option<&'a TopologyNode> {
+    state
+        .selected_node_id
+        .as_deref()
+        .and_then(|id| snapshot.nodes.iter().find(|node| node.id == id))
+        .or_else(|| snapshot.nodes.iter().find(|node| node.is_root))
+}
 
-    let p = Paragraph::new(lines).block(panel("Related to selection"));
-    frame.render_widget(p, area);
+fn node_style(kind: TopologyNodeKind) -> (Color, &'static str) {
+    match kind {
+        TopologyNodeKind::Entity | TopologyNodeKind::ActorGroup => (ACCENT, "●"),
+        TopologyNodeKind::Claim => (GREEN, "■"),
+        TopologyNodeKind::Topic => (SERIES[6], "◆"),
+        TopologyNodeKind::Inference => (SERIES[6], "◇"),
+        TopologyNodeKind::Article => (DIM, "□"),
+        TopologyNodeKind::Source => (MUTED, "○"),
+    }
 }
 
 fn draw_graph_panel(frame: &mut Frame, app: &App, layout: &TopologyLayoutResult) {
-    // 1. Graph Title
-    let title_line = Line::from(vec![
-        Span::styled(
-            "Scoped relationships",
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" • ", Style::default().fg(MUTED)),
-        Span::styled("focused", Style::default().fg(ACCENT)),
-    ]);
-    frame.render_widget(Paragraph::new(title_line), layout.graph_title);
-
-    // 2. Graph Canvas with Nodes and Edges
-    draw_graph_canvas(frame, app, layout.graph_canvas);
-
-    // 3. Anchored Legend
-    draw_legend(frame, layout.graph_legend);
-
-    // 4. Scope Findings
-    draw_scope_findings(frame, app, layout.scope_findings);
-}
-
-fn draw_graph_canvas(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(BORDER))
-        .style(Style::default().bg(BG));
-    frame.render_widget(block, area);
+    let state = &app.topology_state;
+    let counts = state
+        .snapshot
+        .as_ref()
+        .map(|snapshot| {
+            let node_count = snapshot
+                .nodes
+                .iter()
+                .filter(|node| node_visible(state, node))
+                .count();
+            format!(
+                "Neighborhood · {node_count} nodes · {} relationships",
+                snapshot
+                    .edges
+                    .iter()
+                    .filter(|edge| edge_visible(state, edge.kind)
+                        && visible_endpoints(state, snapshot, &edge.from, &edge.to))
+                    .count()
+            )
+        })
+        .unwrap_or_else(|| "Seeded neighborhood".into());
+    frame.render_widget(
+        Paragraph::new(components::clip_text(
+            &counts,
+            layout.graph_title.width as usize,
+        ))
+        .style(theme::text().add_modifier(Modifier::BOLD)),
+        layout.graph_title,
+    );
+    let graph_block = panel(" Graph ").border_style(
+        if matches!(app.focus, Target::TopologyNode(_) | Target::TopologyEdge(_)) {
+            theme::accent()
+        } else {
+            Style::default().fg(BORDER)
+        },
+    );
+    let inner = graph_block.inner(layout.graph_canvas);
+    frame.render_widget(graph_block, layout.graph_canvas);
     app.layout
         .borrow_mut()
-        .register(Target::TopologyGraph, area);
-
-    let inner = Rect::new(
-        area.x + 1,
-        area.y + 1,
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
-    if inner.width < 20 || inner.height < 6 {
-        return;
-    }
-
-    // Positions for canonical nodes (proportional coordinates across canvas)
-    let cx = inner.x + inner.width / 2;
-    let cy = inner.y + inner.height / 2;
-
-    let v_scale = (inner.height as f32 / 36.0).clamp(0.25, 1.0);
-    let scale_y = |offset: i16| -> u16 {
-        let scaled = (offset as f32 * v_scale).round() as i16;
-        let y = cy as i16 + scaled;
-        y.clamp(
-            inner.y as i16,
-            (inner.y + inner.height.saturating_sub(3)) as i16,
-        ) as u16
-    };
-
-    let h_scale = (inner.width as f32 / 80.0).clamp(0.35, 1.0);
-    let scale_x = |offset: i16| -> u16 {
-        let scaled = (offset as f32 * h_scale).round() as i16;
-        let x = cx as i16 + scaled;
-        x.clamp(
-            inner.x as i16,
-            (inner.x + inner.width.saturating_sub(20)) as i16,
-        ) as u16
-    };
-
-    // Node layout offsets relative to center
-    // Root: A-001 (center)
-    let n_root = (scale_x(-4), scale_y(0));
-    // A-002 Maya Chen (top left)
-    let n_a002 = (scale_x(-25), scale_y(-10));
-    // A-003 Harbor Systems (top right)
-    let n_a003 = (scale_x(18), scale_y(-10));
-    // C-111 Leads pilot (mid left-top)
-    let n_c111 = (scale_x(-23), scale_y(-4));
-    // C-112 Approval confirmed (mid left)
-    let n_c112 = (scale_x(-23), scale_y(2));
-    // C-104 Pilot approved (lower left)
-    let n_c104 = (scale_x(-23), scale_y(8));
-    // C-109 Vendor selected (mid right)
-    let n_c109 = (scale_x(18), scale_y(-3));
-    // I-027 Supply-chain risk (lower center-right)
-    let n_i027 = (scale_x(18), scale_y(6));
-    // ART-023 (far left top)
-    let n_art023 = (inner.x + 2, scale_y(-8));
-    // ART-029 (far left mid)
-    let n_art029 = (inner.x + 2, scale_y(-1));
-    // ART-018 (far left lower)
-    let n_art018 = (inner.x + 2, scale_y(7));
-    // ART-021 (far right top)
-    let n_art021 = (inner.x + inner.width.saturating_sub(18), scale_y(-6));
-    // ART-028 (far right lower)
-    let n_art028 = (inner.x + inner.width.saturating_sub(18), scale_y(9));
-    // REP-012 (lower mid-right)
-    let n_rep012 = (scale_x(12), scale_y(12));
-
-    // Draw Edges (connecting arrows / pills)
-    draw_edge_line(frame, app, 0, n_a002, n_c111, "concerns", ACCENT, false);
-    draw_edge_line(frame, app, 1, n_a002, n_art023, "mentioned_in", MUTED, true);
-    draw_edge_line(frame, app, 2, n_c111, n_root, "concerns", ACCENT, false);
-    draw_edge_line(frame, app, 3, n_c112, n_root, "concerns", ACCENT, false);
-    draw_edge_line(
-        frame,
-        app,
-        4,
-        n_c112,
-        n_c104,
-        "L-014 • supports",
-        ACCENT,
-        false,
-    );
-    draw_edge_line(frame, app, 5, n_root, n_c109, "concerns", ACCENT, false);
-    draw_edge_line(frame, app, 6, n_a003, n_c109, "concerns", ACCENT, false);
-    draw_edge_line(frame, app, 7, n_a003, n_art021, "mentioned_in", MUTED, true);
-    draw_edge_line(frame, app, 8, n_c109, n_i027, "premise", SERIES[6], true);
-    draw_edge_line(frame, app, 9, n_c104, n_i027, "premise", SERIES[6], true);
-    draw_edge_line(
-        frame,
-        app,
-        10,
-        n_i027,
-        n_art028,
-        "RL-008 • possible context",
-        WARN,
-        true,
-    );
-    draw_edge_line(frame, app, 11, n_i027, n_rep012, "contains", MUTED, true);
-    draw_edge_line(frame, app, 12, n_art023, n_c111, "source", MUTED, false);
-    draw_edge_line(frame, app, 13, n_art029, n_c112, "source", MUTED, false);
-    draw_edge_line(frame, app, 14, n_art018, n_c104, "source", MUTED, false);
-    draw_edge_line(frame, app, 15, n_c109, n_art021, "source", MUTED, false);
-
-    // Draw Nodes
-    draw_node(
-        frame,
-        app,
-        0,
-        n_root,
-        "A-001",
-        "Northstar Labs",
-        "organization • resolved",
-        TopologyNodeKind::Entity,
-        true,
-    );
-    draw_node(
-        frame,
-        app,
-        1,
-        n_a002,
-        "A-002",
-        "Maya Chen",
-        "person • resolved",
-        TopologyNodeKind::Entity,
-        false,
-    );
-    draw_node(
-        frame,
-        app,
-        2,
-        n_a003,
-        "A-003",
-        "Harbor Systems",
-        "organization • resolved",
-        TopologyNodeKind::Entity,
-        false,
-    );
-    draw_node(
-        frame,
-        app,
-        3,
-        n_c111,
-        "C-111",
-        "Leads pilot",
-        "claim • assessed",
-        TopologyNodeKind::Claim,
-        false,
-    );
-    draw_node(
-        frame,
-        app,
-        4,
-        n_c112,
-        "C-112",
-        "Approval confirmed",
-        "claim • assessed",
-        TopologyNodeKind::Claim,
-        false,
-    );
-    draw_node(
-        frame,
-        app,
-        5,
-        n_c104,
-        "C-104",
-        "Pilot approved",
-        "claim • assessed",
-        TopologyNodeKind::Claim,
-        false,
-    );
-    draw_node(
-        frame,
-        app,
-        6,
-        n_c109,
-        "C-109",
-        "Vendor selected",
-        "claim • assessed",
-        TopologyNodeKind::Claim,
-        false,
-    );
-    draw_node(
-        frame,
-        app,
-        7,
-        n_i027,
-        "I-027",
-        "Supply-chain risk",
-        "inference • assessed",
-        TopologyNodeKind::Topic,
-        false,
-    );
-    draw_node(
-        frame,
-        app,
-        8,
-        n_art023,
-        "ART-023",
-        "Leadership",
-        "12 Oct • cycle 12",
-        TopologyNodeKind::Article,
-        false,
-    );
-    draw_node(
-        frame,
-        app,
-        9,
-        n_art029,
-        "ART-029",
-        "Pilot follow-up",
-        "13 Oct • cycle 13",
-        TopologyNodeKind::Article,
-        false,
-    );
-    draw_node(
-        frame,
-        app,
-        10,
-        n_art018,
-        "ART-018",
-        "Port pilot",
-        "12 Oct • cycle 12",
-        TopologyNodeKind::Article,
-        false,
-    );
-    draw_node(
-        frame,
-        app,
-        11,
-        n_art021,
-        "ART-021",
-        "Vendor report",
-        "11 Oct • cycle 11",
-        TopologyNodeKind::Article,
-        false,
-    );
-    draw_node(
-        frame,
-        app,
-        12,
-        n_art028,
-        "ART-028",
-        "Vendor background",
-        "01 Oct • cycle 1",
-        TopologyNodeKind::Article,
-        false,
-    );
-    draw_node(
-        frame,
-        app,
-        13,
-        n_rep012,
-        "REP-012",
-        "Supply review",
-        "13 Oct • cycle 13",
-        TopologyNodeKind::Article,
-        false,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_node(
-    frame: &mut Frame,
-    app: &App,
-    node_idx: usize,
-    pos: (u16, u16),
-    id: &str,
-    label: &str,
-    subtitle: &str,
-    kind: TopologyNodeKind,
-    is_root: bool,
-) {
-    let (color, glyph) = match kind {
-        TopologyNodeKind::Entity => (ACCENT, "●"),
-        TopologyNodeKind::Claim => (GREEN, "■"),
-        TopologyNodeKind::Topic => (SERIES[6], "◆"),
-        TopologyNodeKind::Article => (DIM, "□"),
-        TopologyNodeKind::Source => (MUTED, "○"),
-    };
-
-    let is_sel = app.topology_state.selected_node_id.as_deref() == Some(id);
-    let title_style = if is_sel {
-        theme::selected()
-    } else {
-        Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
-    };
-
-    let title_line = Line::from(vec![
-        Span::styled(format!("{glyph} "), Style::default().fg(color)),
-        Span::styled(id, Style::default().fg(MUTED)),
-        Span::raw(" "),
-        Span::styled(label, title_style),
-    ]);
-
-    let sub_line = Line::from(vec![
-        Span::raw("  "),
-        Span::styled(subtitle, Style::default().fg(color)),
-    ]);
-
-    let w = 22u16;
-    let h = if is_root { 3u16 } else { 2u16 };
-    let rect = Rect::new(pos.0, pos.1, w, h);
-    app.layout
-        .borrow_mut()
-        .register(Target::TopologyNode(node_idx), rect);
-
-    let mut lines = vec![title_line, sub_line];
-    if is_root {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "[root]",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ),
-        ]));
-    }
-    frame.render_widget(Paragraph::new(lines), rect);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_edge_line(
-    frame: &mut Frame,
-    app: &App,
-    edge_idx: usize,
-    from: (u16, u16),
-    to: (u16, u16),
-    label: &str,
-    color: Color,
-    dashed: bool,
-) {
-    let mid_x = (from.0 + to.0) / 2;
-    let mid_y = (from.1 + to.1) / 2;
-
-    let pill_text = if dashed {
-        format!("┄ {label} ┄▶")
-    } else {
-        format!("─ {label} ─▶")
-    };
-    let pill_w = pill_text.chars().count() as u16;
-    let pill_rect = Rect::new(mid_x.saturating_sub(pill_w / 2), mid_y, pill_w, 1);
-    app.layout
-        .borrow_mut()
-        .register(Target::TopologyEdge(edge_idx), pill_rect);
-    frame.render_widget(
-        Paragraph::new(Span::styled(pill_text, Style::default().fg(color))),
-        pill_rect,
-    );
-}
-
-fn draw_legend(frame: &mut Frame, area: Rect) {
-    let line1 = Line::from(vec![
-        Span::styled("● ", Style::default().fg(ACCENT)),
-        Span::styled("Actor   ", Style::default().fg(TEXT)),
-        Span::styled("■ ", Style::default().fg(GREEN)),
-        Span::styled("Claim   ", Style::default().fg(TEXT)),
-        Span::styled("◆ ", Style::default().fg(SERIES[6])),
-        Span::styled("Inference   ", Style::default().fg(TEXT)),
-        Span::styled("➔ ", Style::default().fg(ACCENT)),
-        Span::styled("Link (recorded)   ", Style::default().fg(TEXT)),
-        Span::styled("┄┄➔ ", Style::default().fg(WARN)),
-        Span::styled("Related (tentative)", Style::default().fg(TEXT)),
-    ]);
-
-    let line2 = Line::from(vec![
-        Span::styled("□ ", Style::default().fg(DIM)),
-        Span::styled(
-            "Article / Report = source reference",
-            Style::default().fg(MUTED),
-        ),
-    ]);
-
-    let p = Paragraph::new(vec![line1, line2]).block(
-        Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(BORDER)),
-    );
-    frame.render_widget(p, area);
-}
-
-fn draw_scope_findings(frame: &mut Frame, app: &App, area: Rect) {
-    let mut lines = Vec::new();
-    if let Some(snap) = &app.topology_state.snapshot {
-        if !snap.findings.recorded.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled("Recorded:    ", Style::default().fg(MUTED)),
-                Span::styled(&snap.findings.recorded[0], Style::default().fg(TEXT)),
-            ]));
-        }
-        if !snap.findings.coverage.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled("Coverage:    ", Style::default().fg(MUTED)),
-                Span::styled(&snap.findings.coverage[0], Style::default().fg(TEXT)),
-            ]));
-        }
-        if !snap.findings.gaps.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled("Gap:         ", Style::default().fg(MUTED)),
-                Span::styled(&snap.findings.gaps[0], Style::default().fg(WARN)),
-            ]));
-        }
-    }
-    if lines.is_empty() {
-        lines = vec![
-            Line::from(vec![
-                Span::styled("Recorded:    ", Style::default().fg(MUTED)),
-                Span::styled("L-014 supports C-104", Style::default().fg(TEXT)),
-            ]),
-            Line::from(vec![
-                Span::styled("Coverage:    ", Style::default().fg(MUTED)),
-                Span::styled("original sources across cycles", Style::default().fg(TEXT)),
-            ]),
-            Line::from(vec![
-                Span::styled("Gap:         ", Style::default().fg(MUTED)),
-                Span::styled(
-                    "RL-008 still needs evidence review",
-                    Style::default().fg(WARN),
-                ),
-            ]),
-        ];
-    }
-    let p = Paragraph::new(lines).block(panel("Scope findings"));
-    frame.render_widget(p, area);
-}
-
-fn draw_navigation(frame: &mut Frame, app: &App, layout: &TopologyLayoutResult) {
-    if layout.right_panel.width == 0 {
-        return;
-    }
-
-    let p_block = panel("Graph navigation");
-    frame.render_widget(p_block, layout.right_panel);
-
-    let inner = Rect::new(
-        layout.right_panel.x + 1,
-        layout.right_panel.y + 1,
-        layout.right_panel.width.saturating_sub(2),
-        layout.right_panel.height.saturating_sub(2),
-    );
-
-    let mut curr_y = inner.y;
-
-    // Scope
-    let scope_label = Line::styled("Scope", Style::default().fg(MUTED));
-    frame.render_widget(
-        Paragraph::new(scope_label),
-        Rect::new(inner.x, curr_y, inner.width, 1),
-    );
-    curr_y += 1;
-    let b_scope_all = Rect::new(inner.x, curr_y, 16, 1);
-    let b_scope_cycle = Rect::new(inner.x + 17, curr_y, 14, 1);
-    draw_button(
-        frame,
-        app,
-        ButtonId::TopologyScopeAll,
-        "[All retained ●]",
-        b_scope_all,
-    );
-    draw_button(
-        frame,
-        app,
-        ButtonId::TopologyScopeThis,
-        "[This cycle]",
-        b_scope_cycle,
-    );
-    curr_y += 2;
-
-    // Depth
-    let depth_label = Line::styled("Depth", Style::default().fg(MUTED));
-    frame.render_widget(
-        Paragraph::new(depth_label),
-        Rect::new(inner.x, curr_y, inner.width, 1),
-    );
-    curr_y += 1;
-    let b_d1 = Rect::new(inner.x, curr_y, 5, 1);
-    let b_d2 = Rect::new(inner.x + 7, curr_y, 7, 1);
-    let b_d3 = Rect::new(inner.x + 16, curr_y, 5, 1);
-    draw_button(frame, app, ButtonId::TopologyDepth1, "[1]", b_d1);
-    draw_button(frame, app, ButtonId::TopologyDepth2, "[2 ●]", b_d2);
-    draw_button(frame, app, ButtonId::TopologyDepth3, "[3]", b_d3);
-    curr_y += 2;
-
-    // Action buttons
-    let b_center = Rect::new(inner.x, curr_y, inner.width, 1);
-    draw_button(
-        frame,
-        app,
-        ButtonId::TopologyCenterSelected,
-        "[Center selected]",
-        b_center,
-    );
-    curr_y += 1;
-    let b_expand = Rect::new(inner.x, curr_y, inner.width, 1);
-    draw_button(
-        frame,
-        app,
-        ButtonId::TopologyExpandNeighbors,
-        "[Expand neighbors]",
-        b_expand,
-    );
-    curr_y += 1;
-    let b_fit = Rect::new(inner.x, curr_y, inner.width, 1);
-    draw_button(frame, app, ButtonId::TopologyFitGraph, "[Fit graph]", b_fit);
-    curr_y += 2;
-
-    // Zoom
-    let zoom_line = Line::from(vec![
-        Span::styled("Zoom   ", Style::default().fg(MUTED)),
-        Span::styled("[-]   ", Style::default().fg(ACCENT)),
-        Span::styled(
-            format!("{}%   ", app.topology_state.zoom_percent),
-            Style::default().fg(TEXT),
-        ),
-        Span::styled("[+]", Style::default().fg(ACCENT)),
-    ]);
-    frame.render_widget(
-        Paragraph::new(zoom_line),
-        Rect::new(inner.x, curr_y, inner.width, 1),
-    );
-    curr_y += 2;
-
-    // Filter checkboxes
-    let filters_title = Line::styled("Memory Kinds", Style::default().fg(MUTED));
-    frame.render_widget(
-        Paragraph::new(filters_title),
-        Rect::new(inner.x, curr_y, inner.width, 1),
-    );
-    curr_y += 1;
-
-    let kinds = [
-        ("Actor", app.topology_state.filter_actor),
-        ("Claim", app.topology_state.filter_claim),
-        ("Inference", app.topology_state.filter_inference),
-        ("Link", app.topology_state.filter_link),
-        ("Related", app.topology_state.filter_related),
-    ];
-    for (k, active) in kinds {
-        let chk = if active { "[x]" } else { "[ ]" };
-        let line = Line::from(vec![
-            Span::styled(chk, Style::default().fg(ACCENT)),
-            Span::raw(" "),
-            Span::styled(k, Style::default().fg(TEXT)),
-        ]);
+        .register(Target::TopologyGraph, inner);
+    let Some(snapshot) = &state.snapshot else {
+        let status = app
+            .topology_error
+            .as_deref()
+            .unwrap_or(if app.topology_loading {
+                "Loading seeded neighborhood…"
+            } else {
+                "No topology snapshot. Refresh to retry."
+            });
         frame.render_widget(
-            Paragraph::new(line),
-            Rect::new(inner.x, curr_y, inner.width, 1),
+            Paragraph::new(components::measured_lines(
+                vec![Line::styled(status.to_owned(), theme::muted())],
+                inner.width,
+            )),
+            inner,
         );
-        curr_y += 1;
-    }
-
-    curr_y += 1;
-    let src_title = Line::styled("Sources", Style::default().fg(MUTED));
-    frame.render_widget(
-        Paragraph::new(src_title),
-        Rect::new(inner.x, curr_y, inner.width, 1),
-    );
-    curr_y += 1;
-    let chk = if app.topology_state.filter_sources {
-        "[x]"
-    } else {
-        "[ ]"
+        draw_graph_annotations(frame, app, layout, 0, 0);
+        return;
     };
-    let src_line = Line::from(vec![
-        Span::styled(chk, Style::default().fg(ACCENT)),
-        Span::raw(" "),
-        Span::styled("Articles / reports", Style::default().fg(TEXT)),
-    ]);
-    frame.render_widget(
-        Paragraph::new(src_line),
-        Rect::new(inner.x, curr_y, inner.width, 1),
+    let indices: Vec<_> = snapshot
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node_visible(state, node))
+        .map(|(index, _)| index)
+        .collect();
+    let geometry = graph_geometry(
+        inner,
+        snapshot,
+        &indices,
+        state.zoom_percent,
+        state.pan,
+        state.viewport_center_id.as_deref(),
     );
-    curr_y += 2;
-
-    // Analysis
-    let analysis_title = Line::styled("Analysis", Style::default().fg(MUTED));
-    frame.render_widget(
-        Paragraph::new(analysis_title),
-        Rect::new(inner.x, curr_y, inner.width, 1),
-    );
-    curr_y += 1;
-
-    let b_analyze = Rect::new(inner.x, curr_y, 16, 1);
-    draw_button(
+    for placement in &geometry.edges {
+        let edge = &snapshot.edges[placement.index];
+        if !edge_visible(state, edge.kind) {
+            continue;
+        }
+        let selected = state.selected_edge_id.as_deref() == Some(&edge.id);
+        let adjacent = state.selected_edge_id.is_none()
+            && state
+                .selected_node_id
+                .as_ref()
+                .is_some_and(|id| edge.from == *id || edge.to == *id);
+        let tentative = edge.kind == TopologyEdgeKind::Related;
+        let color = if selected || adjacent {
+            if tentative {
+                WARN
+            } else {
+                ACCENT
+            }
+        } else {
+            BORDER
+        };
+        for &(x, y, glyph) in &placement.cells {
+            let glyph = if tentative && glyph == "─" {
+                "┄"
+            } else if tentative && glyph == "│" {
+                "┊"
+            } else {
+                glyph
+            };
+            if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                cell.set_symbol(glyph).set_fg(color);
+            }
+        }
+        if placement.target.width > 0 {
+            app.layout
+                .borrow_mut()
+                .register(Target::TopologyEdge(placement.index), placement.target);
+        }
+    }
+    for placement in &geometry.nodes {
+        let node = &snapshot.nodes[placement.index];
+        let selected =
+            state.selected_node_id.as_deref() == Some(&node.id) && state.selected_edge_id.is_none();
+        let target = Target::TopologyNode(placement.index);
+        let focused = app.focus == target;
+        let (color, glyph) = node_style(node.kind);
+        let style = if focused {
+            theme::selected()
+        } else {
+            theme::text()
+        };
+        let block = Block::default()
+            .borders(if placement.rect.height >= 4 {
+                Borders::ALL
+            } else {
+                Borders::LEFT | Borders::RIGHT
+            })
+            .style(Style::default().bg(BG))
+            .border_style(Style::default().fg(if selected || focused { ACCENT } else { BORDER }));
+        let content = if placement.rect.height >= 2 {
+            let content = block.inner(placement.rect);
+            frame.render_widget(block, placement.rect);
+            content
+        } else {
+            frame.render_widget(
+                Paragraph::new("").style(Style::default().bg(BG)),
+                placement.rect,
+            );
+            placement.rect
+        };
+        let title = format!(
+            "{glyph} {}{}",
+            if node.is_root && placement.rect.height == 1 {
+                "SEED "
+            } else if node.is_root {
+                "• "
+            } else {
+                ""
+            },
+            node.label
+        );
+        let kind = format!(
+            "{}{} · {}h",
+            if node.is_root { "SEED · " } else { "" },
+            node.kind.label(),
+            node.min_hops
+        );
+        let lines = vec![
+            Line::styled(
+                components::clip_text(&title, content.width as usize),
+                if selected && !focused {
+                    style.fg(ACCENT).add_modifier(Modifier::BOLD)
+                } else {
+                    style.add_modifier(Modifier::BOLD)
+                },
+            ),
+            Line::styled(
+                components::clip_text(&kind, content.width as usize),
+                Style::default().fg(color),
+            ),
+        ];
+        frame.render_widget(Paragraph::new(lines), content);
+        app.layout.borrow_mut().register(target, placement.visible);
+    }
+    if snapshot.nodes.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Seed record is unavailable. Return to the source or refresh.")
+                .style(theme::muted()),
+            inner,
+        );
+    }
+    draw_graph_annotations(
         frame,
         app,
-        ButtonId::TopologyAnalyzeScope,
-        "[Analyze scope]",
-        b_analyze,
+        layout,
+        geometry.outside_viewport,
+        snapshot.nodes.len().saturating_sub(indices.len()),
     );
-    let status_span = Span::styled(
-        format!(" {}", app.topology_state.scope_status),
-        Style::default().fg(MUTED),
-    );
-    frame.render_widget(
-        Paragraph::new(status_span),
-        Rect::new(inner.x + 16, curr_y, inner.width.saturating_sub(16), 1),
-    );
-    curr_y += 2;
+}
 
-    // Minimap / Overview
-    if inner.height.saturating_sub(curr_y - inner.y) >= 6 {
-        draw_minimap(
-            frame,
-            Rect::new(
-                inner.x,
-                curr_y,
-                inner.width,
-                inner.height.saturating_sub(curr_y - inner.y),
+fn draw_graph_annotations(
+    frame: &mut Frame,
+    app: &App,
+    layout: &TopologyLayoutResult,
+    outside: usize,
+    filtered: usize,
+) {
+    let legend = vec![
+        Line::from(vec![
+            Span::styled("● Actor  ", Style::default().fg(ACCENT)),
+            Span::styled("■ Claim  ", Style::default().fg(GREEN)),
+            Span::styled("◆ Topic  ◇ Inference", Style::default().fg(SERIES[6])),
+        ]),
+        Line::from(vec![
+            Span::styled("□ Article  ○ Source  ", theme::muted()),
+            Span::styled(
+                "→ recorded  ┄→ potential context",
+                Style::default().fg(WARN),
             ),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(legend), layout.graph_legend);
+    let state = &app.topology_state;
+    let scope = match &state.cycle_scope {
+        CycleScope::AllRetained => "all retained".to_owned(),
+        CycleScope::ThisCycle(id) => format!("cycle {id}"),
+    };
+    let mut lines = vec![Line::styled(
+        format!(
+            "Within {} hops · {scope} · {}%",
+            state.depth, state.zoom_percent
+        ),
+        theme::muted(),
+    )];
+    if let Some(error) = &app.topology_error {
+        lines.push(Line::styled(
+            format!(
+                "{} · {error}",
+                if state.snapshot.is_some() {
+                    "Retained snapshot"
+                } else {
+                    "Snapshot unavailable"
+                }
+            ),
+            Style::default().fg(WARN),
+        ));
+    } else if app.topology_loading {
+        lines.push(Line::styled(
+            if state.snapshot.is_some() {
+                "Refreshing retained snapshot…"
+            } else {
+                "Loading seeded neighborhood…"
+            },
+            theme::muted(),
+        ));
+    } else if let Some(snapshot) = &state.snapshot {
+        let message = if outside > 0 || filtered > 0 {
+            format!("{outside} outside viewport · {filtered} filtered · Shift+arrows to pan")
+        } else if snapshot.omitted_nodes > 0
+            || snapshot.omitted_edges > 0
+            || !snapshot.exploration_exhausted
+        {
+            format!(
+                "Bounded projection · {} nodes / {} relationships omitted",
+                snapshot.omitted_nodes, snapshot.omitted_edges
+            )
+        } else if snapshot.nodes.len() == 1 {
+            "No recorded neighbors. The seed remains visible.".into()
+        } else {
+            "● Seed remains fixed · selection inspects · Recenter changes scope".into()
+        };
+        lines.push(Line::styled(message, theme::muted()));
+    }
+    frame.render_widget(Paragraph::new(lines), layout.scope_findings);
+}
+
+fn detail_lines(state: &TopologyState, snapshot: &TopologySnapshot) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(edge) = state
+        .selected_edge_id
+        .as_ref()
+        .and_then(|id| snapshot.edges.iter().find(|edge| &edge.id == id))
+    {
+        let label = |id: &str| {
+            snapshot
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .map(|node| node.label.as_str())
+                .unwrap_or(id)
+                .to_owned()
+        };
+        lines.push(Line::styled(
+            format!(
+                "{} → {} → {}",
+                label(&edge.from),
+                edge.label,
+                label(&edge.to)
+            ),
+            theme::text().add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::styled(
+            format!("{} · {}", edge.kind.label(), edge.status),
+            if edge.kind == TopologyEdgeKind::Related {
+                Style::default().fg(WARN)
+            } else {
+                theme::muted()
+            },
+        ));
+        lines.push(Line::raw(format!("Record: {}", edge.id)));
+        if edge.kind == TopologyEdgeKind::Related {
+            lines.push(Line::styled(
+                "Potential context · not verified corroboration",
+                Style::default().fg(WARN),
+            ));
+        }
+        if !edge.rationale.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(edge.rationale.clone()));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("Recorded basis / receipts", theme::muted()));
+        if edge.receipts.is_empty() {
+            lines.push(Line::raw("No retained receipt available."));
+        } else {
+            lines.extend(edge.receipts.iter().cloned().map(Line::raw));
+        }
+        if !edge.member_ids.is_empty() {
+            lines.push(Line::raw(format!(
+                "Members: {}",
+                edge.member_ids.join(", ")
+            )));
+        }
+    } else if let Some(node) = selected_node(state, snapshot) {
+        let (color, glyph) = node_style(node.kind);
+        lines.push(Line::styled(
+            format!("{glyph} {}", node.label),
+            theme::text().add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::styled(
+            format!(
+                "{} · {} · {}",
+                node.kind.label(),
+                if node.is_root {
+                    "seed".to_owned()
+                } else {
+                    format!("{} hops from seed", node.min_hops)
+                },
+                node.status
+            ),
+            Style::default().fg(color),
+        ));
+        if !node.detail.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(node.detail.clone()));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("Record / projection", theme::muted()));
+        lines.push(Line::raw(node.id.clone()));
+        if !node.revision.is_empty() {
+            lines.push(Line::raw(format!("Revision: {}", node.revision)));
+        }
+        if !node.article_id.is_empty() {
+            lines.push(Line::raw(format!(
+                "Article: {} / {}",
+                node.run_id, node.article_id
+            )));
+        }
+        if !node.subtype.is_empty() {
+            lines.push(Line::raw(format!("Type: {}", node.subtype)));
+        }
+        if !node.member_ids.is_empty() {
+            lines.push(Line::raw(format!(
+                "Retained members: {}",
+                node.member_ids.join(", ")
+            )));
+        }
+        if !node.published_at.is_empty() {
+            lines.push(Line::raw(format!("Published: {}", node.published_at)));
+        }
+        if let Some(predecessor) = &node.predecessor {
+            lines.push(Line::raw(format!("Path via: {predecessor}")));
+        }
+        for passage in &node.passages {
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(passage.clone()));
+        }
+    } else {
+        lines.push(Line::styled(
+            "Selection unavailable in this snapshot.",
+            theme::muted(),
+        ));
+    }
+    lines
+}
+
+fn draw_inspector(frame: &mut Frame, app: &App, layout: &TopologyLayoutResult) {
+    let state = &app.topology_state;
+    let title = if state.snapshot.is_none() {
+        " Inspector "
+    } else if state.selected_edge_id.is_some() {
+        " Relationship · selected "
+    } else {
+        " Inspector · selected "
+    };
+    let block = panel(title).border_style(if app.focus == Target::TopologyInspector {
+        theme::accent()
+    } else {
+        Style::default().fg(BORDER)
+    });
+    let inner = block.inner(layout.inspector_details);
+    frame.render_widget(block, layout.inspector_details);
+    if let Some(snapshot) = &state.snapshot {
+        let action_labels = if state.selected_edge_id.is_some() {
+            vec!["Recenter source", "Recenter target"]
+        } else {
+            vec!["Open record", "Recenter", "Articles"]
+        };
+        let action_width = inner.width.saturating_sub(2);
+        let action_height =
+            components::wrapped_action_rects(Rect::new(0, 0, action_width, 3), &action_labels, 1)
+                .iter()
+                .map(|rect| rect.bottom())
+                .max()
+                .unwrap_or(1)
+                .min(inner.height);
+        let actions = Rect::new(
+            inner.x + 1,
+            inner.bottom().saturating_sub(action_height),
+            inner.width.saturating_sub(2),
+            action_height,
+        );
+        let content = Rect::new(
+            inner.x + 1,
+            inner.y,
+            inner.width.saturating_sub(2),
+            inner.height.saturating_sub(action_height + 1),
+        );
+        let lines = components::measured_lines(detail_lines(state, snapshot), content.width);
+        app.layout
+            .borrow_mut()
+            .register(Target::TopologyInspector, content);
+        let pane = ScrollPane {
+            offset: state
+                .inspector_scroll
+                .min(lines.len().saturating_sub(content.height as usize)),
+        };
+        frame.render_widget(
+            Paragraph::new(pane.visible(&lines, content.height as usize).to_vec()),
+            content,
+        );
+        for (index, rect) in components::wrapped_action_rects(actions, &action_labels, 1)
+            .into_iter()
+            .enumerate()
+        {
+            if rect.height == 0 || rect.width == 0 {
+                continue;
+            }
+            if state.selected_edge_id.is_some() {
+                let target = Target::TopologyEndpoint(index);
+                frame.render_widget(
+                    Paragraph::new(format!("[{}]", action_labels[index])).style(
+                        if app.focus == target {
+                            theme::selected()
+                        } else {
+                            theme::accent()
+                        },
+                    ),
+                    rect,
+                );
+                app.layout.borrow_mut().register(target, rect);
+            } else {
+                let button = [
+                    ButtonId::TopologyOpenMemory,
+                    ButtonId::TopologyRecenter,
+                    ButtonId::TopologyViewEvidence,
+                ][index];
+                draw_button(frame, app, button, action_labels[index], rect);
+            }
+        }
+    } else {
+        frame.render_widget(
+            Paragraph::new(components::measured_lines(
+                vec![Line::styled(
+                    if app.topology_error.is_some() {
+                        "Snapshot unavailable. Press r to retry."
+                    } else {
+                        "Waiting for the seeded snapshot…"
+                    },
+                    theme::muted(),
+                )],
+                inner.width,
+            )),
+            inner,
         );
     }
+    draw_relationships(frame, app, layout.inspector_related);
 }
 
-fn draw_minimap(frame: &mut Frame, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(BORDER))
-        .title("Graph overview")
-        .title_style(Style::default().fg(MUTED));
-    frame.render_widget(block, area);
-
-    let inner = Rect::new(
-        area.x + 1,
-        area.y + 1,
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
+fn draw_relationships(frame: &mut Frame, app: &App, area: Rect) {
+    let block = panel(" Relationships ").border_style(
+        if matches!(
+            app.focus,
+            Target::TopologyRelationships | Target::TopologyRelated(_)
+        ) {
+            theme::accent()
+        } else {
+            Style::default().fg(BORDER)
+        },
     );
-    if inner.width < 10 || inner.height < 4 {
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let tabs = ["All", "Articles"];
+    for (index, rect) in components::tab_rects(
+        Rect::new(inner.x, inner.y, inner.width, 1),
+        &tabs,
+        app.topology_state.inspector_tab,
+    )
+    .into_iter()
+    .enumerate()
+    {
+        if rect.width == 0 {
+            continue;
+        }
+        let target = Target::TopologyInspectorTab(index);
+        components::tab_button(
+            frame,
+            rect,
+            tabs[index],
+            app.topology_state.inspector_tab == index,
+            app.focus == target,
+        );
+        app.layout.borrow_mut().register(target, rect);
+    }
+    let content = Rect::new(
+        inner.x + 1,
+        inner.y + 2,
+        inner.width.saturating_sub(2),
+        inner.height.saturating_sub(2),
+    );
+    app.layout
+        .borrow_mut()
+        .register(Target::TopologyRelationships, content);
+    let Some(snapshot) = &app.topology_state.snapshot else {
+        frame.render_widget(
+            Paragraph::new("Snapshot unavailable.").style(theme::muted()),
+            content,
+        );
+        return;
+    };
+    let indices = related_edge_indices(&app.topology_state);
+    if indices.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No recorded relationships.").style(theme::muted()),
+            content,
+        );
         return;
     }
-
-    // Draw miniature nodes and dashed viewport rectangle
-    let mut mini_lines = Vec::new();
-    let pad = inner.width.saturating_sub(18) / 2;
-    let pad_str = " ".repeat(pad as usize);
-
-    mini_lines.push(Line::raw(""));
-    mini_lines.push(Line::from(vec![
-        Span::raw(&pad_str),
-        Span::styled("┌───", Style::default().fg(ACCENT)),
-        Span::styled("●", Style::default().fg(ACCENT)),
-        Span::styled("─────", Style::default().fg(ACCENT)),
-        Span::styled("●", Style::default().fg(ACCENT)),
-        Span::styled("───┐", Style::default().fg(ACCENT)),
-        Span::styled("┄□", Style::default().fg(DIM)),
-    ]));
-    mini_lines.push(Line::from(vec![
-        Span::raw(&pad_str),
-        Span::styled("│   ", Style::default().fg(ACCENT)),
-        Span::styled("■", Style::default().fg(GREEN)),
-        Span::styled("       ", Style::default().fg(ACCENT)),
-        Span::styled("│", Style::default().fg(ACCENT)),
-    ]));
-    mini_lines.push(Line::from(vec![
-        Span::raw(&pad_str),
-        Span::styled("│   ", Style::default().fg(ACCENT)),
-        Span::styled("■", Style::default().fg(GREEN)),
-        Span::styled("──▶", Style::default().fg(ACCENT)),
-        Span::styled("◆", Style::default().fg(SERIES[6])),
-        Span::styled("   │", Style::default().fg(ACCENT)),
-        Span::styled("┄□", Style::default().fg(DIM)),
-    ]));
-    mini_lines.push(Line::from(vec![
-        Span::raw(&pad_str),
-        Span::styled("└───", Style::default().fg(ACCENT)),
-        Span::styled("■", Style::default().fg(GREEN)),
-        Span::styled("───────┘", Style::default().fg(ACCENT)),
-    ]));
-    mini_lines.push(Line::raw(""));
-    mini_lines.push(Line::styled(
-        "Identity: Brain canonical IDs",
-        Style::default().fg(MUTED),
-    ));
-
-    frame.render_widget(Paragraph::new(mini_lines), inner);
+    let anchor = app
+        .topology_state
+        .selected_node_id
+        .as_deref()
+        .unwrap_or(&snapshot.root_id);
+    let records: Vec<_> = indices
+        .iter()
+        .map(|&index| {
+            let edge = &snapshot.edges[index];
+            let outgoing = edge.from == anchor;
+            let other_id = if outgoing { &edge.to } else { &edge.from };
+            let other = snapshot
+                .nodes
+                .iter()
+                .find(|node| &node.id == other_id)
+                .map(|node| node.label.as_str())
+                .unwrap_or(other_id);
+            let title = if outgoing {
+                format!("{} → {other}", edge.label)
+            } else {
+                format!("← {} · {other}", edge.label)
+            };
+            components::measured_lines(
+                vec![
+                    Line::raw(title),
+                    Line::styled(
+                        if edge.kind == TopologyEdgeKind::Related {
+                            format!("Potential context · {}", edge.status)
+                        } else {
+                            edge.status.clone()
+                        },
+                        theme::muted(),
+                    ),
+                ],
+                content.width,
+            )
+        })
+        .collect();
+    let geometry = ListGeometry::new(records.iter().map(Vec::len));
+    let logical_offset = app
+        .topology_state
+        .related_scroll
+        .min(records.len().saturating_sub(1));
+    let offset = geometry
+        .items
+        .get(logical_offset)
+        .map(|range| range.start)
+        .unwrap_or(0);
+    for (logical_index, lines) in records.iter().enumerate().skip(logical_offset) {
+        let range = &geometry.items[logical_index];
+        let y = range.start.saturating_sub(offset);
+        if y >= content.height as usize {
+            break;
+        }
+        let height = lines.len().min(content.height as usize - y);
+        let rect = Rect::new(
+            content.x,
+            content.y + y as u16,
+            content.width,
+            height as u16,
+        );
+        let selected = app.topology_state.selected_edge_id.as_deref()
+            == Some(&snapshot.edges[indices[logical_index]].id);
+        let focused = app.focus == Target::TopologyRelated(logical_index);
+        let mut visible = lines[..height].to_vec();
+        if selected || focused {
+            for line in &mut visible {
+                *line = line.clone().style(if focused {
+                    theme::selected()
+                } else {
+                    theme::accent()
+                });
+            }
+        }
+        frame.render_widget(Paragraph::new(visible), rect);
+        app.layout
+            .borrow_mut()
+            .register(Target::TopologyRelated(logical_index), rect);
+    }
 }
 
-fn draw_footer(frame: &mut Frame, layout: &TopologyLayoutResult) {
-    let help = Line::from(vec![
-        Span::styled("Tab", Style::default().fg(ACCENT)),
-        Span::styled(" panels   ", Style::default().fg(MUTED)),
-        Span::styled("↑↓", Style::default().fg(ACCENT)),
-        Span::styled(" select   ", Style::default().fg(MUTED)),
-        Span::styled("Enter", Style::default().fg(ACCENT)),
-        Span::styled(" inspect   ", Style::default().fg(MUTED)),
-        Span::styled("+/-", Style::default().fg(ACCENT)),
-        Span::styled(" zoom   ", Style::default().fg(MUTED)),
-        Span::styled("Esc", Style::default().fg(ACCENT)),
-        Span::styled(" back", Style::default().fg(MUTED)),
-    ]);
-    frame.render_widget(Paragraph::new(help), layout.footer);
+fn draw_controls_page(frame: &mut Frame, app: &App, area: Rect) {
+    let block = panel(" Topology controls ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let inner = Rect::new(
+        inner.x + 1,
+        inner.y,
+        inner.width.saturating_sub(2),
+        inner.height,
+    );
+    let mut y = inner.y;
+    frame.render_widget(
+        Paragraph::new("Viewport · pan with Shift+arrows; zoom changes actual positions")
+            .style(theme::muted()),
+        Rect::new(inner.x, y, inner.width, 1),
+    );
+    y += 1;
+    let labels = ["Center selected", "Reset view", "− Zoom", "+ Zoom"];
+    let buttons = [
+        ButtonId::TopologyCenterSelected,
+        ButtonId::TopologyFitGraph,
+        ButtonId::TopologyZoomOut,
+        ButtonId::TopologyZoomIn,
+    ];
+    let action_area = Rect::new(
+        inner.x,
+        y,
+        inner.width,
+        2.min(inner.bottom().saturating_sub(y)),
+    );
+    let rects = components::wrapped_action_rects(action_area, &labels, 1);
+    for ((button, label), rect) in buttons.into_iter().zip(labels).zip(&rects) {
+        if rect.height > 0 {
+            draw_button(frame, app, button, label, *rect);
+        }
+    }
+    y = rects.iter().map(|rect| rect.bottom()).max().unwrap_or(y) + 1;
+    if y >= inner.bottom() {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new("Visible recorded kinds · seed always retained").style(theme::muted()),
+        Rect::new(inner.x, y, inner.width, 1),
+    );
+    y += 1;
+    let filter_names = [
+        "Actors",
+        "Claims",
+        "Topics/inferences",
+        "Links",
+        "Related",
+        "Articles/sources",
+    ];
+    let filters = app.topology_state.filters();
+    let labels: Vec<_> = filter_names
+        .iter()
+        .zip(filters)
+        .map(|(name, enabled)| format!("[{}] {name}", if enabled { "x" } else { " " }))
+        .collect();
+    let refs: Vec<_> = labels.iter().map(String::as_str).collect();
+    let rects = components::wrapped_action_rects(
+        Rect::new(inner.x, y, inner.width, inner.bottom().saturating_sub(y)),
+        &refs,
+        1,
+    );
+    for (index, rect) in rects.iter().enumerate() {
+        if rect.height == 0 || rect.width == 0 {
+            continue;
+        }
+        let target = Target::TopologyFilter(index);
+        frame.render_widget(
+            Paragraph::new(labels[index].clone()).style(if app.focus == target {
+                theme::selected()
+            } else {
+                theme::accent()
+            }),
+            *rect,
+        );
+        app.layout.borrow_mut().register(target, *rect);
+    }
+    y = rects
+        .iter()
+        .filter(|rect| rect.height > 0)
+        .map(|rect| rect.bottom())
+        .max()
+        .unwrap_or(y)
+        + 1;
+    if y < inner.bottom() {
+        let rect = Rect::new(inner.x, y, inner.width.min(20), 1);
+        draw_button_state(
+            frame,
+            app,
+            ButtonId::TopologyAnalyzeScope,
+            "Analyze scope",
+            rect,
+            app.topology_state.analyzing_scope,
+        );
+        y += 1;
+    }
+    if y < inner.bottom() {
+        frame.render_widget(
+            Paragraph::new(app.topology_state.scope_status.clone()).style(theme::muted()),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        y += 2;
+    }
+    if y < inner.bottom() {
+        let mut lines = vec![Line::styled("Projection coverage", theme::accent())];
+        if let Some(snapshot) = &app.topology_state.snapshot {
+            lines.push(Line::raw(format!(
+                "{} displayed nodes · {} displayed relationships",
+                snapshot.nodes.len(),
+                snapshot.edges.len()
+            )));
+            lines.push(Line::raw(format!(
+                "{} discovered nodes · {} discovered relationships (bounded)",
+                snapshot.discovered_nodes, snapshot.discovered_edges
+            )));
+            lines.push(Line::raw(format!(
+                "{} omitted nodes · {} omitted relationships · {} unresolved endpoints",
+                snapshot.omitted_nodes,
+                snapshot.omitted_edges,
+                snapshot.unresolved_endpoints.len()
+            )));
+            lines.extend(
+                snapshot
+                    .findings
+                    .gaps
+                    .iter()
+                    .cloned()
+                    .map(|text| Line::styled(text, Style::default().fg(WARN))),
+            );
+        } else {
+            lines.push(Line::raw("Snapshot unavailable."));
+        }
+        let rows = components::measured_lines(lines, inner.width);
+        frame.render_widget(
+            Paragraph::new(rows),
+            Rect::new(inner.x, y, inner.width, inner.bottom().saturating_sub(y)),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1239,20 +1335,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn topology_state_history_push_and_pop() {
-        let mut state = TopologyState {
-            seed: Some(TopologySeed::Claim("c1".into())),
+    fn retained_origin_supplies_cycle_when_canonical_root_has_no_cycle() {
+        let state = TopologyState {
+            seed: Some(TopologySeed::RetainedActor {
+                run_id: "cycle-42".into(),
+                article_id: "article-7".into(),
+                revision: "revision-3".into(),
+                actor_ref: "local-a1".into(),
+                name: "Retained source actor".into(),
+            }),
+            snapshot: Some(TopologySnapshot::default()),
             ..Default::default()
         };
-        state.push_history();
-        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.current_cycle_id().as_deref(), Some("cycle-42"));
+    }
 
-        state.seed = Some(TopologySeed::Claim("c2".into()));
+    #[test]
+    fn topology_history_preserves_view_and_filters() {
+        let mut state = TopologyState {
+            seed: Some(TopologySeed::Claim("c1".into())),
+            active_panel_tab: 2,
+            inspector_scroll: 8,
+            related_scroll: 3,
+            filter_related: false,
+            ..Default::default()
+        };
+        state.center_selected();
         state.push_history();
-        assert_eq!(state.history.len(), 2);
-
-        let popped = state.pop_history().unwrap();
-        assert_eq!(popped.seed, TopologySeed::Claim("c2".into()));
-        assert_eq!(state.history.len(), 1);
+        let saved = state.pop_history().unwrap();
+        assert_eq!(saved.seed, TopologySeed::Claim("c1".into()));
+        assert_eq!(saved.active_panel_tab, 2);
+        assert_eq!(saved.inspector_scroll, 8);
+        assert_eq!(saved.related_scroll, 3);
+        assert!(!saved.filters[4]);
     }
 }

@@ -122,7 +122,7 @@ The low-level renderer supports existing dumps:
 .agent-scratch/tui-review-env/bin/python scripts/render_tui_cells.py <cells-dir> <screenshots-dir>
 ```
 
-JSON is `{width, height, cells}`, exactly `height` rows of `width` cells. Each cell has `s` (symbol), `fg`/`bg` (ratatui debug colors), `b` (bold), `u` (underline). Preserve modifiers in new exporters. PNGs reconstruct cell geometry/colors and selected glyphs; font rasterization is approximate. These are actual-buffer visualizations, not live terminal photographs. A geometric renderer workaround does not certify every terminal font; use a terminal smoke test when relevant.
+JSON is `{width, height, cells}`, exactly `height` rows of `width` cells. Each cell has `s` (symbol), `fg`/`bg` (ratatui debug colors), `b` (bold), `u` (underline). Preserve modifiers in new exporters. PNGs reconstruct cell geometry/colors and selected glyphs; font rasterization is approximate. Box/graph symbols have geometric fallbacks. Wide text uses an optional Noto CJK/Hiragino fallback recorded as `wide_font` in the manifest; backgrounds are painted before text so continuation cells do not erase glyphs. These are actual-buffer visualizations, not live terminal photographs. A renderer workaround does not certify every terminal font; use a terminal smoke test when relevant.
 
 ## Review, fix and recapture
 

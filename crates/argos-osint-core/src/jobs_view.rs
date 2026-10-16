@@ -250,6 +250,14 @@ pub struct TaskRow {
     pub stage_label: String,
 }
 
+/// Display label for a task's operation: brief stages use their stage name.
+pub fn task_label(operation: &str) -> String {
+    crate::intel_recon::brief_pipeline::STAGES
+        .iter()
+        .find(|(op, _)| *op == operation)
+        .map_or_else(|| operation.to_string(), |(_, label)| (*label).to_string())
+}
+
 /// One attempt (detail attempt history).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRow {
@@ -263,6 +271,9 @@ pub struct AttemptRow {
     pub outcome: String,
     pub error_category: String,
     pub error_message: String,
+    /// Human label of the owning task (a brief stage or the operation).
+    #[serde(default)]
+    pub task_label: String,
 }
 
 /// Detail panel model.
@@ -275,6 +286,10 @@ pub struct JobDetail {
     /// Total tasks (the list above may be truncated).
     pub task_total: i64,
     pub attempts: Vec<AttemptRow>,
+    /// Provider requests actually sent for this job's tasks (a task attempt
+    /// may dispatch several across retries and fallback routes).
+    #[serde(default)]
+    pub wire_requests: i64,
     /// Failed tasks a durable pool can safely rerun.
     pub retryable: i64,
     /// The job finished more than the event retention ago and no events remain.
@@ -514,7 +529,7 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
     let attempts = {
         let mut stmt = conn.prepare(
             "SELECT a.id, a.task_id, a.attempt_number, a.owner, a.started_at, a.finished_at, a.duration_ms,
-                    a.outcome, a.error_category, a.error_message
+                    a.outcome, a.error_category, a.error_message, t.operation
              FROM argos_attempts a JOIN argos_tasks t ON t.id = a.task_id
              WHERE t.job_id = ?1 ORDER BY a.started_at DESC, a.id LIMIT 20",
         )?;
@@ -531,11 +546,22 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
                     outcome: r.get(7)?,
                     error_category: r.get(8)?,
                     error_message: r.get(9)?,
+                    task_label: task_label(&r.get::<_, String>(10)?),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
+    let wire_requests: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM recon_model_attempts a
+             JOIN recon_model_operations o ON o.id = a.operation_id
+             WHERE a.dispatched = 1
+               AND o.task_id IN (SELECT id FROM argos_tasks WHERE job_id = ?1)",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     let mut retryable: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM argos_tasks WHERE job_id=?1 AND {}",
@@ -564,6 +590,7 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
         tasks,
         task_total,
         attempts,
+        wire_requests,
         retryable,
         events_expired,
         insight_progress,

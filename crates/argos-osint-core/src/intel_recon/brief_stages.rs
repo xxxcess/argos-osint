@@ -1845,7 +1845,9 @@ pub async fn run_claimed(
                 let mut once = claimed.clone();
                 once.max_attempts = 1;
                 let reason = error.to_string();
-                let category = tasks::ErrorCategory::InvalidResult;
+                // The executor's typed category wins; only local validation
+                // and parse failures (no provider category) are invalid results.
+                let category = stage_error_category(&error);
                 match tasks::fail_claimed(
                     &store.conn,
                     &once,
@@ -1887,6 +1889,7 @@ pub async fn run_claimed(
             outcome_label,
         ) {
             let _ = super::brief_timing::persist(&store.conn, &timing, &now());
+            let _ = super::brief_timing::record_retry_wait(&store.conn, &claimed, &timing, &now());
             let _ = crate::events::record_event(
                 &store.conn,
                 &crate::events::NewEvent {
@@ -2325,6 +2328,20 @@ impl StageBackend for RuntimeBackend {
             Ok(text)
         })
     }
+}
+
+/// Task category of a stage failure: the executor's typed provider category
+/// (timeout, rate limit, server, auth…) when there is one, otherwise a local
+/// validation/parse failure, which is an invalid result.
+pub fn stage_error_category(error: &anyhow::Error) -> tasks::ErrorCategory {
+    error
+        .chain()
+        .find_map(|e| e.downcast_ref::<crate::recon::model_exec::ModelOperationError>())
+        .and_then(|e| e.category)
+        .map_or(
+            tasks::ErrorCategory::InvalidResult,
+            tasks::ErrorCategory::from_provider,
+        )
 }
 
 /// Production construction from the configured settings.

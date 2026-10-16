@@ -95,6 +95,8 @@ struct Mock {
     seen: Arc<Mutex<Vec<Seen>>>,
     responses: HashMap<String, Vec<String>>,
     fail: HashSet<String>,
+    /// Fail with a typed executor timeout (what a real exhausted chain carries).
+    fail_timeout: HashSet<String>,
     hang: HashSet<String>,
     delay: Option<Duration>,
     related: Vec<AtlasArticleRow>,
@@ -331,6 +333,15 @@ impl StageBackend for Mock {
             }
             if let Some(delay) = mock.delay {
                 tokio::time::sleep(delay).await;
+            }
+            if mock.fail_timeout.contains(&request.stage) {
+                return Err(crate::recon::model_exec::ModelOperationError {
+                    category: Some(crate::provider_diag::Category::Timeout),
+                    requests: 4,
+                    history: vec![],
+                    message: "model routes exhausted: first response/timeout: no response headers within 60s".into(),
+                }
+                .into());
             }
             if mock.fail.contains(&request.stage) {
                 bail!("provider exhausted: server error");
@@ -2282,4 +2293,74 @@ async fn heldout_fast_preset_comparison() {
         std::fs::write(out, &text).unwrap();
     }
     println!("{text}");
+}
+
+// Phase A: the stage's error category is the executor's real cause, not a
+// blanket `invalid_result`; Jobs names the task of every attempt row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timeout_failure_keeps_its_category_and_attempt_rows_name_their_task() {
+    use crate::provider_diag::Category;
+    use crate::tasks::ErrorCategory as E;
+    assert_eq!(stage_error_category(&anyhow!("bad json")), E::InvalidResult);
+    for (c, want) in [
+        (Category::Timeout, E::Timeout),
+        (Category::Server, E::TemporaryNetwork),
+        (Category::RateLimited, E::RateLimit),
+        (Category::Auth, E::AuthOrQuota),
+        (Category::TokenLimit, E::ContextLimit),
+        (Category::InvalidResult, E::InvalidResult),
+    ] {
+        let err: anyhow::Error = crate::recon::model_exec::ModelOperationError {
+            category: Some(c),
+            requests: 1,
+            history: vec![],
+            message: "x".into(),
+        }
+        .into();
+        assert_eq!(stage_error_category(&err.context("stage")), want);
+    }
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.fail_timeout.insert("intel_brief_inferences".into());
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let store = Store::open(&db.path).unwrap();
+    let (cat, msg): (String, String) = store
+        .conn
+        .query_row(
+            "SELECT error_category,error_message FROM argos_tasks WHERE id=?1",
+            [brief_pipeline::task_id(&job, "intel_brief_inferences")],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(cat, "timeout", "{msg}");
+    let detail = crate::jobs_view::job_detail(&store.conn, &job, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.job.error_category, "timeout");
+    let labels: HashSet<&str> = detail
+        .attempts
+        .iter()
+        .map(|a| a.task_label.as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        HashSet::from(["Full article", "Claims", "Inferences"])
+    );
+    let failed = detail
+        .attempts
+        .iter()
+        .find(|a| a.task_label == "Inferences")
+        .unwrap();
+    assert_eq!(
+        (failed.outcome.as_str(), failed.error_category.as_str()),
+        ("failed", "timeout")
+    );
+    assert!(
+        detail.attempts.iter().all(|a| a.attempt_number == 1),
+        "same #1, now disambiguated"
+    );
 }

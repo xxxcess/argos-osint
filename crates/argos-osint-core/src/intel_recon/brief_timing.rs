@@ -235,6 +235,28 @@ pub fn collect(
     Ok(t)
 }
 
+/// Credit the chain's provider backoff to the task's `retry_wait_ms`, so the
+/// Jobs "retry wait" is the real sleep time (it is part of active time: the
+/// stage held its lease while waiting). Fenced by the lease epoch.
+pub fn record_retry_wait(
+    conn: &Connection,
+    claimed: &ClaimedTask,
+    t: &StageTiming,
+    now: &str,
+) -> Result<()> {
+    if t.backoff_ms <= 0 {
+        return Ok(());
+    }
+    let n = conn.execute(
+        "UPDATE argos_tasks SET retry_wait_ms=retry_wait_ms+?1 WHERE id=?2 AND lease_epoch=?3",
+        rusqlite::params![t.backoff_ms, claimed.id, claimed.epoch],
+    )?;
+    if n > 0 {
+        let _ = crate::tasks::refresh_job_state(conn, &claimed.job_id, now);
+    }
+    Ok(())
+}
+
 pub fn persist(conn: &Connection, t: &StageTiming, at: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO intel_brief_stage_timings

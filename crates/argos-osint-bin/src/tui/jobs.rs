@@ -553,14 +553,17 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
         format_duration(job.retry_wait_ms),
         format_duration(job.elapsed_ms(now))
     ));
+    // Task attempts (each task start) and provider requests (every dispatch,
+    // including retries and fallback routes) are different counts.
     lines.push(format!(
-        "Attempts {}{}",
+        "Task attempts {}{} · provider requests {}",
         job.attempts_used,
         if job.attempt_cap > 0 {
             format!(" of {}", job.attempt_cap)
         } else {
             String::new()
-        }
+        },
+        detail.wire_requests
     ));
     let resource = [
         ("Run", &job.run_ref),
@@ -659,7 +662,12 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
                 lines.push(String::new());
             }
             let mut line = format!(
-                "  #{} {} {} {}",
+                "  {} #{} {} {} {}",
+                if attempt.task_label.is_empty() {
+                    "Task"
+                } else {
+                    attempt.task_label.as_str()
+                },
                 attempt.attempt_number,
                 stamp(&attempt.started_at),
                 if attempt.outcome.is_empty() {
@@ -669,6 +677,9 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
                 },
                 format_duration(attempt.duration_ms)
             );
+            if !attempt.error_category.is_empty() {
+                line.push_str(&format!(" [{}]", attempt.error_category));
+            }
             if !attempt.error_message.is_empty() {
                 line.push_str(&format!(" · {}", attempt.error_message));
             }

@@ -213,6 +213,8 @@ A four-route chain therefore sends at most six requests. Other callers keep the 
 
 At stage admission, each route's capabilities are resolved once (`provider_capabilities::admit`). Admission also starts a coalesced 24-hour background catalog refresh when the cached entry is missing or stale. The snapshot's digest is stored in the attempt's `declaration_json` (`capability_digests`). A refresh that finishes mid-operation cannot change an in-flight request. Only observed rejections, which can only narrow what is sent, are merged in for a recovery recompile.
 
+**Stalls and the wall-clock cap.** A route that times out (no headers, no first output, stalled stream) moves straight to the next dispatchable route; it is not resent to the route that just stalled, and no backoff is slept before a fallback. A stall with no later route keeps the normal retry rules. Other transient failures (503, network) keep the primary's one retry. Interactive operations also carry an operation wall-clock cap, 600s (900s for thinking stages), that covers admission queue time, provider pacing, backoff and every attempt: each dispatch is bounded by the time left, a backoff longer than the time left is skipped, and when the cap ends the operation the error is `timeout` ("operation wall-clock cap of Ns reached after N request(s); last failure: ...").
+
 ## Provider-wide request pacing
 
 [![Provider request scheduling](diagrams/model-request-scheduling.svg)](diagrams/model-request-scheduling.html)

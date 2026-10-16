@@ -14,7 +14,7 @@ Standing rules: Inferences **always** uses thinking models. There is no faster n
 | 4 | `brief_stages.rs` hard-codes `ErrorCategory::InvalidResult` | **confirmed**, fixed in A |
 | 5 | The attempt history lists every task's attempt without a name; `Attempts N` is the sum of task starts, not wire requests | **confirmed**, fixed in A |
 | 6 | Retry wait is 0 because chain backoff never reaches `retry_wait_ms` | **confirmed**, fixed in A |
-| 7 | A timeout is `RetryRoute` and the interactive budget allows one identical primary resend | pending (phase C) |
+| 7 | A timeout is `RetryRoute` and the interactive budget allows one identical primary resend (`provider_chain.rs` `from_failure`, `WireBudget::INTERACTIVE`) | **confirmed**, fixed in C. The HTTP 200 on a timeout means headers arrived and the stream then stalled; Phase A relabelled it. |
 | 8 | Any failing per-claim request aborts the whole Inferences stage | pending (phase D) |
 
 ## Phases
@@ -23,7 +23,7 @@ Standing rules: Inferences **always** uses thinking models. There is no faster n
 | --- | --- | --- |
 | A | Typed error category, specific timeout text, task names in attempt history, labelled counts, real retry wait | see log |
 | B | Per-model thinking effort for Inferences (never off, no token caps); thinking-sized deadlines | see log |
-| C | Skip to the next route on a first-output or inactivity stall; operation wall-clock cap that includes pacing and queue time | pending |
+| C | Skip to the next route on a stall (no non-thinking primary); operation wall-clock cap that includes pacing and queue time | see log |
 | D | Per-claim checkpoints, re-run only failed claims, complete with warnings so Links can run | pending |
 | E | Offline reproductions for the whole path; docs, diagrams, matrix | pending |
 
@@ -47,3 +47,10 @@ Standing rules: Inferences **always** uses thinking models. There is no faster n
 - [x] Thinking-sized deadlines selected by `OperationScope::deadlines` (`provider_attempt.rs`, `recon/model_exec.rs`): stream first output 300s, inactivity 120s, total 600s; non-stream headers 540s. Other stages keep their previous deadlines.
 - [ ] Moving to the next route on a stall, and the wall-clock cap: phase C.
 - Tests: `inferences_send_a_per_model_thinking_effort_and_never_turn_thinking_off`, `automatic_stages_leave_output_and_reasoning_limits_to_the_provider` (amended), `automatic_operations_have_no_output_caps_and_only_thinking_stages_send_effort`, `thinking_stages_get_thinking_sized_deadlines_and_others_keep_theirs`, `inferences_send_their_per_model_effort_on_the_wire_and_claims_do_not` (mock server, request body inspected).
+
+### Phase C — fallback on stall and wall-clock cap
+- Verified: route 0 repeated because `Category::Timeout` is `RetryRoute` and `WireBudget::INTERACTIVE` grants route 0 one transient retry after a 10s backoff; two ~180s first-output stalls plus a third route account for the ~7m51s. Provider pacing (`provider_rate_limit::wait`, before the attempt deadline starts) and the 50ms admission poll loop were unbounded; a 429/503 cooldown could add 10-60s per send. Claim 4 (`invalid_result`) was already fixed and re-confirmed in A.
+- [x] `WireBudget.skip_stalled_route`: a timed-out route falls through to the next dispatchable route with no backoff (`provider_chain.rs`). Inferences keeps thinking models; there is no faster primary.
+- [x] `WireBudget.wall_clock` (600s; 900s for thinking stages via `INTERACTIVE_THINKING`) bounds queue, pacing, backoff and dispatch; `DispatchContext.remaining` bounds each attempt (`model_exec::bounded_by_cap`), a long backoff is skipped, expiry reports `timeout`.
+- [x] `ChainReport.wall_clock_exceeded` and the "operation wall-clock cap reached" termination text.
+- Tests: `a_stalled_route_falls_through_instead_of_repeating`, `transient_failures_keep_their_retry_and_the_last_route_retries_a_stall`, `the_wall_clock_cap_ends_the_operation_with_a_timeout`, `a_backoff_longer_than_the_remaining_cap_moves_on`, `interactive_operations_have_a_wall_clock_cap_sized_for_thinking`, `an_attempt_that_outlives_the_cap_becomes_a_typed_timeout`.

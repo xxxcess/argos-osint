@@ -172,7 +172,11 @@ impl<'a> OperationScope<'a> {
     /// budget; everyone else keeps the ordinary policy.
     pub fn wire_budget(&self) -> Option<provider_chain::WireBudget> {
         self.interactive
-            .then_some(provider_chain::WireBudget::INTERACTIVE)
+            .then_some(if self.budget.is_some_and(|b| b.thinks()) {
+                provider_chain::WireBudget::INTERACTIVE_THINKING
+            } else {
+                provider_chain::WireBudget::INTERACTIVE
+            })
     }
 
     pub fn with_interactive(mut self) -> Self {
@@ -296,9 +300,45 @@ impl ModelOperationError {
     }
 }
 
+/// Bound one attempt by the operation's remaining wall-clock cap, covering
+/// provider pacing and every per-attempt wait. Expiry is a typed timeout the
+/// caller records like any other attempt failure.
+async fn bounded_by_cap(
+    remaining: Option<std::time::Duration>,
+    secret: &crate::secrets::ProviderSecret,
+    transport: Transport,
+    attempt: impl std::future::Future<Output = provider_attempt::AttemptReport>,
+) -> provider_attempt::AttemptReport {
+    let Some(left) = remaining else {
+        return attempt.await;
+    };
+    let started = Instant::now();
+    match tokio::time::timeout(left, attempt).await {
+        Ok(report) => report,
+        Err(_) => provider_attempt::AttemptReport {
+            transport,
+            endpoint: provider::normalize_base(&secret.base_url),
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            outcome: Err(ProviderFailure::new(
+                Stage::Admission,
+                Category::Timeout,
+                format!(
+                    "operation wall-clock cap reached while waiting on this route ({}s left of the operation budget)",
+                    left.as_secs()
+                ),
+            )),
+            policy_diagnostics: Vec::new(),
+            effective: None,
+            recovery: None,
+        },
+    }
+}
+
 fn chain_error<T>(report: &ChainReport<T>) -> anyhow::Error {
     let termination = if report.cancelled {
         "operation cancelled"
+    } else if report.wall_clock_exceeded {
+        "operation wall-clock cap reached"
     } else if report.blocked {
         "all routes blocked"
     } else if report.stopped {
@@ -1356,6 +1396,7 @@ where
             .checked_sub(std::time::Duration::from_millis(ctx.queue_ms))
             .unwrap_or_else(Instant::now);
         let backoff_ms = ctx.backoff_ms;
+        let remaining = ctx.remaining;
         let admitted = admitted.clone();
         let contract = contract.clone();
         let secret = secrets[route_idx].clone();
@@ -1507,7 +1548,7 @@ where
             };
             let rep = if insight_contract {
                 let deadlines = scope.deadlines(transport == Transport::Stream);
-                provider_attempt::attempt_spec(
+                let attempt = provider_attempt::attempt_spec(
                     &secret,
                     &messages_vec,
                     transport,
@@ -1519,8 +1560,8 @@ where
                         contract: contract.as_ref(),
                         caps: admitted.get(route_idx),
                     },
-                )
-                .await
+                );
+                bounded_by_cap(remaining, &secret, transport, attempt).await
             } else {
                 provider_attempt::attempt_full(
                     &secret,
@@ -2372,6 +2413,55 @@ mod tests {
                 assert!(policy.json_object);
             }
         }
+    }
+
+    #[test]
+    fn interactive_operations_have_a_wall_clock_cap_sized_for_thinking() {
+        use crate::request_policy::{CLAIMS_BUDGET, INFERENCES_BUDGET};
+        let cap = |scope: OperationScope| scope.wire_budget().unwrap().wall_clock.unwrap();
+        let think = cap(OperationScope::new("op", "synthesis")
+            .with_budget(INFERENCES_BUDGET)
+            .with_interactive());
+        let plain = cap(OperationScope::new("op", "claims")
+            .with_budget(CLAIMS_BUDGET)
+            .with_interactive());
+        assert_eq!(think.as_secs(), 900);
+        assert_eq!(plain.as_secs(), 600);
+        assert!(OperationScope::new("op", "claims").wire_budget().is_none());
+        // Room for a fallback after one thinking-sized stall.
+        assert!(think > Deadlines::insight_stream_thinking().first_output.unwrap() * 2);
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_outlives_the_cap_becomes_a_typed_timeout() {
+        let secret = crate::provider_attempt::mock::secret("http://127.0.0.1:9");
+        let report = bounded_by_cap(
+            Some(std::time::Duration::from_millis(50)),
+            &secret,
+            Transport::Stream,
+            std::future::pending(),
+        )
+        .await;
+        let failure = report.outcome.unwrap_err();
+        assert_eq!(failure.category, Category::Timeout);
+        assert!(
+            failure.message.contains("wall-clock cap"),
+            "{}",
+            failure.message
+        );
+        let uncapped = bounded_by_cap(None, &secret, Transport::Stream, async {
+            provider_attempt::AttemptReport {
+                transport: Transport::Stream,
+                endpoint: String::new(),
+                elapsed_ms: 0,
+                outcome: Err(ProviderFailure::new(Stage::Stream, Category::Empty, "x")),
+                policy_diagnostics: vec![],
+                effective: None,
+                recovery: None,
+            }
+        })
+        .await;
+        assert_eq!(uncapped.outcome.unwrap_err().category, Category::Empty);
     }
 
     #[test]

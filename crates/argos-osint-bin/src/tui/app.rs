@@ -14853,6 +14853,36 @@ mod tests {
         dump_cells(&mut app, &dir, "brain-claim-detail-narrow", 64, 32);
     }
 
+    /// `ARGOS_SCREEN_DIR=… cargo test -p argos-osint-bin dump_defaults_popup_screens -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_defaults_popup_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for role in [
+            DefaultsRole::ClaimAssessor,
+            DefaultsRole::InvestigationController,
+        ] {
+            let mut app = app();
+            app.screen = Rect::new(0, 0, 140, 40);
+            app.google_key = "google-key".into();
+            click(&mut app, Target::App(ModuleId::Providers.index()));
+            click(&mut app, Target::ProviderTab(ProviderPage::Defaults));
+
+            click(&mut app, Target::Button(ButtonId::DefaultRole(role)));
+            click(&mut app, Target::Field(role.provider_field()));
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("defaults-{}-provider-popup", role.role_key()),
+                140,
+                40,
+            );
+        }
+    }
+
     #[test]
     fn recon_tips_cover_every_catalog_target_type_once() {
         use argos_osint_core::osint::contracts::IntelligenceCategory as C;

@@ -487,7 +487,11 @@ async fn run(
     )
     .await;
     if let Err(f) = &result {
-        if matches!(f.http_status, Some(400 | 422)) {
+        // 404 counts when a gateway says no endpoint supports a requested
+        // capability (not when a deployment is missing: that is the model).
+        if matches!(f.http_status, Some(400 | 422))
+            || (f.http_status == Some(404) && f.category == Category::Unsupported)
+        {
             let message = format!(
                 "{} {} {}",
                 f.message,

@@ -575,7 +575,7 @@ pub fn classify_status(status: u16, code: Option<&str>, message: Option<&str>) -
     match status {
         401 => Category::Auth,
         402 | 403 => Category::Permission,
-        404 if mentions_model => Category::InvalidModel,
+        404 if mentions_model || is_deployment_missing(&text) => Category::InvalidModel,
         404 => Category::Unsupported,
         400 | 422 if mentions_stream => Category::Unsupported,
         400 | 422
@@ -615,14 +615,78 @@ pub fn provider_error(body: &str) -> (Option<String>, Option<String>) {
     let code = text("code")
         .or_else(|| text("type"))
         .or_else(|| text("status"));
-    let message = text("message").or_else(|| match err {
-        Value::String(s) => Some(s.clone()),
-        _ => None,
-    });
+    let message = text("message")
+        .or_else(|| text("detail"))
+        .or_else(|| match err {
+            Value::String(s) => Some(s.clone()),
+            _ => None,
+        });
+    // Gateways (OpenRouter) wrap the upstream's own error as
+    // `metadata.raw`; the top-level message is only "Provider returned error".
+    let message = match (message, upstream_detail(err)) {
+        (Some(m), Some(detail)) if !m.contains(&detail) => Some(format!("{m}: {detail}")),
+        (None, Some(detail)) => Some(detail),
+        (m, _) => m,
+    };
     (
         code.map(|c| sanitize(&c)),
-        message.map(|m| sanitize(&bounded(&m, 300))),
+        message.map(|m| sanitize(&bounded(&strip_account_ids(&m), 300))),
     )
+}
+
+/// The upstream provider's own error text carried inside a gateway error,
+/// with internal account identifiers removed.
+fn upstream_detail(err: &Value) -> Option<String> {
+    let raw = err.pointer("/metadata/raw")?;
+    let text = match raw {
+        Value::String(s) => match serde_json::from_str::<Value>(s) {
+            Ok(inner) => ["detail", "message", "error", "title"]
+                .iter()
+                .find_map(|k| inner.get(*k).and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_else(|| s.clone()),
+            Err(_) => s.clone(),
+        },
+        other => ["detail", "message"]
+            .iter()
+            .find_map(|k| other.get(*k).and_then(Value::as_str).map(str::to_string))?,
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(strip_account_ids(text))
+}
+
+/// `account 'abc…'` is a tenant identifier, not a diagnostic.
+fn strip_account_ids(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("account '") {
+        let start = at + "account '".len();
+        out.push_str(&rest[..start]);
+        match rest[start..].find('\'') {
+            Some(end) => {
+                out.push('…');
+                rest = &rest[start + end..];
+            }
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A 404 that says the model's deployment is missing for this account (NVIDIA
+/// NIM "Function id … is not found"), as opposed to an unsupported request mode.
+pub fn is_deployment_missing(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("function id")
+        || t.contains("specified function")
+        || t.contains("not found for account")
+        || t.contains("no endpoints found for")
 }
 
 /// Typed failure for a non-success HTTP response (status, provider code and

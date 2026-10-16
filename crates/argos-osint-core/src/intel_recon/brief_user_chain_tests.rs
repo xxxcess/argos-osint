@@ -335,3 +335,146 @@ async fn dead_first_routes_do_not_multiply_across_operations() {
     assert!(down.by_route["openrouter typesafe/jev-1.13"] <= 8);
     assert!(down.by_route["google models/gemini-3.8-flash"] <= 3);
 }
+
+/// LIVE verification (opt-in). Imports the user's portable profile offline,
+/// runs Atlas once in a scratch `ARGOS_HOME` against the real news providers
+/// and models, then drives `ARGOS_LIVE_ARTICLES` (default 2) of that cycle's
+/// articles through the whole brief with the real providers. Nothing is
+/// mocked, no key is printed or written, and the user's data is untouched.
+///
+/// `ARGOS_LIVE_PROFILE=/path/config.josn ARGOS_HOME=$(mktemp -d) cargo test -p
+///  argos-osint-core --lib live_atlas_then_briefs -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn live_atlas_then_briefs() {
+    let Ok(profile) = std::env::var("ARGOS_LIVE_PROFILE") else {
+        return;
+    };
+    let text = std::fs::read_to_string(profile).unwrap();
+    let plan = crate::config_transfer::parse_document(&text).unwrap();
+    let mut snapshot = crate::config_transfer::ConfigurationSnapshot::default();
+    snapshot.apply(&plan).unwrap();
+    let (auth, settings) = (snapshot.auth, snapshot.settings);
+    let want: usize = std::env::var("ARGOS_LIVE_ARTICLES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("argos.db");
+    drop(Store::open(&path).unwrap());
+    let keys = crate::osint::ProviderKeys {
+        gnews: settings.provider_key("gnews"),
+        gnews_fallback: settings.provider_fallback_key("gnews"),
+        newsdata: settings.provider_key("newsdata"),
+        newsdata_fallback: settings.provider_fallback_key("newsdata"),
+        currents: settings.provider_key("currents"),
+        currents_fallback: settings.provider_fallback_key("currents"),
+        newsapi: settings.provider_key("newsapi"),
+        newsapi_fallback: settings.provider_fallback_key("newsapi"),
+        firecrawl: settings.provider_key("firecrawl"),
+        ..Default::default()
+    };
+    let classifier = crate::provider::role_secret(&auth, &settings, "classifier").ok();
+    let pause = AtomicBool::new(false);
+    let started = std::time::Instant::now();
+    let mut events = 0usize;
+    let outcome = crate::atlas::run_live(
+        &path,
+        &pause,
+        &keys,
+        crate::osint::effective_user_agent(Some(&settings.osint_user_agent)),
+        crate::atlas::LiveRun::Fresh,
+        &[],
+        classifier,
+        None,
+        &[],
+        |_| events += 1,
+    )
+    .await;
+    println!(
+        "ATLAS outcome={:?} events={events} secs={}",
+        outcome.as_ref().map(|_| "ok").map_err(|e| e.to_string()),
+        started.elapsed().as_secs()
+    );
+    let store = Store::open(&path).unwrap();
+    for run in store.atlas_list_runs().unwrap() {
+        println!(
+            "ATLAS run state={} phase={} note={}",
+            run.state, run.phase, run.note
+        );
+    }
+    let articles = store.atlas_recent_articles().unwrap();
+    println!("ATLAS articles={}", articles.len());
+    let cancel = Arc::new(AtomicBool::new(false));
+    for article in articles.iter().take(want) {
+        println!(
+            "ARTICLE {} | {} | {}",
+            article.source_domain, article.title, article.url
+        );
+        let job = ensure_intel_brief_pipeline(&store, article, &settings).unwrap();
+        let mut backend = RuntimeBackend {
+            db_path: path.clone(),
+            keys: keys.clone(),
+            auth: auth.clone(),
+            settings: settings.clone(),
+            user_agent: None,
+        };
+        let t = std::time::Instant::now();
+        let mut outcomes = drain(&path, "live", &mut backend, &cancel, &cfg()).await;
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if let (Ok(all), Ok(more)) = (
+                outcomes.as_mut(),
+                drain(&path, "live", &mut backend, &cancel, &cfg()).await,
+            ) {
+                all.extend(more);
+            }
+        }
+        println!(
+            "BRIEF secs={} outcomes={:?}",
+            t.elapsed().as_secs(),
+            outcomes
+                .as_ref()
+                .map(|o| o.len())
+                .map_err(|e| e.to_string())
+        );
+        for view in stage_views(&store.conn, &job).unwrap() {
+            println!("STAGE {} -> {}", view.label, view.row);
+        }
+        let mut stmt = store.conn.prepare("SELECT operation, state, error_category, substr(error_message,1,700) FROM argos_tasks WHERE job_id=?1").unwrap();
+        for r in stmt
+            .query_map([&job], |r| {
+                Ok(format!(
+                    "{} {} [{}] {}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?
+                ))
+            })
+            .unwrap()
+        {
+            println!("TASK {}", r.unwrap());
+        }
+        let mut stmt = store.conn.prepare("SELECT route_index, attempt, provider, model, transport, outcome, failure_category, http_status, error_message FROM recon_model_attempts WHERE dispatched=1 AND operation_id LIKE ?1 ORDER BY started_at").unwrap();
+        let rows = stmt
+            .query_map([format!("%{}%", &job[..job.len().min(24)])], |r| {
+                Ok(format!(
+                    "{} {} {} {} {} {} {} {:?} {}",
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, Option<i64>>(7)?,
+                    r.get::<_, String>(8)?.chars().take(220).collect::<String>()
+                ))
+            })
+            .unwrap();
+        for r in rows {
+            println!("ATTEMPT {}", r.unwrap());
+        }
+    }
+}

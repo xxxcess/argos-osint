@@ -427,3 +427,65 @@ async fn native_jev_http_errors_are_typed() {
         assert!(request_line(&raw).starts_with("POST /alpha/decisions "));
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gateway_404_rejecting_the_forced_tool_steps_the_mode_down_to_validated_text() {
+    // OpenRouter: 404 "No endpoints found that support tool use".
+    let reject = Reply::Json(
+        404,
+        r#"{"error":{"message":"No endpoints found that support tool use. Try disabling \"tools\".","code":404}}"#.into(),
+    );
+    let server = serve(vec![reject, ok_json(CLAIMS, "stop")]).await;
+    let s = kinded(
+        &server.base_url,
+        "openrouter",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+    );
+    let first = send_contract(&s, &policy(ReasoningEffort::Default), Transport::NonStream).await;
+    assert!(first.outcome.is_err());
+    assert!(
+        first
+            .recovery
+            .as_deref()
+            .is_some_and(|r| r.contains("tool_choice")),
+        "{:?}",
+        first.recovery
+    );
+    // Recovery dispatch: no forced tool, no schema channel; plain text that
+    // the stage validates locally.
+    let second = send_contract(&s, &policy(ReasoningEffort::Default), Transport::NonStream).await;
+    assert!(second.outcome.is_ok(), "{:?}", second.outcome.err());
+    let requests = server.requests.lock().unwrap().clone();
+    assert!(body_of(&requests[0]).get("tools").is_some());
+    let resent = body_of(&requests[1]);
+    assert!(resent.get("tools").is_none() && resent.get("tool_choice").is_none());
+    assert!(resent.get("response_format").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_missing_model_deployment_404_is_not_a_mode_rejection() {
+    // NVIDIA NIM and OpenRouter-wrapped NIM bodies for Nemotron 3 Ultra.
+    let nvidia = Reply::Json(
+        404,
+        r#"{"status":404,"title":"Not Found","detail":"Function id 'abc': Specified function in account 'SECRET-ACCOUNT' is not found"}"#.into(),
+    );
+    let wrapped = Reply::Json(
+        404,
+        r#"{"error":{"message":"Provider returned error","code":404,"metadata":{"raw":"{\"status\":404,\"title\":\"Not Found\",\"detail\":\"Function id 'abc' version 'null': Specified function in account 'SECRET-ACCOUNT' is not found\"}","provider_name":"Nvidia"}}}"#.into(),
+    );
+    for (reply, kind) in [(nvidia, "nvidia"), (wrapped, "openrouter")] {
+        let server = serve(vec![reply]).await;
+        let s = kinded(&server.base_url, kind, "nvidia/nemotron-3-ultra-550b-a55b");
+        let report =
+            send_contract(&s, &policy(ReasoningEffort::Default), Transport::NonStream).await;
+        let f = report.outcome.unwrap_err();
+        assert_eq!(f.category, Category::InvalidModel, "{kind}");
+        assert!(
+            report.recovery.is_none(),
+            "{kind}: a ladder cannot fix a missing deployment"
+        );
+        let text = f.summary();
+        assert!(text.contains("Specified function"), "{kind}: {text}");
+        assert!(!text.contains("SECRET-ACCOUNT"), "{kind}: {text}");
+    }
+}

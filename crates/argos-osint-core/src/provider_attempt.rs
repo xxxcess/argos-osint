@@ -1072,6 +1072,10 @@ fn line_event(
     Ok(())
 }
 
+fn is_gateway_timeout(code: &Option<String>) -> bool {
+    matches!(code.as_deref(), Some("408" | "504" | "524"))
+}
+
 fn sse_error(
     state: &mut StreamState,
     acc: &Acc,
@@ -1096,6 +1100,11 @@ fn sse_error(
     } else if lower.contains("context_length") || lower.contains("maximum context") {
         f.category = Category::MalformedRequest;
         f.retryable = false;
+    } else if lower.contains("timeout") || lower.contains("timed out") || is_gateway_timeout(&code)
+    {
+        // The upstream gave up mid-stream. That is a stall, not a transient
+        // blip: resending to the same route waits out the same silence.
+        f.category = Category::Timeout;
     }
     if let Some(m) = &message {
         f.causes.push(crate::provider_diag::sanitize(m));
@@ -1159,6 +1168,60 @@ pub mod mock {
             serde_json::json!({"choices":[{"finish_reason":finish,"message":{"role":"assistant","content":content}}]})
                 .to_string(),
         )
+    }
+
+    /// Serve by request: `route` sees the raw request (request line, headers
+    /// and body) and returns the reply, so one server can play several
+    /// providers and models at once.
+    pub async fn serve_by(route: impl Fn(&str) -> Reply + Send + Sync + 'static) -> Server {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (h, r) = (hits.clone(), requests.clone());
+        let route = Arc::new(route);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                h.fetch_add(1, Ordering::SeqCst);
+                let (r, route) = (r.clone(), route.clone());
+                tokio::spawn(async move {
+                    let request = read_request(&mut socket).await;
+                    let reply = route(&request);
+                    r.lock().unwrap().push(request);
+                    let _ = socket.write_all(render(reply).as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        Server {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            hits,
+            requests,
+        }
+    }
+
+    fn render(reply: Reply) -> String {
+        match reply {
+            Reply::Json(status, body) => format!(
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+            Reply::Sse(chunks) => {
+                let body: String = chunks.concat();
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            }
+            Reply::Raw(raw) => raw,
+            Reply::Truncated(body) => format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len() + 4096
+            ),
+        }
     }
 
     /// Serve `script` in order (the last reply repeats).

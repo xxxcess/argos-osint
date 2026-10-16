@@ -79,6 +79,9 @@ pub struct OperationScope<'a> {
     pub contract: Option<crate::provider_adapters::ResponseContract>,
     /// Lease epoch of the owning task (schema 41); `None` outside tasks.
     pub task_epoch: Option<i64>,
+    /// Stage-wide request budget and route health shared with sibling
+    /// operations (`None` outside stages).
+    pub ledger: Option<std::sync::Arc<crate::provider_chain::StageLedger>>,
 }
 
 /// Declared response format (spec §3). `BoundedDecision` may use native Jev
@@ -126,6 +129,7 @@ impl<'a> OperationScope<'a> {
             budget: None,
             contract: None,
             task_epoch: None,
+            ledger: None,
         }
     }
 
@@ -239,6 +243,14 @@ impl<'a> OperationScope<'a> {
     /// caller also puts the epoch in the operation id
     /// (`{task_id}:e{epoch}:...`), so a retried execution writes new attempt
     /// rows and prior rows stay immutable.
+    pub fn with_ledger(
+        mut self,
+        ledger: std::sync::Arc<crate::provider_chain::StageLedger>,
+    ) -> Self {
+        self.ledger = Some(ledger);
+        self
+    }
+
     pub fn with_task_epoch(mut self, epoch: i64) -> Self {
         self.task_epoch = Some(epoch);
         self
@@ -337,6 +349,8 @@ async fn bounded_by_cap(
 fn chain_error<T>(report: &ChainReport<T>) -> anyhow::Error {
     let termination = if report.cancelled {
         "operation cancelled"
+    } else if report.budget_exhausted {
+        "stage request budget reached"
     } else if report.wall_clock_exceeded {
         "operation wall-clock cap reached"
     } else if report.blocked {
@@ -1785,6 +1799,7 @@ where
         attempt_limit: insight_contract.then_some(2),
         interactive: scope.interactive,
         wire_budget: scope.wire_budget(),
+        ledger: scope.ledger.clone(),
     };
 
     let report = provider_chain::execute_with_context(&routes, dispatch, opts).await;
@@ -2344,6 +2359,7 @@ where
         attempt_limit: insight_contract.then_some(2),
         interactive: scope.interactive,
         wire_budget: scope.wire_budget(),
+        ledger: scope.ledger.clone(),
     };
 
     let report = provider_chain::execute_with_context(&routes, dispatch, opts).await;

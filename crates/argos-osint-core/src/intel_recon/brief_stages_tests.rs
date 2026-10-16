@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "brief_user_chain_tests.rs"]
+mod user_chain;
 use crate::intel_recon::brief_pipeline::{ensure_chain, stage_views, BriefInputs};
 use crate::intel_recon::clean_body::clean_article;
 use std::sync::atomic::AtomicUsize;
@@ -235,21 +238,22 @@ impl StageBackend for Mock {
         Ok(self.related.clone())
     }
     fn classify_context<'a>(
-        &'a mut self,
+        &mut self,
         _ctx: &'a StageContext,
         batch: crate::intel_recon::brief_context::ContextBatch,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<HashMap<String, String>>> {
+        let mock = self.clone();
         Box::pin(async move {
             ensure!(!cancel.load(Ordering::Acquire), "cancelled");
-            self.context_started.fetch_add(1, Ordering::AcqRel);
-            self.classified.lock().unwrap().push(batch.clone());
-            if self.hang.contains("intel_brief_context") {
+            mock.context_started.fetch_add(1, Ordering::AcqRel);
+            mock.classified.lock().unwrap().push(batch.clone());
+            if mock.hang.contains("intel_brief_context") {
                 loop {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             }
-            if self.invalid_context {
+            if mock.invalid_context {
                 return Ok(HashMap::from([(
                     "invented-sentence".into(),
                     "support".into(),
@@ -259,7 +263,7 @@ impl StageBackend for Mock {
                 .candidates
                 .into_iter()
                 .map(|s| {
-                    let relation = if self.reject_context || s.text.contains("unrelated") {
+                    let relation = if mock.reject_context || s.text.contains("unrelated") {
                         "irrelevant"
                     } else if s.text.contains("corrected") || s.text.contains("denied") {
                         "counterevidence"

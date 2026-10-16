@@ -71,6 +71,16 @@ Standing rules: Inferences **always** uses thinking models. There is no faster n
 - [x] Diagrams updated: `intel-brief-chain` (per-claim checkpoints, warning completion, Retry), `intel-job-states` (Retry resumes, warnings), `model-request-scheduling` (stall falls through, wall-clock cap). `docs/architecture.md` and `docs/providers.md` updated. `graphify update .` run.
 - [x] Final matrix (all with `--locked`, clippy `-D warnings`): default features (LanceDB), `--no-default-features`, `--features nlp` — results in the PR body.
 
+### Phase F — stage-wide request budget and route health (user's imported profile)
+Root cause of 84 requests (offline repro with the imported chain, `brief_user_chain_tests.rs`): classifier work is one operation per ≤8-sentence batch (3 claims x ~5 batches = 15 sequential operations on a 37-sentence article), and each operation re-walked the chain from route 0. With the first routes down (Jev/OpenRouter 503 or SSE `A Timeout Occurred`, Gemini 503) each operation cost 4 requests: 60 of 80 requests were classifier, none of them able to learn the route was dead. `WireBudget` and the wall-clock cap were per operation, so nothing bounded the stage; the `SseError` timeout was retried on the same route.
+- [x] `StageLedger` (provider_chain): one per stage execution, shared through `StageContext`/`OperationScope`. Route health: a route that failed unwell (timeout, 5xx, 429, network, stream, auth) is passed over for 120/300/600s by sibling operations when a later route is available; the last dispatchable route is never skipped; success clears it.
+- [x] Stage request budget: dispatch ceiling (default 24; Inferences declares `2 x (batches + claims + 2) + 8`). Exhaustion stops dispatch with `stage request budget reached` (timeout category) instead of cycling providers.
+- [x] SSE error events whose text/code say timeout (`timeout`, `timed out`, 408/504/524) are `Category::Timeout`: skip to the next route, no same-route resend.
+- [x] Classifier batches across claims run with the same 3 slots as generation (`classify_context` future owns its state). Evidence policy unchanged: every candidate is still classified.
+- Result on the repro: healthy 20 requests (unchanged); first routes down 80 -> 32. Inferences still use thinking routes with fallback; no model or effort change.
+- Tests: `dead_first_routes_do_not_multiply_across_operations`, `a_route_that_just_stalled_is_passed_over_by_sibling_operations`, `the_last_dispatchable_route_is_never_passed_over`, `the_stage_budget_stops_dispatch_across_operations`.
+- Not done: a classifier failure still fails the whole stage (not per claim); no change to batch size (Jev question limit).
+
 ## Audit claims: final verdicts
 | # | Claim | Verdict |
 | --- | --- | --- |

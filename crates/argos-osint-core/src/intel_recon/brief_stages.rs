@@ -77,6 +77,9 @@ pub struct StageContext {
     pub metadata_snapshot: Value,
     /// Captured role defaults (JSON) used to route every dispatch.
     pub route_snapshot: String,
+    /// Request budget and route health shared by every operation of this
+    /// stage execution.
+    pub ledger: Arc<crate::provider_chain::StageLedger>,
 }
 
 impl StageContext {
@@ -99,6 +102,7 @@ impl StageContext {
             .with_task(&self.task_id)
             .with_task_epoch(self.lease_epoch)
             .with_generation(u32::try_from(self.job_generation.max(0)).unwrap_or(u32::MAX))
+            .with_ledger(self.ledger.clone())
     }
 
     /// Captured defaults applied over `settings` (credentials stay in the
@@ -168,8 +172,10 @@ pub trait StageBackend: Send {
     /// Classifier decisions over one bounded, claim-specific context batch.
     /// Custom backends must explicitly implement this boundary; accepting all
     /// candidates by default would bypass evidence selection.
+    /// Like `generate`, the returned future owns its dispatch state so a
+    /// stage can classify several batches concurrently.
     fn classify_context<'a>(
-        &'a mut self,
+        &mut self,
         _ctx: &'a StageContext,
         _batch: super::brief_context::ContextBatch,
         _cancel: &'a Arc<AtomicBool>,
@@ -1121,6 +1127,7 @@ pub fn stage_context(store: &Store, claimed: &ClaimedTask) -> Result<StageContex
         lease_epoch: claimed.epoch,
         metadata_snapshot,
         route_snapshot,
+        ledger: Arc::default(),
     })
 }
 
@@ -1264,9 +1271,13 @@ async fn execute(
             let mut requests = Vec::new();
             let mut claim_analysis = Vec::new();
             let mut analysis_ids = HashSet::new();
+            // Every claim's candidate batches are known before any request is
+            // sent, so the stage can declare its planned work to the shared
+            // request budget and classify the batches of all claims together.
+            let mut prepared = Vec::new();
             for claim in claims["claims"].as_array().into_iter().flatten() {
                 ensure!(!cancel.load(Ordering::Acquire), "cancelled");
-                let mut context = super::brief_context::claim_candidates(
+                let context = super::brief_context::claim_candidates(
                     &index_full,
                     body["markdown"].as_str().unwrap_or(""),
                     claim,
@@ -1275,19 +1286,50 @@ async fn execute(
                 .map_err(anyhow::Error::msg)?;
                 let batches = super::brief_context::classifier_batches(&context)
                     .map_err(anyhow::Error::msg)?;
-                let mut selected = Vec::new();
-                let mut labels = HashMap::new();
-                for batch in batches {
-                    ensure!(!cancel.load(Ordering::Acquire), "cancelled");
-                    activity(db_path, &claimed.id, "selecting claim context");
-                    let decisions = super::brief_timing::timed(
-                        super::brief_timing::Phase::Model,
-                        backend.classify_context(&ctx, batch.clone(), cancel),
-                    )
-                    .await?;
-                    selected.extend(batch.selected(&decisions).map_err(anyhow::Error::msg)?);
-                    labels.extend(decisions);
-                }
+                prepared.push((context, batches));
+            }
+            let planned_batches: usize = prepared.iter().map(|(_, b)| b.len()).sum();
+            // One generation per claim, plus fidelity and de-duplication.
+            ctx.ledger
+                .plan(u32::try_from(planned_batches + prepared.len() + 2).unwrap_or(u32::MAX));
+            let mut claim_selected: Vec<Vec<Sentence>> = vec![Vec::new(); prepared.len()];
+            let mut claim_labels: Vec<HashMap<String, String>> =
+                vec![HashMap::new(); prepared.len()];
+            {
+                let mut jobs = prepared
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(n, (_, batches))| batches.iter().map(move |b| (n, b.clone())))
+                    .collect::<Vec<_>>()
+                    .into_iter();
+                let mut running = FuturesUnordered::new();
+                activity(db_path, &claimed.id, "selecting claim context");
+                super::brief_timing::timed(super::brief_timing::Phase::Model, async {
+                    loop {
+                        while running.len() < INFERENCE_CONCURRENCY {
+                            ensure!(!cancel.load(Ordering::Acquire), "cancelled");
+                            let Some((n, batch)) = jobs.next() else {
+                                break;
+                            };
+                            let dispatch = backend.classify_context(&ctx, batch.clone(), cancel);
+                            running.push(dispatch.map(move |result| (n, batch, result)).boxed());
+                        }
+                        let Some((n, batch, result)) = running.next().await else {
+                            break;
+                        };
+                        let decisions = result?;
+                        claim_selected[n]
+                            .extend(batch.selected(&decisions).map_err(anyhow::Error::msg)?);
+                        claim_labels[n].extend(decisions);
+                    }
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await?;
+            }
+            for ((mut context, _), (selected, labels)) in prepared
+                .into_iter()
+                .zip(claim_selected.into_iter().zip(claim_labels))
+            {
                 let selected = bound_claim_context(&mut context, selected, &labels, &system)?;
                 let user = claim_inferences_user(&context, &selected, &labels);
                 ensure!(
@@ -2314,14 +2356,15 @@ impl StageBackend for RuntimeBackend {
     }
 
     fn classify_context<'a>(
-        &'a mut self,
+        &mut self,
         ctx: &'a StageContext,
         batch: super::brief_context::ContextBatch,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<HashMap<String, String>>> {
+        let (auth, db_path) = (self.auth.clone(), self.db_path.clone());
+        let settings = ctx.routed(&self.settings);
         Box::pin(async move {
             let operation_id = ctx.operation_id("claim-context", &batch.user());
-            let settings = ctx.routed(&self.settings);
             let adapter = super::brief_context::ContextDecisions { batch: &batch };
             let scope = ctx
                 .scope(crate::recon::model_exec::OperationScope::new(
@@ -2332,18 +2375,18 @@ impl StageBackend for RuntimeBackend {
                 .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision)
                 .with_interactive();
             let (labels, _) = crate::recon::model_exec::execute_decisions_or_chat(
-                &self.auth,
+                &auth,
                 &settings,
                 &scope,
                 &adapter,
                 cancel,
                 Some(super::brief_timing::activity_sink(
-                    &self.db_path,
+                    &db_path,
                     &ctx.task_id,
                     "selecting claim context",
                     "classifier",
                 )),
-                Some(self.db_path.as_path()),
+                Some(db_path.as_path()),
             )
             .await?;
             Ok(labels)

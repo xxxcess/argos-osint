@@ -1,0 +1,205 @@
+{
+ "schema_version": 1,
+ "providers": [
+  {
+   "id": "google",
+   "kind": "google",
+   "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+   "default_model": "",
+   "credential": {
+    "source": "inline",
+    "api_key": "sk-redacted-fixture"
+   },
+   "quota_group_id": ""
+  },
+  {
+   "id": "grok",
+   "kind": "grok",
+   "base_url": "https://api.x.ai/v1",
+   "default_model": "grok-4.6",
+   "credential": {
+    "source": "inline",
+    "api_key": "sk-redacted-fixture"
+   },
+   "quota_group_id": ""
+  },
+  {
+   "id": "nvidia",
+   "kind": "nvidia",
+   "base_url": "https://integrate.api.nvidia.com/v1",
+   "default_model": "",
+   "credential": {
+    "source": "inline",
+    "api_key": "sk-redacted-fixture"
+   },
+   "quota_group_id": ""
+  },
+  {
+   "id": "openrouter",
+   "kind": "openrouter",
+   "base_url": "https://openrouter.ai/api/v1",
+   "default_model": "cohere/north-mini-code:free",
+   "credential": {
+    "source": "inline",
+    "api_key": "sk-redacted-fixture"
+   },
+   "quota_group_id": ""
+  }
+ ],
+ "tool_credentials": [],
+ "model_roles": {
+  "recon": {
+   "primary": {
+    "provider_id": "openrouter",
+    "model": "nvidia/nemotron-3-super-120b-a12b:free"
+   },
+   "fallbacks": [
+    {
+     "provider_id": "google",
+     "model": "models/gemini-3.8-flash"
+    },
+    {
+     "provider_id": "nvidia",
+     "model": "nvidia/nemotron-3-super-120b-a12b"
+    }
+   ]
+  },
+  "synthesis": {
+   "primary": {
+    "provider_id": "openrouter",
+    "model": "nvidia/nemotron-3-ultra-550b-a55b:free"
+   },
+   "fallbacks": [
+    {
+     "provider_id": "google",
+     "model": "models/gemini-3.8-flash"
+    },
+    {
+     "provider_id": "nvidia",
+     "model": "nvidia/nemotron-3-ultra-550b-a55b"
+    }
+   ]
+  },
+  "tool_picker": {
+   "primary": {
+    "provider_id": "openrouter",
+    "model": "typesafe/jev-1.13"
+   },
+   "fallbacks": [
+    {
+     "provider_id": "google",
+     "model": "models/gemini-3.8-flash"
+    },
+    {
+     "provider_id": "nvidia",
+     "model": "nvidia/nemotron-3.5-lightning-30b-a3b"
+    }
+   ]
+  },
+  "classifier": {
+   "primary": {
+    "provider_id": "openrouter",
+    "model": "typesafe/jev-1.13"
+   },
+   "fallbacks": [
+    {
+     "provider_id": "google",
+     "model": "models/gemini-3.8-flash"
+    },
+    {
+     "provider_id": "nvidia",
+     "model": "deepseek-ai/deepseek-v4.1-flash"
+    }
+   ]
+  },
+  "summarization": {
+   "primary": {
+    "provider_id": "openrouter",
+    "model": "nvidia/nemotron-3-super-120b-a12b:free"
+   },
+   "fallbacks": [
+    {
+     "provider_id": "google",
+     "model": "models/gemini-3.8-flash"
+    },
+    {
+     "provider_id": "nvidia",
+     "model": "nvidia/nemotron-3-super-120b-a12b"
+    }
+   ]
+  },
+  "evidence_curator": {
+   "primary": {
+    "provider_id": "openrouter",
+    "model": "typesafe/jev-1.13"
+   },
+   "fallbacks": [
+    {
+     "provider_id": "google",
+     "model": "models/gemini-3.8-flash"
+    },
+    {
+     "provider_id": "nvidia",
+     "model": "nvidia/nemotron-3-super-120b-a12b"
+    }
+   ]
+  },
+  "entity_resolver": {
+   "primary": {
+    "provider_id": "openrouter",
+    "model": "typesafe/jev-1.13"
+   },
+   "fallbacks": [
+    {
+     "provider_id": "google",
+     "model": "models/gemini-3.8-flash"
+    },
+    {
+     "provider_id": "nvidia",
+     "model": "deepseek-ai/deepseek-v4.1-flash"
+    }
+   ]
+  },
+  "claim_assessor": {
+   "primary": {
+    "provider_id": "openrouter",
+    "model": "nvidia/nemotron-3-super-120b-a12b:free"
+   },
+   "fallbacks": [
+    {
+     "provider_id": "google",
+     "model": "models/gemini-3.8-flash"
+    },
+    {
+     "provider_id": "nvidia",
+     "model": "nvidia/nemotron-3-ultra-550b-a55b"
+    }
+   ]
+  },
+  "investigation_controller": {
+   "primary": {
+    "provider_id": "openrouter",
+    "model": "typesafe/jev-1.13"
+   },
+   "fallbacks": [
+    {
+     "provider_id": "google",
+     "model": "models/gemini-3.8-flash"
+    },
+    {
+     "provider_id": "nvidia",
+     "model": "nvidia/nemotron-3-super-120b-a12b"
+    }
+   ]
+  },
+  "decision_model": {
+   "primary": {
+    "provider_id": "openrouter",
+    "model": "typesafe/jev-1.13"
+   },
+   "fallbacks": []
+  },
+  "decision_fallback": null
+ },
+ "rate_limits": []
+}

@@ -38,7 +38,7 @@
 <rect x="336" y="40" width="232" height="76" rx="6" fill="#fff3eb" stroke="#eb6c36"/>
 <text x="452.0" y="65" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="14" font-weight="600" fill="#2d3142">Route retry owner</text>
 <text x="452.0" y="85" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="10" fill="#4f5d75">account concurrency + priority</text>
-<text x="452.0" y="103" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="10" fill="#4f5d75">retry / repair / fallback / stop</text>
+<text x="452.0" y="103" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="10" fill="#4f5d75">stall → next route · retry · stop</text>
 <rect x="336" y="168" width="232" height="72" rx="6" fill="#ffffff" stroke="#2d3142"/>
 <text x="452.0" y="193" text-anchor="middle" font-family="Geist,system-ui,sans-serif" font-size="14" font-weight="600" fill="#2d3142">Compile and authorize</text>
 <text x="452.0" y="213" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="10" fill="#4f5d75">adapter + response contract</text>
@@ -67,6 +67,7 @@
 <text x="612" y="187" font-family="Geist,system-ui,sans-serif" font-size="11" fill="#4f5d75">retry / fallback</text>
 <text x="588" y="487" font-family="Geist,system-ui,sans-serif" font-size="11" fill="#4f5d75">response</text>
 <text x="24" y="670" font-family="Geist,system-ui,sans-serif" font-size="12" fill="#4f5d75">Queue waits are cancellable. Retry-After extends pacing; exhausted or terminal routes return an error.</text>
+<text x="24" y="650" font-family="Geist,system-ui,sans-serif" font-size="12" fill="#4f5d75">Interactive operations carry a wall-clock cap (600s; 900s thinking) over queue, pacing, backoff and attempts; a stall skips to the next route.</text>
 <text x="24" y="690" font-family="Geist,system-ui,sans-serif" font-size="12" fill="#4f5d75">Process-local policy; external traffic, token/day quotas and provider outages remain outside this clock.</text>
 </svg>
 </div>

@@ -2499,3 +2499,46 @@ async fn every_claim_failing_fails_inferences_with_the_provider_category() {
         .unwrap();
     assert_eq!(category, "timeout");
 }
+
+// The Jobs panel's retry goes through the same resume path as the brief's
+// Retry button, for failed branches and for completed-with-warnings stages.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jobs_retry_resumes_failed_and_warning_brief_stages() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.filter_inference_evidence = true;
+    mock.fail_claim = ["c1", "c2"].map(String::from).into();
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let store = Store::open(&db.path).unwrap();
+    let detail = crate::jobs_view::job_detail(&store.conn, &job, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.retryable, 1, "the failed Inferences branch");
+    mock.fail_claim = ["c2"].map(String::from).into();
+    assert_eq!(store.retry_failed_tasks(&job).unwrap(), 1);
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    assert!(rows(&db.path, &job)[2].starts_with("Completed with warnings"));
+    let detail = crate::jobs_view::job_detail(&store.conn, &job, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.retryable, 1, "the warning stage is retryable");
+    assert_eq!(detail.warnings.len(), 1);
+    mock.fail_claim.clear();
+    mock.seen.lock().unwrap().clear();
+    assert_eq!(store.retry_failed_tasks(&job).unwrap(), 1);
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    assert_eq!(inference_requests(&mock), [json!("c2")]);
+    let detail = crate::jobs_view::job_detail(&store.conn, &job, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!((detail.retryable, detail.warnings.len()), (0, 0));
+    assert_eq!(store.retry_failed_tasks(&job).unwrap(), 0);
+}

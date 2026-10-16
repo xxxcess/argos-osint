@@ -25,7 +25,7 @@ Standing rules: Inferences **always** uses thinking models. There is no faster n
 | B | Per-model thinking effort for Inferences (never off, no token caps); thinking-sized deadlines | see log |
 | C | Skip to the next route on a stall (no non-thinking primary); operation wall-clock cap that includes pacing and queue time | see log |
 | D | Per-claim checkpoints, re-run only failed claims, complete with warnings so Links can run | see log |
-| E | Offline reproductions for the whole path; docs, diagrams, matrix | pending |
+| E | Jobs `r` retry parity; docs, diagrams, graphify, final matrix | **done** |
 
 ## Phase log
 
@@ -65,3 +65,20 @@ Standing rules: Inferences **always** uses thinking models. There is no faster n
 - Not done: fidelity/dedup failures after all claims succeed still fail the stage (claim checkpoints survive, so a retry re-runs only those steps); Links itself does not degrade on its own failure.
 - Tests: `one_failed_claim_completes_with_warnings_and_retry_asks_only_that_claim`, `every_claim_failing_fails_inferences_with_the_provider_category`, `jobs_detail_shows_partial_completion_with_warnings_and_links_completed`.
 - Screens: `docs/screens/brief-latency/before-jobs-detail-160x90.png` (main: Inferences failed, Links blocked), `after-A-…` (status fixed, still failed), `after-D-jobs-partial-160x90.png` (completed with warnings, Links completed).
+
+### Phase E — parity, docs and final matrix
+- [x] Jobs panel `r` now uses `retry_stage` for brief chains (small and safe: `jobs_view::retry_failed_tasks` delegates for chains with an `intel_brief_runs` row, and `JobDetail.retryable` counts failed branches plus a warning stage). Test: `jobs_retry_resumes_failed_and_warning_brief_stages`.
+- [x] Diagrams updated: `intel-brief-chain` (per-claim checkpoints, warning completion, Retry), `intel-job-states` (Retry resumes, warnings), `model-request-scheduling` (stall falls through, wall-clock cap). `docs/architecture.md` and `docs/providers.md` updated. `graphify update .` run.
+- [x] Final matrix (all with `--locked`, clippy `-D warnings`): default features (LanceDB), `--no-default-features`, `--features nlp` — results in the PR body.
+
+## Audit claims: final verdicts
+| # | Claim | Verdict |
+| --- | --- | --- |
+| 1 | No effort/caps sent; INFERENCES_BUDGET decorative | confirmed (effort); fixed B |
+| 2 | Deadlines too short for thinking | partly wrong (60s header wait is provider queueing on a stream); first-output/inactivity resized in B |
+| 3 | `(HTTP 200)` on a timeout / error text | confirmed; fixed A |
+| 4 | `invalid_result` hard-coded | confirmed; fixed A |
+| 5 | Attempt rows unnamed; counts conflated | confirmed; fixed A |
+| 6 | Retry wait 0 | confirmed; fixed A |
+| 7 | Timeout repeats route 0 / pacing unbounded | confirmed; fixed C |
+| 8 | One claim failure fails Inferences; Links blocked | confirmed; fixed D |

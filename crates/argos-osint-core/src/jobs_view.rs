@@ -595,6 +595,14 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
         [id],
         |r| r.get(0),
     )?;
+    if is_brief_chain(conn, id) {
+        let failed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM argos_tasks WHERE job_id=?1 AND state='failed'",
+            [id],
+            |r| r.get(0),
+        )?;
+        retryable += failed + i64::from(!warnings.is_empty());
+    }
     let mut insight_progress = Vec::new();
     for task in &tasks {
         if let Some(progress) =
@@ -623,6 +631,15 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
     }))
 }
 
+fn is_brief_chain(conn: &Connection, id: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM intel_brief_runs WHERE job_id=?1",
+        [id],
+        |_| Ok(true),
+    )
+    .unwrap_or(false)
+}
+
 /// Requeue a job's failed tasks that a durable worker pool owns (index and
 /// summary work). Completed tasks are untouched, so successful work is never
 /// repeated. Returns how many tasks were requeued.
@@ -640,6 +657,13 @@ pub fn retry_failed_tasks(conn: &Connection, id: &str) -> Result<usize> {
         ),
         params![id, now],
     )?;
+    // An Intel brief chain resumes through its own retry: failed branches, or
+    // a stage that completed with warnings (only its failed items re-run).
+    if is_brief_chain(conn, id)
+        && crate::intel_recon::brief_pipeline::retry_stage(conn, id, &now)?.is_some()
+    {
+        n += 1;
+    }
     let ids = conn
         .prepare("SELECT id FROM argos_tasks WHERE job_id=?1 AND operation='insight_refresh'")?
         .query_map([id], |r| r.get::<_, String>(0))?

@@ -12,6 +12,7 @@ Deep investigation: [architecture.md](architecture.md). Keys and roles: [provide
 | [usage.md](usage.md) | TUI navigation, CLI, state directory |
 | [architecture.md](architecture.md) | Recon turn, binder, picker, persistence, Atlas, news/legal |
 | [providers.md](providers.md) | Model accounts (Defaults, OpenRouter, Google, Nvidia) and OSINT keys |
+| [brief-provider-reliability.md](brief-provider-reliability.md) | Configured-provider brief reproduction, resumable context classification and operation routing |
 | [profile-analytics-dashboard.md](profile-analytics-dashboard.md) | Profile's 20 primary views, simultaneous dashboard, shared layout/components and viewport acceptance |
 | [profile-dashboard-and-search.md](profile-dashboard-and-search.md) | Profile metric dictionary/history, portable configuration and named search engines |
 | [topology-mapper.md](topology-mapper.md) | Seeded Brain/Intel topology, Graph first layout, provenance, bounds and targeted list density |

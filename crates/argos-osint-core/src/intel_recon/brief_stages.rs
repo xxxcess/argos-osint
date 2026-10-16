@@ -1091,6 +1091,65 @@ fn generate_unmeasured<'a>(
     })
 }
 
+/// Persist each validated context batch before starting more work. A failed
+/// sibling or a later synthesis/fidelity failure must not re-pay successful
+/// classification on Retry. The hash binds the original body spans, claim,
+/// policy and captured classifier route, never the lease epoch.
+fn classify_context_cached<'a>(
+    db_path: &'a Path,
+    backend: &mut dyn StageBackend,
+    ctx: &'a StageContext,
+    batch: super::brief_context::ContextBatch,
+    cancel: &'a Arc<AtomicBool>,
+) -> BoxFut<'a, Result<HashMap<String, String>>> {
+    let payload = batch.user();
+    let item = format!("context:{}", crate::nlp::cache::hash(&payload));
+    let input_hash = crate::nlp::cache::hash(
+        &json!([
+            super::brief_context::CONTEXT_PROMPT,
+            super::brief_context::CONTEXT_POLICY,
+            &payload,
+            ctx.route_key(None, "classifier"),
+        ])
+        .to_string(),
+    );
+    let cached = (|| -> Result<Option<HashMap<String, String>>> {
+        let store = Store::open_initialized_light(db_path)?;
+        let output = brief_pipeline::checkpoint_get(
+            &store.conn,
+            &ctx.job_id,
+            "intel_brief_inferences",
+            &item,
+            &input_hash,
+        )?;
+        // A damaged checkpoint is reclassified, never accepted as evidence.
+        Ok(output
+            .and_then(|v| serde_json::from_value::<HashMap<String, String>>(v).ok())
+            .filter(|labels| batch.selected(labels).is_ok()))
+    })();
+    match cached {
+        Err(error) => return Box::pin(async move { Err(error) }),
+        Ok(Some(labels)) => return Box::pin(async move { Ok(labels) }),
+        Ok(None) => {}
+    }
+    let dispatch = backend.classify_context(ctx, batch.clone(), cancel);
+    Box::pin(async move {
+        let labels = dispatch.await?;
+        batch.selected(&labels).map_err(anyhow::Error::msg)?;
+        ensure!(!cancel.load(Ordering::Acquire), "cancelled");
+        let store = Store::open_initialized_light(db_path)?;
+        brief_pipeline::checkpoint_put(
+            &store.conn,
+            &ctx.job_id,
+            "intel_brief_inferences",
+            &item,
+            &input_hash,
+            &serde_json::to_value(&labels)?,
+        )?;
+        Ok(labels)
+    })
+}
+
 /// Run one stage: Ok(value, items, empty_reason).
 /// Build the immutable context for a claimed stage on its own connection.
 pub fn stage_context(store: &Store, claimed: &ClaimedTask) -> Result<StageContext> {
@@ -1295,6 +1354,8 @@ async fn execute(
             let mut claim_selected: Vec<Vec<Sentence>> = vec![Vec::new(); prepared.len()];
             let mut claim_labels: Vec<HashMap<String, String>> =
                 vec![HashMap::new(); prepared.len()];
+            let mut context_errors: Vec<Option<anyhow::Error>> =
+                (0..prepared.len()).map(|_| None).collect();
             {
                 let mut jobs = prepared
                     .iter()
@@ -1311,26 +1372,48 @@ async fn execute(
                             let Some((n, batch)) = jobs.next() else {
                                 break;
                             };
-                            let dispatch = backend.classify_context(&ctx, batch.clone(), cancel);
+                            let dispatch = classify_context_cached(
+                                db_path,
+                                backend,
+                                &ctx,
+                                batch.clone(),
+                                cancel,
+                            );
                             running.push(dispatch.map(move |result| (n, batch, result)).boxed());
                         }
                         let Some((n, batch, result)) = running.next().await else {
                             break;
                         };
-                        let decisions = result?;
-                        claim_selected[n]
-                            .extend(batch.selected(&decisions).map_err(anyhow::Error::msg)?);
-                        claim_labels[n].extend(decisions);
+                        match result {
+                            Ok(decisions) => {
+                                claim_selected[n].extend(
+                                    batch.selected(&decisions).map_err(anyhow::Error::msg)?,
+                                );
+                                claim_labels[n].extend(decisions);
+                            }
+                            Err(error) => {
+                                ensure!(!cancel.load(Ordering::Acquire), "cancelled");
+                                // Finish independent claims and checkpoint any
+                                // successful batches, but never synthesize a
+                                // claim whose classification is incomplete.
+                                context_errors[n].get_or_insert(error);
+                            }
+                        }
                     }
                     Ok::<(), anyhow::Error>(())
                 })
                 .await?;
             }
-            for ((mut context, _), (selected, labels)) in prepared
+            for (n, ((mut context, _), (selected, labels))) in prepared
                 .into_iter()
                 .zip(claim_selected.into_iter().zip(claim_labels))
+                .enumerate()
             {
-                let selected = bound_claim_context(&mut context, selected, &labels, &system)?;
+                let selected = if context_errors[n].is_some() {
+                    Vec::new()
+                } else {
+                    bound_claim_context(&mut context, selected, &labels, &system)?
+                };
                 let user = claim_inferences_user(&context, &selected, &labels);
                 ensure!(
                     system.len() + user.len() <= CLAIM_INFERENCE_REQUEST_BYTES,
@@ -1391,24 +1474,54 @@ async fn execute(
                 crate::nlp::cache::hash(&json!([&system, user, &generate_route]).to_string())
             };
             let mut outputs = vec![Value::Null; requests.len()];
-            let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
+            let context_failed: HashSet<usize> = context_errors
+                .iter()
+                .enumerate()
+                .filter_map(|(n, e)| e.is_some().then_some(n))
+                .collect();
+            let mut failures: Vec<(usize, anyhow::Error)> = context_errors
+                .into_iter()
+                .enumerate()
+                .filter_map(|(n, e)| e.map(|error| (n, error)))
+                .collect();
             let mut reused = 0usize;
+            let mut reused_indices = HashSet::new();
             let mut todo = Vec::new();
             {
                 let store = Store::open(db_path)?;
                 for (n, (claim_id, _, user, _)) in requests.iter().enumerate() {
-                    match super::brief_pipeline::checkpoint_get(
+                    if context_failed.contains(&n) {
+                        continue;
+                    }
+                    let cached = super::brief_pipeline::checkpoint_get(
                         &store.conn,
                         &job,
                         &claimed.operation,
                         claim_id,
                         &checkpoint_hash(user),
-                    )? {
+                    )?
+                    .and_then(|output| {
+                        let mut output = validate_claim_inferences(
+                            &output.to_string(),
+                            claim_id,
+                            &requests[n].1,
+                        )
+                        .ok()?;
+                        retain_inference_counterevidence(
+                            &mut output,
+                            &requests[n].1,
+                            &requests[n].3,
+                        )
+                        .ok()?;
+                        Some(output)
+                    });
+                    match cached {
                         Some(output) => {
                             outputs[n] = output;
                             reused += 1;
+                            reused_indices.insert(n);
                         }
-                        None => todo.push(n),
+                        _ => todo.push(n),
                     }
                 }
             }
@@ -1494,13 +1607,16 @@ async fn execute(
                 .map(|(n, error)| {
                     json!({
                         "claim_id": requests[*n].0,
+                        "phase": if context_failed.contains(n) { "context" } else { "generation" },
                         "category": stage_error_category(error).as_str(),
                         "message": short_error(error),
                     })
                 })
                 .collect();
             for (n, (receipt, output)) in claim_analysis.iter_mut().zip(&outputs).enumerate() {
-                receipt["analysis_request_sent"] = json!(true);
+                receipt["analysis_request_sent"] =
+                    json!(!context_failed.contains(&n) && !reused_indices.contains(&n));
+                receipt["analysis_reused"] = json!(reused_indices.contains(&n));
                 receipt["empty_reason"] = output["empty_reason"].clone();
                 if let Some(failure) = claim_failures
                     .iter()
@@ -1532,7 +1648,7 @@ async fn execute(
             )
             .await?;
             dedup_inferences(db_path, backend, &ctx, cancel, &mut last).await?;
-            last["analysis_requests"] = json!(requests.len());
+            last["analysis_requests"] = json!(requests.len() - context_failed.len() - reused);
             last["path"] = json!("claim_context");
             last["context_policy"] = json!(super::brief_context::CONTEXT_POLICY);
             last["claim_analysis"] = json!(claim_analysis);

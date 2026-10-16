@@ -731,9 +731,12 @@ fn inferences_send_a_per_model_thinking_effort_and_never_turn_thinking_off() {
         .diagnostics
         .iter()
         .any(|d| d.starts_with("unsupported-policy:reasoning=efficient")));
-    // OpenRouter: sent only once the catalog confirms `reasoning`.
+    // OpenRouter's exact profiles work on the first dispatch, before refresh.
     let plain = compile_for(S.0, S.1, &c, &policy).unwrap();
-    assert!(plain.body.get("reasoning").is_none());
+    assert_eq!(plain.body["reasoning"]["effort"], "low");
+    let ultra = compile_for(U.0, U.1, &c, &policy).unwrap();
+    assert_eq!(ultra.body["reasoning"]["effort"], "medium");
+    assert_eq!(ultra.body["provider"]["require_parameters"], true);
     let s = secret(S.0, S.1);
     let ev = caps_mod::CatalogEvidence {
         supported_parameters: ["reasoning", "response_format", "structured_outputs"]

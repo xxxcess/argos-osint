@@ -140,6 +140,17 @@ impl<'a> OperationScope<'a> {
         self
     }
 
+    /// Per-attempt deadlines: thinking stages get thinking-sized waits.
+    pub fn deadlines(&self, stream: bool) -> Deadlines {
+        let thinks = self.budget.is_some_and(|b| b.thinks());
+        match (stream, thinks) {
+            (true, true) => Deadlines::insight_stream_thinking(),
+            (true, false) => Deadlines::insight_stream(),
+            (false, true) => Deadlines::insight_non_stream_thinking(),
+            (false, false) => Deadlines::insight_non_stream(),
+        }
+    }
+
     /// The request policy for this operation's dispatches.
     pub fn request_policy(
         &self,
@@ -1495,11 +1506,7 @@ where
                 )
             };
             let rep = if insight_contract {
-                let deadlines = if transport == Transport::Stream {
-                    Deadlines::insight_stream()
-                } else {
-                    Deadlines::insight_non_stream()
-                };
+                let deadlines = scope.deadlines(transport == Transport::Stream);
                 provider_attempt::attempt_spec(
                     &secret,
                     &messages_vec,
@@ -2341,24 +2348,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn automatic_operations_have_no_output_or_reasoning_budget() {
+    fn automatic_operations_have_no_output_caps_and_only_thinking_stages_send_effort() {
+        use crate::request_policy::{ReasoningEffort, INFERENCES_BUDGET};
         for role in provider::CANONICAL_ROLE_KEYS {
-            for scope in [
-                OperationScope::new("op", role),
-                OperationScope::new("op", role)
-                    .with_budget(crate::request_policy::INFERENCES_BUDGET),
+            for (scope, effort) in [
+                (OperationScope::new("op", role), ReasoningEffort::Default),
+                (
+                    OperationScope::new("op", role).with_budget(INFERENCES_BUDGET),
+                    ReasoningEffort::Efficient,
+                ),
+                (
+                    OperationScope::new("op", role)
+                        .with_budget(crate::request_policy::CLAIMS_BUDGET),
+                    ReasoningEffort::Default,
+                ),
             ] {
                 let policy = scope.request_policy(true, 2048);
                 assert!(policy.max_output_tokens.is_none());
                 assert!(policy.thinking_ceiling.is_none());
                 assert!(policy.reasoning_budget.is_none());
                 assert!(policy.budgeted_ceiling.is_none());
-                assert_eq!(
-                    policy.reasoning,
-                    crate::request_policy::ReasoningEffort::Default
-                );
+                assert_eq!(policy.reasoning, effort);
                 assert!(policy.json_object);
             }
+        }
+    }
+
+    #[test]
+    fn thinking_stages_get_thinking_sized_deadlines_and_others_keep_theirs() {
+        use crate::request_policy::{CLAIMS_BUDGET, INFERENCES_BUDGET, LINKS_BUDGET};
+        let think = OperationScope::new("op", "synthesis").with_budget(INFERENCES_BUDGET);
+        let (s, n) = (think.deadlines(true), think.deadlines(false));
+        assert_eq!(s.first_response, Deadlines::insight_stream().first_response);
+        assert!(s.first_output > Deadlines::insight_stream().first_output);
+        assert!(s.model_inactivity > Deadlines::insight_stream().model_inactivity);
+        assert_eq!(s.total, Deadlines::insight_stream().total);
+        assert!(n.first_response > Deadlines::insight_non_stream().first_response);
+        assert!(n.first_response < n.total);
+        for budget in [CLAIMS_BUDGET, LINKS_BUDGET] {
+            let scope = OperationScope::new("op", "claims").with_budget(budget);
+            assert_eq!(
+                scope.deadlines(true).first_output,
+                Deadlines::insight_stream().first_output
+            );
+            assert_eq!(
+                scope.deadlines(false).first_response,
+                Deadlines::insight_non_stream().first_response
+            );
         }
     }
 

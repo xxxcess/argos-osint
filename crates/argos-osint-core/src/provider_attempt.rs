@@ -110,6 +110,29 @@ impl Deadlines {
         }
     }
 
+    /// Streamed thinking stages (Inferences). Headers are still bounded at 60s
+    /// (a stream accepts quickly regardless of thinking). A model that hides
+    /// its reasoning may emit nothing until the answer, so first output and
+    /// inactivity are thinking-sized. The operation wall-clock cap, not these
+    /// per-attempt limits, bounds total latency.
+    pub const fn insight_stream_thinking() -> Self {
+        Self {
+            first_output: Some(Duration::from_secs(300)),
+            model_inactivity: Some(Duration::from_secs(120)),
+            idle: Duration::from_secs(120),
+            ..Self::insight_stream()
+        }
+    }
+
+    /// Non-streamed thinking stages wait for the whole body.
+    pub const fn insight_non_stream_thinking() -> Self {
+        Self {
+            first_response: Duration::from_secs(540),
+            total: Duration::from_secs(600),
+            ..Self::insight_non_stream()
+        }
+    }
+
     /// Native bounded decisions keep their own short policy.
     pub const fn native_decision() -> Self {
         Self::ordinary()

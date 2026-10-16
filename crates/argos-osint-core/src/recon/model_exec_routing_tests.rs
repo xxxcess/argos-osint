@@ -770,3 +770,59 @@ async fn retried_task_epoch_keeps_prior_attempts_and_records_usage() {
         .unwrap();
     assert_eq!(epoch, Some(4));
 }
+
+// Phase B on the wire: Inferences (a thinking stage) sends the model's own
+// thinking-on effort and no output/reasoning ceiling; Claims keeps the
+// provider default. Same chain, same contract, two budgets.
+#[tokio::test]
+async fn inferences_send_their_per_model_effort_on_the_wire_and_claims_do_not() {
+    let model = "nvidia/nemotron-3-ultra-550b-a55b";
+    let mut bodies = Vec::new();
+    for budget in [
+        crate::request_policy::INFERENCES_BUDGET,
+        crate::request_policy::CLAIMS_BUDGET,
+    ] {
+        let server = mock::serve(vec![mock::ok_json("{}", "stop")]).await;
+        let mut auth = AuthFile::default();
+        auth.set_account(ProviderSecret {
+            kind: "nvidia".into(),
+            model: model.into(),
+            base_url: server.base_url.clone(),
+            api_key: Some("fixture-only".into()),
+            stt_model: None,
+            device: None,
+        });
+        let settings = synthesis_chain(("nvidia", model), &[]);
+        let cancel = Arc::new(AtomicBool::new(false));
+        execute_chat(
+            &auth,
+            &settings,
+            &OperationScope::new("effort-wire", "synthesis")
+                .with_insight_contract()
+                .with_budget(budget)
+                .with_interactive(),
+            &user("JSON please"),
+            json_validator,
+            &cancel,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        bodies.push(server.requests.lock().unwrap()[0].clone());
+    }
+    assert!(
+        bodies[0].contains("\"reasoning_effort\":\"medium\""),
+        "{}",
+        bodies[0]
+    );
+    assert!(!bodies[1].contains("reasoning_effort"), "{}", bodies[1]);
+    for body in &bodies {
+        assert!(
+            !body.contains("max_tokens") && !body.contains("reasoning_budget"),
+            "{body}"
+        );
+    }
+}

@@ -668,6 +668,7 @@ fn automatic_stages_leave_output_and_reasoning_limits_to_the_provider() {
         let policy = budget.policy(true);
         for (provider, model) in [NU, F, NS, S, U] {
             let compiled = compile_for(provider, model, &json_contract(), &policy).unwrap();
+            // No stage ever sends an output or reasoning *ceiling*.
             assert!(
                 compiled.body.get("max_tokens").is_none(),
                 "{}",
@@ -678,12 +679,82 @@ fn automatic_stages_leave_output_and_reasoning_limits_to_the_provider() {
                 .get("maxOutputTokens")
                 .is_none());
             assert!(compiled.body.get("reasoning_budget").is_none());
-            assert!(compiled.body.get("reasoning_effort").is_none());
-            assert!(compiled.body["generationConfig"]
-                .get("thinkingConfig")
-                .is_none());
             assert!(compiled.effective.total_ceiling.is_none());
             assert!(compiled.effective.reasoning_budget.is_none());
+            if !budget.thinks() {
+                // Non-thinking stages keep the provider default.
+                assert!(compiled.body.get("reasoning_effort").is_none());
+                assert!(compiled.body["generationConfig"]
+                    .get("thinkingConfig")
+                    .is_none());
+            }
         }
     }
+}
+
+/// Inferences always thinks: each model gets its own thinking-on effort, never
+/// an off value, and models without a confirmed control omit it (reported).
+#[test]
+fn inferences_send_a_per_model_thinking_effort_and_never_turn_thinking_off() {
+    use crate::request_policy::INFERENCES_BUDGET;
+    let policy = INFERENCES_BUDGET.policy(true);
+    assert_eq!(policy.reasoning, ReasoningEffort::Efficient);
+    let c = json_contract();
+    // Nvidia: effort translated per model (Ultra rejects `low`).
+    assert_eq!(
+        compile_for(NS.0, NS.1, &c, &policy).unwrap().body["reasoning_effort"],
+        "low"
+    );
+    assert_eq!(
+        compile_for(NU.0, NU.1, &c, &policy).unwrap().body["reasoning_effort"],
+        "medium"
+    );
+    assert_eq!(
+        compile_for(NL.0, NL.1, &c, &policy).unwrap().body["chat_template_kwargs"]
+            ["enable_thinking"],
+        true
+    );
+    // Google: Gemini low (thinking mandatory), Gemma binary `high` = on.
+    let level = |m: (&str, &str)| {
+        compile_for(m.0, m.1, &c, &policy).unwrap().body["generationConfig"]["thinkingConfig"]
+            ["thinkingLevel"]
+            .as_str()
+            .map(str::to_ascii_lowercase)
+    };
+    assert_eq!(level(F).as_deref(), Some("low"));
+    assert_eq!(level(D26).as_deref(), Some("high"));
+    // DeepSeek has no documented control: omitted and reported.
+    let nd = compile_for(ND.0, ND.1, &c, &policy).unwrap();
+    assert!(nd.body.get("reasoning_effort").is_none());
+    assert!(nd
+        .effective
+        .diagnostics
+        .iter()
+        .any(|d| d.starts_with("unsupported-policy:reasoning=efficient")));
+    // OpenRouter: sent only once the catalog confirms `reasoning`.
+    let plain = compile_for(S.0, S.1, &c, &policy).unwrap();
+    assert!(plain.body.get("reasoning").is_none());
+    let s = secret(S.0, S.1);
+    let ev = caps_mod::CatalogEvidence {
+        supported_parameters: ["reasoning", "response_format", "structured_outputs"]
+            .map(String::from)
+            .to_vec(),
+        ..Default::default()
+    };
+    let caps = caps_mod::resolve_with(AdapterId::OpenRouter, &s.base_url, S.1, Some((&ev, 1)));
+    let m = msgs();
+    let r = compile(
+        &s,
+        &OperationRequest {
+            messages: &m,
+            tools: &[],
+            contract: &c,
+            policy: &policy,
+            stream: true,
+        },
+        &caps,
+    )
+    .unwrap();
+    assert_eq!(r.body["reasoning"]["effort"], "low");
+    assert!(r.body["reasoning"].get("enabled").is_none());
 }

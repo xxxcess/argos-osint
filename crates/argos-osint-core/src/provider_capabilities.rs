@@ -481,6 +481,15 @@ fn apply_catalog(caps: &mut ResolvedCapabilities, ev: &CatalogEvidence) {
             caps.forced_tool = tri(has("tools") && has("tool_choice"));
             if has("reasoning") {
                 caps.reasoning.control = ReasoningControl::OpenRouter;
+                // OpenRouter normalises `reasoning.effort` across models, so a
+                // catalog-advertised `reasoning` parameter confirms these
+                // values. A profile that already names values wins.
+                if caps.reasoning.values.is_empty() {
+                    caps.reasoning.values = ["low", "medium", "high"].map(String::from).to_vec();
+                }
+                if caps.reasoning.efficient.is_none() {
+                    caps.reasoning.efficient = Some("low".into());
+                }
             }
         }
         AdapterId::Google if !ev.generation_methods.is_empty() => {

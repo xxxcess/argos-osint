@@ -220,7 +220,7 @@ pub struct Scrolls {
     pub intel_list: u16,
     /// Vertical offset of the Briefing Focus center stack.
     pub intel_brief: u16,
-    /// Vertical offset of the Briefing Focus left extracted stack (claims, inferences, actors, links, related context).
+    /// Vertical offset of the Briefing Focus left extracted stack (actors, claims, inferences, links).
     pub intel_extracted: u16,
     /// Line offset inside the fixed-height full-article pane.
     pub intel_full: u16,
@@ -771,6 +771,7 @@ pub enum Target {
     TopologyInspector,
     TopologyRelationships,
     IntelTopologyClaim(usize),
+    IntelTopologyInference(usize),
     IntelTopologyActor(usize),
 }
 
@@ -3435,7 +3436,9 @@ impl App {
                     self.intel_related.sel = index;
                     super::ui::reveal_intel_related(self, index);
                 }
-                Target::IntelTopologyClaim(_) | Target::IntelTopologyActor(_) => {
+                Target::IntelTopologyClaim(_)
+                | Target::IntelTopologyInference(_)
+                | Target::IntelTopologyActor(_) => {
                     super::ui::reveal_intel_topology_entry(self, target);
                 }
                 Target::Button(ButtonId::RelatedScope | ButtonId::IntelRelatedMore) => {
@@ -7168,6 +7171,84 @@ impl App {
         entries
     }
 
+    pub(crate) fn intel_topology_inference_entries(&self) -> Vec<(String, String)> {
+        if let Some(output) = self.intel_brief_outputs.get("intel_brief_inferences") {
+            return output["inferences"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|inference| {
+                    let id = inference["id"].as_str()?;
+                    let text = inference["text"].as_str()?;
+                    let support = inference["support"].as_str().unwrap_or("");
+                    let why = inference["why"].as_str().unwrap_or("");
+                    let limitations = inference["limitations"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let mut record = if support.is_empty() {
+                        text.to_string()
+                    } else {
+                        format!("**{support}** · {text}")
+                    };
+                    if !why.is_empty() {
+                        record.push_str(&format!("\n  Why: {why}"));
+                    }
+                    if !limitations.is_empty() {
+                        record.push_str(&format!("\n  Limits: {limitations}"));
+                    }
+                    Some((id.to_string(), record))
+                })
+                .collect();
+        }
+        self.intel_claims
+            .iter()
+            .filter(|claim| claim.classification == "inference")
+            .map(|claim| (claim.fingerprint.clone(), claim.claim.clone()))
+            .collect()
+    }
+
+    fn open_intel_inference_topology(&mut self, index: usize) {
+        use argos_osint_core::brain_topology::TopologySeed;
+        let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
+            return;
+        };
+        let Some((local_id, label)) = self.intel_topology_inference_entries().get(index).cloned()
+        else {
+            return;
+        };
+        let text = self
+            .intel_brief_outputs
+            .get("intel_brief_inferences")
+            .and_then(|out| out["inferences"].as_array())
+            .and_then(|inferences| {
+                inferences
+                    .iter()
+                    .find(|inference| inference["id"].as_str() == Some(&local_id))
+            })
+            .and_then(|inference| inference["text"].as_str())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.intel_claims
+                    .iter()
+                    .find(|claim| claim.fingerprint == local_id)
+                    .map(|claim| claim.claim.clone())
+            })
+            .unwrap_or(label);
+        let revision = argos_osint_core::atlas_metadata::input_hash(&article);
+        self.open_topology(TopologySeed::RetainedInference {
+            run_id: article.run_id,
+            article_id: article.id,
+            revision,
+            local_id,
+            text,
+            job_id: self.intel_brief_job.clone().unwrap_or_default(),
+        });
+    }
+
     fn open_intel_topology(&mut self, index: usize, actor: bool) {
         use argos_osint_core::brain_topology::TopologySeed;
         let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
@@ -8288,7 +8369,26 @@ impl App {
                     } else if id.starts_with("actor:") {
                         argos_osint_core::brain_topology::TopologySeed::Actor(id.to_string())
                     } else {
-                        argos_osint_core::brain_topology::TopologySeed::Claim(id.to_string())
+                        use argos_osint_core::brain_topology::TopologySeed;
+                        let kind = self
+                            .selected_insight
+                            .as_ref()
+                            .filter(|insight| insight.memory_id == id)
+                            .map(|insight| {
+                                insight
+                                    .metadata
+                                    .as_ref()
+                                    .map_or(insight.classification.as_str(), |metadata| {
+                                        metadata.insight_kind.as_str()
+                                    })
+                            });
+                        match kind {
+                            Some("inference") => TopologySeed::Inference(id.to_string()),
+                            Some("link") => TopologySeed::Link(id.to_string()),
+                            Some("related") => TopologySeed::Related(id.to_string()),
+                            Some("actor") => TopologySeed::Actor(id.to_string()),
+                            _ => TopologySeed::Claim(id.to_string()),
+                        }
                     };
                     self.open_topology(seed);
                 }
@@ -9576,6 +9676,10 @@ impl App {
             Target::IntelTopologyActor(index) => {
                 self.focus = target;
                 self.open_intel_topology(index, true);
+            }
+            Target::IntelTopologyInference(index) => {
+                self.focus = target;
+                self.open_intel_inference_topology(index);
             }
             Target::TopologyPanel(index) => {
                 self.topology_state.active_panel_tab = index.min(2);
@@ -16164,7 +16268,23 @@ mod tests {
                     continue;
                 }
                 let mut app = app();
-                let (_, article) = related_ui_fixture(&mut app);
+                let (_, mut article) = related_ui_fixture(&mut app);
+                article.title = "Baltic board suspended the ferry service.".into();
+                app.store.atlas_upsert_article(&article).unwrap();
+                let mut metadata =
+                    argos_osint_core::atlas_metadata::ArticleMetadata::pending(&article);
+                metadata.entity_state = argos_osint_core::atlas_metadata::MetadataState::Complete;
+                metadata
+                    .mentions
+                    .push(argos_osint_core::atlas_metadata::ArticleMention {
+                        type_hint: "organization".into(),
+                        comparison_key: "baltic board".into(),
+                        field: "title".into(),
+                        start_byte: 0,
+                        end_byte: "Baltic board".len(),
+                        original_text: "Baltic board".into(),
+                    });
+                app.store.atlas_save_metadata(&metadata).unwrap();
                 let lead_target = app
                     .store
                     .atlas_list_articles(&article.run_id)
@@ -16179,9 +16299,16 @@ mod tests {
                 app.open_intel_briefing();
                 let job = app.intel_brief_job.clone().unwrap();
                 let conn = app.store.connection();
+                let mut scoped_claims = claims.clone();
+                scoped_claims["claims"][0]["subject_id"] = serde_json::json!(
+                    argos_osint_core::atlas_metadata::article_actors(&article, &metadata)[0].id
+                );
+                scoped_claims["claims"][0]["predicate"] = serde_json::json!("suspended");
+                scoped_claims["claims"][0]["object"] = serde_json::json!("the ferry service");
+                scoped_claims["claims"][0]["evidence"] = serde_json::json!([{"id":"t1","text":article.title,"start_byte":0,"end_byte":article.title.len()}]);
                 let outputs = [
                     body.clone(),
-                    claims.clone(),
+                    scoped_claims,
                     if *empty {
                         empty_inf.clone()
                     } else {
@@ -16211,10 +16338,31 @@ mod tests {
                         out["empty_reason"].as_str().unwrap_or("")
                     };
                     let items = if n == 0 { 0 } else { items };
-                    assert!(
-                        bp::commit_stage(conn, &c, &out.to_string(), items, reason, &now())
-                            .unwrap()
-                    );
+                    let canonical = if n == 1 {
+                        Some(
+                            argos_osint_core::intel_recon::brief_canonical::prepare_for_stage(
+                                &app.store,
+                                &article,
+                                &serde_json::Value::Null,
+                                out,
+                                &serde_json::Value::Null,
+                                &c.operation,
+                            )
+                            .unwrap(),
+                        )
+                    } else {
+                        None
+                    };
+                    assert!(bp::commit_stage_with(
+                        conn,
+                        &c,
+                        &out.to_string(),
+                        items,
+                        reason,
+                        &now(),
+                        canonical.as_ref()
+                    )
+                    .unwrap());
                 }
                 if let Some(activity) = running {
                     let c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
@@ -21635,7 +21783,12 @@ mod tests {
                 })
                 .collect();
             capture(&mut app, "intel-topology-claims");
+            app.intel_brief_outputs.insert("intel_brief_inferences".into(),serde_json::json!({"inferences":[{"id":"i1","text":"Inspection delays may keep freight capacity constrained.","support":"conditional","why":"The operator has not announced a reopening date.","limitations":["Clearance and revised sailings remain unconfirmed"]},{"id":"i2","text":"A completed inspection could allow partial service to resume.","support":"conditional","why":"The board retained authority to approve restricted crossings.","limitations":["Approval has not yet been given"]}]}));
+            app.set_focus(Target::IntelTopologyInference(1));
+            capture(&mut app, "intel-topology-inference-tail");
             app.intel_brief_outputs.clear();
+            app.scrolls.intel_extracted = 0;
+            app.focus = Target::IntelLeftColumn;
             capture(&mut app, "intel-topology-actors-no-claims");
             app.set_focus(Target::IntelTopologyActor(11));
             capture(&mut app, "intel-topology-actor-tail");
@@ -21657,6 +21810,118 @@ mod tests {
         );
         app.activate_button(ButtonId::TopologyBack);
         assert_eq!(app.focus, Target::IntelTopologyClaim(0));
+    }
+
+    #[test]
+    fn topology_intel_inferences_share_keyboard_click_identity_and_restore_the_brief() {
+        use argos_osint_core::brain_topology::TopologySeed;
+        for (width, height) in [(160, 50), (80, 24), (60, 18)] {
+            let mut app = app();
+            app.module = Some(ModuleId::Intel);
+            app.intel_page = IntelPage::Briefing;
+            app.intel_articles = vec![intel_brief_image_article("inference-actions", "")];
+            app.intel_brief_job = Some("exact-brief-job".into());
+            app.intel_brief_outputs.insert(
+                "intel_brief_claims".into(),
+                serde_json::json!({"claims":[{"id":"c1","text":"The board suspended service."}]}),
+            );
+            app.intel_brief_outputs.insert("intel_brief_inferences".into(), serde_json::json!({"inferences":[{"id":"i1","text":"Inspections may delay reopening.","support":"conditional","why":"Inspectors have not cleared the ferry.","limitations":["Clearance is still pending"]},{"id":"i2","text":"Exact second inference 東京 remains conditional.","support":"conditional","why":"The board withheld a reopening date.","limitations":["A completed inspection could change the outlook"]}]}));
+            app.intel_actors = (0..16)
+                .map(|i| argos_osint_core::atlas_metadata::ArticleActor {
+                    id: format!("actor-{i}"),
+                    display_name: format!("Named operator division {i}"),
+                    type_hint: "organization".into(),
+                    spellings: vec![],
+                    mentions: vec![],
+                })
+                .collect();
+            render(&mut app, width, height);
+            let order = super::super::ui::focus_order(&app);
+            let pos = |target| order.iter().position(|value| *value == target).unwrap();
+            assert!(pos(Target::IntelTopologyActor(0)) < pos(Target::IntelTopologyClaim(0)));
+            assert!(pos(Target::IntelTopologyClaim(0)) < pos(Target::IntelTopologyInference(0)));
+            app.set_focus(Target::IntelTopologyInference(1));
+            assert!(
+                app.scrolls.intel_extracted > 0,
+                "inference after actors is revealed"
+            );
+            let scroll = app.scrolls.intel_extracted;
+            render(&mut app, width, height);
+            assert!(app
+                .layout
+                .borrow()
+                .entries
+                .iter()
+                .any(|entry| entry.target == Target::IntelTopologyInference(1)));
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            let keyboard_seed = app.topology_state.seed.clone().unwrap();
+            assert!(
+                matches!(&keyboard_seed, TopologySeed::RetainedInference {local_id,text,job_id,..} if local_id == "i2" && text == "Exact second inference 東京 remains conditional." && job_id == "exact-brief-job")
+            );
+            app.activate_button(ButtonId::TopologyBack);
+            assert_eq!(app.module, Some(ModuleId::Intel));
+            assert_eq!(app.focus, Target::IntelTopologyInference(1));
+            assert_eq!(app.scrolls.intel_extracted, scroll);
+            render(&mut app, width, height);
+            click(&mut app, Target::IntelTopologyInference(1));
+            assert_eq!(app.topology_state.seed.as_ref(), Some(&keyboard_seed));
+            app.activate_button(ButtonId::TopologyBack);
+            app.set_focus(Target::IntelTopologyActor(15));
+            render(&mut app, width, height);
+            assert!(
+                app.layout
+                    .borrow()
+                    .entries
+                    .iter()
+                    .any(|entry| entry.target == Target::IntelTopologyActor(15)),
+                "actor tail remains independently reachable"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_topology_entry_uses_its_loaded_kind_instead_of_generic_nonclaim_state() {
+        for (kind, prefix) in [
+            ("inference", "inference:"),
+            ("link", "link:"),
+            ("related", "related:"),
+            ("legacy", "claim:"),
+        ] {
+            let mut app = app();
+            app.module = Some(ModuleId::Brain);
+            let memory = app
+                .store
+                .add_user_claim(
+                    "Loaded detail fixture",
+                    "fact",
+                    MemorySource {
+                        app: "test".into(),
+                        conversation_id: "typed-map".into(),
+                        message_id: None,
+                        reference: None,
+                    },
+                )
+                .unwrap();
+            assert!(app.open_memory_detail(&memory.id));
+            app.brain_detail_claim = false;
+            app.selected_insight = Some(recon::InsightView {
+                metadata: None,
+                memory_id: memory.id.clone(),
+                entity: String::new(),
+                predicate: String::new(),
+                object_value: String::new(),
+                topic: String::new(),
+                classification: kind.into(),
+                confidence: 0.0,
+                sources: vec![],
+                related: vec![],
+            });
+            app.activate_button(ButtonId::BrainMapTopology);
+            assert_eq!(
+                app.topology_state.seed.as_ref().unwrap().key(),
+                format!("{prefix}{}", memory.id)
+            );
+        }
     }
 
     #[test]

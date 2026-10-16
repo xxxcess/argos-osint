@@ -1,5 +1,7 @@
 # Brief Performance and a Unified Brain Memory Graph — checklist
 
+Historical implementation checklist. The current automatic brief uses claim-specific Classifier-selected evidence and publishes Claims, Inferences and Links separately; see [the maintained architecture](architecture.md#intel-brief-preparation-intel-brief-v2-dependency-graph). The chunk and final-only publication entries below record the prior implementation.
+
 Spec: "Argos — Brief Performance and a Unified Brain Memory Graph" (2026-10-13, audited main `a12bc9b`, schema 36).
 Branch `feat/brief-performance-unified-brain-graph` from origin/main `a12bc9b05ff314b15e89d0432489c130628bbecb`. Recheck at start: origin/main is identical to the audited SHA, so there is no drift. The §1 findings were reconfirmed in source: `BODY_WINDOW_BYTES=48_000`; `is_ambiguous` substring cues `share`/`related`; `insight_output_options` sends limits only for `JsonMode`; `MemoryKind` has `AtomicClaim` plus legacy kinds; schema 36.
 

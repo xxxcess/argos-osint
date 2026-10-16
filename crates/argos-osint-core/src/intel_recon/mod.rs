@@ -5,6 +5,7 @@ mod body;
 pub(crate) mod body_filter;
 mod brain;
 pub mod brief_canonical;
+pub mod brief_context;
 pub mod brief_contracts;
 pub mod brief_fidelity;
 pub mod brief_pipeline;

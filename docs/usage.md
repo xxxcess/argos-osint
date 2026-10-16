@@ -49,14 +49,14 @@ Turn flow, bindings, and citations: [architecture.md](architecture.md).
 Atlas headline board: tabs, day filter, search, hero story.
 
 - Enter → Focus Brief: extracted facts, article reader, Related and brief Jobs.
-- Left: Confidence, Claims, Inferences, Actors and Links.
+- Left: Confidence, Actors, Claims, Inferences and Links. Activate a Claim or Inference record to map its exact Brain topology.
 - Middle: preview/image, Visit/Reload, bordered Full Article, then bordered Related.
 - Right: Tags, Country and brief preparation Jobs. Compact pages expose Extracted, Reader and Context.
 - Related has its own cursor and scroll; focus reveals its panel. Wheel and PageUp/PageDown scroll its rows before the middle stack. See more stays anchored.
 
 Intel Focus Brief shows Confidence above Claims: an Admiralty badge with Source, Information and Brief rating. The deterministic rating averages unique supported claims and inferences, collapses copied support roots and penalizes explicit refutations; it is a support score, not a truth probability. Source-only B6 is 60 provisional, F6 is N/A, empty completed assessment is N/A and all-refuted is 0. Pending/failed replacements retain the previous rating with a label. Actors from stored title/description mentions are visible before claims and during refresh. Scroll the extracted column to reach every Actor; Related is beneath Full Article in the reader. Full article has a clipped border in loading, empty, error and long-text states, with independent scrolling and See more. Tags/Country/Jobs remain visible in the context column.
 
-Visiting a brief requests initial analysis only after complete retained article details are available. Jobs shows Waiting → Queued → Extracting → Published → Indexed and failure reasons. Article Recon reports are retired: no mode classification, report launch, BLUF or full-report selector. Independent Recon investigations remain available. Historical report artifacts are retained, and validated cached brief artifacts republish on the next normal visit without repeating extraction stages.
+Visiting a brief starts Full article and Claims independently. Inferences then use actor-mention sentences selected by Classifier for each claim, rather than article chunks. Each claim receives its own analysis request with associated actors and selected evidence; unsupported outlooks are withheld. Claims publish and queue indexing as soon as extraction completes, Inferences publish next, and Links publish last, each updating only that kind. A later failure leaves earlier results available. Jobs distinguishes extraction progress, publication, current-revision indexing and failure reasons. Article Recon reports are retired: no mode classification, report launch, BLUF or full-report selector. Independent Recon investigations remain available. Historical report artifacts are retained, and validated cached brief artifacts republish on the next normal visit without repeating extraction stages.
 
 In Intel, Ctrl+K → **Open extraction job** shows stage, completed/total windows and assessment batches, provider route/attempt, withheld items and the exact failure. Ctrl+K → **Retry extraction**, or the extraction job's **Retry extraction** button, admits one retry epoch for recoverable unfinished work and keeps completed compatible checkpoints. Visiting again or restarting does not retry exhausted work. A relevant model-route change admits replacement work using the captured old routes for comparison. Qualified items can publish while optional assessments remain withheld; missing mandatory coverage or all-withheld model failure keeps the previous snapshot. **Published** means Brain rows committed. **Indexed** means their current revisions were acknowledged; pending/disabled index work stays separate. Use **Retry index** on the failed index job in Jobs; reindexing cannot create insights that never published.
 
@@ -79,7 +79,7 @@ Compact detail graphs display Claim, Topic, Entity, Article and Source presentat
 #### Brain Memory Topology
 
 Activate a Brain claim-path or actor-group graph with Enter or a click. In an
-Intel Focus Brief, activate an individual claim or actor record. Each entry opens
+Intel Focus Brief, activate an individual Claim, Inference or Actor record. Each entry opens
 its own retained neighborhood at two hops; no global sample graph is substituted.
 
 - **Layout**: Graph first puts the canvas left (65%) and inspector right (35%) in a body of at least 132×32 cells; 100–131 columns uses 70%/30%. Shorter/narrower bodies expose Graph / Details / Controls pages. Below 60×18 retain Back and a size notice.

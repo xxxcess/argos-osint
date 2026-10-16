@@ -46,6 +46,14 @@ pub enum TopologySeed {
         text: String,
         job_id: String,
     },
+    RetainedInference {
+        run_id: String,
+        article_id: String,
+        revision: String,
+        local_id: String,
+        text: String,
+        job_id: String,
+    },
     RetainedActor {
         run_id: String,
         article_id: String,
@@ -98,6 +106,14 @@ impl TopologySeed {
                 job_id,
                 ..
             } => format!("retained-claim:{run_id}/{article_id}@{revision}:{job_id}:{local_id}"),
+            Self::RetainedInference {
+                run_id,
+                article_id,
+                revision,
+                local_id,
+                job_id,
+                ..
+            } => format!("retained-inference:{run_id}/{article_id}@{revision}:{job_id}:{local_id}"),
             Self::RetainedActor {
                 run_id,
                 article_id,
@@ -122,6 +138,7 @@ impl TopologySeed {
             Self::Topic(label) => format!("Topic {label}"),
             Self::Source { source_id, .. } => format!("Source {source_id}"),
             Self::RetainedClaim { text, .. } => text.clone(),
+            Self::RetainedInference { text, .. } => text.clone(),
             Self::RetainedActor { name, .. } => name.clone(),
         }
     }

@@ -1,0 +1,28 @@
+{
+  "reviewed_on": "2026-10-16",
+  "base_commit": "19321d1d9ef2b2d6fc4aafef6e8c47635819bb28",
+  "source_sha256": {
+    "crates/argos-osint-bin/src/tui/app.rs": "1671c047daf4d9b70943fa6f053d79b8d20ab8c73e4be264e650082f77da6d95",
+    "crates/argos-osint-bin/src/tui/topology.rs": "5e9e9666292fee57f6eb1eded679367c09a67e19ac4893c9b7d87f52f7d56a7e",
+    "crates/argos-osint-bin/src/tui/ui.rs": "d9ba99ec36b51e613f595770da30c43e4e565301411ba0d9826285f0bfdacce6",
+    "crates/argos-osint-core/src/brain_topology.rs": "a214d309d080497cd7b38cf61a47504921a7cd18ca6037326f84997e715f076d",
+    "crates/argos-osint-core/src/brain_topology_query.rs": "357c1b105f0c92d324f850a684ad56ea2ac3f8ef5bcf33de29d2d05af5613ec3",
+    "crates/argos-osint-core/src/brain_topology_tests.rs": "e09ce3240ea77bc2c4620a2e31025a171f9cc9737053145f41bb577b5ecd47c0",
+    "crates/argos-osint-core/src/intel_recon/brief_canonical.rs": "b6ed9fb984d846c3ac55c17e92a51b70834adda2fe488790ff285cdc463c62c4",
+    "crates/argos-osint-core/src/intel_recon/brief_canonical_tests.rs": "437b49663174740baf26ef470db86c0e0f14293ec258e45151603cb227c2d863",
+    "crates/argos-osint-core/src/intel_recon/brief_context.rs": "7766ec02586d9a5dcdab2a530a7ff9c5cf82ea54e737f5034c4f56a18e1f7d6f",
+    "crates/argos-osint-core/src/intel_recon/brief_context_tests.rs": "a6d5b3838242ab68205f036c60599270327a9ac315f2c7676505b862ce58486d",
+    "crates/argos-osint-core/src/intel_recon/brief_contracts.rs": "5c493530c0a2342a1d8db7d595bbbf6dcffb61bdd8cb0e40d10686734d25ec4c",
+    "crates/argos-osint-core/src/intel_recon/brief_pipeline.rs": "961e57189fb39f5ddc16e46d91075e351b5d2aa64b91449da08bcecba386ec01",
+    "crates/argos-osint-core/src/intel_recon/brief_stages.rs": "cce243d9b347122680a871da05f89df34f3b7c893e09f760a14c11d8064337de",
+    "crates/argos-osint-core/src/intel_recon/brief_stages_tests.rs": "58714a3e1e16ace5261d156fe2df5bba0c625e299a423e9f78999dcecac2ffde",
+    "crates/argos-osint-core/src/intel_recon/mod.rs": "d10acf5e137967a1bf1b3ae8fb2dba8e29b00ac6fd960d00979a57837f410ab9",
+    "crates/argos-osint-core/src/investigation/insight_persist.rs": "2c7b33d9d0cd4808e88e9a217515cbf4cbff8882a9c6003b8a4456c0a3847f60",
+    "crates/argos-osint-core/src/investigation/insight_reliability_tests.rs": "01c91453841be0af0d9065a1ad12e60f1f7031f9f499ad965ac67e7999c7b836"
+  },
+  "png_sha256": {
+    "claims-published-after-inference-failure-160x50.png": "a189e6e964ee5ee1cba7ba9e0088a8593514b5aa8bd3c97cd57723a0fc2f82d2",
+    "selected-inference-80x24.png": "6fcae96ca0ee1cc7b30110a3f2a57afbaebf2cee8439285765ce44e71260d3e4"
+  },
+  "visual_review": "All 14 selected capture PNGs inspected; 2 retained here. See README for separate visual, interaction, metric and limitation results."
+}

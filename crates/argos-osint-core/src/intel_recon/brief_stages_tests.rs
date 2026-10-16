@@ -10,7 +10,7 @@ const DESC: &str =
 
 fn story() -> String {
     format!(
-        "{TITLE}\n\nBy Zoë Kowalski\n\n{}\n\nThe harbour master confirmed on Monday that the ferry's insurance certificate expired last week, a detail absent from the headline.\n\n{}",
+        "{TITLE}\n\nBy Zoë Kowalski\n\n{}\n\nFollowing the suspension, the operator's harbour master confirmed on Monday that the ferry's insurance certificate expired last week, a detail absent from the headline.\n\n{}",
         "Officials said the crossing would stay closed while engineers inspected the vessel, and passengers were offered refunds or alternative sailings later in the month. ".repeat(4),
         "The company declined to say when the route would reopen, and regulators said an inquiry remained possible if the inspection found defects. ".repeat(4)
     )
@@ -99,6 +99,12 @@ struct Mock {
     delay: Option<Duration>,
     related: Vec<AtlasArticleRow>,
     assessed: Arc<Mutex<usize>>,
+    fidelity_items: Arc<Mutex<Vec<crate::intel_recon::brief_fidelity::FidelityItem>>>,
+    reject_denied_inference: bool,
+    classified: Arc<Mutex<Vec<crate::intel_recon::brief_context::ContextBatch>>>,
+    context_started: Arc<AtomicUsize>,
+    reject_context: bool,
+    invalid_context: bool,
     forced: bool,
 }
 
@@ -199,11 +205,19 @@ impl StageBackend for Mock {
     ) -> BoxFut<'a, Result<HashMap<String, String>>> {
         Box::pin(async move {
             *self.assessed.lock().unwrap() += items.len();
+            self.fidelity_items.lock().unwrap().extend(items.clone());
             assert!(items.len() <= crate::intel_recon::brief_fidelity::BATCH);
             Ok(items
                 .into_iter()
                 .map(|i| {
-                    let label = if i.passages.is_empty() || i.text.contains("UNFAITHFUL") {
+                    let label = if i.passages.is_empty()
+                        || i.text.contains("UNFAITHFUL")
+                        || (self.reject_denied_inference
+                            && i.kind == "inference"
+                            && i.passages.iter().any(|p| {
+                                p.contains("Counterevidence:")
+                                    && p.contains("denied the insurance certificate")
+                            })) {
                         "insufficient"
                     } else {
                         "faithful"
@@ -215,6 +229,45 @@ impl StageBackend for Mock {
     }
     fn related(&mut self, _a: &AtlasArticleRow) -> Result<Vec<AtlasArticleRow>> {
         Ok(self.related.clone())
+    }
+    fn classify_context<'a>(
+        &'a mut self,
+        _ctx: &'a StageContext,
+        batch: crate::intel_recon::brief_context::ContextBatch,
+        cancel: &'a Arc<AtomicBool>,
+    ) -> BoxFut<'a, Result<HashMap<String, String>>> {
+        Box::pin(async move {
+            ensure!(!cancel.load(Ordering::Acquire), "cancelled");
+            self.context_started.fetch_add(1, Ordering::AcqRel);
+            self.classified.lock().unwrap().push(batch.clone());
+            if self.hang.contains("intel_brief_context") {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+            if self.invalid_context {
+                return Ok(HashMap::from([(
+                    "invented-sentence".into(),
+                    "support".into(),
+                )]));
+            }
+            Ok(batch
+                .candidates
+                .into_iter()
+                .map(|s| {
+                    let relation = if self.reject_context || s.text.contains("unrelated") {
+                        "irrelevant"
+                    } else if s.text.contains("corrected") || s.text.contains("denied") {
+                        "counterevidence"
+                    } else if s.text.contains("insurance certificate") {
+                        "support"
+                    } else {
+                        "context"
+                    };
+                    (s.id, relation.to_string())
+                })
+                .collect())
+        })
     }
     fn generate<'a>(
         &mut self,
@@ -288,7 +341,7 @@ impl StageBackend for Mock {
             }
             if mock.filter_inference_evidence && request.stage == "intel_brief_inferences" {
                 let user: Value = serde_json::from_str(&request.user)?;
-                let ids: HashSet<&str> = user["CLEAN_ARTICLE_BODY"]
+                let ids: HashSet<&str> = user["CONTEXT_SENTENCES"]
                     .as_array()
                     .unwrap()
                     .iter()
@@ -296,11 +349,12 @@ impl StageBackend for Mock {
                     .collect();
                 let mut out: Value = serde_json::from_str(&response)?;
                 out["inferences"].as_array_mut().unwrap().retain(|i| {
-                    i["body_evidence_ids"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .all(|id| ids.contains(id.as_str().unwrap()))
+                    i["premise_claim_ids"] == json!([user["CLAIM"]["id"]])
+                        && i["body_evidence_ids"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .all(|id| ids.contains(id.as_str().unwrap()))
                 });
                 return Ok(out.to_string());
             }
@@ -363,35 +417,38 @@ async fn one_chain_ordered_dispatch_scoped_inputs_and_no_repeat_requests() {
         [
             "intel_brief_claims",
             "intel_brief_inferences",
+            "intel_brief_inferences",
             "intel_brief_links"
         ]
     );
     assert_eq!(
         seen.iter().map(|s| s.tokens).collect::<Vec<_>>(),
-        [2048, 3072, 1536]
+        [2048, 3072, 3072, 1536]
     );
     // §5 stage budget table: Claims/Links thinking off, Inferences efficient.
     {
         use crate::request_policy::ReasoningEffort::{Efficient, Off};
         assert_eq!(
             seen.iter().map(|s| s.reasoning).collect::<Vec<_>>(),
-            [Off, Efficient, Off]
+            [Off, Efficient, Efficient, Off]
         );
         assert_eq!(
             seen.iter()
                 .map(|s| (s.budget.answer, s.budget.thinking))
                 .collect::<Vec<_>>(),
-            [(2048, 4096), (3072, 6144), (1536, 3584)]
+            [(2048, 4096), (3072, 6144), (3072, 6144), (1536, 3584)]
         );
         assert_eq!(seen[1].budget.reasoning_budget, Some(1024));
         assert_eq!(seen[1].budget.budgeted_ceiling, Some(4096));
     }
     // Every generation stage carries its authoritative schema, and the
     // compact limit text rides in the prompt.
-    for (s, name) in seen
-        .iter()
-        .zip(["brief_claims", "brief_inferences", "brief_leads"])
-    {
+    for (s, name) in seen.iter().zip([
+        "brief_claims",
+        "brief_inferences",
+        "brief_inferences",
+        "brief_leads",
+    ]) {
         match &s.contract {
             Some(crate::provider_adapters::ResponseContract::GeneratedJson {
                 name: n,
@@ -405,15 +462,15 @@ async fn one_chain_ordered_dispatch_scoped_inputs_and_no_repeat_requests() {
     assert!(seen[0].user.contains("Unions denied"));
     assert!(!seen[0].user.contains("harbour master"));
     assert!(!seen[0].user.contains("Baltic ferry insurance lapsed"));
-    // Inferences: exact clean artifact sentences + claim anchors; no related metadata.
+    // Each claim is analyzed separately with selected original body sentences.
     let store = Store::open(&db.path).unwrap();
     let body = stage_output(&store, &job, "intel_brief_body").unwrap();
-    for s in sentences("b", body["markdown"].as_str().unwrap()) {
-        assert!(seen[1]
-            .user
-            .contains(&serde_json::to_string(&s.text).unwrap()[1..s.text.len().min(40)]));
-    }
-    assert!(seen[1].user.contains("\"c1\"") && !seen[1].user.contains("regulator says"));
+    assert!(seen[1].user.contains("insurance certificate"));
+    assert!(seen[1].user.contains("\"c1\"") && !seen[1].user.contains("\"c2\""));
+    assert!(seen[2].user.contains("\"c2\"") && !seen[2].user.contains("\"c1\""));
+    assert!(seen[1..3]
+        .iter()
+        .all(|s| !s.user.contains("CLEAN_ARTICLE_BODY") && !s.user.contains("regulator says")));
     // A body detail absent from the headline supports an inference, not a claim.
     let claims = stage_output(&store, &job, "intel_brief_claims").unwrap();
     assert!(!claims.to_string().contains("insurance"));
@@ -424,13 +481,13 @@ async fn one_chain_ordered_dispatch_scoped_inputs_and_no_repeat_requests() {
         ..span["end_byte"].as_u64().unwrap() as usize]
         .contains("insurance certificate"));
     // Links: related metadata only, self + syndicated copy excluded.
-    assert!(!seen[2].user.contains("harbour master"));
+    assert!(!seen[3].user.contains("harbour master"));
     assert!(
-        seen[2].user.contains("r1")
-            && !seen[2].user.contains("r2")
-            && !seen[2].user.contains("Syndicated")
+        seen[3].user.contains("r1")
+            && !seen[3].user.contains("r2")
+            && !seen[3].user.contains("Syndicated")
     );
-    assert!(seen[2].system.starts_with(LINKS_PROMPT));
+    assert!(seen[3].system.starts_with(LINKS_PROMPT));
     let links = stage_output(&store, &job, "intel_brief_links").unwrap();
     assert_eq!(links["leads"][0]["article_id"], "a2");
     // Reopen: attaches to the completed chain and issues no requests.
@@ -485,7 +542,14 @@ async fn stage_three_failure_keeps_predecessors_and_retry_runs_only_stage_three(
         .iter()
         .map(|s| s.stage.clone())
         .collect();
-    assert_eq!(after, ["intel_brief_inferences", "intel_brief_links"]);
+    assert_eq!(
+        after,
+        [
+            "intel_brief_inferences",
+            "intel_brief_inferences",
+            "intel_brief_links"
+        ]
+    );
     assert_eq!(mock.prepared, 1);
     assert!(rows(&db.path, &job)
         .iter()
@@ -513,6 +577,209 @@ async fn empty_inferences_complete_and_links_finish_locally() {
     let r = rows(&db.path, &job);
     assert_eq!(r[2], "Completed · no supported inferences");
     assert_eq!(r[3], "Completed · no supported inferences");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_claims_skip_context_and_inference_requests() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.responses
+        .insert("intel_brief_claims".into(), vec![r#"{"claims":[]}"#.into()]);
+    drain(
+        &db.path,
+        "w1",
+        &mut mock,
+        &Arc::new(AtomicBool::new(false)),
+        &cfg(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(mock.requests().len(), 1);
+    assert!(mock.classified.lock().unwrap().is_empty());
+    let output = stage_output(
+        &Store::open(&db.path).unwrap(),
+        &job,
+        "intel_brief_inferences",
+    )
+    .unwrap();
+    assert_eq!(output["analysis_requests"], json!(0));
+    assert_eq!(output["inferences"], json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_relevant_context_still_analyzes_every_claim_without_body_fallback() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.reject_context = true;
+    drain(
+        &db.path,
+        "w1",
+        &mut mock,
+        &Arc::new(AtomicBool::new(false)),
+        &cfg(),
+    )
+    .await
+    .unwrap();
+    assert!(!mock.classified.lock().unwrap().is_empty());
+    let requests: Vec<_> = mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.stage == "intel_brief_inferences")
+        .collect();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        let user: Value = serde_json::from_str(&request.user).unwrap();
+        assert_eq!(user["CONTEXT_SENTENCES"], json!([]));
+        assert!(request
+            .system
+            .contains("Empty selected context cannot support a conclusion"));
+        assert!(!request.user.contains("insurance certificate"));
+        assert!(!request.user.contains("CLEAN_ARTICLE_BODY"));
+    }
+    let output = stage_output(
+        &Store::open(&db.path).unwrap(),
+        &job,
+        "intel_brief_inferences",
+    )
+    .unwrap();
+    assert_eq!(output["analysis_requests"], json!(2));
+    assert_eq!(output["inferences"], json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_classifier_decisions_fail_closed_before_synthesis() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.invalid_context = true;
+    let outcomes = drain(
+        &db.path,
+        "w1",
+        &mut mock,
+        &Arc::new(AtomicBool::new(false)),
+        &cfg(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcomes.last(), Some(StageOutcome::Failed { operation, .. }) if operation == "intel_brief_inferences")
+    );
+    assert!(mock
+        .requests()
+        .iter()
+        .all(|r| r.stage == "intel_brief_claims"));
+    assert!(stage_output(
+        &Store::open(&db.path).unwrap(),
+        &job,
+        "intel_brief_inferences"
+    )
+    .is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inference_assessor_receives_selected_denial_even_when_synthesis_omits_it() {
+    let db = db();
+    let job = ensure_chain(
+        &Store::open(&db.path).unwrap().conn,
+        &inputs("counterevidence"),
+        &now(),
+    )
+    .unwrap();
+    let mut mock = Mock::happy();
+    mock.body = Some(format!("{}\n\nThe operator denied the insurance certificate had expired, correcting the harbour master's earlier account of the suspension.", story()));
+    mock.reject_denied_inference = true;
+    let proposal: Value =
+        serde_json::from_str(&mock.responses["intel_brief_inferences"][0]).unwrap();
+    assert_eq!(proposal["inferences"][0]["counterevidence_ids"], json!([]));
+    let outcomes = drain(
+        &db.path,
+        "w1",
+        &mut mock,
+        &Arc::new(AtomicBool::new(false)),
+        &cfg(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| matches!(o, StageOutcome::Committed { .. })),
+        "{outcomes:?}"
+    );
+    let assessed = mock.fidelity_items.lock().unwrap();
+    let inference = assessed
+        .iter()
+        .find(|item| item.kind == "inference")
+        .unwrap();
+    assert!(inference
+        .passages
+        .iter()
+        .any(|p| p.contains("confirmed") && p.contains("insurance certificate")));
+    assert!(
+        inference
+            .passages
+            .iter()
+            .any(|p| p.starts_with("Counterevidence:")
+                && p.contains("denied the insurance certificate")),
+        "the assessor must see the source correction despite the missing model citation"
+    );
+    let mut without_denial = inference.clone();
+    without_denial
+        .passages
+        .retain(|p| !p.starts_with("Counterevidence:"));
+    assert_ne!(
+        inference.receipt_key(),
+        without_denial.receipt_key(),
+        "support-only fidelity receipts cannot certify corrected evidence"
+    );
+    let output = stage_output(
+        &Store::open(&db.path).unwrap(),
+        &job,
+        "intel_brief_inferences",
+    )
+    .unwrap();
+    assert_eq!(output["inferences"], json!([]));
+    assert_eq!(output["withheld"], json!(1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancellation_drops_the_context_classifier_without_committing_inferences() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.hang.insert("intel_brief_context".into());
+    let started = mock.context_started.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stop = cancel.clone();
+    let path = db.path.clone();
+    let runner = tokio::spawn(async move {
+        drain(&path, "w1", &mut mock, &cancel, &cfg())
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while started.load(Ordering::Acquire) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    stop.store(true, Ordering::Release);
+    let outcomes = tokio::time::timeout(Duration::from_secs(5), runner)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(outcomes.last(), Some(StageOutcome::Stale { operation }) if operation == "intel_brief_inferences")
+    );
+    assert!(stage_output(
+        &Store::open(&db.path).unwrap(),
+        &job,
+        "intel_brief_inferences"
+    )
+    .is_err());
 }
 
 // Stage 1 admission: incomplete acquisition fails and blocks dependents.
@@ -711,9 +978,9 @@ async fn stale_worker_output_is_fenced_after_epoch_change() {
     assert!(note.is_some_and(|n| n.contains("renewal failed")));
 }
 
-// Long bodies: independent small chunks, three in flight, complete coverage.
+// Article length does not multiply analysis requests or send unrelated prose.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn long_body_is_fully_covered_by_concurrent_chunks() {
+async fn long_body_uses_bounded_selected_context_and_one_request_per_claim() {
     let db = db();
     let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
     let mut mock = Mock::happy();
@@ -722,12 +989,10 @@ async fn long_body_is_fully_covered_by_concurrent_chunks() {
         long.push_str(&format!("\n\nParagraph {i}: inspectors recorded hull measurements at berth {i} and filed their notes with the port authority before noon."));
     }
     long.push_str("\n\nFinal note: the operator later corrected its statement about the storm.");
+    long.push_str("\n\nThe unrelated auditor denied a budget variance in a separate dispute.");
     mock.body = Some(long);
-    mock.inference_barrier = Some(Arc::new(tokio::sync::Barrier::new(INFERENCE_CONCURRENCY)));
+    mock.inference_barrier = Some(Arc::new(tokio::sync::Barrier::new(2)));
     mock.delay = Some(Duration::from_millis(20));
-    let one = r#"{"inferences":[{"id":"i1","text":"Inspection is extensive.","premise_claim_ids":["c1"],"body_evidence_ids":["b1"],"support":"supported","why":"Many berths were inspected.","limitations":[]}]}"#;
-    mock.responses
-        .insert("intel_brief_inferences".into(), vec![one.into()]);
     let cancel = Arc::new(AtomicBool::new(false));
     tokio::time::timeout(
         Duration::from_secs(120),
@@ -736,49 +1001,62 @@ async fn long_body_is_fully_covered_by_concurrent_chunks() {
     .await
     .unwrap()
     .unwrap();
-    let windows: Vec<Seen> = mock
+    let analyses: Vec<Seen> = mock
         .requests()
         .into_iter()
         .filter(|s| s.stage == "intel_brief_inferences")
         .collect();
-    assert!(windows.len() > INFERENCE_CONCURRENCY);
-    assert!(windows
+    assert_eq!(analyses.len(), 2);
+    assert!(analyses
         .iter()
-        .all(|w| !w.user.contains("PRIOR_WINDOW_PROPOSALS")));
-    assert_eq!(
-        mock.inference_peak.load(Ordering::Acquire),
-        INFERENCE_CONCURRENCY
-    );
+        .all(|w| !w.user.contains("PRIOR_WINDOW_PROPOSALS")
+            && !w.user.contains("CLEAN_ARTICLE_BODY")
+            && !w.user.contains("Paragraph 499")
+            && !w.user.contains("unrelated auditor")
+            && w.system.len() + w.user.len() <= CLAIM_INFERENCE_REQUEST_BYTES));
+    assert_eq!(mock.inference_peak.load(Ordering::Acquire), 2);
     assert_eq!(mock.inference_active.load(Ordering::Acquire), 0);
-    assert!(windows
-        .last()
-        .unwrap()
-        .user
-        .contains("corrected its statement"));
+    assert!(analyses
+        .iter()
+        .any(|w| w.user.contains("corrected its statement")));
+    let classified = mock.classified.lock().unwrap();
+    assert!(classified.iter().any(|batch| batch
+        .candidates
+        .iter()
+        .any(|s| s.text.contains("unrelated auditor"))));
+    assert!(classified.iter().all(
+        |batch| batch.payload_bytes() <= crate::intel_recon::brief_context::CONTEXT_BATCH_BYTES
+    ));
     let store = Store::open(&db.path).unwrap();
     let inf = stage_output(&store, &job, "intel_brief_inferences").unwrap();
     let body = stage_output(&store, &job, "intel_brief_body").unwrap();
     let (original, _) = crate::intel_recon::sentence_index::body_sentences(&body);
-    let sent: Vec<String> = windows
+    let sent: HashSet<String> = analyses
         .iter()
         .flat_map(|w| {
             let user: Value = serde_json::from_str(&w.user).unwrap();
-            let body = user["CLEAN_ARTICLE_BODY"].as_array().unwrap();
-            assert!(
-                body.iter().map(|s| s.to_string().len() + 1).sum::<usize>()
-                    <= INFERENCE_CHUNK_BYTES
-            );
+            let body = user["CONTEXT_SENTENCES"].as_array().unwrap();
             body.iter()
                 .map(|s| s["id"].as_str().unwrap().to_string())
                 .collect::<Vec<_>>()
         })
         .collect();
-    assert_eq!(
-        sent,
-        original.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
-        "every original sentence exactly once, in source order"
+    assert!(
+        sent.len() < original.len() / 4,
+        "unrelated article prose stays local"
     );
-    assert_eq!(inf["windows"].as_u64().unwrap() as usize, windows.len());
+    assert_eq!(inf["analysis_requests"], json!(2));
+    assert_eq!(inf["path"], json!("claim_context"));
+    let receipts: HashSet<String> = inf["analysis_sentence_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        sent, receipts,
+        "publication knows exactly which sentences Synthesis saw"
+    );
     assert!(inf["inferences"].as_array().unwrap().len() <= MAX_INFERENCES);
 }
 
@@ -878,32 +1156,170 @@ fn exact_dedup_preserves_different_conditions_for_semantic_selection() {
 }
 
 #[test]
-fn inference_chunks_preserve_unicode_and_oversized_sentences() {
-    let body = sentences(
-        "b",
-        &format!(
-            "Zoë confirmed the finding. {}. Final correction.",
-            "界".repeat(INFERENCE_CHUNK_BYTES)
-        ),
-    );
-    let chunks = inference_windows(&body, INFERENCES_PROMPT, &json!({"claims":[]}));
-    assert_eq!(chunks.concat(), body);
-    assert_eq!(chunks.len(), 3);
+fn claim_scoped_inferences_require_the_assigned_premise_and_offered_sentences() {
+    let source = "Zoë confirmed an insurance certificate lapse. Unrelated context.";
+    let body = sentences("b", source);
+    let good = inferences_ok("b1");
+    let out = validate_claim_inferences(&good, "c1", &body[..1]).unwrap();
+    let span = &out["inferences"][0]["evidence"][0];
     assert_eq!(
-        inference_windows(&[], INFERENCES_PROMPT, &json!({})),
-        vec![Vec::<Sentence>::new()]
+        span,
+        &json!({"id":"b1","start_byte":body[0].start_byte,"end_byte":body[0].end_byte})
+    );
+    assert_eq!(
+        &source[span["start_byte"].as_u64().unwrap() as usize
+            ..span["end_byte"].as_u64().unwrap() as usize],
+        body[0].text
+    );
+    assert!(validate_claim_inferences(&good, "c2", &body[..1]).is_err());
+    assert!(validate_claim_inferences(&good.replace("[\"c1\"]", "[]"), "c1", &body[..1]).is_err());
+    assert!(validate_claim_inferences(
+        &good.replace("[\"c1\"]", "[\"c1\",\"c1\"]"),
+        "c1",
+        &body[..1]
+    )
+    .is_err());
+    assert!(validate_claim_inferences(&inferences_ok("b2"), "c1", &body[..1]).is_err());
+    assert!(validate_claim_inferences(&good, "c1", &[]).is_err());
+    assert!(validate_claim_inferences(
+        r#"{"inferences":[],"empty_reason":"No relevant evidence was selected."}"#,
+        "c1",
+        &[]
+    )
+    .is_ok());
+}
+
+#[test]
+fn server_owned_counterevidence_keeps_exact_spans_when_the_model_omits_citations() {
+    let source = "The certificate expired. The operator denied the certificate had expired.";
+    let body = sentences("b", source);
+    let mut output = validate_claim_inferences(&inferences_ok("b1"), "c1", &body).unwrap();
+    retain_inference_counterevidence(&mut output, &body, &body[1..]).unwrap();
+    assert_eq!(output["inferences"][0]["body_evidence_ids"], json!(["b1"]));
+    assert_eq!(
+        output["inferences"][0]["counterevidence_ids"],
+        json!(["b2"])
+    );
+    let span = &output["inferences"][0]["counterevidence"][0];
+    assert_eq!(span["id"], json!("b2"));
+    assert_eq!(span["start_byte"], json!(body[1].start_byte));
+    assert_eq!(span["end_byte"], json!(body[1].end_byte));
+    assert_eq!(
+        &source[span["start_byte"].as_u64().unwrap() as usize
+            ..span["end_byte"].as_u64().unwrap() as usize],
+        body[1].text
     );
 }
 
+#[test]
+fn bounded_analysis_prioritizes_late_counterevidence_and_records_omissions() {
+    let mut clean = (0..80)
+        .map(|n| {
+            format!(
+                "The operator said the suspension required review number {n} with {}. ",
+                "documented inspection detail ".repeat(12)
+            )
+        })
+        .collect::<String>();
+    clean.push_str("The operator corrected its suspension account after the regulator denied the original explanation.");
+    let index = crate::intel_recon::sentence_index::SentenceIndex::local(&clean, "test");
+    let claim = json!({"id":"c1","text":"The operator said storms forced the suspension."});
+    let mut context =
+        crate::intel_recon::brief_context::claim_candidates(&index, &clean, &claim, &[]).unwrap();
+    assert!(
+        context.candidates.len() > 24,
+        "candidate selection does not discard later matches"
+    );
+    let labels: HashMap<String, String> = context
+        .candidates
+        .iter()
+        .map(|s| {
+            (
+                s.id.clone(),
+                if s.text.contains("corrected") {
+                    "counterevidence"
+                } else {
+                    "context"
+                }
+                .into(),
+            )
+        })
+        .collect();
+    let selected = context.candidates.iter().map(Sentence::from).collect();
+    let selected = bound_claim_context(&mut context, selected, &labels, INFERENCES_PROMPT).unwrap();
+    assert!(selected.iter().any(|s| s.text.contains("corrected")));
+    assert!(selected.len() < context.candidates.len());
+    assert!(context
+        .omitted
+        .iter()
+        .any(|s| s.reason == "analysis_context_budget"));
+    assert!(
+        claim_inferences_user(&context, &selected, &labels).len() + INFERENCES_PROMPT.len()
+            <= CLAIM_INFERENCE_REQUEST_BYTES
+    );
+    assert!(selected
+        .windows(2)
+        .all(|pair| pair[0].start_byte < pair[1].start_byte));
+}
+
+#[test]
+fn analysis_context_dedup_preserves_currency_signs_case_and_relation() {
+    let source = [
+        "The operator denied losing $5 million.",
+        "The operator denied losing €5 million.",
+        "The operator denied losing +5 million.",
+        "The operator denied losing -5 million.",
+        "The operator denied losing $5 million.",
+        "the operator denied losing $5 million.",
+        "The operator denied losing $5 million.",
+    ]
+    .join("\n\n");
+    let index = crate::intel_recon::sentence_index::SentenceIndex::local(&source, "test");
+    let mut context = crate::intel_recon::brief_context::claim_candidates(
+        &index,
+        &source,
+        &json!({"id":"c1","text":"The operator denied a loss."}),
+        &[],
+    )
+    .unwrap();
+    let selected = index.wire_sentences(&source);
+    let mut labels: HashMap<String, String> = selected
+        .iter()
+        .map(|sentence| (sentence.id.clone(), "counterevidence".into()))
+        .collect();
+    labels.insert("b7".into(), "support".into());
+    let retained = bound_claim_context(&mut context, selected, &labels, INFERENCES_PROMPT).unwrap();
+    assert_eq!(
+        retained
+            .iter()
+            .map(|sentence| sentence.id.as_str())
+            .collect::<Vec<_>>(),
+        ["b1", "b2", "b3", "b4", "b6", "b7"]
+    );
+    assert_eq!(
+        context.omitted,
+        [crate::intel_recon::brief_context::OmittedSentence {
+            id: "b5".into(),
+            reason: "duplicate_selected_sentence".into()
+        }],
+        "only identical text with the same relation is deduplicated"
+    );
+    for sentence in retained {
+        assert_eq!(
+            &source[sentence.start_byte..sentence.end_byte],
+            sentence.text
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn concurrent_chunk_failure_or_cancellation_drops_siblings_without_partial_commit() {
+async fn concurrent_claim_failure_or_cancellation_drops_siblings_without_partial_commit() {
     for cancel_stage in [false, true] {
         let db = db();
         let job =
             ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
         let mut mock = Mock::happy();
-        mock.body = Some(story().repeat(50));
-        mock.inference_barrier = Some(Arc::new(tokio::sync::Barrier::new(INFERENCE_CONCURRENCY)));
+        mock.inference_barrier = Some(Arc::new(tokio::sync::Barrier::new(2)));
         if cancel_stage {
             mock.hang.insert("intel_brief_inferences".into());
         } else {
@@ -921,7 +1337,7 @@ async fn concurrent_chunk_failure_or_cancellation_drops_siblings_without_partial
             (outcomes, mock)
         });
         tokio::time::timeout(Duration::from_secs(30), async {
-            while started.load(Ordering::Acquire) < INFERENCE_CONCURRENCY {
+            while started.load(Ordering::Acquire) < 2 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -937,7 +1353,7 @@ async fn concurrent_chunk_failure_or_cancellation_drops_siblings_without_partial
         assert_eq!(
             active.load(Ordering::Acquire),
             0,
-            "all in-flight chunks dropped"
+            "all in-flight claim analyses dropped"
         );
         let store = Store::open(&db.path).unwrap();
         assert!(stage_output(&store, &job, "intel_brief_inferences").is_err());
@@ -948,14 +1364,27 @@ async fn concurrent_chunk_failure_or_cancellation_drops_siblings_without_partial
             );
             assert_eq!(
                 started.load(Ordering::Acquire),
-                INFERENCE_CONCURRENCY,
-                "no further chunks after failure"
+                2,
+                "no further claim analyses after failure"
             );
             brief_pipeline::retry_stage(&store.conn, &job, &now()).unwrap();
             mock.fail.clear();
-            drain(&db.path, "w2", &mut mock, &stop, &cfg())
-                .await
-                .unwrap();
+            // The two-party barrier synchronizes only the failed epoch.
+            // Retry's cumulative dispatch counter must not re-enter it.
+            mock.inference_barrier = None;
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                drain(&db.path, "w2", &mut mock, &stop, &cfg()),
+            )
+            .await
+            .expect("claim inference retry must finish without first-epoch barriers")
+            .unwrap();
+            assert_eq!(
+                started.load(Ordering::Acquire),
+                4,
+                "two failed and two successful claim analyses"
+            );
+            assert_eq!(active.load(Ordering::Acquire), 0);
             assert!(stage_output(&store, &job, "intel_brief_inferences").is_ok());
             assert_eq!(mock.prepared, 1, "roots reused on retry");
         }
@@ -1068,23 +1497,40 @@ fn shortlist_excludes_source_dedupes_syndication_and_caps_at_twelve() {
     assert!(list.iter().all(|c| c.article.id.starts_with('x')));
 }
 
-// Final Stage-4 publication: combined snapshot + leads, newer generation wins.
+// Every successful analytical stage publishes independently; newer inputs win.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stage_four_publishes_snapshot_and_leads_and_new_inputs_replace_them() {
     let db = db();
     let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
     let cancel = Arc::new(AtomicBool::new(false));
-    // Nothing is published before Stage 4 commits.
     let mut partial = Mock::happy();
+    partial.fail.insert("intel_brief_inferences".into());
     partial.fail.insert("intel_brief_links".into());
     drain(&db.path, "w1", &mut partial, &cancel, &cfg())
         .await
         .unwrap();
     {
         let store = Store::open(&db.path).unwrap();
-        assert!(brief_pipeline::published_brief(&store.conn, "a1")
+        let (_, claims, inferences) = brief_pipeline::published_brief(&store.conn, "a1")
             .unwrap()
-            .is_none());
+            .unwrap();
+        assert_eq!(claims["claims"].as_array().unwrap().len(), 2);
+        assert_eq!(inferences["inferences"].as_array().map_or(0, Vec::len), 0);
+        brief_pipeline::retry_stage(&store.conn, &job, &now()).unwrap();
+    }
+    partial.fail.remove("intel_brief_inferences");
+    drain(&db.path, "w1", &mut partial, &cancel, &cfg())
+        .await
+        .unwrap();
+    {
+        let store = Store::open(&db.path).unwrap();
+        let (_, _, inferences) = brief_pipeline::published_brief(&store.conn, "a1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(inferences["inferences"].as_array().unwrap().len(), 1);
+        assert!(brief_pipeline::published_leads(&store.conn, "a1")
+            .unwrap()
+            .is_empty());
         brief_pipeline::retry_stage(&store.conn, &job, &now()).unwrap();
     }
     let mut mock = Mock::happy();
@@ -1133,6 +1579,25 @@ fn input_revision_tracks_metadata_and_roles() {
     let mut b = a.clone();
     b.description.push_str(" Update.");
     assert_ne!(base, input_revision(&b, &s));
+}
+
+#[test]
+fn canonical_preparation_rejects_a_url_changed_after_the_captured_snapshot() {
+    let db = db();
+    let store = Store::open(&db.path).unwrap();
+    let original = article_for(&store, "a1").unwrap();
+    let mut input = inputs("source-fence");
+    input.metadata = metadata_snapshot(&original);
+    ensure_chain(&store.conn, &input, &now()).unwrap();
+    let _body = claim_next(&db.path, "w1", &cfg()).unwrap().unwrap();
+    let claims = claim_next(&db.path, "w2", &cfg()).unwrap().unwrap();
+    assert_eq!(claims.operation, "intel_brief_claims");
+    let mut changed = original;
+    changed.url = "https://different.test/replaced-source".into();
+    store.atlas_upsert_article(&changed).unwrap();
+    let output: Value = serde_json::from_str(&claims_ok()).unwrap();
+    let error = prepare_canonical(&store, &claims, &output).unwrap_err();
+    assert!(error.contains("source revision changed"), "{error}");
 }
 
 // Fidelity: batched, scoped, cached; non-faithful items are withheld.
@@ -1264,7 +1729,7 @@ async fn sqlite_contention_and_publication_delay_keep_leases_and_commit_once() {
         .all(|o| matches!(o, StageOutcome::Committed { .. })));
     assert_eq!(
         mock.requests().len(),
-        3,
+        4,
         "no repeated successful stage calls"
     );
     let store = Store::open(&db.path).unwrap();
@@ -1320,7 +1785,7 @@ async fn overlapping_live_drainers_execute_each_stage_once() {
             "intel_brief_links"
         ]
     );
-    assert_eq!(a.requests().len() + b.requests().len(), 3);
+    assert_eq!(a.requests().len() + b.requests().len(), 4);
     assert_eq!(a.prepared + b.prepared, 1);
     assert!(rows(&db.path, &job)
         .iter()
@@ -1462,6 +1927,23 @@ fn route_changes_move_only_their_own_node_revision() {
     assert_eq!(claims[0], after[0]);
     assert_ne!(claims[1], after[1]);
     assert_eq!(claims[2..], after[2..]);
+
+    // Context classification is routed independently from inference Synthesis.
+    s.defaults.classifier.model = "context-classifier-fixture".into();
+    let classifier = stage_revisions(&a, &s);
+    assert_ne!(
+        classifier[0], claims[0],
+        "body cleanup already uses Classifier"
+    );
+    assert_eq!(
+        classifier[1], claims[1],
+        "claim extraction routing is stable"
+    );
+    assert_ne!(
+        classifier[2], claims[2],
+        "context decisions invalidate Inferences"
+    );
+    assert_eq!(classifier[3], claims[3]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

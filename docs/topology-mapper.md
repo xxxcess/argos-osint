@@ -13,12 +13,13 @@ display a sample graph.
 | Brain claim-path graph | The open canonical Claim ID. Activate the graph pane with Enter or a click. |
 | Brain actor-group graph | Exact group name and retained member IDs; a display group does not merge canonical identities. |
 | Intel Focus Brief claim | Exact article, run, revision, publication job and snapshot-local claim identity. Resolve through its matching publication/derivation. |
+| Intel Focus Brief inference | Exact article, run, revision, publication job and snapshot-local inference identity; resolves to its current canonical Inference independently of Links completion. |
 | Intel Focus Brief actor | Exact article metadata revision and scoped actor reference. Metadata-only actors remain actionable without extracted claims. |
 
 Intel entries preserve typed records through formatting and measure the whole
 visible wrapped record for focus and pointer targets. Display labels are never
 parsed as IDs. Missing canonical publication retains an exact source projection
-and reports its unresolved state; opening topology creates no memories and runs
+and reports its unresolved state, preserving Claim versus Inference type; opening topology creates no memories and runs
 no models. Relational data remains usable while vector indexing is pending.
 
 Selection changes the inspector. Recenter, including an edge endpoint action,
@@ -78,7 +79,7 @@ authoritative `Store::memories_changed_seq`.
 
 Discover neighbors in both endpoint directions while retaining each relationship's
 stable direction. Traverse typed actor references, mentions, Links/Related,
-inference premises, derivations and evidence. Resolve snapshot-local IDs only
+inference premises, derivations and evidence. Canonical publication persists actor bindings on Claims and premise-derived actor associations on Inferences, retaining their kind and provenance. Each stage enqueues changed canonical records through the existing index outbox; new canonical premise writes use indexed relational evidence references for topology adjacency, which remains available while vector acknowledgments are pending. Historical rows without canonical relational receipts retain typed-JSON/local-ID fallback, resolved against the original carried snapshot and source revision. Resolve snapshot-local IDs only
 inside their exact publication. Validate current artifact/URL/time identity
 before attributing historical content to a current article. Group membership
 retains member attribution and does not assert identity. Cycle scope follows
@@ -105,7 +106,7 @@ record is a separate state. Unknown coverage is unavailable rather than zero.
 Scope analysis remains an explicit separate action. Verified canonical Claims
 supply inference premises; canonical Actor references are revalidated. Links may
 use canonical Claim/Actor/Inference or exact Article/Source endpoints. Retained
-Claim/Actor projections are browse data, not canonical memory endpoints. This change does not modify Atlas
+Claim/Inference/Actor projections are browse data, not canonical memory endpoints. This change does not modify Atlas
 classification-only collection, independent Intel/Recon publication, provider
 policy or schema.
 

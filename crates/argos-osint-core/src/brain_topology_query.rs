@@ -28,12 +28,66 @@ fn sql_literal(value: &str) -> String {
 
 /// Match retained metadata content, URL and publication time, rather than
 /// assigning today's article revision to a historical derivation by owner ID.
-fn current_metadata_sql(snapshot: &str, article: &str) -> String {
-    format!("EXISTS(SELECT 1 FROM json_each(CASE WHEN json_valid({snapshot}.inputs_json) THEN json_extract({snapshot}.inputs_json,'$.source_refs') ELSE '[]' END) topology_ref JOIN nlp_artifacts topology_artifact ON topology_artifact.hash=json_extract(topology_ref.value,'$.artifact_hash') WHERE json_extract(topology_ref.value,'$.source_id')='article:'||{article}.article_id AND topology_artifact.text={article}.title||char(10)||{article}.description AND json_extract(topology_ref.value,'$.url')={article}.url AND COALESCE(json_extract(topology_ref.value,'$.published_at'),'')={article}.published_at)")
+fn carried_kinds_sql(snapshot: &str) -> String {
+    format!("CASE WHEN json_valid({snapshot}.readiness_json) THEN COALESCE(json_extract({snapshot}.readiness_json,'$.carried_kinds'),'[]') ELSE '[]' END")
+}
+
+fn source_snapshot_sql(snapshot: &str, kind: &str) -> String {
+    let carried = carried_kinds_sql(snapshot);
+    format!("COALESCE((SELECT NULLIF(json_extract(topology_carried.value,'$.source_snapshot_id'),'') FROM json_each({carried}) topology_carried WHERE json_extract(topology_carried.value,'$.kind')={kind} LIMIT 1),{snapshot}.id)")
+}
+
+fn current_metadata_sql(snapshot: &str, article: &str, kind: &str) -> String {
+    let carried = carried_kinds_sql(snapshot);
+    let original = format!("CASE WHEN json_valid({snapshot}.inputs_json) THEN json_extract({snapshot}.inputs_json,'$.source_refs') ELSE '[]' END");
+    // A scoped publication carries the sibling kind's original retained
+    // metadata. Never assign the new kind's source revision to that sibling.
+    let refs = format!("COALESCE((SELECT json_extract(topology_carried.value,'$.inputs.source_refs') FROM json_each({carried}) topology_carried WHERE json_extract(topology_carried.value,'$.kind')={kind} LIMIT 1),{original})");
+    format!("EXISTS(SELECT 1 FROM json_each({refs}) topology_ref JOIN nlp_artifacts topology_artifact ON topology_artifact.hash=json_extract(topology_ref.value,'$.artifact_hash') WHERE json_extract(topology_ref.value,'$.source_id')='article:'||{article}.article_id AND topology_artifact.text={article}.title||char(10)||{article}.description AND json_extract(topology_ref.value,'$.url')={article}.url AND COALESCE(json_extract(topology_ref.value,'$.published_at'),'')={article}.published_at)")
+}
+
+/// New publications write canonical premise IDs in the existing indexed
+/// evidence relation. JSON payload/local-ID searches below remain necessary
+/// only for historical records without that relational receipt.
+pub(super) const INDEXED_PREMISE_INFERENCES_SQL: &str = "SELECT DISTINCT d.memory_id,d.id,e.premise_id FROM insight_derivation_evidence e INDEXED BY insight_evidence_memory JOIN insight_derivations d ON d.id=e.derivation_id WHERE e.memory_id=?1 AND e.premise_id<>'' AND e.premise_id NOT LIKE 'memory:%' AND d.insight_kind='inference' AND d.memory_id IS NOT NULL AND d.status NOT IN ('deleted','retired','rejected') ORDER BY d.memory_id,d.id,e.premise_id";
+
+/// A later publication failure does not erase an earlier kind's committed
+/// canonical snapshot. Successful per-kind receipts are fenced by exact job;
+/// callers additionally verify the current article metadata and local item.
+fn retained_canonical_state(
+    conn: &rusqlite::Connection,
+    article_id: &str,
+    job_id: &str,
+    kind: &str,
+) -> Result<Option<crate::intel_recon::brief_canonical::IndexState>> {
+    if let Some(state) = crate::intel_recon::brief_canonical::index_state(conn, article_id)?
+        .filter(|state| state.job_id == job_id && state.state == "indexed")
+    {
+        return Ok(Some(state));
+    }
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_state WHERE key=?1",
+            [format!(
+                "intel-brief-canonical-stage:{job_id}:intel_brief_{kind}s"
+            )],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(raw
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|receipt| serde_json::from_value(receipt["state"].clone()).ok())
+        .filter(|state: &crate::intel_recon::brief_canonical::IndexState| {
+            state.job_id == job_id && state.state == "indexed"
+        }))
 }
 
 fn memory_cycle_sql(memory: &str, cycle: &str) -> String {
-    let current = current_metadata_sql("topology_snapshot", "topology_article");
+    let current = current_metadata_sql(
+        "topology_snapshot",
+        "topology_article",
+        "topology_derivation.insight_kind",
+    );
     format!("(EXISTS(SELECT 1 FROM insight_derivations topology_derivation JOIN insight_snapshots topology_snapshot ON topology_snapshot.id=topology_derivation.snapshot_id JOIN atlas_articles topology_article ON topology_article.article_id=topology_snapshot.owner_id WHERE topology_derivation.memory_id={memory} AND topology_article.run_id={cycle} AND topology_derivation.status NOT IN ('deleted','retired','rejected') AND {current}) OR EXISTS(SELECT 1 FROM insight_sources topology_source JOIN insight_claims topology_claim ON topology_claim.fingerprint=topology_source.fingerprint WHERE topology_claim.memory_id={memory} AND topology_source.run_id={cycle} AND topology_source.deleted_origin=0) OR EXISTS(SELECT 1 FROM brain_actor_mentions topology_mention WHERE topology_mention.actor_id={memory} AND topology_mention.origin_kind='article' AND topology_mention.origin_scope={cycle}) OR EXISTS(SELECT 1 FROM brain_memory_actor_refs topology_actor_ref JOIN insight_derivations topology_derivation ON topology_derivation.memory_id=topology_actor_ref.memory_id JOIN insight_snapshots topology_snapshot ON topology_snapshot.id=topology_derivation.snapshot_id JOIN atlas_articles topology_article ON topology_article.article_id=topology_snapshot.owner_id WHERE topology_actor_ref.actor_id={memory} AND topology_article.run_id={cycle} AND topology_derivation.status NOT IN ('deleted','retired','rejected') AND {current}) OR EXISTS(SELECT 1 FROM brain_memory_actor_refs topology_actor_ref JOIN insight_claims topology_claim ON topology_claim.memory_id=topology_actor_ref.memory_id JOIN insight_sources topology_source ON topology_source.fingerprint=topology_claim.fingerprint WHERE topology_actor_ref.actor_id={memory} AND topology_source.run_id={cycle} AND topology_source.deleted_origin=0))")
 }
 
@@ -172,7 +226,11 @@ impl Query<'_> {
             ScopedRows::Article(column) => format!("c{column}={cycle}"),
             ScopedRows::Mention { kind, run } => format!("c{kind}='article' AND c{run}={cycle}"),
             ScopedRows::Evidence { source, revision } => {
-                let current = current_metadata_sql("topology_snapshot", "topology_article");
+                let current = current_metadata_sql(
+                    "topology_snapshot",
+                    "topology_article",
+                    "topology_derivation.insight_kind",
+                );
                 format!("EXISTS(SELECT 1 FROM insight_derivation_evidence topology_evidence JOIN insight_derivations topology_derivation ON topology_derivation.id=topology_evidence.derivation_id JOIN insight_snapshots topology_snapshot ON topology_snapshot.id=topology_derivation.snapshot_id JOIN atlas_articles topology_article ON topology_article.article_id=topology_snapshot.owner_id WHERE topology_evidence.source_id=c{source} AND topology_evidence.source_revision=c{revision} AND topology_article.run_id={cycle} AND topology_derivation.status NOT IN ('deleted','retired','rejected') AND {current})")
             }
             ScopedRows::Link(node) => {
@@ -199,9 +257,15 @@ impl Query<'_> {
         self.rows(&format!("WITH topology_rows({columns}) AS ({sql}) SELECT {columns} FROM topology_rows WHERE {predicate} ORDER BY {columns}"),parameters)
     }
 
-    fn snapshot_matches_article(&self, snapshot: &str, run: &str, article: &str) -> Result<bool> {
-        let current = current_metadata_sql("s", "a");
-        Ok(self.store.conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM insight_snapshots s JOIN atlas_articles a ON a.run_id=?2 AND a.article_id=?3 WHERE s.id=?1 AND s.owner_id=a.article_id AND s.owner_kind IN ('article','atlas') AND {current})"),params![snapshot,run,article],|r|r.get(0))?)
+    fn snapshot_matches_article(
+        &self,
+        snapshot: &str,
+        run: &str,
+        article: &str,
+        kind: &str,
+    ) -> Result<bool> {
+        let current = current_metadata_sql("s", "a", "?4");
+        Ok(self.store.conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM insight_snapshots s JOIN atlas_articles a ON a.run_id=?2 AND a.article_id=?3 WHERE s.id=?1 AND s.owner_id=a.article_id AND s.owner_kind IN ('article','atlas') AND {current})"),params![snapshot,run,article,kind],|r|r.get(0))?)
     }
     /// Every adjacency branch requests one extra row, so truncation is known.
     /// SQL is internal constant text; only the numeric bound is interpolated.
@@ -423,7 +487,7 @@ impl Query<'_> {
         }) = &n.topology_seed
         {
             if origin == "evidence" {
-                let current = current_metadata_sql("s", "a");
+                let current = current_metadata_sql("s", "a", "d.insight_kind");
                 return Ok(self.store.conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM insight_derivation_evidence e JOIN insight_derivations d ON d.id=e.derivation_id JOIN insight_snapshots s ON s.id=d.snapshot_id JOIN atlas_articles a ON a.article_id=s.owner_id WHERE e.source_id=?1 AND e.source_revision=?2 AND a.run_id=?3 AND d.status NOT IN ('deleted','retired','rejected') AND {current})"),params![source_id,revision,cycle],|r|r.get(0))?);
             }
             return Ok(false);
@@ -638,7 +702,7 @@ impl Query<'_> {
             }
         }
         // Direct provenance is independent of tentative Related article pairs.
-        let current = current_metadata_sql("s", "a");
+        let current = current_metadata_sql("s", "a", "d.insight_kind");
         let provenance_sql=format!("SELECT DISTINCT a.run_id,a.article_id,'insight_derivations:'||d.id FROM insight_derivations d JOIN insight_snapshots s ON s.id=d.snapshot_id LEFT JOIN insight_derivation_evidence e ON e.derivation_id=d.id JOIN atlas_articles a ON ((s.owner_kind IN ('article','atlas') AND s.owner_id=a.article_id) OR e.source_id='article:'||a.article_id) WHERE d.memory_id=?1 AND d.status NOT IN ('deleted','retired','rejected') AND {current} UNION SELECT a.run_id,a.article_id,'insight_sources:'||s.fingerprint||':'||s.answer_id||':'||s.call_id FROM insight_sources s JOIN insight_claims c ON c.fingerprint=s.fingerprint JOIN atlas_articles a ON (s.call_id=a.article_id OR s.call_id='article:'||a.article_id) AND (s.run_id=a.run_id OR s.run_id=a.article_id OR s.run_id IS NULL) WHERE c.memory_id=?1 AND s.deleted_origin=0 ORDER BY 1,2,3");
         for [run, id, receipt] in
             self.scoped_rows::<3>(&provenance_sql, [&n.id], ScopedRows::Article(0))?
@@ -692,7 +756,9 @@ impl Query<'_> {
 
     fn inference_neighbours(&mut self, n: &TopologyNode, out: &mut Vec<Adjacency>) -> Result<()> {
         if n.kind == TopologyNodeKind::Inference {
+            let mut canonical = false;
             if let Some(MemoryPayload::Inference(p)) = self.store.memory_payload(&n.id)? {
+                canonical = !p.premise_claims.is_empty();
                 if p.premise_claims.len() > self.limit {
                     self.exhausted = false;
                 }
@@ -716,23 +782,74 @@ impl Query<'_> {
                     }
                 }
             }
-            for [snapshot,json,receipt] in self.rows::<3>("SELECT snapshot_id,item_json,id FROM insight_derivations WHERE memory_id=?1 AND insight_kind='inference' AND status NOT IN ('deleted','retired','rejected') ORDER BY id", [&n.id])? {
+            // Per-derivation canonical receipts also preserve distinct
+            // assessed premises when sources share an inference memory.
+            for [id, receipt, local] in self.rows::<3>("SELECT DISTINCT e.memory_id,d.id,e.premise_id FROM insight_derivations d JOIN insight_derivation_evidence e ON e.derivation_id=d.id WHERE d.memory_id=?1 AND d.insight_kind='inference' AND d.status NOT IN ('deleted','retired','rejected') AND e.memory_id IS NOT NULL AND e.premise_id<>'' AND e.premise_id NOT LIKE 'memory:%' ORDER BY e.memory_id,d.id,e.premise_id",[&n.id])? {
+                if let Some(claim)=self.memory_node(&id)?.filter(|node|node.kind==TopologyNodeKind::Claim) {
+                    canonical=true;
+                    out.push((claim,edge(format!("premise:{id}:{}",n.id),&id,&n.id,TopologyEdgeKind::Premise,format!("{receipt}:premise={local}:canonical={id}"))));
+                }
+            }
+            if canonical {
+                // Never reinterpret local `c1` against a sibling's new Claims
+                // snapshot when canonical premise identities are available.
+                return Ok(());
+            }
+            let origin = source_snapshot_sql("s", "'inference'");
+            for [snapshot,json,receipt] in self.rows::<3>(&format!("SELECT {origin},i.item_json,i.id FROM insight_derivations i JOIN insight_snapshots s ON s.id=i.snapshot_id WHERE i.memory_id=?1 AND i.insight_kind='inference' AND i.status NOT IN ('deleted','retired','rejected') ORDER BY i.id"), [&n.id])? {
                 let value:Value=serde_json::from_str(&json)?;
                 if value["premise_claim_ids"].as_array().is_some_and(|premises|premises.len()>self.limit){self.exhausted=false;}
                 for premise in value["premise_claim_ids"].as_array().into_iter().flatten().take(self.limit) {
                     let Some(local)=premise.as_str() else {continue;};
-                    let id:Option<String>=self.store.conn.query_row("SELECT memory_id FROM insight_derivations WHERE id=?1 AND snapshot_id=?2 AND insight_kind='claim' AND status NOT IN ('deleted','retired','rejected')",params![format!("{snapshot}:{local}"),snapshot],|r| r.get(0)).optional()?.flatten();
-                    if let Some(c)=match id {Some(id)=>self.memory_node(&id)?,None=>None} {
+                    let indexed:Option<String>=self.store.conn.query_row("SELECT memory_id FROM insight_derivation_evidence WHERE derivation_id=?1 AND premise_id=?2 AND memory_id IS NOT NULL ORDER BY memory_id LIMIT 1",params![receipt,local],|r|r.get(0)).optional()?;
+                    let id:Option<String>=match indexed {Some(id)=>Some(id),None=>self.store.conn.query_row("SELECT memory_id FROM insight_derivations WHERE id=?1 AND snapshot_id=?2 AND insight_kind='claim' AND status NOT IN ('deleted','rejected')",params![format!("{snapshot}:{local}"),snapshot],|r| r.get(0)).optional()?.flatten()};
+                    if let Some(c)=match id {Some(id)=>self.memory_node(&id)?.filter(|node|node.kind==TopologyNodeKind::Claim),None=>None} {
                         let mut e=edge(format!("premise:{}:{}",c.id,n.id),&c.id,&n.id,TopologyEdgeKind::Premise,format!("{receipt}:premise={local}"));e.rationale=value["rationale"].as_str().unwrap_or("").into();out.push((c,e));
                     } else {self.gaps.insert(format!("{receipt}: unresolved snapshot-local premise {local}"));}
                 }
             }
         } else {
-            for [id] in self.scoped_rows::<1>("SELECT DISTINCT m.memory_id FROM memory_metadata m,json_each(CASE WHEN json_valid(m.payload_json) THEN json_extract(m.payload_json,'$.payload.premise_claims') ELSE '[]' END) p WHERE m.memory_kind='inference' AND m.lifecycle='active' AND p.value=?1 ORDER BY m.memory_id",[&n.id],ScopedRows::Memory(0))? {
+            for [id, receipt, local] in self.scoped_rows::<3>(
+                INDEXED_PREMISE_INFERENCES_SQL,
+                [&n.id],
+                ScopedRows::Memory(0),
+            )? {
+                if let Some(i) = self
+                    .memory_node(&id)?
+                    .filter(|node| node.kind == TopologyNodeKind::Inference)
+                {
+                    out.push((
+                        i,
+                        edge(
+                            format!("premise:{}:{id}", n.id),
+                            &n.id,
+                            &id,
+                            TopologyEdgeKind::Premise,
+                            format!("{receipt}:premise={local}:canonical={}", n.id),
+                        ),
+                    ));
+                }
+            }
+            for [id] in self.scoped_rows::<1>("SELECT DISTINCT m.memory_id FROM memory_metadata m,json_each(CASE WHEN json_valid(m.payload_json) THEN json_extract(m.payload_json,'$.payload.premise_claims') ELSE '[]' END) p WHERE m.memory_kind='inference' AND m.lifecycle='active' AND p.value=?1 AND NOT EXISTS(SELECT 1 FROM insight_derivation_evidence e INDEXED BY insight_evidence_memory JOIN insight_derivations d ON d.id=e.derivation_id WHERE e.memory_id=?1 AND e.premise_id<>'' AND e.premise_id NOT LIKE 'memory:%' AND d.memory_id=m.memory_id AND d.insight_kind='inference' AND d.status NOT IN ('deleted','retired','rejected')) ORDER BY m.memory_id",[&n.id],ScopedRows::Memory(0))? {
                 if let Some(i)=self.memory_node(&id)? {out.push((i.clone(),edge(format!("premise:{}:{id}",n.id),&n.id,&id,TopologyEdgeKind::Premise,format!("memory_metadata:{id}@{}",i.revision))));}
             }
-            for [id,receipt,local] in self.scoped_rows::<3>("SELECT DISTINCT i.memory_id,i.id,p.value FROM insight_derivations c JOIN insight_derivations i ON i.snapshot_id=c.snapshot_id,json_each(CASE WHEN json_valid(i.item_json) THEN json_extract(i.item_json,'$.premise_claim_ids') ELSE '[]' END) p WHERE c.memory_id=?1 AND c.insight_kind='claim' AND i.insight_kind='inference' AND i.memory_id IS NOT NULL AND c.status NOT IN ('deleted','retired','rejected') AND i.status NOT IN ('deleted','retired','rejected') AND c.id=c.snapshot_id||':'||p.value ORDER BY i.memory_id,i.id,p.value",[&n.id],ScopedRows::Memory(0))? {
-                if let Some(i)=self.memory_node(&id)? {out.push((i,edge(format!("premise:{}:{id}",n.id),&n.id,&id,TopologyEdgeKind::Premise,format!("{receipt}:premise={local}"))));}
+            let origin = source_snapshot_sql("s", "'inference'");
+            let legacy_sql=format!("SELECT DISTINCT i.memory_id,i.id,p.value FROM insight_derivations c JOIN insight_derivations i JOIN insight_snapshots s ON s.id=i.snapshot_id LEFT JOIN memory_metadata m ON m.memory_id=i.memory_id,json_each(CASE WHEN json_valid(i.item_json) THEN json_extract(i.item_json,'$.premise_claim_ids') ELSE '[]' END) p WHERE c.memory_id=?1 AND c.insight_kind='claim' AND i.insight_kind='inference' AND i.memory_id IS NOT NULL AND c.status NOT IN ('deleted','rejected') AND i.status NOT IN ('deleted','retired','rejected') AND c.snapshot_id={origin} AND c.id=c.snapshot_id||':'||p.value AND NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN m.memory_kind='inference' AND json_valid(m.payload_json) THEN json_extract(m.payload_json,'$.payload.premise_claims') ELSE '[]' END)) AND NOT EXISTS(SELECT 1 FROM insight_derivation_evidence e WHERE e.derivation_id=i.id AND e.premise_id=p.value AND e.memory_id IS NOT NULL) ORDER BY i.memory_id,i.id,p.value");
+            for [id, receipt, local] in
+                self.scoped_rows::<3>(&legacy_sql, [&n.id], ScopedRows::Memory(0))?
+            {
+                if let Some(i) = self.memory_node(&id)? {
+                    out.push((
+                        i,
+                        edge(
+                            format!("premise:{}:{id}", n.id),
+                            &n.id,
+                            &id,
+                            TopologyEdgeKind::Premise,
+                            format!("{receipt}:premise={local}"),
+                        ),
+                    ));
+                }
             }
         }
         Ok(())
@@ -743,7 +860,7 @@ impl Query<'_> {
             if !revision.is_empty() && revision!=n.revision {self.gaps.insert(format!("{}: stale actor mention {aid}@{revision}",n.id));continue;}
             if let Some(a)=self.memory_node(&aid)? {let mut e=edge(format!("mention:{aid}:article:{}:{}:{revision}",n.run_id,n.article_id),&a.id,&n.id,TopologyEdgeKind::MentionedIn,format!("brain_actor_mentions:{aid}:article:{}/{}@{revision}\n{receipt}",n.run_id,n.article_id));e.member_ids.push(aid);out.push((a,e));}
         }
-        let current = current_metadata_sql("s", "a");
+        let current = current_metadata_sql("s", "a", "d.insight_kind");
         let provenance_sql=format!("SELECT DISTINCT d.memory_id,'insight_derivations:'||d.id FROM insight_derivations d JOIN insight_snapshots s ON s.id=d.snapshot_id LEFT JOIN insight_derivation_evidence e ON e.derivation_id=d.id JOIN atlas_articles a ON a.article_id=?1 AND a.run_id=?2 WHERE d.memory_id IS NOT NULL AND d.status NOT IN ('deleted','retired','rejected') AND ((s.owner_kind IN ('article','atlas') AND s.owner_id=?1) OR e.source_id='article:'||?1) AND {current} UNION SELECT c.memory_id,'insight_sources:'||s.fingerprint||':'||s.answer_id||':'||s.call_id FROM insight_claims c JOIN insight_sources s ON s.fingerprint=c.fingerprint WHERE s.deleted_origin=0 AND (s.call_id=?1 OR s.call_id='article:'||?1) AND (s.run_id=?2 OR s.run_id=?1 OR s.run_id IS NULL) ORDER BY 1,2");
         for [id, receipt] in self.scoped_rows::<2>(
             &provenance_sql,
@@ -963,14 +1080,36 @@ impl Store {
                 local_id,
                 text,
                 job_id,
+            }
+            | TopologySeed::RetainedInference {
+                run_id,
+                article_id,
+                revision,
+                local_id,
+                text,
+                job_id,
             } => {
                 if let Some(article) = q.article_node(run_id, article_id, revision)? {
-                    let publication:Option<(String,String)>=self.conn.query_row("SELECT p.job_id,p.claims_json FROM intel_brief_publications p JOIN intel_brief_runs r ON r.job_id=p.job_id WHERE p.article_id=?1 AND p.job_id=?2 AND r.state='completed' AND NOT EXISTS(SELECT 1 FROM intel_brief_runs newer WHERE newer.article_id=r.article_id AND newer.generation>r.generation)",params![article_id,job_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                    let inference = matches!(seed, TopologySeed::RetainedInference { .. });
+                    let (kind, list, column, node_kind) = if inference {
+                        (
+                            "inference",
+                            "inferences",
+                            "inferences_json",
+                            TopologyNodeKind::Inference,
+                        )
+                    } else {
+                        ("claim", "claims", "claims_json", TopologyNodeKind::Claim)
+                    };
+                    // Earlier completed kinds remain canonical while later
+                    // stages run or fail. Fence the exact current job,
+                    // generation, item identity and retained article revision.
+                    let publication:Option<(String,String)>=self.conn.query_row(&format!("SELECT p.job_id,p.{column} FROM intel_brief_publications p JOIN intel_brief_runs r ON r.job_id=p.job_id WHERE p.article_id=?1 AND p.job_id=?2 AND r.article_id=p.article_id AND r.state IN ('active','completed','failed') AND NOT EXISTS(SELECT 1 FROM intel_brief_runs newer WHERE newer.article_id=r.article_id AND newer.generation>r.generation)"),params![article_id,job_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
                     let matches = publication
                         .as_ref()
                         .and_then(|(_, json)| serde_json::from_str::<Value>(json).ok())
                         .is_some_and(|v| {
-                            v["claims"]
+                            v[list]
                                 .as_array()
                                 .into_iter()
                                 .flatten()
@@ -979,15 +1118,19 @@ impl Store {
                     let mut canonical = None;
                     let mut projection_status = "retained source · not indexed";
                     if matches {
-                        if let Some(state) = crate::intel_recon::brief_canonical::index_state(
-                            &self.conn, article_id,
-                        )?
-                        .filter(|s| s.job_id == *job_id && s.state == "indexed")
+                        if let Some(state) =
+                            retained_canonical_state(&self.conn, article_id, job_id, kind)?
                         {
-                            let id:Option<String>=self.conn.query_row("SELECT memory_id FROM insight_derivations WHERE snapshot_id=?1 AND id=?2 AND insight_kind='claim' AND status='assessed'",params![state.snapshot_id,format!("{}:{local_id}",state.snapshot_id)],|r|r.get(0)).optional()?.flatten();
-                            if q.snapshot_matches_article(&state.snapshot_id, run_id, article_id)? {
+                            let id:Option<String>=self.conn.query_row("SELECT memory_id FROM insight_derivations WHERE snapshot_id=?1 AND id=?2 AND insight_kind=?3 AND status='assessed'",params![state.snapshot_id,format!("{}:{local_id}",state.snapshot_id),kind],|r|r.get(0)).optional()?.flatten();
+                            if q.snapshot_matches_article(
+                                &state.snapshot_id,
+                                run_id,
+                                article_id,
+                                kind,
+                            )? {
                                 if let Some(id) = id {
-                                    canonical = q.memory_node(&id)?;
+                                    canonical =
+                                        q.memory_node(&id)?.filter(|node| node.kind == node_kind);
                                 }
                             } else {
                                 projection_status =
@@ -999,9 +1142,9 @@ impl Store {
                     if let Some(n) = canonical {
                         roots.push(n);
                     } else {
-                        let mut n = node(seed.key(), TopologyNodeKind::Claim, text.clone());
+                        let mut n = node(seed.key(), node_kind, text.clone());
                         n.status = projection_status.into();
-                        n.subtype = "retained_claim".into();
+                        n.subtype = format!("retained_{kind}");
                         n.article_id = article_id.clone();
                         n.run_id = run_id.clone();
                         n.cycle = Some(run_id.clone());
@@ -1041,7 +1184,7 @@ impl Store {
                             );
                         }
                     }
-                    let current = current_metadata_sql("s", "origin_article");
+                    let current = current_metadata_sql("s", "origin_article", "d.insight_kind");
                     let actor_sql=format!("SELECT DISTINCT a.actor_id FROM brain_actors a WHERE (a.actor_id=?1 OR EXISTS(SELECT 1 FROM brain_actor_external_refs x WHERE x.actor_id=a.actor_id AND ((x.legacy_id=?1 AND x.scope IN ('atlas:'||?3,'recon_entities')) OR (?5<>'' AND x.legacy_id=?5 AND x.scope='atlas:'||?3)))) AND (EXISTS(SELECT 1 FROM brain_actor_mentions m WHERE m.actor_id=a.actor_id AND m.origin_kind='article' AND m.origin_scope=?2 AND m.origin_id=?3 AND m.origin_revision=?4) OR EXISTS(SELECT 1 FROM brain_memory_actor_refs r JOIN insight_derivations d ON d.memory_id=r.memory_id JOIN insight_snapshots s ON s.id=d.snapshot_id JOIN atlas_articles origin_article ON origin_article.run_id=?2 AND origin_article.article_id=?3 WHERE r.actor_id=a.actor_id AND s.owner_kind='article' AND s.owner_id=?3 AND d.status='assessed' AND {current})) ORDER BY a.actor_id");
                     let ids = q.rows::<1>(
                         &actor_sql,

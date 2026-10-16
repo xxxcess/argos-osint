@@ -1,5 +1,7 @@
 # Intel Brief — Sequential Preparation and Extraction — checklist
 
+Historical implementation checklist. The current automatic brief uses claim-specific Classifier-selected evidence and publishes Claims, Inferences and Links separately; see [the maintained architecture](architecture.md#intel-brief-preparation-intel-brief-v2-dependency-graph). The chunk and final-only publication entries below record the prior implementation.
+
 Spec: "Argos Intel Brief — Sequential Preparation and Extraction" (2026-10-13, audited main `bb0dc3a`).
 Branch `feat/intel-brief-sequential-preparation` from origin/main `bb0dc3a857f0afc300d0ed1e0170a52ede1b73c7`. Rechecked at phase 5: main has not moved, so no merge was needed.
 

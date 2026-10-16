@@ -244,6 +244,7 @@ impl TopologyState {
             .or_else(|| match self.seed.as_ref()? {
                 TopologySeed::Article { run_id, .. }
                 | TopologySeed::RetainedClaim { run_id, .. }
+                | TopologySeed::RetainedInference { run_id, .. }
                 | TopologySeed::RetainedActor { run_id, .. } => {
                     (!run_id.is_empty()).then(|| run_id.clone())
                 }

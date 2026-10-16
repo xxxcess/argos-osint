@@ -772,6 +772,353 @@ fn topology_intel_canonical_claim_resolution_fences_owner_local_id_and_generatio
 }
 
 #[test]
+fn topology_current_partial_brief_claim_and_inference_seed_reach_the_same_recorded_graph() {
+    let s = Store::memory().unwrap();
+    let source = article(&s, "current-cycle", "partial-brief");
+    let related = article(&s, "current-cycle", "related-context");
+    let actor_id = actor(&s, "Ferry Board", "article:partial-brief");
+    let claim_id = claim(&s, "Ferry Board suspended the route");
+    let inference_id = claim(&s, "The route could reopen after repairs");
+    actors::add_memory_actor_ref(
+        &s.conn,
+        &claim_id,
+        &actor_id,
+        "subject",
+        crate::memory_metadata::IdentityState::Provisional,
+        &serde_json::json!({"claim":"c1"}),
+    )
+    .unwrap();
+    let payload = crate::memory_metadata::MemoryPayload::Inference(
+        crate::memory_metadata::InferencePayload {
+            premise_claims: vec![claim_id.clone()],
+            actors: vec![crate::memory_metadata::ActorRef {
+                actor_id: actor_id.clone(),
+                role: "relevant".into(),
+                binding_state: crate::memory_metadata::IdentityState::Provisional,
+            }],
+            reasoning: "Repairs are the unresolved reopening condition".into(),
+            support_state: "faithful".into(),
+            ..Default::default()
+        },
+    );
+    s.conn.execute("UPDATE memory_metadata SET memory_kind='inference',payload_json=?2,payload_schema=1 WHERE memory_id=?1",rusqlite::params![inference_id,serde_json::to_string(&payload).unwrap()]).unwrap();
+    s.write_related_memory(&crate::memory_metadata::RelatedPayload {
+        source: EndpointRef::Memory {
+            memory_id: inference_id.clone(),
+            kind: MemoryKind::Inference,
+        },
+        target: EndpointRef::Article {
+            run_id: related.run_id.clone(),
+            article_id: related.id.clone(),
+            revision: crate::atlas_metadata::input_hash(&related),
+        },
+        basis: "metadata context lead".into(),
+        interpretation: "Possible repair schedule context".into(),
+        verification_gap: "Verify the full related article".into(),
+        shared_actors: vec![],
+        source_revisions: vec![],
+    })
+    .unwrap();
+    snapshot_receipt(&s, "partial-snapshot", &source.id);
+    derivation(
+        &s,
+        "partial-snapshot",
+        "c1",
+        &claim_id,
+        "claim",
+        serde_json::json!({"id":"c1","text":"Ferry Board suspended the route"}),
+    );
+    derivation(
+        &s,
+        "partial-snapshot",
+        "i1",
+        &inference_id,
+        "inference",
+        serde_json::json!({"id":"i1","text":"The route could reopen after repairs","premise_claim_ids":["c1"]}),
+    );
+    s.conn.execute("INSERT INTO intel_brief_runs(job_id,article_id,generation,contract,input_revision,state,created_at,updated_at) VALUES('partial-job',?1,1,'fixture','input','active','fixture','fixture')",[&source.id]).unwrap();
+    s.conn.execute("INSERT INTO intel_brief_publications(article_id,job_id,generation,contract,body_hash,snapshot_hash,claims_json,inferences_json,leads_json,published_at) VALUES(?1,'partial-job',1,'fixture','','snapshot',?2,?3,'[]','fixture')",rusqlite::params![source.id,serde_json::json!({"claims":[{"id":"c1","text":"Ferry Board suspended the route"}]}).to_string(),serde_json::json!({"inferences":[{"id":"i1","text":"The route could reopen after repairs"}]}).to_string()]).unwrap();
+    s.conn.execute("INSERT INTO app_state(key,value) VALUES(?1,?2)",rusqlite::params![crate::intel_recon::brief_canonical::state_key(&source.id),serde_json::json!({"publication_version":4,"state":"indexed","snapshot_id":"partial-snapshot","job_id":"partial-job","reason":""}).to_string()]).unwrap();
+    let claim_seed = TopologySeed::RetainedClaim {
+        run_id: source.run_id.clone(),
+        article_id: source.id.clone(),
+        revision: crate::atlas_metadata::input_hash(&source),
+        local_id: "c1".into(),
+        text: "Ferry Board suspended the route".into(),
+        job_id: "partial-job".into(),
+    };
+    let inference_seed = TopologySeed::RetainedInference {
+        run_id: source.run_id.clone(),
+        article_id: source.id.clone(),
+        revision: crate::atlas_metadata::input_hash(&source),
+        local_id: "i1".into(),
+        text: "The route could reopen after repairs".into(),
+        job_id: "partial-job".into(),
+    };
+    for state in ["active", "failed", "completed"] {
+        s.conn
+            .execute(
+                "UPDATE intel_brief_runs SET state=?1 WHERE job_id='partial-job'",
+                [state],
+            )
+            .unwrap();
+        let sequence = s.memories_changed_seq().unwrap();
+        for (seed, expected, kind) in [
+            (&claim_seed, &claim_id, TopologyNodeKind::Claim),
+            (&inference_seed, &inference_id, TopologyNodeKind::Inference),
+        ] {
+            let snapshot = s
+                .topology_snapshot(
+                    seed,
+                    &TopologyOptions {
+                        depth: 3,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(&snapshot.root_id, expected, "{state}");
+            assert_eq!(snapshot.root_kind, Some(kind));
+            for id in [&actor_id, &claim_id, &inference_id] {
+                assert!(contains(&snapshot, id), "{state}: {id}");
+            }
+            assert!(contains(&snapshot, "article:current-cycle/partial-brief"));
+            assert!(contains(&snapshot, "article:current-cycle/related-context"));
+            assert!(snapshot
+                .edges
+                .iter()
+                .any(|edge| edge.kind == TopologyEdgeKind::Premise
+                    && edge.from == claim_id
+                    && edge.to == inference_id));
+            assert!(snapshot
+                .edges
+                .iter()
+                .any(|edge| edge.kind == TopologyEdgeKind::Related && edge.status == "tentative"));
+            assert_closed(&snapshot);
+        }
+        assert_eq!(s.memories_changed_seq().unwrap(), sequence);
+    }
+    // A failed later canonical step changes the footer, but cannot hide a
+    // successful earlier kind's exact publication receipt.
+    for operation in ["intel_brief_claims", "intel_brief_inferences"] {
+        s.conn.execute("INSERT INTO app_state(key,value) VALUES(?1,?2)",rusqlite::params![format!("intel-brief-canonical-stage:partial-job:{operation}"),serde_json::json!({"snapshot_hash":"fixture","state":{"publication_version":4,"state":"indexed","snapshot_id":"partial-snapshot","job_id":"partial-job","reason":""}}).to_string()]).unwrap();
+    }
+    s.conn.execute("UPDATE app_state SET value=?2 WHERE key=?1",rusqlite::params![crate::intel_recon::brief_canonical::state_key(&source.id),serde_json::json!({"publication_version":4,"state":"failed","snapshot_id":"partial-snapshot","job_id":"partial-job","reason":"later Links publication failed"}).to_string()]).unwrap();
+    for (seed, expected) in [(&claim_seed, &claim_id), (&inference_seed, &inference_id)] {
+        assert_eq!(
+            &s.topology_snapshot(seed, &TopologyOptions::default())
+                .unwrap()
+                .root_id,
+            expected
+        );
+    }
+    let mut wrong_text = inference_seed.clone();
+    if let TopologySeed::RetainedInference { text, .. } = &mut wrong_text {
+        *text = "A changed inference is a different retained item".into();
+    }
+    let mismatch = s
+        .topology_snapshot(&wrong_text, &TopologyOptions::default())
+        .unwrap();
+    assert_eq!(mismatch.root_id, wrong_text.key());
+    assert_eq!(mismatch.root_kind, Some(TopologyNodeKind::Inference));
+    s.conn.execute("INSERT INTO intel_brief_runs(job_id,article_id,generation,contract,input_revision,state,created_at,updated_at) VALUES('newer-job',?1,2,'fixture','newer','active','fixture','fixture')",[&source.id]).unwrap();
+    let old = s
+        .topology_snapshot(&inference_seed, &TopologyOptions::default())
+        .unwrap();
+    assert_eq!(old.root_id, inference_seed.key());
+    assert_eq!(old.root_kind, Some(TopologyNodeKind::Inference));
+    assert!(old
+        .nodes
+        .iter()
+        .find(|node| node.is_root)
+        .unwrap()
+        .status
+        .contains("not indexed"));
+}
+
+#[test]
+fn topology_retained_inference_without_canonical_publication_keeps_its_kind_and_source() {
+    let s = Store::memory().unwrap();
+    let source = article(&s, "cycle", "not-published");
+    let seed = TopologySeed::RetainedInference {
+        run_id: source.run_id.clone(),
+        article_id: source.id.clone(),
+        revision: crate::atlas_metadata::input_hash(&source),
+        local_id: "i1".into(),
+        text: "A conditional retained inference".into(),
+        job_id: "unpublished-job".into(),
+    };
+    let before = s.memories_changed_seq().unwrap();
+    let snapshot = s
+        .topology_snapshot(&seed, &TopologyOptions::default())
+        .unwrap();
+    assert_eq!(snapshot.root_id, seed.key());
+    assert_eq!(snapshot.root_kind, Some(TopologyNodeKind::Inference));
+    let root = snapshot.nodes.iter().find(|node| node.is_root).unwrap();
+    assert_eq!(root.subtype, "retained_inference");
+    assert!(root.status.contains("not indexed"));
+    assert!(snapshot
+        .edges
+        .iter()
+        .any(|edge| edge.kind == TopologyEdgeKind::Source && edge.to == root.id));
+    assert_eq!(s.memories_changed_seq().unwrap(), before);
+    assert_closed(&snapshot);
+}
+
+#[test]
+fn topology_carried_inference_never_rebinds_local_premise_or_source_to_new_claims() {
+    for mode in ["typed", "legacy", "indexed"] {
+        let s = Store::memory().unwrap();
+        let mut source = article(&s, "cycle", "carried-source");
+        snapshot_receipt(&s, "original", &source.id);
+        let old_claim = claim(&s, "The original closed route");
+        let new_claim = claim(&s, "A different newly opened route");
+        let inference = claim(&s, "The original route may reopen after repairs");
+        let payload = crate::memory_metadata::MemoryPayload::Inference(
+            crate::memory_metadata::InferencePayload {
+                premise_claims: if mode == "legacy" {
+                    vec![]
+                } else {
+                    vec![old_claim.clone()]
+                },
+                ..Default::default()
+            },
+        );
+        s.conn.execute("UPDATE memory_metadata SET memory_kind='inference',payload_json=?2,payload_schema=1 WHERE memory_id=?1",rusqlite::params![inference,serde_json::to_string(&payload).unwrap()]).unwrap();
+        derivation(
+            &s,
+            "original",
+            "c1",
+            &old_claim,
+            "claim",
+            serde_json::json!({"id":"c1"}),
+        );
+        s.conn
+            .execute(
+                "UPDATE insight_derivations SET status='retired' WHERE snapshot_id='original'",
+                [],
+            )
+            .unwrap();
+        let original_inputs: String = s
+            .conn
+            .query_row(
+                "SELECT inputs_json FROM insight_snapshots WHERE id='original'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        source.title = "New metadata describes a different event".into();
+        s.atlas_upsert_article(&source).unwrap();
+        snapshot_receipt(&s, "current", &source.id);
+        s.conn.execute("UPDATE insight_snapshots SET readiness_json=?1 WHERE id='current'",[serde_json::json!({"carried_kinds":[{"kind":"inference","source_snapshot_id":"original","inputs":serde_json::from_str::<serde_json::Value>(&original_inputs).unwrap()}]}).to_string()]).unwrap();
+        derivation(
+            &s,
+            "current",
+            "c1",
+            &new_claim,
+            "claim",
+            serde_json::json!({"id":"c1"}),
+        );
+        derivation(
+            &s,
+            "current",
+            "i1",
+            &inference,
+            "inference",
+            serde_json::json!({"id":"i1","premise_claim_ids":["c1"]}),
+        );
+        if mode == "indexed" {
+            s.conn.execute("INSERT INTO insight_derivation_evidence(derivation_id,source_id,source_revision,memory_id,premise_id,evidence_json) VALUES('current:i1','article:carried-source','original',?1,'c1','{}')",[&old_claim]).unwrap();
+            let plan = s
+                .conn
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    super::query::INDEXED_PREMISE_INFERENCES_SQL
+                ))
+                .unwrap()
+                .query_map([&old_claim], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                plan.iter()
+                    .any(|line| line.contains("insight_evidence_memory")),
+                "{plan:?}"
+            );
+        }
+        let options = TopologyOptions {
+            depth: 1,
+            ..Default::default()
+        };
+        let forward = s
+            .topology_snapshot(&TopologySeed::Inference(inference.clone()), &options)
+            .unwrap();
+        assert!(contains(&forward, &old_claim), "{mode}");
+        assert!(
+            !contains(&forward, &new_claim),
+            "{mode}: local c1 was rebound"
+        );
+        assert!(
+            !contains(&forward, "article:cycle/carried-source"),
+            "{mode}: old evidence assigned new article metadata"
+        );
+        let reverse = s
+            .topology_snapshot(&TopologySeed::Claim(old_claim.clone()), &options)
+            .unwrap();
+        assert!(
+            contains(&reverse, &inference),
+            "{mode}: old canonical premise lost reverse edge"
+        );
+        let wrong = s
+            .topology_snapshot(&TopologySeed::Claim(new_claim.clone()), &options)
+            .unwrap();
+        assert!(
+            !contains(&wrong, &inference),
+            "{mode}: new local c1 acquired false inference"
+        );
+    }
+}
+
+#[test]
+fn topology_shared_inference_unions_indexed_source_premises_with_current_payload() {
+    let s = Store::memory().unwrap();
+    let first = claim(&s, "Premise from source one");
+    let second = claim(&s, "Premise from source two");
+    let inference = claim(&s, "The same conclusion supported by separate sources");
+    let payload = crate::memory_metadata::MemoryPayload::Inference(
+        crate::memory_metadata::InferencePayload {
+            premise_claims: vec![second.clone()],
+            ..Default::default()
+        },
+    );
+    s.conn.execute("UPDATE memory_metadata SET memory_kind='inference',payload_json=?2,payload_schema=1 WHERE memory_id=?1",rusqlite::params![inference,serde_json::to_string(&payload).unwrap()]).unwrap();
+    snapshot_receipt(&s, "source-one", "unavailable-source");
+    derivation(
+        &s,
+        "source-one",
+        "i1",
+        &inference,
+        "inference",
+        serde_json::json!({"id":"i1","premise_claim_ids":["c1"]}),
+    );
+    s.conn.execute("INSERT INTO insight_derivation_evidence(derivation_id,source_id,source_revision,memory_id,premise_id,evidence_json) VALUES('source-one:i1','retained-source','revision',?1,'c1','{}')",[&first]).unwrap();
+    let options = TopologyOptions {
+        depth: 1,
+        ..Default::default()
+    };
+    let forward = s
+        .topology_snapshot(&TopologySeed::Inference(inference.clone()), &options)
+        .unwrap();
+    assert!(contains(&forward, &first) && contains(&forward, &second));
+    for premise in [first, second] {
+        assert!(contains(
+            &s.topology_snapshot(&TopologySeed::Claim(premise), &options)
+                .unwrap(),
+            &inference
+        ));
+    }
+}
+
+#[test]
 fn topology_cycle_scope_uses_origins_instead_of_creation_date_substrings() {
     let s = Store::memory().unwrap();
     let a = article(&s, "cycle-actual-a", "a");

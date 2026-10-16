@@ -22,7 +22,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Actor identity maintenance | Process | [actor-identity.html](diagrams/actor-identity.html) | [actor-identity.svg](diagrams/actor-identity.svg) |
 | Brain memory topology and scope | Architecture | [brain-topology.html](diagrams/brain-topology.html) | [brain-topology.svg](diagrams/brain-topology.svg) |
 | Intel brief / historical report states | State machine | [intel-job-states.html](diagrams/intel-job-states.html) | [intel-job-states.svg](diagrams/intel-job-states.svg) |
-| Intel brief preparation | Process | [intel-brief-chain.html](diagrams/intel-brief-chain.html) | [intel-brief-chain.svg](diagrams/intel-brief-chain.svg) |
+| Intel brief claim analysis and staged publication | Process | [intel-brief-chain.html](diagrams/intel-brief-chain.html) | [intel-brief-chain.svg](diagrams/intel-brief-chain.svg) |
 | Brain recall | Architecture | [brain-recall.html](diagrams/brain-recall.html) | [brain-recall.svg](diagrams/brain-recall.svg) |
 | Models and roles | Architecture | [model-roles.html](diagrams/model-roles.html) | [model-roles.svg](diagrams/model-roles.svg) |
 | Provider request scheduling | Data flow | [model-request-scheduling.html](diagrams/model-request-scheduling.html) | [model-request-scheduling.svg](diagrams/model-request-scheduling.svg) |

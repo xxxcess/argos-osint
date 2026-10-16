@@ -435,9 +435,8 @@ pub fn commit_stage(
     )
 }
 
-/// [`commit_stage`] carrying the prepared canonical inputs for the final stage,
-/// so brief publication, canonical Brain derivations and the index outbox share
-/// the one fenced transaction.
+/// [`commit_stage`] carrying the completed kind's prepared canonical inputs,
+/// so publication and the index outbox share the fenced stage transaction.
 pub fn commit_stage_with(
     conn: &Connection,
     claimed: &ClaimedTask,
@@ -466,32 +465,59 @@ pub fn commit_stage_with(
             "UPDATE intel_brief_runs SET state='completed',updated_at=?2 WHERE job_id=?1",
             params![claimed.job_id, now],
         )?;
-        if let Some((article_id, snapshot_hash)) = publish(&tx, &claimed.job_id, output_json, now)?
-        {
-            super::brief_canonical::publish_on(
-                &tx,
+    }
+    publish_completed_stage(&tx, &claimed.job_id, &claimed.operation, canonical, now)?;
+    tasks::refresh_job_state(&tx, &claimed.job_id, now)?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// Publish an immutable completed stage. Normal callers already hold the
+/// stage's lease fence; cache repair additionally rechecks the latest run.
+pub(crate) fn publish_completed_stage(
+    tx: &Connection,
+    job_id: &str,
+    operation: &str,
+    canonical: Option<&std::result::Result<super::brief_canonical::CanonicalBrief, String>>,
+    now: &str,
+) -> Result<()> {
+    if ![
+        "intel_brief_claims",
+        "intel_brief_inferences",
+        "intel_brief_links",
+    ]
+    .contains(&operation)
+    {
+        return Ok(());
+    }
+    let current: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM intel_brief_runs r JOIN argos_tasks t ON t.job_id=r.job_id
+         WHERE r.job_id=?1 AND t.operation=?2 AND t.state='completed' AND r.state IN ('active','completed','failed')
+         AND NOT EXISTS(SELECT 1 FROM intel_brief_runs n WHERE n.article_id=r.article_id AND n.generation>r.generation))",
+        params![job_id,operation], |r| r.get(0),
+    )?;
+    if current {
+        if let Some((article_id, snapshot_hash)) = publish(tx, job_id, operation, now)? {
+            super::brief_canonical::publish_stage_on(
+                tx,
                 &article_id,
-                &claimed.job_id,
+                job_id,
+                operation,
                 canonical,
                 &snapshot_hash,
                 now,
             )?;
         }
     }
-    tasks::refresh_job_state(&tx, &claimed.job_id, now)?;
-    tx.commit()?;
-    Ok(true)
+    Ok(())
 }
 
-/// Final Stage-4 publication, inside the fenced commit transaction: the
-/// combined validated snapshot (claims, inferences, leads) and its leads rows.
-/// The previous publication stays until this succeeds; an older generation
-/// never overwrites a newer one. Separate from canonical report snapshots, so
-/// a completed Recon report keeps precedence.
+/// Merge only the completed kind into the displayed brief. New generations
+/// cannot be overwritten by an old worker, and claims need no body receipt.
 fn publish(
     tx: &Connection,
     job_id: &str,
-    links_json: &str,
+    operation: &str,
     now: &str,
 ) -> Result<Option<(String, String)>> {
     let (article_id, generation): (String, i64) = tx.query_row(
@@ -500,33 +526,43 @@ fn publish(
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let output = |op: &str| -> Result<serde_json::Value> {
-        let raw: String = tx.query_row(
-            "SELECT output_json FROM intel_brief_stage_outputs WHERE task_id=?1",
-            [task_id(job_id, op)],
-            |r| r.get(0),
-        )?;
-        Ok(serde_json::from_str(&raw)?)
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT output_json FROM intel_brief_stage_outputs WHERE task_id=?1",
+                [task_id(job_id, op)],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(raw
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({})))
     };
     let body = output("intel_brief_body")?;
     let claims = output("intel_brief_claims")?;
     let inferences = output("intel_brief_inferences")?;
-    let links: serde_json::Value = serde_json::from_str(links_json)?;
-    let snapshot = serde_json::json!([body["content_hash"], claims, inferences, links]).to_string();
+    let links = output("intel_brief_links")?;
+    let snapshot = serde_json::json!([operation, output(operation)?]).to_string();
     let snapshot_hash = crate::nlp::cache::hash(&snapshot);
     let written = tx.execute(
         "INSERT INTO intel_brief_publications(article_id,job_id,generation,contract,body_hash,snapshot_hash,claims_json,inferences_json,leads_json,published_at)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-         ON CONFLICT(article_id) DO UPDATE SET job_id=excluded.job_id,generation=excluded.generation,contract=excluded.contract,body_hash=excluded.body_hash,snapshot_hash=excluded.snapshot_hash,claims_json=excluded.claims_json,inferences_json=excluded.inferences_json,leads_json=excluded.leads_json,published_at=excluded.published_at
+         ON CONFLICT(article_id) DO UPDATE SET job_id=excluded.job_id,generation=excluded.generation,contract=excluded.contract,body_hash=excluded.body_hash,snapshot_hash=excluded.snapshot_hash,
+         claims_json=CASE WHEN ?11='intel_brief_claims' THEN excluded.claims_json ELSE intel_brief_publications.claims_json END,
+         inferences_json=CASE WHEN ?11='intel_brief_inferences' THEN excluded.inferences_json ELSE intel_brief_publications.inferences_json END,
+         leads_json=CASE WHEN ?11='intel_brief_links' THEN excluded.leads_json ELSE intel_brief_publications.leads_json END,published_at=excluded.published_at
          WHERE excluded.generation>=intel_brief_publications.generation",
         params![
             article_id, job_id, generation, CONTRACT,
             body["content_hash"].as_str().unwrap_or(""),
             snapshot_hash,
-            claims.to_string(), inferences.to_string(), links["leads"].to_string(), now
+            claims.to_string(), inferences.to_string(), links["leads"].to_string(), now, operation
         ],
     )?;
     if written == 0 {
         return Ok(None);
+    }
+    if operation != "intel_brief_links" {
+        return Ok(Some((article_id, snapshot_hash)));
     }
     tx.execute(
         "DELETE FROM intel_inference_article_leads WHERE article_id=?1 AND source_generation<=?2",

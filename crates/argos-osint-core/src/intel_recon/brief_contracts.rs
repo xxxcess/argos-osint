@@ -77,7 +77,7 @@ pub fn inferences_schema<S: AsRef<str>, T: AsRef<str>>(claim_ids: &[S], body_ids
     let inference = object(json!({
         "id": {"type": "string"},
         "text": {"type": "string"},
-        "premise_claim_ids": id_array(claim_ids, 0),
+        "premise_claim_ids": id_array(claim_ids, 1),
         "body_evidence_ids": id_array(body_ids, 1),
         "support": {"type": "string", "enum": SUPPORT},
         "why": {"type": "string"},

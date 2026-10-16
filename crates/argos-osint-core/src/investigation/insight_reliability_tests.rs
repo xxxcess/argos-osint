@@ -366,13 +366,37 @@ async fn article_eight_five_eight_is_five_requests_atomic_publication_and_zero_r
         store
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM argos_index_changes WHERE record_kind='memory'",
+                "SELECT COUNT(*) FROM argos_index_changes c JOIN memory_metadata m ON m.memory_id=c.record_id WHERE c.record_kind='memory' AND m.memory_kind IN ('claim','inference')",
                 [],
                 |r| r.get::<_, usize>(0)
             )
             .unwrap(),
         13
     );
+    let expected_actors=store.conn.prepare("SELECT DISTINCT r.actor_id FROM brain_memory_actor_refs r JOIN insight_derivations d ON d.memory_id=r.memory_id JOIN insight_snapshots s ON s.id=d.snapshot_id WHERE s.owner_id='owner' AND d.status='assessed' ORDER BY r.actor_id").unwrap().query_map([],|r|r.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert!(
+        !expected_actors.is_empty(),
+        "published claims/inferences retain canonical actor dependencies"
+    );
+    let queued_actors=store.conn.prepare("SELECT DISTINCT c.record_id FROM argos_index_changes c JOIN memory_metadata m ON m.memory_id=c.record_id WHERE c.record_kind='memory' AND m.memory_kind='actor' ORDER BY c.record_id").unwrap().query_map([],|r|r.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(
+        queued_actors, expected_actors,
+        "every referenced canonical actor is indexed as a dependency, with no unrelated actor work"
+    );
+    for actor in expected_actors {
+        let text: String = store
+            .conn
+            .query_row("SELECT text FROM memories WHERE id=?1", [&actor], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let revision:String=store.conn.query_row("SELECT revision FROM argos_index_changes WHERE record_kind='memory' AND record_id=?1 AND operation='index_upsert' ORDER BY seq DESC LIMIT 1",[&actor],|r|r.get(0)).unwrap();
+        assert_eq!(
+            revision,
+            crate::store::memory_revision(&text),
+            "actor dependency requires its exact current canonical index revision"
+        );
+    }
     let progress = insight_execution::task_progress(&store.conn, &id)
         .unwrap()
         .unwrap();

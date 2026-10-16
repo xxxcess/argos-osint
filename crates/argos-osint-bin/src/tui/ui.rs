@@ -3156,6 +3156,7 @@ pub fn page(app: &mut App, direction: i32) {
                 app.focus,
                 Target::IntelLeftColumn
                     | Target::IntelTopologyClaim(_)
+                    | Target::IntelTopologyInference(_)
                     | Target::IntelTopologyActor(_)
             ) {
                 let max = intel_extracted_scroll_max(app);
@@ -3951,7 +3952,9 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             order.retain(|target| {
                 !matches!(
                     target,
-                    Target::IntelTopologyClaim(_) | Target::IntelTopologyActor(_)
+                    Target::IntelTopologyClaim(_)
+                        | Target::IntelTopologyInference(_)
+                        | Target::IntelTopologyActor(_)
                 )
             });
             let at = order
@@ -3961,9 +3964,10 @@ pub fn focus_order(app: &App) -> Vec<Target> {
             order.splice(
                 at..at,
                 layout
-                    .claim_records
+                    .actor_records
                     .iter()
-                    .chain(&layout.actor_records)
+                    .chain(&layout.claim_records)
+                    .chain(&layout.inference_records)
                     .map(|(_, target)| *target),
             );
         }
@@ -8076,7 +8080,17 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
             &layout.confidence_lines,
             0,
         );
-        // 1. claims
+        // 1. Actors remain visible throughout analytical refresh.
+        draw_intel_topology_records(
+            frame,
+            app,
+            left,
+            layout.actors,
+            &format!(" actors · {} ", layout.actor_count),
+            &layout.actors_lines,
+            &layout.actor_records,
+        );
+        // 2. claims
         if layout.claims_loading {
             draw_clipped_intel_loading(
                 frame,
@@ -8097,7 +8111,7 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
                 &layout.claim_records,
             );
         }
-        // 2. inferences
+        // 3. inferences
         if layout.inferences_loading {
             draw_clipped_intel_loading(
                 frame,
@@ -8108,25 +8122,16 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
                 detail.as_deref(),
             );
         } else {
-            draw_clipped_md_pane(
+            draw_intel_topology_records(
                 frame,
+                app,
                 left,
                 layout.inferences,
                 " inferences ",
                 &layout.inferences_lines,
-                0,
+                &layout.inference_records,
             );
         }
-        // Metadata Actors remain visible throughout analytical refresh.
-        draw_intel_topology_records(
-            frame,
-            app,
-            left,
-            layout.actors,
-            &format!(" actors · {} ", layout.actor_count),
-            &layout.actors_lines,
-            &layout.actor_records,
-        );
         // 4. links
         if layout.links_loading {
             let phase = if !layout.phases[2].is_empty() {
@@ -8729,6 +8734,47 @@ fn intel_topology_rows(
     IntelTopologyRows { lines, records }
 }
 
+fn intel_stage_topology_rows(
+    app: &App,
+    operation: &str,
+    texts: impl IntoIterator<Item = String>,
+    width: usize,
+    target: fn(usize) -> Target,
+) -> IntelTopologyRows {
+    let mut rows = intel_topology_rows(texts, width, target);
+    let stage = app
+        .intel_brief_stages
+        .iter()
+        .find(|s| s.operation == operation);
+    let mut prefix = stage
+        .filter(|s| s.state != "completed")
+        .map(|s| parse_extracted_md(&format!("_{}_\n\n_Previous_", s.row), width))
+        .unwrap_or_default();
+    if !prefix.is_empty() {
+        prefix.push(Line::raw(""));
+    }
+    let offset = prefix.len();
+    for (range, _) in &mut rows.records {
+        range.start += offset;
+        range.end += offset;
+    }
+    prefix.extend(rows.lines);
+    if let Some(withheld) = app
+        .intel_brief_outputs
+        .get(operation)
+        .and_then(|out| out["withheld"].as_u64())
+        .filter(|n| *n > 0)
+    {
+        prefix.push(Line::raw(""));
+        prefix.extend(parse_extracted_md(
+            &format!("_{withheld} withheld · not supported by cited text_"),
+            width,
+        ));
+    }
+    rows.lines = prefix;
+    rows
+}
+
 fn draw_intel_topology_records(
     frame: &mut Frame,
     app: &App,
@@ -8780,6 +8826,7 @@ struct IntelExtractedLayout {
     inferences_lines: Vec<Line<'static>>,
     actors_lines: Vec<Line<'static>>,
     claim_records: Vec<(std::ops::Range<usize>, Target)>,
+    inference_records: Vec<(std::ops::Range<usize>, Target)>,
     actor_records: Vec<(std::ops::Range<usize>, Target)>,
     links_lines: Vec<Line<'static>>,
     claims_loading: bool,
@@ -8900,7 +8947,7 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
         }
     }
     let mut claims_lines = parse_extracted_md(&claims_md, inner_w);
-    let inferences_lines = parse_extracted_md(&inferences_md, inner_w);
+    let mut inferences_lines = parse_extracted_md(&inferences_md, inner_w);
     let mut actors_lines = parse_extracted_md(&actors_md, inner_w);
     let links_lines = parse_extracted_md(&links_md, inner_w);
     let insights_loading = intel_insights_loading(app);
@@ -8920,44 +8967,28 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     let claim_entries = app.intel_topology_claim_entries();
     let mut claim_records = Vec::new();
     if !claims_loading && !claim_entries.is_empty() {
-        let mut rows = intel_topology_rows(
+        let rows = intel_stage_topology_rows(
+            app,
+            "intel_brief_claims",
             claim_entries.into_iter().map(|(_, text)| text),
             inner_w,
             Target::IntelTopologyClaim,
         );
-        // Preserve the stage's lifecycle and Previous banner around retained
-        // actionable records, and keep withheld counts outside their hit ranges.
-        let stage = app
-            .intel_brief_stages
-            .iter()
-            .find(|s| s.operation == "intel_brief_claims");
-        let mut prefix = stage
-            .filter(|s| s.state != "completed")
-            .map(|s| parse_extracted_md(&format!("_{}_\n\n_Previous_", s.row), inner_w))
-            .unwrap_or_default();
-        if !prefix.is_empty() {
-            prefix.push(Line::raw(""));
-        }
-        let offset = prefix.len();
-        for (range, _) in &mut rows.records {
-            range.start += offset;
-            range.end += offset;
-        }
-        prefix.extend(rows.lines);
-        if let Some(withheld) = app
-            .intel_brief_outputs
-            .get("intel_brief_claims")
-            .and_then(|out| out["withheld"].as_u64())
-            .filter(|n| *n > 0)
-        {
-            prefix.push(Line::raw(""));
-            prefix.extend(parse_extracted_md(
-                &format!("_{withheld} withheld · not supported by cited text_"),
-                inner_w,
-            ));
-        }
-        claims_lines = prefix;
+        claims_lines = rows.lines;
         claim_records = rows.records;
+    }
+    let inference_entries = app.intel_topology_inference_entries();
+    let mut inference_records = Vec::new();
+    if !inferences_loading && !inference_entries.is_empty() {
+        let rows = intel_stage_topology_rows(
+            app,
+            "intel_brief_inferences",
+            inference_entries.into_iter().map(|(_, text)| text),
+            inner_w,
+            Target::IntelTopologyInference,
+        );
+        inferences_lines = rows.lines;
+        inference_records = rows.records;
     }
     let actor_entries = app.intel_topology_actor_entries();
     let actor_count = actor_entries.len();
@@ -9013,12 +9044,12 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     let mut y = i32::from(viewport.y) - scroll;
     let confidence = abs_rect(viewport.x, y, viewport.width, confidence_h);
     y += i32::from(confidence_h);
+    let actors = abs_rect(viewport.x, y, viewport.width, actors_h);
+    y += i32::from(actors_h);
     let claims = abs_rect(viewport.x, y, viewport.width, claims_h);
     y += i32::from(claims_h);
     let inferences = abs_rect(viewport.x, y, viewport.width, inferences_h);
     y += i32::from(inferences_h);
-    let actors = abs_rect(viewport.x, y, viewport.width, actors_h);
-    y += i32::from(actors_h);
     let links = abs_rect(viewport.x, y, viewport.width, links_h);
 
     Some(IntelExtractedLayout {
@@ -9032,6 +9063,7 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
         inferences_lines,
         actors_lines,
         claim_records,
+        inference_records,
         actor_records,
         links_lines,
         claims_loading,
@@ -9091,6 +9123,7 @@ pub fn reveal_intel_topology_entry(app: &mut App, target: Target) {
     };
     let (area, records) = match target {
         Target::IntelTopologyClaim(_) => (layout.claims, &layout.claim_records),
+        Target::IntelTopologyInference(_) => (layout.inferences, &layout.inference_records),
         Target::IntelTopologyActor(_) => (layout.actors, &layout.actor_records),
         _ => return,
     };

@@ -1125,7 +1125,7 @@ pub(super) fn validate_dispatch(conn: &Connection, input: &PipelineInput) -> Res
     Ok(())
 }
 
-fn validate_live_evidence(conn: &Connection, snapshot: &EvidenceSnapshot) -> Result<()> {
+pub(crate) fn validate_live_evidence(conn: &Connection, snapshot: &EvidenceSnapshot) -> Result<()> {
     match snapshot.owner_kind.as_str() {
         "article" | "atlas" => {
             let live: bool = conn.query_row(
@@ -1224,6 +1224,106 @@ pub fn write_derivations(
     output: &PipelineOutput,
     now: &str,
 ) -> Result<()> {
+    write_derivations_with_kind(tx, snapshot_id, input, output, now, None)
+}
+
+/// Replace one article insight kind while carrying the other kind's immutable
+/// derivations forward. Carried memories keep their payload, sources and index
+/// revision; only the completed kind is written and enqueued.
+pub fn write_article_derivations_for_kind(
+    tx: &Connection,
+    snapshot_id: &str,
+    input: &PipelineInput,
+    output: &PipelineOutput,
+    now: &str,
+    kind: &str,
+) -> Result<()> {
+    ensure!(
+        input.snapshot.owner_kind == "article",
+        "scoped derivations require an article"
+    );
+    ensure!(
+        ["claim", "inference"].contains(&kind),
+        "invalid derivation kind"
+    );
+    let previous: Option<String> = tx.query_row(
+        "SELECT active_snapshot_id FROM insight_owner_state WHERE owner_kind='article' AND owner_id=?1",
+        [&input.snapshot.owner_id], |r| r.get(0),
+    ).optional()?;
+    let mut carried_metadata = Vec::new();
+    if let Some(previous) = previous.filter(|id| !id.is_empty() && id != snapshot_id) {
+        let carried_kind = if kind == "claim" {
+            "inference"
+        } else {
+            "claim"
+        };
+        let exists: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM insight_derivations WHERE snapshot_id=?1 AND insight_kind=?2 AND status='assessed')",params![previous,carried_kind],|r|r.get(0))?;
+        if exists {
+            let (inputs,entities,coverage,readiness):(String,String,String,String)=tx.query_row("SELECT inputs_json,entities_json,coverage_json,readiness_json FROM insight_snapshots WHERE id=?1",[&previous],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+            let mut readiness: serde_json::Value = serde_json::from_str(&readiness)?;
+            let original = readiness["carried_kinds"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|row| row["kind"] == carried_kind))
+                .cloned();
+            if let Some(object) = readiness.as_object_mut() {
+                object.remove("carried_kinds");
+            }
+            carried_metadata.push(original.unwrap_or(serde_json::json!({
+                "kind":carried_kind,"source_snapshot_id":previous,
+                "inputs":serde_json::from_str::<serde_json::Value>(&inputs)?,
+                "entities":serde_json::from_str::<serde_json::Value>(&entities)?,
+                "coverage":serde_json::from_str::<serde_json::Value>(&coverage)?,
+                "readiness":readiness,
+            })));
+        }
+        tx.execute("INSERT INTO insight_derivations(id,snapshot_id,memory_id,insight_kind,fingerprint,item_json,assessment_json,status,revision)
+            SELECT ?1 || substr(id,length(?2)+1),?1,memory_id,insight_kind,fingerprint,item_json,assessment_json,status,revision
+            FROM insight_derivations WHERE snapshot_id=?2 AND insight_kind<>?3", params![snapshot_id,previous,kind])?;
+        tx.execute("INSERT INTO insight_derivation_evidence(derivation_id,source_id,source_revision,memory_id,premise_id,evidence_json)
+            SELECT ?1 || substr(e.derivation_id,length(?2)+1),e.source_id,e.source_revision,e.memory_id,e.premise_id,e.evidence_json
+            FROM insight_derivation_evidence e JOIN insight_derivations d ON d.id=e.derivation_id
+            WHERE d.snapshot_id=?2 AND d.insight_kind<>?3", params![snapshot_id,previous,kind])?;
+    }
+    if kind == "inference" {
+        let premises: std::collections::BTreeSet<&str> = output
+            .inferences
+            .iter()
+            .flat_map(|inference| inference.premise_claim_ids.iter().map(String::as_str))
+            .collect();
+        for premise in premises {
+            let claim = output
+                .claims
+                .iter()
+                .find(|claim| claim.id == premise)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "canonical premise claim {premise} is not in the current extraction"
+                    )
+                })?;
+            let present: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM insight_derivations d JOIN memories m ON m.id=d.memory_id JOIN memory_metadata typed ON typed.memory_id=m.id WHERE d.id=?1 AND d.fingerprint=?2 AND d.status='assessed' AND typed.memory_kind IN ('claim','atomic_claim') AND typed.lifecycle='active')",
+                params![format!("{snapshot_id}:{}",claim.id),super::insights::claim_fingerprint(claim)], |r|r.get(0),
+            )?;
+            ensure!(
+                present,
+                "canonical premise claim {} is not published at its current revision",
+                claim.id
+            );
+        }
+    }
+    write_derivations_with_kind(tx, snapshot_id, input, output, now, Some(kind))?;
+    tx.execute("UPDATE insight_snapshots SET readiness_json=json_set(readiness_json,'$.carried_kinds',json(?2)) WHERE id=?1",params![snapshot_id,serde_json::to_string(&carried_metadata)?])?;
+    Ok(())
+}
+
+fn write_derivations_with_kind(
+    tx: &Connection,
+    snapshot_id: &str,
+    input: &PipelineInput,
+    output: &PipelineOutput,
+    now: &str,
+    kind: Option<&str>,
+) -> Result<()> {
     // A queued refresh captures old settings. Recheck the transcript's live
     // opt-in under the publication transaction before any Brain/index writes.
     let save_insights = input.save_insights
@@ -1234,10 +1334,14 @@ pub fn write_derivations(
                     [&input.snapshot.owner_id], |r| r.get::<_,bool>(0),
                 )?));
     if input.snapshot.owner_kind == "article" {
-        retire_article_associations(tx, &input.snapshot.owner_id, output)?;
+        if kind.is_some() {
+            retire_article_associations_for_kind(tx, &input.snapshot.owner_id, output, kind)?;
+        } else {
+            retire_article_associations(tx, &input.snapshot.owner_id, output)?;
+        }
     }
     let mut items = Vec::new();
-    for claim in &output.claims {
+    for claim in output.claims.iter().filter(|_| kind != Some("inference")) {
         items.push((
             claim.id.clone(),
             "claim",
@@ -1251,7 +1355,7 @@ pub fn write_derivations(
             claim.object.clone(),
         ));
     }
-    for inference in &output.inferences {
+    for inference in output.inferences.iter().filter(|_| kind != Some("claim")) {
         items.push((
             inference.id.clone(),
             "inference",
@@ -1411,18 +1515,21 @@ pub fn write_derivations(
                         }
                         p.passages = refs.iter().map(|r| r.source_id.clone()).collect();
                         tx.execute(
-                            "UPDATE memory_metadata SET payload_json=?2 WHERE memory_id=?1",
+                            "UPDATE memory_metadata SET payload_json=?2,revision=revision+1,updated_at=?3 WHERE memory_id=?1 AND payload_json<>?2",
                             params![
                                 mid,
                                 serde_json::to_string(
                                     &crate::memory_metadata::MemoryPayload::Claim(p)
-                                )?
+                                )?,now
                             ],
                         )?;
                     }
+                    let actor_ids = tx.prepare("SELECT DISTINCT actor_id FROM brain_memory_actor_refs WHERE memory_id=?1 ORDER BY actor_id")?
+                        .query_map([&mid],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                    crate::store::enqueue_memory_index_on(tx, &actor_ids, None)?;
                 }
                 if kind == "inference" {
-                    use crate::memory_metadata::{InferencePayload, MemoryPayload};
+                    use crate::memory_metadata::{ActorRef, InferencePayload, MemoryPayload};
                     let inference = output
                         .inferences
                         .iter()
@@ -1442,16 +1549,39 @@ pub fn write_derivations(
                             |r| r.get(0),
                         )
                         .optional()?;
-                    let actors = prior
+                    let mut actors: Vec<ActorRef> = prior
                         .and_then(|raw| serde_json::from_str::<MemoryPayload>(&raw).ok())
                         .and_then(|payload| match payload {
                             MemoryPayload::Inference(p) => Some(p.actors),
                             _ => None,
                         })
                         .unwrap_or_default();
+                    actors.retain(|actor| actor.role != "premise");
+                    // These are explicit premise associations, not a claim
+                    // that the actor independently supports the inference.
+                    for premise in &premises {
+                        let raw:Option<String>=tx.query_row("SELECT payload_json FROM memory_metadata WHERE memory_id=?1 AND memory_kind IN ('claim','atomic_claim')",[premise],|r|r.get(0)).optional()?;
+                        if let Some(MemoryPayload::Claim(claim)) =
+                            raw.and_then(|raw| serde_json::from_str::<MemoryPayload>(&raw).ok())
+                        {
+                            for actor in claim.actors {
+                                actors.push(ActorRef {
+                                    actor_id: crate::brain_actors::resolve(tx, &actor.actor_id)?,
+                                    role: "premise".into(),
+                                    binding_state: actor.binding_state,
+                                });
+                            }
+                        }
+                    }
+                    actors.sort_by(|left, right| {
+                        (&left.actor_id, &left.role).cmp(&(&right.actor_id, &right.role))
+                    });
+                    actors.dedup_by(|left, right| {
+                        left.actor_id == right.actor_id && left.role == right.role
+                    });
                     let payload = MemoryPayload::Inference(InferencePayload {
                         premise_claims: premises,
-                        actors,
+                        actors: actors.clone(),
                         reasoning: inference.rationale.clone(),
                         limitations: inference.limitations.join("; "),
                         support_state: inference.assessment.fidelity.clone(),
@@ -1460,6 +1590,20 @@ pub fn write_derivations(
                     // Publish typed metadata before enqueueing/indexing or
                     // creating relationships to this canonical inference.
                     tx.execute("INSERT INTO memory_metadata(memory_id,memory_kind,payload_json,payload_schema,revision,lifecycle,created_at,updated_at) VALUES(?1,'inference',?2,1,1,'active',?3,?3) ON CONFLICT(memory_id) DO UPDATE SET memory_kind='inference',payload_json=excluded.payload_json,payload_schema=1,lifecycle='active',revision=memory_metadata.revision+1,updated_at=excluded.updated_at WHERE memory_metadata.payload_json<>excluded.payload_json OR memory_metadata.memory_kind<>'inference' OR memory_metadata.lifecycle<>'active'",params![mid,serde_json::to_string(&payload)?,now])?;
+                    tx.execute(
+                        "DELETE FROM brain_memory_actor_refs WHERE memory_id=?1 AND role='premise'",
+                        [&mid],
+                    )?;
+                    for actor in actors {
+                        crate::brain_actors::add_memory_actor_ref(
+                            tx,
+                            &mid,
+                            &actor.actor_id,
+                            &actor.role,
+                            actor.binding_state,
+                            &serde_json::json!({"snapshot":snapshot_id,"inference":id,"premise_claims":inference.premise_claim_ids}),
+                        )?;
+                    }
                 }
                 crate::store::enqueue_memory_index_on(tx, std::slice::from_ref(&mid), None)?;
                 for reference in &refs {
@@ -1484,17 +1628,18 @@ pub fn write_derivations(
             tx.execute("INSERT INTO insight_derivation_evidence(derivation_id,source_id,source_revision,evidence_json) VALUES(?1,?2,?3,?4)",params![derivation_id,reference.source_id,reference.revision,serde_json::to_string(&reference)?])?;
         }
     }
-    for inference in &output.inferences {
+    for inference in output.inferences.iter().filter(|_| kind != Some("claim")) {
         for premise in &inference.premise_claim_ids {
             let Some(claim) = output.claims.iter().find(|c| &c.id == premise) else {
                 continue;
             };
+            let memory_id:Option<String>=tx.query_row("SELECT memory_id FROM insight_derivations WHERE id=?1 AND snapshot_id=?2 AND insight_kind='claim' AND status='assessed'",params![format!("{snapshot_id}:{premise}"),snapshot_id],|r|r.get(0)).optional()?.flatten();
             for reference in &claim.evidence_refs {
-                tx.execute("INSERT OR IGNORE INTO insight_derivation_evidence(derivation_id,source_id,source_revision,premise_id,evidence_json) VALUES(?1,?2,?3,?4,?5)",params![format!("{snapshot_id}:{}",inference.id),reference.source_id,reference.revision,premise,serde_json::to_string(reference)?])?;
+                tx.execute("INSERT INTO insight_derivation_evidence(derivation_id,source_id,source_revision,memory_id,premise_id,evidence_json) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(derivation_id,source_id,source_revision,premise_id,evidence_json) DO UPDATE SET memory_id=excluded.memory_id",params![format!("{snapshot_id}:{}",inference.id),reference.source_id,reference.revision,memory_id,premise,serde_json::to_string(reference)?])?;
             }
         }
     }
-    for inference in &output.inferences {
+    for inference in output.inferences.iter().filter(|_| kind != Some("claim")) {
         for (memory_id, revision) in &input.snapshot.memory_refs {
             for reference in &inference.evidence_refs {
                 tx.execute("INSERT OR IGNORE INTO insight_derivation_evidence(derivation_id,source_id,source_revision,memory_id,premise_id,evidence_json) VALUES(?1,?2,?3,?4,?5,?6)",params![format!("{snapshot_id}:{}",inference.id),reference.source_id,reference.revision,memory_id,format!("memory:{memory_id}@{revision}"),serde_json::to_string(reference)?])?;
@@ -1510,7 +1655,7 @@ pub fn write_derivations(
         report,
     );
     tx.execute("UPDATE insight_snapshots SET readiness_json=?2,model_versions_json=(SELECT json_group_array(json(route_json)) FROM insight_stage_checkpoints WHERE owner_kind=?3 AND owner_id=?4 AND generation=?5 AND state='completed') WHERE id=?1",params![snapshot_id,serde_json::json!({"readiness":output.readiness,"limit_reached":output.limit_reached,"partial_enumeration":output.partial_enumeration,"item_gaps":output.item_gaps,"withheld_count":output.withheld_count,"rating":{"policy":"brief-rating-v2","input_mode":input.surface,"source_hash":crate::nlp::cache::key(&serde_json::json!(input.snapshot.source_refs)),"estimate":rating}}).to_string(),input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation])?;
-    for link in &output.links {
+    for link in output.links.iter().filter(|_| kind.is_none()) {
         let left = &link.typed_endpoints[0];
         let right = &link.typed_endpoints[1];
         tx.execute("INSERT INTO insight_derivation_links(id,snapshot_id,left_kind,left_id,right_kind,right_id,relation,rationale,assessment_json,evidence_json,status,revision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'assessed',?11)",params![format!("{snapshot_id}:{}",link.id),snapshot_id,left.kind,left.id,right.kind,right.id,link.relation,link.rationale,serde_json::to_string(&link.assessment)?,serde_json::to_string(&link.evidence_refs)?,crate::nlp::cache::hash(&serde_json::to_string(link)?)])?;
@@ -1531,6 +1676,15 @@ fn retire_article_associations(
     article: &str,
     output: &PipelineOutput,
 ) -> Result<()> {
+    retire_article_associations_for_kind(conn, article, output, None)
+}
+
+fn retire_article_associations_for_kind(
+    conn: &Connection,
+    article: &str,
+    output: &PipelineOutput,
+    kind: Option<&str>,
+) -> Result<()> {
     let retained: std::collections::HashSet<String> = output
         .claims
         .iter()
@@ -1543,13 +1697,15 @@ fn retire_article_associations(
                 .map(super::insights::inference_fingerprint),
         )
         .collect();
-    let rows = conn.prepare("SELECT DISTINCT c.fingerprint,c.memory_id FROM insight_claims c WHERE c.fingerprint IN (SELECT d.fingerprint FROM insight_derivations d JOIN insight_snapshots s ON s.id=d.snapshot_id WHERE s.owner_kind IN ('article','atlas') AND s.owner_id=?1) OR c.fingerprint IN (SELECT fingerprint FROM insight_sources WHERE call_id=?1)")?
-        .query_map([article],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    conn.execute("DELETE FROM insight_sources WHERE answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind IN ('article','atlas') AND owner_id=?1) OR call_id=?1",[article])?;
-    conn.execute("UPDATE insight_derivation_links SET status='retired' WHERE snapshot_id IN (SELECT id FROM insight_snapshots WHERE owner_kind IN ('article','atlas') AND owner_id=?1)",[article])?;
-    conn.execute("UPDATE insight_derivations SET status='retired' WHERE snapshot_id IN (SELECT id FROM insight_snapshots WHERE owner_kind IN ('article','atlas') AND owner_id=?1)",[article])?;
+    let rows = conn.prepare("SELECT DISTINCT c.fingerprint,c.memory_id FROM insight_claims c WHERE (?2 IS NULL OR c.classification=?2) AND (c.fingerprint IN (SELECT d.fingerprint FROM insight_derivations d JOIN insight_snapshots s ON s.id=d.snapshot_id WHERE s.owner_kind IN ('article','atlas') AND s.owner_id=?1) OR c.fingerprint IN (SELECT fingerprint FROM insight_sources WHERE call_id=?1))")?
+        .query_map(params![article,kind],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    conn.execute("DELETE FROM insight_sources WHERE (answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind IN ('article','atlas') AND owner_id=?1) OR call_id=?1) AND (?2 IS NULL OR fingerprint IN (SELECT fingerprint FROM insight_claims WHERE classification=?2))",params![article,kind])?;
+    if kind.is_none() {
+        conn.execute("UPDATE insight_derivation_links SET status='retired' WHERE snapshot_id IN (SELECT id FROM insight_snapshots WHERE owner_kind IN ('article','atlas') AND owner_id=?1)",[article])?;
+    }
+    conn.execute("UPDATE insight_derivations SET status='retired' WHERE snapshot_id IN (SELECT id FROM insight_snapshots WHERE owner_kind IN ('article','atlas') AND owner_id=?1) AND (?2 IS NULL OR insight_kind=?2)",params![article,kind])?;
     for (fp, memory) in rows {
-        let shared: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM insight_sources WHERE fingerprint=?1) OR EXISTS(SELECT 1 FROM insight_derivations d JOIN insight_owner_state h ON h.active_snapshot_id=d.snapshot_id WHERE d.memory_id=?2 AND d.status='assessed' AND h.owner_id<>?3)",params![fp,memory,article],|r|r.get(0))?;
+        let shared: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM insight_sources WHERE fingerprint=?1) OR EXISTS(SELECT 1 FROM insight_derivations d JOIN insight_owner_state h ON h.active_snapshot_id=d.snapshot_id WHERE d.memory_id=?2 AND d.status='assessed' AND h.owner_id<>?3) OR (?4 IS 'claim' AND EXISTS(SELECT 1 FROM memory_metadata m,json_each(CASE WHEN json_valid(m.payload_json) THEN json_extract(m.payload_json,'$.payload.premise_claims') ELSE '[]' END) p WHERE m.memory_kind='inference' AND m.lifecycle='active' AND p.value=?2))",params![fp,memory,article,kind],|r|r.get(0))?;
         if shared {
             continue;
         }

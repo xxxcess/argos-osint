@@ -591,6 +591,14 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
             job.error_summary
         ));
     }
+    for warning in &detail.warnings {
+        lines.push(format!("Warning · {warning}"));
+    }
+    if !detail.warnings.is_empty() {
+        lines.push(
+            "Partial result published · Retry in the brief re-asks only the failed items".into(),
+        );
+    }
     lines.push(String::new());
     if detail.events_expired {
         lines.push(format!(

@@ -290,6 +290,10 @@ pub struct JobDetail {
     /// may dispatch several across retries and fallback routes).
     #[serde(default)]
     pub wire_requests: i64,
+    /// Completed-with-warnings notes ("Inferences: 1 of 2 claims could not be
+    /// analyzed (timeout)"): the job produced a usable partial result.
+    #[serde(default)]
+    pub warnings: Vec<String>,
     /// Failed tasks a durable pool can safely rerun.
     pub retryable: i64,
     /// The job finished more than the event retention ago and no events remain.
@@ -562,6 +566,27 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
             |r| r.get(0),
         )
         .unwrap_or(0);
+    let warnings: Vec<String> = conn
+        .prepare(
+            "SELECT stage,empty_reason FROM intel_brief_stage_outputs
+             WHERE job_id=?1 AND empty_reason LIKE 'warning:%' ORDER BY committed_at",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map([id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(stage, reason)| {
+            format!(
+                "{}: {}",
+                task_label(&stage),
+                reason.trim_start_matches("warning:").trim()
+            )
+        })
+        .collect();
     let mut retryable: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM argos_tasks WHERE job_id=?1 AND {}",
@@ -591,6 +616,7 @@ pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Opti
         task_total,
         attempts,
         wire_requests,
+        warnings,
         retryable,
         events_expired,
         insight_progress,

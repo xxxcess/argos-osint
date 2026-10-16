@@ -24,7 +24,7 @@ Standing rules: Inferences **always** uses thinking models. There is no faster n
 | A | Typed error category, specific timeout text, task names in attempt history, labelled counts, real retry wait | see log |
 | B | Per-model thinking effort for Inferences (never off, no token caps); thinking-sized deadlines | see log |
 | C | Skip to the next route on a stall (no non-thinking primary); operation wall-clock cap that includes pacing and queue time | see log |
-| D | Per-claim checkpoints, re-run only failed claims, complete with warnings so Links can run | pending |
+| D | Per-claim checkpoints, re-run only failed claims, complete with warnings so Links can run | see log |
 | E | Offline reproductions for the whole path; docs, diagrams, matrix | pending |
 
 ## Phase log
@@ -54,3 +54,14 @@ Standing rules: Inferences **always** uses thinking models. There is no faster n
 - [x] `WireBudget.wall_clock` (600s; 900s for thinking stages via `INTERACTIVE_THINKING`) bounds queue, pacing, backoff and dispatch; `DispatchContext.remaining` bounds each attempt (`model_exec::bounded_by_cap`), a long backoff is skipped, expiry reports `timeout`.
 - [x] `ChainReport.wall_clock_exceeded` and the "operation wall-clock cap reached" termination text.
 - Tests: `a_stalled_route_falls_through_instead_of_repeating`, `transient_failures_keep_their_retry_and_the_last_route_retries_a_stall`, `the_wall_clock_cap_ends_the_operation_with_a_timeout`, `a_backoff_longer_than_the_remaining_cap_moves_on`, `interactive_operations_have_a_wall_clock_cap_sized_for_thinking`, `an_attempt_that_outlives_the_cap_becomes_a_typed_timeout`.
+
+### Phase D — degrade instead of fail
+- Verified claim 7: Links blocked by a *failed* Inferences is correct (nothing to link). The defect was that one claim's failure failed the whole stage (claim 8, confirmed), so Links never saw the claims that did succeed.
+- [x] Each claim's Inferences result is checkpointed (`brief_pipeline::checkpoint_put/get`, keyed by job, stage, claim and a hash of prompt + request + resolved route, stored in `app_state`). Reused on retry, cleared on a clean commit.
+- [x] A failing claim is recorded (`claim_failures`, `claim_analysis[].analysis_failed` with its provider category); siblings keep running; cancellation still aborts. All claims failing still fails the stage with the provider category (timeout).
+- [x] Some claims failed: the stage commits `warning: N of M claims could not be analyzed (categories)`, shows "Completed with warnings", Links runs on the analyzed claims.
+- [x] `retry_stage` also reopens a completed-with-warnings stage and its descendants; checkpoints mean only the failed claims are asked again; Links reruns on the full set. Warning outputs are never adopted by cross-generation reuse.
+- [x] Jobs detail shows `Warning · Inferences: …` and the partial-result hint (`JobDetail.warnings`).
+- Not done: fidelity/dedup failures after all claims succeed still fail the stage (claim checkpoints survive, so a retry re-runs only those steps); Links itself does not degrade on its own failure.
+- Tests: `one_failed_claim_completes_with_warnings_and_retry_asks_only_that_claim`, `every_claim_failing_fails_inferences_with_the_provider_category`, `jobs_detail_shows_partial_completion_with_warnings_and_links_completed`.
+- Screens: `docs/screens/brief-latency/before-jobs-detail-160x90.png` (main: Inferences failed, Links blocked), `after-A-…` (status fixed, still failed), `after-D-jobs-partial-160x90.png` (completed with warnings, Links completed).

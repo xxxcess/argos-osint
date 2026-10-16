@@ -97,6 +97,8 @@ struct Mock {
     fail: HashSet<String>,
     /// Fail with a typed executor timeout (what a real exhausted chain carries).
     fail_timeout: HashSet<String>,
+    /// Claim ids whose Inferences request fails with a typed timeout.
+    fail_claim: HashSet<String>,
     hang: HashSet<String>,
     delay: Option<Duration>,
     related: Vec<AtlasArticleRow>,
@@ -333,6 +335,20 @@ impl StageBackend for Mock {
             }
             if let Some(delay) = mock.delay {
                 tokio::time::sleep(delay).await;
+            }
+            if request.stage == "intel_brief_inferences" && !selection {
+                let claim = serde_json::from_str::<Value>(&request.user)
+                    .ok()
+                    .and_then(|u| u["CLAIM"]["id"].as_str().map(str::to_string));
+                if claim.is_some_and(|id| mock.fail_claim.contains(&id)) {
+                    return Err(crate::recon::model_exec::ModelOperationError {
+                        category: Some(crate::provider_diag::Category::Timeout),
+                        requests: 3,
+                        history: vec![],
+                        message: "operation wall-clock cap reached".into(),
+                    }
+                    .into());
+                }
             }
             if mock.fail_timeout.contains(&request.stage) {
                 return Err(crate::recon::model_exec::ModelOperationError {
@@ -2363,4 +2379,123 @@ async fn timeout_failure_keeps_its_category_and_attempt_rows_name_their_task() {
         detail.attempts.iter().all(|a| a.attempt_number == 1),
         "same #1, now disambiguated"
     );
+}
+
+fn inference_requests(mock: &Mock) -> Vec<Value> {
+    mock.requests()
+        .into_iter()
+        .filter(|s| s.stage == "intel_brief_inferences" && !s.user.contains("INFERENCE_CANDIDATES"))
+        .map(|s| serde_json::from_str::<Value>(&s.user).unwrap()["CLAIM"]["id"].clone())
+        .collect()
+}
+
+// Phase D: one failing claim no longer fails Inferences. The analyzed claims
+// publish, the stage completes with warnings, Links runs on them, and Retry
+// re-asks only the failed claim before re-running Links.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_failed_claim_completes_with_warnings_and_retry_asks_only_that_claim() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.filter_inference_evidence = true;
+    mock.fail_claim.insert("c2".into());
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let r = rows(&db.path, &job);
+    assert_eq!(r[2], "Completed with warnings · 1 item", "{r:?}");
+    assert!(
+        r[3].starts_with("Completed"),
+        "Links degrades, not blocks: {r:?}"
+    );
+    let store = Store::open(&db.path).unwrap();
+    let out = stage_output(&store, &job, "intel_brief_inferences").unwrap();
+    assert_eq!(out["claim_failures"][0]["claim_id"], "c2");
+    assert_eq!(out["claim_failures"][0]["category"], "timeout");
+    assert_eq!(
+        out["claim_analysis"][1]["analysis_failed"]["category"],
+        "timeout"
+    );
+    assert_eq!(out["inferences"].as_array().unwrap().len(), 1);
+    assert_eq!(inference_requests(&mock).len(), 2);
+    let leads_before = mock
+        .requests()
+        .iter()
+        .filter(|s| s.stage == "intel_brief_links")
+        .count();
+    assert_eq!(leads_before, 1);
+    let ckpt: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_state WHERE key LIKE 'intel-brief-ckpt:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ckpt, 1, "the analyzed claim keeps its checkpoint");
+
+    // Retry: only c2 is asked; Links reruns on the complete set.
+    mock.fail_claim.clear();
+    mock.seen.lock().unwrap().clear();
+    assert!(
+        crate::intel_recon::brief_pipeline::retry_stage(&store.conn, &job, &now())
+            .unwrap()
+            .is_some()
+    );
+    let r = rows(&db.path, &job);
+    assert!(r[2].starts_with("Queued"), "{r:?}");
+    assert!(r[3].starts_with("Queued"), "{r:?}");
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    assert_eq!(inference_requests(&mock), [json!("c2")]);
+    let r = rows(&db.path, &job);
+    assert!(!r[2].contains("warning"), "{r:?}");
+    assert!(r[3].starts_with("Completed"), "{r:?}");
+    assert_eq!(
+        mock.requests()
+            .iter()
+            .filter(|s| s.stage == "intel_brief_links")
+            .count(),
+        1
+    );
+    let ckpt: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_state WHERE key LIKE 'intel-brief-ckpt:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ckpt, 0, "a clean commit clears the checkpoints");
+}
+
+// Every claim failing is still a failed stage and keeps the provider category.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_claim_failing_fails_inferences_with_the_provider_category() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.fail_claim = ["c1", "c2"].map(String::from).into();
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let r = rows(&db.path, &job);
+    assert!(r[2].starts_with("Failed"), "{r:?}");
+    assert_eq!(r[3], "Queued · blocked by Inferences");
+    let store = Store::open(&db.path).unwrap();
+    let category: String = store
+        .conn
+        .query_row(
+            "SELECT error_category FROM argos_tasks WHERE id=?1",
+            [crate::intel_recon::brief_pipeline::task_id(
+                &job,
+                "intel_brief_inferences",
+            )],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(category, "timeout");
 }

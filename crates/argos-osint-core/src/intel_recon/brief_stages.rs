@@ -1341,8 +1341,46 @@ async fn execute(
                     )),
                 }
             };
+            let generate_route =
+                ctx.route_key(Some(crate::provider::OP_INFERENCES_GENERATE), "synthesis");
+            // A claim's checkpoint is valid for exactly this prompt, request
+            // and resolved route; any change re-asks it.
+            let checkpoint_hash = |user: &str| {
+                crate::nlp::cache::hash(&json!([&system, user, &generate_route]).to_string())
+            };
             let mut outputs = vec![Value::Null; requests.len()];
-            let mut pending = requests.iter().enumerate();
+            let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
+            let mut reused = 0usize;
+            let mut todo = Vec::new();
+            {
+                let store = Store::open(db_path)?;
+                for (n, (claim_id, _, user, _)) in requests.iter().enumerate() {
+                    match super::brief_pipeline::checkpoint_get(
+                        &store.conn,
+                        &job,
+                        &claimed.operation,
+                        claim_id,
+                        &checkpoint_hash(user),
+                    )? {
+                        Some(output) => {
+                            outputs[n] = output;
+                            reused += 1;
+                        }
+                        None => todo.push(n),
+                    }
+                }
+            }
+            if reused > 0 {
+                activity(
+                    db_path,
+                    &claimed.id,
+                    &format!(
+                        "reusing {reused} analyzed claim{}",
+                        if reused == 1 { "" } else { "s" }
+                    ),
+                );
+            }
+            let mut pending = todo.into_iter();
             let mut running = FuturesUnordered::new();
             // Model wall time covers the queue once, not the sum of overlapping
             // requests; provider attempt durations remain separately aggregated.
@@ -1350,9 +1388,10 @@ async fn execute(
                 loop {
                     while running.len() < INFERENCE_CONCURRENCY {
                         ensure!(!cancel.load(Ordering::Acquire), "cancelled");
-                        let Some((n, (claim_id, selected, user, _))) = pending.next() else {
+                        let Some(n) = pending.next() else {
                             break;
                         };
+                        let (claim_id, selected, user, _) = &requests[n];
                         let dispatch = generate_unmeasured(
                             db_path,
                             backend,
@@ -1364,24 +1403,69 @@ async fn execute(
                     let Some((n, result)) = running.next().await else {
                         break;
                     };
-                    let raw = result?;
-                    outputs[n] = validate_claim_inferences(
-                        &raw.to_string(),
-                        &requests[n].0,
-                        &requests[n].1,
-                    )?;
-                    retain_inference_counterevidence(
-                        &mut outputs[n],
-                        &requests[n].1,
-                        &requests[n].3,
-                    )?;
+                    // One claim's failure is that claim's failure: its siblings
+                    // keep running and keep their results. Cancellation is not.
+                    let processed = result.and_then(|raw| {
+                        let mut output = validate_claim_inferences(
+                            &raw.to_string(),
+                            &requests[n].0,
+                            &requests[n].1,
+                        )?;
+                        retain_inference_counterevidence(
+                            &mut output,
+                            &requests[n].1,
+                            &requests[n].3,
+                        )?;
+                        Ok(output)
+                    });
+                    match processed {
+                        Ok(output) => {
+                            if let Ok(store) = Store::open(db_path) {
+                                let _ = super::brief_pipeline::checkpoint_put(
+                                    &store.conn,
+                                    &job,
+                                    &claimed.operation,
+                                    &requests[n].0,
+                                    &checkpoint_hash(&requests[n].2),
+                                    &output,
+                                );
+                            }
+                            outputs[n] = output;
+                        }
+                        Err(error) => {
+                            ensure!(!cancel.load(Ordering::Acquire), "cancelled");
+                            failures.push((n, error));
+                        }
+                    }
                 }
                 Ok::<(), anyhow::Error>(())
             })
             .await?;
-            for (receipt, output) in claim_analysis.iter_mut().zip(&outputs) {
+            if !requests.is_empty() && failures.len() == requests.len() {
+                // Nothing to publish: the stage fails with the first real cause
+                // (its provider category survives).
+                let (_, error) = failures.remove(0);
+                return Err(error);
+            }
+            let claim_failures: Vec<Value> = failures
+                .iter()
+                .map(|(n, error)| {
+                    json!({
+                        "claim_id": requests[*n].0,
+                        "category": stage_error_category(error).as_str(),
+                        "message": short_error(error),
+                    })
+                })
+                .collect();
+            for (n, (receipt, output)) in claim_analysis.iter_mut().zip(&outputs).enumerate() {
                 receipt["analysis_request_sent"] = json!(true);
                 receipt["empty_reason"] = output["empty_reason"].clone();
+                if let Some(failure) = claim_failures
+                    .iter()
+                    .find(|f| f["claim_id"] == json!(requests[n].0))
+                {
+                    receipt["analysis_failed"] = failure.clone();
+                }
             }
             let mut last = join_inferences(&outputs);
             if requests.is_empty() {
@@ -1416,8 +1500,24 @@ async fn execute(
                 .map(|s| &s.id)
                 .collect::<Vec<_>>());
             last["body_hash"] = body["content_hash"].clone();
+            last["claim_failures"] = json!(claim_failures);
             let n = last["inferences"].as_array().map_or(0, Vec::len);
-            let reason = if n == 0 {
+            let reason = if !claim_failures.is_empty() {
+                // Completed with warnings: the analyzed claims publish, Links
+                // proceeds on them, and Retry re-asks only the failed claims.
+                format!(
+                    "warning: {} of {} claims could not be analyzed ({})",
+                    claim_failures.len(),
+                    requests.len(),
+                    claim_failures
+                        .iter()
+                        .filter_map(|f| f["category"].as_str())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else if n == 0 {
                 last["empty_reason"].as_str().unwrap_or("").to_string()
             } else {
                 String::new()
@@ -2333,6 +2433,11 @@ impl StageBackend for RuntimeBackend {
 /// Task category of a stage failure: the executor's typed provider category
 /// (timeout, rate limit, server, auth…) when there is one, otherwise a local
 /// validation/parse failure, which is an invalid result.
+/// First line of an error, bounded for stored receipts.
+fn short_error(error: &anyhow::Error) -> String {
+    error.to_string().chars().take(240).collect()
+}
+
 pub fn stage_error_category(error: &anyhow::Error) -> tasks::ErrorCategory {
     error
         .chain()

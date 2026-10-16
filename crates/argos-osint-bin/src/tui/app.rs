@@ -17150,6 +17150,50 @@ mod tests {
         }
     }
 
+    /// Jobs detail when one claim's inference failed: Inferences completes with
+    /// warnings and Links still runs. Dumps cells when ARGOS_SCREEN_DIR is set.
+    #[test]
+    fn jobs_detail_shows_partial_completion_with_warnings_and_links_completed() {
+        use argos_osint_core::intel_recon::brief_pipeline as bp;
+        let mut app = app();
+        let (_, article) = related_ui_fixture(&mut app);
+        app.select(ModuleId::Intel.index());
+        app.intel_articles = vec![article];
+        app.intel_sel = 0;
+        app.open_intel_briefing();
+        let job = app.intel_brief_job.clone().unwrap();
+        let now = || chrono::Utc::now().to_rfc3339();
+        let conn = app.store.connection();
+        for _ in 0..4 {
+            let c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
+            let (items, reason) = match c.operation.as_str() {
+                "intel_brief_claims" => (2, ""),
+                "intel_brief_inferences" => {
+                    (1, "warning: 1 of 2 claims could not be analyzed (timeout)")
+                }
+                "intel_brief_links" => (1, ""),
+                _ => (0, ""),
+            };
+            assert!(bp::commit_stage(conn, &c, "{}", items, reason, &now()).unwrap());
+        }
+        app.open_job(&job).unwrap();
+        app.jobs.detail_open = true;
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        let text = buffer_text(&render(&mut app, 160, 90));
+        assert!(
+            text.contains("Inferences · Completed with warnings · 1 item"),
+            "{text}"
+        );
+        assert!(text.contains("Links · Completed · 1 item"), "{text}");
+        assert!(
+            text.contains("Warning · Inferences: 1 of 2 claims could not be"),
+            "{text}"
+        );
+        if let Some(dir) = &dir {
+            dump_cells(&mut app, dir, "jobs-brief-partial-160x90", 160, 90);
+        }
+    }
+
     #[test]
     fn extraction_actions_resolve_selected_article_instead_of_stale_display_progress() {
         let mut app = app();

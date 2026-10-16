@@ -56,6 +56,8 @@ pub struct AttemptRecord {
 /// Result of running the chain.
 #[derive(Clone, Debug)]
 pub struct ChainReport<T> {
+    /// The stage-wide request budget ended the operation before it dispatched.
+    pub budget_exhausted: bool,
     pub value: Option<T>,
     pub blocked: bool,
     pub cancelled: bool,
@@ -66,6 +68,9 @@ pub struct ChainReport<T> {
     pub effective_model: String,
     pub terminal_failure: Option<crate::provider_diag::ProviderFailure>,
     pub stopped: bool,
+    /// The operation wall-clock cap ended the chain (queue, pacing, backoff
+    /// and dispatch time all count against it).
+    pub wall_clock_exceeded: bool,
 }
 
 impl<T> ChainReport<T> {
@@ -191,6 +196,14 @@ pub struct WireBudget {
     pub per_route_max: u32,
     pub primary_transient_retries: u32,
     pub shared_extra: u32,
+    /// A timed-out route (no headers, no first output, stalled stream) moves
+    /// straight to the next dispatchable route instead of resending to the
+    /// route that just stalled. A stall with no later dispatchable route keeps
+    /// the normal retry rules.
+    pub skip_stalled_route: bool,
+    /// Operation wall-clock cap across every route, queue wait, provider
+    /// pacing and backoff. `None` = uncapped.
+    pub wall_clock: Option<Duration>,
 }
 
 impl WireBudget {
@@ -199,6 +212,15 @@ impl WireBudget {
         per_route_max: 2,
         primary_transient_retries: 1,
         shared_extra: 2,
+        skip_stalled_route: true,
+        wall_clock: Some(Duration::from_secs(600)),
+    };
+
+    /// Interactive operations on thinking models: per-attempt waits are
+    /// thinking-sized, so the cap leaves room for a fallback after a stall.
+    pub const INTERACTIVE_THINKING: Self = Self {
+        wall_clock: Some(Duration::from_secs(900)),
+        ..Self::INTERACTIVE
     };
 
     pub fn max_dispatches(&self, routes: u32) -> u32 {
@@ -220,6 +242,9 @@ pub struct DispatchContext {
     pub queue_ms: u64,
     /// Retry backoff actually slept before this dispatch.
     pub backoff_ms: u64,
+    /// Wall-clock time left under the operation cap when this dispatch
+    /// starts (`None` = uncapped). The dispatcher bounds the attempt by it.
+    pub remaining: Option<Duration>,
     /// When this dispatch started waiting for admission.
     pub queued_at: String,
 }
@@ -240,6 +265,9 @@ pub struct ExecuteOptions {
     pub interactive: bool,
     /// Operation wire budget; replaces `attempt_limit` when set.
     pub wire_budget: Option<WireBudget>,
+    /// Stage-wide request budget and route health shared by every operation
+    /// of one stage (`None` = operation-local behaviour).
+    pub ledger: Option<Arc<StageLedger>>,
 }
 
 impl ExecuteOptions {
@@ -249,6 +277,137 @@ impl ExecuteOptions {
             ..Self::default()
         }
     }
+}
+
+/// Default stage-wide dispatch ceiling before a stage declares how much work
+/// it planned (see [`StageLedger::plan`]).
+pub const STAGE_REQUEST_CAP: u32 = 24;
+/// How long a route that just failed transiently is passed over by later
+/// operations of the same stage (first, second, third and later strike).
+pub const ROUTE_COOLDOWNS: [Duration; 3] = [
+    Duration::from_secs(120),
+    Duration::from_secs(300),
+    Duration::from_secs(600),
+];
+
+/// Request budget and route-health memory of ONE stage execution, shared by
+/// all of its operations. A [`WireBudget`] bounds a single operation; a stage
+/// of many operations (per-claim classification, generation, fidelity, dedup)
+/// would otherwise restart at route 0 each time and re-pay the same dead
+/// route, multiplying the wire count and the wall clock.
+#[derive(Debug)]
+pub struct StageLedger {
+    cap: std::sync::atomic::AtomicU32,
+    dispatched: std::sync::atomic::AtomicU32,
+    health: Mutex<std::collections::HashMap<String, RouteStrikes>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RouteStrikes {
+    until: std::time::Instant,
+    strikes: usize,
+}
+
+impl Default for StageLedger {
+    fn default() -> Self {
+        Self::new(STAGE_REQUEST_CAP)
+    }
+}
+
+impl StageLedger {
+    pub fn new(cap: u32) -> Self {
+        Self {
+            cap: cap.into(),
+            dispatched: 0.into(),
+            health: Mutex::default(),
+        }
+    }
+
+    /// Declare the operations a stage plans to run. The ceiling becomes twice
+    /// the planned wire count plus slack for repairs and one dead route, never
+    /// less than the default.
+    pub fn plan(&self, operations: u32) {
+        let cap = operations.saturating_mul(2).saturating_add(8);
+        self.cap.fetch_max(
+            cap.max(STAGE_REQUEST_CAP),
+            std::sync::atomic::Ordering::AcqRel,
+        );
+    }
+
+    pub fn cap(&self) -> u32 {
+        self.cap.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn dispatched(&self) -> u32 {
+        self.dispatched.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Claim one wire dispatch; `false` once the stage budget is spent.
+    fn reserve(&self) -> bool {
+        use std::sync::atomic::Ordering::{AcqRel, Acquire};
+        let cap = self.cap();
+        self.dispatched
+            .fetch_update(AcqRel, Acquire, |n| (n < cap).then_some(n + 1))
+            .is_ok()
+    }
+
+    fn key(route: &Route) -> String {
+        format!(
+            "{}|{}",
+            route
+                .admission_key
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .unwrap_or(route.account.as_str()),
+            route.model
+        )
+    }
+
+    fn cooling(&self, route: &Route) -> Option<Duration> {
+        let health = self.health.lock().ok()?;
+        let entry = health.get(&Self::key(route))?;
+        let left = entry
+            .until
+            .saturating_duration_since(std::time::Instant::now());
+        (!left.is_zero()).then_some(left)
+    }
+
+    fn open(&self, route: &Route) {
+        if let Ok(mut health) = self.health.lock() {
+            let entry = health.entry(Self::key(route)).or_insert(RouteStrikes {
+                until: std::time::Instant::now(),
+                strikes: 0,
+            });
+            let cooldown = ROUTE_COOLDOWNS[entry.strikes.min(ROUTE_COOLDOWNS.len() - 1)];
+            entry.strikes += 1;
+            entry.until = std::time::Instant::now() + cooldown;
+        }
+    }
+
+    fn close(&self, route: &Route) {
+        if let Ok(mut health) = self.health.lock() {
+            health.remove(&Self::key(route));
+        }
+    }
+}
+
+/// Failures that say the route itself is unwell right now, as opposed to this
+/// request being bad (malformed output, refusal, oversize).
+fn route_unwell(category: crate::provider_diag::Category) -> bool {
+    use crate::provider_diag::Category::*;
+    matches!(
+        category,
+        Network
+            | Timeout
+            | RateLimited
+            | Server
+            | StreamInterrupted
+            | PrematureEof
+            | SseError
+            | Auth
+            | Permission
+            | InvalidModel
+    )
 }
 
 pub fn route_attempt_limit(route_index: u32) -> u32 {
@@ -366,6 +525,7 @@ where
     Fut: Future<Output = Result<T, DispatchError>>,
 {
     let mut report = ChainReport {
+        budget_exhausted: false,
         value: None,
         blocked: false,
         cancelled: false,
@@ -376,7 +536,41 @@ where
         effective_model: String::new(),
         terminal_failure: None,
         stopped: false,
+        wall_clock_exceeded: false,
     };
+    let wall_clock = opts.wire_budget.and_then(|b| b.wall_clock);
+    let deadline = wall_clock.map(|d| std::time::Instant::now() + d);
+    let remaining = || deadline.map(|at| at.saturating_duration_since(std::time::Instant::now()));
+    // Ends the operation at the cap, keeping the last real failure in the text.
+    fn cap_failure<T>(
+        report: &mut ChainReport<T>,
+        cap: Duration,
+        last: Option<crate::provider_diag::ProviderFailure>,
+    ) {
+        use crate::provider_diag::{Category, ProviderFailure, Stage};
+        let detail = last
+            .map(|f| format!("; last failure: {}", f.summary()))
+            .unwrap_or_default();
+        report.wall_clock_exceeded = true;
+        report.terminal_failure = Some(ProviderFailure::new(
+            Stage::Admission,
+            Category::Timeout,
+            format!(
+                "operation wall-clock cap of {}s reached after {} request(s){detail}",
+                cap.as_secs(),
+                report.requests
+            ),
+        ));
+        report.history.push(AttemptRecord {
+            at: stamp(),
+            route_index: 0,
+            attempt: 0,
+            model: String::new(),
+            dispatched: false,
+            outcome: "skip".into(),
+            reason: format!("operation wall-clock cap of {}s reached", cap.as_secs()),
+        });
+    }
     if routes.is_empty() {
         report.blocked = true;
         report.history.push(AttemptRecord {
@@ -412,6 +606,28 @@ where
             continue;
         }
         any_dispatchable = true;
+        if let Some(left) = opts.ledger.as_deref().and_then(|l| l.cooling(route)) {
+            let ledger = opts.ledger.as_deref().expect("checked");
+            if routes[route_index + 1..]
+                .iter()
+                .any(|r| r.skip_reason.is_none() && ledger.cooling(r).is_none())
+            {
+                report.history.push(AttemptRecord {
+                    at: stamp(),
+                    route_index: route_index as u32,
+                    attempt: 0,
+                    model: route.model.clone(),
+                    dispatched: false,
+                    outcome: "skip".into(),
+                    reason: format!(
+                        "route failed recently in this stage; passed over for {}s",
+                        left.as_secs()
+                    ),
+                });
+                continue;
+            }
+        }
+        let mut route_failure: Option<crate::provider_diag::Category> = None;
         let limit = match opts.wire_budget {
             Some(b) => b.per_route_max,
             None => opts
@@ -433,6 +649,11 @@ where
                 report.cancelled = true;
                 break;
             }
+            if let (Some(cap), Some(0)) = (wall_clock, remaining().map(|r| r.as_millis())) {
+                let last = report.terminal_failure.take();
+                cap_failure(&mut report, cap, last);
+                return report;
+            }
             let queued_at = stamp();
             let queue_start = std::time::Instant::now();
             let guard = if admission_key.is_empty() {
@@ -451,6 +672,9 @@ where
                     {
                         break Some(g);
                     }
+                    if remaining().is_some_and(|r| r.is_zero()) {
+                        break None;
+                    }
                     if sleep_unrecorded(&opts, Duration::from_millis(50)).await {
                         report.cancelled = true;
                         break None;
@@ -459,6 +683,44 @@ where
             };
             if report.cancelled {
                 break;
+            }
+            if guard.is_none() && !admission_key.is_empty() {
+                // Admission wait consumed the cap.
+                if let Some(cap) = wall_clock {
+                    let last = report.terminal_failure.take();
+                    cap_failure(&mut report, cap, last);
+                    return report;
+                }
+            }
+            if let Some(ledger) = opts.ledger.as_deref() {
+                if !ledger.reserve() {
+                    drop(guard);
+                    use crate::provider_diag::{Category, ProviderFailure, Stage};
+                    let last = report.terminal_failure.take();
+                    let detail = last
+                        .map(|f| format!("; last failure: {}", f.summary()))
+                        .unwrap_or_default();
+                    report.budget_exhausted = true;
+                    report.terminal_failure = Some(ProviderFailure::new(
+                        Stage::Admission,
+                        Category::Timeout,
+                        format!(
+                            "stage request budget of {} reached ({} dispatched across this stage's operations){detail}",
+                            ledger.cap(),
+                            ledger.dispatched()
+                        ),
+                    ));
+                    report.history.push(AttemptRecord {
+                        at: stamp(),
+                        route_index: route_index as u32,
+                        attempt: 0,
+                        model: route.model.clone(),
+                        dispatched: false,
+                        outcome: "skip".into(),
+                        reason: format!("stage request budget of {} reached", ledger.cap()),
+                    });
+                    return report;
+                }
             }
             attempt += 1;
             report.requests += 1;
@@ -469,6 +731,7 @@ where
                 recovery: recovery.take(),
                 queue_ms: queue_start.elapsed().as_millis() as u64,
                 backoff_ms: backoff.as_millis() as u64,
+                remaining: remaining(),
                 queued_at,
             };
             backoff = Duration::ZERO;
@@ -495,6 +758,9 @@ where
                         outcome: "ok".into(),
                         reason: String::new(),
                     });
+                    if let Some(ledger) = opts.ledger.as_deref() {
+                        ledger.close(route);
+                    }
                     report.value = Some(value);
                     report.effective_route = Some(route_index as u32);
                     report.effective_model = route.model.clone();
@@ -503,6 +769,7 @@ where
                 Err(err) => err,
             };
             report.terminal_failure = err.failure.clone();
+            route_failure = err.failure.as_ref().map(|f| f.category);
             let stop = err.cancelled
                 || (err.recovery.is_none() && err.disposition == RetryDisposition::Stop);
             report.history.push(AttemptRecord {
@@ -529,6 +796,27 @@ where
             if !is_recovery && err.disposition == RetryDisposition::NextRoute {
                 break;
             }
+            if let Some(cap) = wall_clock {
+                if remaining().is_some_and(|r| r.is_zero()) {
+                    let last = report.terminal_failure.take();
+                    cap_failure(&mut report, cap, last);
+                    return report;
+                }
+            }
+            if !is_recovery
+                && opts.wire_budget.is_some_and(|b| b.skip_stalled_route)
+                && err
+                    .failure
+                    .as_ref()
+                    .is_some_and(|f| f.category == crate::provider_diag::Category::Timeout)
+                && routes[route_index + 1..]
+                    .iter()
+                    .any(|r| r.skip_reason.is_none())
+            {
+                // Stalled: a thinking model that went silent will not answer a
+                // resend sooner. Fall through to the next route.
+                break;
+            }
             if attempt >= limit {
                 break;
             }
@@ -552,6 +840,10 @@ where
                 break;
             };
             let wait = err.retry_after.filter(|d| *d > base).unwrap_or(base);
+            if remaining().is_some_and(|r| r <= wait) {
+                // The wait alone would exhaust the cap: try the next route now.
+                break;
+            }
             if !opts.instant {
                 if let Some(extra) = err.retry_after {
                     tasks::note_shared_rate_limit(admission_key, extra);
@@ -570,6 +862,13 @@ where
             if was_cancelled {
                 report.cancelled = true;
                 break;
+            }
+        }
+        if !report.cancelled {
+            if let (Some(ledger), Some(category)) = (opts.ledger.as_deref(), route_failure) {
+                if route_unwell(category) {
+                    ledger.open(route);
+                }
             }
         }
         if report.cancelled {
@@ -883,6 +1182,137 @@ mod tests {
         assert_eq!(out.waits, vec![Duration::from_secs(10)]);
     }
 
+    fn stall() -> DispatchError {
+        use crate::provider_diag::{Category, ProviderFailure, Stage};
+        DispatchError::from_failure(ProviderFailure::new(
+            Stage::Stream,
+            Category::Timeout,
+            "no model output within 300s of response headers",
+        ))
+    }
+
+    // A stalled thinking route is not resent; the chain falls through to the
+    // next route (the route 0 repeat that cost ~6 minutes on main).
+    #[tokio::test]
+    async fn a_stalled_route_falls_through_instead_of_repeating() {
+        let seen = Mutex::new(Vec::new());
+        let out = execute_with_context(
+            &routes(3),
+            |ctx, _r| {
+                seen.lock().unwrap().push((ctx.route_index, ctx.attempt));
+                async move {
+                    if ctx.route_index < 2 {
+                        Err(stall())
+                    } else {
+                        Ok("answer")
+                    }
+                }
+            },
+            budgeted(),
+        )
+        .await;
+        assert_eq!(out.value, Some("answer"));
+        assert_eq!(*seen.lock().unwrap(), [(0, 1), (1, 1), (2, 1)]);
+        assert!(out.waits.is_empty(), "no backoff before a fallback");
+    }
+
+    // Other transient failures still draw the primary's one retry, and a
+    // primary stall with no fallback is retried because nothing else is left.
+    #[tokio::test]
+    async fn transient_failures_keep_their_retry_and_the_last_route_retries_a_stall() {
+        let seen = Mutex::new(Vec::new());
+        let out = execute_with_context(
+            &routes(2),
+            |ctx, _r| {
+                seen.lock().unwrap().push((ctx.route_index, ctx.attempt));
+                async move {
+                    if ctx.route_index == 0 {
+                        Err::<(), _>(DispatchError::new("503"))
+                    } else {
+                        Err(stall())
+                    }
+                }
+            },
+            budgeted(),
+        )
+        .await;
+        assert!(out.value.is_none());
+        assert_eq!(*seen.lock().unwrap(), [(0, 1), (0, 2), (1, 1)]);
+        let lone = execute_with_context(
+            &routes(1),
+            |_ctx, _r| async { Err::<(), _>(stall()) },
+            budgeted(),
+        )
+        .await;
+        assert_eq!(
+            lone.requests, 2,
+            "no fallback: the stalled primary is retried"
+        );
+    }
+
+    // The wall-clock cap ends the operation across routes and says so,
+    // keeping the last real failure in the message and category `timeout`.
+    #[tokio::test]
+    async fn the_wall_clock_cap_ends_the_operation_with_a_timeout() {
+        let mut opts = budgeted();
+        opts.wire_budget = Some(WireBudget {
+            wall_clock: Some(Duration::from_millis(150)),
+            ..WireBudget::INTERACTIVE
+        });
+        let seen = Mutex::new(Vec::new());
+        let out = execute_with_context(
+            &routes(3),
+            |ctx, _r| {
+                seen.lock().unwrap().push(ctx.remaining);
+                async move {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Err::<(), _>(DispatchError::new("503 busy"))
+                }
+            },
+            opts,
+        )
+        .await;
+        assert!(out.wall_clock_exceeded && out.value.is_none());
+        assert_eq!(out.requests, 1, "no dispatch after the cap");
+        let failure = out.terminal_failure.unwrap();
+        assert_eq!(failure.category, crate::provider_diag::Category::Timeout);
+        assert!(
+            failure.message.contains("wall-clock cap"),
+            "{}",
+            failure.message
+        );
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].unwrap() <= Duration::from_millis(150));
+    }
+
+    // Backoff that would outlast the cap is skipped rather than slept.
+    #[tokio::test]
+    async fn a_backoff_longer_than_the_remaining_cap_moves_on() {
+        let mut opts = budgeted();
+        opts.instant = false;
+        opts.wire_budget = Some(WireBudget {
+            wall_clock: Some(Duration::from_secs(5)),
+            ..WireBudget::INTERACTIVE
+        });
+        let started = std::time::Instant::now();
+        let out = execute_with_context(
+            &routes(2),
+            |ctx, _r| async move {
+                if ctx.route_index == 0 {
+                    Err(DispatchError::new("503"))
+                } else {
+                    Ok(())
+                }
+            },
+            opts,
+        )
+        .await;
+        // The 10s primary backoff would exceed the 5s cap: straight to route 1.
+        assert!(out.value.is_some());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(out.waits.is_empty());
+    }
+
     #[tokio::test]
     async fn recovery_overrides_stop_and_reports_context() {
         let seen = Mutex::new(Vec::new());
@@ -937,5 +1367,87 @@ mod tests {
         assert_eq!(out.requests, 1);
         assert!(recorded.lock().unwrap().is_empty());
         assert!(out.waits.is_empty());
+    }
+
+    fn route(model: &str) -> Route {
+        Route {
+            provider: "p".into(),
+            account: "a".into(),
+            model: model.into(),
+            skip_reason: None,
+            admission_key: Some(format!("k:{model}")),
+        }
+    }
+
+    fn timeout() -> DispatchError {
+        DispatchError::from_failure(crate::provider_diag::ProviderFailure::new(
+            crate::provider_diag::Stage::Stream,
+            crate::provider_diag::Category::Timeout,
+            "stalled",
+        ))
+    }
+
+    async fn run(
+        routes: &[Route],
+        ledger: &Arc<StageLedger>,
+        dead: &str,
+    ) -> (ChainReport<()>, Vec<String>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let dead = dead.to_string();
+        let report = execute_with_context(
+            routes,
+            move |_, r| {
+                log.lock().unwrap().push(r.model.clone());
+                let fail = r.model == dead;
+                async move {
+                    if fail {
+                        Err(timeout())
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            ExecuteOptions {
+                ledger: Some(ledger.clone()),
+                ..budgeted()
+            },
+        )
+        .await;
+        let seen = seen.lock().unwrap().clone();
+        (report, seen)
+    }
+
+    #[tokio::test]
+    async fn a_route_that_just_stalled_is_passed_over_by_sibling_operations() {
+        let routes = [route("a"), route("b")];
+        let ledger = Arc::new(StageLedger::new(50));
+        let (first, seen) = run(&routes, &ledger, "a").await;
+        assert!(first.value.is_some());
+        assert_eq!(seen, ["a", "b"]);
+        let (second, seen) = run(&routes, &ledger, "a").await;
+        assert!(second.value.is_some());
+        assert_eq!(seen, ["b"], "route a is cooling");
+        assert_eq!(ledger.dispatched(), 3);
+    }
+
+    #[tokio::test]
+    async fn the_last_dispatchable_route_is_never_passed_over() {
+        let routes = [route("a")];
+        let ledger = Arc::new(StageLedger::new(50));
+        let _ = run(&routes, &ledger, "a").await;
+        let (_, seen) = run(&routes, &ledger, "a").await;
+        assert!(!seen.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_stage_budget_stops_dispatch_across_operations() {
+        let routes = [route("a"), route("b")];
+        let ledger = Arc::new(StageLedger::new(2));
+        let (_, _) = run(&routes, &ledger, "none").await;
+        let (_, _) = run(&routes, &ledger, "none").await;
+        let (third, seen) = run(&routes, &ledger, "none").await;
+        assert!(third.budget_exhausted && seen.is_empty());
+        assert!(third.value.is_none());
     }
 }

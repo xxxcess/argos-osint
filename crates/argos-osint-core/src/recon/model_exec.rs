@@ -79,6 +79,9 @@ pub struct OperationScope<'a> {
     pub contract: Option<crate::provider_adapters::ResponseContract>,
     /// Lease epoch of the owning task (schema 41); `None` outside tasks.
     pub task_epoch: Option<i64>,
+    /// Stage-wide request budget and route health shared with sibling
+    /// operations (`None` outside stages).
+    pub ledger: Option<std::sync::Arc<crate::provider_chain::StageLedger>>,
 }
 
 /// Declared response format (spec §3). `BoundedDecision` may use native Jev
@@ -126,6 +129,7 @@ impl<'a> OperationScope<'a> {
             budget: None,
             contract: None,
             task_epoch: None,
+            ledger: None,
         }
     }
 
@@ -138,6 +142,17 @@ impl<'a> OperationScope<'a> {
     pub fn with_contract(mut self, contract: crate::provider_adapters::ResponseContract) -> Self {
         self.contract = Some(contract);
         self
+    }
+
+    /// Per-attempt deadlines: thinking stages get thinking-sized waits.
+    pub fn deadlines(&self, stream: bool) -> Deadlines {
+        let thinks = self.budget.is_some_and(|b| b.thinks());
+        match (stream, thinks) {
+            (true, true) => Deadlines::insight_stream_thinking(),
+            (true, false) => Deadlines::insight_stream(),
+            (false, true) => Deadlines::insight_non_stream_thinking(),
+            (false, false) => Deadlines::insight_non_stream(),
+        }
     }
 
     /// The request policy for this operation's dispatches.
@@ -161,7 +176,11 @@ impl<'a> OperationScope<'a> {
     /// budget; everyone else keeps the ordinary policy.
     pub fn wire_budget(&self) -> Option<provider_chain::WireBudget> {
         self.interactive
-            .then_some(provider_chain::WireBudget::INTERACTIVE)
+            .then_some(if self.budget.is_some_and(|b| b.thinks()) {
+                provider_chain::WireBudget::INTERACTIVE_THINKING
+            } else {
+                provider_chain::WireBudget::INTERACTIVE
+            })
     }
 
     pub fn with_interactive(mut self) -> Self {
@@ -224,6 +243,14 @@ impl<'a> OperationScope<'a> {
     /// caller also puts the epoch in the operation id
     /// (`{task_id}:e{epoch}:...`), so a retried execution writes new attempt
     /// rows and prior rows stay immutable.
+    pub fn with_ledger(
+        mut self,
+        ledger: std::sync::Arc<crate::provider_chain::StageLedger>,
+    ) -> Self {
+        self.ledger = Some(ledger);
+        self
+    }
+
     pub fn with_task_epoch(mut self, epoch: i64) -> Self {
         self.task_epoch = Some(epoch);
         self
@@ -285,9 +312,47 @@ impl ModelOperationError {
     }
 }
 
+/// Bound one attempt by the operation's remaining wall-clock cap, covering
+/// provider pacing and every per-attempt wait. Expiry is a typed timeout the
+/// caller records like any other attempt failure.
+async fn bounded_by_cap(
+    remaining: Option<std::time::Duration>,
+    secret: &crate::secrets::ProviderSecret,
+    transport: Transport,
+    attempt: impl std::future::Future<Output = provider_attempt::AttemptReport>,
+) -> provider_attempt::AttemptReport {
+    let Some(left) = remaining else {
+        return attempt.await;
+    };
+    let started = Instant::now();
+    match tokio::time::timeout(left, attempt).await {
+        Ok(report) => report,
+        Err(_) => provider_attempt::AttemptReport {
+            transport,
+            endpoint: provider::normalize_base(&secret.base_url),
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            outcome: Err(ProviderFailure::new(
+                Stage::Admission,
+                Category::Timeout,
+                format!(
+                    "operation wall-clock cap reached while waiting on this route ({}s left of the operation budget)",
+                    left.as_secs()
+                ),
+            )),
+            policy_diagnostics: Vec::new(),
+            effective: None,
+            recovery: None,
+        },
+    }
+}
+
 fn chain_error<T>(report: &ChainReport<T>) -> anyhow::Error {
     let termination = if report.cancelled {
         "operation cancelled"
+    } else if report.budget_exhausted {
+        "stage request budget reached"
+    } else if report.wall_clock_exceeded {
+        "operation wall-clock cap reached"
     } else if report.blocked {
         "all routes blocked"
     } else if report.stopped {
@@ -1345,6 +1410,7 @@ where
             .checked_sub(std::time::Duration::from_millis(ctx.queue_ms))
             .unwrap_or_else(Instant::now);
         let backoff_ms = ctx.backoff_ms;
+        let remaining = ctx.remaining;
         let admitted = admitted.clone();
         let contract = contract.clone();
         let secret = secrets[route_idx].clone();
@@ -1495,12 +1561,8 @@ where
                 )
             };
             let rep = if insight_contract {
-                let deadlines = if transport == Transport::Stream {
-                    Deadlines::insight_stream()
-                } else {
-                    Deadlines::insight_non_stream()
-                };
-                provider_attempt::attempt_spec(
+                let deadlines = scope.deadlines(transport == Transport::Stream);
+                let attempt = provider_attempt::attempt_spec(
                     &secret,
                     &messages_vec,
                     transport,
@@ -1512,8 +1574,8 @@ where
                         contract: contract.as_ref(),
                         caps: admitted.get(route_idx),
                     },
-                )
-                .await
+                );
+                bounded_by_cap(remaining, &secret, transport, attempt).await
             } else {
                 provider_attempt::attempt_full(
                     &secret,
@@ -1737,6 +1799,7 @@ where
         attempt_limit: insight_contract.then_some(2),
         interactive: scope.interactive,
         wire_budget: scope.wire_budget(),
+        ledger: scope.ledger.clone(),
     };
 
     let report = provider_chain::execute_with_context(&routes, dispatch, opts).await;
@@ -2296,6 +2359,7 @@ where
         attempt_limit: insight_contract.then_some(2),
         interactive: scope.interactive,
         wire_budget: scope.wire_budget(),
+        ledger: scope.ledger.clone(),
     };
 
     let report = provider_chain::execute_with_context(&routes, dispatch, opts).await;
@@ -2341,24 +2405,102 @@ mod tests {
     use super::*;
 
     #[test]
-    fn automatic_operations_have_no_output_or_reasoning_budget() {
+    fn automatic_operations_have_no_output_caps_and_only_thinking_stages_send_effort() {
+        use crate::request_policy::{ReasoningEffort, INFERENCES_BUDGET};
         for role in provider::CANONICAL_ROLE_KEYS {
-            for scope in [
-                OperationScope::new("op", role),
-                OperationScope::new("op", role)
-                    .with_budget(crate::request_policy::INFERENCES_BUDGET),
+            for (scope, effort) in [
+                (OperationScope::new("op", role), ReasoningEffort::Default),
+                (
+                    OperationScope::new("op", role).with_budget(INFERENCES_BUDGET),
+                    ReasoningEffort::Efficient,
+                ),
+                (
+                    OperationScope::new("op", role)
+                        .with_budget(crate::request_policy::CLAIMS_BUDGET),
+                    ReasoningEffort::Default,
+                ),
             ] {
                 let policy = scope.request_policy(true, 2048);
                 assert!(policy.max_output_tokens.is_none());
                 assert!(policy.thinking_ceiling.is_none());
                 assert!(policy.reasoning_budget.is_none());
                 assert!(policy.budgeted_ceiling.is_none());
-                assert_eq!(
-                    policy.reasoning,
-                    crate::request_policy::ReasoningEffort::Default
-                );
+                assert_eq!(policy.reasoning, effort);
                 assert!(policy.json_object);
             }
+        }
+    }
+
+    #[test]
+    fn interactive_operations_have_a_wall_clock_cap_sized_for_thinking() {
+        use crate::request_policy::{CLAIMS_BUDGET, INFERENCES_BUDGET};
+        let cap = |scope: OperationScope| scope.wire_budget().unwrap().wall_clock.unwrap();
+        let think = cap(OperationScope::new("op", "synthesis")
+            .with_budget(INFERENCES_BUDGET)
+            .with_interactive());
+        let plain = cap(OperationScope::new("op", "claims")
+            .with_budget(CLAIMS_BUDGET)
+            .with_interactive());
+        assert_eq!(think.as_secs(), 900);
+        assert_eq!(plain.as_secs(), 600);
+        assert!(OperationScope::new("op", "claims").wire_budget().is_none());
+        // Room for a fallback after one thinking-sized stall.
+        assert!(think > Deadlines::insight_stream_thinking().first_output.unwrap() * 2);
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_outlives_the_cap_becomes_a_typed_timeout() {
+        let secret = crate::provider_attempt::mock::secret("http://127.0.0.1:9");
+        let report = bounded_by_cap(
+            Some(std::time::Duration::from_millis(50)),
+            &secret,
+            Transport::Stream,
+            std::future::pending(),
+        )
+        .await;
+        let failure = report.outcome.unwrap_err();
+        assert_eq!(failure.category, Category::Timeout);
+        assert!(
+            failure.message.contains("wall-clock cap"),
+            "{}",
+            failure.message
+        );
+        let uncapped = bounded_by_cap(None, &secret, Transport::Stream, async {
+            provider_attempt::AttemptReport {
+                transport: Transport::Stream,
+                endpoint: String::new(),
+                elapsed_ms: 0,
+                outcome: Err(ProviderFailure::new(Stage::Stream, Category::Empty, "x")),
+                policy_diagnostics: vec![],
+                effective: None,
+                recovery: None,
+            }
+        })
+        .await;
+        assert_eq!(uncapped.outcome.unwrap_err().category, Category::Empty);
+    }
+
+    #[test]
+    fn thinking_stages_get_thinking_sized_deadlines_and_others_keep_theirs() {
+        use crate::request_policy::{CLAIMS_BUDGET, INFERENCES_BUDGET, LINKS_BUDGET};
+        let think = OperationScope::new("op", "synthesis").with_budget(INFERENCES_BUDGET);
+        let (s, n) = (think.deadlines(true), think.deadlines(false));
+        assert_eq!(s.first_response, Deadlines::insight_stream().first_response);
+        assert!(s.first_output > Deadlines::insight_stream().first_output);
+        assert!(s.model_inactivity > Deadlines::insight_stream().model_inactivity);
+        assert_eq!(s.total, Deadlines::insight_stream().total);
+        assert!(n.first_response > Deadlines::insight_non_stream().first_response);
+        assert!(n.first_response < n.total);
+        for budget in [CLAIMS_BUDGET, LINKS_BUDGET] {
+            let scope = OperationScope::new("op", "claims").with_budget(budget);
+            assert_eq!(
+                scope.deadlines(true).first_output,
+                Deadlines::insight_stream().first_output
+            );
+            assert_eq!(
+                scope.deadlines(false).first_response,
+                Deadlines::insight_non_stream().first_response
+            );
         }
     }
 

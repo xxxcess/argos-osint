@@ -240,6 +240,7 @@ fn reuse_checkpoints(
                  JOIN argos_tasks t ON t.id = o.task_id AND t.state='completed'
                  WHERE r.article_id=?1 AND r.generation<?2 AND r.contract=?5
                    AND json_extract(r.stage_revisions_json, '$[' || ?3 || ']') = ?6
+                   AND o.empty_reason NOT LIKE 'warning:%'
                  ORDER BY r.generation DESC LIMIT 1",
                 params![
                     inputs.article_id,
@@ -280,6 +281,7 @@ fn reuse_checkpoints(
                      JOIN intel_brief_runs r ON r.job_id=t.job_id
                      WHERE t.operation=?1 AND t.state='completed' AND t.input_hash=?2
                        AND t.job_id<>?3 AND r.article_id=?4 AND r.contract=?5
+                       AND o.empty_reason NOT LIKE 'warning:%'
                      ORDER BY r.generation DESC LIMIT 1",
                     params![operation, bound, job_id, inputs.article_id, CONTRACT],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
@@ -456,6 +458,11 @@ pub fn commit_stage_with(
         "INSERT OR REPLACE INTO intel_brief_stage_outputs(task_id,job_id,stage,output_hash,output_json,item_count,empty_reason,committed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![claimed.id, claimed.job_id, claimed.operation, hash, output_json, item_count as i64, empty_reason, now],
     )?;
+    // A completed-with-warnings stage keeps its checkpoints so Retry re-asks
+    // only the items that failed.
+    if !empty_reason.starts_with("warning:") {
+        checkpoint_clear(&tx, &claimed.job_id, &claimed.operation)?;
+    }
     let last = STAGES.last().map(|(op, _)| *op) == Some(claimed.operation.as_str());
     if !last {
         let revisions = run_revisions(&tx, &claimed.job_id)?;
@@ -664,7 +671,7 @@ pub fn retry_stage(conn: &Connection, job_id: &str, now: &str) -> Result<Option<
         rows
     };
     if failed.is_empty() {
-        return Ok(None);
+        return retry_warnings(conn, job_id, now);
     }
     for id in &failed {
         conn.execute(
@@ -678,6 +685,117 @@ pub fn retry_stage(conn: &Connection, job_id: &str, now: &str) -> Result<Option<
     )?;
     tasks::refresh_job_state(conn, job_id, now)?;
     Ok(failed.into_iter().next())
+}
+
+fn checkpoint_key(job_id: &str, stage: &str, item: &str) -> String {
+    format!("intel-brief-ckpt:{job_id}:{stage}:{item}")
+}
+
+/// A per-item checkpoint of a stage that fans out (one model request per
+/// claim). Valid only for the exact input hash it was written for.
+pub fn checkpoint_get(
+    conn: &Connection,
+    job_id: &str,
+    stage: &str,
+    item: &str,
+    input_hash: &str,
+) -> Result<Option<serde_json::Value>> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_state WHERE key=?1",
+            [checkpoint_key(job_id, stage, item)],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(raw
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .filter(|v| v["hash"] == input_hash)
+        .map(|v| v["output"].clone()))
+}
+
+pub fn checkpoint_put(
+    conn: &Connection,
+    job_id: &str,
+    stage: &str,
+    item: &str,
+    input_hash: &str,
+    output: &serde_json::Value,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO app_state(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![
+            checkpoint_key(job_id, stage, item),
+            serde_json::json!({"hash": input_hash, "output": output}).to_string()
+        ],
+    )?;
+    Ok(())
+}
+
+/// Drop a stage's checkpoints once its output is committed.
+pub fn checkpoint_clear(conn: &Connection, job_id: &str, stage: &str) -> Result<()> {
+    let prefix = checkpoint_key(job_id, stage, "");
+    conn.execute(
+        "DELETE FROM app_state WHERE substr(key,1,?2)=?1",
+        params![prefix, prefix.chars().count() as i64],
+    )?;
+    Ok(())
+}
+
+/// Retry for a stage that completed with warnings (some items failed): reopen
+/// it and everything downstream of it. Its per-item checkpoints survive, so
+/// only the failed items are asked again; descendants rebind to the new
+/// output when it commits. Nothing is reopened while any stage is running.
+fn retry_warnings(conn: &Connection, job_id: &str, now: &str) -> Result<Option<String>> {
+    let running: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM argos_tasks WHERE job_id=?1 AND state IN ('running','retry_scheduled')",
+        [job_id],
+        |r| r.get(0),
+    )?;
+    if running > 0 {
+        return Ok(None);
+    }
+    let mut reopened: Vec<&str> = Vec::new();
+    for (operation, _) in STAGES {
+        let warned: bool = conn
+            .query_row(
+                "SELECT 1 FROM intel_brief_stage_outputs WHERE task_id=?1 AND empty_reason LIKE 'warning:%'",
+                [task_id(job_id, operation)],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if warned
+            || prerequisites(operation)
+                .iter()
+                .any(|p| reopened.contains(p))
+        {
+            reopened.push(operation);
+        }
+    }
+    let Some(first) = reopened.first().copied() else {
+        return Ok(None);
+    };
+    for operation in &reopened {
+        let id = task_id(job_id, operation);
+        let root_of_retry = *operation == first;
+        conn.execute(
+            "DELETE FROM intel_brief_stage_outputs WHERE task_id=?1",
+            [&id],
+        )?;
+        conn.execute(
+            "UPDATE argos_tasks SET state='queued',attempts=0,recoveries=0,error_category='',error_message='',result_ref='',finished_at='',next_eligible_at='',
+                    input_hash=CASE WHEN ?3 THEN input_hash ELSE '' END,
+                    input_ref=CASE WHEN ?3 THEN input_ref ELSE '' END,updated_at=?2
+             WHERE id=?1",
+            params![id, now, root_of_retry],
+        )?;
+    }
+    conn.execute(
+        "UPDATE intel_brief_runs SET state='active',updated_at=?2 WHERE job_id=?1",
+        params![job_id, now],
+    )?;
+    tasks::refresh_job_state(conn, job_id, now)?;
+    Ok(Some(task_id(job_id, first)))
 }
 
 /// Cancellation/deletion: stop the owned chain and prevent publication.

@@ -1,4 +1,9 @@
 use super::*;
+
+#[path = "brief_configured_live_tests.rs"]
+mod configured_live;
+#[path = "brief_user_chain_tests.rs"]
+mod user_chain;
 use crate::intel_recon::brief_pipeline::{ensure_chain, stage_views, BriefInputs};
 use crate::intel_recon::clean_body::clean_article;
 use std::sync::atomic::AtomicUsize;
@@ -95,6 +100,10 @@ struct Mock {
     seen: Arc<Mutex<Vec<Seen>>>,
     responses: HashMap<String, Vec<String>>,
     fail: HashSet<String>,
+    /// Fail with a typed executor timeout (what a real exhausted chain carries).
+    fail_timeout: HashSet<String>,
+    /// Claim ids whose Inferences request fails with a typed timeout.
+    fail_claim: HashSet<String>,
     hang: HashSet<String>,
     delay: Option<Duration>,
     related: Vec<AtlasArticleRow>,
@@ -105,6 +114,8 @@ struct Mock {
     context_started: Arc<AtomicUsize>,
     reject_context: bool,
     invalid_context: bool,
+    fail_context_claim: HashSet<String>,
+    fail_context_sentence: HashSet<String>,
     forced: bool,
 }
 
@@ -231,31 +242,49 @@ impl StageBackend for Mock {
         Ok(self.related.clone())
     }
     fn classify_context<'a>(
-        &'a mut self,
+        &mut self,
         _ctx: &'a StageContext,
         batch: crate::intel_recon::brief_context::ContextBatch,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<HashMap<String, String>>> {
+        let mock = self.clone();
         Box::pin(async move {
             ensure!(!cancel.load(Ordering::Acquire), "cancelled");
-            self.context_started.fetch_add(1, Ordering::AcqRel);
-            self.classified.lock().unwrap().push(batch.clone());
-            if self.hang.contains("intel_brief_context") {
+            mock.context_started.fetch_add(1, Ordering::AcqRel);
+            mock.classified.lock().unwrap().push(batch.clone());
+            if mock.hang.contains("intel_brief_context") {
                 loop {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             }
-            if self.invalid_context {
+            if mock.invalid_context {
                 return Ok(HashMap::from([(
                     "invented-sentence".into(),
                     "support".into(),
                 )]));
             }
+            if batch.claim["id"]
+                .as_str()
+                .is_some_and(|id| mock.fail_context_claim.contains(id))
+                && (mock.fail_context_sentence.is_empty()
+                    || batch
+                        .candidates
+                        .iter()
+                        .any(|s| mock.fail_context_sentence.contains(&s.id)))
+            {
+                return Err(crate::recon::model_exec::ModelOperationError {
+                    category: Some(crate::provider_diag::Category::Timeout),
+                    requests: 3,
+                    history: vec![],
+                    message: "context classifier routes exhausted".into(),
+                }
+                .into());
+            }
             Ok(batch
                 .candidates
                 .into_iter()
                 .map(|s| {
-                    let relation = if self.reject_context || s.text.contains("unrelated") {
+                    let relation = if mock.reject_context || s.text.contains("unrelated") {
                         "irrelevant"
                     } else if s.text.contains("corrected") || s.text.contains("denied") {
                         "counterevidence"
@@ -331,6 +360,29 @@ impl StageBackend for Mock {
             }
             if let Some(delay) = mock.delay {
                 tokio::time::sleep(delay).await;
+            }
+            if request.stage == "intel_brief_inferences" && !selection {
+                let claim = serde_json::from_str::<Value>(&request.user)
+                    .ok()
+                    .and_then(|u| u["CLAIM"]["id"].as_str().map(str::to_string));
+                if claim.is_some_and(|id| mock.fail_claim.contains(&id)) {
+                    return Err(crate::recon::model_exec::ModelOperationError {
+                        category: Some(crate::provider_diag::Category::Timeout),
+                        requests: 3,
+                        history: vec![],
+                        message: "operation wall-clock cap reached".into(),
+                    }
+                    .into());
+                }
+            }
+            if mock.fail_timeout.contains(&request.stage) {
+                return Err(crate::recon::model_exec::ModelOperationError {
+                    category: Some(crate::provider_diag::Category::Timeout),
+                    requests: 4,
+                    history: vec![],
+                    message: "model routes exhausted: first response/timeout: no response headers within 60s".into(),
+                }
+                .into());
             }
             if mock.fail.contains(&request.stage) {
                 bail!("provider exhausted: server error");
@@ -653,6 +705,12 @@ async fn invalid_classifier_decisions_fail_closed_before_synthesis() {
     let db = db();
     let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
     let mut mock = Mock::happy();
+    // Both claims need real classifier work. A claim with no candidates is a
+    // valid independent empty-evidence analysis, not a classifier failure.
+    mock.body = Some(format!(
+        "{}\n\nUnions denied that staffing was a factor in the suspension, saying the crew schedule was unchanged.",
+        story()
+    ));
     mock.invalid_context = true;
     let outcomes = drain(
         &db.path,
@@ -670,6 +728,14 @@ async fn invalid_classifier_decisions_fail_closed_before_synthesis() {
         .requests()
         .iter()
         .all(|r| r.stage == "intel_brief_claims"));
+    let classified: HashSet<String> = mock
+        .classified
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|b| b.claim["id"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(classified, HashSet::from(["c1".into(), "c2".into()]));
     assert!(stage_output(
         &Store::open(&db.path).unwrap(),
         &job,
@@ -2282,4 +2348,314 @@ async fn heldout_fast_preset_comparison() {
         std::fs::write(out, &text).unwrap();
     }
     println!("{text}");
+}
+
+// Phase A: the stage's error category is the executor's real cause, not a
+// blanket `invalid_result`; Jobs names the task of every attempt row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timeout_failure_keeps_its_category_and_attempt_rows_name_their_task() {
+    use crate::provider_diag::Category;
+    use crate::tasks::ErrorCategory as E;
+    assert_eq!(stage_error_category(&anyhow!("bad json")), E::InvalidResult);
+    for (c, want) in [
+        (Category::Timeout, E::Timeout),
+        (Category::Server, E::TemporaryNetwork),
+        (Category::RateLimited, E::RateLimit),
+        (Category::Auth, E::AuthOrQuota),
+        (Category::TokenLimit, E::ContextLimit),
+        (Category::InvalidResult, E::InvalidResult),
+    ] {
+        let err: anyhow::Error = crate::recon::model_exec::ModelOperationError {
+            category: Some(c),
+            requests: 1,
+            history: vec![],
+            message: "x".into(),
+        }
+        .into();
+        assert_eq!(stage_error_category(&err.context("stage")), want);
+    }
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.fail_timeout.insert("intel_brief_inferences".into());
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let store = Store::open(&db.path).unwrap();
+    let (cat, msg): (String, String) = store
+        .conn
+        .query_row(
+            "SELECT error_category,error_message FROM argos_tasks WHERE id=?1",
+            [brief_pipeline::task_id(&job, "intel_brief_inferences")],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(cat, "timeout", "{msg}");
+    let detail = crate::jobs_view::job_detail(&store.conn, &job, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.job.error_category, "timeout");
+    let labels: HashSet<&str> = detail
+        .attempts
+        .iter()
+        .map(|a| a.task_label.as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        HashSet::from(["Full article", "Claims", "Inferences"])
+    );
+    let failed = detail
+        .attempts
+        .iter()
+        .find(|a| a.task_label == "Inferences")
+        .unwrap();
+    assert_eq!(
+        (failed.outcome.as_str(), failed.error_category.as_str()),
+        ("failed", "timeout")
+    );
+    assert!(
+        detail.attempts.iter().all(|a| a.attempt_number == 1),
+        "same #1, now disambiguated"
+    );
+}
+
+fn inference_requests(mock: &Mock) -> Vec<Value> {
+    mock.requests()
+        .into_iter()
+        .filter(|s| s.stage == "intel_brief_inferences" && !s.user.contains("INFERENCE_CANDIDATES"))
+        .map(|s| serde_json::from_str::<Value>(&s.user).unwrap()["CLAIM"]["id"].clone())
+        .collect()
+}
+
+// Phase D: one failing claim no longer fails Inferences. The analyzed claims
+// publish, the stage completes with warnings, Links runs on them, and Retry
+// re-asks only the failed claim before re-running Links.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_failed_claim_completes_with_warnings_and_retry_asks_only_that_claim() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.filter_inference_evidence = true;
+    mock.fail_claim.insert("c2".into());
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let r = rows(&db.path, &job);
+    assert_eq!(r[2], "Completed with warnings · 1 item", "{r:?}");
+    assert!(
+        r[3].starts_with("Completed"),
+        "Links degrades, not blocks: {r:?}"
+    );
+    let store = Store::open(&db.path).unwrap();
+    let out = stage_output(&store, &job, "intel_brief_inferences").unwrap();
+    assert_eq!(out["claim_failures"][0]["claim_id"], "c2");
+    assert_eq!(out["claim_failures"][0]["category"], "timeout");
+    assert_eq!(
+        out["claim_analysis"][1]["analysis_failed"]["category"],
+        "timeout"
+    );
+    assert_eq!(out["inferences"].as_array().unwrap().len(), 1);
+    assert_eq!(inference_requests(&mock).len(), 2);
+    let leads_before = mock
+        .requests()
+        .iter()
+        .filter(|s| s.stage == "intel_brief_links")
+        .count();
+    assert_eq!(leads_before, 1);
+    let ckpt: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_state WHERE key LIKE 'intel-brief-ckpt:%' AND key NOT LIKE '%:context:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ckpt, 1, "the analyzed claim keeps its checkpoint");
+
+    // Retry: only c2 is asked; Links reruns on the complete set.
+    mock.fail_claim.clear();
+    mock.seen.lock().unwrap().clear();
+    mock.classified.lock().unwrap().clear();
+    assert!(
+        crate::intel_recon::brief_pipeline::retry_stage(&store.conn, &job, &now())
+            .unwrap()
+            .is_some()
+    );
+    let r = rows(&db.path, &job);
+    assert!(r[2].starts_with("Queued"), "{r:?}");
+    assert!(r[3].starts_with("Queued"), "{r:?}");
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    assert_eq!(inference_requests(&mock), [json!("c2")]);
+    assert!(
+        mock.classified.lock().unwrap().is_empty(),
+        "Retry reuses validated context batches as well as generated claims"
+    );
+    let retried = stage_output(&store, &job, "intel_brief_inferences").unwrap();
+    assert_eq!(retried["analysis_requests"], 1);
+    assert_eq!(retried["claim_analysis"][0]["analysis_reused"], true);
+    assert_eq!(retried["claim_analysis"][0]["analysis_request_sent"], false);
+    let r = rows(&db.path, &job);
+    assert!(!r[2].contains("warning"), "{r:?}");
+    assert!(r[3].starts_with("Completed"), "{r:?}");
+    assert_eq!(
+        mock.requests()
+            .iter()
+            .filter(|s| s.stage == "intel_brief_links")
+            .count(),
+        1
+    );
+    let ckpt: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_state WHERE key LIKE 'intel-brief-ckpt:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ckpt, 0, "a clean commit clears the checkpoints");
+}
+
+// Every claim failing is still a failed stage and keeps the provider category.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_claim_failing_fails_inferences_with_the_provider_category() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.fail_claim = ["c1", "c2"].map(String::from).into();
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let r = rows(&db.path, &job);
+    assert!(r[2].starts_with("Failed"), "{r:?}");
+    assert_eq!(r[3], "Queued · blocked by Inferences");
+    let store = Store::open(&db.path).unwrap();
+    let category: String = store
+        .conn
+        .query_row(
+            "SELECT error_category FROM argos_tasks WHERE id=?1",
+            [crate::intel_recon::brief_pipeline::task_id(
+                &job,
+                "intel_brief_inferences",
+            )],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(category, "timeout");
+}
+
+// The Jobs panel's retry goes through the same resume path as the brief's
+// Retry button, for failed branches and for completed-with-warnings stages.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jobs_retry_resumes_failed_and_warning_brief_stages() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    mock.filter_inference_evidence = true;
+    mock.fail_claim = ["c1", "c2"].map(String::from).into();
+    let cancel = Arc::new(AtomicBool::new(false));
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let store = Store::open(&db.path).unwrap();
+    let detail = crate::jobs_view::job_detail(&store.conn, &job, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.retryable, 1, "the failed Inferences branch");
+    mock.fail_claim = ["c2"].map(String::from).into();
+    assert_eq!(store.retry_failed_tasks(&job).unwrap(), 1);
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    assert!(rows(&db.path, &job)[2].starts_with("Completed with warnings"));
+    let detail = crate::jobs_view::job_detail(&store.conn, &job, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.retryable, 1, "the warning stage is retryable");
+    assert_eq!(detail.warnings.len(), 1);
+    mock.fail_claim.clear();
+    mock.seen.lock().unwrap().clear();
+    assert_eq!(store.retry_failed_tasks(&job).unwrap(), 1);
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    assert_eq!(inference_requests(&mock), [json!("c2")]);
+    let detail = crate::jobs_view::job_detail(&store.conn, &job, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!((detail.retryable, detail.warnings.len()), (0, 0));
+    assert_eq!(store.retry_failed_tasks(&job).unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_context_batch_is_isolated_and_retry_only_classifies_that_batch() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    let extra = (0..24)
+        .map(|n| format!("Unions denied that staffing was a factor in the suspension of service number {n}.\n\n"))
+        .collect::<String>();
+    mock.body = Some(format!("{}\n\n{extra}", story()));
+    let cancel = Arc::new(AtomicBool::new(false));
+    // Commit the two independent roots before choosing one classifier batch.
+    for _ in 0..2 {
+        let outcome = run_next_stage(&db.path, "w1", &mut mock, &cancel, &cfg())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(outcome, StageOutcome::Committed { .. }),
+            "{outcome:?}"
+        );
+    }
+    let store = Store::open(&db.path).unwrap();
+    let body = stage_output(&store, &job, "intel_brief_body").unwrap();
+    let claims = stage_output(&store, &job, "intel_brief_claims").unwrap();
+    let (_, index) = crate::intel_recon::sentence_index::body_sentences(&body);
+    let context = crate::intel_recon::brief_context::claim_candidates(
+        &index,
+        body["markdown"].as_str().unwrap(),
+        &claims["claims"][1],
+        &[],
+    )
+    .unwrap();
+    let batches = crate::intel_recon::brief_context::classifier_batches(&context).unwrap();
+    assert!(
+        batches.len() >= 2,
+        "fixture exercises partial classification"
+    );
+    let failed_id = batches.last().unwrap().candidates[0].id.clone();
+    mock.fail_context_claim.insert("c2".into());
+    mock.fail_context_sentence.insert(failed_id.clone());
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let output = stage_output(&store, &job, "intel_brief_inferences").unwrap();
+    assert_eq!(output["claim_failures"][0]["claim_id"], "c2");
+    assert_eq!(output["claim_failures"][0]["phase"], "context");
+    assert_eq!(output["claim_failures"][0]["category"], "timeout");
+    assert_eq!(output["claim_analysis"][1]["analysis_request_sent"], false);
+    assert_eq!(inference_requests(&mock), [json!("c1")]);
+    assert!(rows(&db.path, &job)[3].starts_with("Completed"));
+
+    mock.fail_context_claim.clear();
+    mock.classified.lock().unwrap().clear();
+    mock.seen.lock().unwrap().clear();
+    brief_pipeline::retry_stage(&store.conn, &job, &now())
+        .unwrap()
+        .unwrap();
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let classified = mock.classified.lock().unwrap();
+    assert_eq!(classified.len(), 1, "successful batches are durable");
+    assert_eq!(classified[0].claim["id"], "c2");
+    assert!(classified[0].candidates.iter().any(|s| s.id == failed_id));
+    assert_eq!(inference_requests(&mock), [json!("c2")]);
+    assert!(!rows(&db.path, &job)[2].contains("warning"));
+    assert!(rows(&db.path, &job)[3].starts_with("Completed"));
 }

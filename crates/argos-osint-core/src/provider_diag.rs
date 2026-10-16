@@ -296,16 +296,30 @@ impl ProviderFailure {
     /// One-line reason for cards and job rows.
     pub fn summary(&self) -> String {
         let mut out = self.category.reason().to_string();
-        if let Some(status) = self.http_status {
-            out.push_str(&format!(" (HTTP {status})"));
+        match self.http_status {
+            Some(status) if status >= 400 => out.push_str(&format!(" (HTTP {status})")),
+            // A 2xx on a failure only says the headers arrived; the stall
+            // happened later, so never present it as the failing status.
+            Some(status) => out.push_str(&format!(" (after HTTP {status} headers)")),
+            None => {}
         }
-        if let Some(msg) = self
+        let provider_message = self
             .provider_message
             .as_deref()
             .map(str::trim)
-            .filter(|m| !m.is_empty())
-        {
+            .filter(|m| !m.is_empty());
+        if let Some(msg) = provider_message {
             out.push_str(&format!(": {}", bounded(msg, 160)));
+        } else {
+            // Keep the specific local reason ("no model output within 180s…",
+            // "no response headers within 60s") that the category text hides.
+            let detail = self.message.trim();
+            if !detail.is_empty()
+                && !detail.starts_with("provider returned HTTP")
+                && detail != self.category.reason()
+            {
+                out.push_str(&format!(": {}", bounded(detail, 160)));
+            }
         }
         out
     }
@@ -710,6 +724,46 @@ mod tests {
         }
     }
     impl std::error::Error for Leaf {}
+
+    #[test]
+    fn summary_keeps_the_specific_timeout_and_never_shows_2xx_as_the_failure() {
+        let mut f = ProviderFailure::new(
+            Stage::Stream,
+            Category::Timeout,
+            "no model output within 180s of response headers",
+        );
+        f.http_status = Some(200);
+        let s = f.summary();
+        assert!(s.contains("no model output within 180s"), "{s}");
+        assert!(
+            s.contains("after HTTP 200 headers") && !s.contains("(HTTP 200)"),
+            "{s}"
+        );
+        let mut h = ProviderFailure::new(
+            Stage::Response,
+            Category::Server,
+            "provider returned HTTP 503",
+        );
+        h.http_status = Some(503);
+        h.provider_message = Some("This model is currently experiencing high demand".into());
+        let s = h.summary();
+        assert!(
+            s.contains("(HTTP 503)")
+                && s.contains("high demand")
+                && !s.contains("provider returned"),
+            "{s}"
+        );
+        let t = ProviderFailure::new(
+            Stage::FirstResponse,
+            Category::Timeout,
+            "no response headers within 60s",
+        );
+        assert!(
+            t.summary().ends_with("no response headers within 60s"),
+            "{}",
+            t.summary()
+        );
+    }
 
     #[test]
     fn nested_causes_and_endpoints_are_kept_and_redacted() {

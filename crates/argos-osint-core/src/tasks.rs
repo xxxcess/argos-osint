@@ -102,6 +102,25 @@ impl ErrorCategory {
         }
     }
 
+    /// Map a provider/executor failure category to the task category, so a
+    /// stage that died on a timeout or 503 is never reported as a bad answer.
+    pub fn from_provider(category: crate::provider_diag::Category) -> Self {
+        use crate::provider_diag::Category as C;
+        match category {
+            C::RateLimited => Self::RateLimit,
+            C::Timeout => Self::Timeout,
+            C::Server | C::Network => Self::TemporaryNetwork,
+            C::StreamInterrupted | C::PrematureEof | C::SseError => Self::InterruptedStream,
+            C::Auth | C::Permission => Self::AuthOrQuota,
+            C::InvalidModel | C::Unsupported | C::MalformedRequest => Self::UnsupportedOption,
+            C::TokenLimit => Self::ContextLimit,
+            C::Configuration => Self::ConfigurationMissing,
+            C::Cancelled => Self::CancelledOrStale,
+            C::MalformedPayload | C::Empty | C::InvalidResult | C::Refused => Self::InvalidResult,
+            C::Persistence => Self::Unknown,
+        }
+    }
+
     pub fn retryable(self) -> bool {
         matches!(
             self,

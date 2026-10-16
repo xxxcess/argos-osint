@@ -650,3 +650,30 @@ fn crash_after_one_branch_commit_keeps_it_and_fences_the_stale_sibling() {
     assert_eq!(inf.operation, "intel_brief_inferences");
     assert_eq!(inf.job_id, job);
 }
+
+// Phase A: the chain's provider backoff is credited to the task's retry wait
+// (fenced by epoch) and rolled into the job.
+#[test]
+fn provider_backoff_is_credited_to_retry_wait_and_fenced_by_epoch() {
+    use crate::intel_recon::brief_timing::{record_retry_wait, StageTiming};
+    let store = seeded();
+    let job = ensure_chain(&store.conn, &inputs("r1"), &now()).unwrap();
+    let c = claim_stage(&store.conn, "w", 120, &now()).unwrap().unwrap();
+    let t = StageTiming {
+        backoff_ms: 30_000,
+        ..Default::default()
+    };
+    let mut stale = c.clone();
+    stale.epoch -= 1;
+    record_retry_wait(&store.conn, &stale, &t, &now()).unwrap();
+    let wait =
+        |sql: &str, id: &str| -> i64 { store.conn.query_row(sql, [id], |r| r.get(0)).unwrap() };
+    let task_sql = "SELECT retry_wait_ms FROM argos_tasks WHERE id=?1";
+    assert_eq!(wait(task_sql, &c.id), 0, "stale epoch fenced");
+    record_retry_wait(&store.conn, &c, &t, &now()).unwrap();
+    assert_eq!(wait(task_sql, &c.id), 30_000);
+    assert_eq!(
+        wait("SELECT retry_wait_ms FROM argos_jobs WHERE id=?1", &job),
+        30_000
+    );
+}

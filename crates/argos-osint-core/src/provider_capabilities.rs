@@ -374,9 +374,13 @@ fn apply_profile(caps: &mut ResolvedCapabilities, p: &Profile) {
 /// Normalized catalog metadata for one model endpoint.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CatalogEvidence {
-    /// OpenRouter `supported_parameters` (union over eligible endpoints).
+    /// OpenRouter `supported_parameters` (intersection of eligible endpoints).
     #[serde(default)]
     pub supported_parameters: Vec<String>,
+    /// Model-specific effort vocabulary from OpenRouter's model catalog.
+    /// Parameter support alone does not establish any particular effort.
+    #[serde(default)]
+    pub reasoning: Option<ReasoningCaps>,
     /// Google `supportedGenerationMethods`.
     #[serde(default)]
     pub generation_methods: Vec<String>,
@@ -437,9 +441,48 @@ pub fn parse_openrouter_endpoints(model: &str, value: &Value) -> Option<CatalogE
     upstream.sort();
     Some(CatalogEvidence {
         supported_parameters: params.into_iter().collect(),
+        reasoning: parse_openrouter_reasoning(&value["data"]),
         output_token_limit: limit,
         upstream: (!upstream.is_empty()).then(|| upstream.join(",")),
         ..CatalogEvidence::default()
+    })
+}
+
+/// Parse the model catalog's reasoning contract. `null` efforts means all
+/// gateway values are accepted; an absent efforts field confirms no values.
+/// In particular, Ultra's `medium/high` must never be inferred as `low`.
+pub fn parse_openrouter_reasoning(model: &Value) -> Option<ReasoningCaps> {
+    let reasoning = model.get("reasoning").filter(|v| v.is_object())?;
+    let mut values: Vec<String> = match reasoning.get("supported_efforts") {
+        Some(Value::Null) => ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+            .map(String::from)
+            .to_vec(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mandatory = reasoning["mandatory"].as_bool().unwrap_or(false);
+    if mandatory {
+        values.retain(|v| v != "none");
+    }
+    values.sort();
+    values.dedup();
+    let efficient = ["minimal", "low", "medium", "high", "xhigh", "max"]
+        .into_iter()
+        .find(|v| values.iter().any(|value| value == v))
+        .map(str::to_string);
+    Some(ReasoningCaps {
+        control: ReasoningControl::OpenRouter,
+        off: (!mandatory && values.iter().any(|v| v == "none")).then(|| "none".into()),
+        values,
+        efficient,
+        mandatory,
+        max_tokens: reasoning["supports_max_tokens"].as_bool().unwrap_or(false),
+        ..Default::default()
     })
 }
 
@@ -480,7 +523,16 @@ fn apply_catalog(caps: &mut ResolvedCapabilities, ev: &CatalogEvidence) {
             caps.tools = tri(has("tools"));
             caps.forced_tool = tri(has("tools") && has("tool_choice"));
             if has("reasoning") {
-                caps.reasoning.control = ReasoningControl::OpenRouter;
+                if let Some(reasoning) = &ev.reasoning {
+                    caps.reasoning = reasoning.clone();
+                } else {
+                    // Retain an exact documented profile if one exists.
+                    // Never invent effort values from parameter support.
+                    caps.reasoning.control = ReasoningControl::OpenRouter;
+                }
+            } else {
+                // Fresh endpoint evidence can also narrow an exact profile.
+                caps.reasoning = ReasoningCaps::default();
             }
         }
         AdapterId::Google if !ev.generation_methods.is_empty() => {
@@ -653,7 +705,27 @@ pub async fn fetch_evidence(
                 return Ok(None);
             }
             let v: Value = resp.json().await?;
-            Ok(parse_openrouter_endpoints(&secret.model, &v))
+            let Some(mut evidence) = parse_openrouter_endpoints(&secret.model, &v) else {
+                return Ok(None);
+            };
+            // Endpoint parameter metadata does not enumerate valid efforts.
+            // Read the model contract only in this background refresh, never
+            // on the generation path. Failure retains the exact profile.
+            if evidence.reasoning.is_none() {
+                let req = crate::provider::authorize(client.get(format!("{base}/models")), secret)
+                    .await?;
+                if let Ok(resp) = req.send().await {
+                    if resp.status().is_success() {
+                        if let Ok(catalog) = resp.json::<Value>().await {
+                            evidence.reasoning = catalog["data"]
+                                .as_array()
+                                .and_then(|models| models.iter().find(|m| m["id"] == secret.model))
+                                .and_then(parse_openrouter_reasoning);
+                        }
+                    }
+                }
+            }
+            Ok(Some(evidence))
         }
         AdapterId::Google => {
             let root = crate::provider_adapters::google::native_root(&base);

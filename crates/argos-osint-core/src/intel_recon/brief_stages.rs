@@ -77,6 +77,9 @@ pub struct StageContext {
     pub metadata_snapshot: Value,
     /// Captured role defaults (JSON) used to route every dispatch.
     pub route_snapshot: String,
+    /// Request budget and route health shared by every operation of this
+    /// stage execution.
+    pub ledger: Arc<crate::provider_chain::StageLedger>,
 }
 
 impl StageContext {
@@ -99,6 +102,7 @@ impl StageContext {
             .with_task(&self.task_id)
             .with_task_epoch(self.lease_epoch)
             .with_generation(u32::try_from(self.job_generation.max(0)).unwrap_or(u32::MAX))
+            .with_ledger(self.ledger.clone())
     }
 
     /// Captured defaults applied over `settings` (credentials stay in the
@@ -168,8 +172,10 @@ pub trait StageBackend: Send {
     /// Classifier decisions over one bounded, claim-specific context batch.
     /// Custom backends must explicitly implement this boundary; accepting all
     /// candidates by default would bypass evidence selection.
+    /// Like `generate`, the returned future owns its dispatch state so a
+    /// stage can classify several batches concurrently.
     fn classify_context<'a>(
-        &'a mut self,
+        &mut self,
         _ctx: &'a StageContext,
         _batch: super::brief_context::ContextBatch,
         _cancel: &'a Arc<AtomicBool>,
@@ -1085,6 +1091,65 @@ fn generate_unmeasured<'a>(
     })
 }
 
+/// Persist each validated context batch before starting more work. A failed
+/// sibling or a later synthesis/fidelity failure must not re-pay successful
+/// classification on Retry. The hash binds the original body spans, claim,
+/// policy and captured classifier route, never the lease epoch.
+fn classify_context_cached<'a>(
+    db_path: &'a Path,
+    backend: &mut dyn StageBackend,
+    ctx: &'a StageContext,
+    batch: super::brief_context::ContextBatch,
+    cancel: &'a Arc<AtomicBool>,
+) -> BoxFut<'a, Result<HashMap<String, String>>> {
+    let payload = batch.user();
+    let item = format!("context:{}", crate::nlp::cache::hash(&payload));
+    let input_hash = crate::nlp::cache::hash(
+        &json!([
+            super::brief_context::CONTEXT_PROMPT,
+            super::brief_context::CONTEXT_POLICY,
+            &payload,
+            ctx.route_key(None, "classifier"),
+        ])
+        .to_string(),
+    );
+    let cached = (|| -> Result<Option<HashMap<String, String>>> {
+        let store = Store::open_initialized_light(db_path)?;
+        let output = brief_pipeline::checkpoint_get(
+            &store.conn,
+            &ctx.job_id,
+            "intel_brief_inferences",
+            &item,
+            &input_hash,
+        )?;
+        // A damaged checkpoint is reclassified, never accepted as evidence.
+        Ok(output
+            .and_then(|v| serde_json::from_value::<HashMap<String, String>>(v).ok())
+            .filter(|labels| batch.selected(labels).is_ok()))
+    })();
+    match cached {
+        Err(error) => return Box::pin(async move { Err(error) }),
+        Ok(Some(labels)) => return Box::pin(async move { Ok(labels) }),
+        Ok(None) => {}
+    }
+    let dispatch = backend.classify_context(ctx, batch.clone(), cancel);
+    Box::pin(async move {
+        let labels = dispatch.await?;
+        batch.selected(&labels).map_err(anyhow::Error::msg)?;
+        ensure!(!cancel.load(Ordering::Acquire), "cancelled");
+        let store = Store::open_initialized_light(db_path)?;
+        brief_pipeline::checkpoint_put(
+            &store.conn,
+            &ctx.job_id,
+            "intel_brief_inferences",
+            &item,
+            &input_hash,
+            &serde_json::to_value(&labels)?,
+        )?;
+        Ok(labels)
+    })
+}
+
 /// Run one stage: Ok(value, items, empty_reason).
 /// Build the immutable context for a claimed stage on its own connection.
 pub fn stage_context(store: &Store, claimed: &ClaimedTask) -> Result<StageContext> {
@@ -1121,6 +1186,7 @@ pub fn stage_context(store: &Store, claimed: &ClaimedTask) -> Result<StageContex
         lease_epoch: claimed.epoch,
         metadata_snapshot,
         route_snapshot,
+        ledger: Arc::default(),
     })
 }
 
@@ -1264,9 +1330,13 @@ async fn execute(
             let mut requests = Vec::new();
             let mut claim_analysis = Vec::new();
             let mut analysis_ids = HashSet::new();
+            // Every claim's candidate batches are known before any request is
+            // sent, so the stage can declare its planned work to the shared
+            // request budget and classify the batches of all claims together.
+            let mut prepared = Vec::new();
             for claim in claims["claims"].as_array().into_iter().flatten() {
                 ensure!(!cancel.load(Ordering::Acquire), "cancelled");
-                let mut context = super::brief_context::claim_candidates(
+                let context = super::brief_context::claim_candidates(
                     &index_full,
                     body["markdown"].as_str().unwrap_or(""),
                     claim,
@@ -1275,20 +1345,75 @@ async fn execute(
                 .map_err(anyhow::Error::msg)?;
                 let batches = super::brief_context::classifier_batches(&context)
                     .map_err(anyhow::Error::msg)?;
-                let mut selected = Vec::new();
-                let mut labels = HashMap::new();
-                for batch in batches {
-                    ensure!(!cancel.load(Ordering::Acquire), "cancelled");
-                    activity(db_path, &claimed.id, "selecting claim context");
-                    let decisions = super::brief_timing::timed(
-                        super::brief_timing::Phase::Model,
-                        backend.classify_context(&ctx, batch.clone(), cancel),
-                    )
-                    .await?;
-                    selected.extend(batch.selected(&decisions).map_err(anyhow::Error::msg)?);
-                    labels.extend(decisions);
-                }
-                let selected = bound_claim_context(&mut context, selected, &labels, &system)?;
+                prepared.push((context, batches));
+            }
+            let planned_batches: usize = prepared.iter().map(|(_, b)| b.len()).sum();
+            // One generation per claim, plus fidelity and de-duplication.
+            ctx.ledger
+                .plan(u32::try_from(planned_batches + prepared.len() + 2).unwrap_or(u32::MAX));
+            let mut claim_selected: Vec<Vec<Sentence>> = vec![Vec::new(); prepared.len()];
+            let mut claim_labels: Vec<HashMap<String, String>> =
+                vec![HashMap::new(); prepared.len()];
+            let mut context_errors: Vec<Option<anyhow::Error>> =
+                (0..prepared.len()).map(|_| None).collect();
+            {
+                let mut jobs = prepared
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(n, (_, batches))| batches.iter().map(move |b| (n, b.clone())))
+                    .collect::<Vec<_>>()
+                    .into_iter();
+                let mut running = FuturesUnordered::new();
+                activity(db_path, &claimed.id, "selecting claim context");
+                super::brief_timing::timed(super::brief_timing::Phase::Model, async {
+                    loop {
+                        while running.len() < INFERENCE_CONCURRENCY {
+                            ensure!(!cancel.load(Ordering::Acquire), "cancelled");
+                            let Some((n, batch)) = jobs.next() else {
+                                break;
+                            };
+                            let dispatch = classify_context_cached(
+                                db_path,
+                                backend,
+                                &ctx,
+                                batch.clone(),
+                                cancel,
+                            );
+                            running.push(dispatch.map(move |result| (n, batch, result)).boxed());
+                        }
+                        let Some((n, batch, result)) = running.next().await else {
+                            break;
+                        };
+                        match result {
+                            Ok(decisions) => {
+                                claim_selected[n].extend(
+                                    batch.selected(&decisions).map_err(anyhow::Error::msg)?,
+                                );
+                                claim_labels[n].extend(decisions);
+                            }
+                            Err(error) => {
+                                ensure!(!cancel.load(Ordering::Acquire), "cancelled");
+                                // Finish independent claims and checkpoint any
+                                // successful batches, but never synthesize a
+                                // claim whose classification is incomplete.
+                                context_errors[n].get_or_insert(error);
+                            }
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await?;
+            }
+            for (n, ((mut context, _), (selected, labels))) in prepared
+                .into_iter()
+                .zip(claim_selected.into_iter().zip(claim_labels))
+                .enumerate()
+            {
+                let selected = if context_errors[n].is_some() {
+                    Vec::new()
+                } else {
+                    bound_claim_context(&mut context, selected, &labels, &system)?
+                };
                 let user = claim_inferences_user(&context, &selected, &labels);
                 ensure!(
                     system.len() + user.len() <= CLAIM_INFERENCE_REQUEST_BYTES,
@@ -1341,8 +1466,76 @@ async fn execute(
                     )),
                 }
             };
+            let generate_route =
+                ctx.route_key(Some(crate::provider::OP_INFERENCES_GENERATE), "synthesis");
+            // A claim's checkpoint is valid for exactly this prompt, request
+            // and resolved route; any change re-asks it.
+            let checkpoint_hash = |user: &str| {
+                crate::nlp::cache::hash(&json!([&system, user, &generate_route]).to_string())
+            };
             let mut outputs = vec![Value::Null; requests.len()];
-            let mut pending = requests.iter().enumerate();
+            let context_failed: HashSet<usize> = context_errors
+                .iter()
+                .enumerate()
+                .filter_map(|(n, e)| e.is_some().then_some(n))
+                .collect();
+            let mut failures: Vec<(usize, anyhow::Error)> = context_errors
+                .into_iter()
+                .enumerate()
+                .filter_map(|(n, e)| e.map(|error| (n, error)))
+                .collect();
+            let mut reused = 0usize;
+            let mut reused_indices = HashSet::new();
+            let mut todo = Vec::new();
+            {
+                let store = Store::open(db_path)?;
+                for (n, (claim_id, _, user, _)) in requests.iter().enumerate() {
+                    if context_failed.contains(&n) {
+                        continue;
+                    }
+                    let cached = super::brief_pipeline::checkpoint_get(
+                        &store.conn,
+                        &job,
+                        &claimed.operation,
+                        claim_id,
+                        &checkpoint_hash(user),
+                    )?
+                    .and_then(|output| {
+                        let mut output = validate_claim_inferences(
+                            &output.to_string(),
+                            claim_id,
+                            &requests[n].1,
+                        )
+                        .ok()?;
+                        retain_inference_counterevidence(
+                            &mut output,
+                            &requests[n].1,
+                            &requests[n].3,
+                        )
+                        .ok()?;
+                        Some(output)
+                    });
+                    match cached {
+                        Some(output) => {
+                            outputs[n] = output;
+                            reused += 1;
+                            reused_indices.insert(n);
+                        }
+                        _ => todo.push(n),
+                    }
+                }
+            }
+            if reused > 0 {
+                activity(
+                    db_path,
+                    &claimed.id,
+                    &format!(
+                        "reusing {reused} analyzed claim{}",
+                        if reused == 1 { "" } else { "s" }
+                    ),
+                );
+            }
+            let mut pending = todo.into_iter();
             let mut running = FuturesUnordered::new();
             // Model wall time covers the queue once, not the sum of overlapping
             // requests; provider attempt durations remain separately aggregated.
@@ -1350,9 +1543,10 @@ async fn execute(
                 loop {
                     while running.len() < INFERENCE_CONCURRENCY {
                         ensure!(!cancel.load(Ordering::Acquire), "cancelled");
-                        let Some((n, (claim_id, selected, user, _))) = pending.next() else {
+                        let Some(n) = pending.next() else {
                             break;
                         };
+                        let (claim_id, selected, user, _) = &requests[n];
                         let dispatch = generate_unmeasured(
                             db_path,
                             backend,
@@ -1364,24 +1558,72 @@ async fn execute(
                     let Some((n, result)) = running.next().await else {
                         break;
                     };
-                    let raw = result?;
-                    outputs[n] = validate_claim_inferences(
-                        &raw.to_string(),
-                        &requests[n].0,
-                        &requests[n].1,
-                    )?;
-                    retain_inference_counterevidence(
-                        &mut outputs[n],
-                        &requests[n].1,
-                        &requests[n].3,
-                    )?;
+                    // One claim's failure is that claim's failure: its siblings
+                    // keep running and keep their results. Cancellation is not.
+                    let processed = result.and_then(|raw| {
+                        let mut output = validate_claim_inferences(
+                            &raw.to_string(),
+                            &requests[n].0,
+                            &requests[n].1,
+                        )?;
+                        retain_inference_counterevidence(
+                            &mut output,
+                            &requests[n].1,
+                            &requests[n].3,
+                        )?;
+                        Ok(output)
+                    });
+                    match processed {
+                        Ok(output) => {
+                            if let Ok(store) = Store::open(db_path) {
+                                let _ = super::brief_pipeline::checkpoint_put(
+                                    &store.conn,
+                                    &job,
+                                    &claimed.operation,
+                                    &requests[n].0,
+                                    &checkpoint_hash(&requests[n].2),
+                                    &output,
+                                );
+                            }
+                            outputs[n] = output;
+                        }
+                        Err(error) => {
+                            ensure!(!cancel.load(Ordering::Acquire), "cancelled");
+                            failures.push((n, error));
+                        }
+                    }
                 }
                 Ok::<(), anyhow::Error>(())
             })
             .await?;
-            for (receipt, output) in claim_analysis.iter_mut().zip(&outputs) {
-                receipt["analysis_request_sent"] = json!(true);
+            if !requests.is_empty() && failures.len() == requests.len() {
+                // Nothing to publish: the stage fails with the first real cause
+                // (its provider category survives).
+                let (_, error) = failures.remove(0);
+                return Err(error);
+            }
+            let claim_failures: Vec<Value> = failures
+                .iter()
+                .map(|(n, error)| {
+                    json!({
+                        "claim_id": requests[*n].0,
+                        "phase": if context_failed.contains(n) { "context" } else { "generation" },
+                        "category": stage_error_category(error).as_str(),
+                        "message": short_error(error),
+                    })
+                })
+                .collect();
+            for (n, (receipt, output)) in claim_analysis.iter_mut().zip(&outputs).enumerate() {
+                receipt["analysis_request_sent"] =
+                    json!(!context_failed.contains(&n) && !reused_indices.contains(&n));
+                receipt["analysis_reused"] = json!(reused_indices.contains(&n));
                 receipt["empty_reason"] = output["empty_reason"].clone();
+                if let Some(failure) = claim_failures
+                    .iter()
+                    .find(|f| f["claim_id"] == json!(requests[n].0))
+                {
+                    receipt["analysis_failed"] = failure.clone();
+                }
             }
             let mut last = join_inferences(&outputs);
             if requests.is_empty() {
@@ -1406,7 +1648,7 @@ async fn execute(
             )
             .await?;
             dedup_inferences(db_path, backend, &ctx, cancel, &mut last).await?;
-            last["analysis_requests"] = json!(requests.len());
+            last["analysis_requests"] = json!(requests.len() - context_failed.len() - reused);
             last["path"] = json!("claim_context");
             last["context_policy"] = json!(super::brief_context::CONTEXT_POLICY);
             last["claim_analysis"] = json!(claim_analysis);
@@ -1416,8 +1658,24 @@ async fn execute(
                 .map(|s| &s.id)
                 .collect::<Vec<_>>());
             last["body_hash"] = body["content_hash"].clone();
+            last["claim_failures"] = json!(claim_failures);
             let n = last["inferences"].as_array().map_or(0, Vec::len);
-            let reason = if n == 0 {
+            let reason = if !claim_failures.is_empty() {
+                // Completed with warnings: the analyzed claims publish, Links
+                // proceeds on them, and Retry re-asks only the failed claims.
+                format!(
+                    "warning: {} of {} claims could not be analyzed ({})",
+                    claim_failures.len(),
+                    requests.len(),
+                    claim_failures
+                        .iter()
+                        .filter_map(|f| f["category"].as_str())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else if n == 0 {
                 last["empty_reason"].as_str().unwrap_or("").to_string()
             } else {
                 String::new()
@@ -1845,7 +2103,9 @@ pub async fn run_claimed(
                 let mut once = claimed.clone();
                 once.max_attempts = 1;
                 let reason = error.to_string();
-                let category = tasks::ErrorCategory::InvalidResult;
+                // The executor's typed category wins; only local validation
+                // and parse failures (no provider category) are invalid results.
+                let category = stage_error_category(&error);
                 match tasks::fail_claimed(
                     &store.conn,
                     &once,
@@ -1887,6 +2147,7 @@ pub async fn run_claimed(
             outcome_label,
         ) {
             let _ = super::brief_timing::persist(&store.conn, &timing, &now());
+            let _ = super::brief_timing::record_retry_wait(&store.conn, &claimed, &timing, &now());
             let _ = crate::events::record_event(
                 &store.conn,
                 &crate::events::NewEvent {
@@ -2211,14 +2472,15 @@ impl StageBackend for RuntimeBackend {
     }
 
     fn classify_context<'a>(
-        &'a mut self,
+        &mut self,
         ctx: &'a StageContext,
         batch: super::brief_context::ContextBatch,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<HashMap<String, String>>> {
+        let (auth, db_path) = (self.auth.clone(), self.db_path.clone());
+        let settings = ctx.routed(&self.settings);
         Box::pin(async move {
             let operation_id = ctx.operation_id("claim-context", &batch.user());
-            let settings = ctx.routed(&self.settings);
             let adapter = super::brief_context::ContextDecisions { batch: &batch };
             let scope = ctx
                 .scope(crate::recon::model_exec::OperationScope::new(
@@ -2229,18 +2491,18 @@ impl StageBackend for RuntimeBackend {
                 .with_format(crate::recon::model_exec::ResponseFormat::BoundedDecision)
                 .with_interactive();
             let (labels, _) = crate::recon::model_exec::execute_decisions_or_chat(
-                &self.auth,
+                &auth,
                 &settings,
                 &scope,
                 &adapter,
                 cancel,
                 Some(super::brief_timing::activity_sink(
-                    &self.db_path,
+                    &db_path,
                     &ctx.task_id,
                     "selecting claim context",
                     "classifier",
                 )),
-                Some(self.db_path.as_path()),
+                Some(db_path.as_path()),
             )
             .await?;
             Ok(labels)
@@ -2325,6 +2587,25 @@ impl StageBackend for RuntimeBackend {
             Ok(text)
         })
     }
+}
+
+/// Task category of a stage failure: the executor's typed provider category
+/// (timeout, rate limit, server, auth…) when there is one, otherwise a local
+/// validation/parse failure, which is an invalid result.
+/// First line of an error, bounded for stored receipts.
+fn short_error(error: &anyhow::Error) -> String {
+    error.to_string().chars().take(240).collect()
+}
+
+pub fn stage_error_category(error: &anyhow::Error) -> tasks::ErrorCategory {
+    error
+        .chain()
+        .find_map(|e| e.downcast_ref::<crate::recon::model_exec::ModelOperationError>())
+        .and_then(|e| e.category)
+        .map_or(
+            tasks::ErrorCategory::InvalidResult,
+            tasks::ErrorCategory::from_provider,
+        )
 }
 
 /// Production construction from the configured settings.

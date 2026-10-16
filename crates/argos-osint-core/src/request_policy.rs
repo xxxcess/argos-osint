@@ -1,6 +1,7 @@
 //! Per-operation request policy: optional explicit completion ceiling,
 //! reasoning intent and structured-output request. Automatic operations use
-//! provider output/reasoning defaults rather than stage token caps.
+//! provider output defaults rather than stage token caps; thinking stages
+//! (Inferences) send a per-model reasoning effort but no caps.
 //!
 //! The policy is provider-neutral. Provider adapters
 //! (`crate::provider_adapters`) compile it against the selected model's
@@ -26,6 +27,15 @@ pub enum ReasoningEffort {
 }
 
 impl ReasoningEffort {
+    /// Does this intent keep (or require) thinking on? `Off` and `Default`
+    /// do not request thinking.
+    pub fn thinks(self) -> bool {
+        matches!(
+            self,
+            Self::Efficient | Self::Low | Self::Medium | Self::High
+        )
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Default => "default",
@@ -142,11 +152,29 @@ impl StageBudget {
         }
     }
 
-    /// Stage sizing hints no longer impose provider output or reasoning caps.
-    /// Keep the metadata for compatibility; models use their own defaults.
+    /// Does this stage require a thinking model? Thinking stages get
+    /// thinking-sized deadlines (`Deadlines::*_thinking`).
+    pub fn thinks(&self) -> bool {
+        self.reasoning.thinks()
+    }
+
+    /// Stage sizing hints impose no provider output or reasoning *caps*; models
+    /// use their own defaults. A thinking stage (Inferences) additionally
+    /// sends its reasoning *effort*, which each adapter resolves per model
+    /// from the profile or catalog (`Efficient` = that model's cost-efficient
+    /// value that still thinks: Gemini `low`, Nemotron Super `low`, Ultra
+    /// `medium`, Gemma `high`, lightning `enable_thinking`, OpenRouter
+    /// `low`). Where a model has no confirmed control the field is omitted
+    /// and reported as `unsupported-policy:reasoning=*`. Non-thinking stages
+    /// keep the provider default: this never turns thinking off.
     pub fn policy(&self, json_object: bool) -> RequestPolicy {
         RequestPolicy {
             json_object,
+            reasoning: if self.thinks() {
+                self.reasoning
+            } else {
+                ReasoningEffort::Default
+            },
             ..Default::default()
         }
     }

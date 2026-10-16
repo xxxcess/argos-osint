@@ -11,18 +11,32 @@
     {
       "provider": "openrouter",
       "model": "nvidia/nemotron-3-super-120b-a12b:free",
-      "evidence": "R3 free endpoint advertises structured_outputs + response_format",
+      "evidence": "R3 structured_outputs + response_format; OpenRouter GET /models 2026-10-16 confirms thinking efforts none/low/medium (default medium)",
       "strict_schema": "supported",
-      "json_mode": "supported"
+      "json_mode": "supported",
+      "reasoning": {
+        "control": "open_router",
+        "values": ["none", "low", "medium"],
+        "off": "none",
+        "efficient": "low",
+        "max_tokens": true
+      }
     },
     {
       "provider": "openrouter",
       "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
-      "evidence": "R4 free endpoint advertises tools + forced tool_choice, not response_format",
+      "evidence": "R4 tools + forced tool_choice, not response_format; OpenRouter GET /models 2026-10-16 confirms thinking efforts none/medium/high (default high; low unsupported)",
       "strict_schema": "unsupported",
       "json_mode": "unsupported",
       "tools": "supported",
-      "forced_tool": "supported"
+      "forced_tool": "supported",
+      "reasoning": {
+        "control": "open_router",
+        "values": ["none", "medium", "high"],
+        "off": "none",
+        "efficient": "medium",
+        "max_tokens": true
+      }
     },
     {
       "provider": "openrouter",

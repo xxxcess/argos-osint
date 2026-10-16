@@ -17070,6 +17070,130 @@ mod tests {
         assert!(!app.intel_body_running.contains(&article.id));
     }
 
+    /// Jobs detail for a brief whose Inferences stage timed out: attempt rows
+    /// name their task, counts are labelled, retry wait is real, and the
+    /// category is the provider's. Dumps cells when ARGOS_SCREEN_DIR is set.
+    #[test]
+    fn jobs_detail_names_tasks_labels_counts_and_keeps_the_real_error_category() {
+        use argos_osint_core::intel_recon::brief_pipeline as bp;
+        use argos_osint_core::tasks;
+        let mut app = app();
+        let (_, article) = related_ui_fixture(&mut app);
+        app.select(ModuleId::Intel.index());
+        app.intel_articles = vec![article];
+        app.intel_sel = 0;
+        app.open_intel_briefing();
+        let job = app.intel_brief_job.clone().unwrap();
+        let now = || chrono::Utc::now().to_rfc3339();
+        let conn = app.store.connection();
+        for _ in 0..2 {
+            let c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
+            let items = usize::from(c.operation == "intel_brief_claims") * 2;
+            assert!(bp::commit_stage(conn, &c, "{}", items, "", &now()).unwrap());
+        }
+        let mut c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
+        assert_eq!(c.operation, "intel_brief_inferences");
+        c.max_attempts = 1;
+        tasks::fail_claimed(
+            conn,
+            &c,
+            tasks::OperationKind::OtherLlm,
+            &tasks::TaskError {
+                category: tasks::ErrorCategory::Timeout,
+                message: "model routes exhausted: first response/timeout: no response headers within 60s (4 dispatched attempts): route 0 fail: the provider did not answer in time: no model output within 180s of response headers; route 1 fail: the provider had a server error (HTTP 503): This model is currently experiencing high demand".into(),
+            },
+            &now(),
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE argos_tasks SET retry_wait_ms=30000 WHERE id=?1",
+            [&c.id],
+        )
+        .unwrap();
+        let _ = tasks::refresh_job_state(conn, &job, &now());
+        for (n, route) in ["a", "a", "b", "c"].iter().enumerate() {
+            conn.execute(
+                "INSERT OR IGNORE INTO recon_model_operations(id,task_id,role,status,created_at,updated_at) VALUES('op1',?1,'synthesis','failed','t','t')",
+                [&c.id],
+            )
+            .unwrap();
+            conn.execute(
+                &format!("INSERT INTO recon_model_attempts(id,operation_id,route_index,attempt,provider,account,model,transport,dispatched,outcome,started_at) VALUES('at{n}','op1',{n},{},'openrouter','','m','stream',1,'fail','t')", n + 1),
+                [],
+            )
+            .unwrap();
+            let _ = route;
+        }
+        app.open_job(&job).unwrap();
+        app.jobs.detail_open = true;
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        for (width, height) in [(160, 90), (120, 100)] {
+            let text = buffer_text(&render(&mut app, width, height));
+            assert!(text.contains("Task attempts 3"), "{text}");
+            assert!(text.contains("provider requests 4"), "{text}");
+            assert!(text.contains("Inferences #1"), "{text}");
+            assert!(
+                text.contains("Full article #1") && text.contains("Claims #1"),
+                "{text}"
+            );
+            assert!(text.contains("Latest error (timeout)"), "{text}");
+            assert!(text.contains("retry wait 30s"), "{text}");
+            if let Some(dir) = &dir {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("jobs-brief-detail-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+        }
+    }
+
+    /// Jobs detail when one claim's inference failed: Inferences completes with
+    /// warnings and Links still runs. Dumps cells when ARGOS_SCREEN_DIR is set.
+    #[test]
+    fn jobs_detail_shows_partial_completion_with_warnings_and_links_completed() {
+        use argos_osint_core::intel_recon::brief_pipeline as bp;
+        let mut app = app();
+        let (_, article) = related_ui_fixture(&mut app);
+        app.select(ModuleId::Intel.index());
+        app.intel_articles = vec![article];
+        app.intel_sel = 0;
+        app.open_intel_briefing();
+        let job = app.intel_brief_job.clone().unwrap();
+        let now = || chrono::Utc::now().to_rfc3339();
+        let conn = app.store.connection();
+        for _ in 0..4 {
+            let c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
+            let (items, reason) = match c.operation.as_str() {
+                "intel_brief_claims" => (2, ""),
+                "intel_brief_inferences" => {
+                    (1, "warning: 1 of 2 claims could not be analyzed (timeout)")
+                }
+                "intel_brief_links" => (1, ""),
+                _ => (0, ""),
+            };
+            assert!(bp::commit_stage(conn, &c, "{}", items, reason, &now()).unwrap());
+        }
+        app.open_job(&job).unwrap();
+        app.jobs.detail_open = true;
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        let text = buffer_text(&render(&mut app, 160, 90));
+        assert!(
+            text.contains("Inferences · Completed with warnings · 1 item"),
+            "{text}"
+        );
+        assert!(text.contains("Links · Completed · 1 item"), "{text}");
+        assert!(
+            text.contains("Warning · Inferences: 1 of 2 claims could not be"),
+            "{text}"
+        );
+        if let Some(dir) = &dir {
+            dump_cells(&mut app, dir, "jobs-brief-partial-160x90", 160, 90);
+        }
+    }
+
     #[test]
     fn extraction_actions_resolve_selected_article_instead_of_stale_display_progress() {
         let mut app = app();

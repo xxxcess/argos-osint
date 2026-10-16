@@ -503,7 +503,7 @@ impl DefaultsRole {
         }
     }
 
-    fn of_field(field: FieldId) -> Option<DefaultsRole> {
+    pub(super) fn of_field(field: FieldId) -> Option<DefaultsRole> {
         match field {
             FieldId::ReconProvider | FieldId::ReconModel => Some(DefaultsRole::Recon),
             FieldId::PickerProvider | FieldId::PickerModel => Some(DefaultsRole::ToolPicker),
@@ -6033,11 +6033,11 @@ impl App {
 
     pub fn field_display(&self, field: FieldId) -> String {
         match field {
-            FieldId::ReconProvider
-            | FieldId::PickerProvider
-            | FieldId::SynthesisProvider
-            | FieldId::ClassifierProvider
-            | FieldId::SummarizationProvider => {
+            field
+                if DefaultsRole::ALL
+                    .iter()
+                    .any(|r| r.provider_field() == field) =>
+            {
                 let kind = self.field(field);
                 if kind.is_empty() {
                     String::new()
@@ -11359,19 +11359,9 @@ impl App {
 }
 
 pub fn is_picker_field(field: FieldId) -> bool {
-    matches!(
-        field,
-        FieldId::ReconProvider
-            | FieldId::ReconModel
-            | FieldId::PickerProvider
-            | FieldId::PickerModel
-            | FieldId::SynthesisProvider
-            | FieldId::SynthesisModel
-            | FieldId::ClassifierProvider
-            | FieldId::ClassifierModel
-            | FieldId::SummarizationProvider
-            | FieldId::SummarizationModel
-    )
+    // Every role's provider and model field opens a popup card; deriving it
+    // from the role table keeps new roles from silently becoming text fields.
+    DefaultsRole::of_field(field).is_some()
 }
 
 /// Date button / picker label like `04 OCT 2026`.
@@ -12869,6 +12859,55 @@ mod tests {
         click(&mut app, Target::CloseOverlay);
         assert_eq!(app.overlay, Overlay::None);
         assert_eq!(app.focus, Target::Button(ButtonId::AddFallback));
+    }
+
+    /// Every role (not only the first five) opens provider and model popup
+    /// cards from a click and from Enter, and shows the provider label.
+    #[test]
+    fn every_defaults_role_opens_its_provider_and_model_popups() {
+        for role in DefaultsRole::ALL {
+            let mut app = app();
+            app.google_key = "google-key".into();
+            click(&mut app, Target::App(ModuleId::Providers.index()));
+            click(&mut app, Target::ProviderTab(ProviderPage::Defaults));
+            click(&mut app, Target::PaneTab(1));
+            click(&mut app, Target::Button(ButtonId::DefaultRole(role)));
+            assert_eq!(app.defaults_role, role);
+            let (provider_field, model_field) = (role.provider_field(), role.model_field());
+            assert!(is_picker_field(provider_field), "{role:?} provider");
+            assert!(is_picker_field(model_field), "{role:?} model");
+
+            click(&mut app, Target::Field(provider_field));
+            assert!(
+                matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)),
+                "{role:?} provider card"
+            );
+            let google = app
+                .choice_items
+                .iter()
+                .position(|item| item.id == "google")
+                .expect("google account offered");
+            click(&mut app, Target::Choice(google));
+            assert!(matches!(app.overlay, Overlay::None));
+            assert_eq!(app.field(provider_field), "google", "{role:?}");
+            assert_eq!(app.field_display(provider_field), "Google", "{role:?}");
+
+            click(&mut app, Target::Field(model_field));
+            assert!(
+                matches!(app.overlay, Overlay::Choice(ChoiceKind::Model)),
+                "{role:?} model card"
+            );
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(matches!(app.overlay, Overlay::None));
+
+            // Keyboard: focus the field and press Enter.
+            app.set_focus(Target::Field(provider_field));
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(
+                matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)),
+                "{role:?} Enter opens the provider card"
+            );
+        }
     }
 
     #[test]

@@ -4533,25 +4533,22 @@ fn field_rect(app: &App, field: FieldId) -> Option<Rect> {
                 _ => Some(form.app),
             }
         }
-        FieldId::ReconProvider
-        | FieldId::ReconModel
-        | FieldId::PickerProvider
-        | FieldId::PickerModel
-        | FieldId::SynthesisProvider
-        | FieldId::SynthesisModel
-        | FieldId::ClassifierProvider
-        | FieldId::ClassifierModel
-            if app.module == Some(ModuleId::Providers)
+        field
+            if super::app::DefaultsRole::of_field(field).is_some()
+                && app.module == Some(ModuleId::Providers)
                 && app.provider_page == ProviderPage::Defaults =>
         {
             let rows = model_areas(app, provider_areas(layout.body)[1]);
-            Some(match field {
-                FieldId::ReconProvider
-                | FieldId::PickerProvider
-                | FieldId::SynthesisProvider
-                | FieldId::ClassifierProvider => rows[1],
-                _ => rows[2],
-            })
+            Some(
+                if super::app::DefaultsRole::ALL
+                    .iter()
+                    .any(|r| r.provider_field() == field)
+                {
+                    rows[1]
+                } else {
+                    rows[2]
+                },
+            )
         }
         FieldId::RouterKey
         | FieldId::RouterEndpoint

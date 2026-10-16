@@ -61,7 +61,12 @@ After: the provider popup card lists the providers.
 Screenshots: `docs/screens/request-mode/before/` and `docs/screens/request-mode/after/` (`defaults-claim_assessor-provider-popup.png`, `defaults-investigation_controller-provider-popup.png`).
 
 ## Matrix
-MATRIX_PLACEHOLDER
+Run on the code of `5cd45cf` (later commits are docs only). `cargo fmt --all --check` clean.
+| Configuration | clippy `-D warnings` | tests (core / bin / other) |
+| --- | --- | --- |
+| default features | clean | 1148 / 272 / 3 passed, 0 failed (11 ignored live/dump tests) |
+| `--locked --no-default-features` | clean | 1118 / 272 / 3 passed, 0 failed |
+| `--features nlp` | clean | 1148 / 272 / 3 passed, 0 failed |
 
 ## Open
 - Learned request-mode capabilities are not persisted across restarts.

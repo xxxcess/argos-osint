@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "brief_configured_live_tests.rs"]
+mod configured_live;
 #[path = "brief_user_chain_tests.rs"]
 mod user_chain;
 use crate::intel_recon::brief_pipeline::{ensure_chain, stage_views, BriefInputs};
@@ -112,6 +114,8 @@ struct Mock {
     context_started: Arc<AtomicUsize>,
     reject_context: bool,
     invalid_context: bool,
+    fail_context_claim: HashSet<String>,
+    fail_context_sentence: HashSet<String>,
     forced: bool,
 }
 
@@ -258,6 +262,23 @@ impl StageBackend for Mock {
                     "invented-sentence".into(),
                     "support".into(),
                 )]));
+            }
+            if batch.claim["id"]
+                .as_str()
+                .is_some_and(|id| mock.fail_context_claim.contains(id))
+                && (mock.fail_context_sentence.is_empty()
+                    || batch
+                        .candidates
+                        .iter()
+                        .any(|s| mock.fail_context_sentence.contains(&s.id)))
+            {
+                return Err(crate::recon::model_exec::ModelOperationError {
+                    category: Some(crate::provider_diag::Category::Timeout),
+                    requests: 3,
+                    history: vec![],
+                    message: "context classifier routes exhausted".into(),
+                }
+                .into());
             }
             Ok(batch
                 .candidates
@@ -684,6 +705,12 @@ async fn invalid_classifier_decisions_fail_closed_before_synthesis() {
     let db = db();
     let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
     let mut mock = Mock::happy();
+    // Both claims need real classifier work. A claim with no candidates is a
+    // valid independent empty-evidence analysis, not a classifier failure.
+    mock.body = Some(format!(
+        "{}\n\nUnions denied that staffing was a factor in the suspension, saying the crew schedule was unchanged.",
+        story()
+    ));
     mock.invalid_context = true;
     let outcomes = drain(
         &db.path,
@@ -701,6 +728,14 @@ async fn invalid_classifier_decisions_fail_closed_before_synthesis() {
         .requests()
         .iter()
         .all(|r| r.stage == "intel_brief_claims"));
+    let classified: HashSet<String> = mock
+        .classified
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|b| b.claim["id"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(classified, HashSet::from(["c1".into(), "c2".into()]));
     assert!(stage_output(
         &Store::open(&db.path).unwrap(),
         &job,
@@ -2432,7 +2467,7 @@ async fn one_failed_claim_completes_with_warnings_and_retry_asks_only_that_claim
     let ckpt: i64 = store
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM app_state WHERE key LIKE 'intel-brief-ckpt:%'",
+            "SELECT COUNT(*) FROM app_state WHERE key LIKE 'intel-brief-ckpt:%' AND key NOT LIKE '%:context:%'",
             [],
             |r| r.get(0),
         )
@@ -2442,6 +2477,7 @@ async fn one_failed_claim_completes_with_warnings_and_retry_asks_only_that_claim
     // Retry: only c2 is asked; Links reruns on the complete set.
     mock.fail_claim.clear();
     mock.seen.lock().unwrap().clear();
+    mock.classified.lock().unwrap().clear();
     assert!(
         crate::intel_recon::brief_pipeline::retry_stage(&store.conn, &job, &now())
             .unwrap()
@@ -2454,6 +2490,14 @@ async fn one_failed_claim_completes_with_warnings_and_retry_asks_only_that_claim
         .await
         .unwrap();
     assert_eq!(inference_requests(&mock), [json!("c2")]);
+    assert!(
+        mock.classified.lock().unwrap().is_empty(),
+        "Retry reuses validated context batches as well as generated claims"
+    );
+    let retried = stage_output(&store, &job, "intel_brief_inferences").unwrap();
+    assert_eq!(retried["analysis_requests"], 1);
+    assert_eq!(retried["claim_analysis"][0]["analysis_reused"], true);
+    assert_eq!(retried["claim_analysis"][0]["analysis_request_sent"], false);
     let r = rows(&db.path, &job);
     assert!(!r[2].contains("warning"), "{r:?}");
     assert!(r[3].starts_with("Completed"), "{r:?}");
@@ -2545,4 +2589,73 @@ async fn jobs_retry_resumes_failed_and_warning_brief_stages() {
         .unwrap();
     assert_eq!((detail.retryable, detail.warnings.len()), (0, 0));
     assert_eq!(store.retry_failed_tasks(&job).unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_context_batch_is_isolated_and_retry_only_classifies_that_batch() {
+    let db = db();
+    let job = ensure_chain(&Store::open(&db.path).unwrap().conn, &inputs("r1"), &now()).unwrap();
+    let mut mock = Mock::happy();
+    let extra = (0..24)
+        .map(|n| format!("Unions denied that staffing was a factor in the suspension of service number {n}.\n\n"))
+        .collect::<String>();
+    mock.body = Some(format!("{}\n\n{extra}", story()));
+    let cancel = Arc::new(AtomicBool::new(false));
+    // Commit the two independent roots before choosing one classifier batch.
+    for _ in 0..2 {
+        let outcome = run_next_stage(&db.path, "w1", &mut mock, &cancel, &cfg())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(outcome, StageOutcome::Committed { .. }),
+            "{outcome:?}"
+        );
+    }
+    let store = Store::open(&db.path).unwrap();
+    let body = stage_output(&store, &job, "intel_brief_body").unwrap();
+    let claims = stage_output(&store, &job, "intel_brief_claims").unwrap();
+    let (_, index) = crate::intel_recon::sentence_index::body_sentences(&body);
+    let context = crate::intel_recon::brief_context::claim_candidates(
+        &index,
+        body["markdown"].as_str().unwrap(),
+        &claims["claims"][1],
+        &[],
+    )
+    .unwrap();
+    let batches = crate::intel_recon::brief_context::classifier_batches(&context).unwrap();
+    assert!(
+        batches.len() >= 2,
+        "fixture exercises partial classification"
+    );
+    let failed_id = batches.last().unwrap().candidates[0].id.clone();
+    mock.fail_context_claim.insert("c2".into());
+    mock.fail_context_sentence.insert(failed_id.clone());
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let output = stage_output(&store, &job, "intel_brief_inferences").unwrap();
+    assert_eq!(output["claim_failures"][0]["claim_id"], "c2");
+    assert_eq!(output["claim_failures"][0]["phase"], "context");
+    assert_eq!(output["claim_failures"][0]["category"], "timeout");
+    assert_eq!(output["claim_analysis"][1]["analysis_request_sent"], false);
+    assert_eq!(inference_requests(&mock), [json!("c1")]);
+    assert!(rows(&db.path, &job)[3].starts_with("Completed"));
+
+    mock.fail_context_claim.clear();
+    mock.classified.lock().unwrap().clear();
+    mock.seen.lock().unwrap().clear();
+    brief_pipeline::retry_stage(&store.conn, &job, &now())
+        .unwrap()
+        .unwrap();
+    drain(&db.path, "w1", &mut mock, &cancel, &cfg())
+        .await
+        .unwrap();
+    let classified = mock.classified.lock().unwrap();
+    assert_eq!(classified.len(), 1, "successful batches are durable");
+    assert_eq!(classified[0].claim["id"], "c2");
+    assert!(classified[0].candidates.iter().any(|s| s.id == failed_id));
+    assert_eq!(inference_requests(&mock), [json!("c2")]);
+    assert!(!rows(&db.path, &job)[2].contains("warning"));
+    assert!(rows(&db.path, &job)[3].starts_with("Completed"));
 }

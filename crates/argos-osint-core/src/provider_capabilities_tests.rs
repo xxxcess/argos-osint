@@ -59,6 +59,77 @@ fn openrouter_endpoint_metadata_intersects_eligible_free_endpoints() {
 }
 
 #[test]
+fn openrouter_reasoning_uses_the_model_vocabulary_and_never_invents_low() {
+    let reasoning = parse_openrouter_reasoning(&json!({"reasoning": {
+        "supported_efforts": ["high", "medium", "none"],
+        "default_effort": "high", "default_enabled": true,
+        "mandatory": false, "supports_max_tokens": true,
+    }}))
+    .unwrap();
+    assert_eq!(reasoning.efficient.as_deref(), Some("medium"));
+    assert!(!reasoning.values.iter().any(|v| v == "low"));
+    let evidence = CatalogEvidence {
+        supported_parameters: vec!["reasoning".into()],
+        reasoning: Some(reasoning),
+        ..Default::default()
+    };
+    // An arbitrary swapped-in model uses catalog data, not a name heuristic.
+    let caps = resolve_with(
+        AdapterId::OpenRouter,
+        "https://effort-contract.test/v1",
+        "different/vendor-model",
+        Some((&evidence, 0)),
+    );
+    assert_eq!(caps.reasoning.efficient.as_deref(), Some("medium"));
+    let parameter_only = CatalogEvidence {
+        reasoning: None,
+        ..evidence
+    };
+    let unknown = resolve_with(
+        AdapterId::OpenRouter,
+        "https://effort-contract.test/v1",
+        "different/vendor-model",
+        Some((&parameter_only, 0)),
+    );
+    assert!(unknown.reasoning.values.is_empty());
+    assert!(unknown.reasoning.efficient.is_none());
+}
+
+#[test]
+fn openrouter_reasoning_distinguishes_null_missing_and_mandatory_efforts() {
+    assert!(parse_openrouter_reasoning(&json!({})).is_none());
+    let missing = parse_openrouter_reasoning(&json!({"reasoning": {}})).unwrap();
+    assert!(missing.values.is_empty());
+    let all = parse_openrouter_reasoning(&json!({"reasoning": {
+        "supported_efforts": null, "mandatory": true
+    }}))
+    .unwrap();
+    assert_eq!(all.efficient.as_deref(), Some("minimal"));
+    assert!(all.off.is_none());
+    assert!(!all.values.iter().any(|v| v == "none"));
+}
+
+#[test]
+fn fresh_endpoint_evidence_can_remove_a_profile_reasoning_control() {
+    let model = "nvidia/nemotron-3-ultra-550b-a55b:free";
+    let base = "https://catalog-narrows-profile.test/v1";
+    assert_eq!(
+        resolve(AdapterId::OpenRouter, base, model)
+            .reasoning
+            .efficient
+            .as_deref(),
+        Some("medium")
+    );
+    let evidence = CatalogEvidence {
+        supported_parameters: vec!["tools".into(), "tool_choice".into()],
+        ..Default::default()
+    };
+    let caps = resolve_with(AdapterId::OpenRouter, base, model, Some((&evidence, 1)));
+    assert_eq!(caps.reasoning.control, ReasoningControl::None);
+    assert!(caps.reasoning.efficient.is_none());
+}
+
+#[test]
 fn google_catalog_methods_gate_generation() {
     let v = json!({"name":"models/embed-x","supportedGenerationMethods":["embedContent"],"outputTokenLimit":1});
     let ev = parse_google_model(&v).unwrap();

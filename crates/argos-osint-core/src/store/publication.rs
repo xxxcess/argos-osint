@@ -330,9 +330,9 @@ pub(crate) fn bump_memories_changed(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn memory_text(conn: &Connection, id: &str) -> Result<Option<String>> {
+pub(super) fn memory_text(conn: &Connection, id: &str) -> Result<Option<String>> {
     Ok(conn
-        .query_row("SELECT text FROM memories WHERE id=?1", [id], |r| r.get(0))
+        .query_row("SELECT text FROM memories m WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM memory_metadata mm WHERE mm.memory_id=m.id AND mm.lifecycle<>'active')", [id], |r| r.get(0))
         .optional()?)
 }
 
@@ -450,6 +450,26 @@ pub(crate) fn enqueue_memory_index_on(
 }
 
 impl Store {
+    /// Clear vector proofs after removal, then fence a concurrent reactivation
+    /// with fresh outbox work. No vector writes occur under this transaction.
+    pub(super) fn reconcile_removed_vectors(&self, ids: &[String]) -> Result<()> {
+        self.write_then_index(|| {
+            for id in ids {
+                clear_index_state(&self.conn, id)?;
+            }
+            let active = ids
+                .iter()
+                .filter_map(|id| match memory_text(&self.conn, id) {
+                    Ok(Some(_)) => Some(Ok(id.clone())),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            enqueue_memory_index_on(&self.conn, &active, None)?;
+            Ok(((), Vec::new()))
+        })
+    }
+
     /// Store-connection form of [`enqueue_memory_index_on`].
     pub(crate) fn enqueue_memory_index(
         &self,
@@ -575,7 +595,9 @@ impl Store {
         let Some(text) = text else {
             return match index.remove_many(&ids) {
                 Ok(()) => {
-                    let _ = clear_index_state(&self.conn, memory_id);
+                    if let Err(err) = self.reconcile_removed_vectors(&ids) {
+                        return fail(err);
+                    }
                     IndexOutcome::Ready {
                         revision: DELETED_REVISION.into(),
                         fingerprint: brain_lance::current_fingerprint(),
@@ -639,7 +661,9 @@ impl Store {
             },
             Ok(None) => match index.remove_many(&ids) {
                 Ok(()) => {
-                    let _ = clear_index_state(&self.conn, memory_id);
+                    if let Err(err) = self.reconcile_removed_vectors(&ids) {
+                        return fail(err);
+                    }
                     ready(DELETED_REVISION.into())
                 }
                 Err(err) => fail(err),

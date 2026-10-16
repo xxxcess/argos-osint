@@ -96,6 +96,8 @@ and all other record spacing remain unchanged.
 
 ### Atlas
 
+Automatic news cycles run every **30 minutes**. A manual start resets an armed timer to 30 minutes. Restoring an older schedule shortens a later deadline while preserving due triggers and Auto off. An active cycle is never overlapped.
+
 Classification-only news cycle:
 
 1. GNews + NewsData, 48 h, score countries

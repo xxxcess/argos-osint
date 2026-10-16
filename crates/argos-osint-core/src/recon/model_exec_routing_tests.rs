@@ -528,8 +528,8 @@ async fn unsupported_option_recovery_is_a_second_recorded_dispatch() {
     assert_eq!(rows[1].1, "ok");
     let d: Value = serde_json::from_str(&rows[0].2).unwrap();
     assert_eq!(d["capability_digests"].as_array().unwrap().len(), 1);
-    assert_eq!(d["request_policy"]["max_output_tokens"], 2048);
-    assert_eq!(d["request_policy"]["thinking_ceiling"], 4096);
+    assert!(d["request_policy"]["max_output_tokens"].is_null());
+    assert!(d["request_policy"]["thinking_ceiling"].is_null());
 }
 
 // §6: a forced submit_result call is the answer; its arguments are

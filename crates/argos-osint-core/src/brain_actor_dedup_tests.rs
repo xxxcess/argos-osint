@@ -64,6 +64,60 @@ fn possessives_normalize_before_article_thread_and_claim_binding() {
     assert_eq!(found[0].mentions.len(), 3);
     assert_eq!(found[0].spellings.len(), 3);
 }
+#[cfg(feature = "nlp")]
+#[test]
+fn nlp_repairs_actor_labels_without_changing_identity_or_identifiers() {
+    let s = Store::memory().unwrap();
+    let id = actor(&s, "Allow FBI", "same");
+    let protected: Vec<_> = [
+        "Will Smith",
+        "May Johnson",
+        "Save the Children",
+        "Human Rights Watch",
+        "General Motors",
+        "Federal Bureau of Investigation",
+    ]
+    .into_iter()
+    .map(|name| (name, actor(&s, name, "same")))
+    .collect();
+    let account = s
+        .bind_actor(&BindRequest {
+            name: "Allow FBI",
+            scope: "account",
+            subtype: ActorSubtype::Account,
+            identifiers: &[],
+            external: None,
+            provenance: json!({}),
+        })
+        .unwrap()
+        .actor_id;
+    repair_local(&s, 100).unwrap();
+    assert_eq!(
+        actors::actor(&s.conn, &id).unwrap().unwrap().display_name,
+        "FBI"
+    );
+    assert_eq!(actors::resolve(&s.conn, &id).unwrap(), id);
+    assert!(s
+        .get_memory(&id)
+        .unwrap()
+        .unwrap()
+        .text
+        .contains("Actor: FBI"));
+    assert!(s.conn.query_row("SELECT EXISTS(SELECT 1 FROM brain_actor_aliases WHERE actor_id=?1 AND alias='Allow FBI')",[&id],|r|r.get::<_,bool>(0)).unwrap());
+    for (name, id) in protected {
+        assert_eq!(
+            actors::actor(&s.conn, &id).unwrap().unwrap().display_name,
+            name
+        );
+    }
+    assert_eq!(
+        actors::actor(&s.conn, &account)
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "Allow FBI"
+    );
+}
 #[test]
 fn local_repair_preserves_ids_and_merges_only_same_source_spellings() {
     let s = Store::memory().unwrap();

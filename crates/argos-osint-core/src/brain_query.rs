@@ -86,6 +86,10 @@ pub fn recall_candidates_for(
             let ids: Vec<(String, f32)> = serde_json::from_str(&json)?;
             let mut hits = Vec::new();
             for (id, score) in ids.into_iter().take(candidate_limit) {
+                let active:bool=store.conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM memory_metadata WHERE memory_id=?1 AND lifecycle<>'active')",[&id],|r|r.get(0))?;
+                if !active {
+                    continue;
+                }
                 if let Some(memory) = store.get_memory(&id)? {
                     hits.push(crate::brain::ScoredMemory { memory, score });
                 }
@@ -257,7 +261,7 @@ fn load_legacy_memory_evidence(
     let Some((text, kind)) = base else {
         return Ok(None);
     };
-    let mut stmt = conn.prepare("SELECT DISTINCT s.call_id,s.source_url,COALESCE(s.run_id,'') FROM insight_sources s JOIN insight_claims c ON c.fingerprint=s.fingerprint WHERE c.memory_id=?1 ORDER BY s.call_id")?;
+    let mut stmt = conn.prepare("SELECT DISTINCT s.call_id,s.source_url,COALESCE(s.run_id,'') FROM insight_sources s JOIN insight_claims c ON c.fingerprint=s.fingerprint WHERE c.memory_id=?1 AND s.deleted_origin=0 ORDER BY s.call_id")?;
     let sources = stmt
         .query_map([memory_id], |r| {
             Ok((
@@ -431,6 +435,7 @@ mod tests {
             )
             .unwrap();
         store.delete_memory(&first[1].memory.id).unwrap();
+        store.conn.execute("INSERT INTO memory_metadata(memory_id,memory_kind,lifecycle) VALUES(?1,'claim','retired')",[&first[2].memory.id]).unwrap();
         store
             .add_memory(
                 "A newer Acme factory report",
@@ -440,7 +445,8 @@ mod tests {
             )
             .unwrap();
         let replay = recall_candidates(&store, "recon", "run", "changed retrieval query").unwrap();
-        assert_eq!(replay.len(), 19);
+        assert_eq!(replay.len(), 18);
+        assert!(replay.iter().all(|hit| hit.memory.id != first[2].memory.id));
         assert_eq!(replay[0].memory.text, "Edited Acme assertion");
         assert!(replay.iter().all(|hit| ids.contains(&hit.memory.id)));
         let packed = pack_context(

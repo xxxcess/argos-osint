@@ -373,7 +373,6 @@ pub async fn attempt_spec(
         transport,
         deadlines,
         &mut endpoint,
-        started,
         &mut first_ms,
         &mut stream_state,
         observer,
@@ -386,6 +385,9 @@ pub async fn attempt_spec(
         &mut recovery,
     )
     .await;
+    if let Err(failure) = &outcome {
+        crate::provider_rate_limit::failure(secret, failure);
+    }
     let elapsed_ms = started.elapsed().as_millis() as u64;
     AttemptReport {
         effective,
@@ -413,7 +415,6 @@ async fn run(
     transport: Transport,
     deadlines: Deadlines,
     endpoint: &mut String,
-    started: Instant,
     first_ms: &mut Option<u64>,
     state: &mut StreamState,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
@@ -459,8 +460,7 @@ async fn run(
     diagnostics.extend(compiled.effective.diagnostics.iter().cloned());
     *effective = Some(compiled.effective.clone());
     let result = send_once(
-        &client, secret, &compiled, transport, deadlines, started, first_ms, state, observer,
-        progress,
+        &client, secret, &compiled, transport, deadlines, first_ms, state, observer, progress,
     )
     .await;
     if let Err(f) = &result {
@@ -505,7 +505,6 @@ async fn send_once(
     compiled: &crate::provider_adapters::CompiledRequest,
     transport: Transport,
     deadlines: Deadlines,
-    started: Instant,
     first_ms: &mut Option<u64>,
     state: &mut StreamState,
     observer: Option<&(dyn Fn(&str) + Send + Sync)>,
@@ -523,6 +522,9 @@ async fn send_once(
             }
             f
         })?;
+    crate::provider_rate_limit::wait(secret).await;
+    // Queue time must not consume the provider's response/output deadlines.
+    let started = Instant::now();
     let first_deadline = deadlines.first_response.min(deadlines.total);
     if let Some(p) = progress {
         p(AttemptProgress::Dispatched);
@@ -547,6 +549,7 @@ async fn send_once(
     };
     *first_ms = Some(started.elapsed().as_millis() as u64);
     let status = resp.status();
+    crate::provider_rate_limit::response(secret, status.as_u16(), resp.headers());
     if let Some(p) = progress {
         p(AttemptProgress::HeadersReceived {
             status: status.as_u16(),

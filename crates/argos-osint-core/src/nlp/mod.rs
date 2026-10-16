@@ -178,6 +178,15 @@ struct Job {
     _bytes: BytePermit,
     enqueued: std::time::Instant,
 }
+enum Work {
+    Annotation(Box<Job>),
+    ActorNames {
+        names: Vec<String>,
+        response: std::sync::mpsc::SyncSender<Option<Vec<String>>>,
+        enqueued: std::time::Instant,
+        _bytes: BytePermit,
+    },
+}
 struct BytePermit {
     bytes: usize,
     used: Arc<AtomicUsize>,
@@ -188,7 +197,7 @@ impl Drop for BytePermit {
     }
 }
 pub struct Service {
-    sender: mpsc::Sender<Job>,
+    sender: mpsc::Sender<Work>,
     bytes: Arc<AtomicUsize>,
     pub readiness: Result<(), String>,
 }
@@ -198,7 +207,7 @@ impl Service {
         SERVICE.get_or_init(Self::start)
     }
     fn start() -> Self {
-        let (sender, mut receiver) = mpsc::channel::<Job>(32);
+        let (sender, mut receiver) = mpsc::channel::<Work>(32);
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("argos-nlp".into())
@@ -206,7 +215,37 @@ impl Service {
                 let mut engine = engine::Engine::new();
                 let _ = ready_tx.send(engine.as_ref().map(|_| ()).map_err(|e| e.clone()));
                 let mut memory = cache::MemoryCache::default();
-                while let Some(job) = receiver.blocking_recv() {
+                while let Some(work) = receiver.blocking_recv() {
+                    let job = match work {
+                        Work::Annotation(job) => *job,
+                        Work::ActorNames {
+                            names,
+                            response,
+                            enqueued,
+                            _bytes,
+                        } => {
+                            if enqueued.elapsed() >= std::time::Duration::from_secs(10) {
+                                let _ = response.send(None);
+                                continue;
+                            }
+                            if engine.is_err() {
+                                engine = engine::Engine::new();
+                            }
+                            let cleaned =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    engine
+                                        .as_mut()
+                                        .ok()
+                                        .and_then(|e| e.actor_names(&names).ok())
+                                }))
+                                .unwrap_or_default();
+                            if cleaned.is_none() {
+                                engine = Err("actor parser needs restart".into());
+                            }
+                            let _ = response.send(cleaned);
+                            continue;
+                        }
+                    };
                     let started = std::time::Instant::now();
                     let queue_wait_ms = job.enqueued.elapsed().as_millis() as u64;
                     let mut cache_hit = false;
@@ -236,11 +275,20 @@ impl Service {
                                     }))
                                     .unwrap_or_else(|_| {
                                         while let Ok(pending) = receiver.try_recv() {
-                                            let _ = pending.response.send(Annotation::terminal(
-                                                &pending.source,
-                                                &pending.context,
-                                                Status::Failed,
-                                            ));
+                                            match pending {
+                                                Work::Annotation(pending) => {
+                                                    let _ = pending.response.send(
+                                                        Annotation::terminal(
+                                                            &pending.source,
+                                                            &pending.context,
+                                                            Status::Failed,
+                                                        ),
+                                                    );
+                                                }
+                                                Work::ActorNames { response, .. } => {
+                                                    let _ = response.send(None);
+                                                }
+                                            }
                                         }
                                         let mut failed = Annotation::terminal(
                                             &job.source,
@@ -288,14 +336,16 @@ impl Service {
         if source.prose.len() > MAX_SOURCE {
             return Err(Status::TooLarge);
         }
+        self.reserve_bytes(source.prose.len())
+    }
+    fn reserve_bytes(&self, bytes: usize) -> Result<BytePermit, Status> {
         self.bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                n.checked_add(source.prose.len())
-                    .filter(|n| *n <= QUEUE_BYTES)
+                n.checked_add(bytes).filter(|n| *n <= QUEUE_BYTES)
             })
             .map_err(|_| Status::Busy)?;
         Ok(BytePermit {
-            bytes: source.prose.len(),
+            bytes,
             used: self.bytes.clone(),
         })
     }
@@ -311,14 +361,14 @@ impl Service {
         let permit = self.permit(&source)?;
         let (response, rx) = oneshot::channel();
         self.sender
-            .try_send(Job {
+            .try_send(Work::Annotation(Box::new(Job {
                 source,
                 context,
                 cancel,
                 response,
                 _bytes: permit,
                 enqueued: std::time::Instant::now(),
-            })
+            })))
             .map_err(|e| {
                 if matches!(e, mpsc::error::TrySendError::Closed(_)) {
                     Status::Failed
@@ -345,20 +395,46 @@ impl Service {
         let (response, rx) = oneshot::channel();
         if self
             .sender
-            .send(Job {
+            .send(Work::Annotation(Box::new(Job {
                 source,
                 context,
                 cancel,
                 response,
                 _bytes: permit,
                 enqueued: std::time::Instant::now(),
-            })
+            })))
             .await
             .is_err()
         {
             return terminal;
         }
         rx.await.unwrap_or(terminal)
+    }
+
+    /// Bounded local maintenance, called outside the SQLite transaction. Busy
+    /// or failed parsing is retried later rather than caching a false success.
+    pub(crate) fn actor_names(&self, names: Vec<String>) -> Option<Vec<String>> {
+        if !cfg!(feature = "nlp") {
+            return Some(names);
+        }
+        if names.len() > 100 || names.iter().any(|name| name.len() > 1024) {
+            return None;
+        }
+        let permit = self
+            .reserve_bytes(names.iter().map(String::len).sum())
+            .ok()?;
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(Work::ActorNames {
+                names,
+                response: tx,
+                enqueued: std::time::Instant::now(),
+                _bytes: permit,
+            })
+            .ok()?;
+        rx.recv_timeout(std::time::Duration::from_secs(12))
+            .ok()
+            .flatten()
     }
 }
 

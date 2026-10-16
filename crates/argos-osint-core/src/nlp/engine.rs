@@ -37,6 +37,29 @@ pub(crate) struct Engine {
     guard: Arc<Mutex<Guard>>,
 }
 impl Engine {
+    pub(crate) fn actor_names(&mut self, names: &[String]) -> Result<Vec<String>, String> {
+        #[cfg(not(feature = "nlp"))]
+        {
+            Ok(names.to_vec())
+        }
+        #[cfg(feature = "nlp")]
+        {
+            {
+                let mut guard = self.guard.lock().unwrap();
+                guard.cancel = Arc::new(AtomicBool::new(false));
+                guard.deadline = Instant::now() + Duration::from_secs(2);
+            }
+            self.context.with(|ctx| {
+                let f: rquickjs::Function = ctx
+                    .globals()
+                    .get("argosActorNames")
+                    .map_err(|e| e.to_string())?;
+                let input = serde_json::to_string(names).map_err(|e| e.to_string())?;
+                let output: String = f.call((input,)).map_err(|e| e.to_string())?;
+                serde_json::from_str(&output).map_err(|e| e.to_string())
+            })
+        }
+    }
     pub fn new() -> Result<Self, String> {
         #[cfg(feature = "nlp")]
         {

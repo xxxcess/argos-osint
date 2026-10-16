@@ -1610,6 +1610,7 @@ pub fn reconcile_deleted_memories(conn: &Connection) -> Result<()> {
 }
 
 pub fn reconcile_deleted_articles(conn: &Connection) -> Result<()> {
+    crate::brain_source_lifecycle::reconcile_sources(conn, &chrono::Utc::now().to_rfc3339())?;
     conn.execute_batch("UPDATE insight_owner_state SET desired_generation=desired_generation+1,lifecycle='previous',last_error='origin article removed' WHERE owner_kind IN ('article','atlas') AND lifecycle<>'previous' AND NOT EXISTS (SELECT 1 FROM atlas_articles a WHERE a.article_id=insight_owner_state.owner_id);
         UPDATE insight_derivation_links SET status='origin_deleted' WHERE snapshot_id IN (SELECT active_snapshot_id FROM insight_owner_state WHERE last_error='origin article removed');")?;
     crate::intel_recon::brief_canonical::retire_deleted_article_leads(

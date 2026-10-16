@@ -170,7 +170,7 @@ Structured output follows the contract (BoundedDecision, GeneratedJson or Prose)
 
 OpenRouter adds `provider.require_parameters=true` whenever it uses an optional capability. Google's own host uses native `models/{id}:generateContent` (`streamGenerateContent?alt=sse` when streaming) with `x-goog-api-key`. A custom base ending in `/openai` keeps compatibility chat with the bare model ID. Agent tool loops also use compatibility chat.
 
-Ceilings: `RequestPolicy.max_output_tokens` is the total ceiling when thinking is off. `thinking_ceiling` is the total ceiling when the model thinks; thinking and visible output share it, and no hidden reserve is added. `reasoning_budget` is sent only where a profile documents a budget field, and it is labelled advisory unless the endpoint enforces it. Reasoning intents (`off`, `efficient`, `low`, `medium`, `high`) map onto each model's own vocabulary:
+Automatic model operations use provider defaults for output length and reasoning. Intel brief stages no longer send application-imposed token ceilings, reasoning-token budgets, or forced low/off reasoning settings. Structured response contracts and local evidence validation remain required. The explicit low-level `RequestPolicy` API still supports opt-in ceilings: `max_output_tokens` is the total ceiling when thinking is off. `thinking_ceiling` is the total ceiling when the model thinks; thinking and visible output share it, and no hidden reserve is added. `reasoning_budget` is sent only where a profile documents a budget field, and it is labelled advisory unless the endpoint enforces it. Reasoning intents (`off`, `efficient`, `low`, `medium`, `high`) map onto each model's own vocabulary:
 
 - Nemotron Super: `none`/`low`/`high`.
 - Nemotron Ultra: `none`/`medium`/`high` (`low` is invalid).
@@ -211,20 +211,27 @@ A four-route chain therefore sends at most six requests. Other callers keep the 
 
 At stage admission, each route's capabilities are resolved once (`provider_capabilities::admit`). Admission also starts a coalesced 24-hour background catalog refresh when the cached entry is missing or stale. The snapshot's digest is stored in the attempt's `declaration_json` (`capability_digests`). A refresh that finishes mid-operation cannot change an in-flight request. Only observed rejections, which can only narrow what is sent, are merged in for a recovery recompile.
 
-## Stage budget table
+## Provider-wide request pacing
 
-`request_policy::StageBudget` rows (spec §5). The answer target is the total ceiling when thinking is off. Thinking and visible output share the thinking ceiling, and no hidden reserve is added.
+[![Provider request scheduling](diagrams/model-request-scheduling.svg)](diagrams/model-request-scheduling.html)
 
-| Operation | Answer target | Ceiling with thinking | Reasoning |
-| --- | --- | --- | --- |
-| Cleanup chat fallback | 512 | 2048 (mandatory thinking) | Off |
-| Claims | 2048 | 4096 | Off (Flash: `low`) |
-| Extraction fidelity | 1024 | 3072 | Off |
-| Inferences | 3072 | 4096 with an enforced 1024 reasoning budget, otherwise 6144 | Efficient (NU `medium`, Flash `low`) |
-| Inference support | 1024 | 3072 | Off |
-| Links | 1536 | 3584 | Off |
+Every model HTTP send passes through `provider_rate_limit`, including streamed and non-streamed completions, native Decisions, transcription when configured on a paced provider, chat fallbacks, output repairs and unsupported-option recovery. The scheduler shares one FIFO queue and monotonic clock per provider across all roles, models, endpoints and accounts in the running Argos process:
 
-Jev gets no chat parameters. Claims, Inferences and Links send their `brief_contracts` schema as the response contract: a strict schema where confirmed, otherwise the forced `submit_result` output tool, otherwise JSON mode or validated text. The compact limits sentence goes into the prompt. Output-tool arguments are validated exactly like content.
+| Provider | Argos RPM ceiling | Minimum interval between sends |
+| --- | --- | --- |
+| OpenRouter | 20 | 3 seconds |
+| Google | 10 | 6 seconds |
+| Nvidia | 40 | 1.5 seconds |
+
+These are Argos scheduling limits, rather than claims about every provider tier. OpenRouter documents 20 RPM for free variants; Google quotas vary by model and project, with separate token and daily limits. See [OpenRouter limits](https://openrouter.ai/docs/api_reference/limits) and [Google limits](https://ai.google.dev/gemini-api/docs/rate-limits). The Nvidia ceiling is the configured application policy. Other providers retain existing admission behavior.
+
+The first request can start immediately. Idle time earns no burst, and a delayed waiter schedules the following send from its actual admission time. Compilation and authorization precede transport admission. Cancelled waiters release their queue position without reserving quota. Provider queues are independent; a Google cooldown does not stop OpenRouter or Nvidia. Existing two-active-requests-per-account admission and interactive priority remain in the retry executor; transport waiters enter their provider queue in FIFO order.
+
+HTTP 429 and 503 responses delay all queued sends for that provider, including when the failed request was the route's last attempt. `Retry-After` (seconds or HTTP date) is honored without the diagnostic display cap; absent a header, 429 waits 60 seconds and 503 waits 10 seconds. Stream-delivered rate-limit/server errors feed the same clock. Cooldowns only extend existing waits. The retry executor remains the only retry owner: its retry budget and backoff still apply, and transport pacing may delay the next send further. See [OpenRouter retry guidance](https://openrouter.ai/docs/api_reference/errors-and-debugging).
+
+Queue residence is recorded separately from retry backoff and starts no network/output deadline. The `Dispatched` wire mark is emitted only after transport admission, and native Decisions records its send time at the same boundary. Pacing is process-local: separate Argos processes and other applications do not share this clock. It cannot prevent token/day quotas or provider outages.
+
+`StageBudget` rows are retained as legacy sizing metadata for core API compatibility; their `policy()` no longer transmits output or reasoning restrictions. Claims, Inferences and Links still send their `brief_contracts` schema: a strict schema where confirmed, otherwise the forced `submit_result` output tool, otherwise JSON mode or validated text. Compact item/field limits describe the brief's data contract rather than a provider token budget. Output-tool arguments are validated exactly like content.
 
 ## Canonical Jev decisions
 

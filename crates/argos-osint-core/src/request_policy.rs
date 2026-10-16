@@ -1,5 +1,6 @@
-//! Per-operation request policy: answer target, total completion ceiling,
-//! reasoning intent and structured-output request.
+//! Per-operation request policy: optional explicit completion ceiling,
+//! reasoning intent and structured-output request. Automatic operations use
+//! provider output/reasoning defaults rather than stage token caps.
 //!
 //! The policy is provider-neutral. Provider adapters
 //! (`crate::provider_adapters`) compile it against the selected model's
@@ -117,8 +118,8 @@ pub fn rejected_options(
         .collect()
 }
 
-/// One row of the stage budget table (spec §5). Thinking and visible output
-/// share the total ceiling; no hidden reserve is added.
+/// Historical stage sizing metadata, retained for API compatibility.
+/// `policy` preserves the response contract and sends no output/reasoning caps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StageBudget {
     /// Visible answer target = total ceiling when thinking is off.
@@ -141,21 +142,17 @@ impl StageBudget {
         }
     }
 
-    /// The request policy for this stage.
+    /// Stage sizing hints no longer impose provider output or reasoning caps.
+    /// Keep the metadata for compatibility; models use their own defaults.
     pub fn policy(&self, json_object: bool) -> RequestPolicy {
         RequestPolicy {
-            max_output_tokens: Some(self.answer),
-            thinking_ceiling: Some(self.thinking),
-            reasoning_budget: self.reasoning_budget,
-            budgeted_ceiling: self.budgeted_ceiling,
             json_object,
-            reasoning: self.reasoning,
+            ..Default::default()
         }
     }
 }
 
-/// Stage budget table (spec §5). Off means "no thinking" where the model can
-/// disable it; mandatory-thinking models (Flash: `low`) use `thinking`.
+/// Legacy sizing hints; these values are not sent as provider restrictions.
 pub const CLEANUP_FALLBACK_BUDGET: StageBudget = StageBudget::new(512, 2048, ReasoningEffort::Off);
 pub const CLAIMS_BUDGET: StageBudget = StageBudget::new(2048, 4096, ReasoningEffort::Off);
 pub const FIDELITY_BUDGET: StageBudget = StageBudget::new(1024, 3072, ReasoningEffort::Off);

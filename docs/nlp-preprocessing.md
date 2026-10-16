@@ -12,6 +12,12 @@ Standalone calendar months tagged Person are excluded in temporal contexts (for 
 
 [![NLP evidence flow](diagrams/nlp-preprocessing.svg)](diagrams/nlp-preprocessing.html)
 
+## Actor label maintenance
+
+The elected actor maintenance service sends up to 100 existing Actor labels to the same bounded NLP worker before starting its SQLite write transaction. A batch has a two-second parser deadline; labels over 1024 bytes and account/domain/IP identifiers retain lexical normalization only. The parser trims verbal boundary context only when a clear entity remains: `Allow FBI` and `FBI announced` become `FBI`. Ambiguous people and phrases such as `May Johnson`, `Will Smith`, `Save the Children` and `Human Rights Watch` remain unchanged. Original aliases, IDs and exact source spans survive; cleanup does not establish cross-source identity. Changed text queues index work. Versioned receipts revisit older labels; busy/failed parsing retries on a later tick. NLP Off or a build without NLP keeps lexical normalization, with a separate receipt version so enabling NLP revisits those rows.
+
+The shared annotation queue now accepts bounded actor-label batches as well as source annotations. JavaScript stays on the parser thread, and actor cleanup never adds a provider request. See [actor identity maintenance](architecture.md#actor-identity-maintenance).
+
 ## Configuration and build
 
 The local `config.toml` setting is independent of portable Profile schema v1; importing a Profile preserves it:

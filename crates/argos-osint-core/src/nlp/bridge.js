@@ -30,3 +30,25 @@ globalThis.argosAnnotate = function(text) {
 globalThis.argosDate = function(phrase, today, timezone, dateOrder) {
   return JSON.stringify(nlp(phrase).dates({today,timezone,dateOrder}).json());
 };
+// Lexical cleanup only. Require a confidently identified entity after/before
+// verbal context, and preserve ambiguous proper names and branded phrases.
+globalThis.argosActorNames = function(input) {
+  return JSON.stringify(JSON.parse(input).map(text => {
+    const sentences=nlp(text).json({terms:true,offset:true});
+    if(sentences.length!==1) return text;
+    const terms=sentences[0].terms || [];
+    const has=(t,tag)=>(t.tags||[]).includes(tag);
+    const entity=t=>has(t,'Organization') || has(t,'Person') || has(t,'Place');
+    const verb=t=>has(t,'Verb') && !has(t,'ProperNoun') && !has(t,'Modal');
+    let start=0,end=terms.length;
+    while(start<end && verb(terms[start])) start++;
+    if(start>0) while(start<end && has(terms[start],'Determiner')) start++;
+    while(end>start && verb(terms[end-1])) end--;
+    const kept=terms.slice(start,end);
+    if(!kept.length || !kept.some(entity)) return text;
+    // A leading verb before a person is ambiguous (e.g. Grant Williams).
+    if(start>0 && kept.some(t=>has(t,'Person')) && !kept.some(t=>has(t,'Organization'))) return text;
+    const first=kept[0].offset,last=kept[kept.length-1].offset;
+    return first && last ? text.slice(first.start,last.start+last.length) : text;
+  }));
+};

@@ -61,7 +61,7 @@ pub struct OperationScope<'a> {
     pub generation: u32,
     /// Insight-only bounded repair/fallback policy; other operations retain their policy.
     pub insight_contract: bool,
-    /// Per-stage completion ceiling for the insight lane (defaults to 8,192).
+    /// Optional explicit completion ceiling. Automatic operations leave it unset.
     pub completion_tokens: Option<u32>,
     /// Requested reasoning effort for this operation (provider default if unset).
     pub reasoning: crate::request_policy::ReasoningEffort,
@@ -73,7 +73,7 @@ pub struct OperationScope<'a> {
     pub input_revision: Option<&'a str>,
     /// A user is waiting on this result (admission priority, no preemption).
     pub interactive: bool,
-    /// Stage budget-table row (spec §5); overrides `completion_tokens`/`reasoning`.
+    /// Legacy stage sizing hints; automatic stages use provider output defaults.
     pub budget: Option<crate::request_policy::StageBudget>,
     /// Authoritative response contract (schema for strict/native/output tool).
     pub contract: Option<crate::provider_adapters::ResponseContract>,
@@ -129,10 +129,8 @@ impl<'a> OperationScope<'a> {
         }
     }
 
-    /// Apply a stage budget-table row.
+    /// Retain stage sizing metadata without imposing output/reasoning limits.
     pub fn with_budget(mut self, budget: crate::request_policy::StageBudget) -> Self {
-        self.completion_tokens = Some(budget.answer);
-        self.reasoning = budget.reasoning;
         self.budget = Some(budget);
         self
     }
@@ -146,12 +144,12 @@ impl<'a> OperationScope<'a> {
     pub fn request_policy(
         &self,
         json_object: bool,
-        default_tokens: u32,
+        _default_tokens: u32,
     ) -> crate::request_policy::RequestPolicy {
         match self.budget {
             Some(budget) => budget.policy(json_object),
             None => crate::request_policy::RequestPolicy {
-                max_output_tokens: Some(self.completion_tokens.unwrap_or(default_tokens)),
+                max_output_tokens: self.completion_tokens,
                 json_object,
                 reasoning: self.reasoning,
                 ..Default::default()
@@ -726,6 +724,10 @@ impl AttemptTimings {
 
     /// Convert observed wire marks into offsets from the send instant.
     pub fn wire_marks(&mut self, marks: &WireMarks) {
+        if let Some((at, instant)) = &marks.dispatched {
+            self.sent_at = at.clone();
+            self.sent_instant = Some(*instant);
+        }
         let Some(sent) = self.sent_instant else {
             return;
         };
@@ -753,8 +755,9 @@ impl AttemptTimings {
 }
 
 /// Instants observed from `AttemptProgress` during one wire attempt.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct WireMarks {
+    pub dispatched: Option<(String, Instant)>,
     pub headers: Option<Instant>,
     pub first_reasoning: Option<Instant>,
     pub first_output: Option<Instant>,
@@ -765,6 +768,9 @@ impl WireMarks {
     pub fn observe(&mut self, progress: &provider_attempt::AttemptProgress, at: Instant) {
         use provider_attempt::AttemptProgress as P;
         match progress {
+            P::Dispatched => {
+                self.dispatched.get_or_insert_with(|| (now_rfc3339(), at));
+            }
             P::HeadersReceived { .. } => {
                 self.headers.get_or_insert(at);
             }
@@ -1509,12 +1515,14 @@ where
                 )
                 .await
             } else {
-                provider_attempt::attempt_with_observer(
+                provider_attempt::attempt_full(
                     &secret,
                     &messages_vec,
                     transport,
                     Deadlines::default(),
                     Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
+                    progress_sink.as_deref(),
+                    &crate::request_policy::RequestPolicy::default(),
                 )
                 .await
             };
@@ -1827,7 +1835,7 @@ where
 
     let repairs = Arc::new(OutputRepairs::default());
     let insight_contract = scope.insight_contract;
-    let stage_tokens = scope.completion_tokens;
+    let stage_policy = scope.completion_tokens.is_some() || scope.budget.is_some();
     let chat_policy = scope.request_policy(true, 2048);
     let admitted: Arc<Vec<crate::provider_capabilities::ResolvedCapabilities>> = Arc::new(
         secrets
@@ -1944,7 +1952,14 @@ where
                         )));
                     }
                 }
-                match provider::decide(&secret, &native_state, &native_questions).await {
+                match provider::decide_with_dispatch(
+                    &secret,
+                    &native_state,
+                    &native_questions,
+                    || timings.sent(),
+                )
+                .await
+                {
                     Ok(resp) => {
                         let elapsed_ms = start_t.elapsed().as_millis() as u64;
                         match adapter.parse_native(&resp) {
@@ -2088,9 +2103,18 @@ where
                         "compiled assessment exceeds byte budget",
                     )));
                 }
-                let rep = if insight_contract || stage_tokens.is_some() {
-                    // Bounded decision fallback keeps the ordinary policy; a
-                    // stage policy (e.g. 512-token cleanup batches) overrides it.
+                let marks: Arc<std::sync::Mutex<WireMarks>> = Arc::default();
+                let progress = {
+                    let marks = marks.clone();
+                    move |p: provider_attempt::AttemptProgress| {
+                        if let Ok(mut marks) = marks.lock() {
+                            marks.observe(&p, Instant::now());
+                        }
+                    }
+                };
+                let rep = if insight_contract || stage_policy {
+                    // Preserve the bounded decision response contract without
+                    // imposing the former per-stage output/thinking ceilings.
                     provider_attempt::attempt_spec(
                         &secret,
                         &chat_messages,
@@ -2098,6 +2122,7 @@ where
                         Deadlines::native_decision(),
                         &chat_policy,
                         provider_attempt::AttemptSpec {
+                            progress: Some(&progress),
                             contract: Some(
                                 &crate::provider_adapters::ResponseContract::BoundedDecision,
                             ),
@@ -2107,15 +2132,21 @@ where
                     )
                     .await
                 } else {
-                    provider_attempt::attempt(
+                    provider_attempt::attempt_full(
                         &secret,
                         &chat_messages,
                         Transport::NonStream,
                         Deadlines::default(),
+                        None,
+                        Some(&progress),
+                        &crate::request_policy::RequestPolicy::default(),
                     )
                     .await
                 };
 
+                if let Ok(marks) = marks.lock() {
+                    timings.wire_marks(&marks);
+                }
                 let elapsed_ms = start_t.elapsed().as_millis() as u64;
                 let recovery = rep.recovery.clone();
                 let kind = crate::investigation::decisions::adapters::kind_for_structured(
@@ -2308,6 +2339,46 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_operations_have_no_output_or_reasoning_budget() {
+        for role in provider::CANONICAL_ROLE_KEYS {
+            for scope in [
+                OperationScope::new("op", role),
+                OperationScope::new("op", role)
+                    .with_budget(crate::request_policy::INFERENCES_BUDGET),
+            ] {
+                let policy = scope.request_policy(true, 2048);
+                assert!(policy.max_output_tokens.is_none());
+                assert!(policy.thinking_ceiling.is_none());
+                assert!(policy.reasoning_budget.is_none());
+                assert!(policy.budgeted_ceiling.is_none());
+                assert_eq!(
+                    policy.reasoning,
+                    crate::request_policy::ReasoningEffort::Default
+                );
+                assert!(policy.json_object);
+            }
+        }
+    }
+
+    #[test]
+    fn provider_queue_residence_is_separate_from_wire_latency() {
+        let queued = Instant::now() - Duration::from_secs(10);
+        let sent = queued + Duration::from_secs(6);
+        let mut timings = AttemptTimings::queued("queued", queued);
+        timings.sent(); // Superseded by the actual transport send mark.
+        let mut marks = WireMarks::default();
+        marks.observe(&provider_attempt::AttemptProgress::Dispatched, sent);
+        marks.observe(
+            &provider_attempt::AttemptProgress::HeadersReceived { status: 200 },
+            sent + Duration::from_secs(1),
+        );
+        timings.wire_marks(&marks);
+        timings.finish(8000, false);
+        assert_eq!(timings.queue_ms, 6000);
+        assert_eq!(timings.response_headers_ms, Some(1000));
+    }
 
     #[test]
     fn canonical_attempt_id_is_stable_across_replay() {

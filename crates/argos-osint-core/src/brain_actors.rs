@@ -949,8 +949,10 @@ pub(crate) fn direct_mentions(
 }
 
 /// Reconcile ingest-only actors after replacement/deletion. A surviving
-/// mention, active claim/edge, analyst pin or merged member keeps the actor.
+/// mention, active evidence, analyst pin or merged member keeps the actor.
 pub fn reconcile_lifecycle(conn: &Connection, now: &str) -> Result<()> {
+    let before = conn.total_changes();
+    crate::brain_source_lifecycle::reconcile_sources(conn, now)?;
     conn.execute(
         "WITH RECURSIVE family(root,id) AS (
            SELECT actor_id,actor_id FROM brain_actors
@@ -960,17 +962,27 @@ pub fn reconcile_lifecycle(conn: &Connection, now: &str) -> Result<()> {
            SELECT DISTINCT f.root FROM family f WHERE
              EXISTS(SELECT 1 FROM brain_actor_mentions m WHERE m.actor_id=f.id)
              OR EXISTS(SELECT 1 FROM brain_memory_actor_refs r JOIN memory_metadata mm ON mm.memory_id=r.memory_id
-                       WHERE r.actor_id=f.id AND mm.lifecycle='active' AND r.memory_id<>f.id)
+                       WHERE r.actor_id=f.id AND mm.lifecycle='active' AND mm.memory_kind IN ('claim','atomic_claim','inference') AND r.memory_id<>f.id)
              OR EXISTS(SELECT 1 FROM memories m WHERE m.id=f.id AND m.pinned=1)
              OR EXISTS(SELECT 1 FROM insight_user_edits e WHERE e.memory_id=f.id)
          )
          UPDATE memory_metadata SET lifecycle=CASE WHEN memory_id IN (SELECT root FROM supported) THEN 'active' ELSE 'retired' END,
            updated_at=?1
          WHERE memory_kind='actor' AND lifecycle<>'redirected'
-           AND memory_id IN (SELECT actor_id FROM brain_actors WHERE scope_key LIKE 'atlas-article:%')
+           AND memory_id IN (SELECT actor_id FROM brain_actors WHERE scope_key='' OR scope_key LIKE 'atlas-article:%' OR scope_key LIKE 'atlas:%' OR scope_key LIKE 'article:%' OR scope_key LIKE 'recon:%' OR scope_key LIKE 'recon-thread:%' OR scope_key LIKE 'recon-deleted:%' OR scope_key LIKE 'insight-memory:%')
            AND lifecycle<>CASE WHEN memory_id IN (SELECT root FROM supported) THEN 'active' ELSE 'retired' END",
         [now],
     )?;
+    // Relationships cannot outlive a retired actor or evidence endpoint.
+    // Iterate because a relationship can itself be another record's endpoint.
+    while conn.execute("UPDATE memory_metadata SET lifecycle='retired',revision=revision+1,updated_at=?1
+        WHERE lifecycle='active' AND memory_kind IN ('link','related') AND memory_id IN (
+          SELECT e.memory_id FROM brain_memory_endpoints e JOIN memory_metadata endpoint ON endpoint.memory_id=e.ref_id
+          WHERE e.endpoint_kind='memory' AND endpoint.lifecycle<>'active')",[now])? > 0 {}
+    crate::brain_source_lifecycle::reconcile_index(conn)?;
+    if conn.total_changes() > before {
+        crate::store::bump_memories_changed(conn)?;
+    }
     Ok(())
 }
 

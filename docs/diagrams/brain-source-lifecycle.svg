@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 380" role="img" aria-labelledby="title desc">
+<title id="title">Brain source removal and index eligibility</title>
+<desc id="desc">Deletion removes current source contributions in one SQLite transaction. Shared evidence survives; zero-support evidence, actors and dependent edges retire. Durable index work rechecks eligibility before removing or restoring vectors. Retired rows and evidence history remain retained.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#4f5d75"/></marker></defs>
+<rect width="1000" height="380" fill="#f5f5f5"/>
+<g font-family="system-ui,sans-serif" fill="#2d3142">
+<text x="30" y="30" font-size="14">SQLITE TRANSACTION</text>
+<rect x="30" y="55" width="235" height="90" fill="#fff" stroke="#2d3142"/>
+<text x="45" y="84" font-size="15">Delete article / investigation</text><text x="45" y="111" font-size="12">Remove current contributions</text><text x="45" y="130" font-size="12">Recompute retained source counts</text>
+<rect x="335" y="55" width="270" height="90" fill="#fff4ee" stroke="#eb6c36"/>
+<text x="350" y="84" font-size="15">Reconcile support</text><text x="350" y="111" font-size="12">Shared evidence stays active</text><text x="350" y="130" font-size="12">Zero support → retire + dependent edges</text>
+<rect x="685" y="55" width="285" height="90" fill="#fff" stroke="#2d3142"/>
+<text x="700" y="84" font-size="15">Commit lifecycle + index outbox</text><text x="700" y="111" font-size="12">Retired → durable index_remove</text><text x="700" y="130" font-size="12">Active rows alone serve browse / recall</text>
+<text x="30" y="205" font-size="14">INDEX WORKER AFTER COMMIT</text>
+<rect x="335" y="230" width="270" height="90" fill="#fff" stroke="#2d3142"/>
+<text x="350" y="259" font-size="15">Recheck current eligibility</text><text x="350" y="286" font-size="12">Inactive → remove vector / index proof</text><text x="350" y="305" font-size="12">Reactivated → keep / upsert current text</text>
+<text x="30" y="355" font-size="12">Retirement preserves typed rows, aliases and evidence snapshots; rebuilds include active rows only.</text>
+</g>
+<g fill="none" stroke="#4f5d75" marker-end="url(#arrow)"><path d="M265 100 H335"/><path d="M605 100 H685"/><path d="M827 145 V275 H605"/></g>
+</svg>

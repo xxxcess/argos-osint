@@ -18,12 +18,14 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Atlas classification-only cycle and Related leads | Process | [atlas-pipeline.html](diagrams/atlas-pipeline.html) | [atlas-pipeline.svg](diagrams/atlas-pipeline.svg) |
 | Historical Intel report (retired) | Data flow | [intel-report.html](diagrams/intel-report.html) | [intel-report.svg](diagrams/intel-report.svg) |
 | Brain browse projection | Data flow | [brain-browse.html](diagrams/brain-browse.html) | [brain-browse.svg](diagrams/brain-browse.svg) |
+| Brain source lifecycle | Data flow | [brain-source-lifecycle.html](diagrams/brain-source-lifecycle.html) | [brain-source-lifecycle.svg](diagrams/brain-source-lifecycle.svg) |
 | Actor identity maintenance | Process | [actor-identity.html](diagrams/actor-identity.html) | [actor-identity.svg](diagrams/actor-identity.svg) |
 | Brain memory topology and scope | Architecture | [brain-topology.html](diagrams/brain-topology.html) | [brain-topology.svg](diagrams/brain-topology.svg) |
 | Intel brief / historical report states | State machine | [intel-job-states.html](diagrams/intel-job-states.html) | [intel-job-states.svg](diagrams/intel-job-states.svg) |
 | Intel brief preparation | Process | [intel-brief-chain.html](diagrams/intel-brief-chain.html) | [intel-brief-chain.svg](diagrams/intel-brief-chain.svg) |
 | Brain recall | Architecture | [brain-recall.html](diagrams/brain-recall.html) | [brain-recall.svg](diagrams/brain-recall.svg) |
 | Models and roles | Architecture | [model-roles.html](diagrams/model-roles.html) | [model-roles.svg](diagrams/model-roles.svg) |
+| Provider request scheduling | Data flow | [model-request-scheduling.html](diagrams/model-request-scheduling.html) | [model-request-scheduling.svg](diagrams/model-request-scheduling.svg) |
 | Persistence | Layer stack | [persistence.html](diagrams/persistence.html) | [persistence.svg](diagrams/persistence.svg) |
 | Report tables | Database schema | [schema-core.html](diagrams/schema-core.html) | [schema-core.svg](diagrams/schema-core.svg) |
 | Durable jobs | State machine | [jobs-lifecycle.html](diagrams/jobs-lifecycle.html) | [jobs-lifecycle.svg](diagrams/jobs-lifecycle.svg) |

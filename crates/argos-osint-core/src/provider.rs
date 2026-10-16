@@ -1406,10 +1406,12 @@ pub async fn complete(
         compiled.auth,
     )
     .await?;
+    crate::provider_rate_limit::wait(secret).await;
     let resp = req
         .send()
         .await
         .with_context(|| format!("POST {}", crate::provider_diag::sanitize_endpoint(&url)))?;
+    crate::provider_rate_limit::response(secret, resp.status().as_u16(), resp.headers());
     if !resp.status().is_success() {
         let status = resp.status();
         let headers = resp.headers().clone();
@@ -1449,7 +1451,11 @@ pub async fn complete(
     }
     let completion = acc.into_completion();
     if completion.is_empty() {
-        return Err(completion.empty_error("stream"));
+        let error = completion.empty_error("stream");
+        if let Some(failure) = error.downcast_ref::<crate::provider_diag::ProviderFailure>() {
+            crate::provider_rate_limit::failure(secret, failure);
+        }
+        return Err(error);
     }
     Ok(completion)
 }
@@ -1589,6 +1595,15 @@ pub async fn decide(
     state: &Value,
     questions: &Value,
 ) -> Result<DecisionsResponse> {
+    decide_with_dispatch(secret, state, questions, || {}).await
+}
+
+pub(crate) async fn decide_with_dispatch(
+    secret: &ProviderSecret,
+    state: &Value,
+    questions: &Value,
+    on_dispatch: impl FnOnce(),
+) -> Result<DecisionsResponse> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(45))
         .build()
@@ -1597,7 +1612,10 @@ pub async fn decide(
     let compiled = crate::provider_adapters::compile_decisions(secret, state, questions, &caps);
     let url = compiled.endpoint.clone();
     let req = authorize(client.post(&url).json(&compiled.body), secret).await?;
+    crate::provider_rate_limit::wait(secret).await;
+    on_dispatch();
     let resp = req.send().await.with_context(|| format!("POST {url}"))?;
+    crate::provider_rate_limit::response(secret, resp.status().as_u16(), resp.headers());
     let status = resp.status();
     let headers = resp.headers().clone();
     let text = resp.text().await.unwrap_or_default();
@@ -1637,11 +1655,13 @@ async fn complete_once(
         compiled.auth,
     )
     .await?;
+    crate::provider_rate_limit::wait(secret).await;
     let resp = req
         .send()
         .await
         .with_context(|| format!("POST {}", crate::provider_diag::sanitize_endpoint(&url)))?;
     let status = resp.status();
+    crate::provider_rate_limit::response(secret, status.as_u16(), resp.headers());
     let headers = resp.headers().clone();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -1909,7 +1929,9 @@ pub async fn transcribe(secret: &ProviderSecret, wav: &[u8]) -> Result<String> {
         .part("file", part);
     let url = format!("{}/audio/transcriptions", normalize_base(&secret.base_url));
     let req = authorize(client.post(&url).multipart(form), secret).await?;
+    crate::provider_rate_limit::wait(secret).await;
     let resp = req.send().await.with_context(|| format!("POST {url}"))?;
+    crate::provider_rate_limit::response(secret, resp.status().as_u16(), resp.headers());
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {

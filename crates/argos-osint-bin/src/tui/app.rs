@@ -1814,7 +1814,7 @@ impl App {
         app.refresh_selected()?;
         app.request_manual_history();
         app.load_atlas();
-        app.atlas_auto_next = app.store.atlas_auto_next().ok().flatten();
+        app.restore_atlas_auto();
         app.load_home_draft();
         app.load_session_tabs();
         if app.module.is_none() {
@@ -4905,7 +4905,7 @@ impl App {
         Ok("Resuming cycle · progress in Atlas and Jobs".into())
     }
 
-    /// A manual start moves the next automatic run to 60 minutes from now.
+    /// A manual start moves the next automatic run to 30 minutes from now.
     fn shift_atlas_auto_after_manual(&mut self) {
         if self.atlas_auto_next.is_some() {
             self.persist_atlas_auto(Some(unix_now().saturating_add(ATLAS_AUTO_SECS)));
@@ -4971,7 +4971,7 @@ impl App {
         let now = unix_now();
         self.persist_atlas_auto(Some(now.saturating_add(ATLAS_AUTO_SECS)));
         if self.atlas_pause.is_some() {
-            return Ok("Auto run on. Next pipeline in 60 minutes".into());
+            return Ok("Auto run on. Next pipeline in 30 minutes".into());
         }
         if tokio::runtime::Handle::try_current().is_ok() {
             self.spawn_atlas(atlas::LiveRun::Fresh)?;
@@ -4985,7 +4985,18 @@ impl App {
         let _ = self.store.set_atlas_auto_next(when);
     }
 
-    /// When the saved trigger is due, move it forward by 60 minutes.
+    fn restore_atlas_auto(&mut self) {
+        let saved = self.store.atlas_auto_next().ok().flatten();
+        // Honor due triggers and Off, and shorten a deadline saved by an older
+        // cadence without delaying an already scheduled run.
+        let next = saved.map(|next| next.min(unix_now().saturating_add(ATLAS_AUTO_SECS)));
+        self.atlas_auto_next = next;
+        if next != saved {
+            let _ = self.store.set_atlas_auto_next(next);
+        }
+    }
+
+    /// When the saved trigger is due, move it forward by 30 minutes.
     /// Returns whether a pipeline should start.
     fn take_atlas_auto_tick(&mut self, now: u64) -> bool {
         if self.atlas_auto_next.is_none_or(|next| now < next) {
@@ -11345,7 +11356,7 @@ pub(crate) fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-const ATLAS_AUTO_SECS: u64 = 60 * 60;
+const ATLAS_AUTO_SECS: u64 = 30 * 60;
 
 fn atlas_countdown_visible(app: &App) -> bool {
     app.atlas_auto_next.is_some()
@@ -19098,14 +19109,14 @@ mod tests {
     }
 
     #[test]
-    fn manual_run_moves_the_next_auto_trigger_out_by_90_minutes() {
+    fn manual_run_moves_the_next_auto_trigger_out_by_30_minutes() {
         let mut app = app();
         app.atlas_auto_next = Some(unix_now() + 30);
         let before = unix_now();
         app.shift_atlas_auto_after_manual();
         let next = app.atlas_auto_next.expect("still armed");
-        assert!(next >= before + ATLAS_AUTO_SECS);
-        assert!(next <= unix_now() + ATLAS_AUTO_SECS);
+        assert!(next >= before + 1_800);
+        assert!(next <= unix_now() + 1_800);
         assert_eq!(app.store.atlas_auto_next().unwrap(), Some(next));
         app.persist_atlas_auto(None);
         app.shift_atlas_auto_after_manual();
@@ -19118,11 +19129,52 @@ mod tests {
         let mut app = app();
         let flag = Arc::new(AtomicBool::new(false));
         app.atlas_pause = Some(flag.clone());
-        app.toggle_atlas_auto().unwrap();
+        assert_eq!(
+            app.toggle_atlas_auto().unwrap(),
+            "Auto run on. Next pipeline in 30 minutes"
+        );
         assert!(Arc::ptr_eq(app.atlas_pause.as_ref().unwrap(), &flag));
         let next = app.atlas_auto_next.expect("armed");
         assert!(next >= unix_now() + ATLAS_AUTO_SECS - 1);
         assert!(next <= unix_now() + ATLAS_AUTO_SECS);
+    }
+
+    #[test]
+    fn atlas_auto_restore_shortens_old_cadence_and_preserves_due_or_off() {
+        let mut app = app();
+        app.store
+            .set_atlas_auto_next(Some(unix_now() + 3_600))
+            .unwrap();
+        app.restore_atlas_auto();
+        assert!(app.atlas_auto_next.unwrap() <= unix_now() + 1_800);
+        assert_eq!(app.atlas_auto_next, app.store.atlas_auto_next().unwrap());
+        app.store.set_atlas_auto_next(Some(1)).unwrap();
+        app.restore_atlas_auto();
+        assert_eq!(app.atlas_auto_next, Some(1));
+        app.store.set_atlas_auto_next(None).unwrap();
+        app.restore_atlas_auto();
+        assert_eq!(app.atlas_auto_next, None);
+    }
+
+    #[test]
+    fn dump_atlas_auto_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [(160, 50), (80, 24)] {
+            let mut app = app();
+            app.select(ModuleId::Atlas.index());
+            app.atlas_pause = Some(Arc::new(AtomicBool::new(false)));
+            app.status = app.toggle_atlas_auto().unwrap();
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("atlas-auto-{width}x{height}"),
+                width,
+                height,
+            );
+        }
     }
 
     #[test]

@@ -1032,7 +1032,7 @@ impl Store {
     pub fn list_memories(&self) -> Result<Vec<Memory>> {
         // Default Brain listing: evidence/user memories. Actor/Link/Related
         // structural records are browsed through typed kind filters.
-        let mut stmt = self.conn.prepare("SELECT id,text,category,pinned,created_at,source_json FROM memories m WHERE NOT EXISTS (SELECT 1 FROM memory_metadata t WHERE t.memory_id=m.id AND t.memory_kind IN ('actor','link','related')) ORDER BY pinned DESC,created_at DESC")?;
+        let mut stmt = self.conn.prepare("SELECT id,text,category,pinned,created_at,source_json FROM memories m WHERE NOT EXISTS (SELECT 1 FROM memory_metadata t WHERE t.memory_id=m.id AND (t.memory_kind IN ('actor','link','related') OR t.lifecycle<>'active')) ORDER BY pinned DESC,created_at DESC")?;
         let rows = stmt.query_map([], |row| {
             let source: String = row.get(5)?;
             let source = serde_json::from_str(&source).map_err(|err| {
@@ -1061,12 +1061,12 @@ impl Store {
             "SELECT DISTINCT m.id,m.text,m.category,m.pinned,m.created_at,m.source_json
              FROM memories m
              LEFT JOIN insight_claims c ON c.memory_id = m.id
-             WHERE m.text LIKE ?1 ESCAPE '\\'
+             WHERE NOT EXISTS (SELECT 1 FROM memory_metadata mm WHERE mm.memory_id=m.id AND mm.lifecycle<>'active') AND (m.text LIKE ?1 ESCAPE '\\'
                 OR m.category LIKE ?1 ESCAPE '\\'
                 OR IFNULL(c.entity_id,'') LIKE ?1 ESCAPE '\\'
                 OR IFNULL(c.predicate,'') LIKE ?1 ESCAPE '\\'
                 OR IFNULL(c.object_value,'') LIKE ?1 ESCAPE '\\'
-                OR m.source_json LIKE ?1 ESCAPE '\\'
+                OR m.source_json LIKE ?1 ESCAPE '\\')
              ORDER BY m.pinned DESC, m.created_at DESC",
         )?;
         let rows = stmt.query_map([needle], memory_row)?;
@@ -1216,22 +1216,16 @@ impl Store {
         let mut out = Vec::new();
         match ids {
             None => {
-                let mut stmt = self.conn.prepare("SELECT id,text FROM memories")?;
+                let mut stmt = self.conn.prepare("SELECT id,text FROM memories m WHERE NOT EXISTS (SELECT 1 FROM memory_metadata mm WHERE mm.memory_id=m.id AND mm.lifecycle<>'active')")?;
                 let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
                 for row in rows {
                     out.push(row?);
                 }
             }
             Some(ids) => {
-                let mut stmt = self
-                    .conn
-                    .prepare("SELECT id,text FROM memories WHERE id=?1")?;
                 for id in ids {
-                    if let Some(row) = stmt
-                        .query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))
-                        .optional()?
-                    {
-                        out.push(row);
+                    if let Some(text) = publication::memory_text(&self.conn, id)? {
+                        out.push((id.clone(), text));
                     }
                 }
             }
@@ -1652,9 +1646,7 @@ impl Store {
                 .cloned()
                 .collect();
             index.remove_many(&gone)?;
-            for id in &gone {
-                publication::clear_index_state(&self.conn, id)?;
-            }
+            self.reconcile_removed_vectors(&gone)?;
             Ok(())
         })();
         match result {
@@ -2177,6 +2169,13 @@ impl Store {
     /// A claim that another cycle also sourced keeps its memory and loses only this cycle's source row.
     pub fn delete_cycle_memories(&self, run_id: &str) -> Result<()> {
         let answer_id = atlas_answer_id(run_id);
+        // A repeated article remains a live origin after one cycle is removed.
+        // Move legacy source pointers before pruning this cycle's contributions.
+        self.conn.execute("UPDATE OR IGNORE insight_sources SET
+            run_id=(SELECT a.run_id FROM atlas_articles a WHERE a.run_id<>?1 AND a.article_id=insight_sources.call_id ORDER BY a.seen_at DESC,a.run_id LIMIT 1),
+            answer_id=CASE WHEN answer_id=?2 THEN 'atlas-'||(SELECT a.run_id FROM atlas_articles a WHERE a.run_id<>?1 AND a.article_id=insight_sources.call_id ORDER BY a.seen_at DESC,a.run_id LIMIT 1) ELSE answer_id END
+            WHERE run_id=?1 AND (answer_id=?2 OR answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind='atlas'))
+              AND EXISTS(SELECT 1 FROM atlas_articles a WHERE a.run_id<>?1 AND a.article_id=insight_sources.call_id)",params![run_id,answer_id])?;
         let fingerprints: Vec<String> = {
             let mut stmt = self.conn.prepare(
                 "SELECT DISTINCT fingerprint FROM insight_sources WHERE run_id=?1 AND (answer_id=?2 OR answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind='atlas'))",
@@ -4162,6 +4161,66 @@ mod tests {
         assert_eq!(shared_left.len(), 1);
         assert_eq!(shared_left[0].entity, "fleet");
         assert_eq!(store.list_memories().unwrap().len(), before - 1);
+    }
+
+    #[test]
+    fn inactive_memories_cannot_be_rebuilt_or_requeued_as_upserts() {
+        let store = Store::memory().unwrap();
+        let m = store
+            .add_memory(
+                "Retired evidence",
+                "fact",
+                false,
+                MemorySource {
+                    app: "user".into(),
+                    conversation_id: "fixture".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE argos_index_changes SET state='completed' WHERE record_id=?1",
+                [&m.id],
+            )
+            .unwrap();
+        store.conn.execute("INSERT INTO memory_metadata(memory_id,memory_kind,lifecycle) VALUES(?1,'claim','retired')",[&m.id]).unwrap();
+        assert!(store
+            .memory_texts(None)
+            .unwrap()
+            .iter()
+            .all(|(id, _)| id != &m.id));
+        assert!(store
+            .memory_texts(Some(std::slice::from_ref(&m.id)))
+            .unwrap()
+            .is_empty());
+        assert_eq!(publication::memory_text(&store.conn, &m.id).unwrap(), None);
+        store
+            .enqueue_memory_index(std::slice::from_ref(&m.id), None)
+            .unwrap();
+        let operation:String=store.conn.query_row("SELECT operation FROM argos_index_changes WHERE record_id=?1 ORDER BY seq DESC LIMIT 1",[&m.id],|r|r.get(0)).unwrap();
+        assert_eq!(operation, "index_remove");
+        assert!(store
+            .list_memories_by_kind(Some(crate::memory_metadata::MemoryKind::Claim), "")
+            .unwrap()
+            .is_empty());
+        store
+            .conn
+            .execute(
+                "UPDATE memory_metadata SET lifecycle='active' WHERE memory_id=?1",
+                [&m.id],
+            )
+            .unwrap();
+        store
+            .reconcile_removed_vectors(std::slice::from_ref(&m.id))
+            .unwrap();
+        let operation:String=store.conn.query_row("SELECT operation FROM argos_index_changes WHERE record_id=?1 ORDER BY seq DESC LIMIT 1",[&m.id],|r|r.get(0)).unwrap();
+        assert_eq!(
+            operation, "index_upsert",
+            "removal must repair a concurrent reactivation"
+        );
     }
 
     #[test]

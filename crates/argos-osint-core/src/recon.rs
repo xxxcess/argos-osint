@@ -1508,6 +1508,7 @@ impl Store {
             reference: None,
         };
         let retagged = tx.execute("UPDATE memories SET source_json=?1 WHERE id IN (SELECT memory_id FROM insight_claims) AND source_json LIKE ?2",params![serde_json::to_string(&deleted_source)?,format!("%{tid}%")])?;
+        crate::brain_actors::reconcile_lifecycle(&tx, &chrono::Utc::now().to_rfc3339())?;
         // Durable vector removal (or re-verification for survivors) commits with
         // the deletion; the index pool applies it after commit.
         let queued = if doomed_memories.is_empty() {
@@ -1591,7 +1592,7 @@ impl Store {
         else {
             return Ok(None);
         };
-        let mut stmt=self.conn.prepare("SELECT thread_id,run_id,answer_id,call_id,source_url,deleted_origin,published_at FROM insight_sources WHERE fingerprint=?1")?;
+        let mut stmt=self.conn.prepare("SELECT thread_id,run_id,answer_id,call_id,source_url,deleted_origin,published_at FROM insight_sources WHERE fingerprint=?1 AND deleted_origin=0")?;
         let sources = stmt
             .query_map([&fingerprint], |r| {
                 Ok(InsightSource {
@@ -1669,7 +1670,7 @@ impl Store {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
         for (_, canonical) in entities {
-            let mut stmt=self.conn.prepare("SELECT m.id,m.text,c.entity_id,c.predicate,c.updated_at,(SELECT COUNT(*) FROM insight_sources s WHERE s.fingerprint=c.fingerprint) FROM insight_claims c JOIN memories m ON m.id=c.memory_id WHERE c.entity_id=?1 ORDER BY c.updated_at DESC LIMIT 8")?;
+            let mut stmt=self.conn.prepare("SELECT m.id,m.text,c.entity_id,c.predicate,c.updated_at,(SELECT COUNT(*) FROM insight_sources s WHERE s.fingerprint=c.fingerprint AND s.deleted_origin=0) FROM insight_claims c JOIN memories m ON m.id=c.memory_id WHERE c.entity_id=?1 AND NOT EXISTS(SELECT 1 FROM memory_metadata mm WHERE mm.memory_id=m.id AND mm.lifecycle<>'active') ORDER BY c.updated_at DESC LIMIT 8")?;
             for row in stmt.query_map([canonical], |r| {
                 Ok(RecallInsight {
                     memory_id: r.get(0)?,

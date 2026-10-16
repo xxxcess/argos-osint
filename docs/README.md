@@ -36,11 +36,13 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 | Atlas cycle | Process | [diagrams/atlas-pipeline.html](diagrams/atlas-pipeline.html) |
 | Historical Intel report (retired) | Data flow | [diagrams/intel-report.html](diagrams/intel-report.html) |
 | Brain browse projection | Data flow | [diagrams/brain-browse.html](diagrams/brain-browse.html) |
+| Brain source lifecycle | Data flow | [diagrams/brain-source-lifecycle.html](diagrams/brain-source-lifecycle.html) |
 | Actor identity maintenance | Process | [diagrams/actor-identity.html](diagrams/actor-identity.html) |
 | Brain memory topology and scope | Architecture | [diagrams/brain-topology.html](diagrams/brain-topology.html) |
 | Intel brief / historical report states | State machine | [diagrams/intel-job-states.html](diagrams/intel-job-states.html) |
 | Brain recall | Architecture | [diagrams/brain-recall.html](diagrams/brain-recall.html) |
 | Models and roles | Architecture | [diagrams/model-roles.html](diagrams/model-roles.html) |
+| Provider request scheduling | Data flow | [diagrams/model-request-scheduling.html](diagrams/model-request-scheduling.html) |
 | Persistence | Layer stack | [diagrams/persistence.html](diagrams/persistence.html) |
 | Report tables | Database schema | [diagrams/schema-core.html](diagrams/schema-core.html) |
 | Durable jobs | State machine | [diagrams/jobs-lifecycle.html](diagrams/jobs-lifecycle.html) |

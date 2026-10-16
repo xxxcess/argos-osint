@@ -75,6 +75,7 @@ impl Store {
             "SELECT m.id,m.text,m.category,m.pinned,m.created_at,m.source_json FROM memories m
              LEFT JOIN memory_metadata t ON t.memory_id=m.id
              WHERE (t.memory_kind IN ({}) {})
+               AND (t.memory_id IS NULL OR t.lifecycle='active')
                AND (?1='' OR m.text LIKE ?2 ESCAPE '\\' OR m.category LIKE ?2 ESCAPE '\\' OR IFNULL(t.payload_json,'') LIKE ?2 ESCAPE '\\')
              ORDER BY m.pinned DESC, m.created_at DESC",
             spellings

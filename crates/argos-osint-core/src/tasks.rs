@@ -912,6 +912,25 @@ fn lease_deadline(now: &str, lease_secs: i64) -> String {
 
 /// Atomically claim the next ready task routed to one of `pools`.
 ///
+/// Single source of truth for whether a queued task may be leased, written
+/// against alias `t` for `argos_tasks` with `?3` bound to "now". Both the
+/// candidate selector and the claim `UPDATE` embed it so they cannot drift.
+/// - the job is inside its 3-day window, not cancel-requested, not retired;
+/// - every dependency has completed;
+/// - Intel brief chains: independent roots run together while a dependent
+///   stage stays exclusive, and no stage dispatches from an unbound input.
+const CLAIM_ELIGIBLE: &str = "(
+    EXISTS(SELECT 1 FROM argos_jobs j WHERE j.id=t.job_id AND julianday(j.created_at)>=julianday(?3)-3 AND j.cancel_requested=0)
+    AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=t.job_id)
+    AND NOT EXISTS(SELECT 1 FROM argos_task_dependencies d JOIN argos_tasks p ON p.id=d.depends_on
+                   WHERE d.task_id=t.id AND p.state<>'completed')
+    AND NOT (t.pool='intel_brief' AND EXISTS(SELECT 1 FROM argos_tasks o
+             WHERE o.job_id=t.job_id AND o.id<>t.id AND o.state='running'
+               AND (EXISTS(SELECT 1 FROM argos_task_dependencies d WHERE d.task_id=t.id)
+                    OR EXISTS(SELECT 1 FROM argos_task_dependencies d WHERE d.task_id=o.id))))
+    AND (t.pool<>'intel_brief' OR t.input_hash<>'')
+)";
+
 /// One `UPDATE … WHERE id=(SELECT …) RETURNING` statement both selects and
 /// leases the row, so two processes cannot own the same attempt; only a row this
 /// call actually changed is returned. An empty `pools` slice claims from any pool
@@ -934,24 +953,15 @@ pub fn claim_next_in(
             .join(",");
         format!("AND pool IN ({list})")
     };
-    // The selector must apply the same eligibility predicates as the claim
-    // UPDATE. Otherwise the top-ranked row can be one the UPDATE rejects (stale
-    // or cancelled job, retired, unmet dependency, unbound input) and the
-    // claim returns None forever, starving every eligible task behind it.
+    // The selector applies the same `CLAIM_ELIGIBLE` predicate as the claim
+    // UPDATE. Otherwise the top-ranked row can be one the UPDATE rejects and
+    // every claim returns None, starving the eligible tasks behind it.
     let selector = format!(
         "(SELECT t.id FROM argos_tasks t
             WHERE t.state IN ('queued','retry_scheduled')
               AND (t.next_eligible_at='' OR julianday(t.next_eligible_at)<=julianday(?3))
               {pool_filter}
-              AND EXISTS(SELECT 1 FROM argos_jobs j WHERE j.id=t.job_id AND julianday(j.created_at)>=julianday(?3)-3 AND j.cancel_requested=0)
-              AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=t.job_id)
-              AND NOT EXISTS(SELECT 1 FROM argos_task_dependencies d JOIN argos_tasks p ON p.id=d.depends_on
-                             WHERE d.task_id=t.id AND p.state<>'completed')
-              AND NOT (t.pool='{POOL_INTEL_BRIEF}' AND EXISTS(SELECT 1 FROM argos_tasks o
-                       WHERE o.job_id=t.job_id AND o.id<>t.id AND o.state='running'
-                         AND (EXISTS(SELECT 1 FROM argos_task_dependencies d WHERE d.task_id=t.id)
-                              OR EXISTS(SELECT 1 FROM argos_task_dependencies d WHERE d.task_id=o.id))))
-              AND (t.pool<>'{POOL_INTEL_BRIEF}' OR t.input_hash<>'')
+              AND {CLAIM_ELIGIBLE}
             ORDER BY t.priority ASC, t.created_at ASC LIMIT 1)"
     );
     claim_with(conn, &selector, None, owner, lease_secs, now)
@@ -981,27 +991,13 @@ fn claim_with(
 ) -> Result<Option<ClaimedTask>> {
     let lease_until = lease_deadline(now, lease_secs);
     let sql = format!(
-        "UPDATE argos_tasks SET state='running', lease_owner=?1, lease_until=?2,
+        "UPDATE argos_tasks AS t SET state='running', lease_owner=?1, lease_until=?2,
             lease_epoch=lease_epoch+1, attempts=attempts+1, updated_at=?3, heartbeat_at=?3,
             started_at=CASE WHEN started_at='' THEN ?3 ELSE started_at END,
             blocked_reason=''
-         WHERE id = {selector}
-           AND state IN ('queued','retry_scheduled')
-           AND EXISTS(SELECT 1 FROM argos_jobs j WHERE j.id=argos_tasks.job_id AND julianday(j.created_at)>=julianday(?3)-3 AND j.cancel_requested=0)
-           AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=argos_tasks.job_id)
-           -- Dependencies: every predecessor must have committed.
-           AND NOT EXISTS(SELECT 1 FROM argos_task_dependencies d JOIN argos_tasks p ON p.id=d.depends_on
-                          WHERE d.task_id=argos_tasks.id AND p.state<>'completed')
-           -- Brief chains: independent roots (no prerequisites) may run
-           -- together — at most the two v2 roots — while any dependent stage
-           -- stays exclusive. A legacy v1 chain has a single root, so it
-           -- keeps one active stage.
-           AND NOT (pool='{POOL_INTEL_BRIEF}' AND EXISTS(SELECT 1 FROM argos_tasks o
-                    WHERE o.job_id=argos_tasks.job_id AND o.id<>argos_tasks.id AND o.state='running'
-                      AND (EXISTS(SELECT 1 FROM argos_task_dependencies d WHERE d.task_id=argos_tasks.id)
-                           OR EXISTS(SELECT 1 FROM argos_task_dependencies d WHERE d.task_id=o.id))))
-           -- A brief stage never dispatches from an unbound (partial) input.
-           AND (pool<>'{POOL_INTEL_BRIEF}' OR input_hash<>'')
+         WHERE t.id = {selector}
+           AND t.state IN ('queued','retry_scheduled')
+           AND {CLAIM_ELIGIBLE}
          RETURNING id, job_id, operation, lease_epoch, attempts, max_attempts,
                    input_ref, input_hash, source_revision, created_at, retry_since, queue_ms"
     );
@@ -2052,6 +2048,11 @@ pub fn set_job_stage_coverage(conn: &Connection, job_id: &str, coverage_json: &s
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claim_eligibility_const_names_the_brief_pool() {
+        assert!(super::CLAIM_ELIGIBLE.contains(&format!("'{}'", super::POOL_INTEL_BRIEF)));
+    }
+
     use super::*;
     use rusqlite::Connection;
 

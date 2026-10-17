@@ -29,11 +29,7 @@ pub struct TopologyLayoutResult {
     pub graph_title: Rect,
     pub graph_canvas: Rect,
     pub graph_legend: Rect,
-    /// Bordered Scope summary panel (Desktop/Compact) or the one-line
-    /// headline under the graph (Stacked).
-    pub scope_summary: Rect,
-    /// Full-page Scope summary (Stacked Summary tab).
-    pub summary_page: Rect,
+    pub scope_findings: Rect,
     pub controls_page: Rect,
     pub footer: Rect,
 }
@@ -98,14 +94,7 @@ impl TopologyLayoutResult {
             inspector.height.saturating_sub(detail_height),
         );
         let legend_height = 2;
-        // The old two-row findings strip is folded into the summary's caveat
-        // line. Wide layouts give the summary a bordered panel; stacked
-        // layouts keep a one-line headline and a separate Summary page.
-        let scope_height = if split {
-            ((graph.height as u32 * 22 / 100) as u16).clamp(6, 10)
-        } else {
-            1
-        };
+        let scope_height = 2;
         let canvas_height = graph
             .height
             .saturating_sub(1 + legend_height + scope_height);
@@ -127,8 +116,7 @@ impl TopologyLayoutResult {
                 graph.width,
                 legend_height,
             ),
-            summary_page: content,
-            scope_summary: Rect::new(
+            scope_findings: Rect::new(
                 graph.x,
                 graph.y + 1 + canvas_height + legend_height,
                 graph.width,
@@ -212,7 +200,7 @@ pub fn graph_geometry(
         .max(5)
         .min(base_node_width as i32) as usize;
     let node_height = (base_node_height * zoom / 100).clamp(1, base_node_height);
-    let vertical_zoom = if base_node_height == 1 {
+    let vertical_zoom = if base_node_height == 1 && gap == 0 {
         zoom.max(100)
     } else {
         zoom

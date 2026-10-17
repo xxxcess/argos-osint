@@ -82,5 +82,3 @@ pub mod subscription;
 pub mod summarization;
 pub mod tasks;
 pub mod telemetry;
-pub mod topology_summary;
-pub mod topology_summary_run;

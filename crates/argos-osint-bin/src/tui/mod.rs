@@ -21,7 +21,6 @@ pub mod profile_config;
 pub mod profile_layout;
 mod recon_parts;
 mod related_articles;
-mod scope_summary;
 mod summary_card;
 mod theme;
 mod tool_catalog;

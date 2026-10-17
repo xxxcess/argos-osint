@@ -82,7 +82,7 @@ Activate a Brain claim-path or actor-group graph with Enter or a click. In an
 Intel Focus Brief, activate an individual Claim, Inference or Actor record. Each entry opens
 its own retained neighborhood at two hops; no global sample graph is substituted.
 
-- **Layout**: Graph first puts the canvas left (65%) and inspector right (35%) in a body of at least 132×32 cells; 100–131 columns uses 70%/30%. A Scope summary panel (markdown, scrollable, written automatically through the Summarization role when configured) sits under the graph; shorter/narrower bodies expose Graph / Summary / Details / Controls pages. Below 60×18 retain Back and a size notice.
+- **Layout**: Graph first puts the canvas left (65%) and inspector right (35%) in a body of at least 132×32 cells; 100–131 columns uses 70%/30%. Shorter/narrower bodies expose Graph / Details / Controls pages. Below 60×18 retain Back and a size notice.
 - **Inspection**: Select a node to inspect its complete record and spaced relationships. Select a relationship for true direction, rationale and exact receipts. Inferences and derived topics are visible; actor name groups preserve member identities. Tentative Related leads remain possible context.
 - **Navigation**: Recenter (or `c`) changes the seed; selection alone keeps it. Depth 1/2/3 and retained/current-cycle scope change the queried neighborhood. `+`/`-` zoom, Shift+Arrows pan and Reset view clears the transform. Crowded hop columns can be panned. Back/Esc restores topology history and then the Brain/Intel entry. Open record exposes full snapshot detail. Scope analysis remains an explicit separate action.
 

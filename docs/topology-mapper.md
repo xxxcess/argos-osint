@@ -19,12 +19,8 @@ display a sample graph.
 Intel entries preserve typed records through formatting and measure the whole
 visible wrapped record for focus and pointer targets. Display labels are never
 parsed as IDs. Missing canonical publication retains an exact source projection
-and reports its unresolved state, preserving Claim versus Inference type; opening topology creates no memories. The
-neighborhood itself is read without models. After a snapshot is accepted, the
-Scope summary (below) may be written automatically through the Summarization
-role; that is the only model work, it never runs during draw, and with no
-Summarization route the deterministic text stays. Relational data remains usable
-while vector indexing is pending.
+and reports its unresolved state, preserving Claim versus Inference type; opening topology creates no memories and runs
+no models. Relational data remains usable while vector indexing is pending.
 
 Selection changes the inspector. Recenter, including an edge endpoint action,
 changes the seed and pushes topology history. Back first restores that history,
@@ -45,9 +41,9 @@ Dimensions below refer to the available body after the shared shell:
 
 | Available body | Layout |
 | --- | --- |
-| At least 132 columns and 32 rows | Canvas left 65%, inspector/relationships right 35%. Under the canvas and legend, a bordered Scope summary panel (6–10 rows). |
+| At least 132 columns and 32 rows | Canvas left 65%, inspector/relationships right 35%. |
 | 100–131 columns and at least 32 rows | Canvas left 70%, inspector/relationships right 30%, compact actions. |
-| At least 60 columns and 18 rows, below the split threshold | Graph / Summary / Details / Controls pages with retained state; under the graph, a one-line summary headline. |
+| At least 60 columns and 18 rows, below the split threshold | Graph / Details / Controls pages with retained state. |
 | Smaller | Reachable Back and a minimum-size notice. |
 
 Back, title, origin, seed, depth 1/2/3, retained/current-cycle scope and snapshot
@@ -170,28 +166,3 @@ and ignored `dump_brain_kind_screens` / `brain-actor-graph-*` and
 plus 132/131-column and 100×34/100×33 height split boundaries. Include selected edges, controls, crowded,
 isolated, loading, stale and error states. Record image observations separately
 from interaction and data results; generation alone does not complete review.
-
-## Scope summary
-
-A markdown explanation of how the visible, filtered nodes in the current scope
-connect (not a per-node list), shown under the graph (Desktop/Compact) or on the
-Summary page (Stacked). Both the deterministic text and the AI narrative are
-rendered with the shared markdown renderer and wrapped.
-
-- **Deterministic text** is built instantly from the accepted snapshot
-  (`topology_summary::deterministic_summary`): In scope, Connections grouped by
-  relationship kind, Caveats. It is also the no-model fallback.
-- **AI narrative** is written automatically when the scope changes (recenter,
-  depth, cycle, filter) through the Summarization role, only after the snapshot
-  is accepted. A saved summary is reused for the same digest (scope, graph
-  version, model, prompt); a saved one older than 7 days is rewritten; when only
-  brain-wide change moves the content, a refresh waits 10 minutes; a failed run
-  cools down for 2 minutes. A result for an earlier scope is saved but not shown.
-- **States** appear in the panel title: deterministic, writing…, AI summary,
-  stale (earlier text kept until the new one is ready), failed and no model.
-  Failed and stale offer `[Retry]` (key `s`). Failure details are in Logs.
-- **Scrolling** is independent of the graph and inspector: Tab to the panel, then
-  Up/Down, PgUp/PgDn, Home/End or the mouse wheel; a `▲ a–b/total ▼` indicator
-  shows the position. The position survives redraws and resets on scope change.
-- The former two-row findings strip (outside viewport, filtered, bounded,
-  loading, error) is the panel's footer caveat line, or the headline when stacked.

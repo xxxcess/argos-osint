@@ -673,7 +673,6 @@ pub enum ButtonId {
     ResumeSessionDismiss,
     BrainMapTopology,
     TopologyBack,
-    TopologySummaryRetry,
     TopologyOpenMemory,
     TopologyViewEvidence,
     TopologyScopeAll,
@@ -771,8 +770,6 @@ pub enum Target {
     TopologyEndpoint(usize),
     TopologyInspector,
     TopologyRelationships,
-    /// Scrollable Scope summary body.
-    TopologySummary,
     IntelTopologyClaim(usize),
     IntelTopologyInference(usize),
     IntelTopologyActor(usize),
@@ -816,31 +813,6 @@ enum DashboardSnapshot {
     Logs(Box<super::logs::LogsView>),
     Jobs(Box<super::jobs::JobsView>),
     Counts(argos_osint_core::jobs_view::EventCounts),
-}
-
-/// What the planning step decided for a scope summary.
-#[derive(Clone, Debug)]
-pub enum PlannedAction {
-    Reuse,
-    Generate,
-    Running,
-    Throttled(std::time::Duration),
-    Cooling(Box<argos_osint_core::store::ExplanationRecord>),
-    Unavailable(String),
-}
-
-#[derive(Debug)]
-pub enum ScopeSummaryStage {
-    Planned {
-        digest: String,
-        saved: Option<super::scope_summary::SavedText>,
-        action: PlannedAction,
-    },
-    Finished {
-        digest: String,
-        report: Box<argos_osint_core::graph_explanation::ExplainReport>,
-    },
-    Error(String),
 }
 
 #[derive(Debug)]
@@ -971,14 +943,6 @@ enum WorkEvent {
     },
     GraphSummary {
         report: Box<argos_osint_core::graph_explanation::ExplainReport>,
-    },
-    /// Topology scope summary worker progress. `request` fences planning;
-    /// results carry their digest so a late run for an old scope is saved by
-    /// the worker but never displayed.
-    ScopeSummary {
-        request: u64,
-        scope_key: String,
-        stage: Box<ScopeSummaryStage>,
     },
     Related {
         request: u64,
@@ -1920,7 +1884,6 @@ impl App {
         {
             return false;
         }
-        self.scope_summary_tick();
         let first = self.dashboards_at.is_none() && !self.logs.loaded;
         self.dashboards_at = Some(Instant::now());
         if first && self.background_db.is_none() {
@@ -5680,11 +5643,6 @@ impl App {
                 self.on_brain_detail_loaded(generation, outcome);
                 true
             }
-            WorkEvent::ScopeSummary {
-                request,
-                scope_key,
-                stage,
-            } => self.on_scope_summary(request, scope_key, *stage),
             WorkEvent::TopologyLoaded {
                 generation,
                 seed,
@@ -5726,7 +5684,6 @@ impl App {
                             self.topology_state.snapshot = Some(*snap);
                             self.topology_error = None;
                             self.layout.borrow_mut().view_stamp.clear();
-                            self.sync_scope_summary(false);
                             if visible {
                                 if let Some(target) = focus.and_then(|focus| {
                                     super::topology::resolve_focus(&self.topology_state, focus)
@@ -7103,268 +7060,6 @@ impl App {
         self.set_focus(Target::Button(ButtonId::TopologyBack));
     }
 
-    fn topology_panel_step(&self, index: usize, direction: isize) -> usize {
-        let mode =
-            super::topology_layout::TopologyLayoutResult::compute(super::ui::body_rect(self)).mode;
-        let order = super::topology::panel_tabs(mode);
-        let at = order.iter().position(|(i, _)| *i == index).unwrap_or(0);
-        order[at.saturating_add_signed(direction).min(order.len() - 1)].0
-    }
-
-    /// Recompute the scope summary for the accepted snapshot / filters.
-    ///
-    /// The deterministic text is built here, instantly and purely. When the
-    /// scope or graph version changed (or `explicit`), a background worker
-    /// plans (read-only), then writes through the Summarization role when the
-    /// freshness rules say so. Nothing runs during draw.
-    pub(crate) fn sync_scope_summary(&mut self, explicit: bool) {
-        use argos_osint_core::topology_summary::graph_version;
-        let Some(seed) = self.topology_state.seed.clone() else {
-            return;
-        };
-        let Some(snapshot) = self.topology_state.snapshot.as_ref() else {
-            return;
-        };
-        let state = &self.topology_state;
-        let spec = super::scope_summary::ScopeSummaryState::spec(
-            &seed,
-            state.depth,
-            &state.cycle_scope,
-            state.filters(),
-        );
-        let scope_key = spec.key();
-        let version = graph_version(snapshot, &spec.filters);
-        let current = &state.summary;
-        if !explicit && current.scope_key == scope_key && current.graph_version == version {
-            return;
-        }
-        let input = argos_osint_core::topology_summary_run::ScopeInput {
-            spec: spec.clone(),
-            snapshot: snapshot.clone(),
-        };
-        let summary = &mut self.topology_state.summary;
-        if summary.scope_key != scope_key {
-            // A different scope never shows another scope's text.
-            summary.saved = None;
-            summary.scroll = 0;
-        }
-        summary.set_deterministic(&input.snapshot, &spec);
-        summary.scope_key = scope_key.clone();
-        summary.graph_version = version;
-        summary.digest.clear();
-        summary.notice.clear();
-        summary.failure = None;
-        summary.details_open = false;
-        summary.retry_after = None;
-        summary.phase = super::scope_summary::SummaryPhase::Idle;
-        summary.request = summary.request.wrapping_add(1);
-        let request = summary.request;
-        let secret = provider::role_secret(&self.auth, &self.settings, "summarization")
-            .map_err(|e| e.to_string());
-        let (Ok(runtime), Some(db)) = (tokio::runtime::Handle::try_current(), tracked::db_path())
-        else {
-            // No background runtime (fixtures): the deterministic text stays.
-            return;
-        };
-        let tx = self.work_tx.clone();
-        runtime.spawn(async move {
-            use argos_osint_core::topology_summary_run as run;
-            let send = |stage: ScopeSummaryStage| {
-                let _ = tx.send(WorkEvent::ScopeSummary {
-                    request,
-                    scope_key: input.spec.key(),
-                    stage: Box::new(stage),
-                });
-            };
-            let planned = match Store::open_light(&db) {
-                Ok(store) => run::plan(
-                    &store,
-                    &input,
-                    secret.as_ref().map_err(String::clone),
-                    chrono::Utc::now(),
-                    explicit,
-                ),
-                Err(err) => Err(err),
-            };
-            let plan = match planned {
-                Ok(plan) => plan,
-                Err(err) => {
-                    send(ScopeSummaryStage::Error(err.to_string()));
-                    return;
-                }
-            };
-            let action = match &plan.action {
-                run::Action::None => PlannedAction::Reuse,
-                run::Action::Generate { .. } => PlannedAction::Generate,
-                run::Action::Throttled { retry_in } => PlannedAction::Throttled(*retry_in),
-                run::Action::Cooling(rec) => PlannedAction::Cooling(rec.clone()),
-                run::Action::Running => PlannedAction::Running,
-                run::Action::Unavailable(why) => PlannedAction::Unavailable(why.clone()),
-            };
-            let generate = matches!(plan.action, run::Action::Generate { .. });
-            send(ScopeSummaryStage::Planned {
-                digest: plan.digest.clone(),
-                saved: plan
-                    .saved
-                    .as_ref()
-                    .map(|s| super::scope_summary::SavedText {
-                        text: s.text.clone(),
-                        created_at: s.created_at.clone(),
-                        fresh: s.fresh,
-                    }),
-                action,
-            });
-            let (true, Ok(secret)) = (generate, secret) else {
-                return;
-            };
-            let mut opts = argos_osint_core::summarization::ExecOptions::for_secret(&secret);
-            if cfg!(test) {
-                opts.max_backoff = std::time::Duration::from_millis(20);
-            }
-            let report = run::generate(
-                &db,
-                &secret,
-                &input,
-                &plan,
-                &opts,
-                &argos_osint_core::job_registry::new_job_id("topology-request"),
-                Arc::new(AtomicBool::new(false)),
-            )
-            .await;
-            send(ScopeSummaryStage::Finished {
-                digest: plan.digest,
-                report: Box::new(report),
-            });
-        });
-    }
-
-    /// Re-plan once the 10 minute throttle has elapsed.
-    pub(crate) fn scope_summary_tick(&mut self) {
-        let due = self
-            .topology_state
-            .summary
-            .retry_after
-            .is_some_and(|at| Instant::now() >= at);
-        let visible =
-            self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Topology;
-        if due && visible {
-            self.topology_state.summary.retry_after = None;
-            self.topology_state.summary.graph_version.clear();
-            self.sync_scope_summary(false);
-        }
-    }
-
-    fn on_scope_summary(
-        &mut self,
-        request: u64,
-        scope_key: String,
-        stage: ScopeSummaryStage,
-    ) -> bool {
-        use super::scope_summary::SummaryPhase as P;
-        let current = &mut self.topology_state.summary;
-        match stage {
-            ScopeSummaryStage::Planned {
-                digest,
-                saved,
-                action,
-            } => {
-                if request != current.request || scope_key != current.scope_key {
-                    return false;
-                }
-                current.digest = digest;
-                current.saved = saved;
-                current.notice.clear();
-                current.failure = None;
-                current.phase = match action {
-                    PlannedAction::Reuse => P::Ready,
-                    PlannedAction::Generate | PlannedAction::Running => P::Writing,
-                    PlannedAction::Throttled(retry_in) => {
-                        current.retry_after = Some(Instant::now() + retry_in);
-                        current.notice =
-                            super::scope_summary::ScopeSummaryState::throttle_note(retry_in);
-                        P::Stale
-                    }
-                    PlannedAction::Cooling(rec) => {
-                        current.failure =
-                            Some(super::summary_card::SummaryFailure::from_record(&rec));
-                        current.details_open = false;
-                        P::Failed
-                    }
-                    PlannedAction::Unavailable(why) => {
-                        current.notice = format!(
-                            "No Summarization model ({why}). Showing the deterministic summary"
-                        );
-                        P::Unavailable
-                    }
-                };
-                true
-            }
-            ScopeSummaryStage::Error(err) => {
-                if request != current.request || scope_key != current.scope_key {
-                    return false;
-                }
-                current.phase = P::Failed;
-                current.details_open = false;
-                current.failure = Some(super::summary_card::SummaryFailure::local(
-                    "topology",
-                    &argos_osint_core::provider_diag::ProviderFailure::from_error(
-                        argos_osint_core::provider_diag::Stage::Configuration,
-                        argos_osint_core::provider_diag::Category::Configuration,
-                        &std::io::Error::other(err.clone()),
-                    ),
-                ));
-                self.push_log_detail("error", "Topology: scope summary could not start", err);
-                true
-            }
-            ScopeSummaryStage::Finished { digest, report } => {
-                use argos_osint_core::graph_explanation::ExplainOutcome;
-                if let Some(err) = &report.logging_error {
-                    self.push_log(
-                        "warn",
-                        format!("Topology summary logging incomplete: {err}"),
-                    );
-                }
-                let current = &mut self.topology_state.summary;
-                if digest != current.digest || scope_key != current.scope_key {
-                    // The user moved on. The worker already saved the result
-                    // under its own digest, so returning to that scope reuses it.
-                    self.push_log(
-                        "info",
-                        "Topology: a summary for an earlier scope finished; saved, not shown",
-                    );
-                    return false;
-                }
-                match &report.outcome {
-                    ExplainOutcome::Saved(text) => {
-                        current.saved = Some(super::scope_summary::SavedText {
-                            text: text.clone(),
-                            created_at: chrono::Utc::now().to_rfc3339(),
-                            fresh: true,
-                        });
-                        current.phase = P::Ready;
-                        current.notice.clear();
-                        current.failure = None;
-                    }
-                    ExplainOutcome::Superseded(why) => {
-                        current.phase = P::Stale;
-                        current.notice = format!("Summary discarded: {why}");
-                    }
-                    ExplainOutcome::Failed(failure) => {
-                        current.phase = P::Failed;
-                        current.details_open = false;
-                        current.scroll = 0;
-                        current.failure = Some(super::summary_card::SummaryFailure::from_report(
-                            &report, failure,
-                        ));
-                        let detail = failure.message.clone();
-                        self.push_log_detail("error", "Topology: scope summary failed", detail);
-                    }
-                }
-                true
-            }
-        }
-    }
-
     pub(crate) fn refresh_topology(&mut self) {
         if let Some(seed) = self.topology_state.seed.clone() {
             self.topology_generation = self.topology_generation.wrapping_add(1);
@@ -7677,9 +7372,6 @@ impl App {
             Target::TopologyInspector => {
                 super::topology::scroll_topology(self, Target::TopologyInspector, direction);
             }
-            Target::TopologySummary => {
-                super::scope_summary::scroll(self, direction);
-            }
             Target::TopologyRelated(_) | Target::TopologyRelationships => {
                 let count = super::topology::related_edge_indices(&self.topology_state).len();
                 if count == 0 {
@@ -7749,18 +7441,6 @@ impl App {
                     self.topology_state.zoom_percent.saturating_sub(10).max(50);
                 true
             }
-            KeyCode::Home if self.focus == Target::TopologySummary => {
-                super::scope_summary::scroll(self, isize::MIN);
-                true
-            }
-            KeyCode::End if self.focus == Target::TopologySummary => {
-                super::scope_summary::scroll(self, isize::MAX);
-                true
-            }
-            KeyCode::Char('s') | KeyCode::Char('S') => {
-                self.sync_scope_summary(true);
-                true
-            }
             KeyCode::Home => {
                 self.topology_state.pan = (0, 0);
                 self.topology_state.zoom_percent = 100;
@@ -7807,7 +7487,7 @@ impl App {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.topology_state.pan.0 = self.topology_state.pan.0.saturating_sub(4);
                 } else if let Target::TopologyPanel(index) = self.focus {
-                    self.set_focus(Target::TopologyPanel(self.topology_panel_step(index, -1)));
+                    self.set_focus(Target::TopologyPanel(index.saturating_sub(1)));
                 } else if let Target::TopologyInspectorTab(index) = self.focus {
                     self.set_focus(Target::TopologyInspectorTab(index.saturating_sub(1)));
                 } else {
@@ -7819,7 +7499,7 @@ impl App {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.topology_state.pan.0 = self.topology_state.pan.0.saturating_add(4);
                 } else if let Target::TopologyPanel(index) = self.focus {
-                    self.set_focus(Target::TopologyPanel(self.topology_panel_step(index, 1)));
+                    self.set_focus(Target::TopologyPanel((index + 1).min(2)));
                 } else if let Target::TopologyInspectorTab(index) = self.focus {
                     self.set_focus(Target::TopologyInspectorTab((index + 1).min(1)));
                 } else {
@@ -8542,33 +8222,10 @@ impl App {
 
     /// Brain summary card actions.
     fn activate_summary_card(&mut self, button: ButtonId) -> Result<String> {
-        // The same card serves the Brain graph summary and the topology scope
-        // summary; the focused view decides which failure it acts on.
-        let topology =
-            self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Topology;
-        let failure = if topology {
-            self.topology_state.summary.failure.clone()
-        } else {
-            self.summary_failure.clone()
-        };
-        let Some(failure) = failure else {
+        let Some(failure) = self.summary_failure.clone() else {
             return Ok("No summary failure".into());
         };
         match button {
-            ButtonId::SummaryDetails if topology => {
-                let summary = &mut self.topology_state.summary;
-                summary.details_open = !summary.details_open;
-                summary.scroll = 0;
-                Ok(if summary.details_open {
-                    "Summary failure details".into()
-                } else {
-                    "Details hidden".into()
-                })
-            }
-            ButtonId::SummaryRetry if topology => {
-                self.sync_scope_summary(true);
-                Ok("Retrying scope summary…".into())
-            }
             ButtonId::SummaryDetails => {
                 self.summary_details_open = !self.summary_details_open;
                 self.scrolls.summary = 0;
@@ -8853,10 +8510,6 @@ impl App {
                     self.topology_state.snapshot = None;
                     self.refresh_topology();
                 }
-                return;
-            }
-            ButtonId::TopologySummaryRetry => {
-                self.sync_scope_summary(true);
                 return;
             }
             ButtonId::TopologyDepth1 => {
@@ -10029,22 +9682,11 @@ impl App {
                 self.open_intel_inference_topology(index);
             }
             Target::TopologyPanel(index) => {
+                self.topology_state.active_panel_tab = index.min(2);
                 let mode = super::topology_layout::TopologyLayoutResult::compute(
                     super::ui::body_rect(self),
                 )
                 .mode;
-                // The Summary tab exists only in stacked layouts.
-                let index = if index == super::topology::SUMMARY_TAB
-                    && matches!(
-                        mode,
-                        super::topology_layout::TopologyResponsiveMode::Desktop
-                            | super::topology_layout::TopologyResponsiveMode::Compact
-                    ) {
-                    0
-                } else {
-                    index.min(super::topology::SUMMARY_TAB)
-                };
-                self.topology_state.active_panel_tab = index;
                 let focus = if index == 1
                     && matches!(
                         mode,
@@ -10094,7 +9736,6 @@ impl App {
                 self.topology_state.related_sel = 0;
                 self.topology_state.related_scroll = 0;
                 self.layout.borrow_mut().view_stamp.clear();
-                self.sync_scope_summary(false);
                 self.set_focus(target);
             }
             Target::TopologyEndpoint(index) => {
@@ -10122,9 +9763,7 @@ impl App {
             Target::TopologyGraph => {
                 self.set_focus(Target::TopologyGraph);
             }
-            Target::TopologyInspector | Target::TopologyRelationships | Target::TopologySummary => {
-                self.set_focus(target)
-            }
+            Target::TopologyInspector | Target::TopologyRelationships => self.set_focus(target),
             Target::TopologyNode(index) => {
                 if let Some(snap) = &self.topology_state.snapshot {
                     if let Some(node) = snap.nodes.get(index) {
@@ -22607,751 +22246,7 @@ mod tests {
             exploration_exhausted: true,
             ..Default::default()
         });
-        app.sync_scope_summary(false);
         app
-    }
-
-    fn failed_record() -> Box<argos_osint_core::store::ExplanationRecord> {
-        Box::new(argos_osint_core::store::ExplanationRecord {
-            memory_id: "topology:scope".into(),
-            job_id: "job-topology-0001".into(),
-            request_id: "req-topology".into(),
-            cache_key: "digest".into(),
-            state: "failed".into(),
-            category: "auth".into(),
-            reason: "provider rejected the credentials · HTTP 401".into(),
-            guidance: "Check the Summarization API key in Models, then retry.".into(),
-            needs_config: true,
-            retryable: false,
-            attempts: 1,
-            event_id: "event-topology-0001".into(),
-            diagnostic_json: "{}".into(),
-            updated_at: "2026-10-16T12:00:00Z".into(),
-        })
-    }
-
-    fn long_summary() -> String {
-        let mut text = String::from("## In scope\n\n**Harbor contract shifted** is the seed, with eight records around it.\n\n## Connections\n\n");
-        for n in 1..=14 {
-            text.push_str(&format!(
-                "- **Concerns** link {n}: the seed names *Aster Logistics* and *Bay Authority*, and the relationship is recorded, not inferred.\n"
-            ));
-        }
-        text.push_str(
-            "\n## Caveats\n\n- Related links are potential context, not verified corroboration.\n",
-        );
-        text
-    }
-
-    fn with_summary(phase: super::super::scope_summary::SummaryPhase, text: Option<String>) -> App {
-        let mut app = topology_fixture();
-        let summary = &mut app.topology_state.summary;
-        summary.phase = phase;
-        summary.saved = text.map(|text| super::super::scope_summary::SavedText {
-            text,
-            created_at: "2026-10-16T12:00:00Z".into(),
-            fresh: phase == super::super::scope_summary::SummaryPhase::Ready,
-        });
-        app
-    }
-
-    fn summary_rect(app: &App) -> Rect {
-        app.layout
-            .borrow()
-            .entries
-            .iter()
-            .find(|entry| entry.target == Target::TopologySummary)
-            .map(|entry| entry.rect)
-            .expect("summary body registered")
-    }
-
-    #[test]
-    fn summary_layout_geometry_per_size_and_findings_strip_is_folded() {
-        use super::super::topology_layout::{
-            TopologyLayoutResult as L, TopologyResponsiveMode as M,
-        };
-        for (w, h, mode, panel_rows) in [
-            (160u16, 50u16, M::Desktop, 9u16),
-            (120, 40, M::Compact, 7),
-            (100, 32, M::Compact, 6),
-        ] {
-            let l = L::compute(Rect::new(0, 0, w, h));
-            assert_eq!(l.mode, mode);
-            assert_eq!(l.scope_summary.height, panel_rows, "{w}x{h}");
-            assert_eq!(l.scope_summary.bottom(), l.content.bottom(), "{w}x{h}");
-            assert_eq!(l.scope_summary.width, l.graph_canvas.width);
-            assert_eq!(l.graph_legend.bottom(), l.scope_summary.y);
-            assert!(l.graph_canvas.height >= 16, "{w}x{h}");
-        }
-        for (w, h) in [(80u16, 24u16), (60, 18)] {
-            let l = L::compute(Rect::new(0, 0, w, h));
-            assert_eq!(l.mode, M::Stacked);
-            assert_eq!(l.scope_summary.height, 1, "headline only");
-            assert_eq!(l.summary_page, l.content);
-            assert_eq!(l.scope_summary.bottom(), l.content.bottom());
-        }
-    }
-
-    #[test]
-    fn summary_panel_renders_markdown_not_raw_syntax_and_replaces_the_old_strip() {
-        use super::super::scope_summary::SummaryPhase;
-        let mut app = with_summary(SummaryPhase::Ready, Some(long_summary()));
-        let text = buffer_text(&render(&mut app, 160, 50));
-        assert!(text.contains("Scope summary · AI summary"));
-        assert!(text.contains("In scope"));
-        assert!(
-            !text.contains("## In scope"),
-            "headings are rendered, not shown raw"
-        );
-        assert!(!text.contains("**Concerns**"), "emphasis is rendered");
-        assert!(
-            !text.contains("Seed remains fixed"),
-            "old strip text is gone"
-        );
-        assert!(text.contains("2 hops") || text.contains("hops"));
-        // Idle shows the deterministic markdown, including the caveat footer.
-        let mut idle = topology_fixture();
-        let text = buffer_text(&render(&mut idle, 160, 50));
-        assert!(text.contains("Scope summary · deterministic"));
-        assert!(text.contains("In scope") && !text.contains("## "));
-        idle.set_focus(Target::TopologySummary);
-        idle.handle_topology_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        let text = buffer_text(&render(&mut idle, 160, 50));
-        assert!(
-            text.contains("Caveats"),
-            "the end of the deterministic text is reachable"
-        );
-    }
-
-    #[test]
-    fn summary_scrolls_independently_by_keyboard_and_wheel_and_resets_on_scope_change() {
-        use super::super::scope_summary::SummaryPhase;
-        let mut app = with_summary(SummaryPhase::Ready, Some(long_summary()));
-        render(&mut app, 160, 50);
-        let rect = summary_rect(&app);
-        assert_eq!(rect.height, 9 - 3);
-        let pan = app.topology_state.pan;
-        let inspector = app.topology_state.inspector_scroll;
-        app.set_focus(Target::TopologySummary);
-        // Down / PageDown / End / Home / PageUp from the keyboard.
-        app.handle_topology_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.topology_state.summary.scroll, 1);
-        app.handle_topology_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-        assert_eq!(app.topology_state.summary.scroll, 1 + rect.height as usize);
-        app.handle_topology_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        let end = app.topology_state.summary.scroll;
-        let total =
-            super::super::scope_summary::lines(&app.topology_state.summary, rect.width).len();
-        assert_eq!(end, total - rect.height as usize, "End shows the last row");
-        app.handle_topology_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.topology_state.summary.scroll, end, "clamped at the end");
-        let text = buffer_text(&render(&mut app, 160, 50));
-        assert!(
-            text.contains("▲") && !text.contains(" ▼ "),
-            "scrolled to the end shows only ▲"
-        );
-        assert!(text.contains(&format!("/{total}")));
-        app.handle_topology_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
-        assert_eq!(
-            app.topology_state.summary.scroll,
-            end - rect.height as usize
-        );
-        app.handle_topology_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        assert_eq!(app.topology_state.summary.scroll, 0);
-        // Mouse wheel over the panel moves only the summary (3 rows per notch).
-        let (x, y) = (rect.x + 2, rect.y + 1);
-        super::super::ui::scroll_at(&mut app, x, y, 1);
-        assert_eq!(app.topology_state.summary.scroll, 3);
-        super::super::ui::scroll_at(&mut app, x, y, -1);
-        assert_eq!(app.topology_state.summary.scroll, 0);
-        // Wheel and keys never touched the graph or inspector.
-        assert_eq!(app.topology_state.pan, pan);
-        assert_eq!(app.topology_state.inspector_scroll, inspector);
-        // Stable across redraws.
-        app.topology_state.summary.scroll = 4;
-        let first = buffer_text(&render(&mut app, 160, 50));
-        let second = buffer_text(&render(&mut app, 160, 50));
-        assert_eq!(first, second);
-        assert_eq!(app.topology_state.summary.scroll, 4);
-        // A scope change (filter) resets to the top.
-        app.activate_target(Target::TopologyFilter(0));
-        assert_eq!(app.topology_state.summary.scroll, 0);
-    }
-
-    #[test]
-    fn summary_scroll_keeps_position_when_same_scope_text_is_replaced() {
-        use super::super::scope_summary::SummaryPhase;
-        let mut app = with_summary(SummaryPhase::Writing, Some(long_summary()));
-        render(&mut app, 160, 50);
-        app.topology_state.summary.scroll = 5;
-        app.topology_state.summary.phase = SummaryPhase::Ready;
-        render(&mut app, 160, 50);
-        assert_eq!(app.topology_state.summary.scroll, 5);
-    }
-
-    #[test]
-    fn summary_page_in_stacked_layouts_has_a_tab_scrolls_and_fits() {
-        use super::super::scope_summary::SummaryPhase;
-        // Sizes are topology content cells; the app chrome adds two rows.
-        for (w, h) in [(80u16, 24u16), (60, 18)] {
-            let h = h + 2;
-            let mut app = with_summary(SummaryPhase::Ready, Some(long_summary()));
-            let text = buffer_text(&render(&mut app, w, h));
-            let tabs: Vec<_> = ["Graph", "Summary", "Details", "Controls"]
-                .iter()
-                .map(|label| {
-                    text.find(label)
-                        .unwrap_or_else(|| panic!("{label} tab at {w}x{h}"))
-                })
-                .collect();
-            assert!(
-                tabs.windows(2).all(|pair| pair[0] < pair[1]),
-                "tab order {w}x{h}"
-            );
-            // Graph page shows a one-line headline, not the full panel.
-            assert!(text.contains("Summary ▸"), "{w}x{h}");
-            app.activate_target(Target::TopologyPanel(super::super::topology::SUMMARY_TAB));
-            let text = buffer_text(&render(&mut app, w, h));
-            assert!(text.contains("Scope summary · AI summary"), "{w}x{h}");
-            assert!(text.contains("In scope"));
-            let rect = summary_rect(&app);
-            assert!(rect.height >= 5, "{w}x{h}: {rect:?}");
-            app.set_focus(Target::TopologySummary);
-            app.handle_topology_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-            assert_eq!(app.topology_state.summary.scroll, rect.height as usize);
-            let (x, y) = (rect.x + 1, rect.y + 1);
-            super::super::ui::scroll_at(&mut app, x, y, -1);
-            assert_eq!(
-                app.topology_state.summary.scroll,
-                (rect.height as usize).saturating_sub(3)
-            );
-            app.handle_topology_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-            assert!(app.topology_state.summary.scroll > 0);
-            // Tab navigation follows the stacked order Graph → Summary → Details → Controls.
-            app.set_focus(Target::TopologyPanel(0));
-            app.handle_topology_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-            assert_eq!(
-                app.focus,
-                Target::TopologyPanel(super::super::topology::SUMMARY_TAB)
-            );
-            app.handle_topology_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-            assert_eq!(app.focus, Target::TopologyPanel(1));
-        }
-        // Wide layouts have no Summary tab and map it to Graph.
-        let mut wide = topology_fixture();
-        let text = buffer_text(&render(&mut wide, 120, 40));
-        assert!(!text.contains("Summary │") && !text.contains(" Summary "));
-        wide.activate_target(Target::TopologyPanel(super::super::topology::SUMMARY_TAB));
-        assert_eq!(wide.topology_state.active_panel_tab, 0);
-    }
-
-    #[test]
-    fn summary_states_are_labelled_and_failed_or_stale_offer_a_working_retry() {
-        use super::super::scope_summary::SummaryPhase as P;
-        for (phase, label) in [
-            (P::Idle, "deterministic"),
-            (P::Writing, "writing…"),
-            (P::Ready, "AI summary"),
-            (P::Stale, "stale"),
-            (P::Failed, "failed"),
-            (P::Unavailable, "no model"),
-        ] {
-            let saved = matches!(phase, P::Ready | P::Stale | P::Writing).then(long_summary);
-            let mut app = with_summary(phase, saved);
-            app.topology_state.summary.notice = "notice text".into();
-            let text = buffer_text(&render(&mut app, 160, 50));
-            assert!(
-                text.contains(&format!("Scope summary · {label}")),
-                "{phase:?}"
-            );
-            assert!(text.contains("notice text"), "{phase:?}");
-            assert!(
-                !text.contains("*notice") && !text.contains("_notice"),
-                "{phase:?}"
-            );
-            assert_eq!(
-                text.contains("[Retry]"),
-                matches!(phase, P::Failed | P::Stale),
-                "{phase:?}"
-            );
-            if phase == P::Stale || phase == P::Writing {
-                assert!(text.contains("Earlier summary (stale)"), "{phase:?}");
-            }
-        }
-        let mut app = with_summary(P::Failed, None);
-        render(&mut app, 160, 50);
-        let rect = app
-            .layout
-            .borrow()
-            .entries
-            .iter()
-            .find(|e| e.target == Target::Button(ButtonId::TopologySummaryRetry))
-            .map(|e| e.rect)
-            .expect("retry registered");
-        let before = app.topology_state.summary.request;
-        assert_eq!(
-            super::super::ui::hit_test(&app, rect.x, rect.y),
-            Some(Target::Button(ButtonId::TopologySummaryRetry))
-        );
-        app.activate_target(Target::Button(ButtonId::TopologySummaryRetry));
-        assert_eq!(
-            app.topology_state.summary.request,
-            before + 1,
-            "retry replans"
-        );
-        // Keyboard parity: s retries too.
-        app.handle_topology_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
-        assert_eq!(app.topology_state.summary.request, before + 2);
-    }
-
-    #[test]
-    fn scope_summary_events_apply_to_the_current_scope_and_drop_obsolete_ones() {
-        use super::super::scope_summary::SummaryPhase as P;
-        let mut app = topology_fixture();
-        app.sync_scope_summary(true);
-        let request = app.topology_state.summary.request;
-        let scope = app.topology_state.summary.scope_key.clone();
-        let planned = |digest: &str, action| ScopeSummaryStage::Planned {
-            digest: digest.into(),
-            saved: None,
-            action,
-        };
-        // An obsolete planning request is ignored.
-        assert!(!app.on_scope_summary(
-            request - 1,
-            scope.clone(),
-            planned("d0", PlannedAction::Generate)
-        ));
-        assert_eq!(app.topology_state.summary.phase, P::Idle);
-        assert!(app.on_scope_summary(
-            request,
-            scope.clone(),
-            planned("d1", PlannedAction::Generate)
-        ));
-        assert_eq!(app.topology_state.summary.phase, P::Writing);
-        let report = |digest: &str, outcome| {
-            Box::new(argos_osint_core::graph_explanation::ExplainReport {
-                request_id: "r".into(),
-                memory_id: "topology".into(),
-                job_id: "job-1234567890".into(),
-                cache_key: digest.into(),
-                outcome,
-                attempts: vec![],
-                admission_wait_ms: 0,
-                fallback_reason: None,
-                event_id: String::new(),
-                logging_error: None,
-            })
-        };
-        use argos_osint_core::graph_explanation::ExplainOutcome as O;
-        // A late result for another digest/scope is not displayed.
-        let late = ScopeSummaryStage::Finished {
-            digest: "old-digest".into(),
-            report: report("old-digest", O::Saved("## OLD".into())),
-        };
-        assert!(!app.on_scope_summary(request, scope.clone(), late));
-        assert_eq!(app.topology_state.summary.phase, P::Writing);
-        assert!(app.topology_state.summary.saved.is_none());
-        // The current digest's result is shown.
-        let done = ScopeSummaryStage::Finished {
-            digest: "d1".into(),
-            report: report("d1", O::Saved("## NEW\n\ntext".into())),
-        };
-        assert!(app.on_scope_summary(request, scope.clone(), done));
-        assert_eq!(app.topology_state.summary.phase, P::Ready);
-        let text = buffer_text(&render(&mut app, 160, 50));
-        assert!(text.contains("NEW") && text.contains("AI summary"));
-        // Changing scope (filter) drops the prior text and fences old results.
-        app.activate_target(Target::TopologyFilter(1));
-        assert!(app.topology_state.summary.saved.is_none());
-        assert_ne!(app.topology_state.summary.scope_key, scope);
-        let stale = ScopeSummaryStage::Finished {
-            digest: "d1".into(),
-            report: report("d1", O::Saved("## NEW".into())),
-        };
-        assert!(!app.on_scope_summary(request, scope, stale));
-        assert_ne!(app.topology_state.summary.phase, P::Ready);
-        // Failure, unavailable and throttled outcomes.
-        let request = app.topology_state.summary.request;
-        let scope = app.topology_state.summary.scope_key.clone();
-        app.on_scope_summary(
-            request,
-            scope.clone(),
-            planned("d2", PlannedAction::Unavailable("not configured".into())),
-        );
-        assert_eq!(app.topology_state.summary.phase, P::Unavailable);
-        app.on_scope_summary(
-            request,
-            scope.clone(),
-            planned(
-                "d2",
-                PlannedAction::Throttled(std::time::Duration::from_secs(300)),
-            ),
-        );
-        assert_eq!(app.topology_state.summary.phase, P::Stale);
-        assert!(app.topology_state.summary.retry_after.is_some());
-        assert!(app.topology_state.summary.notice.contains("5 min"));
-        let failure = argos_osint_core::provider_diag::ProviderFailure::from_error(
-            argos_osint_core::provider_diag::Stage::Response,
-            argos_osint_core::provider_diag::Category::Auth,
-            &std::io::Error::other("bad key"),
-        );
-        app.on_scope_summary(
-            request,
-            scope.clone(),
-            planned("d3", PlannedAction::Generate),
-        );
-        let failed = ScopeSummaryStage::Finished {
-            digest: "d3".into(),
-            report: report("d3", O::Failed(Box::new(failure))),
-        };
-        app.on_scope_summary(request, scope, failed);
-        assert_eq!(app.topology_state.summary.phase, P::Failed);
-        let card = app.topology_state.summary.failure.as_ref().unwrap();
-        assert_eq!(card.job_id, "job-1234567890");
-        assert!(card.details.iter().any(|d| d.contains("job-1234567890")));
-    }
-
-    #[test]
-    fn topology_failure_uses_the_brain_failure_card_with_working_actions() {
-        use super::super::scope_summary::SummaryPhase as P;
-        let planned = |app: &mut App| {
-            app.sync_scope_summary(true);
-            let request = app.topology_state.summary.request;
-            let scope = app.topology_state.summary.scope_key.clone();
-            app.on_scope_summary(
-                request,
-                scope,
-                ScopeSummaryStage::Planned {
-                    digest: "digest".into(),
-                    saved: None,
-                    action: PlannedAction::Cooling(failed_record()),
-                },
-            );
-        };
-        // Desktop panel, compact panel, and both stacked Summary pages.
-        for (w, h, page) in [
-            (160u16, 50u16, false),
-            (100, 32, false),
-            (80, 24, true),
-            (60, 18, true),
-        ] {
-            let mut app = topology_fixture();
-            planned(&mut app);
-            assert_eq!(app.topology_state.summary.phase, P::Failed);
-            // The screen size decides whether the Summary tab exists.
-            render(&mut app, w, h + 2);
-            if page {
-                app.activate_target(Target::TopologyPanel(super::super::topology::SUMMARY_TAB));
-            }
-            let text = buffer_text(&render(&mut app, w, h + 2));
-            assert!(
-                text.contains("AI summary failed"),
-                "{w}x{h} phase={:?}\n{text}",
-                app.topology_state.summary.phase
-            );
-            assert!(
-                text.contains("provider rejected the credentials"),
-                "{w}x{h}"
-            );
-            for button in [
-                ButtonId::SummaryDetails,
-                ButtonId::SummaryLogs,
-                ButtonId::SummaryJob,
-                ButtonId::SummaryRetry,
-                ButtonId::SummaryModels,
-            ] {
-                let rect = app
-                    .layout
-                    .borrow()
-                    .entries
-                    .iter()
-                    .find(|e| e.target == Target::Button(button))
-                    .map(|e| e.rect);
-                let rect = rect.unwrap_or_else(|| panic!("{button:?} registered at {w}x{h}"));
-                assert_eq!(
-                    super::super::ui::hit_test(&app, rect.x, rect.y),
-                    Some(Target::Button(button)),
-                    "{button:?} {w}x{h}"
-                );
-            }
-        }
-        let mut app = topology_fixture();
-        planned(&mut app);
-        render(&mut app, 160, 52);
-        // View details toggles the diagnostic lines; the Brain flag is untouched.
-        app.activate_target(Target::Button(ButtonId::SummaryDetails));
-        assert!(app.topology_state.summary.details_open && !app.summary_details_open);
-        let text = buffer_text(&render(&mut app, 160, 52));
-        assert!(text.contains("Hide details"));
-        // Retry replans for the topology scope (not the Brain memory).
-        let before = app.topology_state.summary.request;
-        app.activate_target(Target::Button(ButtonId::SummaryRetry));
-        assert_eq!(app.topology_state.summary.request, before + 1);
-        assert!(
-            app.topology_state.summary.failure.is_none(),
-            "cleared while retrying"
-        );
-        // Open Models routes to the Summarization role.
-        planned(&mut app);
-        app.activate_target(Target::Button(ButtonId::SummaryModels));
-        assert_eq!(app.module, Some(ModuleId::Providers));
-    }
-
-    /// End to end through the offline mock provider: a scope change writes a
-    /// markdown narrative once, a return to the scope reuses it with no
-    /// request, and a failing provider yields the failure card.
-    #[test]
-    fn scope_summary_worker_writes_reuses_and_fails_through_the_mock_provider() {
-        use super::super::scope_summary::SummaryPhase as P;
-        use argos_osint_core::provider_attempt::mock::{ok_json, Reply};
-        let mut app = topology_fixture();
-        let fx = summary_fixture(
-            &mut app,
-            vec![
-                ok_json(
-                    "## In scope\n\n**Harbor contract shifted** links to *Aster Logistics*.",
-                    "stop",
-                ),
-                Reply::Json(401, AUTH_401.into()),
-            ],
-        );
-        let _enter = fx.rt.enter();
-        let settle = |app: &mut App, done: fn(P) -> bool| {
-            for _ in 0..400 {
-                fx.rt
-                    .block_on(tokio::time::sleep(Duration::from_millis(25)));
-                while let Ok(event) = app.work_rx.try_recv() {
-                    app.on_work_event(event);
-                }
-                if done(app.topology_state.summary.phase) {
-                    return;
-                }
-            }
-            panic!(
-                "scope summary never settled: {:?}",
-                app.topology_state.summary.phase
-            );
-        };
-        app.topology_state.summary = Default::default();
-        app.sync_scope_summary(false);
-        assert_eq!(
-            app.topology_state.summary.phase,
-            P::Idle,
-            "deterministic text first"
-        );
-        assert!(!app.topology_state.summary.deterministic.is_empty());
-        settle(&mut app, |p| p == P::Ready);
-        let saved = app.topology_state.summary.saved.clone().unwrap();
-        assert!(saved.text.contains("**Harbor contract shifted**"));
-        assert_eq!(fx.server.hits(), 1);
-        let text = buffer_text(&render(&mut app, 160, 52));
-        assert!(text.contains("AI summary") && !text.contains("**"));
-        // Filter away (new scope, second scripted reply is a 401) ...
-        app.activate_target(Target::TopologyFilter(0));
-        settle(&mut app, |p| p == P::Failed);
-        assert!(app.topology_state.summary.failure.is_some());
-        let text = buffer_text(&render(&mut app, 160, 52));
-        assert!(text.contains("AI summary failed"));
-        // ... and back: the saved narrative for the first scope is reused, no request.
-        let hits = fx.server.hits();
-        app.activate_target(Target::TopologyFilter(0));
-        settle(&mut app, |p| p == P::Ready);
-        assert_eq!(fx.server.hits(), hits);
-        assert_eq!(app.topology_state.summary.saved.unwrap().text, saved.text);
-        // The job and the failed record were persisted for Logs.
-        let store = Store::open(&fx.db).unwrap();
-        assert!(store
-            .graph_explanation_record(&format!(
-                "topology:{}",
-                app.topology_state.summary.scope_key
-            ))
-            .unwrap()
-            .is_some());
-        super::super::tracked::testing::use_db(None);
-    }
-
-    /// Scope summary screenshots (all states, long and scrolled content, each
-    /// layout). Sizes are topology content cells; the chrome adds two rows.
-    /// `ARGOS_SCREEN_DIR=… cargo test -p argos-osint-bin dump_topology_summary_screens`
-    #[test]
-    fn dump_topology_summary_screens() {
-        use super::super::scope_summary::SavedText;
-        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
-            return;
-        };
-        std::fs::create_dir_all(&dir).unwrap();
-        let ready_text = "## In scope\n\n**Harbor contract shifted** is the seed. Eight records sit within two hops: 2 actors, 2 claims, 2 articles, 1 topic and 1 inference.\n\n## Connections\n\n- The seed **concerns** *Aster Logistics* and *Bay Authority*, and is **sourced from** the *Tender report*.\n- *Supplier exposure* is a **premise** for the seed; *Capacity fell 18%* shares an actor with it.\n- *Freight review* is only **potential context** (Related), not verified corroboration.\n\n## Caveats\n\n- Related links are tentative.\n";
-        let saved = |text: &str| {
-            Some(SavedText {
-                text: text.to_string(),
-                created_at: "2026-10-16T12:00:00Z".into(),
-                fresh: true,
-            })
-        };
-        let plan = |app: &mut App, saved: Option<SavedText>, action: PlannedAction| {
-            app.sync_scope_summary(true);
-            let request = app.topology_state.summary.request;
-            let scope = app.topology_state.summary.scope_key.clone();
-            app.on_scope_summary(
-                request,
-                scope,
-                ScopeSummaryStage::Planned {
-                    digest: "digest".into(),
-                    saved,
-                    action,
-                },
-            );
-        };
-        type Setup = fn(&mut App, &dyn Fn(&mut App, Option<SavedText>, PlannedAction), &str);
-        let states: Vec<(&str, Setup)> = vec![
-            ("idle", |_, _, _| {}),
-            ("writing-first", |app, plan, _| {
-                plan(app, None, PlannedAction::Generate)
-            }),
-            ("writing-stale", |app, plan, text| {
-                plan(
-                    app,
-                    Some(SavedText {
-                        text: text.into(),
-                        created_at: String::new(),
-                        fresh: false,
-                    }),
-                    PlannedAction::Generate,
-                )
-            }),
-            ("ready", |app, plan, text| {
-                plan(
-                    app,
-                    Some(SavedText {
-                        text: text.into(),
-                        created_at: String::new(),
-                        fresh: true,
-                    }),
-                    PlannedAction::Reuse,
-                )
-            }),
-            ("stale", |app, plan, text| {
-                plan(
-                    app,
-                    Some(SavedText {
-                        text: text.into(),
-                        created_at: String::new(),
-                        fresh: false,
-                    }),
-                    PlannedAction::Throttled(std::time::Duration::from_secs(420)),
-                )
-            }),
-            ("failed", |app, plan, _| {
-                plan(app, None, PlannedAction::Cooling(failed_record()))
-            }),
-            ("unavailable", |app, plan, _| {
-                plan(
-                    app,
-                    None,
-                    PlannedAction::Unavailable("Summarization is not configured".into()),
-                )
-            }),
-        ];
-        let _ = saved;
-        let long = long_summary();
-        for (w, h) in [(160u16, 50u16), (120, 40), (100, 32), (80, 24), (60, 18)] {
-            let stacked = w < 100 || h < 32;
-            for (name, setup) in &states {
-                let mut app = topology_fixture();
-                setup(&mut app, &plan, ready_text);
-                dump_cells(&mut app, &dir, &format!("summary-{name}-{w}x{h}"), w, h + 2);
-                if stacked {
-                    app.activate_target(Target::TopologyPanel(super::super::topology::SUMMARY_TAB));
-                    dump_cells(&mut app, &dir, &format!("page-{name}-{w}x{h}"), w, h + 2);
-                }
-            }
-            let mut app = topology_fixture();
-            plan(&mut app, None, PlannedAction::Cooling(failed_record()));
-            app.activate_target(Target::Button(ButtonId::SummaryDetails));
-            dump_cells(
-                &mut app,
-                &dir,
-                &format!("summary-failed-details-{w}x{h}"),
-                w,
-                h + 2,
-            );
-            if stacked {
-                app.activate_target(Target::TopologyPanel(super::super::topology::SUMMARY_TAB));
-                dump_cells(
-                    &mut app,
-                    &dir,
-                    &format!("page-failed-details-{w}x{h}"),
-                    w,
-                    h + 2,
-                );
-            }
-            let mut app = topology_fixture();
-            plan(&mut app, saved(&long), PlannedAction::Reuse);
-            dump_cells(
-                &mut app,
-                &dir,
-                &format!("summary-long-top-{w}x{h}"),
-                w,
-                h + 2,
-            );
-            if stacked {
-                app.activate_target(Target::TopologyPanel(super::super::topology::SUMMARY_TAB));
-                dump_cells(&mut app, &dir, &format!("page-long-top-{w}x{h}"), w, h + 2);
-            }
-            app.set_focus(Target::TopologySummary);
-            render(&mut app, w, h + 2);
-            for _ in 0..2 {
-                app.handle_topology_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-            }
-            dump_cells(
-                &mut app,
-                &dir,
-                &format!(
-                    "{}-long-scrolled-{w}x{h}",
-                    if stacked { "page" } else { "summary" }
-                ),
-                w,
-                h + 2,
-            );
-            if stacked {
-                app.activate_target(Target::TopologyPanel(0));
-                dump_cells(
-                    &mut app,
-                    &dir,
-                    &format!("summary-long-scrolled-{w}x{h}"),
-                    w,
-                    h + 2,
-                );
-            }
-        }
-        for (w, h) in [(160u16, 50u16), (80, 24), (60, 18)] {
-            let stacked = w < 100;
-            let page = |app: &mut App, dir: &str, name: &str| {
-                dump_cells(app, dir, &format!("summary-{name}-{w}x{h}"), w, h + 2);
-                if stacked {
-                    app.activate_target(Target::TopologyPanel(super::super::topology::SUMMARY_TAB));
-                    dump_cells(app, dir, &format!("page-{name}-{w}x{h}"), w, h + 2);
-                }
-            };
-            let mut filtered = topology_fixture();
-            filtered.activate_target(Target::TopologyFilter(0));
-            filtered.activate_target(Target::TopologyFilter(4));
-            page(&mut filtered, &dir, "filtered");
-            let mut isolated = topology_fixture();
-            let snapshot = isolated.topology_state.snapshot.as_mut().unwrap();
-            snapshot.nodes.retain(|node| node.is_root);
-            snapshot.edges.clear();
-            isolated.sync_scope_summary(true);
-            page(&mut isolated, &dir, "isolated");
-            let mut bounded = topology_fixture();
-            let snapshot = bounded.topology_state.snapshot.as_mut().unwrap();
-            snapshot.omitted_nodes = 37;
-            snapshot.omitted_edges = 90;
-            snapshot.exploration_exhausted = false;
-            bounded.sync_scope_summary(true);
-            page(&mut bounded, &dir, "bounded");
-        }
     }
 
     #[test]
@@ -23427,12 +22322,6 @@ mod tests {
             .unwrap()
             .rect;
         app.set_focus(Target::TopologyPanel(0));
-        app.handle_topology_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        // Stacked order is Graph → Summary → Details → Controls.
-        assert_eq!(
-            app.focus,
-            Target::TopologyPanel(super::super::topology::SUMMARY_TAB)
-        );
         app.handle_topology_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         assert_eq!(app.focus, Target::TopologyPanel(1));
         assert_eq!(app.topology_state.active_panel_tab, 0);

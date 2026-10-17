@@ -16,37 +16,6 @@ use super::topology_layout::{graph_geometry, TopologyLayoutResult, TopologyRespo
 use super::ui::{draw_button, draw_button_state};
 
 pub const TOPOLOGY_HISTORY_CAP: usize = 32;
-/// Panel tab index of the stacked Summary page. Indices 0..=2 keep their
-/// meaning (Graph, Details, Controls); Summary is shown second when stacked.
-pub const SUMMARY_TAB: usize = 3;
-
-/// Tab order for a layout mode: (panel index, label).
-pub fn panel_tabs(mode: TopologyResponsiveMode) -> Vec<(usize, &'static str)> {
-    if matches!(
-        mode,
-        TopologyResponsiveMode::Desktop | TopologyResponsiveMode::Compact
-    ) {
-        vec![(0, "Graph"), (1, "Details"), (2, "Controls")]
-    } else {
-        vec![
-            (0, "Graph"),
-            (SUMMARY_TAB, "Summary"),
-            (1, "Details"),
-            (2, "Controls"),
-        ]
-    }
-}
-
-fn hidden_nodes(app: &App) -> usize {
-    let state = &app.topology_state;
-    state.snapshot.as_ref().map_or(0, |snapshot| {
-        snapshot
-            .nodes
-            .iter()
-            .filter(|node| !node_visible(state, node))
-            .count()
-    })
-}
 
 #[derive(Clone, Debug)]
 pub enum TopologyFocus {
@@ -156,8 +125,6 @@ pub struct TopologyState {
     pub scope_status: String,
     pub history: Vec<TopologyHistoryFrame>,
     pub pending_focus: Option<TopologyFocus>,
-    /// Scope summary text, phase and scroll for the current scope.
-    pub summary: super::scope_summary::ScopeSummaryState,
 }
 
 impl Default for TopologyState {
@@ -187,7 +154,6 @@ impl Default for TopologyState {
             scope_status: "On demand · idle".into(),
             history: Vec::new(),
             pending_focus: None,
-            summary: Default::default(),
         }
     }
 }
@@ -390,7 +356,6 @@ pub fn scroll_topology(app: &mut App, target: Target, delta: isize) -> bool {
             }
             true
         }
-        Target::TopologySummary => super::scope_summary::scroll(app, delta),
         Target::TopologyRelated(_) | Target::TopologyRelationships => {
             app.topology_state.related_scroll = app
                 .topology_state
@@ -445,8 +410,6 @@ pub fn draw_topology(frame: &mut Frame, app: &App, area: Rect) {
     );
     if app.topology_state.active_panel_tab == 2 {
         draw_controls_page(frame, app, layout.controls_page);
-    } else if !split && app.topology_state.active_panel_tab == SUMMARY_TAB {
-        super::scope_summary::draw_panel(frame, app, layout.summary_page, 0, hidden_nodes(app));
     } else if split {
         draw_graph_panel(frame, app, &layout);
         draw_inspector(frame, app, &layout);
@@ -494,29 +457,23 @@ fn draw_top_bar(frame: &mut Frame, app: &App, layout: &TopologyLayoutResult) {
         .style(theme::muted()),
         layout.subheader,
     );
-    let order = panel_tabs(layout.mode);
-    let tabs: Vec<&str> = order.iter().map(|(_, label)| *label).collect();
-    let reveal_panel = match app.focus {
+    let tabs = ["Graph", "Details", "Controls"];
+    let reveal = match app.focus {
         Target::TopologyPanel(index) => index,
         _ => state.active_panel_tab,
     };
-    let reveal = order
-        .iter()
-        .position(|(index, _)| *index == reveal_panel)
-        .unwrap_or(0);
-    for (slot, rect) in components::tab_rects(layout.seed_tabs, &tabs, reveal)
+    for (index, rect) in components::tab_rects(layout.seed_tabs, &tabs, reveal)
         .into_iter()
         .enumerate()
     {
         if rect.width == 0 {
             continue;
         }
-        let index = order[slot].0;
         let target = Target::TopologyPanel(index);
         components::tab_button(
             frame,
             rect,
-            tabs[slot],
+            tabs[index],
             state.active_panel_tab == index,
             app.focus == target,
         );
@@ -608,19 +565,13 @@ fn draw_graph_panel(frame: &mut Frame, app: &App, layout: &TopologyLayoutResult)
                 .filter(|node| node_visible(state, node))
                 .count();
             format!(
-                "Neighborhood · {node_count} nodes · {} links · {} hops · {} · {}%",
+                "Neighborhood · {node_count} nodes · {} relationships",
                 snapshot
                     .edges
                     .iter()
                     .filter(|edge| edge_visible(state, edge.kind)
                         && visible_endpoints(state, snapshot, &edge.from, &edge.to))
-                    .count(),
-                state.depth,
-                match &state.cycle_scope {
-                    CycleScope::AllRetained => "all retained".to_owned(),
-                    CycleScope::ThisCycle(id) => format!("cycle {id}"),
-                },
-                state.zoom_percent
+                    .count()
             )
         })
         .unwrap_or_else(|| "Seeded neighborhood".into());
@@ -820,16 +771,58 @@ fn draw_graph_annotations(
         ]),
     ];
     frame.render_widget(Paragraph::new(legend), layout.graph_legend);
-    // The former two-row findings strip is folded into the summary's caveat
-    // line (panel footer, or the one-line headline when stacked).
-    if matches!(
-        layout.mode,
-        TopologyResponsiveMode::Desktop | TopologyResponsiveMode::Compact
-    ) {
-        super::scope_summary::draw_panel(frame, app, layout.scope_summary, outside, filtered);
-    } else {
-        super::scope_summary::draw_headline(frame, app, layout.scope_summary, outside, filtered);
+    let state = &app.topology_state;
+    let scope = match &state.cycle_scope {
+        CycleScope::AllRetained => "all retained".to_owned(),
+        CycleScope::ThisCycle(id) => format!("cycle {id}"),
+    };
+    let mut lines = vec![Line::styled(
+        format!(
+            "Within {} hops · {scope} · {}%",
+            state.depth, state.zoom_percent
+        ),
+        theme::muted(),
+    )];
+    if let Some(error) = &app.topology_error {
+        lines.push(Line::styled(
+            format!(
+                "{} · {error}",
+                if state.snapshot.is_some() {
+                    "Retained snapshot"
+                } else {
+                    "Snapshot unavailable"
+                }
+            ),
+            Style::default().fg(WARN),
+        ));
+    } else if app.topology_loading {
+        lines.push(Line::styled(
+            if state.snapshot.is_some() {
+                "Refreshing retained snapshot…"
+            } else {
+                "Loading seeded neighborhood…"
+            },
+            theme::muted(),
+        ));
+    } else if let Some(snapshot) = &state.snapshot {
+        let message = if outside > 0 || filtered > 0 {
+            format!("{outside} outside viewport · {filtered} filtered · Shift+arrows to pan")
+        } else if snapshot.omitted_nodes > 0
+            || snapshot.omitted_edges > 0
+            || !snapshot.exploration_exhausted
+        {
+            format!(
+                "Bounded projection · {} nodes / {} relationships omitted",
+                snapshot.omitted_nodes, snapshot.omitted_edges
+            )
+        } else if snapshot.nodes.len() == 1 {
+            "No recorded neighbors. The seed remains visible.".into()
+        } else {
+            "● Seed remains fixed · selection inspects · Recenter changes scope".into()
+        };
+        lines.push(Line::styled(message, theme::muted()));
     }
+    frame.render_widget(Paragraph::new(lines), layout.scope_findings);
 }
 
 fn detail_lines(state: &TopologyState, snapshot: &TopologySnapshot) -> Vec<Line<'static>> {

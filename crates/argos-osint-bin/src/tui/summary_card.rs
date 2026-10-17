@@ -206,42 +206,9 @@ pub fn button_cells(
     out
 }
 
-/// Text rows kept for `inner`. `compact` (the topology panel, which has only a
-/// handful of rows) trims guidance rows so the buttons always stay visible.
-fn fitted_rows(
-    failure: &SummaryFailure,
-    details_open: bool,
-    inner: Rect,
-    compact: bool,
-) -> Vec<(String, Style)> {
-    let mut rows = text_rows(failure, inner.width as usize);
-    if compact {
-        let probe = Rect {
-            y: 0,
-            height: u16::MAX,
-            ..inner
-        };
-        let button_rows = button_cells(failure, details_open, probe)
-            .last()
-            .map(|(_, _, r)| r.y + 1)
-            .unwrap_or(0) as usize;
-        rows.truncate((inner.height as usize).saturating_sub(button_rows).max(1));
-    }
-    rows
-}
-
 /// Card rows, including the button rows and one blank separator.
 pub fn height(failure: &SummaryFailure, details_open: bool, inner: Rect) -> u16 {
-    height_with(failure, details_open, inner, false)
-}
-
-pub fn height_with(
-    failure: &SummaryFailure,
-    details_open: bool,
-    inner: Rect,
-    compact: bool,
-) -> u16 {
-    let text = fitted_rows(failure, details_open, inner, compact).len() as u16;
+    let text = text_rows(failure, inner.width as usize).len() as u16;
     let probe = Rect {
         y: 0,
         height: u16::MAX,
@@ -254,13 +221,8 @@ pub fn height_with(
     (text + rows + 1).min(inner.height)
 }
 
-fn button_row_area(
-    failure: &SummaryFailure,
-    details_open: bool,
-    inner: Rect,
-    compact: bool,
-) -> Rect {
-    let text = fitted_rows(failure, details_open, inner, compact).len() as u16;
+fn button_row_area(failure: &SummaryFailure, inner: Rect) -> Rect {
+    let text = text_rows(failure, inner.width as usize).len() as u16;
     Rect {
         y: inner.y + text,
         height: inner.height.saturating_sub(text),
@@ -270,20 +232,8 @@ fn button_row_area(
 
 /// Draw the card at the top of `inner` (the summary panel's inner area).
 pub fn draw(frame: &mut Frame, app: &App, failure: &SummaryFailure, inner: Rect) {
-    draw_with(frame, app, failure, inner, app.summary_details_open, false);
-}
-
-/// Draw with an explicit details state (Brain uses the app flag; topology
-/// keeps its own) and optional compact trimming.
-pub fn draw_with(
-    frame: &mut Frame,
-    app: &App,
-    failure: &SummaryFailure,
-    inner: Rect,
-    details_open: bool,
-    compact: bool,
-) {
-    let rows = fitted_rows(failure, details_open, inner, compact);
+    let width = inner.width as usize;
+    let rows = text_rows(failure, width);
     let lines: Vec<Line> = rows
         .iter()
         .map(|(text, style)| Line::from(Span::styled(text.clone(), *style)))
@@ -296,8 +246,8 @@ pub fn draw_with(
             ..inner
         },
     );
-    let buttons = button_row_area(failure, details_open, inner, compact);
-    for (id, text, rect) in button_cells(failure, details_open, buttons) {
+    let buttons = button_row_area(failure, inner);
+    for (id, text, rect) in button_cells(failure, app.summary_details_open, buttons) {
         if rect.y >= inner.y + inner.height {
             break;
         }
@@ -323,7 +273,7 @@ pub fn button_at(
     x: u16,
     y: u16,
 ) -> Option<ButtonId> {
-    let buttons = button_row_area(failure, app.summary_details_open, inner, false);
+    let buttons = button_row_area(failure, inner);
     button_cells(failure, app.summary_details_open, buttons)
         .into_iter()
         .find(|(_, _, r)| super::ui::contains(*r, x, y))

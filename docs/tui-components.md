@@ -80,10 +80,8 @@ The brief **Jobs** pane shows the dependency chain summary followed by one space
 `topology_layout::TopologyLayoutResult` computes pure geometry for the **Graph first** preset (dimensions refer to its available body):
 - **Desktop (≥132×32)**: GraphCanvas left 65%, TopologyInspector right 35%.
 - **Compact (100–131 columns, ≥32 rows)**: GraphCanvas 70%, TopologyInspector 30%.
-- **Stacked (<100 columns or <32 rows)**: Full-width `[Graph] [Summary] [Details] [Controls]` TabBar pages (`topology::panel_tabs`; panel index 3 is Summary). A one-line `Summary ▸` headline sits under the graph.
+- **Stacked (<100 columns or <32 rows)**: Full-width `[Graph] [Details] [Controls]` TabBar pages.
 - **Tiny (<60×18 cells)**: Explicit minimum size guidance panel.
-
-**Scope summary** (`scope_summary.rs`): Desktop and Compact give the left column a bordered panel (`TopologyLayoutResult::scope_summary`, 6–10 rows) below the legend; Stacked uses `summary_page`. The panel renders markdown through `graph::summary_lines` (the Brain/Atlas renderer) with wrapping, a `▲ a–b/total ▼` indicator, and a one-row footer that carries the former findings strip as the caveat line. It registers `Target::TopologySummary` (Tab-focusable); Up/Down, PgUp/PgDn, Home/End and the mouse wheel scroll it independently of the graph and inspector through `scroll_topology`, and `ScopeSummaryState::scroll` is clamped at draw, kept across redraws and reset on a scope change. Phases (`SummaryPhase`): deterministic, writing…, AI summary, stale, failed, no model. A failed run reuses the Brain `summary_card` failure card (`draw_with`, compact trimming) with View details/logs/job, Retry and Open Models; stale text offers `[Retry]` (also `s`). Drawing reads only this state.
 
 `topology.rs` renders only immutable scoped snapshot nodes, edges and receipts;
 no sample graph or evidence substitutes for loading, empty or failed data.

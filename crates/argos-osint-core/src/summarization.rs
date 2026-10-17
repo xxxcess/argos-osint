@@ -924,7 +924,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_nine_modes_round_trip() {
+    fn every_summarization_mode_round_trips() {
         assert_eq!(SummarizationMode::ALL.len(), 10);
         for mode in SummarizationMode::ALL {
             assert_eq!(SummarizationMode::parse(mode.as_str()), Some(mode));

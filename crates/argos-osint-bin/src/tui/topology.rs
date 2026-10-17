@@ -1136,6 +1136,9 @@ fn failure_note(failure: &GenerationFailure) -> String {
         FailureKind::Cancelled => {
             "Generation was cancelled; showing the recorded brief.".to_string()
         }
+        FailureKind::Timeout => format!(
+            "Waiting for the summary worker timed out ({reason}); showing the recorded brief. Retry summary."
+        ),
         FailureKind::Provider | FailureKind::Storage => format!(
             "The summary request failed ({reason}); showing the recorded brief."
         ),
@@ -1268,6 +1271,7 @@ pub fn summary_label(state: &TopologyState, loading: bool, error: Option<&str>) 
                         FailureKind::NotConfigured | FailureKind::Blocked => "blocked",
                         FailureKind::Rejected => "rejected",
                         FailureKind::Cancelled => "cancelled",
+                        FailureKind::Timeout => "timed out",
                         _ => "failed",
                     }
                     .into(),

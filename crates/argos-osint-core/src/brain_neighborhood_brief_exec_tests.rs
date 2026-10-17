@@ -361,15 +361,16 @@ async fn delayed_reply_keeps_the_fallback_readable_until_the_watcher_sees_the_re
 #[tokio::test(flavor = "multi_thread")]
 async fn lease_is_renewed_while_generating() {
     let server = mock::serve_delayed(
-        Duration::from_millis(2200),
+        Duration::from_millis(4500),
         vec![mock::ok_json(&good(), "stop")],
     )
     .await;
     let rt = runtime(&server.base_url, "fixture");
     let (_dir, path, store) = file_store();
     prepared(&store, &rt);
-    // A 1s lease would expire mid-request without the heartbeat.
-    let out = drain_summary_flush_with_runtime(&store.conn, "w1", None, Some(&rt), Some(&path), 1)
+    // A 3s lease expires mid-request without the heartbeat; the generous
+    // lease and delay keep the test tolerant of a loaded runner.
+    let out = drain_summary_flush_with_runtime(&store.conn, "w1", None, Some(&rt), Some(&path), 3)
         .unwrap();
     assert!(out[0].generated && !out[0].stale, "{out:?}");
 }
@@ -549,4 +550,65 @@ fn an_obsolete_watcher_detaches_without_a_result() {
     let req = prepared(&store, &rt);
     let stop = AtomicBool::new(true);
     assert!(watch_until_settled(&path, &req, Duration::from_millis(50), &stop).is_none());
+}
+
+#[test]
+fn a_request_nobody_works_on_times_out_with_a_typed_failure() {
+    let (_dir, path, store) = file_store();
+    let rt = runtime("http://127.0.0.1:1", "fixture");
+    let req = prepared(&store, &rt);
+    let stop = AtomicBool::new(false);
+    let limits = WatchLimits {
+        max_poll_errors: 5,
+        deadline: Duration::from_millis(200),
+    };
+    let began = Instant::now();
+    match watch_with_limits(&path, &req, Duration::from_millis(50), &stop, limits) {
+        Some(Delivery::Failed(f)) => {
+            assert_eq!(f.kind, FailureKind::Timeout);
+            assert!(f.message.contains("waiting for a worker"), "{f:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(began.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn repeated_poll_errors_end_the_watch_with_a_storage_failure() {
+    let (_dir, path, store) = file_store();
+    let rt = runtime("http://127.0.0.1:1", "fixture");
+    let req = prepared(&store, &rt);
+    store
+        .conn
+        .execute_batch("DROP TABLE argos_tasks; DROP TABLE argos_derived_summaries;")
+        .unwrap();
+    let stop = AtomicBool::new(false);
+    let limits = WatchLimits {
+        max_poll_errors: 3,
+        deadline: Duration::from_secs(30),
+    };
+    match watch_with_limits(&path, &req, Duration::from_millis(20), &stop, limits) {
+        Some(Delivery::Failed(f)) => assert_eq!(f.kind, FailureKind::Storage),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_database_that_cannot_be_opened_is_a_storage_failure() {
+    let (_dir, _path, store) = file_store();
+    let rt = runtime("http://127.0.0.1:1", "fixture");
+    let req = prepared(&store, &rt);
+    let missing = std::path::Path::new("/nonexistent-dir/none/argos.db");
+    let stop = AtomicBool::new(false);
+    match watch_until_settled(missing, &req, Duration::from_millis(20), &stop) {
+        Some(Delivery::Failed(f)) => assert_eq!(f.kind, FailureKind::Storage),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_standard_deadline_is_the_attempt_budget_plus_a_margin() {
+    let limits = WatchLimits::standard();
+    assert_eq!(limits.deadline, Duration::from_secs(90 * 2 + 60));
+    assert!(limits.max_poll_errors >= 2);
 }

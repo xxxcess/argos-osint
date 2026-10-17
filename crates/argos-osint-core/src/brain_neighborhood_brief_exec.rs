@@ -51,6 +51,8 @@ pub enum FailureKind {
     Provider,
     /// Cache or queue storage failed.
     Storage,
+    /// No worker settled the request before the deadline.
+    Timeout,
 }
 
 impl FailureKind {
@@ -62,6 +64,7 @@ impl FailureKind {
             Self::Rejected => "rejected",
             Self::Provider => "provider",
             Self::Storage => "storage",
+            Self::Timeout => "timeout",
         }
     }
 
@@ -72,6 +75,7 @@ impl FailureKind {
             "cancelled" => Self::Cancelled,
             "rejected" => Self::Rejected,
             "storage" => Self::Storage,
+            "timeout" => Self::Timeout,
             _ => Self::Provider,
         }
     }
@@ -508,32 +512,67 @@ fn heartbeat(
     std::thread::spawn(move || {
         let mut waited = std::time::Duration::ZERO;
         let tick = std::time::Duration::from_millis(25);
+        // The lease was last extended at `renewed_at`; it truly lapses
+        // `lease_secs` later. A late or failed renewal under load is retried
+        // (shorter interval) and is only fatal when the lease really passed,
+        // two renewals in a row failed, or another worker owns the task.
+        let mut renewed_at = std::time::Instant::now();
+        let mut failures = 0u32;
+        let mut interval = every;
         while !stop.load(Ordering::SeqCst) {
             std::thread::sleep(tick);
             waited += tick;
-            if waited < every {
+            if waited < interval {
                 continue;
             }
             waited = std::time::Duration::ZERO;
-            let renewed = Connection::open(&path)
-                .ok()
-                .and_then(|conn| {
-                    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
-                    crate::tasks::renew_lease(
-                        &conn,
-                        &id,
-                        &owner,
-                        epoch,
-                        lease_secs,
-                        &chrono::Utc::now().to_rfc3339(),
+            // Ok(Some(true)) renewed; Ok(Some(false)) refused but still ours;
+            // Ok(None) the task is gone/taken; Err transient failure.
+            let attempt = Connection::open(&path).map_err(|_| ()).and_then(|conn| {
+                let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+                let ok = crate::tasks::renew_lease(
+                    &conn,
+                    &id,
+                    &owner,
+                    epoch,
+                    lease_secs,
+                    &chrono::Utc::now().to_rfc3339(),
+                )
+                .map_err(|_| ())?;
+                if ok {
+                    return Ok(Some(true));
+                }
+                // Refused: is the task still ours (a transient refusal) or
+                // genuinely taken/finished/cancelled?
+                let ours: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM argos_tasks WHERE id=?1 AND lease_owner=?2 AND lease_epoch=?3 AND state='running'",
+                        rusqlite::params![id, owner, epoch],
+                        |_| Ok(()),
                     )
-                    .ok()
-                })
-                .unwrap_or(false);
-            if !renewed {
-                lost.store(true, Ordering::SeqCst);
-                cancel.store(true, Ordering::SeqCst);
-                break;
+                    .optional()
+                    .map_err(|_| ())?
+                    .is_some();
+                Ok(if ours { Some(false) } else { None })
+            });
+            match attempt {
+                Ok(Some(true)) => {
+                    renewed_at = std::time::Instant::now();
+                    failures = 0;
+                    interval = every;
+                }
+                other => {
+                    failures += 1;
+                    let gone = matches!(other, Ok(None));
+                    let passed = renewed_at.elapsed()
+                        >= std::time::Duration::from_secs(lease_secs.max(1) as u64);
+                    if gone || failures >= 2 || passed {
+                        lost.store(true, Ordering::SeqCst);
+                        cancel.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    interval = std::time::Duration::from_millis(100);
+                }
             }
         }
     })
@@ -651,6 +690,30 @@ pub fn run_claimed(
     })
 }
 
+/// Bounds for the background watcher: it never waits forever.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WatchLimits {
+    /// Give up after this many consecutive failed polls.
+    pub max_poll_errors: u32,
+    /// Overall deadline from the first poll.
+    pub deadline: std::time::Duration,
+}
+
+impl WatchLimits {
+    /// Summarization attempt timeout x attempt cap, plus a margin for the
+    /// queue and worker start.
+    pub fn standard() -> Self {
+        let per_attempt = crate::provider_request::TimeoutProfile::SUMMARIZATION
+            .attempt_timeout()
+            .as_secs();
+        let cap = u64::from(crate::tasks::OperationKind::Summarization.attempt_cap());
+        Self {
+            max_poll_errors: 5,
+            deadline: std::time::Duration::from_secs(per_attempt * cap + 60),
+        }
+    }
+}
+
 /// Background watcher body: poll the cache and task state every `every`
 /// (one read in flight, never a model request) until the request settles or
 /// `stop` is set. Returns `None` when detached.
@@ -660,16 +723,60 @@ pub fn watch_until_settled(
     every: std::time::Duration,
     stop: &AtomicBool,
 ) -> Option<Delivery> {
+    watch_with_limits(db_path, req, every, stop, WatchLimits::standard())
+}
+
+/// As [`watch_until_settled`] with explicit bounds. Repeated poll errors, a
+/// vanished database and the deadline all end in a typed `Delivery::Failed`
+/// so the UI can stop showing "generating".
+pub fn watch_with_limits(
+    db_path: &Path,
+    req: &SummaryRequest,
+    every: std::time::Duration,
+    stop: &AtomicBool,
+    limits: WatchLimits,
+) -> Option<Delivery> {
     use std::sync::atomic::Ordering;
-    let conn = Connection::open(db_path).ok()?;
-    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    let begun = std::time::Instant::now();
+    let fail =
+        |kind, message: String| Some(Delivery::Failed(GenerationFailure::new(kind, message)));
+    let open = || -> Option<Connection> {
+        let conn = Connection::open(db_path).ok()?;
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+        Some(conn)
+    };
+    let Some(mut conn) = open() else {
+        return fail(
+            FailureKind::Storage,
+            "the database could not be opened".into(),
+        );
+    };
+    let mut errors = 0u32;
     loop {
         if stop.load(Ordering::SeqCst) {
             return None;
         }
         match poll(&conn, req) {
-            Ok(Delivery::Pending) | Err(_) => {}
+            Ok(Delivery::Pending) => errors = 0,
             Ok(settled) => return Some(settled),
+            Err(error) => {
+                errors += 1;
+                if errors >= limits.max_poll_errors {
+                    return fail(
+                        FailureKind::Storage,
+                        format!("could not read the summary state: {error:#}"),
+                    );
+                }
+                if let Some(fresh) = open() {
+                    conn = fresh;
+                }
+            }
+        }
+        if begun.elapsed() >= limits.deadline {
+            return fail(
+                FailureKind::Timeout,
+                "waiting for a worker: no summary result before the deadline".into(),
+            );
         }
         let mut slept = std::time::Duration::ZERO;
         while slept < every {

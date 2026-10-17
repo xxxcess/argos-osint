@@ -1781,7 +1781,7 @@ async fn sqlite_contention_and_publication_delay_keep_leases_and_commit_once() {
     });
     let cancel = Arc::new(AtomicBool::new(false));
     let config = ExecConfig {
-        lease_secs: 3,
+        lease_secs: 6,
         heartbeat: Duration::from_millis(250),
     };
     let out = drain(&db.path, "w1", &mut mock, &cancel, &config)

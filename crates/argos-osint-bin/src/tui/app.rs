@@ -7229,81 +7229,43 @@ impl App {
         let basis_key = brief.basis_key.clone();
         let request = summary.request.clone();
         let tx = self.work_tx.clone();
-        let runtime = argos_osint_core::recon::model_exec::RoleRuntime::new(
-            AuthFile::load().unwrap_or_default(),
-            SettingsFile::load().unwrap_or_default(),
-        );
-        let run = move |store: &Store, db: Option<&std::path::Path>, send: &dyn Fn(WorkEvent)| {
-            use argos_osint_core::brain_neighborhood_brief_exec as exec;
-            let conn = store.connection();
-            let fingerprint = exec::route_fingerprint(&runtime);
-            let published = if retry {
-                // Explicit Retry: reuse the request identity, reset it once.
-                let req = request
-                    .map(|r| *r)
-                    .unwrap_or_else(|| exec::build_request(&input, &fingerprint));
-                let _ = exec::retry(conn, &req);
-                exec::poll(conn, &req).map(|delivery| (req, delivery))
-            } else {
-                exec::publish(conn, &input, &brief, &fingerprint)
-            };
-            let ev = |outcome| WorkEvent::TopologySummaryLoaded {
-                generation,
-                seed: seed.clone(),
-                options: options.clone(),
-                basis_key: basis_key.clone(),
-                outcome,
-            };
-            let (req, delivery) = match published {
-                Ok(pair) => pair,
-                Err(error) => {
-                    send(ev(Err(exec::GenerationFailure {
-                        kind: exec::FailureKind::Storage,
-                        message: error.to_string().chars().take(300).collect(),
-                    })));
-                    return;
-                }
-            };
-            send(WorkEvent::TopologySummaryStarted {
-                generation,
-                seed: seed.clone(),
-                options: options.clone(),
-                basis_key: basis_key.clone(),
-                request: Box::new(req.clone()),
-            });
-            let settled = match delivery {
-                exec::Delivery::Pending => match db {
-                    Some(db) => exec::watch_until_settled(
-                        db,
-                        &req,
-                        std::time::Duration::from_millis(750),
-                        &stop,
-                    ),
-                    None => return,
-                },
-                exec::Delivery::Idle => return,
-                other => Some(other),
-            };
-            match settled {
-                Some(exec::Delivery::Generated(g)) => send(ev(Ok(g))),
-                Some(exec::Delivery::Failed(f)) => send(ev(Err(f))),
-                _ => {}
-            }
+        let job = TopologySummaryJob {
+            generation,
+            seed,
+            options,
+            basis_key,
+            brief,
+            input,
+            request,
+            retry,
+            stop,
+            limits: argos_osint_core::brain_neighborhood_brief_exec::WatchLimits::standard(),
         };
         if let Some(db) = self.background_db.clone() {
+            // Auth/settings loading, the role runtime and the database open all
+            // happen on the worker thread, never on the UI thread.
             std::thread::spawn(move || {
-                let Ok(store) = Store::open_light(&db) else {
-                    return;
-                };
-                run(&store, Some(&db), &|event| {
+                let send = |event| {
                     let _ = tx.send(event);
-                });
+                };
+                let runtime = load_summary_runtime();
+                match Store::open_light(&db) {
+                    Ok(store) => job.run(&store, Some(&db), &runtime, &send),
+                    Err(error) => job.fail(
+                        argos_osint_core::brain_neighborhood_brief_exec::FailureKind::Storage,
+                        format!("could not open the database: {error}"),
+                        &send,
+                    ),
+                }
             });
         } else {
             // In-memory fixtures: one synchronous publish, no polling thread.
             let mut events = Vec::new();
             let cell = std::cell::RefCell::new(&mut events);
-            run(&self.store, None, &|event| cell.borrow_mut().push(event));
+            let runtime = load_summary_runtime();
+            job.run(&self.store, None, &runtime, &|event| {
+                cell.borrow_mut().push(event)
+            });
             for event in events {
                 self.on_work_event(event);
             }
@@ -12336,6 +12298,133 @@ pub(crate) fn structural_title(app: &App) -> Option<&'static str> {
         Some("Kind: Link") => Some(" link graph "),
         Some("Kind: Related") => Some(" related lead "),
         _ => None,
+    }
+}
+
+fn load_summary_runtime() -> argos_osint_core::recon::model_exec::RoleRuntime {
+    argos_osint_core::recon::model_exec::RoleRuntime::new(
+        AuthFile::load().unwrap_or_default(),
+        SettingsFile::load().unwrap_or_default(),
+    )
+}
+
+/// One background neighborhood-summary request: everything the worker thread
+/// needs, owned (no UI state is shared).
+struct TopologySummaryJob {
+    generation: u64,
+    seed: argos_osint_core::brain_topology::TopologySeed,
+    options: argos_osint_core::brain_topology::TopologyOptions,
+    basis_key: String,
+    brief: argos_osint_core::brain_neighborhood_brief::NeighborhoodBrief,
+    input: argos_osint_core::brain_neighborhood_brief::NeighborhoodInput,
+    request: Option<Box<argos_osint_core::summarization::SummaryRequest>>,
+    retry: bool,
+    stop: Arc<AtomicBool>,
+    limits: argos_osint_core::brain_neighborhood_brief_exec::WatchLimits,
+}
+
+impl TopologySummaryJob {
+    fn event(
+        &self,
+        outcome: Result<
+            Box<argos_osint_core::brain_neighborhood_brief_exec::Generated>,
+            argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure,
+        >,
+    ) -> WorkEvent {
+        WorkEvent::TopologySummaryLoaded {
+            generation: self.generation,
+            seed: self.seed.clone(),
+            options: self.options.clone(),
+            basis_key: self.basis_key.clone(),
+            outcome,
+        }
+    }
+
+    /// Typed terminal failure: the UI stops showing "generating".
+    fn fail(
+        &self,
+        kind: argos_osint_core::brain_neighborhood_brief_exec::FailureKind,
+        message: String,
+        send: &dyn Fn(WorkEvent),
+    ) {
+        send(self.event(Err(
+            argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure {
+                kind,
+                message: message.chars().take(300).collect(),
+            },
+        )));
+    }
+
+    fn run(
+        &self,
+        store: &Store,
+        db: Option<&std::path::Path>,
+        runtime: &argos_osint_core::recon::model_exec::RoleRuntime,
+        send: &dyn Fn(WorkEvent),
+    ) {
+        use argos_osint_core::brain_neighborhood_brief_exec as exec;
+        let conn = store.connection();
+        let fingerprint = exec::route_fingerprint(runtime);
+        let published = if self.retry {
+            // Explicit Retry: reuse the request identity, reset it once.
+            let req = self
+                .request
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(|| exec::build_request(&self.input, &fingerprint));
+            let _ = exec::retry(conn, &req);
+            exec::poll(conn, &req).map(|delivery| (req, delivery))
+        } else {
+            exec::publish(conn, &self.input, &self.brief, &fingerprint)
+        };
+        let (req, delivery) = match published {
+            Ok(pair) => pair,
+            Err(error) => {
+                self.fail(exec::FailureKind::Storage, error.to_string(), send);
+                return;
+            }
+        };
+        send(WorkEvent::TopologySummaryStarted {
+            generation: self.generation,
+            seed: self.seed.clone(),
+            options: self.options.clone(),
+            basis_key: self.basis_key.clone(),
+            request: Box::new(req.clone()),
+        });
+        let settled = match delivery {
+            exec::Delivery::Pending => match db {
+                Some(db) => exec::watch_with_limits(
+                    db,
+                    &req,
+                    std::time::Duration::from_millis(750),
+                    &self.stop,
+                    self.limits,
+                ),
+                // No polling thread (in-memory fixture): the request stays
+                // queued and the fallback stays on screen.
+                None => return,
+            },
+            exec::Delivery::Idle => {
+                self.fail(
+                    exec::FailureKind::Storage,
+                    "the summary request is no longer queued".into(),
+                    send,
+                );
+                return;
+            }
+            other => Some(other),
+        };
+        match settled {
+            Some(exec::Delivery::Generated(g)) => send(self.event(Ok(g))),
+            Some(exec::Delivery::Failed(f)) => send(self.event(Err(f))),
+            Some(exec::Delivery::Idle) => self.fail(
+                exec::FailureKind::Storage,
+                "the summary request is no longer queued".into(),
+                send,
+            ),
+            // Detached on purpose (obsolete request): nothing to report.
+            Some(exec::Delivery::Pending) | None => {}
+        }
     }
 }
 
@@ -23060,6 +23149,147 @@ mod tests {
             assert!(text.contains("Back"), "{w}x{h}: {text}");
             assert!(text.contains("Needs"), "{w}x{h}: {text}");
         }
+    }
+
+    fn app_with_packet() -> App {
+        use argos_osint_core::brain_neighborhood_brief as brief;
+        let mut app = brief_fixture();
+        let seed = app.topology_state.seed.clone().unwrap();
+        let (depth, cycle) = (
+            app.topology_state.depth,
+            app.topology_state.cycle_scope.clone(),
+        );
+        let key = app.topology_state.summary.basis_key.clone();
+        let snap = app.topology_state.snapshot.as_mut().unwrap();
+        let input = brief::build_input(
+            &brief::BriefInput {
+                snapshot: snap,
+                seed: &seed,
+                depth,
+                cycle: &cycle,
+                payloads: Default::default(),
+                payload_reads_skipped: 0,
+            },
+            &key,
+        );
+        snap.neighborhood_input = Some(input);
+        app
+    }
+
+    fn next_summary_event(app: &mut App) -> WorkEvent {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let Ok(event) = app.work_rx.try_recv() {
+                if matches!(event, WorkEvent::TopologySummaryLoaded { .. }) {
+                    return event;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "no summary event arrived"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn job_for(app: &App, retry: bool) -> TopologySummaryJob {
+        let snap = app.topology_state.snapshot.as_ref().unwrap();
+        TopologySummaryJob {
+            generation: 1,
+            seed: app.topology_state.seed.clone().unwrap(),
+            options: argos_osint_core::brain_topology::TopologyOptions {
+                depth: app.topology_state.depth,
+                cycle_scope: app.topology_state.cycle_scope.clone(),
+                max_nodes: 100,
+                max_edges: 200,
+                continuation_token: None,
+            },
+            basis_key: app.topology_state.summary.basis_key.clone(),
+            brief: snap.neighborhood_brief.clone().unwrap(),
+            input: snap.neighborhood_input.clone().unwrap(),
+            request: None,
+            retry,
+            stop: Arc::new(AtomicBool::new(false)),
+            limits: argos_osint_core::brain_neighborhood_brief_exec::WatchLimits::standard(),
+        }
+    }
+
+    #[test]
+    fn topology_summary_open_failure_becomes_a_typed_failure_not_a_stuck_generating() {
+        use super::super::topology::SummaryGen;
+        use argos_osint_core::brain_neighborhood_brief_exec::FailureKind;
+        let mut app = app_with_packet();
+        app.background_db = Some(PathBuf::from("/nonexistent-dir/none/argos.db"));
+        app.begin_topology_summary(false);
+        assert!(matches!(
+            app.topology_state.summary.gen,
+            SummaryGen::Pending
+        ));
+        let event = next_summary_event(&mut app);
+        app.on_work_event(event);
+        match &app.topology_state.summary.gen {
+            SummaryGen::Failed(f) => assert_eq!(f.kind, FailureKind::Storage),
+            other => panic!("{other:?}"),
+        }
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("Overview"), "fallback kept");
+        assert!(!text.contains("generating"));
+    }
+
+    #[test]
+    fn topology_summary_idle_request_is_reported_not_silent() {
+        use argos_osint_core::brain_neighborhood_brief_exec as exec;
+        let app = app_with_packet();
+        let mut job = job_for(&app, true);
+        // A retry for a request that was never queued polls as Idle.
+        let fingerprint = exec::route_fingerprint(&load_summary_runtime());
+        job.request = Some(Box::new(exec::build_request(&job.input, &fingerprint)));
+        let events = std::cell::RefCell::new(Vec::new());
+        job.run(&app.store, None, &load_summary_runtime(), &|e| {
+            events.borrow_mut().push(e)
+        });
+        let events = events.into_inner();
+        let last = events.last().expect("an event");
+        match last {
+            WorkEvent::TopologySummaryLoaded {
+                outcome: Err(f), ..
+            } => {
+                assert_eq!(f.kind, exec::FailureKind::Storage);
+            }
+            _ => panic!("expected a typed failure"),
+        }
+    }
+
+    #[test]
+    fn topology_summary_unworked_request_times_out_with_waiting_for_worker() {
+        use super::super::topology::SummaryGen;
+        use argos_osint_core::brain_neighborhood_brief_exec as exec;
+        let mut app = app_with_packet();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("argos.db");
+        let store = Store::open(&db).unwrap();
+        let mut job = job_for(&app, false);
+        job.limits = exec::WatchLimits {
+            max_poll_errors: 5,
+            deadline: std::time::Duration::from_millis(150),
+        };
+        let events = std::cell::RefCell::new(Vec::new());
+        job.run(&store, Some(&db), &load_summary_runtime(), &|e| {
+            events.borrow_mut().push(e)
+        });
+        let events = events.into_inner();
+        app.topology_state.summary.generation = 1;
+        app.topology_state.summary.gen = SummaryGen::Pending;
+        for event in events {
+            app.on_work_event(event);
+        }
+        match &app.topology_state.summary.gen {
+            SummaryGen::Failed(f) => assert_eq!(f.kind, exec::FailureKind::Timeout),
+            other => panic!("{other:?}"),
+        }
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("timed out"), "{text}");
+        assert!(text.contains("Overview"));
     }
 
     #[test]

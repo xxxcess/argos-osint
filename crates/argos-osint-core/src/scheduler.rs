@@ -212,6 +212,60 @@ pub fn drain_summary_flush_with_runtime(
     db_path: Option<&std::path::Path>,
     lease_secs: i64,
 ) -> Result<Vec<FlushOutcome>> {
+    drain_summary_flush_lazy(
+        conn,
+        owner,
+        Lazy::given(secret),
+        Lazy::given(runtime),
+        db_path,
+        lease_secs,
+    )
+}
+
+/// A dependency that is either supplied or loaded on first use. The idle
+/// worker tick therefore reads no auth/settings files: they load only after a
+/// summary task has actually been claimed, once per drain.
+pub(crate) struct Lazy<'a, T> {
+    given: Option<Option<&'a T>>,
+    load: Option<fn() -> Option<T>>,
+    cell: std::cell::OnceCell<Option<T>>,
+}
+
+impl<'a, T> Lazy<'a, T> {
+    pub(crate) fn given(value: Option<&'a T>) -> Self {
+        Self {
+            given: Some(value),
+            load: None,
+            cell: std::cell::OnceCell::new(),
+        }
+    }
+
+    pub(crate) fn loaded_on_demand(load: fn() -> Option<T>) -> Self {
+        Self {
+            given: None,
+            load: Some(load),
+            cell: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn get(&self) -> Option<&T> {
+        if let Some(value) = self.given {
+            return value;
+        }
+        self.cell
+            .get_or_init(|| self.load.and_then(|load| load()))
+            .as_ref()
+    }
+}
+
+pub(crate) fn drain_summary_flush_lazy(
+    conn: &Connection,
+    owner: &str,
+    secret: Lazy<crate::secrets::ProviderSecret>,
+    runtime: Lazy<crate::recon::model_exec::RoleRuntime>,
+    db_path: Option<&std::path::Path>,
+    lease_secs: i64,
+) -> Result<Vec<FlushOutcome>> {
     let mut outcomes = Vec::new();
     for _ in 0..8 {
         let now = chrono::Utc::now().to_rfc3339();
@@ -230,7 +284,11 @@ pub fn drain_summary_flush_with_runtime(
         };
         if claimed.operation == crate::brain_neighborhood_brief_exec::OPERATION {
             match crate::brain_neighborhood_brief_exec::run_claimed(
-                conn, &claimed, runtime, db_path, lease_secs,
+                conn,
+                &claimed,
+                runtime.get(),
+                db_path,
+                lease_secs,
             ) {
                 Ok(o) => outcomes.push(outcome(&o.tag, o.generated, o.stale)),
                 Err(error) => {
@@ -251,12 +309,14 @@ pub fn drain_summary_flush_with_runtime(
         // upgrade); storage errors are not provider errors and are not retried
         // blindly. No error text is ever stored as a completion result.
         let result = match crate::summarization::load_flush_request(conn, &claimed.input_hash) {
-            Ok(Some(_)) => {
-                crate::summarization::try_live_summary_upgrade(conn, secret, &claimed.input_hash)
-                    .map_err(|err| {
-                        tasks::TaskError::new(tasks::ErrorCategory::Unknown, format!("{err:#}"))
-                    })
-            }
+            Ok(Some(_)) => crate::summarization::try_live_summary_upgrade(
+                conn,
+                secret.get(),
+                &claimed.input_hash,
+            )
+            .map_err(|err| {
+                tasks::TaskError::new(tasks::ErrorCategory::Unknown, format!("{err:#}"))
+            }),
             Ok(None) => Err(tasks::TaskError::new(
                 tasks::ErrorCategory::Unknown,
                 format!("flush request missing for {}", claimed.input_hash),
@@ -419,8 +479,7 @@ impl WorkerPool {
                         tasks::retire_atlas_insight_work(&conn, &chrono::Utc::now().to_rfc3339());
                     // Best-effort: load summarization role secret when configured.
                     // Never invents success when auth/settings/secret are missing.
-                    let secret = load_summarization_secret();
-                    let runtime = load_role_runtime();
+                    // Loaded lazily, only once a summary task is claimed.
                     // Service-health row; batches/tasks supply the job history.
                     if loops.is_multiple_of(40) {
                         let now = chrono::Utc::now().to_rfc3339();
@@ -436,11 +495,11 @@ impl WorkerPool {
                         }
                     }
                     loops = loops.wrapping_add(1);
-                    let _ = drain_summary_flush_with_runtime(
+                    let _ = drain_summary_flush_lazy(
                         &conn,
                         &owner,
-                        secret.as_ref(),
-                        runtime.as_ref(),
+                        Lazy::loaded_on_demand(load_summarization_secret),
+                        Lazy::loaded_on_demand(load_role_runtime),
                         Some(&db_path),
                         DEFAULT_LEASE_SECS,
                     );
@@ -713,6 +772,38 @@ mod tests {
             &now,
         )
         .unwrap());
+    }
+
+    static LOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn counting_secret() -> Option<crate::secrets::ProviderSecret> {
+        LOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        None
+    }
+    fn counting_runtime() -> Option<crate::recon::model_exec::RoleRuntime> {
+        LOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        None
+    }
+
+    #[test]
+    fn an_idle_summary_tick_loads_no_secret_or_role_runtime() {
+        let conn = Connection::open_in_memory().unwrap();
+        tasks::migrate_tables(&conn).unwrap();
+        LOADS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let out = drain_summary_flush_lazy(
+            &conn,
+            "worker",
+            Lazy::loaded_on_demand(counting_secret),
+            Lazy::loaded_on_demand(counting_runtime),
+            None,
+            DEFAULT_LEASE_SECS,
+        )
+        .unwrap();
+        assert!(out.is_empty());
+        assert_eq!(
+            LOADS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "idle ticks must not read auth/settings"
+        );
     }
 
     #[test]

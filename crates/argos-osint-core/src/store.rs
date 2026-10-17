@@ -14,6 +14,7 @@ use crate::profile_stats;
 
 mod graph_summaries;
 mod publication;
+mod topology_summaries;
 pub use graph_summaries::{ExplanationRecord, GraphSummaryEntry, SaveOutcome, SummaryKey};
 pub(crate) use publication::{bump_memories_changed, enqueue_memory_index_on, tombstone_runs};
 pub use publication::{
@@ -21,6 +22,7 @@ pub use publication::{
     MemoryChangeWatcher, PublicationReceipt, PublicationVerification, PublishOptions,
     RejectedClaim, DELETED_REVISION, MEMORY_RECORD,
 };
+pub use topology_summaries::{TopologySummaryRow, MAX_PER_SEED as TOPOLOGY_SUMMARY_MAX_PER_SEED};
 
 static IDS: AtomicU64 = AtomicU64::new(1);
 
@@ -43,7 +45,7 @@ pub struct GraphSummary {
 /// complete summary-result envelopes; existing facts are preserved unchanged.
 /// 37 adds the unified Brain graph (typed kinds, actors, endpoints) and brief
 /// stage timings; `atomic_claim` memories migrate to claim/inference in place.
-pub const SCHEMA_VERSION: i64 = 42;
+pub const SCHEMA_VERSION: i64 = 43;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -999,6 +1001,11 @@ impl Store {
                 crate::brain_schema::migrate(&self.conn)?;
                 self.conn.pragma_update(None, "user_version", 42)?;
             }
+            if version < 43 {
+                // Additive: saved topology scope summaries, one row per digest.
+                topology_summaries::migrate(&self.conn)?;
+                self.conn.pragma_update(None, "user_version", 43)?;
+            }
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
             if version < 26 {
@@ -1413,6 +1420,10 @@ impl Store {
                     "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
                     [&memory_id],
                 )?;
+                self.conn.execute(
+                    "DELETE FROM topology_scope_summaries WHERE seed_ref=?1",
+                    [&memory_id],
+                )?;
                 self.conn
                     .execute("DELETE FROM memories WHERE id=?1", [&memory_id])?;
                 doomed.push(memory_id);
@@ -1817,6 +1828,10 @@ impl Store {
                 .execute("DELETE FROM insight_claims WHERE memory_id=?1", [id])?;
             self.conn.execute(
                 "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
+                [id],
+            )?;
+            self.conn.execute(
+                "DELETE FROM topology_scope_summaries WHERE seed_ref=?1",
                 [id],
             )?;
             let deleted = self

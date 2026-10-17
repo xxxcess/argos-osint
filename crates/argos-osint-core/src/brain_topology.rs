@@ -124,6 +124,24 @@ impl TopologySeed {
         }
     }
 
+    /// The stored memory this seed is, when it is one (Claim, Actor, Inference,
+    /// Link, Related); empty for derived seeds. Saved scope summaries are
+    /// deleted with that memory.
+    pub fn memory_ref(&self) -> String {
+        match self {
+            Self::Claim(id)
+            | Self::Actor(id)
+            | Self::Inference(id)
+            | Self::Link(id)
+            | Self::Related(id) => id.clone(),
+            Self::Article {
+                originating_memory: Some(id),
+                ..
+            } => id.clone(),
+            _ => String::new(),
+        }
+    }
+
     pub fn display_label(&self) -> String {
         match self {
             Self::Claim(id) => format!("Claim {id}"),

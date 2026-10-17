@@ -30,8 +30,8 @@ See the [final design](../../docs/topology-scope-summary-plan.md) and [specifica
 - [x] topology-mapper.md, diagram pair, architecture.md, tui-components.md, plan, this checklist
 - [x] graphify update
 - [x] PR #48 body rewritten; screenshots pinned to the final SHA
-- [ ] CI matrix green on all four targets (macOS arm64/x86_64, Linux x86_64/aarch64) at the final SHA
-- [ ] Local matrix (default, `--no-default-features`, nlp) re-run on the final SHA
+- [x] CI matrix green on all four targets (macOS arm64/x86_64, Linux x86_64/aarch64) at `dba2fff` (run 39047777535)
+- [x] Local matrix (default, `--no-default-features`, nlp) fmt/clippy/tests via `scripts/agent_cargo.py` (run before the last heartbeat commit; CI covers `dba2fff`)
 - [ ] Live Summarization check (not run: no Summarization account configured)
 
 ## Known limits

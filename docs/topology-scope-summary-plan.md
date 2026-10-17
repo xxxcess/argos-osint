@@ -52,7 +52,7 @@ The details panel takes 75% of the inspector height (min 8), leaving Relationshi
 | 2 | `b55fcc1` | Scheduler role dispatch, lease/epoch fencing, truthful outcomes, `TopologySummaryLoaded`, delayed mock server |
 | 3 | `0b08923` | TUI tabs, watcher and states, history, tests, screenshots |
 | 4 | `1c6ca92` | Docs, diagram pair, plan, checklist, graphify |
-| 5 | `8920477`, then see PR | CI fixes (lease heartbeat, bounded watcher, worker-thread config load, lazy idle tick); render cache; docs trim |
+| 5 | `8920477`, `d692708`, `d7cd6f8`, `c83df54`, `dba2fff` | CI fixes (lease heartbeat, bounded watcher, worker-thread config load, lazy idle tick); render cache; docs trim |
 
 ## Verification
 

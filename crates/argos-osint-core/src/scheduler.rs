@@ -15,6 +15,67 @@ use crate::tasks::{self, OperationKind};
 pub const SCHEDULER_LEASE_KEY: &str = "argos_scheduler";
 pub const DEFAULT_LEASE_SECS: i64 = 30;
 
+/// Backend factory for the Intel brief drainer.
+pub type IntelBackendFactory =
+    Arc<dyn Fn() -> Box<dyn crate::intel_recon::brief_stages::StageBackend + Send> + Send + Sync>;
+
+/// Minimum gap before the same drainer repeats the same error.
+const DRAINER_ERROR_REPEAT: Duration = Duration::from_secs(300);
+
+/// Decide whether a drainer error should be surfaced now: always for a new
+/// message, and for a repeated one only after [`DRAINER_ERROR_REPEAT`].
+fn should_surface(
+    seen: &mut std::collections::HashMap<String, (String, std::time::Instant)>,
+    name: &str,
+    message: &str,
+    at: std::time::Instant,
+) -> bool {
+    match seen.get(name) {
+        Some((last, when))
+            if last == message && at.duration_since(*when) < DRAINER_ERROR_REPEAT =>
+        {
+            false
+        }
+        _ => {
+            seen.insert(name.to_string(), (message.to_string(), at));
+            true
+        }
+    }
+}
+
+/// Surface a drainer failure as a redacted, rate-limited error event (Logs)
+/// instead of discarding it; a poll loop repeating one error logs it once.
+fn report_drainer<T>(db_path: &std::path::Path, name: &str, result: Result<T>) {
+    static SEEN: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
+    > = std::sync::OnceLock::new();
+    let Err(error) = result else {
+        return;
+    };
+    let message = format!("{error:#}");
+    let fresh = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| should_surface(&mut seen, name, &message, std::time::Instant::now()))
+        .unwrap_or(true);
+    if !fresh {
+        return;
+    }
+    if let Ok(conn) = Connection::open(db_path) {
+        let _ = conn.busy_timeout(Duration::from_secs(2));
+        let _ = crate::events::record_event(
+            &conn,
+            &crate::events::NewEvent {
+                severity: Some(crate::events::Severity::Error),
+                app: "system".into(),
+                event_type: "drainer.error".into(),
+                message: format!("{name} worker error: {message}"),
+                ..Default::default()
+            },
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PoolKind {
     Llm,
@@ -412,8 +473,12 @@ impl WorkerPool {
                         try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
                     });
                     if elected {
-                        let _ = runtime
-                            .block_on(crate::brain_actor_dedup::drain(&db_path, &owner, &flag));
+                        report_drainer(
+                            &db_path,
+                            "actor-dedup",
+                            runtime
+                                .block_on(crate::brain_actor_dedup::drain(&db_path, &owner, &flag)),
+                        );
                     }
                     for _ in 0..120 {
                         if flag.load(Ordering::Acquire) {
@@ -460,34 +525,61 @@ impl WorkerPool {
     /// dispatches ready stages onto separate Tokio tasks. The multi-thread
     /// runtime keeps lease heartbeats independent of blocking SQLite work.
     pub fn spawn_intel_brief_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
+        let db = db_path.clone();
+        Self::spawn_intel_brief_drainer_with(
+            db_path,
+            owner,
+            Arc::new(move || {
+                Box::new(crate::intel_recon::brief_stages::RuntimeBackend::load(&db))
+                    as Box<dyn crate::intel_recon::brief_stages::StageBackend + Send>
+            }),
+        )
+    }
+
+    /// [`Self::spawn_intel_brief_drainer`] with an injectable backend factory
+    /// (production passes `RuntimeBackend::load`); same loop, same error reporting.
+    pub fn spawn_intel_brief_drainer_with(
+        db_path: std::path::PathBuf,
+        owner: String,
+        make_backend: IntelBackendFactory,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let _ = std::thread::Builder::new()
             .name("argos-intel-brief".into())
             .spawn(move || {
-                let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .enable_all()
                     .build()
-                else {
-                    return;
+                {
+                    Ok(runtime) => runtime,
+                    Err(e) => {
+                        report_drainer::<()>(
+                            &db_path,
+                            "intel-brief",
+                            Err(anyhow::anyhow!("runtime failed to start: {e}")),
+                        );
+                        return;
+                    }
                 };
                 let config = crate::intel_recon::brief_stages::ExecConfig::default();
                 while !flag.load(Ordering::Acquire) {
                     // Two stage slots: the independent v2 roots really run
                     // together, each with its own backend and connections.
-                    let db = db_path.clone();
-                    let _ = runtime.block_on(crate::intel_recon::brief_stages::drain_parallel(
+                    let factory = make_backend.clone();
+                    report_drainer(
                         &db_path,
-                        &format!("{owner}:intel-brief"),
-                        move || {
-                            Box::new(crate::intel_recon::brief_stages::RuntimeBackend::load(&db))
-                                as Box<dyn crate::intel_recon::brief_stages::StageBackend + Send>
-                        },
-                        &flag,
-                        &config,
-                        crate::intel_recon::brief_stages::STAGE_SLOTS,
-                    ));
+                        "intel-brief",
+                        runtime.block_on(crate::intel_recon::brief_stages::drain_parallel(
+                            &db_path,
+                            &format!("{owner}:intel-brief"),
+                            move || factory(),
+                            &flag,
+                            &config,
+                            crate::intel_recon::brief_stages::STAGE_SLOTS,
+                        )),
+                    );
                     std::thread::sleep(Duration::from_millis(750));
                 }
             });
@@ -513,9 +605,13 @@ impl WorkerPool {
                     if elected {
                         let auth = crate::secrets::AuthFile::load().unwrap_or_default();
                         let settings = crate::provider::SettingsFile::load().unwrap_or_default();
-                        let _ = runtime.block_on(
-                            crate::investigation::insight_persist::recover_refreshes(
-                                &db_path, &auth, &settings, &flag,
+                        report_drainer(
+                            &db_path,
+                            "insight-refresh",
+                            runtime.block_on(
+                                crate::investigation::insight_persist::recover_refreshes(
+                                    &db_path, &auth, &settings, &flag,
+                                ),
                             ),
                         );
                     }
@@ -544,9 +640,13 @@ impl WorkerPool {
                         try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
                     });
                     if elected {
-                        let _ = runtime.block_on(crate::brain_scope::drain_scope_tasks(
-                            &db_path, &owner, &flag,
-                        ));
+                        report_drainer(
+                            &db_path,
+                            "brain-scope",
+                            runtime.block_on(crate::brain_scope::drain_scope_tasks(
+                                &db_path, &owner, &flag,
+                            )),
+                        );
                     }
                     std::thread::sleep(Duration::from_millis(750));
                 }
@@ -572,6 +672,38 @@ pub fn operation_kind(name: &str) -> OperationKind {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drainer_errors_surface_once_then_rate_limit_and_new_errors_pass() {
+        use std::time::Instant;
+        let mut seen = std::collections::HashMap::new();
+        let t0 = Instant::now();
+        assert!(super::should_surface(&mut seen, "intel-brief", "boom", t0));
+        assert!(!super::should_surface(
+            &mut seen,
+            "intel-brief",
+            "boom",
+            t0 + Duration::from_secs(1)
+        ));
+        assert!(super::should_surface(
+            &mut seen,
+            "intel-brief",
+            "different",
+            t0 + Duration::from_secs(2)
+        ));
+        assert!(super::should_surface(
+            &mut seen,
+            "brain-scope",
+            "different",
+            t0 + Duration::from_secs(2)
+        ));
+        assert!(super::should_surface(
+            &mut seen,
+            "intel-brief",
+            "different",
+            t0 + Duration::from_secs(2) + super::DRAINER_ERROR_REPEAT
+        ));
+    }
+
     use super::*;
     use tempfile::tempdir;
 

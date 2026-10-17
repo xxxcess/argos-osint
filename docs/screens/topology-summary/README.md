@@ -1,13 +1,13 @@
 # Topology neighborhood summary — screenshots (Phase 3)
 
-Actual-cell captures from `dump_brain_topology_screens` (`scripts/tui_review.py capture`, include `topology-summary-*`), fictional fixture data. Sizes are terminal cells: 160x50, 120x40, 100x32, 80x24, 60x18, 40x20, plus 60x20 (the real minimum, see below).
+Actual-cell captures from `dump_brain_topology_screens` (`scripts/tui_review.py capture`, include `topology-summary-*`), fictional fixture data. Ten representative captures of the full set (generated at 160x50, 120x40, 80x24 and 60x18; generating, blocked, failed, stale, limited, overflow). Re-capture the full matrix with `scripts/tui_review.py capture` (include `topology-summary-*`; sizes 160x50, 120x40, 100x32, 80x24, 60x20, 60x18, 40x20). 60x18 and 40x20 show only the existing too-small notice, so only one is kept.
 States: `generating`, `generated`, `blocked` (no usable Summarization model; Retry/Logs/Models), `failed` (rejected; Retry/Logs), `stale` (refresh failed, previous snapshot retained), `limited`, `overflow` (scrolled).
 
 ## Visual review (images read by an agent; no human or terminal-emulator pass)
 
 | Check | Result |
 | --- | --- |
-| 160x50, 120x40, 100x32: Summary/Record tab bar, one-or-two-row state label, markdown, Basis list, indicator, button row | pass |
+| 160x50, 120x40, 100x32: Summary/Record tab bar, one-or-two-row state label (now coloured per state), styled brief text, Basis list, indicator, button row | pass |
 | 80x24 (Details panel, stacked): tabs, label, scrolled content, `▲▼ rows a–b of n` indicator | pass |
 | Failure states keep the recorded brief and show Retry / View logs (+ Models when blocked) | pass |
 | Label wraps instead of clipping `limited coverage` / `refresh failed` | pass (defect found and fixed during review) |

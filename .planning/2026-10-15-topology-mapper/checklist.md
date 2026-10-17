@@ -1,6 +1,6 @@
 # Topology neighborhood summary checklist
 
-See the [final design](topology-scope-summary-plan.md) and [specification](topology-mapper.md#neighborhood-summary).
+See the [final design](../../docs/topology-scope-summary-plan.md) and [specification](../../docs/topology-mapper.md#neighborhood-summary).
 
 ## Phase 1 — brief, packet, cache (`d1c11c0`)
 - [x] Deterministic `NeighborhoodBrief` and typed `NeighborhoodInput` built in the topology read transaction
@@ -24,16 +24,23 @@ See the [final design](topology-scope-summary-plan.md) and [specification](topol
 - [x] Atomic replacement, no focus steal, obsolete results fenced
 - [x] Retry keeps content; generating/generated/failed/blocked/stale/limited labels
 - [x] History and tab/scroll restoration; compact Details and Back in too-small mode
-- [x] Screenshots at 160×50, 120×40, 100×32, 80×24, 60×18, 60×20, 40×20
+- [x] Representative screenshots (10) from the 160×50 to 60×18 matrix
 
 ## Phase 4 — docs and verification
 - [x] topology-mapper.md, diagram pair, architecture.md, tui-components.md, plan, this checklist
 - [x] graphify update
 - [x] PR #48 body rewritten; screenshots pinned to the final SHA
-- [x] Matrix: default, `--no-default-features`, `--no-default-features --features nlp` (fmt, Clippy, tests)
-- [x] Optional live Summarization check: result recorded in the PR body
+- [ ] CI matrix green on all four targets (macOS arm64/x86_64, Linux x86_64/aarch64) at the final SHA
+- [ ] Local matrix (default, `--no-default-features`, nlp) re-run on the final SHA
+- [ ] Live Summarization check (not run: no Summarization account configured)
 
 ## Known limits
 - 60×20 leaves two Summary content rows
 - Visual review was by image only; no human or live-terminal pass
 - Fixture generated text is canned
+
+## Phase 5 — review fixes
+- [x] Lease heartbeat load-tolerant; watcher bounded (deadline, poll errors, typed failures)
+- [x] Auth/settings/runtime load off the UI thread; idle tick loads nothing
+- [x] Rows cached; styled lines from the typed brief
+- [x] Docs trimmed, state diagram added, representative screenshots only

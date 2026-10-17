@@ -83,7 +83,7 @@ The brief **Jobs** pane shows the dependency chain summary followed by one space
 - **Stacked (<100 columns or <32 rows)**: Full-width `[Graph] [Details] [Controls]` TabBar pages.
 - **Tiny (<60×18 cells)**: Explicit minimum size guidance panel.
 
-The inspector body has **Summary** / **Record** `TabBar` content tabs (Summary default; `ContentTab` state, restored by history). Summary draws the brief with the shared markdown renderer in a `ScrollPane` with measured geometry, an overflow indicator, a wrapped state label and failure actions (Retry summary, View logs, Models). Typed basis rows are `Target::TopologyBasis` and open Record on activation. `compute_with(area, summary_active)` gives the Summary details panel 75% of inspector height (min 8, Relationships keeps ≥5).
+The inspector body has **Summary** / **Record** `TabBar` content tabs (Summary default; `ContentTab` state, restored by history). Summary draws styled lines built from the typed brief (cached per basis/generation/outcome/width) in a `ScrollPane` with measured geometry, an overflow indicator, a wrapped state label and failure actions (Retry summary, View logs, Models). Typed basis rows are `Target::TopologyBasis` and open Record on activation. `compute_with(area, summary_active)` gives the Summary details panel 75% of inspector height (min 8, Relationships keeps ≥5).
 
 `topology.rs` renders only immutable scoped snapshot nodes, edges and receipts;
 no sample graph or evidence substitutes for loading, empty or failed data.

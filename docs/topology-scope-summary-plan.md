@@ -1,6 +1,6 @@
 # Topology neighborhood summary: final design
 
-Status: implemented on `feat/topology-mapper-scope-summary` (PR #48, draft). This replaces the earlier model-written scope-summary proposal, which was reverted in `9c43c2c` (new table, worker, throttle and failure card). Spec baseline: `main` `66878bc`. Progress is tracked in the [checklist](topology-neighborhood-summary-checklist.md); behavior is specified in [topology-mapper.md](topology-mapper.md#neighborhood-summary).
+Status: implemented on `feat/topology-mapper-scope-summary` (PR #48, draft). This replaces the earlier model-written scope-summary proposal, which was reverted in `9c43c2c` (new table, worker, throttle and failure card). Spec baseline: `main` `66878bc`. Progress is tracked in `.planning/2026-10-15-topology-mapper/checklist.md`; behavior is specified in [topology-mapper.md](topology-mapper.md#neighborhood-summary).
 
 ## Outcome
 
@@ -51,8 +51,9 @@ The details panel takes 75% of the inspector height (min 8), leaving Relationshi
 | 1 | `d1c11c0` | Brief builder, typed packet, validator, cache/executor, snapshot fields |
 | 2 | `b55fcc1` | Scheduler role dispatch, lease/epoch fencing, truthful outcomes, `TopologySummaryLoaded`, delayed mock server |
 | 3 | `0b08923` | TUI tabs, watcher and states, history, tests, screenshots |
-| 4 | see PR | Docs, diagram pair, plan and checklist, full matrix, live check |
+| 4 | `1c6ca92` | Docs, diagram pair, plan, checklist, graphify |
+| 5 | `8920477`, then see PR | CI fixes (lease heartbeat, bounded watcher, worker-thread config load, lazy idle tick); render cache; docs trim |
 
 ## Verification
 
-Offline by default: fmt, strict Clippy and full tests with `ARGOS_EMBED` unset and `--locked` for default features, `--no-default-features` and `--no-default-features --features nlp`. Screenshots: `dump_brain_topology_screens` / `topology-summary-*` in [screens/topology-summary](screens/topology-summary/README.md), with visual review recorded separately from interaction tests. No live provider call is part of the default gate.
+CI (macOS Apple Silicon and Intel, Linux x86_64 and aarch64) is the gate of record; see the PR for its result. Offline by default: fmt, strict Clippy and full tests with `ARGOS_EMBED` unset and `--locked` for default features, `--no-default-features` and `--no-default-features --features nlp`. Screenshots: `dump_brain_topology_screens` / `topology-summary-*` in [screens/topology-summary](screens/topology-summary/README.md), with visual review recorded separately from interaction tests. No live provider call is part of the default gate.

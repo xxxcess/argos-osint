@@ -30,9 +30,9 @@
     "semantic_hash": "769b9d268d68d2b876cb64cebcc855f9"
   },
   "crates/argos-osint-bin/src/tui/app.rs": {
-    "mtime": 1792239673.7975686,
-    "seen": 1792240372.5386064,
-    "ast_hash": "72dc8748c1c3a03b883e4c57eb3394f7",
+    "mtime": 1792250500.589893,
+    "seen": 1792250868.7800446,
+    "ast_hash": "6edcabf8d3ea9405e2e1062b3aa3c09e",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/brain_detail.rs": {
@@ -450,9 +450,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/scheduler.rs": {
-    "mtime": 1792237530.0707598,
-    "seen": 1792240372.5388875,
-    "ast_hash": "31028e80bec65de87c9372b47baaa373",
+    "mtime": 1792250295.9138932,
+    "seen": 1792250868.7843935,
+    "ast_hash": "ed1c9ba011ac5ab3489288f075062259",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/secrets.rs": {
@@ -486,9 +486,9 @@
     "semantic_hash": "45cdfb0c86f1dbcab829532eea338d48"
   },
   "crates/argos-osint-core/src/summarization.rs": {
-    "mtime": 1792237372.0147598,
-    "seen": 1792240372.538893,
-    "ast_hash": "e2f2c15f1e7301626c27651f4220a1b6",
+    "mtime": 1792250244.701893,
+    "seen": 1792250868.7844923,
+    "ast_hash": "460f329d9a460083bca41224709bc4a7",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/summarization/exec.rs": {
@@ -876,9 +876,9 @@
     "semantic_hash": ""
   },
   "docs/README.md": {
-    "mtime": 1792240359.7335684,
-    "seen": 1792240372.5390072,
-    "ast_hash": "f0b10b913086acc52711411d1d340128",
+    "mtime": 1792250822.9698932,
+    "seen": 1792250868.7865317,
+    "ast_hash": "5bcdf2b3da75be914f3222472b6d6c2d",
     "semantic_hash": ""
   },
   "docs/concepts.md": {
@@ -894,9 +894,9 @@
     "semantic_hash": ""
   },
   "docs/diagrams.md": {
-    "mtime": 1792235250.7705915,
-    "seen": 1792240372.5390208,
-    "ast_hash": "6df18fae1e4eb0a9d79db15224752cbc",
+    "mtime": 1792250822.9698932,
+    "seen": 1792250868.786711,
+    "ast_hash": "90dd09574af6df0f69fa5ae7dc3c5a4e",
     "semantic_hash": ""
   },
   "docs/diagrams/agent-graphify.html": {
@@ -1608,9 +1608,9 @@
     "semantic_hash": ""
   },
   "docs/tui-components.md": {
-    "mtime": 1792240336.2495685,
-    "seen": 1792240372.5390658,
-    "ast_hash": "6944f73406fd82e16cbac748eb789d94",
+    "mtime": 1792250848.9898932,
+    "seen": 1792250868.7873561,
+    "ast_hash": "4ae96f23986c3ae814c413e5dd37aec2",
     "semantic_hash": ""
   },
   "docs/tui-design-spec.md": {
@@ -2538,15 +2538,15 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_stages.rs": {
-    "mtime": 1792235251.3345914,
-    "seen": 1792240372.5387263,
-    "ast_hash": "aa2941d89d3545ea0234d4507d911717",
+    "mtime": 1792250293.5458932,
+    "seen": 1792250868.7818384,
+    "ast_hash": "c427246ac496eb289be8200e4efc0d66",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_stages_tests.rs": {
-    "mtime": 1792235251.3425915,
-    "seen": 1792240372.5387282,
-    "ast_hash": "87c1a51ef0d50a639f179f6346b1d2f3",
+    "mtime": 1792250293.5458932,
+    "seen": 1792250868.7818396,
+    "ast_hash": "03c7c2a5af14fa9ad2955ceb78cb0fd8",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/clean_body.rs": {
@@ -3222,9 +3222,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/topology.rs": {
-    "mtime": 1792239608.5335684,
-    "seen": 1792240372.5386395,
-    "ast_hash": "b3b4a1635faf12c408c2218f70991c7b",
+    "mtime": 1792250718.145893,
+    "seen": 1792250868.780563,
+    "ast_hash": "771bb925715c880298d76093f39bd364",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/topology_layout.rs": {
@@ -3276,9 +3276,9 @@
     "semantic_hash": ""
   },
   "docs/topology-mapper.md": {
-    "mtime": 1792240336.2455685,
-    "seen": 1792240372.539063,
-    "ast_hash": "fa1abccbfab58547cac0d11d52036a92",
+    "mtime": 1792250848.9898932,
+    "seen": 1792250868.7873528,
+    "ast_hash": "2f7786ac6bcad30ebe375e737367e4c7",
     "semantic_hash": ""
   },
   "docs/tui-verification-topology-2026-10-15.md": {
@@ -3546,15 +3546,15 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain_neighborhood_brief_exec.rs": {
-    "mtime": 1792237372.0107598,
-    "seen": 1792240372.5386817,
-    "ast_hash": "a31b09da46b3a6075884e1977119b207",
+    "mtime": 1792250016.2778933,
+    "seen": 1792250868.7811618,
+    "ast_hash": "759989f02ee25cb1cc07ce263755270c",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain_neighborhood_brief_exec_tests.rs": {
-    "mtime": 1792237528.8667598,
-    "seen": 1792240372.5386827,
-    "ast_hash": "6a2a914ffcab84fd4c695ec0ca266db5",
+    "mtime": 1792249845.1578932,
+    "seen": 1792250868.7811632,
+    "ast_hash": "f4c775e4e5b0c1920e6745bca8c56a23",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain_neighborhood_brief_tests.rs": {
@@ -3588,21 +3588,15 @@
     "semantic_hash": ""
   },
   "docs/screens/topology-summary/README.md": {
-    "mtime": 1792239780.8815684,
-    "seen": 1792240372.5390573,
-    "ast_hash": "de936b17ad19c114577a0d0f94f7740b",
-    "semantic_hash": ""
-  },
-  "docs/topology-neighborhood-summary-checklist.md": {
-    "mtime": 1792240359.7215686,
-    "seen": 1792240372.5390642,
-    "ast_hash": "a7bf037a2897b69de05b9ac0fb704497",
+    "mtime": 1792250848.9898932,
+    "seen": 1792250868.7872734,
+    "ast_hash": "91429d819389727b03307cc1b1bbd013",
     "semantic_hash": ""
   },
   "docs/topology-scope-summary-plan.md": {
-    "mtime": 1792240359.7215686,
-    "seen": 1792240372.539065,
-    "ast_hash": "5a6b128e93e14ab7e8b4326cc59b6e7a",
+    "mtime": 1792250848.9898932,
+    "seen": 1792250868.7873545,
+    "ast_hash": "c0f145190ed16f5692a03126d21f3323",
     "semantic_hash": ""
   },
   "docs/screens/request-mode/after/defaults-claim_assessor-provider-popup.png": {
@@ -3629,298 +3623,82 @@
     "ast_hash": "9714a760ae966c696428c5df8d4dabe0",
     "semantic_hash": ""
   },
-  "docs/screens/topology-summary/topology-summary-blocked-100x32.png": {
-    "mtime": 1792239780.8695686,
-    "seen": 1792240372.5391881,
-    "ast_hash": "c35b27c62bbfd347cc15e77abc81453b",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-blocked-120x40.png": {
-    "mtime": 1792239780.8695686,
-    "seen": 1792240372.539189,
-    "ast_hash": "f67d9abf4d417dcbd1ceda0f1591cac1",
-    "semantic_hash": ""
-  },
   "docs/screens/topology-summary/topology-summary-blocked-160x50.png": {
-    "mtime": 1792239780.8695686,
-    "seen": 1792240372.5391903,
-    "ast_hash": "320475c726f6ad40dc5590786966d473",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-blocked-40x20.png": {
-    "mtime": 1792239780.8695686,
-    "seen": 1792240372.539191,
-    "ast_hash": "826b359c7d9f7913d50014e1b48334f6",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-blocked-60x18.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5391917,
-    "ast_hash": "fe6b1a0e94dfff9bbbc14faa7ca6ef6a",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-blocked-60x20.png": {
-    "mtime": 1792239780.8775685,
-    "seen": 1792240372.5391924,
-    "ast_hash": "c2be8a3b1353ace50aa236332018cea6",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-blocked-80x24.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5391932,
-    "ast_hash": "ded1b3b3f13f170161a40e30654d6214",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-failed-100x32.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5391939,
-    "ast_hash": "e05429aec77f369613b4d22595f1ab1b",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-failed-120x40.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5391948,
-    "ast_hash": "df95e1139195d3133c2cfc635d45c576",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-failed-160x50.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5391955,
-    "ast_hash": "ffdd609cb5446a0a7cb4f1677bf91765",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-failed-40x20.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5391965,
-    "ast_hash": "826b359c7d9f7913d50014e1b48334f6",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-failed-60x18.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5391972,
-    "ast_hash": "fe6b1a0e94dfff9bbbc14faa7ca6ef6a",
+    "mtime": 1792250797.6898932,
+    "seen": 1792250868.7896469,
+    "ast_hash": "1fc61446d85d3964ac7039c8b9d74f57",
     "semantic_hash": ""
   },
   "docs/screens/topology-summary/topology-summary-failed-60x20.png": {
-    "mtime": 1792239780.8775685,
-    "seen": 1792240372.539198,
-    "ast_hash": "d3c833f48cc32917a056ac0b653677d9",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-failed-80x24.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5391986,
-    "ast_hash": "6d66803f0f9876617b99cd3c0cb3b310",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-generated-100x32.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5391998,
-    "ast_hash": "5ad66f6a1bc70b48e4ec2c98af3dd231",
+    "mtime": 1792250797.6898932,
+    "seen": 1792250868.7896485,
+    "ast_hash": "3882ad099a3d3cbaf7cc2d8f0cddab42",
     "semantic_hash": ""
   },
   "docs/screens/topology-summary/topology-summary-generated-120x40.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392005,
-    "ast_hash": "d38a58ea8dbf6686e09ac0acddbb6eee",
+    "mtime": 1792250797.6858933,
+    "seen": 1792250868.78965,
+    "ast_hash": "06bba1945682010792686e239db8c093",
     "semantic_hash": ""
   },
   "docs/screens/topology-summary/topology-summary-generated-160x50.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392013,
-    "ast_hash": "fa6169fb78b2839c065ebf4d2eae9c32",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-generated-40x20.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.539202,
-    "ast_hash": "826b359c7d9f7913d50014e1b48334f6",
+    "mtime": 1792250797.681893,
+    "seen": 1792250868.7896514,
+    "ast_hash": "d9694f95981f53e5225cf72d89575b7a",
     "semantic_hash": ""
   },
   "docs/screens/topology-summary/topology-summary-generated-60x18.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.539203,
+    "mtime": 1792250797.6938932,
+    "seen": 1792250868.7896528,
     "ast_hash": "fe6b1a0e94dfff9bbbc14faa7ca6ef6a",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-generated-60x20.png": {
-    "mtime": 1792239780.8775685,
-    "seen": 1792240372.539204,
-    "ast_hash": "b74d5ecf3bb4a90c5d1d8dc871063d24",
     "semantic_hash": ""
   },
   "docs/screens/topology-summary/topology-summary-generated-80x24.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392046,
-    "ast_hash": "4addb91c6ad18d38ec56e56e0a1506a7",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-generating-100x32.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.539205,
-    "ast_hash": "900785c62ca9235fd1e60b6609ee4b1b",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-generating-120x40.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392058,
-    "ast_hash": "70a3d3a13f098c9f1ae5a95a7247eb6b",
+    "mtime": 1792250797.6858933,
+    "seen": 1792250868.7896543,
+    "ast_hash": "c29525cf7b1daff537ee252cdb04bab2",
     "semantic_hash": ""
   },
   "docs/screens/topology-summary/topology-summary-generating-160x50.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.539207,
-    "ast_hash": "17ddefdaaaca57719e743f87fd260383",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-generating-40x20.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.539208,
-    "ast_hash": "826b359c7d9f7913d50014e1b48334f6",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-generating-60x18.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392084,
-    "ast_hash": "fe6b1a0e94dfff9bbbc14faa7ca6ef6a",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-generating-60x20.png": {
-    "mtime": 1792239780.8775685,
-    "seen": 1792240372.5392091,
-    "ast_hash": "b027510fb39e300795e239b2c4d26069",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-generating-80x24.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.53921,
-    "ast_hash": "d1d784cdf67a8a93c0ca0b38b623a148",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-limited-100x32.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392108,
-    "ast_hash": "0890db545cf44e434f5595e66235b6d2",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-limited-120x40.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392115,
-    "ast_hash": "5e554f12159fc0e721457f0acc6705e2",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-limited-160x50.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392122,
-    "ast_hash": "2988fe68036144d9268a390dd5c2cc8c",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-limited-40x20.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.539213,
-    "ast_hash": "826b359c7d9f7913d50014e1b48334f6",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-limited-60x18.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.539214,
-    "ast_hash": "fe6b1a0e94dfff9bbbc14faa7ca6ef6a",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-limited-60x20.png": {
-    "mtime": 1792239780.8775685,
-    "seen": 1792240372.5392146,
-    "ast_hash": "acd4f8862a4d750d39961e996dae8b76",
+    "mtime": 1792250797.6858933,
+    "seen": 1792250868.789656,
+    "ast_hash": "433a7edae545cc621e049995d7922b25",
     "semantic_hash": ""
   },
   "docs/screens/topology-summary/topology-summary-limited-80x24.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392156,
-    "ast_hash": "c547c7e9e11f4fedd758746ca4fdedec",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-overflow-100x32.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392163,
-    "ast_hash": "f3863e7b8287e495adacc7c7669bc6ad",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-overflow-120x40.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392172,
-    "ast_hash": "898950ff8b760645a2d9d55c592bab06",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-overflow-160x50.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392182,
-    "ast_hash": "0a9b4ad72346d7a8867b55f6c662a4d9",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-overflow-40x20.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.539219,
-    "ast_hash": "826b359c7d9f7913d50014e1b48334f6",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-overflow-60x18.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392196,
-    "ast_hash": "fe6b1a0e94dfff9bbbc14faa7ca6ef6a",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-overflow-60x20.png": {
-    "mtime": 1792239780.8775685,
-    "seen": 1792240372.5392208,
-    "ast_hash": "a26e4c4fe2c3381f47bc2d7da5519c8c",
+    "mtime": 1792250797.6938932,
+    "seen": 1792250868.789657,
+    "ast_hash": "17d82366fb0868fe508b39d9556e370c",
     "semantic_hash": ""
   },
   "docs/screens/topology-summary/topology-summary-overflow-80x24.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392215,
-    "ast_hash": "3491a60785bc38e84a9126870b0c26d7",
+    "mtime": 1792250797.6938932,
+    "seen": 1792250868.7896583,
+    "ast_hash": "b41ae365fd01760d12b44a8db9298376",
     "semantic_hash": ""
   },
   "docs/screens/topology-summary/topology-summary-stale-100x32.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392222,
-    "ast_hash": "c7cb08ef6a6fec84813b3d2f12cc3e15",
+    "mtime": 1792250797.6898932,
+    "seen": 1792250868.7896595,
+    "ast_hash": "cf8d25315555234ceb34d5490bcc6378",
     "semantic_hash": ""
   },
-  "docs/screens/topology-summary/topology-summary-stale-120x40.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.539223,
-    "ast_hash": "14d0d97ed95fd3e59c9312d21191b37e",
+  ".planning/2026-10-15-topology-mapper/checklist.md": {
+    "mtime": 1792250856.645893,
+    "seen": 1792250868.786114,
+    "ast_hash": "1b8fb33d6248026f8df53639b1fc6193",
     "semantic_hash": ""
   },
-  "docs/screens/topology-summary/topology-summary-stale-160x50.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.539224,
-    "ast_hash": "3df8ba23e227ccaa4d4925a8ed0e24c1",
+  "docs/diagrams/topology-summary-states.html": {
+    "mtime": 1792250822.9698932,
+    "seen": 1792250868.7870576,
+    "ast_hash": "d932592753220d624dc332b124e602fe",
     "semantic_hash": ""
   },
-  "docs/screens/topology-summary/topology-summary-stale-40x20.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392249,
-    "ast_hash": "826b359c7d9f7913d50014e1b48334f6",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-stale-60x18.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392253,
-    "ast_hash": "fe6b1a0e94dfff9bbbc14faa7ca6ef6a",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-stale-60x20.png": {
-    "mtime": 1792239780.8775685,
-    "seen": 1792240372.5392263,
-    "ast_hash": "7e989d7e168bb9a0332aecde8860cc9d",
-    "semantic_hash": ""
-  },
-  "docs/screens/topology-summary/topology-summary-stale-80x24.png": {
-    "mtime": 1792239780.8735685,
-    "seen": 1792240372.5392272,
-    "ast_hash": "ddf146cd012bd737f5f86351a640473f",
+  "docs/diagrams/topology-summary-states.svg": {
+    "mtime": 1792250822.9658933,
+    "seen": 1792250868.7879376,
+    "ast_hash": "a2959daa588d120e3ee78b4bc37c6567",
     "semantic_hash": ""
   }
 }

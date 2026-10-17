@@ -17,7 +17,8 @@ fn test_store() -> (tempfile::TempDir, Store) {
 async fn enqueue_and_drain_scope_analysis_creates_inferences_and_links() {
     let (dir, store) = test_store();
     let db_path = dir.path().join("test.db");
-    let now = "2026-10-14T20:00:00Z";
+    // Claims only lease jobs inside a 3-day window, so a fixed date rots.
+    let now = &chrono::Utc::now().to_rfc3339();
 
     // Migrate tasks tables
     tasks::migrate_tables(&store.conn).unwrap();

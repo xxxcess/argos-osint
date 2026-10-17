@@ -36,6 +36,13 @@ pub struct TopologyLayoutResult {
 
 impl TopologyLayoutResult {
     pub fn compute(area: Rect) -> Self {
+        Self::compute_with(area, false)
+    }
+
+    /// `summary_active` gives the inspector's details panel (Summary tab) 75%
+    /// of the inspector height instead of 55%, always leaving the
+    /// Relationships panel at least five rows.
+    pub fn compute_with(area: Rect, summary_active: bool) -> Self {
         let mode = if area.width < 60 || area.height < 18 {
             TopologyResponsiveMode::Tiny
         } else if area.width >= 132 && area.height >= 32 {
@@ -83,8 +90,8 @@ impl TopologyLayoutResult {
         } else {
             content
         };
-        let detail_height = (inspector.height * 55 / 100)
-            .max(7)
+        let detail_height = (inspector.height * if summary_active { 75 } else { 55 } / 100)
+            .max(if summary_active { 8 } else { 7 })
             .min(inspector.height.saturating_sub(5));
         let inspector_details = Rect::new(inspector.x, inspector.y, inspector.width, detail_height);
         let inspector_related = Rect::new(

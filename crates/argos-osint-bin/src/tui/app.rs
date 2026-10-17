@@ -7259,7 +7259,9 @@ impl App {
                 }
             });
         } else {
-            // In-memory fixtures: one synchronous publish, no polling thread.
+            // Fixture-only: production always sets `background_db` (see `App::new`);
+            // only the test constructor leaves it `None`, so this blocking load never
+            // runs on the real UI thread.
             let mut events = Vec::new();
             let cell = std::cell::RefCell::new(&mut events);
             let runtime = load_summary_runtime();
@@ -23259,6 +23261,26 @@ mod tests {
         app.topology_state.summary.generation += 1;
         let d = summary_rows(&app.topology_state, false, None, 40);
         assert!(!Rc::ptr_eq(&c, &d));
+        // A failure kind rebuilds; the message text is not part of the key.
+        use argos_osint_core::brain_neighborhood_brief_exec::{FailureKind, GenerationFailure};
+        app.topology_state.summary.gen = SummaryGen::Failed(GenerationFailure {
+            kind: FailureKind::Timeout,
+            message: "first".into(),
+        });
+        let f1 = summary_rows(&app.topology_state, false, None, 40);
+        assert!(!Rc::ptr_eq(&d, &f1));
+        app.topology_state.summary.gen = SummaryGen::Failed(GenerationFailure {
+            kind: FailureKind::Rejected,
+            message: "first".into(),
+        });
+        let f2 = summary_rows(&app.topology_state, false, None, 40);
+        assert!(!Rc::ptr_eq(&f1, &f2), "a different kind rebuilds");
+        app.topology_state.summary.gen = SummaryGen::Failed(GenerationFailure {
+            kind: FailureKind::Rejected,
+            message: "second".into(),
+        });
+        let f3 = summary_rows(&app.topology_state, false, None, 40);
+        assert!(Rc::ptr_eq(&f2, &f3), "same kind and generation reuse rows");
         // Scrolling reuses the cache: no rebuild between wheel steps.
         render(&mut app, 120, 40);
         let before = summary_rows(&app.topology_state, false, None, 33);

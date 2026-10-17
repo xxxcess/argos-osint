@@ -1156,39 +1156,64 @@ fn failure_note(failure: &GenerationFailure) -> String {
     }
 }
 
+/// Small, allocation-free identity of one built rows list. Equal keys mean
+/// the rows would be identical. The failure message is deliberately not part
+/// of it: a failure arrives once, as a `Pending -> Failed` transition that
+/// changes `gen`, and a retry bumps `generation`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SummaryRowsKey {
+    basis: u64,
+    generation: u64,
+    /// 0 idle, 1 pending, 2 generated, 3 failed.
+    gen: u8,
+    failure_kind: Option<&'static str>,
+    width: u16,
+    loading: bool,
+    error: u64,
+    has_snapshot: bool,
+    has_seed: bool,
+}
+
+fn hash_of(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
 /// Rows cache of the Summary pane, valid for one exact key.
 #[derive(Clone, Debug, Default)]
 pub struct SummaryRowsCache {
-    key: String,
+    key: SummaryRowsKey,
     rows: Rc<Vec<SummaryRow>>,
 }
 
 /// All rows of the Summary pane at `width`. Built once per distinct
-/// (basis, generated/fallback, request generation, failure, width, loading,
-/// error) and then shared by draw, wheel and keyboard scrolling.
+/// (basis, generated/fallback, request generation, failure kind, width,
+/// loading, error) and then shared by draw, wheel and keyboard scrolling.
 pub fn summary_rows(
     state: &TopologyState,
     loading: bool,
     error: Option<&str>,
     width: u16,
 ) -> Rc<Vec<SummaryRow>> {
-    let gen_tag = match &state.summary.gen {
-        SummaryGen::Idle => "idle".to_string(),
-        SummaryGen::Pending => "pending".to_string(),
-        SummaryGen::Generated(_) => "generated".to_string(),
-        SummaryGen::Failed(f) => format!("failed:{}:{}", f.kind.as_str(), f.message),
+    let (gen, failure_kind) = match &state.summary.gen {
+        SummaryGen::Idle => (0, None),
+        SummaryGen::Pending => (1, None),
+        SummaryGen::Generated(_) => (2, None),
+        SummaryGen::Failed(f) => (3, Some(f.kind.as_str())),
     };
-    let key = format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}",
-        state.summary.basis_key,
-        state.summary.generation,
-        gen_tag,
+    let key = SummaryRowsKey {
+        basis: hash_of(&state.summary.basis_key),
+        generation: state.summary.generation,
+        gen,
+        failure_kind,
         width,
         loading,
-        error.unwrap_or(""),
-        state.snapshot.is_some(),
-        state.seed.is_some(),
-    );
+        error: error.map(hash_of).unwrap_or(0),
+        has_snapshot: state.snapshot.is_some(),
+        has_seed: state.seed.is_some(),
+    };
     if let Some(hit) = state
         .summary_rows_cache
         .borrow()

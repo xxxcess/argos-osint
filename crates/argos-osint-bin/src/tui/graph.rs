@@ -223,7 +223,7 @@ pub fn summary_inner(area: Rect) -> Rect {
     inset(area)
 }
 
-fn summary_lines(text: &str, width: usize) -> Vec<Line<'static>> {
+pub(super) fn summary_lines(text: &str, width: usize) -> Vec<Line<'static>> {
     markdown::markdown_lines(text, width.max(1))
         .into_iter()
         .map(|line| {

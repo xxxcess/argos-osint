@@ -492,10 +492,14 @@ references. Unindexed records retain source-scoped identity without writing data
 - **TUI delivery**: One background read at a time coalesces superseded requests. Generation/seed fences reject late loads; `Store::memories_changed_seq` supplies the mutation sequence. The canvas, inspector, relationship rows and counts render the same snapshot, with no database access during drawing. Shared pure geometry owns visible target rectangles. Selection inspects; explicit recenter pushes history; Back restores its origin.
 - **Background Scope Analysis**: Explicit candidate proposal and link assessment executes on dedicated worker pool `POOL_BRAIN_SCOPE = "brain_scope"` (`scheduler.rs`, `tasks.rs`). The worker uses `Store::open_light`, validates canonical premises/actors, writes inference memory and metadata, and writes qualified Links. These are separate writes rather than an atomic brief publication. Retained-source projections are not eligible canonical premises.
 
+- **Scope summary**: `topology_summary.rs` (pure) derives the scope key (seed key, depth, cycle, filters), the graph version (hash of visible nodes and edges, ignoring selection, pan, zoom, order and `memory_changed_seq`), the digest (adds mode, provider, model, prompt version) and the deterministic markdown. `topology_summary_run.rs` plans read-only and generates through the Summarization role (`complete_summary_report`, a registered job, `topology_summary.*` events, `argos_graph_explanations` failure/running records keyed `topology:{scope_key}`): an exact digest younger than 7 days is reused; same-scope content change plus brain-wide churn waits 10 minutes; a failed digest cools down 120 s; no route keeps the deterministic text. Rows live in `topology_scope_summaries` (schema 43, newest 50 per seed, deleted with the seed). The TUI spawns the worker only after a snapshot or filter change is accepted, never in draw, and displays a result only when its digest matches the current scope; a late result for an old scope is saved, not shown.
+
 The [topology mapper specification](topology-mapper.md) defines entry identity,
 responsive layout, interaction and coverage contracts.
 
 [![Brain memory topology](diagrams/brain-topology.svg)](diagrams/brain-topology.html)
+
+[![Topology scope summary](diagrams/topology-scope-summary.svg)](diagrams/topology-scope-summary.html)
 
 ## Intel reports
 

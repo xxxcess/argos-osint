@@ -825,7 +825,7 @@ pub enum PlannedAction {
     Generate,
     Running,
     Throttled(std::time::Duration),
-    Cooling(String),
+    Cooling(Box<argos_osint_core::store::ExplanationRecord>),
     Unavailable(String),
 }
 
@@ -7153,6 +7153,8 @@ impl App {
         summary.graph_version = version;
         summary.digest.clear();
         summary.notice.clear();
+        summary.failure = None;
+        summary.details_open = false;
         summary.retry_after = None;
         summary.phase = super::scope_summary::SummaryPhase::Idle;
         summary.request = summary.request.wrapping_add(1);
@@ -7195,7 +7197,7 @@ impl App {
                 run::Action::None => PlannedAction::Reuse,
                 run::Action::Generate { .. } => PlannedAction::Generate,
                 run::Action::Throttled { retry_in } => PlannedAction::Throttled(*retry_in),
-                run::Action::Cooling(rec) => PlannedAction::Cooling(rec.reason.clone()),
+                run::Action::Cooling(rec) => PlannedAction::Cooling(rec.clone()),
                 run::Action::Running => PlannedAction::Running,
                 run::Action::Unavailable(why) => PlannedAction::Unavailable(why.clone()),
             };
@@ -7272,6 +7274,7 @@ impl App {
                 current.digest = digest;
                 current.saved = saved;
                 current.notice.clear();
+                current.failure = None;
                 current.phase = match action {
                     PlannedAction::Reuse => P::Ready,
                     PlannedAction::Generate | PlannedAction::Running => P::Writing,
@@ -7281,10 +7284,10 @@ impl App {
                             super::scope_summary::ScopeSummaryState::throttle_note(retry_in);
                         P::Stale
                     }
-                    PlannedAction::Cooling(reason) => {
-                        current.notice = format!(
-                            "The last summary attempt failed ({reason}). Retry to try again"
-                        );
+                    PlannedAction::Cooling(rec) => {
+                        current.failure =
+                            Some(super::summary_card::SummaryFailure::from_record(&rec));
+                        current.details_open = false;
                         P::Failed
                     }
                     PlannedAction::Unavailable(why) => {
@@ -7301,7 +7304,15 @@ impl App {
                     return false;
                 }
                 current.phase = P::Failed;
-                current.notice = format!("Summary could not start: {err}");
+                current.details_open = false;
+                current.failure = Some(super::summary_card::SummaryFailure::local(
+                    "topology",
+                    &argos_osint_core::provider_diag::ProviderFailure::from_error(
+                        argos_osint_core::provider_diag::Stage::Configuration,
+                        argos_osint_core::provider_diag::Category::Configuration,
+                        &std::io::Error::other(err.clone()),
+                    ),
+                ));
                 self.push_log_detail("error", "Topology: scope summary could not start", err);
                 true
             }
@@ -7332,6 +7343,7 @@ impl App {
                         });
                         current.phase = P::Ready;
                         current.notice.clear();
+                        current.failure = None;
                     }
                     ExplainOutcome::Superseded(why) => {
                         current.phase = P::Stale;
@@ -7339,11 +7351,11 @@ impl App {
                     }
                     ExplainOutcome::Failed(failure) => {
                         current.phase = P::Failed;
-                        current.notice = format!(
-                            "Summary failed: {}. Retry, or see Logs (job {})",
-                            failure.category.reason(),
-                            super::logs::short_id(&report.job_id)
-                        );
+                        current.details_open = false;
+                        current.scroll = 0;
+                        current.failure = Some(super::summary_card::SummaryFailure::from_report(
+                            &report, failure,
+                        ));
                         let detail = failure.message.clone();
                         self.push_log_detail("error", "Topology: scope summary failed", detail);
                     }
@@ -8530,10 +8542,33 @@ impl App {
 
     /// Brain summary card actions.
     fn activate_summary_card(&mut self, button: ButtonId) -> Result<String> {
-        let Some(failure) = self.summary_failure.clone() else {
+        // The same card serves the Brain graph summary and the topology scope
+        // summary; the focused view decides which failure it acts on.
+        let topology =
+            self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Topology;
+        let failure = if topology {
+            self.topology_state.summary.failure.clone()
+        } else {
+            self.summary_failure.clone()
+        };
+        let Some(failure) = failure else {
             return Ok("No summary failure".into());
         };
         match button {
+            ButtonId::SummaryDetails if topology => {
+                let summary = &mut self.topology_state.summary;
+                summary.details_open = !summary.details_open;
+                summary.scroll = 0;
+                Ok(if summary.details_open {
+                    "Summary failure details".into()
+                } else {
+                    "Details hidden".into()
+                })
+            }
+            ButtonId::SummaryRetry if topology => {
+                self.sync_scope_summary(true);
+                Ok("Retrying scope summary…".into())
+            }
             ButtonId::SummaryDetails => {
                 self.summary_details_open = !self.summary_details_open;
                 self.scrolls.summary = 0;
@@ -22576,6 +22611,25 @@ mod tests {
         app
     }
 
+    fn failed_record() -> Box<argos_osint_core::store::ExplanationRecord> {
+        Box::new(argos_osint_core::store::ExplanationRecord {
+            memory_id: "topology:scope".into(),
+            job_id: "job-topology-0001".into(),
+            request_id: "req-topology".into(),
+            cache_key: "digest".into(),
+            state: "failed".into(),
+            category: "auth".into(),
+            reason: "provider rejected the credentials · HTTP 401".into(),
+            guidance: "Check the Summarization API key in Models, then retry.".into(),
+            needs_config: true,
+            retryable: false,
+            attempts: 1,
+            event_id: "event-topology-0001".into(),
+            diagnostic_json: "{}".into(),
+            updated_at: "2026-10-16T12:00:00Z".into(),
+        })
+    }
+
     fn long_summary() -> String {
         let mut text = String::from("## In scope\n\n**Harbor contract shifted** is the seed, with eight records around it.\n\n## Connections\n\n");
         for n in 1..=14 {
@@ -22953,11 +23007,168 @@ mod tests {
         };
         app.on_scope_summary(request, scope, failed);
         assert_eq!(app.topology_state.summary.phase, P::Failed);
-        assert!(app
-            .topology_state
-            .summary
-            .notice
-            .contains(&super::super::logs::short_id("job-1234567890")));
+        let card = app.topology_state.summary.failure.as_ref().unwrap();
+        assert_eq!(card.job_id, "job-1234567890");
+        assert!(card.details.iter().any(|d| d.contains("job-1234567890")));
+    }
+
+    #[test]
+    fn topology_failure_uses_the_brain_failure_card_with_working_actions() {
+        use super::super::scope_summary::SummaryPhase as P;
+        let planned = |app: &mut App| {
+            app.sync_scope_summary(true);
+            let request = app.topology_state.summary.request;
+            let scope = app.topology_state.summary.scope_key.clone();
+            app.on_scope_summary(
+                request,
+                scope,
+                ScopeSummaryStage::Planned {
+                    digest: "digest".into(),
+                    saved: None,
+                    action: PlannedAction::Cooling(failed_record()),
+                },
+            );
+        };
+        // Desktop panel, compact panel, and both stacked Summary pages.
+        for (w, h, page) in [
+            (160u16, 50u16, false),
+            (100, 32, false),
+            (80, 24, true),
+            (60, 18, true),
+        ] {
+            let mut app = topology_fixture();
+            planned(&mut app);
+            assert_eq!(app.topology_state.summary.phase, P::Failed);
+            // The screen size decides whether the Summary tab exists.
+            render(&mut app, w, h + 2);
+            if page {
+                app.activate_target(Target::TopologyPanel(super::super::topology::SUMMARY_TAB));
+            }
+            let text = buffer_text(&render(&mut app, w, h + 2));
+            assert!(
+                text.contains("AI summary failed"),
+                "{w}x{h} phase={:?}\n{text}",
+                app.topology_state.summary.phase
+            );
+            assert!(
+                text.contains("provider rejected the credentials"),
+                "{w}x{h}"
+            );
+            for button in [
+                ButtonId::SummaryDetails,
+                ButtonId::SummaryLogs,
+                ButtonId::SummaryJob,
+                ButtonId::SummaryRetry,
+                ButtonId::SummaryModels,
+            ] {
+                let rect = app
+                    .layout
+                    .borrow()
+                    .entries
+                    .iter()
+                    .find(|e| e.target == Target::Button(button))
+                    .map(|e| e.rect);
+                let rect = rect.unwrap_or_else(|| panic!("{button:?} registered at {w}x{h}"));
+                assert_eq!(
+                    super::super::ui::hit_test(&app, rect.x, rect.y),
+                    Some(Target::Button(button)),
+                    "{button:?} {w}x{h}"
+                );
+            }
+        }
+        let mut app = topology_fixture();
+        planned(&mut app);
+        render(&mut app, 160, 52);
+        // View details toggles the diagnostic lines; the Brain flag is untouched.
+        app.activate_target(Target::Button(ButtonId::SummaryDetails));
+        assert!(app.topology_state.summary.details_open && !app.summary_details_open);
+        let text = buffer_text(&render(&mut app, 160, 52));
+        assert!(text.contains("Hide details"));
+        // Retry replans for the topology scope (not the Brain memory).
+        let before = app.topology_state.summary.request;
+        app.activate_target(Target::Button(ButtonId::SummaryRetry));
+        assert_eq!(app.topology_state.summary.request, before + 1);
+        assert!(
+            app.topology_state.summary.failure.is_none(),
+            "cleared while retrying"
+        );
+        // Open Models routes to the Summarization role.
+        planned(&mut app);
+        app.activate_target(Target::Button(ButtonId::SummaryModels));
+        assert_eq!(app.module, Some(ModuleId::Providers));
+    }
+
+    /// End to end through the offline mock provider: a scope change writes a
+    /// markdown narrative once, a return to the scope reuses it with no
+    /// request, and a failing provider yields the failure card.
+    #[test]
+    fn scope_summary_worker_writes_reuses_and_fails_through_the_mock_provider() {
+        use super::super::scope_summary::SummaryPhase as P;
+        use argos_osint_core::provider_attempt::mock::{ok_json, Reply};
+        let mut app = topology_fixture();
+        let fx = summary_fixture(
+            &mut app,
+            vec![
+                ok_json(
+                    "## In scope\n\n**Harbor contract shifted** links to *Aster Logistics*.",
+                    "stop",
+                ),
+                Reply::Json(401, AUTH_401.into()),
+            ],
+        );
+        let _enter = fx.rt.enter();
+        let settle = |app: &mut App, done: fn(P) -> bool| {
+            for _ in 0..400 {
+                fx.rt
+                    .block_on(tokio::time::sleep(Duration::from_millis(25)));
+                while let Ok(event) = app.work_rx.try_recv() {
+                    app.on_work_event(event);
+                }
+                if done(app.topology_state.summary.phase) {
+                    return;
+                }
+            }
+            panic!(
+                "scope summary never settled: {:?}",
+                app.topology_state.summary.phase
+            );
+        };
+        app.topology_state.summary = Default::default();
+        app.sync_scope_summary(false);
+        assert_eq!(
+            app.topology_state.summary.phase,
+            P::Idle,
+            "deterministic text first"
+        );
+        assert!(!app.topology_state.summary.deterministic.is_empty());
+        settle(&mut app, |p| p == P::Ready);
+        let saved = app.topology_state.summary.saved.clone().unwrap();
+        assert!(saved.text.contains("**Harbor contract shifted**"));
+        assert_eq!(fx.server.hits(), 1);
+        let text = buffer_text(&render(&mut app, 160, 52));
+        assert!(text.contains("AI summary") && !text.contains("**"));
+        // Filter away (new scope, second scripted reply is a 401) ...
+        app.activate_target(Target::TopologyFilter(0));
+        settle(&mut app, |p| p == P::Failed);
+        assert!(app.topology_state.summary.failure.is_some());
+        let text = buffer_text(&render(&mut app, 160, 52));
+        assert!(text.contains("AI summary failed"));
+        // ... and back: the saved narrative for the first scope is reused, no request.
+        let hits = fx.server.hits();
+        app.activate_target(Target::TopologyFilter(0));
+        settle(&mut app, |p| p == P::Ready);
+        assert_eq!(fx.server.hits(), hits);
+        assert_eq!(app.topology_state.summary.saved.unwrap().text, saved.text);
+        // The job and the failed record were persisted for Logs.
+        let store = Store::open(&fx.db).unwrap();
+        assert!(store
+            .graph_explanation_record(&format!(
+                "topology:{}",
+                app.topology_state.summary.scope_key
+            ))
+            .unwrap()
+            .is_some());
+        super::super::tracked::testing::use_db(None);
     }
 
     /// Scope summary screenshots (all states, long and scrolled content, each
@@ -23032,11 +23243,7 @@ mod tests {
                 )
             }),
             ("failed", |app, plan, _| {
-                plan(
-                    app,
-                    None,
-                    PlannedAction::Cooling("provider rejected the credentials".into()),
-                )
+                plan(app, None, PlannedAction::Cooling(failed_record()))
             }),
             ("unavailable", |app, plan, _| {
                 plan(
@@ -23058,6 +23265,26 @@ mod tests {
                     app.activate_target(Target::TopologyPanel(super::super::topology::SUMMARY_TAB));
                     dump_cells(&mut app, &dir, &format!("page-{name}-{w}x{h}"), w, h + 2);
                 }
+            }
+            let mut app = topology_fixture();
+            plan(&mut app, None, PlannedAction::Cooling(failed_record()));
+            app.activate_target(Target::Button(ButtonId::SummaryDetails));
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("summary-failed-details-{w}x{h}"),
+                w,
+                h + 2,
+            );
+            if stacked {
+                app.activate_target(Target::TopologyPanel(super::super::topology::SUMMARY_TAB));
+                dump_cells(
+                    &mut app,
+                    &dir,
+                    &format!("page-failed-details-{w}x{h}"),
+                    w,
+                    h + 2,
+                );
             }
             let mut app = topology_fixture();
             plan(&mut app, saved(&long), PlannedAction::Reuse);

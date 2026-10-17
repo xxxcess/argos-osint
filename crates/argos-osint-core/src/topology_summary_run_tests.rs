@@ -350,3 +350,58 @@ fn the_brief_is_bounded_and_fenced() {
     assert!(b.contains("more nodes") && b.contains("more relationships"));
     assert!(b.lines().count() < 330);
 }
+
+/// One real request through the installed Summarization route. Run manually:
+/// `ARGOS_LIVE_TOPOLOGY=1 cargo test -p argos-osint-core live_topology -- --ignored --nocapture`
+/// Prints only the route (provider kind, model, host) and the outcome, never a key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn live_topology_summary_through_the_installed_summarization_route() {
+    if std::env::var("ARGOS_LIVE_TOPOLOGY").is_err() {
+        return;
+    }
+    let auth = crate::secrets::AuthFile::load().unwrap();
+    let settings = crate::provider::SettingsFile::load().unwrap();
+    let secret = crate::provider::role_secret(&auth, &settings, "summarization").unwrap();
+    let host = url::Url::parse(&secret.base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_default();
+    println!(
+        "route: kind={} model={} host={host} key_present={}",
+        crate::provider::effective_kind(&secret),
+        secret.model,
+        secret.api_key.as_deref().is_some_and(|k| !k.is_empty())
+    );
+    let (_d, store, path) = setup();
+    let i = input("live1", 1, "Harbor contract shifted");
+    let p = plan(&store, &i, Ok(&secret), Utc::now(), false).unwrap();
+    let mut opts = ExecOptions::for_secret(&secret);
+    opts.admission_account = "topology-live".into();
+    let report = generate(
+        &path,
+        &secret,
+        &i,
+        &p,
+        &opts,
+        "req-live",
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await;
+    println!("requests: {}", report.attempts.len());
+    match &report.outcome {
+        ExplainOutcome::Saved(text) => {
+            println!("outcome: saved {} chars\n{text}", text.len());
+            assert!(
+                plan(&store, &i, Ok(&secret), Utc::now(), false)
+                    .unwrap()
+                    .action
+                    == Action::None
+            );
+        }
+        ExplainOutcome::Failed(f) => {
+            println!("outcome: failed · {} · {}", f.category.reason(), f.message)
+        }
+        ExplainOutcome::Superseded(why) => println!("outcome: superseded {why}"),
+    }
+}

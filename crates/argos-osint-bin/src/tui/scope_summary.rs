@@ -72,6 +72,9 @@ pub struct ScopeSummaryState {
     pub scroll: usize,
     pub request: u64,
     pub retry_after: Option<Instant>,
+    /// Failure card (the Brain graph_explanation card) for a failed run.
+    pub failure: Option<super::summary_card::SummaryFailure>,
+    pub details_open: bool,
 }
 
 impl ScopeSummaryState {
@@ -104,7 +107,7 @@ impl ScopeSummaryState {
     /// Markdown shown in the panel for the current phase.
     pub fn body_markdown(&self) -> String {
         let mut out = String::new();
-        if !self.notice.is_empty() {
+        if !self.notice.is_empty() && self.failure.is_none() {
             out.push_str(&format!("*{}*\n\n", self.notice));
         }
         match (&self.saved, self.phase) {
@@ -134,6 +137,24 @@ pub fn lines(state: &ScopeSummaryState, width: u16) -> Vec<Line<'static>> {
     super::graph::summary_lines(&state.body_markdown(), width.max(1) as usize)
 }
 
+/// Rows the body scrolls: failure details (when expanded) above the text.
+fn content_lines(state: &ScopeSummaryState, width: u16) -> Vec<Line<'static>> {
+    let mut all = Vec::new();
+    if state.phase == SummaryPhase::Failed && state.details_open {
+        if let Some(failure) = &state.failure {
+            all.extend(
+                failure
+                    .details
+                    .iter()
+                    .map(|d| Line::styled(d.clone(), theme::dim())),
+            );
+            all.push(Line::raw(""));
+        }
+    }
+    all.extend(lines(state, width));
+    all
+}
+
 /// Scroll the summary body by exactly the extent the last draw measured.
 /// `isize::MIN` / `isize::MAX` jump to Home / End.
 pub fn scroll(app: &mut App, delta: isize) -> bool {
@@ -147,7 +168,7 @@ pub fn scroll(app: &mut App, delta: isize) -> bool {
     let Some(area) = area else {
         return false;
     };
-    let total = lines(&app.topology_state.summary, area.width).len();
+    let total = content_lines(&app.topology_state.summary, area.width).len();
     let max = total.saturating_sub(area.height as usize);
     let scroll = &mut app.topology_state.summary.scroll;
     *scroll = scroll.saturating_add_signed(delta).min(max);
@@ -226,6 +247,7 @@ pub fn draw_headline(frame: &mut Frame, app: &App, area: Rect, outside: usize, f
 
 /// Bordered panel: markdown body (independently scrollable), a scroll
 /// indicator in the top border, and a one-row footer with the caveat line.
+/// A failed run puts the shared failure card at the top of the panel.
 pub fn draw_panel(frame: &mut Frame, app: &App, area: Rect, outside: usize, filtered: usize) {
     let state = &app.topology_state;
     let summary = &state.summary;
@@ -241,17 +263,33 @@ pub fn draw_panel(frame: &mut Frame, app: &App, area: Rect, outside: usize, filt
         frame.render_widget(block, area);
         return;
     }
-    let body = Rect::new(
-        inner.x + 1,
-        inner.y,
-        inner.width - 2,
-        inner.height.saturating_sub(1),
+    let content = Rect::new(inner.x + 1, inner.y, inner.width - 2, inner.height);
+    let card = match (&summary.failure, summary.phase) {
+        (Some(failure), SummaryPhase::Failed) => Some((
+            failure,
+            super::summary_card::height_with(failure, summary.details_open, content, true),
+        )),
+        _ => None,
+    };
+    let card_h = card.map_or(0, |(_, h)| h);
+    let rest = Rect::new(
+        content.x,
+        content.y + card_h,
+        content.width,
+        content.height.saturating_sub(card_h),
     );
-    let footer = Rect::new(inner.x + 1, inner.bottom() - 1, inner.width - 2, 1);
-    let all = lines(summary, body.width);
+    let footer_rows = u16::from(rest.height >= 2);
+    let body = Rect::new(
+        rest.x,
+        rest.y,
+        rest.width,
+        rest.height.saturating_sub(footer_rows),
+    );
+    let footer = Rect::new(rest.x, rest.bottom().saturating_sub(1), rest.width, 1);
+    let all = content_lines(summary, body.width);
     let room = body.height as usize;
     let offset = summary.scroll.min(all.len().saturating_sub(room));
-    let block = if all.len() > room {
+    let block = if room > 0 && all.len() > room {
         let end = (offset + room).min(all.len());
         let indicator = format!(
             " {}{}–{}/{}{} ",
@@ -266,13 +304,22 @@ pub fn draw_panel(frame: &mut Frame, app: &App, area: Rect, outside: usize, filt
         block
     };
     frame.render_widget(block, area);
-    app.layout
-        .borrow_mut()
-        .register(Target::TopologySummary, body);
-    let visible: Vec<_> = all.into_iter().skip(offset).take(room).collect();
-    frame.render_widget(Paragraph::new(visible), body);
+    if let Some((failure, _)) = card {
+        super::summary_card::draw_with(frame, app, failure, content, summary.details_open, true);
+    }
+    if room > 0 {
+        app.layout
+            .borrow_mut()
+            .register(Target::TopologySummary, body);
+        let visible: Vec<_> = all.into_iter().skip(offset).take(room).collect();
+        frame.render_widget(Paragraph::new(visible), body);
+    }
+    if footer_rows == 0 {
+        return;
+    }
     let mut text_width = footer.width as usize;
-    if summary.can_retry() {
+    // The card carries its own Retry; the plain button is for stale text.
+    if summary.can_retry() && card.is_none() {
         let label = "[Retry]";
         let width = label.len() as u16;
         if footer.width > width + 8 {

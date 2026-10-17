@@ -133,6 +133,19 @@ impl Deadlines {
         }
     }
 
+    /// Structured Summarization operations (`TimeoutProfile::SUMMARIZATION`).
+    pub const fn summarization() -> Self {
+        let p = crate::provider_request::TimeoutProfile::SUMMARIZATION;
+        Self {
+            connect: Duration::from_secs(p.connection),
+            first_response: Duration::from_secs(p.first_response),
+            idle: Duration::from_secs(p.stream_inactivity),
+            total: Duration::from_secs(p.attempt_execution),
+            first_output: None,
+            model_inactivity: None,
+        }
+    }
+
     /// Native bounded decisions keep their own short policy.
     pub const fn native_decision() -> Self {
         Self::ordinary()

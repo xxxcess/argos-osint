@@ -1223,6 +1223,12 @@ impl Store {
             );
             snapshot.unresolved_endpoints = q.gaps.into_iter().collect();
             snapshot.exploration_exhausted = q.exhausted;
+            snapshot.neighborhood_brief = Some(crate::brain_neighborhood_brief::missing(
+                &snapshot,
+                seed,
+                options.depth.clamp(1, 3),
+                &options.cycle_scope,
+            ));
             return Ok(snapshot);
         };
         snapshot.root_id = root.id.clone();
@@ -1507,6 +1513,21 @@ impl Store {
                     .push(format!("{} · {}", n.id, n.label));
             }
         }
+        // Assemble the brief while the read transaction is still open.
+        let (brief, packet) = {
+            let input = crate::brain_neighborhood_brief::hydrate(
+                self,
+                &snapshot,
+                seed,
+                options.depth.clamp(1, 3),
+                &options.cycle_scope,
+            );
+            let brief = crate::brain_neighborhood_brief::build(&input);
+            let packet = crate::brain_neighborhood_brief::build_input(&input, &brief.basis_key);
+            (brief, packet)
+        };
+        snapshot.neighborhood_brief = Some(brief);
+        snapshot.neighborhood_input = Some(packet);
         Ok(snapshot)
     }
 }

@@ -204,6 +204,7 @@ pub const SUMMARY_OPERATIONS: &[&str] = &[
     "section_digest",
     "atlas_brief",
     "article_description",
+    "topology_neighborhood",
     "summarization",
 ];
 

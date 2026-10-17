@@ -2913,6 +2913,8 @@ pub fn page(app: &mut App, direction: i32) {
                 Target::TopologyGraph | Target::TopologyNode(_) | Target::TopologyEdge(_)
             ) {
                 Target::TopologyGraph
+            } else if matches!(target, Target::TopologyBasis(_)) {
+                Target::TopologySummary
             } else {
                 target
             };
@@ -3706,6 +3708,18 @@ fn topology_geometry_stamp(state: &super::topology::TopologyState) -> String {
         &state.selected_edge_id,
         state.analyzing_scope,
         &state.scope_status,
+    )
+        .hash(&mut hash);
+    (
+        state.content_tab.index(),
+        state.summary_scroll,
+        state.summary.basis_key.as_str(),
+        match &state.summary.gen {
+            super::topology::SummaryGen::Idle => 0u8,
+            super::topology::SummaryGen::Pending => 1,
+            super::topology::SummaryGen::Generated(_) => 2,
+            super::topology::SummaryGen::Failed(f) => 3 + f.kind as u8,
+        },
     )
         .hash(&mut hash);
     state.snapshot.is_some().hash(&mut hash);

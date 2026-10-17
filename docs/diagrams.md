@@ -21,6 +21,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Brain source lifecycle | Data flow | [brain-source-lifecycle.html](diagrams/brain-source-lifecycle.html) | [brain-source-lifecycle.svg](diagrams/brain-source-lifecycle.svg) |
 | Actor identity maintenance | Process | [actor-identity.html](diagrams/actor-identity.html) | [actor-identity.svg](diagrams/actor-identity.svg) |
 | Brain memory topology and scope | Architecture | [brain-topology.html](diagrams/brain-topology.html) | [brain-topology.svg](diagrams/brain-topology.svg) |
+| Topology neighborhood summary states | State machine | [topology-summary-states.html](diagrams/topology-summary-states.html) | [topology-summary-states.svg](diagrams/topology-summary-states.svg) |
 | Intel brief / historical report states | State machine | [intel-job-states.html](diagrams/intel-job-states.html) | [intel-job-states.svg](diagrams/intel-job-states.svg) |
 | Intel brief claim analysis and staged publication | Process | [intel-brief-chain.html](diagrams/intel-brief-chain.html) | [intel-brief-chain.svg](diagrams/intel-brief-chain.svg) |
 | Brain recall | Architecture | [brain-recall.html](diagrams/brain-recall.html) | [brain-recall.svg](diagrams/brain-recall.svg) |

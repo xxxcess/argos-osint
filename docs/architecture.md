@@ -492,6 +492,8 @@ references. Unindexed records retain source-scoped identity without writing data
 - **TUI delivery**: One background read at a time coalesces superseded requests. Generation/seed fences reject late loads; `Store::memories_changed_seq` supplies the mutation sequence. The canvas, inspector, relationship rows and counts render the same snapshot, with no database access during drawing. Shared pure geometry owns visible target rectangles. Selection inspects; explicit recenter pushes history; Back restores its origin.
 - **Background Scope Analysis**: Explicit candidate proposal and link assessment executes on dedicated worker pool `POOL_BRAIN_SCOPE = "brain_scope"` (`scheduler.rs`, `tasks.rs`). The worker uses `Store::open_light`, validates canonical premises/actors, writes inference memory and metadata, and writes qualified Links. These are separate writes rather than an atomic brief publication. Retained-source projections are not eligible canonical premises.
 
+- **Neighborhood summary**: The same read transaction builds an immutable deterministic brief and a frozen typed packet (`brain_neighborhood_brief.rs`). `brain_neighborhood_brief_exec.rs` publishes the fallback in `argos_derived_summaries`, enqueues one deduplicated `topology_neighborhood` request in `POOL_SUMMARY`, and the scheduler runs the Summarization role chain with lease renewal and epoch-fenced publication. Only a complete validated result is cached and delivered by `TopologySummaryLoaded` (seed/options/basis fenced); failure keeps the fallback. No migration and no canonical writes.
+
 The [topology mapper specification](topology-mapper.md) defines entry identity,
 responsive layout, interaction and coverage contracts.
 

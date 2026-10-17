@@ -61,6 +61,10 @@ pub struct OperationScope<'a> {
     pub generation: u32,
     /// Insight-only bounded repair/fallback policy; other operations retain their policy.
     pub insight_contract: bool,
+    /// Summarization-role structured operation: honors `contract`, uses the
+    /// Summarization attempt cap and timeout profile, and is never labeled
+    /// insight extraction.
+    pub summarization: bool,
     /// Optional explicit completion ceiling. Automatic operations leave it unset.
     pub completion_tokens: Option<u32>,
     /// Requested reasoning effort for this operation (provider default if unset).
@@ -120,6 +124,7 @@ impl<'a> OperationScope<'a> {
             task_id: None,
             generation: 1,
             insight_contract: false,
+            summarization: false,
             completion_tokens: None,
             reasoning: crate::request_policy::ReasoningEffort::Default,
             operation_key: None,
@@ -263,6 +268,17 @@ impl<'a> OperationScope<'a> {
 
     pub fn with_completion_tokens(mut self, tokens: u32) -> Self {
         self.completion_tokens = Some(tokens);
+        self
+    }
+
+    /// Mark a structured Summarization operation (see [`OperationScope::summarization`]).
+    pub fn for_summarization(
+        mut self,
+        contract: crate::provider_adapters::ResponseContract,
+    ) -> Self {
+        self.summarization = true;
+        self.response_format = ResponseFormat::GeneratedJson;
+        self.contract = Some(contract);
         self
     }
 
@@ -1376,6 +1392,7 @@ where
 
     let repairs = Arc::new(OutputRepairs::default());
     let insight_contract = scope.insight_contract;
+    let summarization = scope.summarization && !insight_contract;
     let insight_policy = scope.request_policy(true, 8192);
     // Stage admission: capture one capability snapshot per route (and kick a
     // coalesced background catalog refresh) so nothing changes mid-operation.
@@ -1560,8 +1577,12 @@ where
                     }) as Arc<provider_attempt::ProgressFn>,
                 )
             };
-            let rep = if insight_contract {
-                let deadlines = scope.deadlines(transport == Transport::Stream);
+            let rep = if insight_contract || summarization {
+                let deadlines = if summarization {
+                    Deadlines::summarization()
+                } else {
+                    scope.deadlines(transport == Transport::Stream)
+                };
                 let attempt = provider_attempt::attempt_spec(
                     &secret,
                     &messages_vec,
@@ -1796,7 +1817,13 @@ where
         cancel: Some(cancel.clone()),
         recorded_waits: None,
         admission_account: String::new(),
-        attempt_limit: insight_contract.then_some(2),
+        attempt_limit: if insight_contract {
+            Some(2)
+        } else if summarization {
+            Some(crate::tasks::OperationKind::Summarization.attempt_cap())
+        } else {
+            None
+        },
         interactive: scope.interactive,
         wire_budget: scope.wire_budget(),
         ledger: scope.ledger.clone(),

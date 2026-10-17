@@ -30,10 +30,12 @@ pub enum SummarizationMode {
     SectionDigest,
     AtlasBrief,
     ArticleDescription,
+    /// Typed topology neighborhood packet → structured brief JSON.
+    TopologyNeighborhood,
 }
 
 impl SummarizationMode {
-    pub const ALL: [SummarizationMode; 9] = [
+    pub const ALL: [SummarizationMode; 10] = [
         Self::PageEvidence,
         Self::GraphExplanation,
         Self::FollowUpContext,
@@ -43,6 +45,7 @@ impl SummarizationMode {
         Self::SectionDigest,
         Self::AtlasBrief,
         Self::ArticleDescription,
+        Self::TopologyNeighborhood,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -56,6 +59,7 @@ impl SummarizationMode {
             Self::SectionDigest => "section_digest",
             Self::AtlasBrief => "atlas_brief",
             Self::ArticleDescription => "article_description",
+            Self::TopologyNeighborhood => "topology_neighborhood",
         }
     }
 
@@ -70,12 +74,16 @@ impl SummarizationMode {
             "section_digest" | "section-digest" => Some(Self::SectionDigest),
             "atlas_brief" | "atlas-brief" => Some(Self::AtlasBrief),
             "article_description" | "article-description" => Some(Self::ArticleDescription),
+            "topology_neighborhood" | "topology-neighborhood" => Some(Self::TopologyNeighborhood),
             _ => None,
         }
     }
 
     /// Prompt version string included in cache keys.
     pub fn prompt_version(self) -> &'static str {
+        if self == Self::TopologyNeighborhood {
+            return "topology-neighborhood.p1.o1";
+        }
         "summarization.v2"
     }
 }
@@ -147,6 +155,7 @@ pub struct CoverageMeta {
 /// System prompt for a mode. Callers pass sources separately as data.
 pub fn system_prompt(mode: SummarizationMode) -> &'static str {
     match mode {
+        SummarizationMode::TopologyNeighborhood => crate::brain_neighborhood_brief::MODEL_TASK,
         SummarizationMode::PageEvidence => {
             "Compress the supplied page evidence for investigation use. Preserve attribution, uncertainty, and exact identifiers. Do not invent facts, call tools, or decide directive completion. Write concise Markdown."
         }
@@ -192,6 +201,11 @@ pub fn validate_result(
             if text.chars().count() > 80 {
                 return Err("title exceeds length budget".into());
             }
+        }
+        SummarizationMode::TopologyNeighborhood => {
+            serde_json::from_str::<crate::brain_neighborhood_brief::NeighborhoodBrief>(text)
+                .map_err(|e| format!("malformed neighborhood brief: {e}"))?;
+            return Ok(());
         }
         SummarizationMode::GraphExplanation | SummarizationMode::PageEvidence => {
             if text.chars().count() < 20 {
@@ -490,6 +504,12 @@ pub fn try_live_summary_upgrade(
     if !cached.fallback {
         return Ok((cached, "already_upgraded"));
     }
+    if req.mode == SummarizationMode::TopologyNeighborhood {
+        // Structured generation needs the whole role chain, not one secret:
+        // `scheduler::drain_summary_flush_with_runtime` dispatches it. This
+        // single-secret path never reports it as upgraded.
+        return Ok((cached, "role_dispatch_required"));
+    }
     let Some(secret) = secret else {
         return Ok((cached, "cached_deterministic_no_secret"));
     };
@@ -514,7 +534,7 @@ pub fn try_live_summary_upgrade(
     Ok((upgraded, outcome))
 }
 
-fn sha_hex(text: &str) -> String {
+pub(crate) fn sha_hex(text: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
@@ -904,8 +924,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_nine_modes_round_trip() {
-        assert_eq!(SummarizationMode::ALL.len(), 9);
+    fn every_summarization_mode_round_trips() {
+        assert_eq!(SummarizationMode::ALL.len(), 10);
         for mode in SummarizationMode::ALL {
             assert_eq!(SummarizationMode::parse(mode.as_str()), Some(mode));
             assert!(!system_prompt(mode).is_empty());

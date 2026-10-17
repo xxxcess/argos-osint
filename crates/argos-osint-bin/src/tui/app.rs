@@ -16547,6 +16547,18 @@ mod tests {
                             "completed Claims kept"
                         );
                         assert!(text.contains("blocked by Inferences"));
+                        // The first Extracted page itself (the 80x24 screenshot)
+                        // keeps Links on screen with the recovery lines.
+                        app.compact_pages[ModuleId::Intel.index()] = 0;
+                        let page = buffer_text(&render(&mut app, width, height));
+                        assert!(
+                            page.contains("blocked by Inferences"),
+                            "{width}x{height}\n{page}"
+                        );
+                        // Panes wrap, so check the recovery wording in fragments.
+                        assert!(page.contains("Retry article"), "{page}");
+                        assert!(page.contains("failed stage."), "{page}");
+                        assert!(page.contains("Inferences failed · Retry"), "{page}");
                         // Global Jobs shows identical stage states.
                         let detail = argos_osint_core::jobs_view::job_detail(
                             app.store.connection(),

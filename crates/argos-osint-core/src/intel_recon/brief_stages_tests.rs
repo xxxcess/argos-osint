@@ -2659,3 +2659,61 @@ async fn failed_context_batch_is_isolated_and_retry_only_classifies_that_batch()
     assert!(!rows(&db.path, &job)[2].contains("warning"));
     assert!(rows(&db.path, &job)[3].starts_with("Completed"));
 }
+
+/// Queue head-of-line regression: a queued task the claim predicate rejects
+/// (job past the 3-day window, cancel requested, retired) must never starve
+/// eligible stages of other jobs.
+fn second_article(db: &Db, id: &str) {
+    let store = Store::open(&db.path).unwrap();
+    store
+        .atlas_upsert_article(&article(
+            "fixture",
+            id,
+            TITLE,
+            DESC,
+            &format!("https://example.test/{id}"),
+        ))
+        .unwrap();
+}
+
+fn chain_for(db: &Db, id: &str) -> String {
+    let store = Store::open(&db.path).unwrap();
+    let mut i = inputs("r1");
+    i.article_id = id.into();
+    ensure_chain(&store.conn, &i, &now()).unwrap()
+}
+
+#[test]
+fn ineligible_queued_head_does_not_starve_fresh_brief_stages() {
+    type Poison = fn(&rusqlite::Connection, &str);
+    let cases: [(&str, Poison); 3] = [
+        ("stale job", |c, j| {
+            c.execute(
+                "UPDATE argos_jobs SET created_at='2020-01-01T00:00:00Z' WHERE id=?1",
+                [j],
+            )
+            .unwrap();
+        }),
+        ("cancel requested", |c, j| {
+            c.execute("UPDATE argos_jobs SET cancel_requested=1 WHERE id=?1", [j])
+                .unwrap();
+        }),
+        ("retired", |c, j| {
+            c.execute("INSERT INTO argos_job_retirements(job_id,retired_at,reason) VALUES(?1,'2026-10-01T00:00:00Z','t')", [j]).unwrap();
+        }),
+    ];
+    for (name, poison) in cases {
+        let db = db();
+        second_article(&db, "a2");
+        let old = chain_for(&db, "a1");
+        let store = Store::open(&db.path).unwrap();
+        poison(&store.conn, &old);
+        let fresh = chain_for(&db, "a2");
+        let got = brief_pipeline::claim_stage(&store.conn, "w", 30, &now()).unwrap();
+        assert_eq!(
+            got.as_ref().map(|c| c.job_id.as_str()),
+            Some(fresh.as_str()),
+            "{name}: fresh brief stage must be claimable"
+        );
+    }
+}

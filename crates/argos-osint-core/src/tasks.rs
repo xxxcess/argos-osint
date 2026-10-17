@@ -934,12 +934,25 @@ pub fn claim_next_in(
             .join(",");
         format!("AND pool IN ({list})")
     };
+    // The selector must apply the same eligibility predicates as the claim
+    // UPDATE. Otherwise the top-ranked row can be one the UPDATE rejects (stale
+    // or cancelled job, retired, unmet dependency, unbound input) and the
+    // claim returns None forever, starving every eligible task behind it.
     let selector = format!(
-        "(SELECT id FROM argos_tasks
-            WHERE state IN ('queued','retry_scheduled')
-              AND (next_eligible_at='' OR julianday(next_eligible_at)<=julianday(?3))
+        "(SELECT t.id FROM argos_tasks t
+            WHERE t.state IN ('queued','retry_scheduled')
+              AND (t.next_eligible_at='' OR julianday(t.next_eligible_at)<=julianday(?3))
               {pool_filter}
-            ORDER BY priority ASC, created_at ASC LIMIT 1)"
+              AND EXISTS(SELECT 1 FROM argos_jobs j WHERE j.id=t.job_id AND julianday(j.created_at)>=julianday(?3)-3 AND j.cancel_requested=0)
+              AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=t.job_id)
+              AND NOT EXISTS(SELECT 1 FROM argos_task_dependencies d JOIN argos_tasks p ON p.id=d.depends_on
+                             WHERE d.task_id=t.id AND p.state<>'completed')
+              AND NOT (t.pool='{POOL_INTEL_BRIEF}' AND EXISTS(SELECT 1 FROM argos_tasks o
+                       WHERE o.job_id=t.job_id AND o.id<>t.id AND o.state='running'
+                         AND (EXISTS(SELECT 1 FROM argos_task_dependencies d WHERE d.task_id=t.id)
+                              OR EXISTS(SELECT 1 FROM argos_task_dependencies d WHERE d.task_id=o.id))))
+              AND (t.pool<>'{POOL_INTEL_BRIEF}' OR t.input_hash<>'')
+            ORDER BY t.priority ASC, t.created_at ASC LIMIT 1)"
     );
     claim_with(conn, &selector, None, owner, lease_secs, now)
 }

@@ -98,6 +98,8 @@ pub fn rejected_options(
         "invalid",
         "not allowed",
         "extra",
+        // OpenRouter: "No endpoints found that support tool use".
+        "no endpoints found",
     ]
     .iter()
     .any(|w| lower.contains(w));

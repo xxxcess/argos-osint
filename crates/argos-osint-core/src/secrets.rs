@@ -1,5 +1,4 @@
-//! Provider secrets. `auth.json` is owner-only on Unix (0600),
-//! same convention Grok uses for `~/.grok/auth.json`.
+//! Provider secrets. `auth.json` is owner-only on Unix (0600).
 //!
 //! Writes route through the configuration commit store (see
 //! [`crate::config_commit`]): a unique sibling temporary file is created 0600 at
@@ -23,6 +22,10 @@ pub struct AuthFile {
     /// Independent provider accounts. Legacy text/voice slots still round-trip.
     #[serde(default)]
     pub accounts: std::collections::BTreeMap<String, ProviderSecret>,
+    /// Labels of saved providers that were dropped on load because the desk no
+    /// longer supports them. Never serialized.
+    #[serde(skip)]
+    pub dropped_providers: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,6 +70,29 @@ impl AuthFile {
         }
         result
     }
+    /// Drops saved connections of a provider the desk no longer supports (Grok /
+    /// xAI). The file on disk is untouched until the next save; the labels are
+    /// kept in `dropped_providers` so the UI can say what happened.
+    pub fn drop_removed_providers(&mut self) {
+        let removed = |secret: &ProviderSecret| {
+            crate::provider::is_removed_kind(&secret.kind)
+                || crate::provider::is_removed_host(&secret.base_url)
+        };
+        let before = self.accounts.len() + usize::from(self.text.is_some());
+        self.accounts
+            .retain(|key, secret| !crate::provider::is_removed_kind(key) && !removed(secret));
+        if self.text.as_ref().is_some_and(removed) {
+            self.text = None;
+        }
+        if self.voice.as_ref().is_some_and(removed) {
+            self.voice = None;
+        }
+        let after = self.accounts.len() + usize::from(self.text.is_some());
+        if after < before {
+            self.dropped_providers.push("Grok (xAI)".to_string());
+        }
+    }
+
     /// Resolve an account without copying another vendor's credentials.
     pub fn account(&self, kind: &str) -> Option<ProviderSecret> {
         let kind = crate::provider::normalize_kind(kind);
@@ -122,7 +148,8 @@ impl AuthFile {
         if raw.trim().is_empty() {
             return Ok(Self::default());
         }
-        let auth: Self = serde_json::from_str(&raw)?;
+        let mut auth: Self = serde_json::from_str(&raw)?;
+        auth.drop_removed_providers();
         let legacy: serde_json::Value = serde_json::from_str(&raw)?;
         if legacy.get("research").is_some() || legacy.get("gmail").is_some() {
             auth.save_to(path)?;
@@ -193,27 +220,26 @@ mod tests {
 
     #[test]
     fn mask_keeps_tail() {
-        assert_eq!(mask("xai-secret-key1"), "••••key1");
+        assert_eq!(mask("sk-secret-key1"), "••••key1");
         assert_eq!(mask(""), "(empty)");
     }
 
     #[test]
     fn legacy_connection_migrates_without_overwriting_other_accounts() {
-        let legacy = r#"{"text":{"kind":"grok","base_url":"https://api.x.ai/v1","model":"grok-custom","api_key":"xai-existing"},"voice":null,"gmail":{"email":"test@example.com","app_password":"existing-mail"}}"#;
+        let legacy = r#"{"text":{"kind":"openai","base_url":"https://api.openai.com/v1","model":"custom","api_key":"openai-existing"},"voice":null,"gmail":{"email":"test@example.com","app_password":"existing-mail"}}"#;
         let mut auth: AuthFile = serde_json::from_str(legacy).unwrap();
         let mut router = crate::provider::account_secret(&auth, "openrouter");
         assert!(router.api_key.is_none());
         router.api_key = Some("router-existing".into());
         auth.set_account(router);
         assert_eq!(
-            auth.account("grok").unwrap().api_key.as_deref(),
-            Some("xai-existing")
+            auth.account("openai").unwrap().api_key.as_deref(),
+            Some("openai-existing")
         );
         assert_eq!(
             auth.account("openrouter").unwrap().api_key.as_deref(),
             Some("router-existing")
         );
-        assert!(auth.account("openai").is_none());
         assert!(auth.account("openai-chatgpt").is_none());
         assert!(!serde_json::to_string(&auth)
             .unwrap()
@@ -223,11 +249,25 @@ mod tests {
         auth.text = auth.account("openrouter");
         let restored: AuthFile =
             serde_json::from_str(&serde_json::to_string(&auth).unwrap()).unwrap();
-        assert_eq!(restored.account("grok").unwrap().model, "grok-custom");
+        assert_eq!(restored.account("openai").unwrap().model, "custom");
         assert_eq!(
             restored.account("openrouter").unwrap().api_key.as_deref(),
             Some("router-existing")
         );
+    }
+
+    #[test]
+    fn loading_old_auth_drops_removed_grok_connections_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(&path, r#"{"text":{"kind":"grok","base_url":"https://api.x.ai/v1","model":"grok-4.6","api_key":"xai-old"},"accounts":{"grok":{"kind":"grok","base_url":"https://api.x.ai/v1","model":"grok-4.6","api_key":"xai-old"},"openrouter":{"kind":"openrouter","base_url":"https://openrouter.ai/api/v1","model":"m","api_key":"router-key"}}}"#).unwrap();
+        let auth = AuthFile::load_from(&path).unwrap();
+        assert!(auth.text.is_none());
+        assert!(auth.account("grok").is_none());
+        assert!(auth.account("openrouter").is_some());
+        assert_eq!(auth.dropped_providers, vec!["Grok (xAI)".to_string()]);
+        // Nothing is rewritten by a load.
+        assert!(std::fs::read_to_string(&path).unwrap().contains("xai-old"));
     }
 
     #[test]
@@ -247,15 +287,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auth.json");
         let mut auth = AuthFile::default();
-        let mut grok = crate::provider::account_secret(&auth, "grok");
-        grok.api_key = Some("xai-existing".into());
-        auth.set_account(grok);
+        let mut openai = crate::provider::account_secret(&auth, "openai");
+        openai.api_key = Some("openai-existing".into());
+        auth.set_account(openai);
         auth.save_to(&path).unwrap();
         let restored: AuthFile =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
-            restored.account("grok").unwrap().api_key.as_deref(),
-            Some("xai-existing")
+            restored.account("openai").unwrap().api_key.as_deref(),
+            Some("openai-existing")
         );
         #[cfg(unix)]
         {

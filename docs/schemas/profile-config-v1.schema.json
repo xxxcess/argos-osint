@@ -88,7 +88,7 @@
         },
         "kind": {
           "type": "string",
-          "enum": ["openrouter", "google", "nvidia", "grok", "openai", "local", "subscription"],
+          "enum": ["openrouter", "google", "nvidia", "openai", "local", "subscription"],
           "minLength": 1,
           "description": "Provider kind. `subscription` marks an OAuth route that requires reauthorization on the importing machine; it never carries key material."
         },

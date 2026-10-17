@@ -302,7 +302,6 @@ fn test_resolve_adapter_kinds() {
             DecisionAdapterKind::ValidatedText,
         ),
         ("gpt-4o", "openai", DecisionAdapterKind::ValidatedText),
-        ("grok-4.6", "grok", DecisionAdapterKind::ValidatedText),
         (
             "custom-local-model",
             "local",

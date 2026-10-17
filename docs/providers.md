@@ -17,7 +17,7 @@ Saving or verifying a connection does not change a role. Old Writer config seeds
 | Google | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | Nvidia | `NVIDIA_API_KEY` | `https://integrate.api.nvidia.com/v1` |
 
-Verification checks the current draft without saving. Legacy Grok/OpenAI in `auth.json` keep working until replaced. They have no new-setup tabs. Their keys are never sent to Google or Nvidia.
+Verification checks the current draft without saving. Legacy OpenAI in `auth.json` keeps working until replaced and has no new-setup tab. Grok (xAI) is removed: saved Grok connections and routes are ignored on load and dropped on import, with a warning. See `docs/brief-request-mode-test-report.md` for the migration note. Their keys are never sent to Google or Nvidia.
 
 ```sh
 argos login

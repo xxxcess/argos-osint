@@ -503,7 +503,7 @@ impl DefaultsRole {
         }
     }
 
-    fn of_field(field: FieldId) -> Option<DefaultsRole> {
+    pub(super) fn of_field(field: FieldId) -> Option<DefaultsRole> {
         match field {
             FieldId::ReconProvider | FieldId::ReconModel => Some(DefaultsRole::Recon),
             FieldId::PickerProvider | FieldId::PickerModel => Some(DefaultsRole::ToolPicker),
@@ -1675,7 +1675,14 @@ impl App {
             cursor: 0,
             screen: Rect::default(),
             layout: std::cell::RefCell::new(LayoutRegistry::default()),
-            status: "ready".into(),
+            status: if auth.dropped_providers.is_empty() {
+                "ready".into()
+            } else {
+                format!(
+                    "ready · {} is no longer supported; its saved routes were ignored",
+                    auth.dropped_providers.join(", ")
+                )
+            },
             see_more_pages: std::cell::Cell::new([8, 8, 8]),
             recon_tip: 0,
             recon_tip_at: Instant::now(),
@@ -6014,7 +6021,6 @@ impl App {
         let raw = self.field(self.defaults_role.provider_field());
         match provider::normalize_kind(raw).as_str() {
             "openai" => "openai-chatgpt".into(),
-            "grok-subscription" => "grok".into(),
             other => other.to_string(),
         }
     }
@@ -6033,11 +6039,11 @@ impl App {
 
     pub fn field_display(&self, field: FieldId) -> String {
         match field {
-            FieldId::ReconProvider
-            | FieldId::PickerProvider
-            | FieldId::SynthesisProvider
-            | FieldId::ClassifierProvider
-            | FieldId::SummarizationProvider => {
+            field
+                if DefaultsRole::ALL
+                    .iter()
+                    .any(|r| r.provider_field() == field) =>
+            {
                 let kind = self.field(field);
                 if kind.is_empty() {
                     String::new()
@@ -6425,10 +6431,7 @@ impl App {
     fn rebuild_provider_choices(&mut self) {
         let mut items = Vec::new();
         let current = self.role_provider();
-        if matches!(
-            current.as_str(),
-            "grok" | "grok-subscription" | "openai" | "openai-chatgpt"
-        ) {
+        if matches!(current.as_str(), "openai" | "openai-chatgpt") {
             items.push(ChoiceItem {
                 id: current.clone(),
                 label: format!(
@@ -9266,12 +9269,9 @@ impl App {
             kind
         };
         if role != DefaultsRole::Synthesis
-            && !matches!(
-                kind.as_str(),
-                "grok" | "openai-chatgpt" | "openrouter" | "local"
-            )
+            && !matches!(kind.as_str(), "openai-chatgpt" | "openrouter" | "local")
         {
-            anyhow::bail!("Choose Grok, OpenAI, OpenRouter, or local");
+            anyhow::bail!("Choose OpenAI, OpenRouter, or local");
         }
         let assignment = self
             .settings
@@ -11359,19 +11359,9 @@ impl App {
 }
 
 pub fn is_picker_field(field: FieldId) -> bool {
-    matches!(
-        field,
-        FieldId::ReconProvider
-            | FieldId::ReconModel
-            | FieldId::PickerProvider
-            | FieldId::PickerModel
-            | FieldId::SynthesisProvider
-            | FieldId::SynthesisModel
-            | FieldId::ClassifierProvider
-            | FieldId::ClassifierModel
-            | FieldId::SummarizationProvider
-            | FieldId::SummarizationModel
-    )
+    // Every role's provider and model field opens a popup card; deriving it
+    // from the role table keeps new roles from silently becoming text fields.
+    DefaultsRole::of_field(field).is_some()
 }
 
 /// Date button / picker label like `04 OCT 2026`.
@@ -11388,7 +11378,6 @@ pub fn intel_day_button_label(day: &str) -> String {
 
 fn provider_label(kind: &str) -> &'static str {
     match provider::normalize_kind(kind).as_str() {
-        "grok" | "grok-subscription" => "Grok (legacy)",
         "openai" | "openai-chatgpt" => "OpenAI (legacy)",
         "openrouter" => "OpenRouter",
         "google" => "Google",
@@ -12646,7 +12635,7 @@ mod tests {
         let mut other = provider::account_secret(&app.auth, "local");
         other.api_key = Some("other-secret".into());
         app.auth.set_account(other);
-        app.settings.defaults.recon.provider = "grok".into();
+        app.settings.defaults.recon.provider = "local".into();
         click(&mut app, Target::App(ModuleId::Providers.index()));
         click(&mut app, Target::ProviderTab(ProviderPage::OpenRouter));
         click(&mut app, Target::Field(FieldId::RouterKey));
@@ -12660,7 +12649,7 @@ mod tests {
             app.auth.account("local").unwrap().api_key.as_deref(),
             Some("other-secret")
         );
-        assert_eq!(app.settings.defaults.recon.provider, "grok");
+        assert_eq!(app.settings.defaults.recon.provider, "local");
         let saved = std::fs::read_to_string(&app.auth_path).unwrap();
         assert!(saved.contains("router-secret"));
     }
@@ -12674,12 +12663,12 @@ mod tests {
         let mut router = provider::account_secret(&app.auth, "openrouter");
         router.api_key = Some("router-key".into());
         app.auth.set_account(router);
-        app.settings.defaults.recon.provider = "grok".into();
-        app.settings.defaults.recon.model = "grok-4.6".into();
+        app.settings.defaults.recon.provider = "local".into();
+        app.settings.defaults.recon.model = "llama3.2".into();
         app.settings.defaults.synthesis.provider = "openrouter".into();
         app.settings.defaults.synthesis.model = "openrouter/free".into();
-        app.recon_provider = "grok".into();
-        app.recon_model = "grok-4.6".into();
+        app.recon_provider = "local".into();
+        app.recon_model = "llama3.2".into();
         app.synthesis_provider = "openrouter".into();
         app.synthesis_model = "openrouter/free".into();
         let auth_before = serde_json::to_string(&app.auth).unwrap();
@@ -12723,11 +12712,11 @@ mod tests {
         assert!(app.status.contains("decisions"), "{}", app.status);
         assert_eq!(app.settings.defaults.tool_picker.provider, "openrouter");
         assert_eq!(app.settings.defaults.tool_picker.model, "typesafe/jev-1.13");
-        assert_eq!(app.settings.defaults.recon.provider, "grok");
-        assert_eq!(app.settings.defaults.recon.model, "grok-4.6");
+        assert_eq!(app.settings.defaults.recon.provider, "local");
+        assert_eq!(app.settings.defaults.recon.model, "llama3.2");
         assert_eq!(app.settings.defaults.synthesis.provider, "openrouter");
         assert_eq!(app.settings.defaults.synthesis.model, "openrouter/free");
-        assert_eq!(app.recon_model, "grok-4.6");
+        assert_eq!(app.recon_model, "llama3.2");
         assert_eq!(app.synthesis_model, "openrouter/free");
         assert!(events(&app)
             .iter()
@@ -12871,6 +12860,55 @@ mod tests {
         assert_eq!(app.focus, Target::Button(ButtonId::AddFallback));
     }
 
+    /// Every role (not only the first five) opens provider and model popup
+    /// cards from a click and from Enter, and shows the provider label.
+    #[test]
+    fn every_defaults_role_opens_its_provider_and_model_popups() {
+        for role in DefaultsRole::ALL {
+            let mut app = app();
+            app.google_key = "google-key".into();
+            click(&mut app, Target::App(ModuleId::Providers.index()));
+            click(&mut app, Target::ProviderTab(ProviderPage::Defaults));
+            click(&mut app, Target::PaneTab(1));
+            click(&mut app, Target::Button(ButtonId::DefaultRole(role)));
+            assert_eq!(app.defaults_role, role);
+            let (provider_field, model_field) = (role.provider_field(), role.model_field());
+            assert!(is_picker_field(provider_field), "{role:?} provider");
+            assert!(is_picker_field(model_field), "{role:?} model");
+
+            click(&mut app, Target::Field(provider_field));
+            assert!(
+                matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)),
+                "{role:?} provider card"
+            );
+            let google = app
+                .choice_items
+                .iter()
+                .position(|item| item.id == "google")
+                .expect("google account offered");
+            click(&mut app, Target::Choice(google));
+            assert!(matches!(app.overlay, Overlay::None));
+            assert_eq!(app.field(provider_field), "google", "{role:?}");
+            assert_eq!(app.field_display(provider_field), "Google", "{role:?}");
+
+            click(&mut app, Target::Field(model_field));
+            assert!(
+                matches!(app.overlay, Overlay::Choice(ChoiceKind::Model)),
+                "{role:?} model card"
+            );
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(matches!(app.overlay, Overlay::None));
+
+            // Keyboard: focus the field and press Enter.
+            app.set_focus(Target::Field(provider_field));
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(
+                matches!(app.overlay, Overlay::Choice(ChoiceKind::Provider)),
+                "{role:?} Enter opens the provider card"
+            );
+        }
+    }
+
     #[test]
     fn defaults_pick_provider_and_model_from_account_access() {
         let mut app = app();
@@ -12905,11 +12943,11 @@ mod tests {
         assert_eq!(app.recon_provider, "openrouter");
 
         app.model_catalog = vec![ListedModel {
-            id: "grok-4.6".into(),
-            name: "Grok 4.6".into(),
+            id: "llama3.2".into(),
+            name: "Llama 3.2".into(),
             free: false,
         }];
-        app.catalog_for = "grok".into();
+        app.catalog_for = "local".into();
         app.on_work_event(WorkEvent::CatalogDone {
             role: DefaultsRole::Recon,
             provider: "openrouter".into(),
@@ -12979,7 +13017,7 @@ mod tests {
         assert_eq!(app.synthesis_model, "nvidia-text-model");
         app.on_work_event(WorkEvent::CatalogDone {
             role: DefaultsRole::Synthesis,
-            provider: "grok".into(),
+            provider: "local".into(),
             outcome: Ok(vec![ListedModel {
                 id: "not-allowed".into(),
                 name: "Not allowed".into(),
@@ -13129,7 +13167,7 @@ mod tests {
             .unwrap();
         let run = app
             .store
-            .new_run(&thread.id, &user.id, "grok / recon", "grok / synthesis")
+            .new_run(&thread.id, &user.id, "local / recon", "local / synthesis")
             .unwrap();
         let tool = osint::registry()[0].id;
         let plan = recon::Plan {
@@ -14812,6 +14850,36 @@ mod tests {
         dump_cells(&mut app, &dir, "brain-claim-detail", 140, 40);
         app.screen = Rect::new(0, 0, 64, 32);
         dump_cells(&mut app, &dir, "brain-claim-detail-narrow", 64, 32);
+    }
+
+    /// `ARGOS_SCREEN_DIR=… cargo test -p argos-osint-bin dump_defaults_popup_screens -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_defaults_popup_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for role in [
+            DefaultsRole::ClaimAssessor,
+            DefaultsRole::InvestigationController,
+        ] {
+            let mut app = app();
+            app.screen = Rect::new(0, 0, 140, 40);
+            app.google_key = "google-key".into();
+            click(&mut app, Target::App(ModuleId::Providers.index()));
+            click(&mut app, Target::ProviderTab(ProviderPage::Defaults));
+
+            click(&mut app, Target::Button(ButtonId::DefaultRole(role)));
+            click(&mut app, Target::Field(role.provider_field()));
+            dump_cells(
+                &mut app,
+                &dir,
+                &format!("defaults-{}-provider-popup", role.role_key()),
+                140,
+                40,
+            );
+        }
     }
 
     #[test]

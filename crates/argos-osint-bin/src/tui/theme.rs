@@ -14,7 +14,7 @@ pub const MUTED: Color = Color::Rgb(145, 145, 145);
 pub const SELECT: Color = Color::Rgb(48, 48, 48);
 pub const WARN: Color = Color::Rgb(229, 192, 123);
 pub const RED: Color = Color::Rgb(240, 138, 138);
-/// Raised band behind a user prompt, the same role as Grok Build's `bg_light` prompt band.
+/// Raised band behind a user prompt, the prompt band.
 pub const USER_BAND: Color = SURFACE;
 /// Fenced code background, quieter than the user band.
 pub const CODE_BG: Color = Color::Rgb(37, 37, 37);
@@ -61,7 +61,7 @@ pub fn accent() -> Style {
     Style::default().fg(ACCENT).bg(BG)
 }
 
-/// User turn, close to the Grok Build prompt block.
+/// User turn, a distinct prompt block.
 pub fn user_message() -> Style {
     Style::default().fg(TEXT).bg(USER_BAND)
 }

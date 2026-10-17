@@ -381,12 +381,8 @@ fn ask(label: &str, default: &str) -> Result<String> {
 async fn login() -> Result<()> {
     let kind = ask("Provider (google/nvidia/openrouter/local)", "google")?;
     let kind = provider::normalize_kind(&kind);
-    if kind == "grok" {
-        println!(
-            "{}",
-            argos_osint_core::grok_oauth::login(|line| println!("{line}")).await?
-        );
-        return Ok(());
+    if provider::is_removed_kind(&kind) {
+        anyhow::bail!("Grok (xAI) is no longer supported. Choose google, nvidia, openrouter, openai or local.");
     }
     if matches!(kind.as_str(), "openai" | "openai-chatgpt") {
         println!(
@@ -527,13 +523,7 @@ fn defaults_command(command: DefaultsCommand) -> Result<()> {
             anyhow::ensure!(
                 matches!(
                     kind.as_str(),
-                    "grok"
-                        | "openai"
-                        | "openai-chatgpt"
-                        | "openrouter"
-                        | "google"
-                        | "nvidia"
-                        | "local"
+                    "openai" | "openai-chatgpt" | "openrouter" | "google" | "nvidia" | "local"
                 ),
                 "unknown provider"
             );
@@ -1104,16 +1094,16 @@ mod tests {
         let mut settings = SettingsFile::default();
         settings.defaults.seed_tool_picker();
         settings.defaults.synthesis = provider::ModelAssignment {
-            provider: "grok".into(),
-            model: "grok-4.6".into(),
+            provider: "openrouter".into(),
+            model: "openai/gpt-4.1".into(),
             ..Default::default()
         };
         let shown = defaults_json(&AuthFile::default(), &settings).unwrap();
         assert_eq!(shown["tool_picker"]["provider"], "openrouter");
         assert_eq!(shown["tool_picker"]["model"], provider::TOOL_PICKER_MODEL);
         assert_eq!(shown["tool_picker"]["transport"], "decisions");
-        assert_eq!(shown["synthesis"]["model"], "grok-4.6");
-        settings.defaults.role_mut("tool-picker").unwrap().model = "x-ai/grok-4".into();
+        assert_eq!(shown["synthesis"]["model"], "openai/gpt-4.1");
+        settings.defaults.role_mut("tool-picker").unwrap().model = "openai/gpt-4.1".into();
         let shown = defaults_json(&AuthFile::default(), &settings).unwrap();
         assert_eq!(shown["tool_picker"]["transport"], "chat");
         assert!(settings.defaults.role_mut("writer").is_none());
@@ -1140,14 +1130,14 @@ mod tests {
         let lines = model_lines(
             true,
             "openrouter",
-            &["x-ai/grok-4".into(), provider::TOOL_PICKER_MODEL.into()],
+            &["openai/gpt-4.1".into(), provider::TOOL_PICKER_MODEL.into()],
         );
         assert_eq!(lines[0], "typesafe/jev-1.13  Jev 1.13 (decisions)");
         assert_eq!(lines.len(), 2);
         assert_eq!(
-            model_lines(false, "openrouter", &["x-ai/grok-4".into()]),
-            vec!["x-ai/grok-4".to_string()]
+            model_lines(false, "openrouter", &["openai/gpt-4.1".into()]),
+            vec!["openai/gpt-4.1".to_string()]
         );
-        assert!(model_lines(true, "grok", &[]).is_empty());
+        assert!(model_lines(true, "google", &[]).is_empty());
     }
 }

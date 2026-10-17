@@ -290,6 +290,20 @@ pub const ROUTE_COOLDOWNS: [Duration; 3] = [
     Duration::from_secs(600),
 ];
 
+/// Extra overload retries granted to the last route that can still answer.
+pub const LAST_ROUTE_RETRIES: u32 = 2;
+
+/// Hold time for a route that hard-rejected (credentials, access, model
+/// deployment missing): retrying inside a session cannot fix those.
+pub const HARD_REJECT_COOLDOWN: Duration = Duration::from_secs(1800);
+
+/// `nvidia/nemotron-3-ultra-550b-a55b:free` and the same id on another
+/// gateway name one model.
+fn model_family(model: &str) -> String {
+    let id = model.split(':').next().unwrap_or(model);
+    id.rsplit('/').next().unwrap_or(id).to_ascii_lowercase()
+}
+
 /// Request budget and route-health memory of ONE stage execution, shared by
 /// all of its operations. A [`WireBudget`] bounds a single operation; a stage
 /// of many operations (per-claim classification, generation, fidelity, dedup)
@@ -300,6 +314,10 @@ pub struct StageLedger {
     cap: std::sync::atomic::AtomicU32,
     dispatched: std::sync::atomic::AtomicU32,
     health: Mutex<std::collections::HashMap<String, RouteStrikes>>,
+    /// Model families whose deployment this account cannot reach (hard
+    /// reject), with the recorded reason. Routes through another gateway to
+    /// the same model are passed over too.
+    dead: Mutex<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -320,6 +338,7 @@ impl StageLedger {
             cap: cap.into(),
             dispatched: 0.into(),
             health: Mutex::default(),
+            dead: Mutex::default(),
         }
     }
 
@@ -372,16 +391,43 @@ impl StageLedger {
         (!left.is_zero()).then_some(left)
     }
 
-    fn open(&self, route: &Route) {
+    /// Pass over a route after a failure. Hard rejects (credentials, access,
+    /// missing model deployment) hold for 30 minutes; transient failures back
+    /// off 120/300/600s per strike.
+    fn open(&self, route: &Route, failure: Option<&crate::provider_diag::ProviderFailure>) {
+        use crate::provider_diag::Category;
+        let category = failure.map(|f| f.category);
+        let hard = matches!(
+            category,
+            Some(Category::Auth | Category::Permission | Category::InvalidModel)
+        );
+        if category == Some(Category::InvalidModel) {
+            if let (Ok(mut dead), Some(f)) = (self.dead.lock(), failure) {
+                dead.insert(model_family(&route.model), f.summary());
+            }
+        }
         if let Ok(mut health) = self.health.lock() {
             let entry = health.entry(Self::key(route)).or_insert(RouteStrikes {
                 until: std::time::Instant::now(),
                 strikes: 0,
             });
-            let cooldown = ROUTE_COOLDOWNS[entry.strikes.min(ROUTE_COOLDOWNS.len() - 1)];
+            let cooldown = if hard {
+                HARD_REJECT_COOLDOWN
+            } else {
+                ROUTE_COOLDOWNS[entry.strikes.min(ROUTE_COOLDOWNS.len() - 1)]
+            };
             entry.strikes += 1;
             entry.until = std::time::Instant::now() + cooldown;
         }
+    }
+
+    /// Why this route's model is known to be unreachable for the account.
+    fn dead_reason(&self, route: &Route) -> Option<String> {
+        self.dead
+            .lock()
+            .ok()?
+            .get(&model_family(&route.model))
+            .cloned()
     }
 
     fn close(&self, route: &Route) {
@@ -606,12 +652,32 @@ where
             continue;
         }
         any_dispatchable = true;
+        if let Some(reason) = opts.ledger.as_deref().and_then(|l| l.dead_reason(route)) {
+            report.history.push(AttemptRecord {
+                at: stamp(),
+                route_index: route_index as u32,
+                attempt: 0,
+                model: route.model.clone(),
+                dispatched: false,
+                outcome: "skip".into(),
+                reason: format!("same model already rejected in this stage: {reason}"),
+            });
+            if report.terminal_failure.is_none() {
+                report.terminal_failure = Some(crate::provider_diag::ProviderFailure::new(
+                    crate::provider_diag::Stage::Admission,
+                    crate::provider_diag::Category::InvalidModel,
+                    reason,
+                ));
+            }
+            continue;
+        }
         if let Some(left) = opts.ledger.as_deref().and_then(|l| l.cooling(route)) {
             let ledger = opts.ledger.as_deref().expect("checked");
-            if routes[route_index + 1..]
-                .iter()
-                .any(|r| r.skip_reason.is_none() && ledger.cooling(r).is_none())
-            {
+            if routes[route_index + 1..].iter().any(|r| {
+                r.skip_reason.is_none()
+                    && ledger.cooling(r).is_none()
+                    && ledger.dead_reason(r).is_none()
+            }) {
                 report.history.push(AttemptRecord {
                     at: stamp(),
                     route_index: route_index as u32,
@@ -627,7 +693,7 @@ where
                 continue;
             }
         }
-        let mut route_failure: Option<crate::provider_diag::Category> = None;
+        let mut route_failure: Option<crate::provider_diag::ProviderFailure> = None;
         let limit = match opts.wire_budget {
             Some(b) => b.per_route_max,
             None => opts
@@ -769,7 +835,7 @@ where
                 Err(err) => err,
             };
             report.terminal_failure = err.failure.clone();
-            route_failure = err.failure.as_ref().map(|f| f.category);
+            route_failure = err.failure.clone();
             let stop = err.cancelled
                 || (err.recovery.is_none() && err.disposition == RetryDisposition::Stop);
             report.history.push(AttemptRecord {
@@ -821,8 +887,29 @@ where
                 break;
             }
             if let Some(b) = opts.wire_budget {
-                let transient_ok =
-                    route_index == 0 && primary_transient_used < b.primary_transient_retries;
+                // The last route that can still answer is the only hope: a
+                // brief overload (503/429) there deserves a short backoff and
+                // another try rather than ending the operation.
+                let last_live = routes[route_index + 1..].iter().all(|r| {
+                    r.skip_reason.is_some()
+                        || opts
+                            .ledger
+                            .as_deref()
+                            .is_some_and(|l| l.cooling(r).is_some() || l.dead_reason(r).is_some())
+                });
+                let overloaded = err.failure.as_ref().is_some_and(|f| {
+                    matches!(
+                        f.category,
+                        crate::provider_diag::Category::Server
+                            | crate::provider_diag::Category::RateLimited
+                    )
+                });
+                let transient_ok = (route_index == 0
+                    && primary_transient_used < b.primary_transient_retries)
+                    || (last_live
+                        && overloaded
+                        && primary_transient_used
+                            < b.primary_transient_retries + LAST_ROUTE_RETRIES);
                 if extra_used >= b.shared_extra || !(is_recovery || transient_ok) {
                     break;
                 }
@@ -865,9 +952,10 @@ where
             }
         }
         if !report.cancelled {
-            if let (Some(ledger), Some(category)) = (opts.ledger.as_deref(), route_failure) {
-                if route_unwell(category) {
-                    ledger.open(route);
+            if let (Some(ledger), Some(failure)) = (opts.ledger.as_deref(), route_failure.as_ref())
+            {
+                if route_unwell(failure.category) {
+                    ledger.open(route, Some(failure));
                 }
             }
         }
@@ -1449,5 +1537,139 @@ mod tests {
         let (third, seen) = run(&routes, &ledger, "none").await;
         assert!(third.budget_exhausted && seen.is_empty());
         assert!(third.value.is_none());
+    }
+
+    fn failure(category: crate::provider_diag::Category, text: &str) -> DispatchError {
+        DispatchError::from_failure(crate::provider_diag::ProviderFailure::new(
+            crate::provider_diag::Stage::Response,
+            category,
+            text,
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_missing_deployment_is_not_retried_on_another_route_to_the_same_model() {
+        // Route 0: OpenRouter gateway id, route 2: same model direct.
+        let routes = [
+            route("nvidia/ultra:free"),
+            route("models/gemini"),
+            route("nvidia/ultra"),
+        ];
+        let ledger = Arc::new(StageLedger::new(50));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        for _ in 0..2 {
+            let log = seen.clone();
+            let report: ChainReport<()> = execute_with_context(
+                &routes,
+                move |_, r| {
+                    log.lock().unwrap().push(r.model.clone());
+                    let model = r.model.clone();
+                    async move {
+                        if model.contains("ultra") {
+                            Err(failure(
+                                crate::provider_diag::Category::InvalidModel,
+                                "function not found",
+                            ))
+                        } else {
+                            Err(failure(crate::provider_diag::Category::Server, "503"))
+                        }
+                    }
+                },
+                ExecuteOptions {
+                    ledger: Some(ledger.clone()),
+                    ..budgeted()
+                },
+            )
+            .await;
+            assert!(report.value.is_none());
+        }
+        let seen = seen.lock().unwrap().clone();
+        // First op: ultra:free (reject), gemini x2 (overload retry on the last
+        // live route), ultra skipped. Second op: ultra and gemini passed over
+        // or retried only as the last live route; ultra never again.
+        assert_eq!(
+            seen.iter().filter(|m| m.contains("ultra")).count(),
+            1,
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_last_live_route_gets_a_short_overload_retry() {
+        let routes = [route("a"), route("b")];
+        let ledger = Arc::new(StageLedger::new(50));
+        let calls = Arc::new(Mutex::new(0u32));
+        let counter = calls.clone();
+        let report = execute_with_context(
+            &routes,
+            move |_, r| {
+                let model = r.model.clone();
+                let n = {
+                    let mut c = counter.lock().unwrap();
+                    *c += 1;
+                    *c
+                };
+                async move {
+                    match model.as_str() {
+                        "a" => Err(failure(
+                            crate::provider_diag::Category::InvalidModel,
+                            "gone",
+                        )),
+                        _ if n < 3 => Err(failure(crate::provider_diag::Category::Server, "503")),
+                        _ => Ok(()),
+                    }
+                }
+            },
+            ExecuteOptions {
+                ledger: Some(ledger),
+                ..budgeted()
+            },
+        )
+        .await;
+        assert!(report.value.is_some(), "{:?}", report.history);
+    }
+
+    #[tokio::test]
+    async fn a_cooling_route_is_still_tried_when_every_later_route_is_a_dead_model() {
+        // Live regression: [ultra:free, gemini, ultra] with ultra missing and
+        // gemini recently timed out must still ask gemini.
+        let routes = [
+            route("nvidia/ultra:free"),
+            route("models/gemini"),
+            route("nvidia/ultra"),
+        ];
+        let ledger = Arc::new(StageLedger::new(50));
+        ledger.open(
+            &routes[1],
+            Some(&crate::provider_diag::ProviderFailure::new(
+                crate::provider_diag::Stage::Stream,
+                crate::provider_diag::Category::Timeout,
+                "stalled",
+            )),
+        );
+        ledger.open(
+            &routes[0],
+            Some(&crate::provider_diag::ProviderFailure::new(
+                crate::provider_diag::Stage::Response,
+                crate::provider_diag::Category::InvalidModel,
+                "function not found",
+            )),
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let report: ChainReport<()> = execute_with_context(
+            &routes,
+            move |_, r| {
+                log.lock().unwrap().push(r.model.clone());
+                async { Ok(()) }
+            },
+            ExecuteOptions {
+                ledger: Some(ledger),
+                ..budgeted()
+            },
+        )
+        .await;
+        assert!(report.value.is_some());
+        assert_eq!(seen.lock().unwrap().as_slice(), ["models/gemini"]);
     }
 }

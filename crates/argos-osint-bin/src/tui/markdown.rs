@@ -1,6 +1,6 @@
 //! Terminal Markdown for the Recon transcript and Brain graph summary.
 //!
-//! Pretty mode hides the source markers, matching Grok Build's agent messages:
+//! Pretty mode hides the source markers, for agent messages:
 //! headings, emphasis, inline code, links, lists, quotes, and fenced code.
 
 use ratatui::style::{Modifier, Style};

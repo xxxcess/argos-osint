@@ -1,6 +1,6 @@
       <svg role="img" aria-labelledby="model-roles-title model-roles-desc" viewBox="0 0 800 312" xmlns="http://www.w3.org/2000/svg">
         <title id="model-roles-title">Models and roles</title>
-        <desc id="model-roles-desc">auth.json holds accounts. config.toml holds independent role assignments. Saving a key never writes a default. Legacy Grok and OpenAI stay until the user reassigns them.</desc>
+        <desc id="model-roles-desc">auth.json holds accounts. config.toml holds independent role assignments. Saving a key never writes a default. Legacy OpenAI stays until the user reassigns them.</desc>
 
         <defs>
           <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>

@@ -54,7 +54,7 @@ pub enum AdapterId {
     OpenRouter,
     Google,
     Nvidia,
-    /// Any other OpenAI-compatible chat endpoint (x.ai, OpenAI, local, proxies).
+    /// Any other OpenAI-compatible chat endpoint (OpenAI, local, proxies).
     OpenAiCompatible,
 }
 

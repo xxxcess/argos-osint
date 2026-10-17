@@ -37,7 +37,7 @@ Each role is provider + model plus an ordered `fallbacks` list in `config.toml`.
 | Summarization | Graph/path summaries |
 | Evidence curator, Entity resolver, Claim assessor, Investigation controller | Investigation harness |
 
-Legacy Grok/OpenAI accounts remain until the user assigns a replacement. New setup tabs are Defaults, OpenRouter, Google, Nvidia.
+Legacy OpenAI accounts remain until the user assigns a replacement. New setup tabs are Defaults, OpenRouter, Google, Nvidia.
 
 ## Primary OSINT providers
 

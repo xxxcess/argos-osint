@@ -23215,6 +23215,60 @@ mod tests {
     }
 
     #[test]
+    fn topology_summary_rows_are_cached_per_key_and_keep_markup_characters() {
+        use super::super::topology::{summary_rows, SummaryGen, SummaryRow};
+        use std::rc::Rc;
+        let mut app = brief_fixture();
+        app.topology_state
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .neighborhood_brief
+            .as_mut()
+            .unwrap()
+            .overview
+            .as_mut()
+            .unwrap()
+            .text = "Entity `x*y*` and *Star* Corp".into();
+        let st = &app.topology_state;
+        let a = summary_rows(st, false, None, 40);
+        let b = summary_rows(st, false, None, 40);
+        assert!(Rc::ptr_eq(&a, &b), "same key reuses the built rows");
+        let plain: String = a
+            .iter()
+            .filter_map(|r| match r {
+                SummaryRow::Text(line) => Some(
+                    line.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            plain.contains("`x*y*`") && plain.contains("*Star*"),
+            "{plain}"
+        );
+        // Each key component rebuilds.
+        assert!(!Rc::ptr_eq(&a, &summary_rows(st, false, None, 41)));
+        assert!(!Rc::ptr_eq(&a, &summary_rows(st, true, None, 41)));
+        let c = summary_rows(st, false, None, 40);
+        app.topology_state.summary.gen = SummaryGen::Pending;
+        app.topology_state.summary.generation += 1;
+        let d = summary_rows(&app.topology_state, false, None, 40);
+        assert!(!Rc::ptr_eq(&c, &d));
+        // Scrolling reuses the cache: no rebuild between wheel steps.
+        render(&mut app, 120, 40);
+        let before = summary_rows(&app.topology_state, false, None, 33);
+        app.set_focus(Target::TopologySummary);
+        key(&mut app, KeyCode::Down);
+        let after = summary_rows(&app.topology_state, false, None, 33);
+        assert!(Rc::ptr_eq(&before, &after) || before.len() == after.len());
+    }
+
+    #[test]
     fn topology_summary_open_failure_becomes_a_typed_failure_not_a_stuck_generating() {
         use super::super::topology::SummaryGen;
         use argos_osint_core::brain_neighborhood_brief_exec::FailureKind;

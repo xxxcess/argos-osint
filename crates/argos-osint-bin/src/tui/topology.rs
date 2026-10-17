@@ -5,6 +5,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -194,6 +196,7 @@ pub struct TopologyState {
     pub content_tab: ContentTab,
     /// Independent row offset of the Summary pane.
     pub summary_scroll: usize,
+    pub summary_rows_cache: RefCell<Option<SummaryRowsCache>>,
     pub summary: SummaryState,
     pub related_sel: usize,
     /// Logical relationship record offset; detail prose has its own row offset.
@@ -227,6 +230,7 @@ impl Default for TopologyState {
             inspector_scroll: 0,
             content_tab: ContentTab::Summary,
             summary_scroll: 0,
+            summary_rows_cache: RefCell::new(None),
             summary: SummaryState::default(),
             related_sel: 0,
             related_scroll: 0,
@@ -1077,42 +1081,49 @@ pub fn displayed_brief(state: &TopologyState) -> Option<(&NeighborhoodBrief, boo
     Some((fallback, false))
 }
 
-fn md_safe(text: &str) -> String {
-    text.chars().filter(|c| !matches!(c, '*' | '`')).collect()
-}
-
-/// The brief as Markdown for the existing renderer.
-pub fn brief_markdown(brief: &NeighborhoodBrief) -> String {
-    let mut out = vec![format!("### {}", md_safe(&brief.header())), String::new()];
+/// Styled lines of the typed brief, wrapped to `width`. Built directly from
+/// the typed fields (no Markdown round trip), so entity names containing `*`
+/// or backticks are shown exactly as recorded.
+fn brief_lines(brief: &NeighborhoodBrief, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    out.extend(components::measured_lines(
+        vec![Line::from(Span::styled(
+            brief.header(),
+            theme::accent().add_modifier(Modifier::BOLD),
+        ))],
+        width,
+    ));
+    out.push(Line::from(""));
     for (name, items) in brief.blocks() {
-        out.push(format!("**{name}**"));
+        out.push(Line::styled(
+            name.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
         for item in items {
             let refs = argos_osint_core::brain_neighborhood_brief::refs_text(&item.basis);
-            let bullet = if name == "Connections" { "- " } else { "" };
-            out.push(format!("{bullet}{}{refs}", md_safe(&item.text)));
-        }
-        out.push(String::new());
-    }
-    out.push(format!("*{}*", md_safe(&brief.footer())));
-    out.join("\n")
-}
-
-fn md_to_lines(text: &str, width: usize) -> Vec<Line<'static>> {
-    super::markdown::markdown_lines(text, width.max(1))
-        .into_iter()
-        .map(|row| {
-            if row.pieces.is_empty() {
-                Line::from("")
+            let text = format!("{}{refs}", item.text);
+            if name == "Connections" && width > 3 {
+                let wrapped = components::measured_lines(vec![Line::from(text)], width - 2);
+                for (i, line) in wrapped.into_iter().enumerate() {
+                    let mut spans = vec![Span::raw(if i == 0 { "• " } else { "  " })];
+                    spans.extend(line.spans);
+                    out.push(Line::from(spans));
+                }
             } else {
-                Line::from(
-                    row.pieces
-                        .into_iter()
-                        .map(|piece| Span::styled(piece.text, super::markdown::style(piece.tone)))
-                        .collect::<Vec<_>>(),
-                )
+                out.extend(components::measured_lines(vec![Line::from(text)], width));
             }
-        })
-        .collect()
+        }
+        out.push(Line::from(""));
+    }
+    out.extend(components::measured_lines(
+        vec![Line::from(Span::styled(
+            brief.footer(),
+            theme::muted().add_modifier(Modifier::ITALIC),
+        ))],
+        width,
+    ));
+    out
 }
 
 fn failure_note(failure: &GenerationFailure) -> String {
@@ -1145,9 +1156,58 @@ fn failure_note(failure: &GenerationFailure) -> String {
     }
 }
 
+/// Rows cache of the Summary pane, valid for one exact key.
+#[derive(Clone, Debug, Default)]
+pub struct SummaryRowsCache {
+    key: String,
+    rows: Rc<Vec<SummaryRow>>,
+}
+
+/// All rows of the Summary pane at `width`. Built once per distinct
+/// (basis, generated/fallback, request generation, failure, width, loading,
+/// error) and then shared by draw, wheel and keyboard scrolling.
+pub fn summary_rows(
+    state: &TopologyState,
+    loading: bool,
+    error: Option<&str>,
+    width: u16,
+) -> Rc<Vec<SummaryRow>> {
+    let gen_tag = match &state.summary.gen {
+        SummaryGen::Idle => "idle".to_string(),
+        SummaryGen::Pending => "pending".to_string(),
+        SummaryGen::Generated(_) => "generated".to_string(),
+        SummaryGen::Failed(f) => format!("failed:{}:{}", f.kind.as_str(), f.message),
+    };
+    let key = format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        state.summary.basis_key,
+        state.summary.generation,
+        gen_tag,
+        width,
+        loading,
+        error.unwrap_or(""),
+        state.snapshot.is_some(),
+        state.seed.is_some(),
+    );
+    if let Some(hit) = state
+        .summary_rows_cache
+        .borrow()
+        .as_ref()
+        .filter(|c| c.key == key)
+    {
+        return hit.rows.clone();
+    }
+    let rows = Rc::new(build_summary_rows(state, loading, error, width));
+    *state.summary_rows_cache.borrow_mut() = Some(SummaryRowsCache {
+        key,
+        rows: rows.clone(),
+    });
+    rows
+}
+
 /// All rows of the Summary pane at `width`, measured once for draw, wheel and
 /// keyboard scrolling alike.
-pub fn summary_rows(
+fn build_summary_rows(
     state: &TopologyState,
     loading: bool,
     error: Option<&str>,
@@ -1155,7 +1215,7 @@ pub fn summary_rows(
 ) -> Vec<SummaryRow> {
     let width = width.max(1);
     let text = |message: String, style: Style| -> Vec<SummaryRow> {
-        components::measured_lines(vec![Line::styled(message, style)], width)
+        components::measured_lines(vec![Line::from(Span::styled(message, style))], width)
             .into_iter()
             .map(SummaryRow::Text)
             .collect()
@@ -1188,11 +1248,7 @@ pub fn summary_rows(
         rows.extend(text(failure_note(failure), Style::default().fg(WARN)));
         rows.push(SummaryRow::Text(Line::from("")));
     }
-    rows.extend(
-        md_to_lines(&brief_markdown(brief), width as usize)
-            .into_iter()
-            .map(SummaryRow::Text),
-    );
+    rows.extend(brief_lines(brief, width).into_iter().map(SummaryRow::Text));
     if !brief.references.is_empty() {
         rows.push(SummaryRow::Text(Line::from("")));
         rows.push(SummaryRow::Text(Line::styled(
@@ -1316,7 +1372,8 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
     let (label, label_style) = summary_label(state, app.topology_loading, error);
     // The state label wraps (at most two rows) so a qualifier such as
     // "limited coverage" or "refresh failed" is never clipped away.
-    let label_lines = components::measured_lines(vec![Line::styled(label, label_style)], width);
+    let label_lines =
+        components::measured_lines(vec![Line::from(Span::styled(label, label_style))], width);
     let label_rows = (label_lines.len() as u16)
         .min(2)
         .min(area.height.saturating_sub(1));

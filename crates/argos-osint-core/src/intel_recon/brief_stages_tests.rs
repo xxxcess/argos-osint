@@ -2717,3 +2717,235 @@ fn ineligible_queued_head_does_not_starve_fresh_brief_stages() {
         );
     }
 }
+
+fn set_state(conn: &rusqlite::Connection, job: &str, op: &str, state: &str, error: &str) {
+    conn.execute(
+        "UPDATE argos_tasks SET state=?3,error_message=?4 WHERE id=?1 AND operation=?2",
+        rusqlite::params![brief_pipeline::task_id(job, op), op, state, error],
+    )
+    .unwrap();
+}
+
+// A chain whose Body and Claims failed leaves Inferences queued with a bound
+// input at the head of the pool's order. A fresh chain whose predecessors
+// committed must still claim its own Inferences stage behind that head.
+#[test]
+fn failed_predecessor_head_does_not_starve_a_fresh_chain() {
+    let db = db();
+    second_article(&db, "a2");
+    let store = Store::open(&db.path).unwrap();
+    let stuck = chain_for(&db, "a1");
+    set_state(
+        &store.conn,
+        &stuck,
+        "intel_brief_body",
+        "failed",
+        "story missing",
+    );
+    set_state(&store.conn, &stuck, "intel_brief_claims", "failed", "boom");
+    store
+        .conn
+        .execute(
+            "UPDATE argos_tasks SET input_hash='bound' WHERE job_id=?1 AND operation='intel_brief_inferences'",
+            [&stuck],
+        )
+        .unwrap();
+    let fresh = chain_for(&db, "a2");
+    set_state(&store.conn, &fresh, "intel_brief_body", "completed", "");
+    set_state(&store.conn, &fresh, "intel_brief_claims", "completed", "");
+    store
+        .conn
+        .execute(
+            "UPDATE argos_tasks SET input_hash='bound' WHERE job_id=?1 AND operation='intel_brief_inferences'",
+            [&fresh],
+        )
+        .unwrap();
+    let got = brief_pipeline::claim_stage(&store.conn, "w", 30, &now())
+        .unwrap()
+        .expect("fresh Inferences must be claimable");
+    assert_eq!(got.job_id, fresh);
+    assert_eq!(got.operation, "intel_brief_inferences");
+}
+
+// The failure and its recovery reach the stage rows: a failed stage and every
+// stage it blocks name the error and Retry; a missing key adds the Providers
+// hint; healthy queued stages and unrelated failures carry nothing extra.
+#[test]
+fn failed_and_blocked_stages_carry_error_retry_and_provider_hint() {
+    let db = db();
+    let store = Store::open(&db.path).unwrap();
+    let job = chain_for(&db, "a1");
+    let healthy = stage_views(&store.conn, &job).unwrap();
+    assert!(
+        healthy.iter().all(|v| v.detail.is_empty()),
+        "no placeholders"
+    );
+
+    set_state(
+        &store.conn,
+        &job,
+        "intel_brief_claims",
+        "failed",
+        "all routes blocked (0 dispatched attempts): route 0 skip: API key missing; configure google in Providers",
+    );
+    let views = stage_views(&store.conn, &job).unwrap();
+    assert!(
+        views[1].detail.contains("API key missing"),
+        "{:?}",
+        views[1].detail
+    );
+    assert!(views[1]
+        .detail
+        .contains("Configure a provider in Providers."));
+    assert!(views[1].detail.contains("Retry"));
+    assert!(views[0].detail.is_empty(), "unaffected stage stays quiet");
+    for blocked in [&views[2], &views[3]] {
+        assert!(
+            blocked.row.starts_with("Queued · blocked by"),
+            "{}",
+            blocked.row
+        );
+        assert!(blocked
+            .detail
+            .starts_with("Claims failed: all routes blocked"));
+        assert!(blocked
+            .detail
+            .contains("Configure a provider in Providers."));
+        assert!(blocked.detail.contains("Retry"));
+    }
+
+    set_state(
+        &store.conn,
+        &job,
+        "intel_brief_claims",
+        "failed",
+        "model returned invalid JSON",
+    );
+    let views = stage_views(&store.conn, &job).unwrap();
+    assert!(
+        views[1].row.contains("invalid JSON"),
+        "short errors stay in the row only"
+    );
+    assert!(!views[1].detail.contains("invalid JSON"));
+    assert!(
+        !views[1].detail.contains("Providers"),
+        "hint only for missing keys"
+    );
+    assert!(views[1].detail.contains("Retry"));
+}
+
+// Through the REAL drainer loop with an injected backend, the whole chain
+// completes without the test driving any stage by hand.
+#[test]
+fn spawned_drainer_completes_the_full_chain() {
+    let db = db();
+    let job = chain_for(&db, "a1");
+    let mock = Mock::happy();
+    let pool = crate::scheduler::WorkerPool::spawn_intel_brief_drainer_with(
+        db.path.clone(),
+        "w-spawn".into(),
+        Arc::new(move || Box::new(mock.clone())),
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut r = Vec::new();
+    while std::time::Instant::now() < deadline {
+        r = rows(&db.path, &job);
+        if r.len() == 4 && r.iter().all(|row| row.starts_with("Completed")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    pool.stop();
+    assert!(
+        r.len() == 4 && r.iter().all(|row| row.starts_with("Completed")),
+        "{r:?}"
+    );
+}
+
+// End to end on a COPY of a database seeded with the stale rows a long-lived
+// install accumulates (job past the 3-day window, cancel requested, retired,
+// failed predecessors): the real drainer loop must still run a fresh chain.
+#[test]
+fn stale_seeded_database_copy_runs_a_fresh_chain_end_to_end() {
+    let db = db();
+    for id in ["s1", "s2", "s3", "s4"] {
+        second_article(&db, id);
+    }
+    {
+        let store = Store::open(&db.path).unwrap();
+        let old = chain_for(&db, "s1");
+        store
+            .conn
+            .execute(
+                "UPDATE argos_jobs SET created_at='2020-01-01T00:00:00Z' WHERE id=?1",
+                [&old],
+            )
+            .unwrap();
+        let cancelled = chain_for(&db, "s2");
+        store
+            .conn
+            .execute(
+                "UPDATE argos_jobs SET cancel_requested=1 WHERE id=?1",
+                [&cancelled],
+            )
+            .unwrap();
+        let retired = chain_for(&db, "s3");
+        store
+            .conn
+            .execute(
+                "INSERT INTO argos_job_retirements(job_id,retired_at,reason) VALUES(?1,'2026-10-01T00:00:00Z','t')",
+                [&retired],
+            )
+            .unwrap();
+        let failed = chain_for(&db, "s4");
+        set_state(
+            &store.conn,
+            &failed,
+            "intel_brief_body",
+            "failed",
+            "story missing",
+        );
+        set_state(&store.conn, &failed, "intel_brief_claims", "failed", "boom");
+        store
+            .conn
+            .execute(
+                "UPDATE argos_tasks SET input_hash='bound' WHERE job_id=?1 AND operation='intel_brief_inferences'",
+                [&failed],
+            )
+            .unwrap();
+        // Flush the WAL so the file copy is a complete database.
+        let _ = store
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    }
+    let copy_dir = tempfile::tempdir().unwrap();
+    let copy = copy_dir.path().join("argos.db");
+    std::fs::copy(&db.path, &copy).unwrap();
+    let fresh = chain_for(
+        &Db {
+            _dir: tempfile::tempdir().unwrap(),
+            path: copy.clone(),
+        },
+        "a1",
+    );
+    let mock = Mock::happy();
+    let pool = crate::scheduler::WorkerPool::spawn_intel_brief_drainer_with(
+        copy.clone(),
+        "w-e2e".into(),
+        Arc::new(move || Box::new(mock.clone())),
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut r = Vec::new();
+    while std::time::Instant::now() < deadline {
+        r = rows(&copy, &fresh);
+        if r.len() == 4 && r.iter().all(|row| row.starts_with("Completed")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    pool.stop();
+    assert!(
+        r.len() == 4 && r.iter().all(|row| row.starts_with("Completed")),
+        "fresh chain must run past stale rows: {r:?}"
+    );
+}

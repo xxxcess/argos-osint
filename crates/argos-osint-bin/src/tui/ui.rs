@@ -8935,10 +8935,17 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
                 // A section shows its own stage state; history is Previous.
                 let previous =
                     !md.trim().is_empty() && !md.contains("_none_") && !md.starts_with('_');
-                *md = if previous {
-                    format!("_{}_\n\n_Previous_\n\n{md}", stage.row)
-                } else {
+                // A failed stage, or one blocked by a failed predecessor, names
+                // the failure and how to recover; nothing is added otherwise.
+                let head = if stage.detail.is_empty() {
                     format!("_{}_", stage.row)
+                } else {
+                    format!("_{}_\n\n{}", stage.row, stage.detail)
+                };
+                *md = if previous {
+                    format!("{head}\n\n_Previous_\n\n{md}")
+                } else {
+                    head
                 };
             }
         }

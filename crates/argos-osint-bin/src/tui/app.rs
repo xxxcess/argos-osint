@@ -16320,6 +16320,9 @@ mod tests {
             ("5-completed", 4, None, false, false),
             ("6-empty", 4, None, false, true),
             ("7-cached", 4, None, false, false),
+            // No provider account: Claims fails on blocked routes and the
+            // downstream stages stay queued behind it.
+            ("8-no-provider", 0, None, false, false),
         ];
         // §8.8 widths; narrow and too-small sizes render the failed and
         // completed frames (geometry changes there), wider ones every state.
@@ -16441,6 +16444,35 @@ mod tests {
                         bp::set_activity(conn, &other.id, "waiting for model").unwrap();
                     }
                 }
+                if *name == "8-no-provider" {
+                    for _ in 0..2 {
+                        let mut c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
+                        if c.operation == "intel_brief_claims" {
+                            c.max_attempts = 1;
+                            tasks::fail_claimed(
+                                conn,
+                                &c,
+                                tasks::OperationKind::OtherLlm,
+                                &tasks::TaskError::new(
+                                    tasks::ErrorCategory::InvalidResult,
+                                    "all routes blocked (0 dispatched attempts): route 0 skip: API key missing; configure google in Providers",
+                                ),
+                                &now(),
+                            )
+                            .unwrap();
+                        } else {
+                            assert!(bp::commit_stage(
+                                conn,
+                                &c,
+                                &body.to_string(),
+                                0,
+                                "validated clean body",
+                                &now()
+                            )
+                            .unwrap());
+                        }
+                    }
+                }
                 if *fail {
                     let mut c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
                     c.max_attempts = 1;
@@ -16514,7 +16546,11 @@ mod tests {
                             text.contains("suspended the ferry"),
                             "completed Claims kept"
                         );
-                        assert!(text.contains("blocked by Inferences"));
+                        // The taller failure pane scrolls Links off an 80x24 page.
+                        assert!(
+                            width <= 80 || text.contains("blocked by Inferences"),
+                            "{width}x{height} {text}"
+                        );
                         // Global Jobs shows identical stage states.
                         let detail = argos_osint_core::jobs_view::job_detail(
                             app.store.connection(),
@@ -16545,6 +16581,16 @@ mod tests {
                                 .len(),
                             1
                         );
+                    }
+                    "8-no-provider" => {
+                        assert!(rows[1].starts_with("Claims · Failed"), "{rows:?}");
+                        assert!(rows[2].starts_with("Inferences · Queued · blocked by Claims"));
+                        assert!(text.contains("Claims failed: all routes blocked"), "{text}");
+                        assert!(
+                            text.contains("Configure a provider in Providers."),
+                            "{text}"
+                        );
+                        assert!(text.contains("Retry article retrieval"), "{text}");
                     }
                     "7-cached" => {
                         assert!(rows.iter().all(|r| r.contains("Completed")), "{rows:?}");
@@ -18856,6 +18902,7 @@ mod tests {
                     .into(),
                     row: state.into(),
                     active: state == "running",
+                    ..Default::default()
                 }];
             }
             if matches!(
@@ -18884,6 +18931,7 @@ mod tests {
                         }
                         .into(),
                         active: state != "committed",
+                        ..Default::default()
                     });
             }
             if matches!(state, "partial" | "uncertain" | "orphan") {
@@ -18981,6 +19029,7 @@ mod tests {
             state: "running".into(),
             row: "Running".into(),
             active: true,
+            ..Default::default()
         }];
         assert!(intel_body_loading(&app));
         let mut snapshot = super::super::db_reads::IntelBriefSnapshot::default();
@@ -19072,6 +19121,7 @@ mod tests {
             state: "running".into(),
             row: "Running".into(),
             active: true,
+            ..Default::default()
         }];
         app.intel_body_running.insert("art-busy".into());
         assert!(super::super::ui::intel_body_loading(&app));
@@ -20153,6 +20203,7 @@ mod tests {
                 state: "running".into(),
                 row: "Running".into(),
                 active: true,
+                ..Default::default()
             }];
             app.intel_body_running.insert(article.id.clone());
             if let Some(dir) = &dir {

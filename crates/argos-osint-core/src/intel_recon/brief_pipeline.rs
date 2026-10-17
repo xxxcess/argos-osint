@@ -818,7 +818,7 @@ pub fn cancel_chain(conn: &Connection, job_id: &str, now: &str) -> Result<()> {
 
 /// One immutable stage row for every surface (brief Jobs panel, section
 /// headers, global Jobs, Logs).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StageView {
     pub operation: String,
     pub label: &'static str,
@@ -826,6 +826,45 @@ pub struct StageView {
     /// Display row, e.g. `Queued · after Claims`, `Completed · 3 items`.
     pub row: String,
     pub active: bool,
+    /// Extra lines for a failed stage or one blocked by a failed predecessor:
+    /// the failure, a Providers hint for a missing key, and how to retry.
+    /// Empty when there is nothing to say.
+    pub detail: String,
+}
+
+/// Longest failure text shown in a stage pane.
+const DETAIL_ERROR_CHARS: usize = 220;
+
+/// First line of a stage error, bounded for display.
+fn detail_error(reason: &str) -> String {
+    let first = reason.lines().next().unwrap_or("").trim();
+    let mut out: String = first.chars().take(DETAIL_ERROR_CHARS).collect();
+    if first.chars().count() > DETAIL_ERROR_CHARS {
+        out.push('…');
+    }
+    out
+}
+
+/// Pane lines for a failed stage (`own`) or one blocked by `blocker`'s failure.
+fn failure_detail(subject: &str, own: bool, error: &str) -> String {
+    let error = detail_error(error);
+    if error.is_empty() {
+        return String::new();
+    }
+    // The stage's own row already shows a short error in full; repeat the
+    // text only when the row truncated it.
+    let mut lines = Vec::new();
+    if !own {
+        lines.push(format!("{subject} failed: {error}"));
+    } else if short(&error) != error {
+        lines.push(error.clone());
+    }
+    let lower = error.to_lowercase();
+    if lower.contains("api key missing") || lower.contains("all routes blocked") {
+        lines.push("Configure a provider in Providers.".into());
+    }
+    lines.push("Retry article retrieval resumes the failed stage.".into());
+    lines.join("\n\n")
 }
 
 fn short(reason: &str) -> String {
@@ -846,7 +885,8 @@ fn short(reason: &str) -> String {
 /// the failed prerequisite (transitively) that blocks it.
 pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
     let mut out: Vec<StageView> = Vec::new();
-    let mut failed_by: std::collections::HashMap<String, &'static str> = Default::default();
+    let mut failed_by: std::collections::HashMap<String, (&'static str, String)> =
+        Default::default();
     for (operation, label) in STAGES {
         let id = task_id(job_id, operation);
         let row: Option<(String, String, String)> = conn
@@ -876,13 +916,10 @@ pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let blocker = deps.iter().find_map(|(op, st)| {
-            if st == "failed" {
-                Some(label_of(op))
-            } else {
-                failed_by.get(op).copied()
-            }
-        });
+        // A failed prerequisite registers itself in `failed_by` below, so one
+        // lookup covers direct and transitive blockers.
+        let blocker_full = deps.iter().find_map(|(op, _)| failed_by.get(op).cloned());
+        let blocker = blocker_full.as_ref().map(|(label, _)| *label);
         let text = match state.as_str() {
             "completed" => match output {
                 Some((0, reason)) if !reason.is_empty() => format!("Completed · {reason}"),
@@ -929,14 +966,25 @@ pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
                 }
             },
         };
+        let detail = if state == "failed" {
+            failure_detail(label, true, &error)
+        } else if state == "queued" {
+            blocker_full
+                .as_ref()
+                .map(|(who, err)| failure_detail(who, false, err))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         if state == "failed" {
-            failed_by.insert(operation.to_string(), label);
+            failed_by.insert(operation.to_string(), (label, error.clone()));
         } else if state != "completed" {
-            if let Some(b) = blocker {
+            if let Some(b) = blocker_full {
                 failed_by.insert(operation.to_string(), b);
             }
         }
         out.push(StageView {
+            detail,
             operation: operation.into(),
             label,
             active: state == "running",

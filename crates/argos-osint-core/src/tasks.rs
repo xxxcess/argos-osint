@@ -685,6 +685,11 @@ pub fn migrate_additive(conn: &Connection) -> Result<()> {
         "
         CREATE INDEX IF NOT EXISTS argos_tasks_pool_ready
             ON argos_tasks(pool, state, next_eligible_at, priority, created_at);
+        -- Ordered claim scan over queued rows only. Created idempotently like
+        -- the other indexes here: no schema-version bump, no data migration.
+        CREATE INDEX IF NOT EXISTS argos_tasks_queued_order
+            ON argos_tasks(pool, priority, created_at)
+            WHERE state IN ('queued','retry_scheduled');
         CREATE INDEX IF NOT EXISTS argos_tasks_job ON argos_tasks(job_id);
         CREATE INDEX IF NOT EXISTS argos_attempts_task ON argos_attempts(task_id, attempt_number);
         CREATE INDEX IF NOT EXISTS argos_jobs_parent ON argos_jobs(parent_id);
@@ -2048,6 +2053,32 @@ pub fn set_job_stage_coverage(conn: &Connection, job_id: &str, coverage_json: &s
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn queued_claim_scan_uses_the_partial_index_without_a_schema_bump() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_tables(&conn).unwrap();
+        migrate_tables(&conn).unwrap();
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT t.id FROM argos_tasks t
+                 WHERE t.state IN ('queued','retry_scheduled') AND t.pool IN ('intel_brief')
+                 ORDER BY t.priority ASC, t.created_at ASC LIMIT 1",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let plan = plan.join(" | ");
+        assert!(plan.contains("argos_tasks_queued_order"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 0, "migrate_tables never touches user_version");
+        assert_eq!(crate::store::SCHEMA_VERSION, 42);
+    }
+
     #[test]
     fn claim_eligibility_const_names_the_brief_pool() {
         assert!(super::CLAIM_ELIGIBLE.contains(&format!("'{}'", super::POOL_INTEL_BRIEF)));

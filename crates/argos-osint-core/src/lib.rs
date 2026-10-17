@@ -46,7 +46,6 @@ pub mod events;
 pub mod evidence;
 pub mod explore;
 pub mod graph_explanation;
-pub mod grok_oauth;
 pub mod hardware;
 pub mod intel_recon;
 pub mod investigation;

@@ -174,8 +174,8 @@ fn test_claim_specific_evidence_isolation() {
 fn test_role_defaults_inheritance_hierarchy() {
     let mut defaults = RoleDefaults {
         recon: ModelAssignment {
-            provider: "grok".into(),
-            model: "grok-4.6".into(),
+            provider: "openrouter".into(),
+            model: "openai/gpt-4.1".into(),
             ..Default::default()
         },
         synthesis: ModelAssignment {
@@ -195,8 +195,8 @@ fn test_role_defaults_inheritance_hierarchy() {
     // 1. Evidence Curator inherits Recon
     let (curator, parent) = defaults.resolve_role("evidence_curator");
     assert_eq!(parent, Some("recon"));
-    assert_eq!(curator.provider, "grok");
-    assert_eq!(curator.model, "grok-4.6");
+    assert_eq!(curator.provider, "openrouter");
+    assert_eq!(curator.model, "openai/gpt-4.1");
 
     // 2. Entity Resolver inherits Classifier
     let (resolver, parent) = defaults.resolve_role("entity_resolver");
@@ -213,7 +213,7 @@ fn test_role_defaults_inheritance_hierarchy() {
     // 4. Investigation Controller inherits Recon
     let (controller, parent) = defaults.resolve_role("investigation_controller");
     assert_eq!(parent, Some("recon"));
-    assert_eq!(controller.provider, "grok");
+    assert_eq!(controller.provider, "openrouter");
 
     // 5. Summarization inherits Synthesis
     let (summary, parent) = defaults.resolve_role("summarization");

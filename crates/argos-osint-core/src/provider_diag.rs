@@ -513,7 +513,6 @@ pub fn classify_text(text: &str) -> Category {
     let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
     if has(&[
         "not configured",
-        "no grok subscription login",
         "no summarization",
         "not signed in",
         "login required",

@@ -429,7 +429,7 @@ pub(crate) fn total_ceiling(
 fn output_limit_field(kind: &str) -> Option<&'static str> {
     match kind {
         "openai" => Some("max_completion_tokens"),
-        "openrouter" | "google" | "nvidia" | "grok" => Some("max_tokens"),
+        "openrouter" | "google" | "nvidia" => Some("max_tokens"),
         _ => None,
     }
 }

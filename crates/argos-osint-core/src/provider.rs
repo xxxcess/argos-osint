@@ -2,7 +2,7 @@
 //!
 //! The agent loop speaks one protocol: OpenAI-compatible chat completions,
 //! plus `/audio/transcriptions` for voice. Login chooses which vendor fills
-//! that protocol: Grok (`api.x.ai`), OpenAI, OpenRouter, or a local server
+//! that protocol: OpenAI, OpenRouter, Google, NVIDIA, or a local server
 //! (Ollama, llama.cpp, LM Studio). Cloud providers take an API key typed at
 //! the terminal or the vendor's environment variable. A local server may omit
 //! the key. OpenRouter also gets its attribution headers.
@@ -141,15 +141,6 @@ pub struct ProviderPreset {
 pub fn presets() -> &'static [ProviderPreset] {
     &[
         ProviderPreset {
-            id: "grok",
-            label: "Grok",
-            base_url: "https://api.x.ai/v1",
-            text_model: "grok-4.6",
-            voice_model: "whisper-1",
-            env_key: Some("XAI_API_KEY"),
-            key_required: true,
-        },
-        ProviderPreset {
             id: "openai",
             label: "OpenAI",
             base_url: "https://api.openai.com/v1",
@@ -202,32 +193,29 @@ pub fn preset(id: &str) -> Option<&'static ProviderPreset> {
     presets().iter().find(|preset| preset.id == id)
 }
 
-/// Built-in Grok catalog. The default matches the model Grok Build starts
-/// on (`grok-4.6` in its `default_models.json`). Older ids stay selectable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GrokModel {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub detail: &'static str,
+/// Provider kinds that were removed from the desk. Saved configuration that
+/// still names one is dropped on load or import (see `AuthFile::load_from` and
+/// `config_transfer`), never mapped onto another vendor.
+pub fn is_removed_kind(kind: &str) -> bool {
+    let compact: String = kind
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '-' && *ch != '_')
+        .collect();
+    matches!(
+        compact.as_str(),
+        "grok" | "xai" | "x.ai" | "groksubscription"
+    )
 }
 
-pub fn grok_models() -> &'static [GrokModel] {
-    &[
-        GrokModel {
-            id: "grok-4.6",
-            name: "Grok 4.6",
-            detail: "Current default. Frontier model for agents.",
-        },
-        GrokModel {
-            id: "grok-4.5",
-            name: "Grok 4.5",
-            detail: "Previous Grok Build default.",
-        },
-    ]
-}
-
-pub fn default_grok_model() -> &'static str {
-    grok_models()[0].id
+/// True for a base URL on the removed vendor's host.
+pub fn is_removed_host(url: &str) -> bool {
+    let host = url::Url::parse(url.trim())
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .unwrap_or_default();
+    host == "x.ai" || host.ends_with(".x.ai")
 }
 
 /// Exact id or display name, then a single unambiguous prefix. Empty and
@@ -257,25 +245,25 @@ pub fn resolve_model_choice(choices: &[(String, String)], query: &str) -> Option
     }
 }
 
-/// The text provider a turn should call. With nothing saved, that is Grok
-/// on `api.x.ai` using the current default model. `selected` (from
+/// The text provider a turn should call. With nothing saved, that is OpenRouter
+/// using its preset model. `selected` (from
 /// `/model`, Ctrl+M, or `-m`) wins over the model stored on the provider.
 pub fn active_text_secret(
     auth: &crate::secrets::AuthFile,
     selected: &str,
 ) -> crate::secrets::ProviderSecret {
     use crate::secrets::ProviderSecret;
-    let grok = preset("grok").expect("grok preset");
+    let fallback = preset("openrouter").expect("openrouter preset");
     let mut secret = auth.text.clone().unwrap_or_else(|| ProviderSecret {
-        kind: "grok".into(),
-        base_url: grok.base_url.into(),
-        model: grok.text_model.into(),
+        kind: "openrouter".into(),
+        base_url: fallback.base_url.into(),
+        model: fallback.text_model.into(),
         api_key: None,
-        stt_model: Some(grok.voice_model.into()),
+        stt_model: Some(fallback.voice_model.into()),
         device: None,
     });
     if secret.kind.trim().is_empty() {
-        secret.kind = "grok".into();
+        secret.kind = "openrouter".into();
     }
     if secret.base_url.trim().is_empty() {
         if let Some(preset) = preset(&secret.kind) {
@@ -287,20 +275,20 @@ pub fn active_text_secret(
     } else if secret.model.trim().is_empty() {
         secret.model = preset(&effective_kind(&secret))
             .map(|preset| preset.text_model)
-            .unwrap_or_else(|| default_grok_model())
+            .unwrap_or("")
             .to_string();
     }
-    subscription_connection(secret)
+    secret
 }
 
 /// Account defaults contain no credentials from another provider.
 pub fn account_secret(auth: &crate::secrets::AuthFile, kind: &str) -> ProviderSecret {
     let kind = normalize_kind(kind);
     if let Some(secret) = auth.account(&kind) {
-        return subscription_connection(secret);
+        return secret;
     }
     let preset = preset(&kind);
-    subscription_connection(ProviderSecret {
+    ProviderSecret {
         kind: kind.clone(),
         // A transport identifier lets the existing agent distinguish this
         // configured CLI connection from an absent HTTP provider.
@@ -323,18 +311,7 @@ pub fn account_secret(auth: &crate::secrets::AuthFile, kind: &str) -> ProviderSe
         api_key: None,
         stt_model: None,
         device: None,
-    })
-}
-
-/// Keep archived API credentials in AuthFile, but Grok account selection
-/// always resolves to subscription auth on the official endpoint.
-fn subscription_connection(mut secret: ProviderSecret) -> ProviderSecret {
-    if effective_kind(&secret) == "grok" {
-        secret.kind = "grok-subscription".into();
-        secret.api_key = None;
-        secret.base_url = preset("grok").expect("Grok preset").base_url.into();
     }
-    secret
 }
 
 /// Resolve the writer account and model; old configurations retain their text connection.
@@ -393,6 +370,32 @@ pub struct ModelAssignment {
 }
 
 impl ModelAssignment {
+    /// Drops routes of a removed provider (Grok / xAI). A removed primary is
+    /// replaced by the first remaining fallback, or cleared so the role
+    /// inherits. Returns how many routes were dropped.
+    pub fn drop_removed(&mut self) -> usize {
+        let before = self.fallbacks.len();
+        self.fallbacks
+            .retain(|route| !is_removed_kind(&route.provider));
+        let mut dropped = before - self.fallbacks.len();
+        if is_removed_kind(&self.provider) {
+            dropped += 1;
+            match (!self.fallbacks.is_empty()).then(|| self.fallbacks.remove(0)) {
+                Some(next) => {
+                    self.provider = next.provider;
+                    self.model = next.model;
+                    self.account = next.account;
+                }
+                None => {
+                    self.provider.clear();
+                    self.model.clear();
+                    self.account.clear();
+                }
+            }
+        }
+        dropped
+    }
+
     pub fn as_route(&self) -> ModelRoute {
         ModelRoute {
             provider: self.provider.clone(),
@@ -704,6 +707,35 @@ pub fn role_name(role: &str) -> Option<&'static str> {
 }
 
 impl RoleDefaults {
+    /// Removes every Grok (xAI) route from every role, the decision fallback and
+    /// the operation overrides. Returns the number of routes dropped.
+    pub fn drop_removed_providers(&mut self) -> usize {
+        let mut dropped = 0;
+        for role in [
+            &mut self.recon,
+            &mut self.synthesis,
+            &mut self.tool_picker,
+            &mut self.classifier,
+            &mut self.summarization,
+            &mut self.evidence_curator,
+            &mut self.entity_resolver,
+            &mut self.claim_assessor,
+            &mut self.investigation_controller,
+            &mut self.decision_model,
+        ] {
+            dropped += role.drop_removed();
+        }
+        if let Some(fallback) = self.decision_fallback.as_mut() {
+            dropped += fallback.drop_removed();
+        }
+        for entry in self.operation_overrides.values_mut() {
+            if let OperationOverride::Assignment(assignment) = entry {
+                dropped += assignment.drop_removed();
+            }
+        }
+        dropped
+    }
+
     pub fn role(&self, role: &str) -> Option<&ModelAssignment> {
         match role_name(role)? {
             "recon" => Some(&self.recon),
@@ -1217,8 +1249,6 @@ pub fn normalize_kind(kind: &str) -> String {
         .filter(|ch| !ch.is_whitespace() && *ch != '-' && *ch != '_')
         .collect();
     match compact.as_str() {
-        "grok" | "xai" | "x.ai" => "grok".into(),
-        "groksubscription" => "grok-subscription".into(),
         "openai" => "openai".into(),
         "chatgpt" | "openaichatgpt" => "openai-chatgpt".into(),
         "openrouter" => "openrouter".into(),
@@ -1233,9 +1263,6 @@ pub fn normalize_kind(kind: &str) -> String {
 /// Older files that only have a base URL are classified from the host.
 pub fn effective_kind(secret: &ProviderSecret) -> String {
     let kind = normalize_kind(&secret.kind);
-    if kind == "grok-subscription" {
-        return "grok".into();
-    }
     if kind == "openai-chatgpt" || preset(&kind).is_some() {
         return kind;
     }
@@ -1253,8 +1280,6 @@ pub fn detect_kind_from_url(url: &str) -> String {
         "google".into()
     } else if host == "integrate.api.nvidia.com" {
         "nvidia".into()
-    } else if host == "api.x.ai" || host == "x.ai" || host.ends_with(".x.ai") {
-        "grok".into()
     } else if host == "api.openai.com" || host.ends_with(".openai.com") {
         "openai".into()
     } else {
@@ -1272,10 +1297,7 @@ fn resolved_key_with(
     secret: &ProviderSecret,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    if matches!(
-        normalize_kind(&secret.kind).as_str(),
-        "grok-subscription" | "openai-chatgpt"
-    ) {
+    if normalize_kind(&secret.kind) == "openai-chatgpt" {
         return None;
     }
     if let Some(key) = secret
@@ -1311,16 +1333,7 @@ pub fn provider_headers(secret: &ProviderSecret) -> Vec<(&'static str, &'static 
 }
 
 async fn bearer_token(secret: &ProviderSecret) -> Result<Option<String>, String> {
-    if normalize_kind(&secret.kind) == "grok-subscription" {
-        return crate::grok_oauth::bearer().await;
-    }
-    if let Some(key) = resolved_key(secret) {
-        return Ok(Some(key));
-    }
-    if effective_kind(secret) == "grok" {
-        return crate::grok_oauth::bearer().await;
-    }
-    Ok(None)
+    Ok(resolved_key(secret))
 }
 
 pub(crate) async fn authorize(
@@ -1345,11 +1358,6 @@ pub(crate) async fn authorize_as(
     }
     match bearer_token(secret).await {
         Ok(Some(key)) => req = req.bearer_auth(key),
-        Ok(None) if effective_kind(secret) == "grok" => {
-            return Err(anyhow!(
-                "No Grok subscription login. Sign in at Providers → Grok, or run `grok login --oauth`."
-            ));
-        }
         Ok(None) if preset(&effective_kind(secret)).is_some_and(|p| p.key_required) => {
             return Err(anyhow!("{} credentials are not configured. Connect this account in Providers before selecting its models.", effective_kind(secret)));
         }
@@ -2030,7 +2038,7 @@ pub async fn list_catalog(secret: &ProviderSecret) -> Result<Vec<ListedModel>> {
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(catalog_error(secret, status, &text));
+        return Err(catalog_error(status, &text));
     }
     let v: Value = serde_json::from_str(&text).context("malformed model catalog JSON")?;
     anyhow::ensure!(
@@ -2040,29 +2048,7 @@ pub async fn list_catalog(secret: &ProviderSecret) -> Result<Vec<ListedModel>> {
     Ok(parse_model_catalog(&v))
 }
 
-fn catalog_error(
-    secret: &ProviderSecret,
-    status: reqwest::StatusCode,
-    body: &str,
-) -> anyhow::Error {
-    if normalize_kind(&secret.kind) == "grok-subscription" {
-        let payload: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-        let code = payload
-            .get("code")
-            .or_else(|| payload.pointer("/error/code"))
-            .and_then(Value::as_str);
-        if status == reqwest::StatusCode::FORBIDDEN
-            && code == Some("personal-team-blocked:spending-limit")
-        {
-            return anyhow!("Signed in · Grok model access blocked (spending limit). Check this account's subscription/usage at grok.com, then Check existing login.");
-        }
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return anyhow!("Grok rejected the saved login (401). Sign in with Grok again; saved API keys are not used.");
-        }
-        if status == reqwest::StatusCode::FORBIDDEN {
-            return anyhow!("Grok denied model access (403). Check the signed-in account's subscription and permissions, then Check existing login.");
-        }
-    }
+fn catalog_error(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
     anyhow!("models {status}: {body}")
 }
 
@@ -2368,13 +2354,18 @@ impl SettingsFile {
         let mut settings: Self = toml::from_str(&raw)?;
         // A blank OSINT User-Agent is unset, so requests keep the built-in default.
         settings.osint_user_agent = settings.osint_user_agent.trim().to_string();
+        let mut dropped = settings.defaults.drop_removed_providers();
+        if is_removed_kind(&settings.writer_provider) {
+            settings.writer_provider.clear();
+            dropped += 1;
+        }
         let legacy_provider = settings.writer_provider.clone();
         let legacy_model = if settings.writer_model.is_empty() {
             settings.model.clone()
         } else {
             settings.writer_model.clone()
         };
-        let mut migrated = false;
+        let mut migrated = dropped > 0;
         for role in [
             &mut settings.defaults.recon,
             &mut settings.defaults.synthesis,
@@ -2691,11 +2682,12 @@ mod tests {
 
     #[test]
     fn obsolete_research_configuration_is_ignored() {
-        let settings: SettingsFile =
-            toml::from_str("writer_model = 'grok-4.6'\nsearx_url = 'old'\nreport_dir = 'old'\n")
-                .unwrap();
+        let settings: SettingsFile = toml::from_str(
+            "writer_model = 'openai/gpt-4.1'\nsearx_url = 'old'\nreport_dir = 'old'\n",
+        )
+        .unwrap();
         let saved = toml::to_string(&settings).unwrap();
-        assert!(saved.contains("grok-4.6"));
+        assert!(saved.contains("openai/gpt-4.1"));
         assert!(!saved.contains("searx_url"));
         assert!(!saved.contains("report_dir"));
     }
@@ -2750,22 +2742,22 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "[defaults.synthesis]\nprovider = 'grok'\nmodel = 'grok-4.6'\n",
+            "[defaults.synthesis]\nprovider = 'openrouter'\nmodel = 'openai/gpt-4.1'\n",
         )
         .unwrap();
         let settings = SettingsFile::load_from(&path).unwrap();
-        assert_eq!(settings.defaults.synthesis.model, "grok-4.6");
-        assert_eq!(settings.defaults.synthesis.provider, "grok");
+        assert_eq!(settings.defaults.synthesis.model, "openai/gpt-4.1");
+        assert_eq!(settings.defaults.synthesis.provider, "openrouter");
         assert_eq!(settings.defaults.tool_picker.model, TOOL_PICKER_MODEL);
         assert!(settings.defaults.recon.model.is_empty());
         // A saved picker assignment is never overwritten.
         std::fs::write(
             &path,
-            "[defaults.tool_picker]\nprovider = 'grok'\nmodel = 'grok-4.6'\n",
+            "[defaults.tool_picker]\nprovider = 'openrouter'\nmodel = 'openai/gpt-4.1'\n",
         )
         .unwrap();
         let kept = SettingsFile::load_from(&path).unwrap();
-        assert_eq!(kept.defaults.tool_picker.model, "grok-4.6");
+        assert_eq!(kept.defaults.tool_picker.model, "openai/gpt-4.1");
         assert_eq!(picker_transport(&kept.defaults.tool_picker.model), "chat");
         assert_eq!(picker_transport(TOOL_PICKER_MODEL), "decisions");
         assert_eq!(picker_transport("~typesafe/jev-latest"), "decisions");
@@ -2845,7 +2837,8 @@ mod tests {
         .unwrap();
         let loaded: RoleDefaults = toml::from_str(&toml).unwrap();
         assert_eq!(loaded.recon.fallbacks.len(), 1);
-        let empty: RoleDefaults = toml::from_str("[recon]\nprovider='grok'\nmodel='g'\n").unwrap();
+        let empty: RoleDefaults =
+            toml::from_str("[recon]\nprovider='openrouter'\nmodel='g'\n").unwrap();
         assert!(empty.recon.fallbacks.is_empty());
     }
 
@@ -3380,5 +3373,37 @@ model = 'imported-recon'
         let fallback = loaded.defaults.decision_fallback.as_ref().unwrap();
         assert_eq!(fallback.provider, "nvidia");
         assert_eq!(fallback.model, "decision-mirror");
+    }
+}
+
+#[cfg(test)]
+mod removed_provider_tests {
+    use super::*;
+
+    #[test]
+    fn a_saved_config_with_grok_routes_loads_without_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "writer_provider = 'grok'\n[defaults.recon]\nprovider = 'grok'\nmodel = 'grok-4.6'\n[[defaults.recon.fallbacks]]\nprovider = 'openrouter'\nmodel = 'openai/gpt-4.1'\n[defaults.synthesis]\nprovider = 'openrouter'\nmodel = 'm'\n[[defaults.synthesis.fallbacks]]\nprovider = 'grok'\nmodel = 'grok-4.6'\n",
+        )
+        .unwrap();
+        let settings = SettingsFile::load_from(&path).unwrap();
+        assert_eq!(settings.defaults.recon.provider, "openrouter");
+        assert_eq!(settings.defaults.recon.model, "openai/gpt-4.1");
+        assert!(settings.defaults.synthesis.fallbacks.is_empty());
+        assert!(settings.writer_provider.is_empty());
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(!rewritten.contains("grok"), "{rewritten}");
+    }
+
+    #[test]
+    fn grok_is_no_longer_a_preset_or_a_known_kind() {
+        assert!(preset("grok").is_none());
+        assert!(presets().iter().all(|p| p.id != "grok"));
+        assert!(is_removed_kind("xAI") && is_removed_kind("grok-subscription"));
+        assert!(is_removed_host("https://api.x.ai/v1"));
+        assert!(!is_removed_kind("openrouter"));
     }
 }

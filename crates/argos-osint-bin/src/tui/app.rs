@@ -1675,7 +1675,14 @@ impl App {
             cursor: 0,
             screen: Rect::default(),
             layout: std::cell::RefCell::new(LayoutRegistry::default()),
-            status: "ready".into(),
+            status: if auth.dropped_providers.is_empty() {
+                "ready".into()
+            } else {
+                format!(
+                    "ready · {} is no longer supported; its saved routes were ignored",
+                    auth.dropped_providers.join(", ")
+                )
+            },
             see_more_pages: std::cell::Cell::new([8, 8, 8]),
             recon_tip: 0,
             recon_tip_at: Instant::now(),
@@ -6014,7 +6021,6 @@ impl App {
         let raw = self.field(self.defaults_role.provider_field());
         match provider::normalize_kind(raw).as_str() {
             "openai" => "openai-chatgpt".into(),
-            "grok-subscription" => "grok".into(),
             other => other.to_string(),
         }
     }
@@ -6425,10 +6431,7 @@ impl App {
     fn rebuild_provider_choices(&mut self) {
         let mut items = Vec::new();
         let current = self.role_provider();
-        if matches!(
-            current.as_str(),
-            "grok" | "grok-subscription" | "openai" | "openai-chatgpt"
-        ) {
+        if matches!(current.as_str(), "openai" | "openai-chatgpt") {
             items.push(ChoiceItem {
                 id: current.clone(),
                 label: format!(
@@ -9266,12 +9269,9 @@ impl App {
             kind
         };
         if role != DefaultsRole::Synthesis
-            && !matches!(
-                kind.as_str(),
-                "grok" | "openai-chatgpt" | "openrouter" | "local"
-            )
+            && !matches!(kind.as_str(), "openai-chatgpt" | "openrouter" | "local")
         {
-            anyhow::bail!("Choose Grok, OpenAI, OpenRouter, or local");
+            anyhow::bail!("Choose OpenAI, OpenRouter, or local");
         }
         let assignment = self
             .settings
@@ -11378,7 +11378,6 @@ pub fn intel_day_button_label(day: &str) -> String {
 
 fn provider_label(kind: &str) -> &'static str {
     match provider::normalize_kind(kind).as_str() {
-        "grok" | "grok-subscription" => "Grok (legacy)",
         "openai" | "openai-chatgpt" => "OpenAI (legacy)",
         "openrouter" => "OpenRouter",
         "google" => "Google",
@@ -12636,7 +12635,7 @@ mod tests {
         let mut other = provider::account_secret(&app.auth, "local");
         other.api_key = Some("other-secret".into());
         app.auth.set_account(other);
-        app.settings.defaults.recon.provider = "grok".into();
+        app.settings.defaults.recon.provider = "local".into();
         click(&mut app, Target::App(ModuleId::Providers.index()));
         click(&mut app, Target::ProviderTab(ProviderPage::OpenRouter));
         click(&mut app, Target::Field(FieldId::RouterKey));
@@ -12650,7 +12649,7 @@ mod tests {
             app.auth.account("local").unwrap().api_key.as_deref(),
             Some("other-secret")
         );
-        assert_eq!(app.settings.defaults.recon.provider, "grok");
+        assert_eq!(app.settings.defaults.recon.provider, "local");
         let saved = std::fs::read_to_string(&app.auth_path).unwrap();
         assert!(saved.contains("router-secret"));
     }
@@ -12664,12 +12663,12 @@ mod tests {
         let mut router = provider::account_secret(&app.auth, "openrouter");
         router.api_key = Some("router-key".into());
         app.auth.set_account(router);
-        app.settings.defaults.recon.provider = "grok".into();
-        app.settings.defaults.recon.model = "grok-4.6".into();
+        app.settings.defaults.recon.provider = "local".into();
+        app.settings.defaults.recon.model = "llama3.2".into();
         app.settings.defaults.synthesis.provider = "openrouter".into();
         app.settings.defaults.synthesis.model = "openrouter/free".into();
-        app.recon_provider = "grok".into();
-        app.recon_model = "grok-4.6".into();
+        app.recon_provider = "local".into();
+        app.recon_model = "llama3.2".into();
         app.synthesis_provider = "openrouter".into();
         app.synthesis_model = "openrouter/free".into();
         let auth_before = serde_json::to_string(&app.auth).unwrap();
@@ -12713,11 +12712,11 @@ mod tests {
         assert!(app.status.contains("decisions"), "{}", app.status);
         assert_eq!(app.settings.defaults.tool_picker.provider, "openrouter");
         assert_eq!(app.settings.defaults.tool_picker.model, "typesafe/jev-1.13");
-        assert_eq!(app.settings.defaults.recon.provider, "grok");
-        assert_eq!(app.settings.defaults.recon.model, "grok-4.6");
+        assert_eq!(app.settings.defaults.recon.provider, "local");
+        assert_eq!(app.settings.defaults.recon.model, "llama3.2");
         assert_eq!(app.settings.defaults.synthesis.provider, "openrouter");
         assert_eq!(app.settings.defaults.synthesis.model, "openrouter/free");
-        assert_eq!(app.recon_model, "grok-4.6");
+        assert_eq!(app.recon_model, "llama3.2");
         assert_eq!(app.synthesis_model, "openrouter/free");
         assert!(events(&app)
             .iter()
@@ -12944,11 +12943,11 @@ mod tests {
         assert_eq!(app.recon_provider, "openrouter");
 
         app.model_catalog = vec![ListedModel {
-            id: "grok-4.6".into(),
-            name: "Grok 4.6".into(),
+            id: "llama3.2".into(),
+            name: "Llama 3.2".into(),
             free: false,
         }];
-        app.catalog_for = "grok".into();
+        app.catalog_for = "local".into();
         app.on_work_event(WorkEvent::CatalogDone {
             role: DefaultsRole::Recon,
             provider: "openrouter".into(),
@@ -13018,7 +13017,7 @@ mod tests {
         assert_eq!(app.synthesis_model, "nvidia-text-model");
         app.on_work_event(WorkEvent::CatalogDone {
             role: DefaultsRole::Synthesis,
-            provider: "grok".into(),
+            provider: "local".into(),
             outcome: Ok(vec![ListedModel {
                 id: "not-allowed".into(),
                 name: "Not allowed".into(),
@@ -13168,7 +13167,7 @@ mod tests {
             .unwrap();
         let run = app
             .store
-            .new_run(&thread.id, &user.id, "grok / recon", "grok / synthesis")
+            .new_run(&thread.id, &user.id, "local / recon", "local / synthesis")
             .unwrap();
         let tool = osint::registry()[0].id;
         let plan = recon::Plan {

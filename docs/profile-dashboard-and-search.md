@@ -146,7 +146,7 @@ Rejected:
 - a `schema_version` that is not the integer `1`; a malformed `exported_at`
 - duplicate object keys; any unknown field at any level
 - empty ids, kinds, models, routes or provider names; duplicate provider, tool-credential, or `(quota_group_id, scope)` entries
-- a provider `kind` outside `openrouter`, `google`, `nvidia`, `grok`, `openai`, `local`, `subscription`
+- a provider `kind` outside `openrouter`, `google`, `nvidia`, `openai`, `local`, `subscription`
 - a `base_url` that is not an absolute URL with a host, or is not `https` unless the kind is a documented local route
 - a subscription route carrying key material; an `inline` credential with a blank key or a stray env name; an `env` credential that is not a valid variable name or that also carries a key; a `none` credential carrying any value
 - a `quota_group_id` that references a group `rate_limits` does not define

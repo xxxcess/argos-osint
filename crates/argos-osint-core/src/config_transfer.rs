@@ -57,7 +57,6 @@ pub const PROVIDER_KINDS: &[&str] = &[
     "openrouter",
     "google",
     "nvidia",
-    "grok",
     "openai",
     "local",
     "subscription",
@@ -1363,10 +1362,7 @@ fn check_route_reference(
         .iter()
         .any(|id| provider::normalize_kind(id) == normalized)
         || provider::preset(&normalized).is_some()
-        || matches!(
-            normalized.as_str(),
-            "grok" | "grok-subscription" | "openai" | "openai-chatgpt" | "local"
-        );
+        || matches!(normalized.as_str(), "openai" | "openai-chatgpt" | "local");
     if !known {
         issues.push(issue(
             &child(pointer, "primary"),
@@ -1694,7 +1690,7 @@ fn report(issues: &[ConfigIssue]) -> String {
 /// onto the portable `subscription` marker, which never carries key material.
 fn export_kind(secret: &ProviderSecret) -> String {
     match provider::effective_kind(secret).as_str() {
-        "grok-subscription" | "openai-chatgpt" => "subscription".to_string(),
+        "openai-chatgpt" => "subscription".to_string(),
         other => other.to_string(),
     }
 }
@@ -1902,6 +1898,111 @@ pub fn write_export(document: &ProfileConfig, path: &Path) -> Result<()> {
 // Import
 // ---------------------------------------------------------------------------
 
+/// Grok (xAI) is no longer a supported provider. An older document that still
+/// carries it keeps importing: its provider entry and rate limits are dropped,
+/// every role or override route that used it is removed (a removed primary
+/// falls back to documented inheritance, so the first remaining fallback is
+/// promoted), and each kind of drop is reported once as a warning. Nothing is
+/// mapped onto another vendor.
+fn drop_removed_providers(value: &mut Value, warnings: &mut Vec<ConfigIssue>) {
+    let Some(root) = value.as_object_mut() else {
+        return;
+    };
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(Value::Array(providers)) = root.get_mut("providers") {
+        providers.retain(|entry| {
+            let text = |key: &str| entry.get(key).and_then(Value::as_str).unwrap_or("");
+            let removed = provider::is_removed_kind(text("kind"))
+                || provider::is_removed_kind(text("id"))
+                || provider::is_removed_host(text("base_url"));
+            if removed {
+                ids.push(text("id").to_string());
+            }
+            !removed
+        });
+    }
+    ids.push("grok".to_string());
+    ids.push("xai".to_string());
+    let removed_route = |route: &Value| {
+        route
+            .get("provider_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| provider::is_removed_kind(id) || ids.iter().any(|r| r == id))
+    };
+    let mut routes_dropped = 0usize;
+    fn scrub(value: &mut Value, removed: &dyn Fn(&Value) -> bool, dropped: &mut usize) {
+        match value {
+            Value::Object(map) => {
+                if map.get("primary").is_some_and(|primary| removed(primary)) {
+                    *dropped += 1;
+                    let promoted = match map.get_mut("fallbacks") {
+                        Some(Value::Array(list)) => {
+                            list.retain(|route| {
+                                let keep = !removed(route);
+                                if !keep {
+                                    *dropped += 1;
+                                }
+                                keep
+                            });
+                            (!list.is_empty()).then(|| list.remove(0))
+                        }
+                        _ => None,
+                    };
+                    map.insert("primary".into(), promoted.unwrap_or(Value::Null));
+                }
+                if let Some(Value::Array(list)) = map.get_mut("fallbacks") {
+                    list.retain(|route| {
+                        let keep = !removed(route);
+                        if !keep {
+                            *dropped += 1;
+                        }
+                        keep
+                    });
+                }
+                for child in map.values_mut() {
+                    scrub(child, removed, dropped);
+                }
+            }
+            Value::Array(list) => list
+                .iter_mut()
+                .for_each(|child| scrub(child, removed, dropped)),
+            _ => {}
+        }
+    }
+    if let Some(roles) = root.get_mut("model_roles") {
+        scrub(roles, &removed_route, &mut routes_dropped);
+    }
+    let mut limits_dropped = 0usize;
+    if let Some(Value::Array(limits)) = root.get_mut("rate_limits") {
+        limits.retain(|limit| {
+            let named = ["provider_id", "provider", "quota_group_id"]
+                .iter()
+                .any(|key| {
+                    limit.get(*key).and_then(Value::as_str).is_some_and(|id| {
+                        provider::is_removed_kind(id) || ids.iter().any(|r| r == id)
+                    })
+                });
+            if named {
+                limits_dropped += 1;
+            }
+            !named
+        });
+    }
+    let provider_dropped = ids.len() > 2;
+    if provider_dropped || routes_dropped > 0 || limits_dropped > 0 {
+        warnings.push(issue(
+            "/providers",
+            format!(
+                "Grok (xAI) is no longer supported and was not imported: {} provider entr{}, {} role route(s) and {} rate limit(s) dropped. Roles that lost their primary route use the next remaining fallback or inherit.",
+                ids.len() - 2,
+                if ids.len() - 2 == 1 { "y" } else { "ies" },
+                routes_dropped,
+                limits_dropped
+            ),
+        ));
+    }
+}
+
 /// Parses a document and returns the validated plan plus everything the Import
 /// screen shows before the user commits.
 ///
@@ -1918,7 +2019,9 @@ pub fn parse_document(text: &str) -> Result<ImportPlan> {
     let value = serde_json::from_str::<NoDuplicates>(text)
         .map(|parsed| parsed.0)
         .map_err(|err| anyhow::anyhow!("the document is not valid JSON: {err}"))?;
+    let mut value = value;
     let mut warnings: Vec<ConfigIssue> = Vec::new();
+    drop_removed_providers(&mut value, &mut warnings);
     let issues = validate_document(&value, &mut warnings);
     if !issues.is_empty() {
         bail!(
@@ -1956,15 +2059,8 @@ fn stored_kind(document_kind: &str, base_url: &str, existing: Option<&ProviderSe
     }
     match document_kind {
         "subscription" => {
-            let host = url::Url::parse(base_url.trim())
-                .ok()
-                .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
-                .unwrap_or_default();
-            if host.contains("grok") || host.contains("x.ai") {
-                "grok-subscription".to_string()
-            } else {
-                "openai-chatgpt".to_string()
-            }
+            let _ = base_url;
+            "openai-chatgpt".to_string()
         }
         other => provider::normalize_kind(other),
     }

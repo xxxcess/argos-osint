@@ -5535,7 +5535,12 @@ mod tests {
             .add_message(&thread.id, "user", "Who owns 8.8.8.8?", None)
             .unwrap();
         let run = store
-            .new_run(&thread.id, &user.id, "grok / model", "grok / model")
+            .new_run(
+                &thread.id,
+                &user.id,
+                "openrouter / model",
+                "openrouter / model",
+            )
             .unwrap();
         let inputs = json!({"ip":"8.8.8.8"});
         let call_id = store
@@ -6085,9 +6090,9 @@ mod tests {
                 &thread.id,
                 &user.id,
                 [
-                    "grok / recon",
+                    "openrouter / recon",
                     "openrouter / typesafe/jev-1.13",
-                    "grok / synth",
+                    "openrouter / synth",
                 ],
                 RunLimits {
                     max_rounds: 6,
@@ -6098,7 +6103,7 @@ mod tests {
             .unwrap();
         let loaded = store.get_run(&run.id).unwrap().unwrap();
         assert_eq!(loaded.tool_picker_model, "openrouter / typesafe/jev-1.13");
-        assert_eq!(loaded.recon_model, "grok / recon");
+        assert_eq!(loaded.recon_model, "openrouter / recon");
         let legacy = store
             .new_run(&thread.id, &user.id, "a / b", "c / d")
             .unwrap();

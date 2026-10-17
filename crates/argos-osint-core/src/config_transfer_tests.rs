@@ -688,10 +688,10 @@ mod tests {
             "the error names the credential pointer: {err}"
         );
 
-        // A subscription route with a keyless credential and a grok endpoint is accepted.
+        // A subscription route with a keyless credential is accepted.
         let mut v = doc();
         v["providers"][0]["kind"] = serde_json::json!("subscription");
-        v["providers"][0]["base_url"] = serde_json::json!("https://grok.com");
+        v["providers"][0]["base_url"] = serde_json::json!("codex://chatgpt");
         v["providers"][0]["credential"] =
             serde_json::json!({"source": "none", "api_key": "", "name": ""});
         assert!(
@@ -1387,15 +1387,15 @@ mod tests {
     #[test]
     fn a_subscription_account_keeps_its_device_endpoints_through_an_import() {
         let secret = ProviderSecret {
-            kind: "grok-subscription".into(),
-            base_url: "https://grok.com".into(),
-            model: "grok-4.6".into(),
+            kind: "openai-chatgpt".into(),
+            base_url: "codex://chatgpt".into(),
+            model: "codex-default".into(),
             api_key: None,
             stt_model: Some("whisper-1".into()),
             device: Some(DeviceEndpoints {
                 client_id: "cid".into(),
-                device_auth_url: "https://auth.x.ai/device".into(),
-                token_url: "https://auth.x.ai/token".into(),
+                device_auth_url: "https://auth.example/device".into(),
+                token_url: "https://auth.example/token".into(),
                 scope: "openid profile email".into(),
             }),
         };
@@ -1404,9 +1404,8 @@ mod tests {
         source.set_account(secret.clone());
         let quotas = QuotaSettingsFile {
             settings: vec![
-                rate_limit_entry("grok"),
                 rate_limit_entry("subscription"),
-                rate_limit_entry("grok-subscription"),
+                rate_limit_entry("openai-chatgpt"),
             ],
         };
         let text = serialize_document(&export_document(&SettingsFile::default(), &source, &quotas))
@@ -1489,5 +1488,39 @@ mod tests {
         }
         assert!(!target.exists(), "a failed validation writes no file");
         assert_no_staged_files(dir.path());
+    }
+
+    #[test]
+    fn an_old_profile_with_grok_still_imports_and_drops_every_grok_route_with_one_warning() {
+        let mut v = doc();
+        let providers = v["providers"].as_array_mut().unwrap();
+        providers.push(serde_json::json!({
+            "id": "grok", "kind": "grok", "base_url": "https://api.x.ai/v1",
+            "default_model": "grok-4.6",
+            "credential": {"source": "inline", "api_key": "sk-redacted-fixture"},
+            "quota_group_id": ""
+        }));
+        let first = v["model_roles"]["recon"]["primary"].clone();
+        v["model_roles"]["recon"]["primary"] =
+            serde_json::json!({"provider_id": "grok", "model": "grok-4.6"});
+        v["model_roles"]["recon"]["fallbacks"] = serde_json::json!([first.clone()]);
+        v["model_roles"]["synthesis"]["fallbacks"] =
+            serde_json::json!([{"provider_id": "grok", "model": "grok-4.6"}]);
+        let plan = parse_document(&render(&v)).expect("an old profile with Grok still imports");
+        assert!(plan.config.providers.iter().all(|p| p.id != "grok"));
+        let recon = &plan.config.model_roles.recon;
+        assert_eq!(
+            recon.primary.as_ref().map(|r| r.model.clone()),
+            first["model"].as_str().map(str::to_string)
+        );
+        let text = format!("{:?}", plan.config.model_roles);
+        assert!(!text.contains("grok"), "{text}");
+        let warning: Vec<_> = plan
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("Grok (xAI) is no longer supported"))
+            .collect();
+        assert_eq!(warning.len(), 1, "{:?}", plan.warnings);
+        assert!(!warning[0].message.contains("sk-redacted"));
     }
 }

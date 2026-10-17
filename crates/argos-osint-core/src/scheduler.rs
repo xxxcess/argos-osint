@@ -19,40 +19,76 @@ pub const DEFAULT_LEASE_SECS: i64 = 30;
 pub type IntelBackendFactory =
     Arc<dyn Fn() -> Box<dyn crate::intel_recon::brief_stages::StageBackend + Send> + Send + Sync>;
 
-/// Minimum gap before the same drainer repeats the same error.
+/// A given error from a given drainer is surfaced at most once per window.
 const DRAINER_ERROR_REPEAT: Duration = Duration::from_secs(300);
+/// Upper bound on remembered (drainer, message) pairs.
+const DRAINER_ERROR_CAP: usize = 128;
 
-/// Decide whether a drainer error should be surfaced now: always for a new
-/// message, and for a repeated one only after [`DRAINER_ERROR_REPEAT`].
-fn should_surface(
-    seen: &mut std::collections::HashMap<String, (String, std::time::Instant)>,
-    name: &str,
-    message: &str,
-    at: std::time::Instant,
-) -> bool {
-    match seen.get(name) {
-        Some((last, when))
-            if last == message && at.duration_since(*when) < DRAINER_ERROR_REPEAT =>
-        {
-            false
-        }
-        _ => {
-            seen.insert(name.to_string(), (message.to_string(), at));
-            true
-        }
+type Seen = std::collections::HashMap<(String, String), std::time::Instant>;
+
+/// Decide whether a drainer error should be surfaced now. Keyed by
+/// (drainer name, redacted message), so alternating errors A, B, A each log
+/// once per window. Entries older than [`DRAINER_ERROR_REPEAT`] are evicted and
+/// the map never exceeds [`DRAINER_ERROR_CAP`] (oldest dropped first).
+fn should_surface(seen: &mut Seen, name: &str, message: &str, at: std::time::Instant) -> bool {
+    seen.retain(|_, when| at.saturating_duration_since(*when) < DRAINER_ERROR_REPEAT);
+    let key = (name.to_string(), message.to_string());
+    if seen.contains_key(&key) {
+        return false;
     }
+    while seen.len() >= DRAINER_ERROR_CAP {
+        let Some(oldest) = seen
+            .iter()
+            .min_by_key(|(_, when)| **when)
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        seen.remove(&oldest);
+    }
+    seen.insert(key, at);
+    true
 }
 
-/// Surface a drainer failure as a redacted, rate-limited error event (Logs)
-/// instead of discarding it; a poll loop repeating one error logs it once.
+/// Replace local paths in `message`: the `ARGOS_HOME` override becomes
+/// `$ARGOS_HOME`, and the user's home directory (`HOME` and the platform home)
+/// becomes `~`. Longest path first, so an `ARGOS_HOME` inside the home
+/// directory wins over `~`. `events::redact` does not cover paths.
+fn redact_paths(message: &str, argos_home: Option<&str>, homes: &[&str]) -> String {
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    if let Some(path) = argos_home {
+        pairs.push((path, "$ARGOS_HOME"));
+    }
+    pairs.extend(homes.iter().map(|path| (*path, "~")));
+    pairs.retain(|(path, _)| path.trim_end_matches('/').len() > 1);
+    pairs.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
+    let mut out = message.to_string();
+    for (path, replacement) in pairs {
+        out = out.replace(path.trim_end_matches('/'), replacement);
+    }
+    out
+}
+
+fn redact_local_paths(message: &str) -> String {
+    let argos_home = std::env::var("ARGOS_HOME")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let env_home = std::env::var("HOME").ok().filter(|v| !v.trim().is_empty());
+    let dirs_home = dirs::home_dir().map(|p| p.to_string_lossy().into_owned());
+    let mut homes: Vec<&str> = Vec::new();
+    homes.extend(env_home.as_deref());
+    homes.extend(dirs_home.as_deref());
+    redact_paths(message, argos_home.as_deref(), &homes)
+}
+
+/// Surface a drainer failure as a redacted (secrets and local paths),
+/// rate-limited error event (Logs) instead of discarding it.
 fn report_drainer<T>(db_path: &std::path::Path, name: &str, result: Result<T>) {
-    static SEEN: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
-    > = std::sync::OnceLock::new();
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<Seen>> = std::sync::OnceLock::new();
     let Err(error) = result else {
         return;
     };
-    let message = format!("{error:#}");
+    let message = redact_local_paths(&format!("{error:#}"));
     let fresh = SEEN
         .get_or_init(Default::default)
         .lock()
@@ -673,35 +709,46 @@ pub fn operation_kind(name: &str) -> OperationKind {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn drainer_errors_surface_once_then_rate_limit_and_new_errors_pass() {
+    fn alternating_drainer_errors_each_surface_once_per_window_and_map_is_bounded() {
         use std::time::Instant;
-        let mut seen = std::collections::HashMap::new();
+        let mut seen = Seen::new();
         let t0 = Instant::now();
-        assert!(super::should_surface(&mut seen, "intel-brief", "boom", t0));
-        assert!(!super::should_surface(
-            &mut seen,
-            "intel-brief",
-            "boom",
-            t0 + Duration::from_secs(1)
-        ));
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        assert!(super::should_surface(&mut seen, "intel-brief", "A", at(0)));
+        assert!(super::should_surface(&mut seen, "intel-brief", "B", at(1)));
+        assert!(!super::should_surface(&mut seen, "intel-brief", "A", at(2)));
+        assert!(!super::should_surface(&mut seen, "intel-brief", "B", at(3)));
+        // Same message from another drainer is its own key.
+        assert!(super::should_surface(&mut seen, "brain-scope", "A", at(4)));
+        // After the window both repeat once more, and stale keys are evicted.
+        let later = super::DRAINER_ERROR_REPEAT.as_secs() + 10;
         assert!(super::should_surface(
             &mut seen,
             "intel-brief",
-            "different",
-            t0 + Duration::from_secs(2)
+            "A",
+            at(later)
         ));
-        assert!(super::should_surface(
-            &mut seen,
-            "brain-scope",
-            "different",
-            t0 + Duration::from_secs(2)
-        ));
-        assert!(super::should_surface(
-            &mut seen,
-            "intel-brief",
-            "different",
-            t0 + Duration::from_secs(2) + super::DRAINER_ERROR_REPEAT
-        ));
+        assert!(seen.len() <= 2, "old entries evicted: {}", seen.len());
+        for n in 0..(super::DRAINER_ERROR_CAP * 2) {
+            super::should_surface(&mut seen, "intel-brief", &format!("e{n}"), at(later + 1));
+        }
+        assert!(seen.len() <= super::DRAINER_ERROR_CAP);
+    }
+
+    #[test]
+    fn drainer_messages_replace_argos_home_and_home_with_placeholders() {
+        let msg = "open /home/x3/.argos/argos.db failed; cache /home/x3/.cache/a; root /";
+        // ARGOS_HOME inside HOME: the longer path wins over `~`.
+        let out = super::redact_paths(msg, Some("/home/x3/.argos"), &["/home/x3"]);
+        assert_eq!(
+            out,
+            "open $ARGOS_HOME/argos.db failed; cache ~/.cache/a; root /"
+        );
+        // Trailing slashes and a bare `/` home never rewrite every slash.
+        let out = super::redact_paths("a/b", None, &["/", "/home/x3/"]);
+        assert_eq!(out, "a/b");
+        // Unrelated text and no configured paths are untouched.
+        assert_eq!(super::redact_paths("plain", None, &[]), "plain");
     }
 
     use super::*;

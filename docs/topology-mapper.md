@@ -103,12 +103,120 @@ snapshot can remain visible during refresh or after a read error with explicit
 stale/error status. An isolated valid root has one node and zero edges; a missing
 record is a separate state. Unknown coverage is unavailable rather than zero.
 
-Scope analysis remains an explicit separate action. Verified canonical Claims
+The [neighborhood summary](#neighborhood-summary) reads this snapshot but never writes canonical data. Scope analysis remains an explicit separate action. Verified canonical Claims
 supply inference premises; canonical Actor references are revalidated. Links may
 use canonical Claim/Actor/Inference or exact Article/Source endpoints. Retained
 Claim/Inference/Actor projections are browse data, not canonical memory endpoints. This change does not modify Atlas
 classification-only collection, independent Intel/Recon publication, provider
 policy or schema.
+
+## Neighborhood summary
+
+Each seed shows a deterministic **neighborhood brief** immediately, then
+automatically generates a better explanation with the configured Summarization
+role and atomically replaces the fallback only after the complete answer
+validates. Any failure keeps the fallback. No schema migration, canonical memory,
+relationship, extraction or index write accompanies it; summary cache, task and
+log rows are the only writes.
+
+### Flow
+
+1. **Fallback and frozen input.** Inside the topology read transaction
+   (`brain_neighborhood_brief.rs`), bounded typed payloads (at most
+   `MAX_PAYLOAD_READS` = 160) for the admitted nodes and edges yield an immutable
+   `NeighborhoodBrief` and a typed `NeighborhoodInput` packet. The snapshot owns
+   both as defaulted optional fields. Semantics come from typed payloads and edge
+   kinds, never from parsing labels or IDs. The transaction is released before any
+   cache write, enqueue or network work.
+2. **Queued generation.** `brain_neighborhood_brief_exec.rs` publishes the
+   fallback through `summarization::publish_deterministic_and_enqueue`
+   (`SummarizationMode::TopologyNeighborhood`, operation `topology_neighborhood`,
+   `POOL_SUMMARY`). The request is deduplicated on its identity (task
+   `sum-task-<cache key>`), so reopen and refresh do not duplicate work. The worker
+   holds a renewed lease and runs the Summarization role chain through
+   `model_exec::execute_chat` with `ResponseFormat::GeneratedJson` and the
+   Summarization attempt cap and timeout profile. The chain owns provider
+   retries and fallbacks; the queue never replays an exhausted chain.
+   Decisions-only and unconfigured routes are skipped without dispatch.
+3. **Validate, then replace.** Output is buffered until complete, then checked for
+   schema, meaningful content, known typed references, reference-kind and
+   epistemic compatibility, relation direction, preserved qualifications and
+   unsupported assertions. Host code owns seed, keys, counts, coverage and required
+   caveats. Only a valid result is cached (with the actual provider/model route)
+   and delivered. Empty, malformed, truncated, rejected, blocked, cancelled or
+   storage-failed outcomes complete the task with a typed failure
+   (`topology_failed:<kind>`), so the fallback stays and the indicator stops.
+4. **Delivery.** A background watcher polls cache/task state every 750 ms with one
+   read in flight; it never runs a model request and never runs during drawing.
+   `WorkEvent::TopologySummaryLoaded` carries the summary generation, typed seed,
+   options and `basis_key`. The app drops it unless all still match the open view,
+   assigns the result in one step (text and typed references together) and never
+   moves focus. Obsolete watchers are detached on new seed, Back, a cleared
+   snapshot and every new begin.
+
+### Immutable input ownership
+
+The snapshot read owns the brief and packet; the UI and executor only borrow
+clones. Selection, display filters, pan and zoom never change them. Recenter,
+depth, cycle scope, changed data or a changed route/model configuration produce a
+new `basis_key` and request. The generated brief is accepted only for the same
+`basis_key` as the fallback on screen.
+
+### Cache identity
+
+`SummaryRequest` identity is `mode`, source `topology:<seed key>` with the
+`basis_key` as revision and a hash of the packet JSON, focus, budget
+(`PACKET_BYTES_MAX` = 36 000), prompt and output versions, and
+`provider = "role-chain"`, `model = route fingerprint`. The fingerprint hashes the
+ordered Summarization routes (provider, account, model, endpoint host, skip
+state) and contains no secrets. `basis_key` hashes seed, options, admitted
+content, hydrated revisions and content, coverage and `FORMAT_VERSION`. Changing
+any of these resolves a fresh request; an exact valid generated hit displays
+immediately. Results live in `argos_derived_summaries`, separate from the
+deterministic local identity and from `memory_graph_summaries`. Reopening an
+exhausted request keeps its fallback until explicit **Retry summary**, which
+resets that same request in place and never blanks content.
+
+### Content and mapping
+
+Target 120–180 words, fewer when sparse. Blocks: Overview, Connections (at most
+two), Interpretation (at most one existing inference with its limitations or a
+tentative lead with its gap) and Limits; unsupported blocks are omitted entirely.
+Header `<seed> · Neighborhood summary`; footer
+`Within <depth> hops · <cycle scope> · <coverage>`. Argos has no confidence
+rating, origin groups, source reliability, valid time or likelihood, so none is
+shown. See the [plan](topology-scope-summary-plan.md) for the concept-to-record
+mapping.
+
+### Summary and Record tabs
+
+The inspector has **Summary** and **Record** content tabs. Summary is the default
+for a new seed and renders the brief as markdown with typed basis references.
+Record keeps selection details and actions; the Relationships panel keeps its
+separate All/Articles tabs. Activating a node, edge, related row or basis
+reference (click or Enter) opens it in Record without recentering or changing
+filters. Focus movement and arrow navigation alone never switch tabs. Summary
+scrolls independently by wheel, PgUp/PgDn, arrows and Home/End with an
+`▲▼ rows a–b of n` indicator. History restores the tab and scroll. Compact
+Details keeps both tabs; below the minimum, Back remains.
+
+State label: `Summary · generating…`, `generated · <route>`, `blocked`
+(no usable model; Retry summary, View logs, Models), `rejected`/`failed`
+(Retry summary, View logs), `stale · refresh failed` or
+`stale · loading the new scope`, `limited coverage`, `isolated`,
+`seed not found`, `recorded brief`. A new query shows loading, then its fallback;
+a same-query refresh or error keeps graph and brief together with stale labeling.
+
+### Summary sizing
+
+The details panel takes 75% of the inspector height (minimum 8 rows), always
+leaving the Relationships panel at least 5 rows; Record keeps 55% (minimum 7).
+Inside it: a 1-row tab bar, a 1–2 row wrapped state label, the scroll content
+(registered as the pointer and focus target), a 1-row indicator only on overflow
+and a 1-row button row only on failure. Measured panel heights including borders:
+160×50 → 32, 120×40 → 24, 100×32 → 18, 80×24 → 12, 60×20 → 8. At 60×20 only two
+content rows remain; it is reachable and scrollable but cramped. 60×18 and
+40×20 are below the mapper minimum and show the size notice with Back.
 
 ## Requested list density
 
@@ -159,7 +267,7 @@ Interaction fixtures cover generation races, selection/recenter, stable focus,
 origin restoration, filters, compact pages and keyboard/pointer parity.
 
 Use fresh actual TestBackend captures per [TUI verification](tui-verification.md):
-`dump_brain_topology_screens` / `topology-*`,
+`dump_brain_topology_screens` / `topology-*` and `topology-summary-*` (committed in `screens/topology-summary/`),
 `dump_topology_density_and_entries_screens` / `density-*` and `intel-topology-*`,
 and ignored `dump_brain_kind_screens` / `brain-actor-graph-*` and
 `brain-claim-split-*`. Review 160×50, 120×40, 100×32, 80×24, 60×20, 60×18 and 40×20,

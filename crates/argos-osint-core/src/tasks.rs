@@ -936,6 +936,22 @@ const CLAIM_ELIGIBLE: &str = "(
     AND (t.pool<>'intel_brief' OR t.input_hash<>'')
 )";
 
+/// Candidate selector for [`claim_next_in`]: the top-ranked queued row that
+/// passes the same `CLAIM_ELIGIBLE` predicate as the claim `UPDATE`, so the
+/// head can never be a row the UPDATE would reject (which would starve every
+/// eligible task behind it). `pool_filter` is an `AND pool IN (...)` clause or
+/// empty. Binds `?3` as "now".
+fn claim_selector_sql(pool_filter: &str) -> String {
+    format!(
+        "(SELECT t.id FROM argos_tasks t
+            WHERE t.state IN ('queued','retry_scheduled')
+              AND (t.next_eligible_at='' OR julianday(t.next_eligible_at)<=julianday(?3))
+              {pool_filter}
+              AND {CLAIM_ELIGIBLE}
+            ORDER BY t.priority ASC, t.created_at ASC LIMIT 1)"
+    )
+}
+
 /// One `UPDATE … WHERE id=(SELECT …) RETURNING` statement both selects and
 /// leases the row, so two processes cannot own the same attempt; only a row this
 /// call actually changed is returned. An empty `pools` slice claims from any pool
@@ -958,17 +974,7 @@ pub fn claim_next_in(
             .join(",");
         format!("AND pool IN ({list})")
     };
-    // The selector applies the same `CLAIM_ELIGIBLE` predicate as the claim
-    // UPDATE. Otherwise the top-ranked row can be one the UPDATE rejects and
-    // every claim returns None, starving the eligible tasks behind it.
-    let selector = format!(
-        "(SELECT t.id FROM argos_tasks t
-            WHERE t.state IN ('queued','retry_scheduled')
-              AND (t.next_eligible_at='' OR julianday(t.next_eligible_at)<=julianday(?3))
-              {pool_filter}
-              AND {CLAIM_ELIGIBLE}
-            ORDER BY t.priority ASC, t.created_at ASC LIMIT 1)"
-    );
+    let selector = claim_selector_sql(&pool_filter);
     claim_with(conn, &selector, None, owner, lease_secs, now)
 }
 
@@ -2058,14 +2064,14 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         migrate_tables(&conn).unwrap();
         migrate_tables(&conn).unwrap();
+        // The production selector itself, not a copy.
+        let selector = super::claim_selector_sql("AND pool IN ('intel_brief')");
         let plan: Vec<String> = conn
-            .prepare(
-                "EXPLAIN QUERY PLAN SELECT t.id FROM argos_tasks t
-                 WHERE t.state IN ('queued','retry_scheduled') AND t.pool IN ('intel_brief')
-                 ORDER BY t.priority ASC, t.created_at ASC LIMIT 1",
-            )
+            .prepare(&format!("EXPLAIN QUERY PLAN SELECT id FROM {selector}"))
             .unwrap()
-            .query_map([], |r| r.get::<_, String>(3))
+            .query_map(rusqlite::params!["", "", "2026-01-01T00:00:00Z"], |r| {
+                r.get::<_, String>(3)
+            })
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();

@@ -19,7 +19,7 @@ Probe of `nvidia/nemotron-3-ultra-550b-a55b` (OpenRouter `:free` and direct NVID
 `404 Function id '948fe171-…' version 'null': Specified function in account '…' is not found` in every mode.
 `nemotron-3-super-120b-a12b` returns 200 in all three modes on both routes (forced tool works).
 
-So Ultra has no deployment for this account; OpenRouter's `:free` route is the same NVIDIA upstream. This is **not** a request-mode problem, so no mode ladder can fix it. Previously the app labelled it "endpoint does not support this request mode", learned nothing, and each sibling operation re-hit the same dead model on every route. Combined with Gemini 503/429, that produced the screenshot.
+So Ultra had no deployment for this account at the time of the afternoon probes (it later came back overloaded, see follow-up 2); OpenRouter's `:free` route is the same NVIDIA upstream. This is **not** a request-mode problem, so no mode ladder can fix it. Previously the app labelled it "endpoint does not support this request mode", learned nothing, and each sibling operation re-hit the same dead model on every route. Combined with Gemini 503/429, that produced the screenshot.
 
 ## Fix
 - `provider_diag`: a deployment-missing 404 is `InvalidModel` ("the configured model was not found"), with upstream detail shown and tenant account IDs masked.
@@ -61,12 +61,13 @@ After: the provider popup card lists the providers.
 Screenshots: `docs/screens/request-mode/before/` and `docs/screens/request-mode/after/` (`defaults-claim_assessor-provider-popup.png`, `defaults-investigation_controller-provider-popup.png`).
 
 ## Matrix
-Run on the code of `5cd45cf` (later commits are docs only). `cargo fmt --all --check` clean.
-| Configuration | clippy `-D warnings` | tests (core / bin / other) |
-| --- | --- | --- |
-| default features | clean | 1148 / 272 / 3 passed, 0 failed (11 ignored live/dump tests) |
-| `--locked --no-default-features` | clean | 1118 / 272 / 3 passed, 0 failed |
-| `--features nlp` | clean | 1148 / 272 / 3 passed, 0 failed |
+Final run on the code of `c883324` (later commits are docs only). `cargo fmt --all --check` clean; clippy `-D warnings` clean in all three configurations.
+| Configuration | tests (core / bin / other) |
+| --- | --- |
+| default features | 1150 / 272 / 3 passed, 0 failed (11 ignored live/dump tests) |
+| `--locked --no-default-features` | 1120 / 272 / 3 passed, 0 failed |
+| `--features nlp` | 1150 / 272 / 3 passed, 0 failed |
+(An earlier matrix on `5cd45cf` was 1148 / 272 / 3, 1118 / 272 / 3, 1148 / 272 / 3.) Two test fixtures broke after the Grok removal and were fixed in `c883324`.
 
 ## Follow-up (2026-10-16 evening): acquisition failure, Ultra history, Grok removal
 
@@ -82,8 +83,9 @@ Run on the code of `5cd45cf` (later commits are docs only). `cargo fmt --all --c
 - Since `7e72832` the adapters send to Ultra: forced single output tool, no `response_format`, `reasoning_effort` from its own vocabulary (none/medium/high), `provider.require_parameters=true` on OpenRouter when options are sent, streaming. Brief Inferences (`339eca5`, `592385b`, `d81684d`) added the effort/deadline sizing; they did not change the model id or routing.
 - In the user's profile the **recon** role uses `nemotron-3-super…`, not Ultra. Ultra is only in **synthesis** (primary on OpenRouter `:free`, fallback Nvidia) and as a claim-assessor fallback. So recon never exercised Ultra in this profile; the "recon works" observation is Super working.
 - Live probes (earlier today, same keys): Ultra returned `404 Function id … Specified function in account … is not found` on both OpenRouter `:free` and Nvidia direct for the plain request (no tools), the forced-tool request, and forced tool + `require_parameters`. A request with no tools at all fails identically, so no request shape (including a recon-style one) avoids it. Both catalogs (`/models`) list the model id, so the id is advertised but not deployed for this account at the time of the probes.
-- Late re-check: a recon-style request (tools + `tool_choice: auto`, non-streaming) to both routes did not 404; it timed out at 60 s on each. That differs from the earlier 0.2 s 404 and suggests a cold or flapping deployment rather than a permanent absence; it is not conclusive. A second, tighter comparison probe was blocked by the sandbox's command review and was not run, so this stays open. No Inferences request change was justified by the evidence: the request is not what differs.
-- Conclusion: deployment-side. Mitigation already shipped (classification, stage-wide dead-model memory, breaker); the user is adding a Super fallback to Synthesis.
+- Late re-check (LIVE, 2026-10-16 ~8:50 PM New York): one request each, recon-style (plain chat) vs Inferences-style (forced output tool + `reasoning_effort: medium`), on OpenRouter `:free` and Nvidia direct. **No route returned the 404 any more.** OpenRouter answered with an in-band `503 Upstream error from Nvidia: Service temporarily overloaded` for both shapes (HTTP 200 envelope; the app already treats an error body as a failure), Nvidia direct returned 503 for the plain request and 500 for the forced-tool one. A second probe earlier the same evening (tools + `tool_choice: auto`) timed out at 60 s on both routes.
+- So Ultra's state changed over the day: 404 "function not found" (afternoon) → timeouts → 503/500 overloaded (evening). The model is deployed intermittently and capacity-starved, not permanently undeployed, and **the failure does not depend on request shape** (both shapes fail the same way at the same moment; the afternoon plain request 404'd too). No Inferences request change is justified and none was made. This matches the user's recollection that Ultra "worked" at times.
+- Consequences for the app (already covered): a 404/503/500 from Ultra must fail over quickly (hard-reject memory for 404; short backoff then next route for 503), which is why a Super fallback in Synthesis is the right fix on the user's side. Caveat: three single-request probes, not a load test; whether Ultra works at other times was not measured.
 
 ### 3. Grok (xAI) removal — OFFLINE tests
 Removed: provider preset and `GrokModel` catalog, `grok_oauth` module and its bearer/login paths, `grok-subscription` kind and its error text, `x.ai` host detection, CLI `login` branch, TUI choices and "Grok (legacy)" label, portable-schema `grok` kind (v1 and v2 enums), docs and diagrams. Default text provider with nothing saved is now OpenRouter.

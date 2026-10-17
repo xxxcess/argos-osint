@@ -845,26 +845,29 @@ fn detail_error(reason: &str) -> String {
     out
 }
 
-/// Pane lines for a failed stage (`own`) or one blocked by `blocker`'s failure.
+/// Pane lines for a failed stage (`own`) or one blocked by `subject`'s failure.
+/// Compact by design: a failed stage adds its full error only when the row
+/// truncated it, plus one recovery line; a blocked stage adds one line.
 fn failure_detail(subject: &str, own: bool, error: &str) -> String {
     let error = detail_error(error);
     if error.is_empty() {
         return String::new();
     }
-    // The stage's own row already shows a short error in full; repeat the
-    // text only when the row truncated it.
-    let mut lines = Vec::new();
-    if !own {
-        lines.push(format!("{subject} failed: {error}"));
-    } else if short(&error) != error {
-        lines.push(error.clone());
-    }
     let lower = error.to_lowercase();
-    if lower.contains("api key missing") || lower.contains("all routes blocked") {
-        lines.push("Configure a provider in Providers.".into());
+    let recovery = if lower.contains("api key missing") || lower.contains("all routes blocked") {
+        "Configure a provider in Providers, then Retry article retrieval."
+    } else {
+        "Retry article retrieval resumes the failed stage."
+    };
+    if !own {
+        // The cause sits in the failed stage's own pane; only recovery repeats.
+        return format!("{subject} failed · {recovery}");
     }
-    lines.push("Retry article retrieval resumes the failed stage.".into());
-    lines.join("\n\n")
+    if short(&error) != error {
+        format!("{error}\n{recovery}")
+    } else {
+        recovery.to_string()
+    }
 }
 
 fn short(reason: &str) -> String {

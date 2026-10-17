@@ -2796,7 +2796,7 @@ fn failed_and_blocked_stages_carry_error_retry_and_provider_hint() {
     );
     assert!(views[1]
         .detail
-        .contains("Configure a provider in Providers."));
+        .contains("Configure a provider in Providers"));
     assert!(views[1].detail.contains("Retry"));
     assert!(views[0].detail.is_empty(), "unaffected stage stays quiet");
     for blocked in [&views[2], &views[3]] {
@@ -2805,12 +2805,16 @@ fn failed_and_blocked_stages_carry_error_retry_and_provider_hint() {
             "{}",
             blocked.row
         );
-        assert!(blocked
-            .detail
-            .starts_with("Claims failed: all routes blocked"));
-        assert!(blocked
-            .detail
-            .contains("Configure a provider in Providers."));
+        assert!(
+            blocked.detail.starts_with("Claims failed"),
+            "{}",
+            blocked.detail
+        );
+        assert!(
+            !blocked.detail.contains('\n'),
+            "blocked stages stay one line"
+        );
+        assert!(blocked.detail.contains("Configure a provider in Providers"));
         assert!(blocked.detail.contains("Retry"));
     }
 

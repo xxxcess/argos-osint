@@ -8940,7 +8940,7 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
                 let head = if stage.detail.is_empty() {
                     format!("_{}_", stage.row)
                 } else {
-                    format!("_{}_\n\n{}", stage.row, stage.detail)
+                    format!("_{}_\n{}", stage.row, stage.detail)
                 };
                 *md = if previous {
                     format!("{head}\n\n_Previous_\n\n{md}")

@@ -16546,11 +16546,7 @@ mod tests {
                             text.contains("suspended the ferry"),
                             "completed Claims kept"
                         );
-                        // The taller failure pane scrolls Links off an 80x24 page.
-                        assert!(
-                            width <= 80 || text.contains("blocked by Inferences"),
-                            "{width}x{height} {text}"
-                        );
+                        assert!(text.contains("blocked by Inferences"));
                         // Global Jobs shows identical stage states.
                         let detail = argos_osint_core::jobs_view::job_detail(
                             app.store.connection(),
@@ -16585,11 +16581,9 @@ mod tests {
                     "8-no-provider" => {
                         assert!(rows[1].starts_with("Claims · Failed"), "{rows:?}");
                         assert!(rows[2].starts_with("Inferences · Queued · blocked by Claims"));
-                        assert!(text.contains("Claims failed: all routes blocked"), "{text}");
-                        assert!(
-                            text.contains("Configure a provider in Providers."),
-                            "{text}"
-                        );
+                        assert!(text.contains("all routes blocked"), "{text}");
+                        assert!(text.contains("Claims failed"), "{text}");
+                        assert!(text.contains("Configure a provider in Providers"), "{text}");
                         assert!(text.contains("Retry article retrieval"), "{text}");
                     }
                     "7-cached" => {

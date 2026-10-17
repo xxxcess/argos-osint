@@ -360,6 +360,7 @@ async fn delayed_reply_keeps_the_fallback_readable_until_the_watcher_sees_the_re
 
 #[tokio::test(flavor = "multi_thread")]
 async fn lease_is_renewed_while_generating() {
+    HEARTBEAT_TRACE.lock().unwrap().clear();
     let server = mock::serve_delayed(
         Duration::from_millis(4500),
         vec![mock::ok_json(&good(), "stop")],
@@ -372,7 +373,12 @@ async fn lease_is_renewed_while_generating() {
     // lease and delay keep the test tolerant of a loaded runner.
     let out = drain_summary_flush_with_runtime(&store.conn, "w1", None, Some(&rt), Some(&path), 3)
         .unwrap();
-    assert!(out[0].generated && !out[0].stale, "{out:?}");
+    let trace = HEARTBEAT_TRACE.lock().unwrap().clone();
+    assert!(
+        out[0].generated && !out[0].stale,
+        "{out:?}\nheartbeat trace:\n{}",
+        trace.join("\n")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

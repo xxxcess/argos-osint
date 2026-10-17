@@ -485,6 +485,11 @@ pub struct Outcome {
     pub stale: bool,
 }
 
+/// Heartbeat trace (tests only): shows why a lease was declared lost.
+#[cfg(test)]
+pub(crate) static HEARTBEAT_TRACE: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
 fn lease_held(conn: &Connection, c: &crate::tasks::ClaimedTask) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT 1 FROM argos_tasks WHERE id=?1 AND lease_owner=?2 AND lease_epoch=?3 AND state='running'",
@@ -555,6 +560,11 @@ fn heartbeat(
                     .is_some();
                 Ok(if ours { Some(false) } else { None })
             });
+            #[cfg(test)]
+            HEARTBEAT_TRACE.lock().unwrap().push(format!(
+                "{id} since_renew={}ms failures={failures} attempt={attempt:?}",
+                renewed_at.elapsed().as_millis()
+            ));
             match attempt {
                 Ok(Some(true)) => {
                     renewed_at = std::time::Instant::now();
@@ -659,6 +669,20 @@ pub fn run_claimed(
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| storage(&e))?;
     if !lease_held(&tx, claimed).map_err(|e| storage(&e))? {
+        #[cfg(test)]
+        {
+            let row: Option<(String, String, i64, String)> = tx
+                .query_row(
+                    "SELECT state, lease_owner, lease_epoch, lease_until FROM argos_tasks WHERE id=?1",
+                    [&claimed.id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .ok();
+            HEARTBEAT_TRACE.lock().unwrap().push(format!(
+                "fence failed: row={row:?} claimed_owner={} claimed_epoch={}",
+                claimed.owner, claimed.epoch
+            ));
+        }
         return Ok(Outcome {
             tag: "lease_lost".into(),
             generated: false,

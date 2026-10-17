@@ -515,8 +515,12 @@ fn heartbeat(
     let (id, owner, epoch) = (c.id.clone(), c.owner.clone(), c.epoch);
     let every = std::time::Duration::from_millis((lease_secs.max(1) as u64 * 1000 / 3).max(50));
     std::thread::spawn(move || {
-        let mut waited = std::time::Duration::ZERO;
+        // Real elapsed time, not a count of sleeps: a descheduled thread must
+        // not stretch the renewal interval.
+        let mut last_attempt = std::time::Instant::now();
         let tick = std::time::Duration::from_millis(25);
+        #[cfg(test)]
+        let mut max_sleep_ms = 0u128;
         // The lease was last extended at `renewed_at`; it truly lapses
         // `lease_secs` later. A late or failed renewal under load is retried
         // (shorter interval) and is only fatal when the lease really passed,
@@ -525,15 +529,24 @@ fn heartbeat(
         let mut failures = 0u32;
         let mut interval = every;
         while !stop.load(Ordering::SeqCst) {
+            #[cfg(test)]
+            let slept = std::time::Instant::now();
             std::thread::sleep(tick);
-            waited += tick;
-            if waited < interval {
+            #[cfg(test)]
+            {
+                max_sleep_ms = max_sleep_ms.max(slept.elapsed().as_millis());
+            }
+            if last_attempt.elapsed() < interval {
                 continue;
             }
-            waited = std::time::Duration::ZERO;
+            last_attempt = std::time::Instant::now();
+            #[cfg(test)]
+            let began = std::time::Instant::now();
             // Ok(Some(true)) renewed; Ok(Some(false)) refused but still ours;
             // Ok(None) the task is gone/taken; Err transient failure.
             let attempt = Connection::open(&path).map_err(|_| ()).and_then(|conn| {
+                #[cfg(test)]
+                HEARTBEAT_TRACE.lock().unwrap().push(format!("{} opened after {}ms", path.display(), began.elapsed().as_millis()));
                 let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
                 let ok = crate::tasks::renew_lease(
                     &conn,
@@ -562,8 +575,10 @@ fn heartbeat(
             });
             #[cfg(test)]
             HEARTBEAT_TRACE.lock().unwrap().push(format!(
-                "{id} since_renew={}ms failures={failures} attempt={attempt:?}",
-                renewed_at.elapsed().as_millis()
+                "{} since_renew={}ms attempt_took={}ms max_sleep={max_sleep_ms}ms failures={failures} attempt={attempt:?}",
+                path.display(),
+                renewed_at.elapsed().as_millis(),
+                began.elapsed().as_millis()
             ));
             match attempt {
                 Ok(Some(true)) => {

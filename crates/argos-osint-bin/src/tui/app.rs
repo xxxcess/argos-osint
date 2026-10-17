@@ -828,6 +828,21 @@ enum WorkEvent {
         memory_id: String,
         outcome: Result<Option<recon::InsightView>, String>,
     },
+    /// A topology neighborhood summary settled (validated generated brief or
+    /// a typed failure). Carries the identity it was requested under so a
+    /// consumer can drop anything that no longer matches the open view.
+    #[allow(dead_code)]
+    TopologySummaryLoaded {
+        generation: u64,
+        seed: argos_osint_core::brain_topology::TopologySeed,
+        options: argos_osint_core::brain_topology::TopologyOptions,
+        basis_key: String,
+        request_key: String,
+        outcome: Result<
+            Box<argos_osint_core::brain_neighborhood_brief_exec::Generated>,
+            argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure,
+        >,
+    },
     ManualHistoryLoaded {
         outcome: Result<Vec<recon::Call>, String>,
     },
@@ -5296,6 +5311,17 @@ impl App {
                     self.brain_preview_for = Some(memory_id);
                 }
                 true
+            }
+            WorkEvent::TopologySummaryLoaded {
+                generation,
+                basis_key,
+                ..
+            } => {
+                // Stub consumer (the Summary tab arrives in the TUI phase):
+                // obsolete results are dropped and nothing is redrawn, so a
+                // late completion can never steal focus or blank content.
+                let _ = (generation, basis_key);
+                false
             }
             WorkEvent::ManualHistoryLoaded { outcome } => {
                 self.manual_reading = false;

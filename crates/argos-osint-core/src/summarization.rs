@@ -505,8 +505,9 @@ pub fn try_live_summary_upgrade(
         return Ok((cached, "already_upgraded"));
     }
     if req.mode == SummarizationMode::TopologyNeighborhood {
-        // Structured generation needs the whole role chain, not one secret;
-        // it is dispatched by the role-aware worker path.
+        // Structured generation needs the whole role chain, not one secret:
+        // `scheduler::drain_summary_flush_with_runtime` dispatches it. This
+        // single-secret path never reports it as upgraded.
         return Ok((cached, "role_dispatch_required"));
     }
     let Some(secret) = secret else {

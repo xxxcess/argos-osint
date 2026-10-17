@@ -469,6 +469,220 @@ pub fn store_generated(conn: &Connection, req: &SummaryRequest, g: &Generated) -
     cache_put(conn, req, &result)
 }
 
+/// Terminal result of one claimed topology task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outcome {
+    /// Queue tag recorded on the task.
+    pub tag: String,
+    /// A complete, validated generated brief is now cached. A fallback, a
+    /// rejection or a failure is never success.
+    pub generated: bool,
+    /// The lease was lost; nothing was published or completed.
+    pub stale: bool,
+}
+
+fn lease_held(conn: &Connection, c: &crate::tasks::ClaimedTask) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT 1 FROM argos_tasks WHERE id=?1 AND lease_owner=?2 AND lease_epoch=?3 AND state='running'",
+        rusqlite::params![c.id, c.owner, c.epoch],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|r| r.is_some())
+}
+
+/// Renew the lease on its own connection until `stop`. A refused renewal
+/// means the lease is lost: set `lost` and cancel the model operation.
+fn heartbeat(
+    db_path: &Path,
+    c: &crate::tasks::ClaimedTask,
+    lease_secs: i64,
+    stop: Arc<AtomicBool>,
+    lost: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    use std::sync::atomic::Ordering;
+    let path = db_path.to_path_buf();
+    let (id, owner, epoch) = (c.id.clone(), c.owner.clone(), c.epoch);
+    let every = std::time::Duration::from_millis((lease_secs.max(1) as u64 * 1000 / 3).max(50));
+    std::thread::spawn(move || {
+        let mut waited = std::time::Duration::ZERO;
+        let tick = std::time::Duration::from_millis(25);
+        while !stop.load(Ordering::SeqCst) {
+            std::thread::sleep(tick);
+            waited += tick;
+            if waited < every {
+                continue;
+            }
+            waited = std::time::Duration::ZERO;
+            let renewed = Connection::open(&path)
+                .ok()
+                .and_then(|conn| {
+                    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+                    crate::tasks::renew_lease(
+                        &conn,
+                        &id,
+                        &owner,
+                        epoch,
+                        lease_secs,
+                        &chrono::Utc::now().to_rfc3339(),
+                    )
+                    .ok()
+                })
+                .unwrap_or(false);
+            if !renewed {
+                lost.store(true, Ordering::SeqCst);
+                cancel.store(true, Ordering::SeqCst);
+                break;
+            }
+        }
+    })
+}
+
+/// Run one claimed `topology_neighborhood` task with the full role runtime.
+///
+/// The lease is renewed while the model runs. Publication and completion
+/// happen in one immediate transaction fenced by `(owner, epoch)`, so a
+/// stale worker can neither publish nor complete. Provider retries belong to
+/// the model chain; every chain-level failure completes the task with a
+/// typed tag, so the queue never replays an exhausted chain. Only storage
+/// failures are returned as `Err` (the queue's own retry policy applies).
+pub fn run_claimed(
+    conn: &Connection,
+    claimed: &crate::tasks::ClaimedTask,
+    runtime: Option<&RoleRuntime>,
+    db_path: Option<&Path>,
+    lease_secs: i64,
+) -> Result<Outcome, crate::tasks::TaskError> {
+    use crate::tasks::{ErrorCategory, TaskError};
+    use std::sync::atomic::Ordering;
+    let storage = |e: &dyn std::fmt::Display| TaskError::new(ErrorCategory::Unknown, e.to_string());
+    let req = load_flush_request(conn, &claimed.input_hash)
+        .map_err(|e| storage(&format!("{e:#}")))?
+        .ok_or_else(|| storage(&format!("flush request missing for {}", claimed.input_hash)))?;
+    let finish = |tag: String, generated: bool| -> Result<Outcome, TaskError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let done = crate::tasks::complete_claimed(conn, claimed, &tag, &now)
+            .map_err(|e| storage(&format!("{e:#}")))?;
+        Ok(Outcome {
+            tag,
+            generated: generated && done,
+            stale: !done,
+        })
+    };
+    if let Some(hit) = cache_get(conn, &req).map_err(|e| storage(&format!("{e:#}")))? {
+        if delivered(&hit).is_some() {
+            return finish("already_upgraded".into(), true);
+        }
+    }
+    let Some(runtime) = runtime else {
+        let f = GenerationFailure::new(
+            FailureKind::NotConfigured,
+            "no Summarization model runtime is available",
+        );
+        return finish(f.tag(), false);
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let lost = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    let beat = db_path.map(|p| {
+        heartbeat(
+            p,
+            claimed,
+            lease_secs,
+            stop.clone(),
+            lost.clone(),
+            cancel.clone(),
+        )
+    });
+    let operation_id = format!("{}:e{}:topology", claimed.id, claimed.epoch);
+    let result = crate::brain_lance::block_on(generate(
+        runtime,
+        db_path,
+        &operation_id,
+        Some((&claimed.id, claimed.epoch)),
+        &req,
+        &cancel,
+    ));
+    stop.store(true, Ordering::SeqCst);
+    if let Some(h) = beat {
+        let _ = h.join();
+    }
+    if lost.load(Ordering::SeqCst) {
+        return Ok(Outcome {
+            tag: "lease_lost".into(),
+            generated: false,
+            stale: true,
+        });
+    }
+    // Fenced publication: lease check, cache write and completion are one
+    // immediate transaction.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| storage(&e))?;
+    if !lease_held(&tx, claimed).map_err(|e| storage(&e))? {
+        return Ok(Outcome {
+            tag: "lease_lost".into(),
+            generated: false,
+            stale: true,
+        });
+    }
+    let (tag, generated) = match &result {
+        Ok(g) => {
+            store_generated(&tx, &req, g).map_err(|e| storage(&format!("{e:#}")))?;
+            (format!("generated:{}", g.route), true)
+        }
+        Err(f) => (f.tag(), false),
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let done = crate::tasks::complete_claimed(&tx, claimed, &tag, &now)
+        .map_err(|e| storage(&format!("{e:#}")))?;
+    if !done {
+        return Ok(Outcome {
+            tag: "lease_lost".into(),
+            generated: false,
+            stale: true,
+        });
+    }
+    tx.commit().map_err(|e| storage(&e))?;
+    Ok(Outcome {
+        tag,
+        generated,
+        stale: false,
+    })
+}
+
+/// Background watcher body: poll the cache and task state every `every`
+/// (one read in flight, never a model request) until the request settles or
+/// `stop` is set. Returns `None` when detached.
+pub fn watch_until_settled(
+    db_path: &Path,
+    req: &SummaryRequest,
+    every: std::time::Duration,
+    stop: &AtomicBool,
+) -> Option<Delivery> {
+    use std::sync::atomic::Ordering;
+    let conn = Connection::open(db_path).ok()?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return None;
+        }
+        match poll(&conn, req) {
+            Ok(Delivery::Pending) | Err(_) => {}
+            Ok(settled) => return Some(settled),
+        }
+        let mut slept = std::time::Duration::ZERO;
+        while slept < every {
+            if stop.load(Ordering::SeqCst) {
+                return None;
+            }
+            let step = std::time::Duration::from_millis(25).min(every - slept);
+            std::thread::sleep(step);
+            slept += step;
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "brain_neighborhood_brief_exec_tests.rs"]
 mod tests;

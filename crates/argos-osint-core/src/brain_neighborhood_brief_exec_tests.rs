@@ -249,3 +249,304 @@ fn isolated_neighborhoods_are_not_generated() {
     assert_eq!(d, Delivery::Idle);
     assert_eq!(task_count(&store), 0);
 }
+
+// ---------------------------------------------------------- scheduler delivery
+
+use crate::scheduler::{drain_summary_flush_with_runtime, DEFAULT_LEASE_SECS};
+use std::time::{Duration, Instant};
+
+fn file_store() -> (tempfile::TempDir, std::path::PathBuf, Store) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.db");
+    let store = Store::open(&path).unwrap();
+    (dir, path, store)
+}
+
+fn prepared(store: &Store, rt: &RoleRuntime) -> SummaryRequest {
+    let f = rich();
+    publish(
+        &store.conn,
+        &input_of(&f),
+        &brief_of(&f),
+        &route_fingerprint(rt),
+    )
+    .unwrap()
+    .0
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_generates_publishes_and_completes_under_the_role_runtime() {
+    let server = mock::serve(vec![mock::ok_json(&good(), "stop")]).await;
+    let rt = runtime(&server.base_url, "fixture");
+    let (_dir, path, store) = file_store();
+    let req = prepared(&store, &rt);
+    let out = drain_summary_flush_with_runtime(
+        &store.conn,
+        "w1",
+        None,
+        Some(&rt),
+        Some(&path),
+        DEFAULT_LEASE_SECS,
+    )
+    .unwrap();
+    assert_eq!(out.len(), 1);
+    assert!(out[0].generated && !out[0].stale);
+    assert_eq!(out[0].tag, "generated:local/fixture");
+    assert!(matches!(
+        poll(&store.conn, &req).unwrap(),
+        Delivery::Generated(_)
+    ));
+    // Nothing left to claim; the cache answers without a request.
+    let again = drain_summary_flush_with_runtime(
+        &store.conn,
+        "w1",
+        None,
+        Some(&rt),
+        Some(&path),
+        DEFAULT_LEASE_SECS,
+    )
+    .unwrap();
+    assert!(again.is_empty());
+    assert_eq!(server.hits(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delayed_reply_keeps_the_fallback_readable_until_the_watcher_sees_the_result() {
+    let server = mock::serve_delayed(
+        Duration::from_millis(900),
+        vec![mock::ok_json(&good(), "stop")],
+    )
+    .await;
+    let rt = runtime(&server.base_url, "fixture");
+    let (_dir, path, store) = file_store();
+    let req = prepared(&store, &rt);
+    let stop = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let (p, r, s) = (path.clone(), req.clone(), stop.clone());
+        std::thread::spawn(move || watch_until_settled(&p, &r, Duration::from_millis(100), &s))
+    };
+    let worker = {
+        let (p, r) = (path.clone(), rt.clone());
+        std::thread::spawn(move || {
+            let conn = Connection::open(&p).unwrap();
+            drain_summary_flush_with_runtime(
+                &conn,
+                "w1",
+                None,
+                Some(&r),
+                Some(&p),
+                DEFAULT_LEASE_SECS,
+            )
+            .unwrap()
+        })
+    };
+    // While the model is still thinking, readers get Pending (fallback stays).
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(poll(&store.conn, &req).unwrap(), Delivery::Pending);
+    let started = Instant::now();
+    let settled = tokio::task::spawn_blocking(move || watcher.join().unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(settled, Some(Delivery::Generated(_))));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let out = worker.join().unwrap();
+    assert!(out[0].generated);
+    assert_eq!(
+        server.hits(),
+        1,
+        "watching never runs a second model request"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lease_is_renewed_while_generating() {
+    let server = mock::serve_delayed(
+        Duration::from_millis(2200),
+        vec![mock::ok_json(&good(), "stop")],
+    )
+    .await;
+    let rt = runtime(&server.base_url, "fixture");
+    let (_dir, path, store) = file_store();
+    prepared(&store, &rt);
+    // A 1s lease would expire mid-request without the heartbeat.
+    let out = drain_summary_flush_with_runtime(&store.conn, "w1", None, Some(&rt), Some(&path), 1)
+        .unwrap();
+    assert!(out[0].generated && !out[0].stale, "{out:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_that_lost_its_lease_cannot_publish_or_complete() {
+    let server = mock::serve_delayed(
+        Duration::from_millis(1500),
+        vec![mock::ok_json(&good(), "stop")],
+    )
+    .await;
+    let rt = runtime(&server.base_url, "fixture");
+    let (_dir, path, store) = file_store();
+    let req = prepared(&store, &rt);
+    let thief = {
+        let p = path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            let conn = Connection::open(&p).unwrap();
+            conn.execute("UPDATE argos_tasks SET lease_epoch=lease_epoch+1 WHERE operation='topology_neighborhood'", [])
+                .unwrap();
+        })
+    };
+    let out = drain_summary_flush_with_runtime(&store.conn, "w1", None, Some(&rt), Some(&path), 1)
+        .unwrap();
+    thief.join().unwrap();
+    assert!(out[0].stale && !out[0].generated, "{out:?}");
+    assert!(!matches!(
+        poll(&store.conn, &req).unwrap(),
+        Delivery::Generated(_)
+    ));
+    let state: String = store
+        .conn
+        .query_row(
+            "SELECT state FROM argos_tasks WHERE operation='topology_neighborhood'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        state, "running",
+        "the stale worker did not complete the task"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failures_are_not_success_and_the_queue_does_not_replay_an_exhausted_chain() {
+    let server = mock::serve(vec![mock::ok_json("not json", "stop")]).await;
+    let rt = runtime(&server.base_url, "fixture");
+    let (_dir, path, store) = file_store();
+    let req = prepared(&store, &rt);
+    let out = drain_summary_flush_with_runtime(
+        &store.conn,
+        "w1",
+        None,
+        Some(&rt),
+        Some(&path),
+        DEFAULT_LEASE_SECS,
+    )
+    .unwrap();
+    assert!(!out[0].generated && out[0].tag.starts_with("topology_failed:rejected"));
+    let hits = server.hits();
+    assert!(hits <= 2);
+    match poll(&store.conn, &req).unwrap() {
+        Delivery::Failed(f) => assert_eq!(f.kind, FailureKind::Rejected),
+        other => panic!("{other:?}"),
+    }
+    let again = drain_summary_flush_with_runtime(
+        &store.conn,
+        "w1",
+        None,
+        Some(&rt),
+        Some(&path),
+        DEFAULT_LEASE_SECS,
+    )
+    .unwrap();
+    assert!(again.is_empty());
+    assert_eq!(server.hits(), hits);
+    // No runtime: not configured, not generated, fallback stays.
+    let (_d2, p2, s2) = file_store();
+    let req2 = prepared(&s2, &rt);
+    let out = drain_summary_flush_with_runtime(&s2.conn, "w1", None, None, Some(&p2), 30).unwrap();
+    assert!(!out[0].generated);
+    match poll(&s2.conn, &req2).unwrap() {
+        Delivery::Failed(f) => assert_eq!(f.kind, FailureKind::NotConfigured),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cache_write_failure_publishes_nothing_and_leaves_the_task_to_the_queue_policy() {
+    let server = mock::serve(vec![mock::ok_json(&good(), "stop")]).await;
+    let rt = runtime(&server.base_url, "fixture");
+    let (_dir, path, store) = file_store();
+    let req = prepared(&store, &rt);
+    store
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER no_generated BEFORE INSERT ON argos_derived_summaries
+             BEGIN SELECT RAISE(ABORT,'cache full'); END;",
+        )
+        .unwrap();
+    let out = drain_summary_flush_with_runtime(
+        &store.conn,
+        "w1",
+        None,
+        Some(&rt),
+        Some(&path),
+        DEFAULT_LEASE_SECS,
+    )
+    .unwrap();
+    assert_eq!(out[0].tag, "storage_failed");
+    assert!(!out[0].generated);
+    assert!(!matches!(
+        poll(&store.conn, &req).unwrap(),
+        Delivery::Generated(_)
+    ));
+    let state: String = store
+        .conn
+        .query_row(
+            "SELECT state FROM argos_tasks WHERE operation='topology_neighborhood'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_ne!(state, "completed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_cache_table_is_a_queue_failure_not_a_success() {
+    let rt = runtime("http://127.0.0.1:1", "fixture");
+    let (_dir, path, store) = file_store();
+    prepared(&store, &rt);
+    store
+        .conn
+        .execute_batch("DROP TABLE argos_derived_summaries")
+        .unwrap();
+    let out = drain_summary_flush_with_runtime(
+        &store.conn,
+        "w1",
+        None,
+        Some(&rt),
+        Some(&path),
+        DEFAULT_LEASE_SECS,
+    )
+    .unwrap();
+    assert!(!out[0].generated);
+    assert_eq!(out[0].tag, "storage_failed");
+}
+
+#[test]
+fn other_modes_report_a_deterministic_fallback_as_not_generated() {
+    let store = Store::memory().unwrap();
+    let req = crate::summarization::flush_request(
+        SummarizationMode::AtlasBrief,
+        "atlas-1",
+        "r1",
+        "Some deterministic atlas text that is long enough to keep.",
+        "focus",
+        400,
+    );
+    crate::summarization::publish_deterministic_and_enqueue(
+        &store.conn,
+        &req,
+        crate::summarization::deterministic_follow_up("Some deterministic atlas text.", 400),
+    )
+    .unwrap();
+    let out = drain_summary_flush_with_runtime(&store.conn, "w1", None, None, None, 30).unwrap();
+    assert_eq!(out.len(), 1);
+    assert!(!out[0].generated, "{out:?}");
+}
+
+#[test]
+fn an_obsolete_watcher_detaches_without_a_result() {
+    let (_dir, path, store) = file_store();
+    let rt = runtime("http://127.0.0.1:1", "fixture");
+    let req = prepared(&store, &rt);
+    let stop = AtomicBool::new(true);
+    assert!(watch_until_settled(&path, &req, Duration::from_millis(50), &stop).is_none());
+}

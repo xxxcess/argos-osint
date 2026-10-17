@@ -409,7 +409,7 @@ async fn live_atlas_then_briefs() {
                         .chars()
                         .take(160)
                         .collect::<String>()
-                        .replace(|c: char| c == '=', ":")
+                        .replace('=', ":")
                 );
             }
         },

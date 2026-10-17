@@ -7,5 +7,8 @@
 - [x] Defaults popups for all 9 roles + TestBackend test
 - [x] Live Atlas + 8 articles through the brief; per-route errors recorded
 - [x] Matrix (default, no-default-features, nlp) with clippy -D warnings and fmt
+- [x] Atlas: transient retry, same-host redirects, quota counted separately, failures named in status
+- [x] Ultra history analysed (deployment-side; recon uses Super); one comparison probe blocked by sandbox review (open)
+- [x] Grok (xAI) removed with migration + tests
 - [ ] Persist learned request-mode capabilities (open)
 - [ ] User action: replace Ultra with Super / check Gemini quota

@@ -691,7 +691,7 @@ mod tests {
         // A subscription route with a keyless credential is accepted.
         let mut v = doc();
         v["providers"][0]["kind"] = serde_json::json!("subscription");
-        v["providers"][0]["base_url"] = serde_json::json!("codex://chatgpt");
+        v["providers"][0]["base_url"] = serde_json::json!("https://chatgpt.com");
         v["providers"][0]["credential"] =
             serde_json::json!({"source": "none", "api_key": "", "name": ""});
         assert!(
@@ -1388,7 +1388,7 @@ mod tests {
     fn a_subscription_account_keeps_its_device_endpoints_through_an_import() {
         let secret = ProviderSecret {
             kind: "openai-chatgpt".into(),
-            base_url: "codex://chatgpt".into(),
+            base_url: "https://chatgpt.com".into(),
             model: "codex-default".into(),
             api_key: None,
             stt_model: Some("whisper-1".into()),

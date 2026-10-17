@@ -374,7 +374,11 @@ async fn live_atlas_then_briefs() {
         firecrawl: settings.provider_key("firecrawl"),
         ..Default::default()
     };
-    let classifier = crate::provider::role_secret(&auth, &settings, "classifier").ok();
+    let classifier = if std::env::var("ARGOS_LIVE_NO_CLASSIFIER").is_ok() {
+        None
+    } else {
+        crate::provider::role_secret(&auth, &settings, "classifier").ok()
+    };
     let pause = AtomicBool::new(false);
     let started = std::time::Instant::now();
     let mut events = 0usize;
@@ -388,7 +392,27 @@ async fn live_atlas_then_briefs() {
         classifier,
         None,
         &[],
-        |_| events += 1,
+        |event| {
+            events += 1;
+            if let crate::atlas::AtlasEvent::Fault(fault) = &event {
+                // Summary only: the body is never printed, and key-like values are masked.
+                let summary = fault
+                    .summary
+                    .split(['?', '&'])
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                println!(
+                    "ATLAS FAULT {summary} | {}",
+                    fault
+                        .summary
+                        .chars()
+                        .take(160)
+                        .collect::<String>()
+                        .replace(|c: char| c == '=', ":")
+                );
+            }
+        },
     )
     .await;
     println!(

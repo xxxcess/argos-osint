@@ -783,6 +783,10 @@ pub struct CoverageStats {
     /// Phase 6 occurrences whose index write failed (no receipt).
     #[serde(default)]
     pub actor_index_failed: u32,
+    /// Provider calls skipped because the provider's quota or rate limit was
+    /// exhausted. Expected and daily-resetting, so not an acquisition failure.
+    #[serde(default)]
+    pub quota_skipped: u32,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -793,6 +797,10 @@ pub struct RunStats {
     pub coverage: CoverageStats,
     #[serde(default)]
     pub acquisition_retry: Option<Cursor>,
+    /// One line per acquisition failure (provider and cause), capped, so the
+    /// status text can name what failed.
+    #[serde(default)]
+    pub acquisition_faults: Vec<String>,
     pub counts: BTreeMap<String, u32>,
     pub origins: Vec<OriginStat>,
     pub scored: bool,
@@ -884,6 +892,8 @@ pub struct HttpCall {
 pub struct HttpReply {
     pub status: u16,
     pub body: String,
+    /// `Location` of a 3xx reply, so the dispatcher can follow same-host redirects.
+    pub location: Option<String>,
 }
 
 /// A provider rejection. `summary` is the log line. `body` is the full response.
@@ -1957,6 +1967,8 @@ where
     }
     if resume && cursor.phase <= 2 {
         stats.coverage.acquisition_failures = 0;
+        stats.coverage.quota_skipped = 0;
+        stats.acquisition_faults.clear();
         stats.acquisition_retry = None;
     }
     stats.contract_version = crate::atlas_work::COLLECTION_CONTRACT.into();
@@ -2110,19 +2122,25 @@ where
                                 }
                             }
                             Err(err) => {
-                                stats.coverage.acquisition_failures += 1;
-                                if stats.acquisition_retry.is_none() {
+                                let fault = ProviderFault {
+                                    summary: format!("{provider} unreadable response: {err}"),
+                                    body: String::new(),
+                                };
+                                if record_fault(&mut stats, provider, &fault)
+                                    && stats.acquisition_retry.is_none()
+                                {
                                     stats.acquisition_retry = Some(here.clone());
                                 }
-                                emit(parse_fault(provider, err.to_string(), &body));
+                                emit(parse_fault(provider, fault.summary, &body));
                                 stop_provider = true;
                             }
                         }
                     }
                     None => {
                         if let Some(fault) = fetched.fault {
-                            stats.coverage.acquisition_failures += 1;
-                            if stats.acquisition_retry.is_none() {
+                            if record_fault(&mut stats, provider, &fault)
+                                && stats.acquisition_retry.is_none()
+                            {
                                 stats.acquisition_retry = Some(here.clone());
                             }
                             emit(AtlasEvent::Fault(fault));
@@ -2344,17 +2362,23 @@ where
                         }
                     }
                     Err(err) => {
-                        stats.coverage.acquisition_failures += 1;
-                        if stats.acquisition_retry.is_none() {
+                        let fault = ProviderFault {
+                            summary: format!("{} unreadable response: {err}", job.provider),
+                            body: String::new(),
+                        };
+                        if record_fault(&mut stats, job.provider, &fault)
+                            && stats.acquisition_retry.is_none()
+                        {
                             stats.acquisition_retry = Some(cursor_at(job, &cursor.from));
                         }
-                        emit(parse_fault(job.provider, err.to_string(), &body));
+                        emit(parse_fault(job.provider, fault.summary, &body));
                     }
                 },
                 None => {
                     if let Some(fault) = fetched.fault {
-                        stats.coverage.acquisition_failures += 1;
-                        if stats.acquisition_retry.is_none() {
+                        if record_fault(&mut stats, job.provider, &fault)
+                            && stats.acquisition_retry.is_none()
+                        {
                             stats.acquisition_retry = Some(cursor_at(job, &cursor.from));
                         }
                         emit(AtlasEvent::Fault(fault));
@@ -2652,7 +2676,7 @@ where
         "completed"
     };
     let note = format!(
-        "Classification {}/{} · legacy unk {} · entities {} · publisher priors {} · Related {} · actors indexed {}/{} (zero-actor {}, failed {}) · acquisition failures {}{}",
+        "Classification {}/{} · legacy unk {} · entities {} · publisher priors {} · Related {} · actors indexed {}/{} (zero-actor {}, failed {}) · acquisition failures {}{}{}{}",
         stats.coverage.classified,
         stats.coverage.articles,
         stats.coverage.legacy_unknown,
@@ -2664,6 +2688,16 @@ where
         stats.coverage.actor_zero,
         stats.coverage.actor_index_failed,
         stats.coverage.acquisition_failures,
+        if stats.acquisition_faults.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", stats.acquisition_faults.join("; "))
+        },
+        if stats.coverage.quota_skipped > 0 {
+            format!(" · quota-limited calls {}", stats.coverage.quota_skipped)
+        } else {
+            String::new()
+        },
         if stats.coverage.warnings > 0 {
             " · metadata warnings"
         } else {
@@ -2782,6 +2816,29 @@ fn park(
     Ok(Stop::Paused)
 }
 
+/// Records one provider fault. A quota or rate limit is an expected daily
+/// condition and is counted separately; anything else is an acquisition
+/// failure that the status text names. Returns true for a real failure.
+fn record_fault(stats: &mut RunStats, provider: &str, fault: &ProviderFault) -> bool {
+    if quota_fault(fault) {
+        stats.coverage.quota_skipped += 1;
+        return false;
+    }
+    stats.coverage.acquisition_failures += 1;
+    if stats.acquisition_faults.len() < 5 {
+        let line = one_line(&fault.summary);
+        let line = if line.to_ascii_lowercase().starts_with(provider) {
+            line
+        } else {
+            format!("{provider}: {line}")
+        };
+        stats
+            .acquisition_faults
+            .push(line.chars().take(110).collect());
+    }
+    true
+}
+
 fn parse_fault(_provider: &str, summary: String, body: &serde_json::Value) -> AtlasEvent {
     AtlasEvent::Fault(ProviderFault {
         summary: one_line(&summary),
@@ -2839,6 +2896,24 @@ fn provider_fault(provider: &str, status: u16, raw: &str) -> ProviderFault {
     }
 }
 
+/// Whether a failed call is worth one more try: transport errors, timeouts,
+/// request timeouts and 5xx. A 429 is not retried here (quota is handled by the
+/// spare-key path) and neither is any other 4xx.
+fn transient_status(status: u16) -> bool {
+    status == 408 || (500..600).contains(&status)
+}
+
+/// The redirect target when it keeps the same https host (so a key in the URL or
+/// headers never leaves the provider), resolved against the request URL.
+fn same_host_redirect(from: &str, location: &str) -> Option<String> {
+    let base = url::Url::parse(from).ok()?;
+    let next = base.join(location).ok()?;
+    (next.scheme() == "https" && next.host_str() == base.host_str()).then(|| next.to_string())
+}
+
+const DISPATCH_ATTEMPTS: u32 = 2;
+const DISPATCH_REDIRECTS: u32 = 3;
+
 async fn dispatch<F>(
     fetch: &mut F,
     spec: CallSpec,
@@ -2851,16 +2926,66 @@ where
     let mut headers = spec.headers;
     headers.push(("User-Agent".into(), user_agent.into()));
     headers.push(("Accept".into(), "application/json".into()));
-    let reply = fetch(HttpCall {
-        provider: provider.into(),
-        url: spec.url,
-        headers,
-    })
-    .await
-    .map_err(|err| ProviderFault {
-        summary: format!("{provider} request failed: {err}"),
-        body: String::new(),
-    })?;
+    let mut url = spec.url;
+    let mut attempt = 0;
+    let mut redirects = 0;
+    let reply = loop {
+        attempt += 1;
+        let sent = fetch(HttpCall {
+            provider: provider.into(),
+            url: url.clone(),
+            headers: headers.clone(),
+        })
+        .await;
+        match sent {
+            Ok(reply) if (300..400).contains(&reply.status) && redirects < DISPATCH_REDIRECTS => {
+                match reply
+                    .location
+                    .as_deref()
+                    .and_then(|location| same_host_redirect(&url, location))
+                {
+                    Some(next) => {
+                        redirects += 1;
+                        url = next;
+                        continue;
+                    }
+                    None => break reply,
+                }
+            }
+            Ok(reply) if transient_status(reply.status) && attempt < DISPATCH_ATTEMPTS => {}
+            Ok(reply) => break reply,
+            Err(err) if attempt < DISPATCH_ATTEMPTS => {
+                let _ = err;
+            }
+            Err(err) => {
+                let kind = if err
+                    .downcast_ref::<reqwest::Error>()
+                    .is_some_and(reqwest::Error::is_timeout)
+                {
+                    "timed out"
+                } else {
+                    "request failed"
+                };
+                return Err(ProviderFault {
+                    summary: one_line(&format!(
+                        "{provider} {kind} after {attempt} attempts: {err}"
+                    )),
+                    body: String::new(),
+                });
+            }
+        }
+        #[cfg(not(test))]
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+    };
+    if (300..400).contains(&reply.status) {
+        return Err(ProviderFault {
+            summary: format!(
+                "{provider} HTTP {} redirect to another host was not followed",
+                reply.status
+            ),
+            body: String::new(),
+        });
+    }
     if !(200..300).contains(&reply.status) {
         return Err(provider_fault(provider, reply.status, &reply.body));
     }
@@ -2925,8 +3050,17 @@ pub async fn run_live(
                 }
                 let response = request.send().await?;
                 let status = response.status().as_u16();
+                let location = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
                 let body = response.text().await?;
-                Ok(HttpReply { status, body })
+                Ok(HttpReply {
+                    status,
+                    body,
+                    location,
+                })
             })
         },
     )
@@ -4215,7 +4349,11 @@ mod tests {
         } else {
             serde_json::json!({"status":"ok","news":[{"title":"Local wire","url":"https://example.com/local","author":"Desk","published":"2026-10-01T01:00:00Z"}]}).to_string()
         };
-        HttpReply { status: 200, body }
+        HttpReply {
+            status: 200,
+            body,
+            location: None,
+        }
     }
 
     /// Top headlines with no `source.country`, and a NewsData row named Germany.
@@ -4262,6 +4400,137 @@ mod tests {
                 .to_string()
             }
         };
-        HttpReply { status: 200, body }
+        HttpReply {
+            status: 200,
+            body,
+            location: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod acquisition_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn spec(url: &str) -> CallSpec {
+        CallSpec {
+            provider: "gnews",
+            url: url.into(),
+            headers: Vec::new(),
+        }
+    }
+
+    fn scripted(
+        replies: Vec<Result<HttpReply>>,
+        seen: Arc<Mutex<Vec<String>>>,
+    ) -> impl FnMut(HttpCall) -> FetchFut {
+        let queue = Arc::new(Mutex::new(
+            replies
+                .into_iter()
+                .collect::<std::collections::VecDeque<_>>(),
+        ));
+        move |call: HttpCall| {
+            seen.lock().unwrap().push(call.url.clone());
+            let next = queue.lock().unwrap().pop_front().expect("scripted reply");
+            Box::pin(async move { next })
+        }
+    }
+
+    fn reply(status: u16, body: &str, location: Option<&str>) -> Result<HttpReply> {
+        Ok(HttpReply {
+            status,
+            body: body.into(),
+            location: location.map(str::to_string),
+        })
+    }
+
+    #[tokio::test]
+    async fn one_server_error_is_retried_before_it_counts_as_a_failure() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut fetch = scripted(
+            vec![
+                reply(503, "unavailable", None),
+                reply(200, "{\"articles\":[]}", None),
+            ],
+            seen.clone(),
+        );
+        let value = dispatch(&mut fetch, spec("https://gnews.io/api/v4/x"), "ua").await;
+        assert!(value.is_ok(), "{value:?}");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_transport_error_is_retried_once_and_then_named() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut fetch = scripted(
+            vec![
+                Err(anyhow::anyhow!("connection reset")),
+                Err(anyhow::anyhow!("connection reset")),
+            ],
+            seen.clone(),
+        );
+        let fault = dispatch(&mut fetch, spec("https://gnews.io/x"), "ua")
+            .await
+            .unwrap_err();
+        assert!(
+            fault
+                .summary
+                .starts_with("gnews request failed after 2 attempts"),
+            "{}",
+            fault.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn a_same_host_redirect_is_followed_and_a_foreign_one_is_named() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut fetch = scripted(
+            vec![reply(301, "", Some("/api/v5/x")), reply(200, "{}", None)],
+            seen.clone(),
+        );
+        assert!(
+            dispatch(&mut fetch, spec("https://gnews.io/api/v4/x"), "ua")
+                .await
+                .is_ok()
+        );
+        assert_eq!(seen.lock().unwrap()[1], "https://gnews.io/api/v5/x");
+
+        let mut fetch = scripted(
+            vec![reply(302, "", Some("https://evil.example/x"))],
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let fault = dispatch(&mut fetch, spec("https://gnews.io/api/v4/x"), "ua")
+            .await
+            .unwrap_err();
+        assert!(
+            fault
+                .summary
+                .contains("redirect to another host was not followed"),
+            "{}",
+            fault.summary
+        );
+    }
+
+    #[test]
+    fn a_quota_limit_is_not_an_acquisition_failure_but_a_real_fault_is_named() {
+        let mut stats = RunStats::default();
+        let quota = ProviderFault {
+            summary: "gnews HTTP 429: daily quota exceeded".into(),
+            body: String::new(),
+        };
+        assert!(!record_fault(&mut stats, "gnews", &quota));
+        assert_eq!(stats.coverage.quota_skipped, 1);
+        assert_eq!(stats.coverage.acquisition_failures, 0);
+        let bad = ProviderFault {
+            summary: "newsdata malformed JSON: eof".into(),
+            body: String::new(),
+        };
+        assert!(record_fault(&mut stats, "newsdata", &bad));
+        assert_eq!(stats.coverage.acquisition_failures, 1);
+        assert_eq!(
+            stats.acquisition_faults,
+            vec!["newsdata malformed JSON: eof".to_string()]
+        );
     }
 }

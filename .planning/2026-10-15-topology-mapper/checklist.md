@@ -30,7 +30,7 @@ See the [final design](../../docs/topology-scope-summary-plan.md) and [specifica
 - [x] topology-mapper.md, diagram pair, architecture.md, tui-components.md, plan, this checklist
 - [x] graphify update
 - [x] PR #48 body rewritten; screenshots pinned to the final SHA
-- [x] CI matrix green on all four targets (macOS arm64/x86_64, Linux x86_64/aarch64) at `dba2fff` (run 39047777535)
+- [x] CI matrix green on all four targets (macOS arm64/x86_64, Linux x86_64/aarch64) at `dba2fff` (run 39047777535) and at `4758691` (run 39050891830: Linux x86_64/aarch64, macOS arm64/Intel, policy all pass)
 - [x] Local matrix (default, `--no-default-features`, nlp) fmt/clippy/tests via `scripts/agent_cargo.py` (run before the last heartbeat commit; CI covers `dba2fff`)
 - [ ] Live Summarization check (not run: no Summarization account configured)
 
@@ -44,3 +44,5 @@ See the [final design](../../docs/topology-scope-summary-plan.md) and [specifica
 - [x] Auth/settings/runtime load off the UI thread; idle tick loads nothing
 - [x] Rows cached; styled lines from the typed brief
 - [x] Docs trimmed, state diagram added, representative screenshots only
+- [x] Lease heartbeat stress: 20 runs of the executor and `sqlite_contention` tests under 16 busy loops with `--test-threads=32`, 0/20 failures
+- Note: the `lease_secs` 3 to 6 bump in `intel_recon/brief_stages_tests.rs` is a mitigation, not a root-cause fix

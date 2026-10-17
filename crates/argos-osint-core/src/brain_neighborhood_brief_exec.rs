@@ -485,11 +485,6 @@ pub struct Outcome {
     pub stale: bool,
 }
 
-/// Heartbeat trace (tests only): shows why a lease was declared lost.
-#[cfg(test)]
-pub(crate) static HEARTBEAT_TRACE: std::sync::Mutex<Vec<String>> =
-    std::sync::Mutex::new(Vec::new());
-
 fn lease_held(conn: &Connection, c: &crate::tasks::ClaimedTask) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT 1 FROM argos_tasks WHERE id=?1 AND lease_owner=?2 AND lease_epoch=?3 AND state='running'",
@@ -519,8 +514,6 @@ fn heartbeat(
         // not stretch the renewal interval.
         let mut last_attempt = std::time::Instant::now();
         let tick = std::time::Duration::from_millis(25);
-        #[cfg(test)]
-        let mut max_sleep_ms = 0u128;
         // The lease was last extended at `renewed_at`; it truly lapses
         // `lease_secs` later. A late or failed renewal under load is retried
         // (shorter interval) and is only fatal when the lease really passed,
@@ -529,24 +522,14 @@ fn heartbeat(
         let mut failures = 0u32;
         let mut interval = every;
         while !stop.load(Ordering::SeqCst) {
-            #[cfg(test)]
-            let slept = std::time::Instant::now();
             std::thread::sleep(tick);
-            #[cfg(test)]
-            {
-                max_sleep_ms = max_sleep_ms.max(slept.elapsed().as_millis());
-            }
             if last_attempt.elapsed() < interval {
                 continue;
             }
             last_attempt = std::time::Instant::now();
-            #[cfg(test)]
-            let began = std::time::Instant::now();
             // Ok(Some(true)) renewed; Ok(Some(false)) refused but still ours;
             // Ok(None) the task is gone/taken; Err transient failure.
             let attempt = Connection::open(&path).map_err(|_| ()).and_then(|conn| {
-                #[cfg(test)]
-                HEARTBEAT_TRACE.lock().unwrap().push(format!("{} opened after {}ms", path.display(), began.elapsed().as_millis()));
                 let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
                 let ok = crate::tasks::renew_lease(
                     &conn,
@@ -573,13 +556,6 @@ fn heartbeat(
                     .is_some();
                 Ok(if ours { Some(false) } else { None })
             });
-            #[cfg(test)]
-            HEARTBEAT_TRACE.lock().unwrap().push(format!(
-                "{} since_renew={}ms attempt_took={}ms max_sleep={max_sleep_ms}ms failures={failures} attempt={attempt:?}",
-                path.display(),
-                renewed_at.elapsed().as_millis(),
-                began.elapsed().as_millis()
-            ));
             match attempt {
                 Ok(Some(true)) => {
                     renewed_at = std::time::Instant::now();
@@ -684,20 +660,6 @@ pub fn run_claimed(
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| storage(&e))?;
     if !lease_held(&tx, claimed).map_err(|e| storage(&e))? {
-        #[cfg(test)]
-        {
-            let row: Option<(String, String, i64, String)> = tx
-                .query_row(
-                    "SELECT state, lease_owner, lease_epoch, lease_until FROM argos_tasks WHERE id=?1",
-                    [&claimed.id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )
-                .ok();
-            HEARTBEAT_TRACE.lock().unwrap().push(format!(
-                "fence failed: row={row:?} claimed_owner={} claimed_epoch={}",
-                claimed.owner, claimed.epoch
-            ));
-        }
         return Ok(Outcome {
             tag: "lease_lost".into(),
             generated: false,

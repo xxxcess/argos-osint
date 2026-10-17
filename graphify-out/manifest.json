@@ -30,9 +30,9 @@
     "semantic_hash": "769b9d268d68d2b876cb64cebcc855f9"
   },
   "crates/argos-osint-bin/src/tui/app.rs": {
-    "mtime": 1792250500.589893,
-    "seen": 1792250868.7800446,
-    "ast_hash": "6edcabf8d3ea9405e2e1062b3aa3c09e",
+    "mtime": 1792258871.6557682,
+    "seen": 1792259380.2597744,
+    "ast_hash": "1adce811ff7c2d8e6f43db3772759f2e",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/brain_detail.rs": {
@@ -3222,9 +3222,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/topology.rs": {
-    "mtime": 1792250718.145893,
-    "seen": 1792250868.780563,
-    "ast_hash": "771bb925715c880298d76093f39bd364",
+    "mtime": 1792255818.011049,
+    "seen": 1792259380.260286,
+    "ast_hash": "26cfaff69e0b0399bd1d646006964091",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/topology_layout.rs": {
@@ -3546,14 +3546,14 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain_neighborhood_brief_exec.rs": {
-    "mtime": 1792250016.2778933,
-    "seen": 1792250868.7811618,
-    "ast_hash": "759989f02ee25cb1cc07ce263755270c",
+    "mtime": 1792259175.371768,
+    "seen": 1792259380.2609024,
+    "ast_hash": "43b03e12174cd973f0071c8826c74e58",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain_neighborhood_brief_exec_tests.rs": {
-    "mtime": 1792249845.1578932,
-    "seen": 1792250868.7811632,
+    "mtime": 1792259175.371768,
+    "seen": 1792259380.260904,
     "ast_hash": "f4c775e4e5b0c1920e6745bca8c56a23",
     "semantic_hash": ""
   },
@@ -3588,15 +3588,15 @@
     "semantic_hash": ""
   },
   "docs/screens/topology-summary/README.md": {
-    "mtime": 1792250848.9898932,
-    "seen": 1792250868.7872734,
-    "ast_hash": "91429d819389727b03307cc1b1bbd013",
+    "mtime": 1792250883.2698932,
+    "seen": 1792259380.267284,
+    "ast_hash": "00c1dc6891d91d722a4b598fbacaa35b",
     "semantic_hash": ""
   },
   "docs/topology-scope-summary-plan.md": {
-    "mtime": 1792250848.9898932,
-    "seen": 1792250868.7873545,
-    "ast_hash": "c0f145190ed16f5692a03126d21f3323",
+    "mtime": 1792255600.579049,
+    "seen": 1792259380.2673843,
+    "ast_hash": "04debb58209af23f8240d5dea2bccdb5",
     "semantic_hash": ""
   },
   "docs/screens/request-mode/after/defaults-claim_assessor-provider-popup.png": {
@@ -3684,21 +3684,21 @@
     "semantic_hash": ""
   },
   ".planning/2026-10-15-topology-mapper/checklist.md": {
-    "mtime": 1792250856.645893,
-    "seen": 1792250868.786114,
-    "ast_hash": "1b8fb33d6248026f8df53639b1fc6193",
+    "mtime": 1792259182.411768,
+    "seen": 1792259380.2659476,
+    "ast_hash": "6ba0252cb249f9e0d4a9ed31c88dc244",
     "semantic_hash": ""
   },
   "docs/diagrams/topology-summary-states.html": {
-    "mtime": 1792250822.9698932,
-    "seen": 1792250868.7870576,
-    "ast_hash": "d932592753220d624dc332b124e602fe",
+    "mtime": 1792255907.291049,
+    "seen": 1792259380.2670527,
+    "ast_hash": "d32b2c49edcf9c5e0bed8cec9fba031b",
     "semantic_hash": ""
   },
   "docs/diagrams/topology-summary-states.svg": {
-    "mtime": 1792250822.9658933,
-    "seen": 1792250868.7879376,
-    "ast_hash": "a2959daa588d120e3ee78b4bc37c6567",
+    "mtime": 1792255914.035049,
+    "seen": 1792259380.267987,
+    "ast_hash": "64c7343eb3c82f28b7959cb3c83a62f4",
     "semantic_hash": ""
   }
 }

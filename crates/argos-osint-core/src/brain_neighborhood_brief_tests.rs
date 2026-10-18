@@ -878,3 +878,98 @@ fn fenced_json_is_accepted_and_overlong_output_is_not() {
         serde_json::json!([{"text": format!("stored inference {long}"), "basis": ["N4"]}]);
     assert!(check(&v.to_string()).unwrap_err().contains("too long"));
 }
+
+// ----------------------------------------- model-cited record ids (regression)
+
+/// A fixture whose stored Inference reasoning names raw record ids, with the
+/// cited record `b23` two hops out. `depth` limits how far the snapshot reaches.
+pub(crate) fn with_raw_ids(depth: usize) -> Fixture {
+    let mut f = rich();
+    let mut b23 = node(
+        "b23",
+        TopologyNodeKind::Claim,
+        "Insurers paused port cover",
+        2,
+    );
+    b23.status = "extraction assessed".into();
+    f.snapshot.nodes.push(b23);
+    f.snapshot
+        .edges
+        .push(edge("l2", "b23", "c2", TopologyEdgeKind::Link));
+    f.payloads.insert(
+        "l2".into(),
+        link("b23", "c2", "supports", "Same port, same week"),
+    );
+    f.payloads.insert(
+        "i1".into(),
+        MemoryPayload::Inference(InferencePayload {
+            premise_claims: vec!["c1".into(), "c2".into(), "b23".into()],
+            actors: vec![],
+            reasoning: "Reasoning: b23 shows insurers paused cover, and c1 and c2 name the same harbor operator".into(),
+            limitations: "Only two retained articles; no shipping data".into(),
+            support_state: "supported".into(),
+            coverage_receipt: "coverage-1".into(),
+        }),
+    );
+    f.snapshot.nodes.retain(|n| n.min_hops <= depth);
+    let keep: BTreeSet<String> = f.snapshot.nodes.iter().map(|n| n.id.clone()).collect();
+    f.snapshot
+        .edges
+        .retain(|e| keep.contains(&e.from) && keep.contains(&e.to));
+    f
+}
+
+fn input_at(f: &Fixture, depth: usize) -> NeighborhoodInput {
+    let b = BriefInput {
+        snapshot: &f.snapshot,
+        seed: &f.seed,
+        depth,
+        cycle: &CycleScope::AllRetained,
+        payloads: f.payloads.clone(),
+        payload_reads_skipped: 0,
+    };
+    build_input(&b, &build(&b).basis_key)
+}
+
+fn brief_at(f: &Fixture, depth: usize) -> NeighborhoodBrief {
+    build(&BriefInput {
+        snapshot: &f.snapshot,
+        seed: &f.seed,
+        depth,
+        cycle: &CycleScope::AllRetained,
+        payloads: f.payloads.clone(),
+        payload_reads_skipped: 0,
+    })
+}
+
+#[test]
+fn a_model_that_copies_a_raw_record_id_into_basis_does_not_sink_the_answer() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    // The id reaches the model today, so a faithful model copies it.
+    let prompt = input.prompt_json().to_lowercase();
+    assert!(
+        !prompt.contains("b23"),
+        "the model-facing packet must not contain raw record ids"
+    );
+    let raw = with(
+        "interpretation",
+        "A stored inference with support state supported reads the claims together; it is a stored interpretation, not a verified conclusion.",
+        &["b23", "N4"],
+    );
+    let ok = validate_generated(&input, &brief_at(&f, 2), &raw);
+    assert!(ok.is_ok(), "{ok:?}");
+}
+
+#[test]
+fn a_raw_id_in_basis_is_reported_by_key_and_sinks_only_that_key() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    let text = "A stored inference with support state supported reads the claims together; it is a stored interpretation, not a verified conclusion.";
+    let both = with("interpretation", text, &["b23", "N4"]);
+    let ok = validate_generated(&input, &brief_at(&f, 2), &both);
+    assert!(ok.is_ok(), "{ok:?}");
+    let alone = with("interpretation", text, &["b23"]);
+    let err = validate_generated(&input, &brief_at(&f, 2), &alone).unwrap_err();
+    assert!(err.contains("b23"), "{err}");
+}

@@ -2061,7 +2061,7 @@ pub fn set_job_stage_coverage(conn: &Connection, job_id: &str, coverage_json: &s
 #[cfg(test)]
 mod tests {
     #[test]
-    fn queued_claim_scan_uses_the_partial_index_without_a_schema_bump() {
+    fn queued_claim_scan_uses_the_partial_index() {
         let conn = Connection::open_in_memory().unwrap();
         migrate_tables(&conn).unwrap();
         migrate_tables(&conn).unwrap();
@@ -2083,7 +2083,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 0, "migrate_tables never touches user_version");
-        assert_eq!(crate::store::SCHEMA_VERSION, 42);
+        assert_eq!(crate::store::SCHEMA_VERSION, 43);
     }
 
     #[test]

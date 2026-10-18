@@ -103,13 +103,6 @@ Shared chain (`provider_chain`): primary **4** attempts (waits 10s, 20s, 30s bef
 - Successful fallback is informational and does not mark a cycle Partial
 - Provider 429 / 503 defer picker calls; deterministic order when no primaries remain
 
-## Graph explanation jobs
-
-- One job per memory per provider/model
-- Cache key: memory text revision + graph brief + focus + provider + model + prompt version
-- Failures persist with diagnostics. Memories stay. Atlas indexing continues.
-- Stages: compact, evidence, synthesis
-
 ## News and legal keys
 
 NewsAPI and CourtListener are keyed context providers, not primaries. Keys never appear in URL, tool input, cache key, plan, or stored body (echoed keys redacted). 0 credits; budgets are per-turn call caps. Fallback after rate/quota only. 401/403 do not switch accounts.
@@ -130,7 +123,6 @@ Recon limits: `news_calls_per_turn` 2, `legal_calls_per_turn` 3. Spec defaults s
 - Unit tests for every failure category and stage
 - Summary executor budget is 2 total requests, including transport fallback; admission wait consumes no attempt
 - Cache invalidation when inputs change
-- Graph explanation provider integration
 
 ## Investigative assessment routes
 

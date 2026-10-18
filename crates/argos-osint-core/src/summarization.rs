@@ -14,15 +14,14 @@ use crate::tasks::OperationKind;
 mod exec;
 pub use exec::{
     admission_account, complete_summary_report, AttemptEvent, AttemptLog, ExecOptions,
-    SummaryExecution, GRAPH_MAX_REQUESTS, MAX_REQUESTS,
+    SummaryExecution, MAX_REQUESTS,
 };
 
-/// Nine production modes. Each maps to a real call site.
+/// Production modes. Each maps to a real call site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SummarizationMode {
     PageEvidence,
-    GraphExplanation,
     FollowUpContext,
     ToolObservation,
     InvestigationTitle,
@@ -35,9 +34,8 @@ pub enum SummarizationMode {
 }
 
 impl SummarizationMode {
-    pub const ALL: [SummarizationMode; 10] = [
+    pub const ALL: [SummarizationMode; 9] = [
         Self::PageEvidence,
-        Self::GraphExplanation,
         Self::FollowUpContext,
         Self::ToolObservation,
         Self::InvestigationTitle,
@@ -51,7 +49,6 @@ impl SummarizationMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::PageEvidence => "page_evidence",
-            Self::GraphExplanation => "graph_explanation",
             Self::FollowUpContext => "follow_up_context",
             Self::ToolObservation => "tool_observation",
             Self::InvestigationTitle => "investigation_title",
@@ -66,7 +63,6 @@ impl SummarizationMode {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "page_evidence" | "page-evidence" => Some(Self::PageEvidence),
-            "graph_explanation" | "graph-explanation" => Some(Self::GraphExplanation),
             "follow_up_context" | "follow-up-context" => Some(Self::FollowUpContext),
             "tool_observation" | "tool-observation" => Some(Self::ToolObservation),
             "investigation_title" | "investigation-title" => Some(Self::InvestigationTitle),
@@ -159,9 +155,6 @@ pub fn system_prompt(mode: SummarizationMode) -> &'static str {
         SummarizationMode::PageEvidence => {
             "Compress the supplied page evidence for investigation use. Preserve attribution, uncertainty, and exact identifiers. Do not invent facts, call tools, or decide directive completion. Write concise Markdown."
         }
-        SummarizationMode::GraphExplanation => {
-            "Explain only the selected claim path and its supplied support. Preserve timestamps, attribution, and fact-versus-inference labels. Do not invent sources or outcomes."
-        }
         SummarizationMode::FollowUpContext => {
             "Summarize the prior investigation answer for the next turn. Copy supplied directive states exactly; do not reassess completion. Keep entities, identifiers, uncertainty, and unresolved questions."
         }
@@ -207,7 +200,7 @@ pub fn validate_result(
                 .map_err(|e| format!("malformed neighborhood brief: {e}"))?;
             return Ok(());
         }
-        SummarizationMode::GraphExplanation | SummarizationMode::PageEvidence => {
+        SummarizationMode::PageEvidence => {
             if text.chars().count() < 20 {
                 return Err("summary too short to be useful".into());
             }
@@ -925,7 +918,7 @@ mod tests {
 
     #[test]
     fn every_summarization_mode_round_trips() {
-        assert_eq!(SummarizationMode::ALL.len(), 10);
+        assert_eq!(SummarizationMode::ALL.len(), 9);
         for mode in SummarizationMode::ALL {
             assert_eq!(SummarizationMode::parse(mode.as_str()), Some(mode));
             assert!(!system_prompt(mode).is_empty());
@@ -952,7 +945,7 @@ mod tests {
     #[test]
     fn cache_key_changes_with_revision_and_focus() {
         let mut req = SummaryRequest {
-            mode: SummarizationMode::GraphExplanation,
+            mode: SummarizationMode::PageEvidence,
             sources: vec![SummarySource {
                 id: "m1".into(),
                 revision: "1".into(),

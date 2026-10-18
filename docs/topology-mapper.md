@@ -10,8 +10,8 @@ display a sample graph.
 
 | Entry | Seed |
 | --- | --- |
-| Brain claim-path graph | The open canonical Claim ID. Activate the graph pane with Enter or a click. |
-| Brain actor-group graph | Exact group name and retained member IDs; a display group does not merge canonical identities. |
+| Brain memory (Enter) | The selected canonical memory ID, by its stored kind (Claim, Inference, Link, Related or Actor); opens at one hop. |
+| Brain actor group (Enter) | Exact group name and retained member IDs; a display group does not merge canonical identities. |
 | Intel Focus Brief claim | Exact article, run, revision, publication job and snapshot-local claim identity. Resolve through its matching publication/derivation. |
 | Intel Focus Brief inference | Exact article, run, revision, publication job and snapshot-local inference identity; resolves to its current canonical Inference independently of Links completion. |
 | Intel Focus Brief actor | Exact article metadata revision and scoped actor reference. Metadata-only actors remain actionable without extracted claims. |
@@ -223,9 +223,8 @@ origin restoration, filters, compact pages and keyboard/pointer parity.
 
 Use fresh actual TestBackend captures per [TUI verification](tui-verification.md):
 `dump_brain_topology_screens` / `topology-*` and `topology-summary-*` (committed in `screens/topology-summary/`),
-`dump_topology_density_and_entries_screens` / `density-*` and `intel-topology-*`,
-and ignored `dump_brain_kind_screens` / `brain-actor-graph-*` and
-`brain-claim-split-*`. Review 160×50, 120×40, 100×32, 80×24, 60×20, 60×18 and 40×20,
+`dump_topology_density_and_entries_screens` / `density-*` and `intel-topology-*`.
+Review 160×50, 120×40, 100×32, 80×24, 60×20, 60×18 and 40×20,
 plus 132/131-column and 100×34/100×33 height split boundaries. Include selected edges, controls, crowded,
 isolated, loading, stale and error states. Record image observations separately
 from interaction and data results; generation alone does not complete review.

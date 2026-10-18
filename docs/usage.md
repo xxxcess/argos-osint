@@ -72,15 +72,15 @@ Details: [concepts.md](concepts.md) · [architecture.md](architecture.md#intel-r
 
 Kind cycles **All → Claims → Actors → All**. All is exactly the union of visible claims and normalized Actor-name groups; internal inferences, links, tentative Related records, digests, profiles and notes stay stored for recall. Create saves a user-supplied, unassessed Claim. Pin/Delete apply to claims; actor groups are read-only.
 
-An Actor group collects all member and redirected identities for browsing. Possessive spellings share a normalized group; article totals include direct retained mentions even when there are no Related articles. Counts follow ingestion, corrections and deletion. The background Actor identity maintenance service repairs old spellings; when Entity Resolver is configured it also assesses contextual aliases. Grouping itself does not merge identities. Its tabs are **Claims · Threads · Articles**; a Claim exposes **Actors · Sources**. Select a row with keyboard or mouse to open the claim, actor group, original Recon transcript or exact Intel article brief. Back/Esc restores the record, tab, selection, focus and independent offsets. Sources are direct retained origins; similar memories and tentative article leads are excluded. Lists show totals and See more; graphs cover the entire association set.
+An Actor group collects all member and redirected identities for browsing. Possessive spellings share a normalized group; article totals include direct retained mentions even when there are no Related articles. Counts follow ingestion, corrections and deletion. The background Actor identity maintenance service repairs old spellings; when Entity Resolver is configured it also assesses contextual aliases. Grouping itself does not merge identities. Thread detections are recorded only with Recall enabled; later disabling Recall preserves earlier receipts.
 
-Compact detail graphs display Claim, Topic, Entity, Article and Source presentations. Focus and scrolling remain available; activating the claim-path or actor-group graph pane opens its exact topology. Claims keep Graph above Related/Summary, stacking below 68 columns. Actor detail uses Graph 65% / Related 35% at 100×28 or larger, with reachable Graph/Related pages below that. Thread detections are recorded only with Recall enabled; later disabling Recall preserves earlier receipts.
+Enter on a memory (or an actor group) opens its Memory Topology directly, at one hop from the selected record; there is no separate detail or claim-path graph view. Back/Esc returns to the Brain list with the same selection. Click selects a row; Enter opens it. A saved last-view session that recorded a memory detail resumes at the Brain list.
 
 #### Brain Memory Topology
 
-Activate a Brain claim-path or actor-group graph with Enter or a click. In an
-Intel Focus Brief, activate an individual Claim, Inference or Actor record. Each entry opens
-its own retained neighborhood at two hops; no global sample graph is substituted.
+Press Enter on a Brain memory (one hop). In an
+Intel Focus Brief, activate an individual Claim, Inference or Actor record (two hops). Each entry opens
+its own retained neighborhood; no global sample graph is substituted.
 
 - **Layout**: Graph first puts the canvas left (65%) and inspector right (35%) in a body of at least 132×32 cells; 100–131 columns uses 70%/30%. Shorter/narrower bodies expose Graph / Details / Controls pages. Below 60×18 retain Back and a size notice.
 - **Inspection**: Select a node to inspect its complete record and spaced relationships. Select a relationship for true direction, rationale and exact receipts. Inferences and derived topics are visible; actor name groups preserve member identities. Tentative Related leads remain possible context.
@@ -209,7 +209,7 @@ State: `~/.argos` (`ARGOS_HOME` overrides).
 
 | Path | Contents |
 | --- | --- |
-| `argos.db` | SQLite, `user_version` 26, additive migrations |
+| `argos.db` | SQLite, `user_version` 43 (`SCHEMA_VERSION` in `store.rs`), additive migrations |
 | `memory_lancedb/` | Brain vectors |
 | `config.toml` | Role defaults |
 | `auth.json` | Credentials (owner-only on Unix) |

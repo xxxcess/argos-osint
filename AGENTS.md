@@ -47,7 +47,7 @@ OpenCode: load `argos-commit` or `/ecc-commit` for commit tasks. `plan` prepares
 ## State & Config (all under `~/.argos`, override with `ARGOS_HOME`)
 | File | Purpose |
 |------|---------|
-| `argos.db` | SQLite: Brain memories, threads, runs, calls, cache, entities, provenance, legacy Atlas packets, article metadata/Related pairs, recon model operations (schema 30) |
+| `argos.db` | SQLite: Brain memories, threads, runs, calls, cache, entities, provenance, legacy Atlas packets, article metadata/Related pairs, recon model operations (schema 43, see `SCHEMA_VERSION` in `store.rs`) |
 | `memory_lancedb/` | LanceDB vectors for Brain (table `brain_memories`, 384-dim) |
 | `config.toml` | Role defaults (Recon, Tool picker, Synthesis, Classifier, Summarization), OSINT settings, recon limits |
 | `auth.json` | Provider credentials (OpenRouter, Google, Nvidia, and a preserved legacy OpenAI account) — owner-only perms on Unix |

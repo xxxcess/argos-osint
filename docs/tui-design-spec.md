@@ -58,7 +58,7 @@ The shared data/render separation, geometry, scrolling and measured input apply 
 | Recon | Transcript + 30% context at ≥110 columns; compact context page; measured composer | `ui.rs::draw_recon_chat`, `draw_recon_context`, `composer_height`; `recon_parts.rs` |
 | Intel | Three columns ≥132, two at 100–131, tabbed below 100 or short height; borderless center stack with bordered Full Article followed by Related; brief Jobs in context | `ui.rs::intel_briefing_areas`, `draw_intel_briefing`, `draw_clipped_md_pane` |
 | Atlas | Dashboard/table presets; compact Origins/Coverage/Headlines pages; preserve map | Atlas layout/draw functions; `atlas_table.rs`, `map.rs` |
-| Brain | Claims/Actor-name browse projection; Claim graph above Related/Summary (stack below 68); Actor Graph/Related 65%/35% at ≥100×28, compact pages below; topology Graph first: canvas left 65% / inspector right 35% at ≥132×32, 70%/30% at 100–131×≥32, Graph/Details/Controls pages below; minimum 60×18 | `brain_detail.rs`, `graph.rs`, `topology.rs`, `topology_layout.rs`, `ui.rs::draw_brain` |
+| Brain | Claims/Actor-name browse projection; Enter on a memory opens the topology mapper at one hop (no detail view); topology Graph first: canvas left 65% / inspector right 35% at ≥132×32, 70%/30% at 100–131×≥32, Graph/Details/Controls pages below; minimum 60×18 | `topology.rs`, `topology_layout.rs`, `ui.rs::draw_brain` |
 | Tools / Models | List + editor; compact pages; registered role list | `ui.rs::draw_osint`, `draw_providers`; `model_roles.rs` |
 | Jobs / Logs / System | Scrollable tables/details and reachable Host/Paths/Configs actions | `jobs.rs`, `logs.rs`, `profile.rs::draw_system_tab`, `profile_config.rs` |
 

@@ -1,4 +1,4 @@
-//! Related memories for the Brain claim/recon detail view.
+//! Related memories for a Brain record.
 //!
 //! Every row is an existing canonical memory, identified by its memory id.
 //! Explicit relationships come from stored rows (claim relations, shared

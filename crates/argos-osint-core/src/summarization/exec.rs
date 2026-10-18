@@ -23,8 +23,6 @@ use crate::tasks::{self, AdmissionGuard};
 /// Outbound requests one summary execution may send on the primary route.
 /// Summary-specific policy: two total requests, including transport fallback.
 pub const MAX_REQUESTS: u32 = 2;
-/// Existing independent GraphExplanation gate.
-pub const GRAPH_MAX_REQUESTS: u32 = crate::provider_chain::PRIMARY_ATTEMPTS;
 
 /// Execution limits.
 #[derive(Clone, Debug)]
@@ -169,12 +167,7 @@ pub async fn complete_summary_report(
         );
         return out;
     }
-    // GraphExplanation retains its existing independent request gate.
-    let cap = if mode == SummarizationMode::GraphExplanation {
-        crate::provider_chain::PRIMARY_ATTEMPTS
-    } else {
-        MAX_REQUESTS
-    };
+    let cap = MAX_REQUESTS;
     let mut transport = opts.first_transport;
     let mut number = 0u32;
     while number < cap {

@@ -23914,6 +23914,20 @@ mod tests {
                 width,
                 height,
             );
+            let mut cited = base();
+            cited.topology_state.summary.gen = SummaryGen::Failed(
+                argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure {
+                    kind: FailureKind::Rejected,
+                    message: "model operation stopped: validation/invalid_result: validation failed: brief rejected: connections: unknown reference \"b23\" (cite only packet references such as N1 or E2); no valid basis remains (1 dispatched attempts): route 0 fail: the answer was not a usable summary".into(),
+                },
+            );
+            dump_cells(
+                &mut cited,
+                &dir,
+                &format!("topology-summary-rejected-key-{width}x{height}"),
+                width,
+                height,
+            );
             let mut stale = base();
             stale.topology_error =
                 Some("Read failed · previous snapshot retained · r retries".into());

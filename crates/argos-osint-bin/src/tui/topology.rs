@@ -1126,13 +1126,91 @@ fn brief_lines(brief: &NeighborhoodBrief, width: u16) -> Vec<Line<'static>> {
     out
 }
 
+/// One dim line summarizing the host's adjustments to a generated brief:
+/// unknown basis keys it ignored (collapsed when several) and other parts
+/// kept from the deterministic brief.
+pub fn host_note_line(notes: &[String], width: usize) -> Option<String> {
+    const MARK: &str = "ignored unknown basis reference ";
+    let mut keys: Vec<String> = Vec::new();
+    let mut other = 0usize;
+    for note in notes {
+        match note.split_once(MARK) {
+            Some((_, key)) => {
+                let key = key.trim().trim_matches('"').to_string();
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+            None => other += 1,
+        }
+    }
+    let tail = (other > 0).then(|| {
+        format!(
+            "{other} part{} kept from the recorded brief",
+            if other == 1 { "" } else { "s" }
+        )
+    });
+    let n = keys.len();
+    // Longest form that fits: list up to three keys, fewer keys, then the count.
+    let keyed = |shown: usize| -> Option<String> {
+        match n {
+            0 => None,
+            1 => Some(format!("Ignored unknown reference {}", keys[0])),
+            _ if shown == 0 => Some(format!("Ignored {n} unknown references")),
+            _ => {
+                let list: Vec<&str> = keys.iter().take(shown).map(String::as_str).collect();
+                let more = if n > shown { ", …" } else { "" };
+                Some(format!(
+                    "Ignored {n} unknown references: {}{more}",
+                    list.join(", ")
+                ))
+            }
+        }
+    };
+    let join = |head: Option<String>| match (head, &tail) {
+        (Some(h), Some(t)) => Some(format!("{h} · {t}")),
+        (Some(h), None) => Some(h),
+        (None, Some(t)) => Some(t.clone()),
+        (None, None) => None,
+    };
+    let mut best = None;
+    for shown in (0..=n.min(3)).rev() {
+        let line = join(keyed(shown))?;
+        let fits = line.chars().count() <= width;
+        best = Some(line);
+        if fits {
+            break;
+        }
+    }
+    best
+}
+
+/// Longest reason shown in the failure banner.
+const FAILURE_REASON_MAX: usize = 240;
+
+/// The part of a failure message worth showing: everything up to and
+/// including `brief rejected:` is wrapper text, and the trailing attempt
+/// bookkeeping repeats the reason. The offending key stays visible.
+fn failure_reason(message: &str) -> String {
+    const MARK: &str = "brief rejected:";
+    let mut s = match message.find(MARK) {
+        Some(i) => message[i + MARK.len()..].trim_start(),
+        None => message.trim(),
+    };
+    if let Some(i) = s.find(" dispatched attempt") {
+        if let Some(j) = s[..i].rfind(" (") {
+            s = s[..j].trim_end();
+        }
+    }
+    if s.chars().count() <= FAILURE_REASON_MAX {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(FAILURE_REASON_MAX - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
 fn failure_note(failure: &GenerationFailure) -> String {
-    let reason: String = failure
-        .message
-        .trim_start_matches("brief rejected: ")
-        .chars()
-        .take(120)
-        .collect();
+    let reason = failure_reason(&failure.message);
     match failure.kind {
         FailureKind::NotConfigured => {
             "No usable Summarization model is configured; showing the recorded brief. Set one in Models."
@@ -1259,7 +1337,7 @@ fn build_summary_rows(
             text("Waiting for the seeded snapshot…".into(), theme::muted())
         };
     };
-    let Some((brief, _)) = displayed_brief(state) else {
+    let Some((brief, generated)) = displayed_brief(state) else {
         return text(
             format!(
                 "No neighborhood summary is available for {}.",
@@ -1272,6 +1350,14 @@ fn build_summary_rows(
     if let SummaryGen::Failed(failure) = &state.summary.gen {
         rows.extend(text(failure_note(failure), Style::default().fg(WARN)));
         rows.push(SummaryRow::Text(Line::from("")));
+    }
+    if let (true, SummaryGen::Generated(g)) = (generated, &state.summary.gen) {
+        if let Some(note) = host_note_line(&g.host_notes, width as usize) {
+            rows.push(SummaryRow::Text(Line::styled(
+                components::clip_text(&note, width as usize),
+                theme::muted(),
+            )));
+        }
     }
     rows.extend(brief_lines(brief, width).into_iter().map(SummaryRow::Text));
     if !brief.references.is_empty() {
@@ -1923,6 +2009,68 @@ fn draw_controls_page(frame: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rejected(message: &str) -> GenerationFailure {
+        GenerationFailure {
+            kind: FailureKind::Rejected,
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn host_note_line_collapses_keys_and_other_adjustments() {
+        let k = |key: &str| format!("connections: ignored unknown basis reference {key:?}");
+        assert_eq!(host_note_line(&[], 80), None);
+        assert_eq!(
+            host_note_line(&[k("b23")], 80).as_deref(),
+            Some("Ignored unknown reference b23")
+        );
+        assert_eq!(
+            host_note_line(&[k("b23"), k("b23"), k("x1")], 80).as_deref(),
+            Some("Ignored 2 unknown references: b23, x1")
+        );
+        assert_eq!(
+            host_note_line(&[k("a1"), k("a2"), k("a3"), k("a4")], 80).as_deref(),
+            Some("Ignored 4 unknown references: a1, a2, a3, …")
+        );
+        assert_eq!(
+            host_note_line(&["overview kept from the deterministic brief".into()], 80).as_deref(),
+            Some("1 part kept from the recorded brief")
+        );
+        // A narrow pane drops keys before it clips the count.
+        assert_eq!(
+            host_note_line(&[k("a1"), k("a2"), k("a3"), k("a4")], 30).as_deref(),
+            Some("Ignored 4 unknown references")
+        );
+    }
+
+    #[test]
+    fn failure_banner_keeps_the_offending_key_and_drops_the_wrapper_text() {
+        let wrapped = "model operation stopped: validation/invalid_result: validation failed: brief rejected: connections: unknown reference \"b23\" (cite only packet references such as N1 or E2); no valid basis remains (1 dispatched attempts): route 0 fail: the answer was not a usable summary: validation failed: brief rejected: connections: unknown reference \"b23\"";
+        let note = failure_note(&rejected(wrapped));
+        assert!(note.contains("unknown reference \"b23\""), "{note}");
+        assert!(!note.contains("model operation stopped"), "{note}");
+        assert!(!note.contains("validation failed"), "{note}");
+        assert!(!note.contains("dispatched attempts"), "{note}");
+        // A bare reason (no wrapper) is unchanged.
+        assert_eq!(
+            failure_reason("brief rejected: interpretation: number 9 is not in the record"),
+            "interpretation: number 9 is not in the record"
+        );
+        assert_eq!(failure_reason("route refused"), "route refused");
+    }
+
+    #[test]
+    fn failure_reason_is_capped_at_240_chars_with_the_key_first() {
+        let long = format!(
+            "brief rejected: overview: unknown reference \"zz9\" {}",
+            "x".repeat(600)
+        );
+        let reason = failure_reason(&long);
+        assert_eq!(reason.chars().count(), FAILURE_REASON_MAX);
+        assert!(reason.starts_with("overview: unknown reference \"zz9\""));
+        assert!(reason.ends_with('…'));
+    }
 
     #[test]
     fn retained_origin_supplies_cycle_when_canonical_root_has_no_cycle() {

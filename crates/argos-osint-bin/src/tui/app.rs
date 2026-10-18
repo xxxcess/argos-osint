@@ -7036,12 +7036,36 @@ impl App {
         self.status = "Memories".into();
     }
 
+    /// Enter on a memory: open the topology mapper seeded with that memory at
+    /// one hop. The seed kind comes from the memory's own metadata.
     fn open_memory_graph(&mut self) {
-        let Some(id) = self.memories.get(self.memory_sel).map(|m| m.id.clone()) else {
+        let Some(memory) = self.memories.get(self.memory_sel).cloned() else {
             self.status = "No memory selected".into();
             return;
         };
-        self.open_memory_detail(&id);
+        use argos_osint_core::brain_topology::TopologySeed;
+        use argos_osint_core::memory_metadata::MemoryKind;
+        let id = memory.id.clone();
+        let seed = if id.starts_with("actor-group:") {
+            TopologySeed::ActorGroup {
+                name_key: id.trim_start_matches("actor-group:").to_string(),
+                member_ids: memory
+                    .source
+                    .reference
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default(),
+            }
+        } else {
+            match argos_osint_core::brain_kinds::memory_kind(&self.store, &id) {
+                Ok(MemoryKind::Inference) => TopologySeed::Inference(id),
+                Ok(MemoryKind::Link) => TopologySeed::Link(id),
+                Ok(MemoryKind::Related) => TopologySeed::Related(id),
+                Ok(MemoryKind::Actor) => TopologySeed::Actor(id),
+                _ => TopologySeed::Claim(id),
+            }
+        };
+        self.open_topology(seed, Some(1));
     }
 
     fn detail_snapshot(&self) -> Option<super::brain_detail::DetailSnapshot> {
@@ -7067,7 +7091,14 @@ impl App {
         })
     }
 
-    pub(crate) fn open_topology(&mut self, seed: argos_osint_core::brain_topology::TopologySeed) {
+    /// Open the topology mapper on `seed`. `depth` is the starting hop count
+    /// for a fresh mapper (None keeps the default of 2); an in-place recenter
+    /// or history step never changes the depth.
+    pub(crate) fn open_topology(
+        &mut self,
+        seed: argos_osint_core::brain_topology::TopologySeed,
+        depth: Option<usize>,
+    ) {
         let already_open =
             self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Topology;
         if already_open {
@@ -7086,7 +7117,7 @@ impl App {
             {
                 "Brain · actor group graph".into()
             } else {
-                "Brain · claim path".into()
+                "Brain · memories".into()
             };
             let origin_article = (self.module == Some(ModuleId::Intel))
                 .then(|| self.intel_articles.get(self.intel_sel))
@@ -7108,6 +7139,9 @@ impl App {
             });
             self.topology_state.summary.detach();
             self.topology_state = Default::default();
+            if let Some(depth) = depth {
+                self.topology_state.depth = depth;
+            }
         }
         self.module = Some(ModuleId::Brain);
         self.brain_list_mode = BrainListMode::Topology;
@@ -7532,14 +7566,17 @@ impl App {
             })
             .unwrap_or(label);
         let revision = argos_osint_core::atlas_metadata::input_hash(&article);
-        self.open_topology(TopologySeed::RetainedInference {
-            run_id: article.run_id,
-            article_id: article.id,
-            revision,
-            local_id,
-            text,
-            job_id: self.intel_brief_job.clone().unwrap_or_default(),
-        });
+        self.open_topology(
+            TopologySeed::RetainedInference {
+                run_id: article.run_id,
+                article_id: article.id,
+                revision,
+                local_id,
+                text,
+                job_id: self.intel_brief_job.clone().unwrap_or_default(),
+            },
+            None,
+        );
     }
 
     fn open_intel_topology(&mut self, index: usize, actor: bool) {
@@ -7592,7 +7629,7 @@ impl App {
                 job_id: self.intel_brief_job.clone().unwrap_or_default(),
             }
         };
-        self.open_topology(seed);
+        self.open_topology(seed, None);
     }
 
     fn recenter_topology(&mut self) {
@@ -7613,7 +7650,7 @@ impl App {
             return;
         };
         if let Some(seed) = node.topology_seed.clone() {
-            self.open_topology(seed);
+            self.open_topology(seed, None);
             return;
         }
         let seed = match node.kind {
@@ -7635,7 +7672,7 @@ impl App {
                 return;
             }
         };
-        self.open_topology(seed);
+        self.open_topology(seed, None);
     }
 
     fn reveal_topology_related(&mut self, index: usize) {
@@ -8730,7 +8767,7 @@ impl App {
                             _ => TopologySeed::Claim(id.to_string()),
                         }
                     };
-                    self.open_topology(seed);
+                    self.open_topology(seed, None);
                 }
                 return;
             }
@@ -23659,7 +23696,7 @@ mod tests {
             )
             .unwrap();
         let seed = TopologySeed::Claim(claim.id.clone());
-        app.open_topology(seed.clone());
+        app.open_topology(seed.clone(), None);
         let obsolete = app.topology_generation;
         app.topology_state.depth = 3;
         app.refresh_topology();
@@ -23720,6 +23757,51 @@ mod tests {
         app.activate_button(ButtonId::TopologyBack);
         assert_eq!(app.brain_list_mode, BrainListMode::Graph);
         assert_eq!(app.scrolls.path, 7);
+    }
+
+    #[test]
+    fn enter_on_a_memory_opens_the_topology_at_one_hop_and_intel_entries_at_two() {
+        use argos_osint_core::brain_topology::TopologySeed;
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        let claim = app
+            .store
+            .add_user_claim(
+                "Exact claim for the list",
+                "fact",
+                MemorySource {
+                    app: "test".into(),
+                    conversation_id: "list".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        app.reload_memories();
+        app.memory_sel = app.memories.iter().position(|m| m.id == claim.id).unwrap();
+        app.set_focus(Target::Memory(app.memory_sel));
+        app.on_enter();
+        assert_eq!(app.brain_list_mode, BrainListMode::Topology);
+        assert_eq!(
+            app.topology_state.seed,
+            Some(TopologySeed::Claim(claim.id.clone()))
+        );
+        assert_eq!(app.topology_state.depth, 1);
+        assert_eq!(app.topology_origin_label, "Brain · memories");
+        // The depth buttons still work.
+        app.activate_button(ButtonId::TopologyDepth3);
+        assert_eq!(app.topology_state.depth, 3);
+        // Back returns to the memory list.
+        app.activate_button(ButtonId::TopologyBack);
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
+        // Every other entry keeps the default of two hops.
+        app.module = Some(ModuleId::Intel);
+        app.open_topology(TopologySeed::Claim(claim.id.clone()), None);
+        assert_eq!(app.topology_state.depth, 2);
+        // An in-place recenter never resets the depth.
+        app.topology_state.depth = 3;
+        app.open_topology(TopologySeed::Claim(claim.id.clone()), Some(1));
+        assert_eq!(app.topology_state.depth, 3);
     }
 
     #[test]
@@ -23784,9 +23866,10 @@ mod tests {
         app.module = Some(ModuleId::Intel);
         app.intel_page = IntelPage::Briefing;
         app.intel_articles = vec![intel_brief_image_article("origin-article", "")];
-        app.open_topology(argos_osint_core::brain_topology::TopologySeed::Claim(
-            "missing".into(),
-        ));
+        app.open_topology(
+            argos_osint_core::brain_topology::TopologySeed::Claim("missing".into()),
+            None,
+        );
         app.intel_articles.clear();
         app.activate_button(ButtonId::TopologyBack);
         assert_eq!(app.intel_page, IntelPage::Bulletin);

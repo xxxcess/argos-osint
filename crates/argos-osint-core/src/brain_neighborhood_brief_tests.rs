@@ -1152,8 +1152,91 @@ fn the_packet_size_cap_keeps_references_stable_and_id_free() {
     );
     let want = packet_refs(&input);
     let schema = output_schema(&input);
-    assert_eq!(
-        schema["properties"]["connections"]["items"]["properties"]["basis"]["items"]["enum"],
-        serde_json::json!(want)
+    // 90+ refs inlined four times would exceed the strict-provider enum budget,
+    // so the basis is pinned by pattern; the refs themselves are unchanged.
+    let basis = &schema["properties"]["connections"]["items"]["properties"]["basis"]["items"];
+    if want.len() * 4 <= BASIS_ENUM_BUDGET {
+        assert_eq!(basis["enum"], serde_json::json!(want));
+    } else {
+        assert!(basis.get("enum").is_none() && basis["pattern"].is_string());
+    }
+}
+
+fn enum_values_in(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Object(o) => o
+            .iter()
+            .map(|(k, x)| {
+                if k == "enum" {
+                    x.as_array().map_or(0, Vec::len)
+                } else {
+                    enum_values_in(x)
+                }
+            })
+            .sum(),
+        serde_json::Value::Array(a) => a.iter().map(enum_values_in).sum(),
+        _ => 0,
+    }
+}
+
+#[test]
+fn schema_stays_under_the_strict_provider_enum_cap_at_the_maximum_ref_count() {
+    // The topology maximum: 100 nodes and 200 edges, so 300 refs. Inlined four
+    // times that would be 1200 enum values, far above the ~500 provider cap.
+    let opts = crate::brain_topology::TopologyOptions::default();
+    let mut f = rich();
+    for k in 0..(opts.max_nodes - f.snapshot.nodes.len()) {
+        f.snapshot.nodes.push(node(
+            &format!("m{k:03}"),
+            TopologyNodeKind::Claim,
+            &format!("Filler {k}"),
+            1,
+        ));
+    }
+    for k in 0..(opts.max_edges - f.snapshot.edges.len()) {
+        f.snapshot.edges.push(edge(
+            &format!("f{k:03}"),
+            &format!("m{:03}", k % 90),
+            "c1",
+            TopologyEdgeKind::Link,
+        ));
+    }
+    let input = input_at(&f, 2);
+    let refs = packet_refs(&input);
+    // The 36 kB packet cap itself bounds the ref count (244 for these minimal
+    // records, below the 300 topology maximum).
+    assert!(refs.len() > 200 && refs.len() <= opts.max_nodes + opts.max_edges);
+    let schema = output_schema(&input);
+    assert!(
+        enum_values_in(&schema) <= 500,
+        "{} enum values",
+        enum_values_in(&schema)
+    );
+    let basis = &schema["properties"]["interpretation"]["items"]["properties"]["basis"]["items"];
+    assert!(basis.get("enum").is_none());
+    let re = basis["pattern"].as_str().unwrap();
+    assert_eq!(re, "^[NE][0-9]{1,4}$");
+    // Every real ref matches the pattern shape; record ids do not.
+    assert!(refs
+        .iter()
+        .all(|r| r.len() <= 5 && r[1..].chars().all(|c| c.is_ascii_digit())));
+    assert!(!"b23".starts_with(['N', 'E']));
+    // Small packets keep the exact enum, within budget.
+    let small = output_schema(&input_at(&rich(), 2));
+    assert!(enum_values_in(&small) <= BASIS_ENUM_BUDGET);
+    assert!(enum_values_in(&small) > 0);
+}
+
+#[test]
+fn a_non_inference_ref_plus_an_unknown_key_still_fails_interpretation() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    // N1 is a Claim (not an Inference); b23 is dropped, leaving one valid
+    // non-Inference ref, which cannot carry an interpretation.
+    let raw = with("interpretation", INTERP, &["N1", "b23"]);
+    let err = validate_generated(&input, &brief_at(&f, 2), &raw).unwrap_err();
+    assert!(
+        err.contains("no stored inference or tentative lead cited"),
+        "{err}"
     );
 }

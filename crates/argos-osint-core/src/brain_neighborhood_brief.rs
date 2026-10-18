@@ -1739,16 +1739,30 @@ pub fn packet_refs(input: &NeighborhoodInput) -> Vec<String> {
         .collect()
 }
 
+/// Strict structured-output providers cap the total number of enum values
+/// in a schema (about 500). The item schema appears in four blocks, so the
+/// enum is used only while `4 × refs` stays under this budget; above it the
+/// basis is pinned by pattern instead (`$ref`/`$defs` is not relied on: the
+/// provider adapters pass the schema through verbatim and not every route
+/// accepts it).
+pub const BASIS_ENUM_BUDGET: usize = 400;
+
 /// The JSON schema of the model's structured brief. `basis` entries are
 /// limited to this packet's references, so a model cannot cite a record id.
 pub fn output_schema(input: &NeighborhoodInput) -> serde_json::Value {
+    let refs = packet_refs(input);
+    let basis_item = if refs.len() * 4 <= BASIS_ENUM_BUDGET {
+        serde_json::json!({"type": "string", "enum": refs})
+    } else {
+        serde_json::json!({"type": "string", "pattern": "^[NE][0-9]{1,4}$"})
+    };
     let item = serde_json::json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["text", "basis"],
         "properties": {
             "text": {"type": "string"},
-            "basis": {"type": "array", "items": {"type": "string", "enum": packet_refs(input)}}
+            "basis": {"type": "array", "items": basis_item}
         }
     });
     let list = |max: usize| serde_json::json!({"type": "array", "maxItems": max, "items": item});

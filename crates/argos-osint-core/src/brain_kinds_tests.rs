@@ -203,3 +203,61 @@ fn operational_ttl_never_removes_brain_identities_and_deletes_retire_edges() {
         .unwrap();
     assert_eq!(state, "retired");
 }
+
+#[test]
+fn memory_kind_reads_typed_rows_and_treats_untyped_memories_as_claims() {
+    use crate::memory_metadata::MemoryKind;
+    let store = Store::memory().unwrap();
+    let mut ids = std::collections::HashMap::new();
+    for (name, kind) in [
+        ("m-inf", "inference"),
+        ("m-link", "link"),
+        ("m-rel", "related"),
+        ("m-act", "actor"),
+    ] {
+        let memory = store
+            .add_user_claim(
+                name,
+                "fact",
+                crate::brain::MemorySource {
+                    app: "test".into(),
+                    conversation_id: name.into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        let changed = store
+            .conn
+            .execute(
+                "UPDATE memory_metadata SET memory_kind=?2 WHERE memory_id=?1",
+                [memory.id.as_str(), kind],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        ids.insert(name, memory.id);
+    }
+    for (id, expected) in [
+        ("m-inf", MemoryKind::Inference),
+        ("m-link", MemoryKind::Link),
+        ("m-rel", MemoryKind::Related),
+        ("m-act", MemoryKind::Actor),
+        ("never-typed", MemoryKind::Claim),
+    ] {
+        let id = ids.get(id).map(String::as_str).unwrap_or(id);
+        assert_eq!(
+            crate::brain_kinds::memory_kind(&store, id).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn memory_kind_surfaces_a_read_error_instead_of_defaulting_to_claim() {
+    let store = Store::memory().unwrap();
+    store
+        .conn
+        .execute_batch("DROP TABLE memory_metadata")
+        .unwrap();
+    assert!(crate::brain_kinds::memory_kind(&store, "m1").is_err());
+}

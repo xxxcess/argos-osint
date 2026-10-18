@@ -10,6 +10,8 @@ use crate::store::Store;
 /// Kind of a stored memory. Memories without typed metadata are legacy
 /// evidence and browse as [`MemoryKind::Claim`].
 pub fn memory_kind(store: &Store, memory_id: &str) -> Result<MemoryKind> {
+    use rusqlite::OptionalExtension;
+    // A missing metadata row is a legacy untyped memory; a read error is not.
     let raw: Option<String> = store
         .conn
         .query_row(
@@ -17,7 +19,7 @@ pub fn memory_kind(store: &Store, memory_id: &str) -> Result<MemoryKind> {
             [memory_id],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
     Ok(raw
         .as_deref()
         .and_then(MemoryKind::parse)

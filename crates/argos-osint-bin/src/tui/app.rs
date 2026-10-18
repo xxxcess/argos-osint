@@ -6781,7 +6781,6 @@ impl App {
             return;
         };
         use argos_osint_core::brain_topology::TopologySeed;
-        use argos_osint_core::memory_metadata::MemoryKind;
         let id = memory.id.clone();
         let seed = if id.starts_with("actor-group:") {
             TopologySeed::ActorGroup {
@@ -6794,12 +6793,23 @@ impl App {
                     .unwrap_or_default(),
             }
         } else {
+            match self.store.get_memory(&id) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    self.status = format!("Memory unavailable: {id} no longer exists");
+                    return;
+                }
+                Err(error) => {
+                    self.status = format!("Memory unavailable: {error:#}");
+                    return;
+                }
+            }
             match argos_osint_core::brain_kinds::memory_kind(&self.store, &id) {
-                Ok(MemoryKind::Inference) => TopologySeed::Inference(id),
-                Ok(MemoryKind::Link) => TopologySeed::Link(id),
-                Ok(MemoryKind::Related) => TopologySeed::Related(id),
-                Ok(MemoryKind::Actor) => TopologySeed::Actor(id),
-                _ => TopologySeed::Claim(id),
+                Ok(kind) => memory_topology_seed(kind, id),
+                Err(error) => {
+                    self.status = format!("Memory kind unreadable: {error:#}");
+                    return;
+                }
             }
         };
         self.open_topology(seed, Some(1));
@@ -10995,6 +11005,23 @@ fn flush_streams(app: &mut App) -> bool {
         }
     }
     dirty
+}
+
+/// Topology seed for a stored memory of the given kind (legacy untyped memories
+/// are Claims).
+fn memory_topology_seed(
+    kind: argos_osint_core::memory_metadata::MemoryKind,
+    id: String,
+) -> argos_osint_core::brain_topology::TopologySeed {
+    use argos_osint_core::brain_topology::TopologySeed;
+    use argos_osint_core::memory_metadata::MemoryKind;
+    match kind {
+        MemoryKind::Inference => TopologySeed::Inference(id),
+        MemoryKind::Link => TopologySeed::Link(id),
+        MemoryKind::Related => TopologySeed::Related(id),
+        MemoryKind::Actor => TopologySeed::Actor(id),
+        _ => TopologySeed::Claim(id),
+    }
 }
 
 fn mouse_dirties(kind: MouseEventKind) -> bool {
@@ -21297,6 +21324,114 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn memory_kinds_map_to_their_own_topology_seed() {
+        use argos_osint_core::brain_topology::TopologySeed as S;
+        use argos_osint_core::memory_metadata::MemoryKind as K;
+        let id = || "m1".to_string();
+        assert_eq!(memory_topology_seed(K::Claim, id()), S::Claim(id()));
+        assert_eq!(memory_topology_seed(K::Inference, id()), S::Inference(id()));
+        assert_eq!(memory_topology_seed(K::Link, id()), S::Link(id()));
+        assert_eq!(memory_topology_seed(K::Related, id()), S::Related(id()));
+        assert_eq!(memory_topology_seed(K::Actor, id()), S::Actor(id()));
+    }
+
+    #[test]
+    fn enter_on_an_actor_group_opens_its_group_topology() {
+        use argos_osint_core::brain_topology::TopologySeed;
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        app.memories = vec![Memory {
+            id: "actor-group:ana ruiz".into(),
+            text: "Ana Ruiz".into(),
+            category: "actor group".into(),
+            pinned: false,
+            created_at: String::new(),
+            source: MemorySource {
+                app: "brain-actor-group".into(),
+                conversation_id: "ana ruiz".into(),
+                message_id: None,
+                reference: Some("[\"a1\",\"a2\"]".into()),
+            },
+        }];
+        app.memory_sel = 0;
+        app.set_focus(Target::Memory(0));
+        app.on_enter();
+        assert_eq!(app.brain_list_mode, BrainListMode::Topology);
+        assert_eq!(
+            app.topology_state.seed,
+            Some(TopologySeed::ActorGroup {
+                name_key: "ana ruiz".into(),
+                member_ids: vec!["a1".into(), "a2".into()],
+            })
+        );
+        assert_eq!(app.topology_state.depth, 1);
+    }
+
+    #[test]
+    fn enter_on_a_missing_memory_shows_an_error_and_stays_on_the_list() {
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        let claim = app
+            .store
+            .add_user_claim(
+                "Soon deleted",
+                "fact",
+                MemorySource {
+                    app: "test".into(),
+                    conversation_id: "gone".into(),
+                    message_id: None,
+                    reference: None,
+                },
+            )
+            .unwrap();
+        app.reload_memories();
+        app.memory_sel = 0;
+        app.set_focus(Target::Memory(0));
+        app.store.delete_memory(&claim.id).unwrap();
+        app.on_enter();
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
+        assert!(
+            app.status.starts_with("Memory unavailable"),
+            "{}",
+            app.status
+        );
+        assert!(app.topology_state.seed.is_none());
+    }
+
+    #[test]
+    fn back_from_the_topology_keeps_selection_and_scroll() {
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        for i in 0..6 {
+            app.store
+                .add_user_claim(
+                    &format!("Claim number {i}"),
+                    "fact",
+                    MemorySource {
+                        app: "test".into(),
+                        conversation_id: format!("c{i}"),
+                        message_id: None,
+                        reference: None,
+                    },
+                )
+                .unwrap();
+        }
+        app.reload_memories();
+        app.memory_sel = 3;
+        app.scrolls.memories = 2;
+        app.set_focus(Target::Memory(3));
+        let id = app.memories[3].id.clone();
+        app.on_enter();
+        assert_eq!(app.brain_list_mode, BrainListMode::Topology);
+        app.activate_button(ButtonId::TopologyBack);
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
+        assert_eq!(app.memory_sel, 3);
+        assert_eq!(app.memories[app.memory_sel].id, id);
+        assert_eq!(app.scrolls.memories, 2);
+        assert_eq!(app.focus, Target::Memory(3));
     }
 
     #[test]

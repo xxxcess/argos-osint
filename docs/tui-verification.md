@@ -91,8 +91,8 @@ For another module, extend a deterministic test to emit the same cell format int
 
 ```sh
 .agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture \
-  --output .planning/<PLAN_ID>/tui/run-02 --test dump_phase5b_screens --ignored \
-  --include 'brain-claim-detail*' --reason "Brain claim detail; normal and narrow states"
+  --output .planning/<PLAN_ID>/tui/run-02 --test dump_memory_enter_topology_screens \
+  --include 'memory-*' --reason "Brain memory list and Enter opening the topology; normal and narrow states"
 python3 scripts/tui_review.py validate .planning/<PLAN_ID>/tui/run-02/cells
 ```
 

@@ -1212,7 +1212,7 @@ pub struct App {
     pub atlas_news_run: String,
     pub atlas_articles: Vec<AtlasArticleRow>,
     pub atlas_article_sel: usize,
-    /// Article marked from a claim-path click. Cleared when the feed is opened any other way.
+    /// Article marked by the caller that opened the feed. Cleared when the feed is opened any other way.
     pub claim_mark: Option<String>,
     /// Last pointer, so Ctrl+U/D can page the table under it.
     pub pointer: Option<(u16, u16)>,

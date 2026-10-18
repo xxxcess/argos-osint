@@ -15,6 +15,103 @@ use crate::tasks::{self, OperationKind};
 pub const SCHEDULER_LEASE_KEY: &str = "argos_scheduler";
 pub const DEFAULT_LEASE_SECS: i64 = 30;
 
+/// Backend factory for the Intel brief drainer.
+pub type IntelBackendFactory =
+    Arc<dyn Fn() -> Box<dyn crate::intel_recon::brief_stages::StageBackend + Send> + Send + Sync>;
+
+/// A given error from a given drainer is surfaced at most once per window.
+const DRAINER_ERROR_REPEAT: Duration = Duration::from_secs(300);
+/// Upper bound on remembered (drainer, message) pairs.
+const DRAINER_ERROR_CAP: usize = 128;
+
+type Seen = std::collections::HashMap<(String, String), std::time::Instant>;
+
+/// Decide whether a drainer error should be surfaced now. Keyed by
+/// (drainer name, redacted message), so alternating errors A, B, A each log
+/// once per window. Entries older than [`DRAINER_ERROR_REPEAT`] are evicted and
+/// the map never exceeds [`DRAINER_ERROR_CAP`] (oldest dropped first).
+fn should_surface(seen: &mut Seen, name: &str, message: &str, at: std::time::Instant) -> bool {
+    seen.retain(|_, when| at.saturating_duration_since(*when) < DRAINER_ERROR_REPEAT);
+    let key = (name.to_string(), message.to_string());
+    if seen.contains_key(&key) {
+        return false;
+    }
+    while seen.len() >= DRAINER_ERROR_CAP {
+        let Some(oldest) = seen
+            .iter()
+            .min_by_key(|(_, when)| **when)
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        seen.remove(&oldest);
+    }
+    seen.insert(key, at);
+    true
+}
+
+/// Replace local paths in `message`: the `ARGOS_HOME` override becomes
+/// `$ARGOS_HOME`, and the user's home directory (`HOME` and the platform home)
+/// becomes `~`. Longest path first, so an `ARGOS_HOME` inside the home
+/// directory wins over `~`. `events::redact` does not cover paths.
+fn redact_paths(message: &str, argos_home: Option<&str>, homes: &[&str]) -> String {
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    if let Some(path) = argos_home {
+        pairs.push((path, "$ARGOS_HOME"));
+    }
+    pairs.extend(homes.iter().map(|path| (*path, "~")));
+    pairs.retain(|(path, _)| path.trim_end_matches('/').len() > 1);
+    pairs.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
+    let mut out = message.to_string();
+    for (path, replacement) in pairs {
+        out = out.replace(path.trim_end_matches('/'), replacement);
+    }
+    out
+}
+
+fn redact_local_paths(message: &str) -> String {
+    let argos_home = std::env::var("ARGOS_HOME")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let env_home = std::env::var("HOME").ok().filter(|v| !v.trim().is_empty());
+    let dirs_home = dirs::home_dir().map(|p| p.to_string_lossy().into_owned());
+    let mut homes: Vec<&str> = Vec::new();
+    homes.extend(env_home.as_deref());
+    homes.extend(dirs_home.as_deref());
+    redact_paths(message, argos_home.as_deref(), &homes)
+}
+
+/// Surface a drainer failure as a redacted (secrets and local paths),
+/// rate-limited error event (Logs) instead of discarding it.
+fn report_drainer<T>(db_path: &std::path::Path, name: &str, result: Result<T>) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<Seen>> = std::sync::OnceLock::new();
+    let Err(error) = result else {
+        return;
+    };
+    let message = redact_local_paths(&format!("{error:#}"));
+    let fresh = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| should_surface(&mut seen, name, &message, std::time::Instant::now()))
+        .unwrap_or(true);
+    if !fresh {
+        return;
+    }
+    if let Ok(conn) = Connection::open(db_path) {
+        let _ = conn.busy_timeout(Duration::from_secs(2));
+        let _ = crate::events::record_event(
+            &conn,
+            &crate::events::NewEvent {
+                severity: Some(crate::events::Severity::Error),
+                app: "system".into(),
+                event_type: "drainer.error".into(),
+                message: format!("{name} worker error: {message}"),
+                ..Default::default()
+            },
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PoolKind {
     Llm,
@@ -543,8 +640,12 @@ impl WorkerPool {
                         try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
                     });
                     if elected {
-                        let _ = runtime
-                            .block_on(crate::brain_actor_dedup::drain(&db_path, &owner, &flag));
+                        report_drainer(
+                            &db_path,
+                            "actor-dedup",
+                            runtime
+                                .block_on(crate::brain_actor_dedup::drain(&db_path, &owner, &flag)),
+                        );
                     }
                     for _ in 0..120 {
                         if flag.load(Ordering::Acquire) {
@@ -591,34 +692,61 @@ impl WorkerPool {
     /// dispatches ready stages onto separate Tokio tasks. The multi-thread
     /// runtime keeps lease heartbeats independent of blocking SQLite work.
     pub fn spawn_intel_brief_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
+        let db = db_path.clone();
+        Self::spawn_intel_brief_drainer_with(
+            db_path,
+            owner,
+            Arc::new(move || {
+                Box::new(crate::intel_recon::brief_stages::RuntimeBackend::load(&db))
+                    as Box<dyn crate::intel_recon::brief_stages::StageBackend + Send>
+            }),
+        )
+    }
+
+    /// [`Self::spawn_intel_brief_drainer`] with an injectable backend factory
+    /// (production passes `RuntimeBackend::load`); same loop, same error reporting.
+    pub fn spawn_intel_brief_drainer_with(
+        db_path: std::path::PathBuf,
+        owner: String,
+        make_backend: IntelBackendFactory,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let _ = std::thread::Builder::new()
             .name("argos-intel-brief".into())
             .spawn(move || {
-                let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .enable_all()
                     .build()
-                else {
-                    return;
+                {
+                    Ok(runtime) => runtime,
+                    Err(e) => {
+                        report_drainer::<()>(
+                            &db_path,
+                            "intel-brief",
+                            Err(anyhow::anyhow!("runtime failed to start: {e}")),
+                        );
+                        return;
+                    }
                 };
                 let config = crate::intel_recon::brief_stages::ExecConfig::default();
                 while !flag.load(Ordering::Acquire) {
                     // Two stage slots: the independent v2 roots really run
                     // together, each with its own backend and connections.
-                    let db = db_path.clone();
-                    let _ = runtime.block_on(crate::intel_recon::brief_stages::drain_parallel(
+                    let factory = make_backend.clone();
+                    report_drainer(
                         &db_path,
-                        &format!("{owner}:intel-brief"),
-                        move || {
-                            Box::new(crate::intel_recon::brief_stages::RuntimeBackend::load(&db))
-                                as Box<dyn crate::intel_recon::brief_stages::StageBackend + Send>
-                        },
-                        &flag,
-                        &config,
-                        crate::intel_recon::brief_stages::STAGE_SLOTS,
-                    ));
+                        "intel-brief",
+                        runtime.block_on(crate::intel_recon::brief_stages::drain_parallel(
+                            &db_path,
+                            &format!("{owner}:intel-brief"),
+                            move || factory(),
+                            &flag,
+                            &config,
+                            crate::intel_recon::brief_stages::STAGE_SLOTS,
+                        )),
+                    );
                     std::thread::sleep(Duration::from_millis(750));
                 }
             });
@@ -644,9 +772,13 @@ impl WorkerPool {
                     if elected {
                         let auth = crate::secrets::AuthFile::load().unwrap_or_default();
                         let settings = crate::provider::SettingsFile::load().unwrap_or_default();
-                        let _ = runtime.block_on(
-                            crate::investigation::insight_persist::recover_refreshes(
-                                &db_path, &auth, &settings, &flag,
+                        report_drainer(
+                            &db_path,
+                            "insight-refresh",
+                            runtime.block_on(
+                                crate::investigation::insight_persist::recover_refreshes(
+                                    &db_path, &auth, &settings, &flag,
+                                ),
                             ),
                         );
                     }
@@ -675,9 +807,13 @@ impl WorkerPool {
                         try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
                     });
                     if elected {
-                        let _ = runtime.block_on(crate::brain_scope::drain_scope_tasks(
-                            &db_path, &owner, &flag,
-                        ));
+                        report_drainer(
+                            &db_path,
+                            "brain-scope",
+                            runtime.block_on(crate::brain_scope::drain_scope_tasks(
+                                &db_path, &owner, &flag,
+                            )),
+                        );
                     }
                     std::thread::sleep(Duration::from_millis(750));
                 }
@@ -703,6 +839,49 @@ pub fn operation_kind(name: &str) -> OperationKind {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn alternating_drainer_errors_each_surface_once_per_window_and_map_is_bounded() {
+        use std::time::Instant;
+        let mut seen = Seen::new();
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        assert!(super::should_surface(&mut seen, "intel-brief", "A", at(0)));
+        assert!(super::should_surface(&mut seen, "intel-brief", "B", at(1)));
+        assert!(!super::should_surface(&mut seen, "intel-brief", "A", at(2)));
+        assert!(!super::should_surface(&mut seen, "intel-brief", "B", at(3)));
+        // Same message from another drainer is its own key.
+        assert!(super::should_surface(&mut seen, "brain-scope", "A", at(4)));
+        // After the window both repeat once more, and stale keys are evicted.
+        let later = super::DRAINER_ERROR_REPEAT.as_secs() + 10;
+        assert!(super::should_surface(
+            &mut seen,
+            "intel-brief",
+            "A",
+            at(later)
+        ));
+        assert!(seen.len() <= 2, "old entries evicted: {}", seen.len());
+        for n in 0..(super::DRAINER_ERROR_CAP * 2) {
+            super::should_surface(&mut seen, "intel-brief", &format!("e{n}"), at(later + 1));
+        }
+        assert!(seen.len() <= super::DRAINER_ERROR_CAP);
+    }
+
+    #[test]
+    fn drainer_messages_replace_argos_home_and_home_with_placeholders() {
+        let msg = "open /home/x3/.argos/argos.db failed; cache /home/x3/.cache/a; root /";
+        // ARGOS_HOME inside HOME: the longer path wins over `~`.
+        let out = super::redact_paths(msg, Some("/home/x3/.argos"), &["/home/x3"]);
+        assert_eq!(
+            out,
+            "open $ARGOS_HOME/argos.db failed; cache ~/.cache/a; root /"
+        );
+        // Trailing slashes and a bare `/` home never rewrite every slash.
+        let out = super::redact_paths("a/b", None, &["/", "/home/x3/"]);
+        assert_eq!(out, "a/b");
+        // Unrelated text and no configured paths are untouched.
+        assert_eq!(super::redact_paths("plain", None, &[]), "plain");
+    }
+
     use super::*;
     use tempfile::tempdir;
 

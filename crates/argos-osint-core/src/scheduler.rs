@@ -1026,6 +1026,89 @@ mod tests {
     }
 
     #[test]
+    fn a_leftover_graph_explanation_task_fails_cleanly_and_the_fresh_task_still_runs() {
+        let conn = Connection::open_in_memory().unwrap();
+        tasks::migrate_tables(&conn).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        // An upgraded database: the removed graph-explanation operation was queued
+        // before the view was removed.
+        tasks::enqueue_job(
+            &conn,
+            &tasks::NewJob {
+                id: "job-old".into(),
+                kind: "graph_summary".into(),
+                owner_scope: String::new(),
+                input_revision: "1".into(),
+                deadline_at: String::new(),
+            },
+            &now,
+        )
+        .unwrap();
+        assert!(tasks::enqueue_task(
+            &conn,
+            &tasks::NewTask {
+                id: "task-old".into(),
+                job_id: "job-old".into(),
+                operation: "graph_explanation".into(),
+                dedupe_key: "legacy-graph".into(),
+                priority: 99,
+                input_ref: "memory-1".into(),
+                input_hash: "legacy-graph-key".into(),
+                source_revision: "1".into(),
+                role_snapshot: "summarization".into(),
+                max_attempts: 2,
+            },
+            &now,
+        )
+        .unwrap());
+        let req = crate::summarization::flush_request(
+            crate::summarization::SummarizationMode::AtlasBrief,
+            "atlas-brief-r1",
+            "r1",
+            "Brief text about the cycle.",
+            "atlas",
+            800,
+        );
+        let det = crate::summarization::SummaryResult {
+            content: "Brief text about the cycle.".into(),
+            source_refs: vec!["atlas-brief-r1".into()],
+            source_hash: String::new(),
+            model: "deterministic".into(),
+            prompt_version: req.prompt_version.clone(),
+            coverage: Default::default(),
+            source_hashes: Vec::new(),
+            provider: "local".into(),
+            preprocessing: serde_json::Value::Null,
+            fallback: true,
+        };
+        crate::summarization::cache_put(&conn, &req, &det).unwrap();
+        crate::summarization::persist_flush_request(&conn, &req).unwrap();
+        summary_task(&conn, &req.cache_key());
+        let n = drain_summary_flush_cached(&conn, "worker").unwrap();
+        assert_eq!(n, 2, "the drainer handles both tasks without stalling");
+        let state = |id: &str| -> (String, String) {
+            conn.query_row(
+                "SELECT state, error_message FROM argos_tasks WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(state("task-s").0, "completed");
+        let (old_state, message) = state("task-old");
+        assert_eq!(old_state, "failed", "{message}");
+        assert!(message.contains("flush request missing"), "{message}");
+        let open: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM argos_tasks WHERE state IN ('queued','running','retry_scheduled')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open, 0);
+    }
+
+    #[test]
     fn summary_worker_errors_are_typed_failures_not_completions() {
         let conn = Connection::open_in_memory().unwrap();
         tasks::migrate_tables(&conn).unwrap();

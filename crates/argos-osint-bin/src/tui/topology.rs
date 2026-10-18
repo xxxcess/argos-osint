@@ -5,9 +5,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use argos_osint_core::brain_neighborhood_brief::{BasisTarget, NeighborhoodBrief};
+use argos_osint_core::brain_neighborhood_brief_exec::{FailureKind, Generated, GenerationFailure};
 use argos_osint_core::brain_topology::{
     CycleScope, TopologyEdgeKind, TopologyNode, TopologyNodeKind, TopologySeed, TopologySnapshot,
 };
+use argos_osint_core::summarization::SummaryRequest;
 
 use super::app::{App, ButtonId, Target};
 use super::components::{self, ListGeometry, ScrollPane};
@@ -16,6 +24,70 @@ use super::topology_layout::{graph_geometry, TopologyLayoutResult, TopologyRespo
 use super::ui::{draw_button, draw_button_state};
 
 pub const TOPOLOGY_HISTORY_CAP: usize = 32;
+
+/// Content tabs of the topology inspector. Independent of `inspector_tab`,
+/// which stays the Relationships All/Articles tab.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ContentTab {
+    /// The neighborhood summary (default for a new seed).
+    #[default]
+    Summary,
+    /// The selected node/edge details and actions.
+    Record,
+}
+
+impl ContentTab {
+    pub fn index(self) -> usize {
+        match self {
+            Self::Summary => 0,
+            Self::Record => 1,
+        }
+    }
+
+    pub fn from_index(index: usize) -> Self {
+        if index == 0 {
+            Self::Summary
+        } else {
+            Self::Record
+        }
+    }
+}
+
+/// Where the generated explanation of the loaded neighborhood stands.
+#[derive(Clone, Debug, Default)]
+pub enum SummaryGen {
+    /// Nothing to generate (isolated or missing seed, or not yet started).
+    #[default]
+    Idle,
+    /// Queued or running; the recorded brief stays on screen.
+    Pending,
+    /// A complete validated result; replaces the recorded brief.
+    Generated(Box<Generated>),
+    /// Ended without a usable result; the recorded brief stays.
+    Failed(GenerationFailure),
+}
+
+/// Background summary request state for the loaded snapshot.
+#[derive(Clone, Debug, Default)]
+pub struct SummaryState {
+    /// Fence: bumped each time a request starts; events carry it.
+    pub generation: u64,
+    /// `basis_key` of the brief this state belongs to.
+    pub basis_key: String,
+    pub gen: SummaryGen,
+    pub request: Option<Box<SummaryRequest>>,
+    /// Set to detach the polling thread of an obsolete request.
+    pub stop: Option<Arc<AtomicBool>>,
+}
+
+impl SummaryState {
+    /// Detach any running watcher (obsolete request).
+    pub fn detach(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop.store(true, Ordering::SeqCst);
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum TopologyFocus {
@@ -92,6 +164,8 @@ pub struct TopologyHistoryFrame {
     pub active_panel_tab: usize,
     pub inspector_tab: usize,
     pub inspector_scroll: usize,
+    pub content_tab: ContentTab,
+    pub summary_scroll: usize,
     pub related_sel: usize,
     pub related_scroll: usize,
     pub filters: [bool; 6],
@@ -118,6 +192,12 @@ pub struct TopologyState {
     pub active_panel_tab: usize,
     pub inspector_tab: usize,
     pub inspector_scroll: usize,
+    /// Summary or Record in the inspector (Summary on a new seed).
+    pub content_tab: ContentTab,
+    /// Independent row offset of the Summary pane.
+    pub summary_scroll: usize,
+    pub summary_rows_cache: RefCell<Option<SummaryRowsCache>>,
+    pub summary: SummaryState,
     pub related_sel: usize,
     /// Logical relationship record offset; detail prose has its own row offset.
     pub related_scroll: usize,
@@ -148,6 +228,10 @@ impl Default for TopologyState {
             active_panel_tab: 0,
             inspector_tab: 0,
             inspector_scroll: 0,
+            content_tab: ContentTab::Summary,
+            summary_scroll: 0,
+            summary_rows_cache: RefCell::new(None),
+            summary: SummaryState::default(),
             related_sel: 0,
             related_scroll: 0,
             analyzing_scope: false,
@@ -198,6 +282,8 @@ impl TopologyState {
                 active_panel_tab: self.active_panel_tab,
                 inspector_tab: self.inspector_tab,
                 inspector_scroll: self.inspector_scroll,
+                content_tab: self.content_tab,
+                summary_scroll: self.summary_scroll,
                 related_sel: self.related_sel,
                 related_scroll: self.related_scroll,
                 filters: self.filters(),
@@ -222,6 +308,8 @@ impl TopologyState {
         self.active_panel_tab = frame.active_panel_tab;
         self.inspector_tab = frame.inspector_tab;
         self.inspector_scroll = frame.inspector_scroll;
+        self.content_tab = frame.content_tab;
+        self.summary_scroll = frame.summary_scroll;
         self.related_sel = frame.related_sel;
         self.related_scroll = frame.related_scroll;
         self.set_filters(frame.filters);
@@ -356,6 +444,29 @@ pub fn scroll_topology(app: &mut App, target: Target, delta: isize) -> bool {
             }
             true
         }
+        Target::TopologySummary | Target::TopologyBasis(_) => {
+            let area = app
+                .layout
+                .borrow()
+                .entries
+                .iter()
+                .find(|entry| entry.target == Target::TopologySummary)
+                .map(|entry| entry.rect);
+            if let Some(area) = area {
+                let rows = summary_rows(
+                    &app.topology_state,
+                    app.topology_loading,
+                    app.topology_error.as_deref(),
+                    area.width,
+                );
+                let mut pane = ScrollPane {
+                    offset: app.topology_state.summary_scroll,
+                };
+                pane.scroll(delta, rows.len(), area.height as usize);
+                app.topology_state.summary_scroll = pane.offset;
+            }
+            true
+        }
         Target::TopologyRelated(_) | Target::TopologyRelationships => {
             app.topology_state.related_scroll = app
                 .topology_state
@@ -373,7 +484,10 @@ pub fn scroll_topology(app: &mut App, target: Target, delta: isize) -> bool {
 }
 
 pub fn draw_topology(frame: &mut Frame, app: &App, area: Rect) {
-    let layout = TopologyLayoutResult::compute(area);
+    let layout = TopologyLayoutResult::compute_with(
+        area,
+        app.topology_state.content_tab == ContentTab::Summary,
+    );
     if layout.mode == TopologyResponsiveMode::Tiny {
         draw_button(
             frame,
@@ -945,22 +1059,497 @@ fn detail_lines(state: &TopologyState, snapshot: &TopologySnapshot) -> Vec<Line<
     lines
 }
 
+// ------------------------------------------------------------ Summary tab
+
+/// One scrollable row of the Summary pane.
+#[derive(Clone, Debug)]
+pub enum SummaryRow {
+    Text(Line<'static>),
+    /// A typed basis reference (index into `NeighborhoodBrief::references`).
+    Basis(usize, Line<'static>),
+}
+
+/// The brief on screen: the validated generated brief once it replaces the
+/// fallback, else the deterministic brief of the loaded snapshot.
+pub fn displayed_brief(state: &TopologyState) -> Option<(&NeighborhoodBrief, bool)> {
+    let fallback = state.snapshot.as_ref()?.neighborhood_brief.as_ref()?;
+    if let SummaryGen::Generated(g) = &state.summary.gen {
+        if g.brief.basis_key == fallback.basis_key {
+            return Some((&g.brief, true));
+        }
+    }
+    Some((fallback, false))
+}
+
+/// Styled lines of the typed brief, wrapped to `width`. Built directly from
+/// the typed fields (no Markdown round trip), so entity names containing `*`
+/// or backticks are shown exactly as recorded.
+fn brief_lines(brief: &NeighborhoodBrief, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    out.extend(components::measured_lines(
+        vec![Line::from(Span::styled(
+            brief.header(),
+            theme::accent().add_modifier(Modifier::BOLD),
+        ))],
+        width,
+    ));
+    out.push(Line::from(""));
+    for (name, items) in brief.blocks() {
+        out.push(Line::styled(
+            name.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        for item in items {
+            let refs = argos_osint_core::brain_neighborhood_brief::refs_text(&item.basis);
+            let text = format!("{}{refs}", item.text);
+            if name == "Connections" && width > 3 {
+                let wrapped = components::measured_lines(vec![Line::from(text)], width - 2);
+                for (i, line) in wrapped.into_iter().enumerate() {
+                    let mut spans = vec![Span::raw(if i == 0 { "• " } else { "  " })];
+                    spans.extend(line.spans);
+                    out.push(Line::from(spans));
+                }
+            } else {
+                out.extend(components::measured_lines(vec![Line::from(text)], width));
+            }
+        }
+        out.push(Line::from(""));
+    }
+    out.extend(components::measured_lines(
+        vec![Line::from(Span::styled(
+            brief.footer(),
+            theme::muted().add_modifier(Modifier::ITALIC),
+        ))],
+        width,
+    ));
+    out
+}
+
+fn failure_note(failure: &GenerationFailure) -> String {
+    let reason: String = failure
+        .message
+        .trim_start_matches("brief rejected: ")
+        .chars()
+        .take(120)
+        .collect();
+    match failure.kind {
+        FailureKind::NotConfigured => {
+            "No usable Summarization model is configured; showing the recorded brief. Set one in Models."
+                .to_string()
+        }
+        FailureKind::Blocked => format!(
+            "Every Summarization route is blocked ({reason}); showing the recorded brief. Check Models."
+        ),
+        FailureKind::Rejected => format!(
+            "The generated summary was rejected ({reason}); showing the recorded brief."
+        ),
+        FailureKind::Cancelled => {
+            "Generation was cancelled; showing the recorded brief.".to_string()
+        }
+        FailureKind::Timeout => format!(
+            "Waiting for the summary worker timed out ({reason}); showing the recorded brief. Retry summary."
+        ),
+        FailureKind::Provider | FailureKind::Storage => format!(
+            "The summary request failed ({reason}); showing the recorded brief."
+        ),
+    }
+}
+
+/// Small, allocation-free identity of one built rows list. Equal keys mean
+/// the rows would be identical. The failure message is deliberately not part
+/// of it: a failure arrives once, as a `Pending -> Failed` transition that
+/// changes `gen`, and a retry bumps `generation`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SummaryRowsKey {
+    basis: u64,
+    generation: u64,
+    /// 0 idle, 1 pending, 2 generated, 3 failed.
+    gen: u8,
+    failure_kind: Option<&'static str>,
+    width: u16,
+    loading: bool,
+    error: u64,
+    has_snapshot: bool,
+    has_seed: bool,
+}
+
+fn hash_of(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// Rows cache of the Summary pane, valid for one exact key.
+#[derive(Clone, Debug, Default)]
+pub struct SummaryRowsCache {
+    key: SummaryRowsKey,
+    rows: Rc<Vec<SummaryRow>>,
+}
+
+/// All rows of the Summary pane at `width`. Built once per distinct
+/// (basis, generated/fallback, request generation, failure kind, width,
+/// loading, error) and then shared by draw, wheel and keyboard scrolling.
+pub fn summary_rows(
+    state: &TopologyState,
+    loading: bool,
+    error: Option<&str>,
+    width: u16,
+) -> Rc<Vec<SummaryRow>> {
+    let (gen, failure_kind) = match &state.summary.gen {
+        SummaryGen::Idle => (0, None),
+        SummaryGen::Pending => (1, None),
+        SummaryGen::Generated(_) => (2, None),
+        SummaryGen::Failed(f) => (3, Some(f.kind.as_str())),
+    };
+    let key = SummaryRowsKey {
+        basis: hash_of(&state.summary.basis_key),
+        generation: state.summary.generation,
+        gen,
+        failure_kind,
+        width,
+        loading,
+        error: error.map(hash_of).unwrap_or(0),
+        has_snapshot: state.snapshot.is_some(),
+        has_seed: state.seed.is_some(),
+    };
+    if let Some(hit) = state
+        .summary_rows_cache
+        .borrow()
+        .as_ref()
+        .filter(|c| c.key == key)
+    {
+        return hit.rows.clone();
+    }
+    let rows = Rc::new(build_summary_rows(state, loading, error, width));
+    *state.summary_rows_cache.borrow_mut() = Some(SummaryRowsCache {
+        key,
+        rows: rows.clone(),
+    });
+    rows
+}
+
+/// All rows of the Summary pane at `width`, measured once for draw, wheel and
+/// keyboard scrolling alike.
+fn build_summary_rows(
+    state: &TopologyState,
+    loading: bool,
+    error: Option<&str>,
+    width: u16,
+) -> Vec<SummaryRow> {
+    let width = width.max(1);
+    let text = |message: String, style: Style| -> Vec<SummaryRow> {
+        components::measured_lines(vec![Line::from(Span::styled(message, style))], width)
+            .into_iter()
+            .map(SummaryRow::Text)
+            .collect()
+    };
+    let Some(snapshot) = &state.snapshot else {
+        return if let Some(error) = error {
+            text(
+                format!("The neighborhood could not be read: {error}. Press r to retry."),
+                Style::default().fg(WARN),
+            )
+        } else if state.seed.is_none() {
+            text("No seed selected.".into(), theme::muted())
+        } else if loading {
+            text("Loading the neighborhood…".into(), theme::muted())
+        } else {
+            text("Waiting for the seeded snapshot…".into(), theme::muted())
+        };
+    };
+    let Some((brief, _)) = displayed_brief(state) else {
+        return text(
+            format!(
+                "No neighborhood summary is available for {}.",
+                snapshot.root_label
+            ),
+            theme::muted(),
+        );
+    };
+    let mut rows = Vec::new();
+    if let SummaryGen::Failed(failure) = &state.summary.gen {
+        rows.extend(text(failure_note(failure), Style::default().fg(WARN)));
+        rows.push(SummaryRow::Text(Line::from("")));
+    }
+    rows.extend(brief_lines(brief, width).into_iter().map(SummaryRow::Text));
+    if !brief.references.is_empty() {
+        rows.push(SummaryRow::Text(Line::from("")));
+        rows.push(SummaryRow::Text(Line::styled(
+            "Basis · Enter opens the record",
+            theme::muted(),
+        )));
+        for (index, reference) in brief.references.iter().enumerate() {
+            let label = components::clip_text(
+                &format!("[{}] {}", reference.n, reference.label),
+                width as usize,
+            );
+            rows.push(SummaryRow::Basis(
+                index,
+                Line::styled(label, theme::accent()),
+            ));
+        }
+    }
+    rows
+}
+
+fn scope_differs(state: &TopologyState, brief: &NeighborhoodBrief) -> bool {
+    state.seed.as_ref() != Some(&brief.seed)
+        || brief.coverage.depth != state.depth
+        || brief.coverage.cycle_scope != state.cycle_scope
+}
+
+/// Explicit state label of the Summary pane.
+pub fn summary_label(state: &TopologyState, loading: bool, error: Option<&str>) -> (String, Style) {
+    use argos_osint_core::brain_neighborhood_brief::CoverageStatus;
+    let warn = Style::default().fg(WARN);
+    let Some(snapshot) = &state.snapshot else {
+        return if error.is_some() {
+            ("Summary · unavailable · neighborhood not read".into(), warn)
+        } else {
+            ("Summary · loading the neighborhood…".into(), theme::muted())
+        };
+    };
+    let Some((brief, generated)) = displayed_brief(state) else {
+        let _ = snapshot;
+        return ("Summary · unavailable".into(), theme::muted());
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut style = theme::muted();
+    if error.is_some() {
+        parts.push("stale · refresh failed".into());
+        style = warn;
+    } else if loading && scope_differs(state, brief) {
+        parts.push("stale · loading the new scope".into());
+        style = warn;
+    } else if loading {
+        parts.push("refreshing · previous snapshot retained".into());
+    }
+    match brief.coverage.status {
+        CoverageStatus::Missing => parts.push("seed not found".into()),
+        CoverageStatus::Isolated => parts.push("isolated".into()),
+        _ => match &state.summary.gen {
+            SummaryGen::Pending => {
+                parts.push("generating…".into());
+                if style == theme::muted() {
+                    style = theme::accent();
+                }
+            }
+            SummaryGen::Generated(g) if generated => {
+                parts.push(if g.route.is_empty() {
+                    "generated".into()
+                } else {
+                    format!("generated · {}", g.route)
+                });
+                if style == theme::muted() {
+                    style = Style::default().fg(GREEN);
+                }
+            }
+            SummaryGen::Failed(f) => {
+                parts.push(
+                    match f.kind {
+                        FailureKind::NotConfigured | FailureKind::Blocked => "blocked",
+                        FailureKind::Rejected => "rejected",
+                        FailureKind::Cancelled => "cancelled",
+                        FailureKind::Timeout => "timed out",
+                        _ => "failed",
+                    }
+                    .into(),
+                );
+                style = warn;
+            }
+            _ => parts.push("recorded brief".into()),
+        },
+    }
+    if brief.coverage.status == CoverageStatus::Limited {
+        parts.push("limited coverage".into());
+    }
+    (format!("Summary · {}", parts.join(" · ")), style)
+}
+
+/// Resolve a Basis reference to an existing record of the loaded snapshot.
+pub fn basis_target(state: &TopologyState, index: usize) -> Option<BasisTarget> {
+    let (brief, _) = displayed_brief(state)?;
+    let target = brief.references.get(index)?.target.clone();
+    let snapshot = state.snapshot.as_ref()?;
+    let exists = match &target {
+        BasisTarget::Node(id) => snapshot.nodes.iter().any(|n| &n.id == id),
+        BasisTarget::Edge(id) => snapshot.edges.iter().any(|e| &e.id == id),
+    };
+    exists.then_some(target)
+}
+
+/// Row offset of a Basis reference (for reveal).
+pub fn basis_row(rows: &[SummaryRow], index: usize) -> Option<usize> {
+    rows.iter()
+        .position(|row| matches!(row, SummaryRow::Basis(i, _) if *i == index))
+}
+
+fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
+    let state = &app.topology_state;
+    let width = area.width.saturating_sub(2);
+    if area.height < 2 || width == 0 {
+        return;
+    }
+    let x = area.x + 1;
+    let error = app.topology_error.as_deref();
+    let (label, label_style) = summary_label(state, app.topology_loading, error);
+    // The state label wraps (at most two rows) so a qualifier such as
+    // "limited coverage" or "refresh failed" is never clipped away.
+    let label_lines =
+        components::measured_lines(vec![Line::from(Span::styled(label, label_style))], width);
+    let label_rows = (label_lines.len() as u16)
+        .min(2)
+        .min(area.height.saturating_sub(1));
+    for (slot, line) in label_lines
+        .into_iter()
+        .take(label_rows as usize)
+        .enumerate()
+    {
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(x, area.y + slot as u16, width, 1),
+        );
+    }
+    let failure = match &state.summary.gen {
+        SummaryGen::Failed(f) if displayed_brief(state).is_some() => Some(f.clone()),
+        _ => None,
+    };
+    let rows = summary_rows(state, app.topology_loading, error, width);
+    let button_rows = u16::from(failure.is_some() && area.height >= 4);
+    let available = area.height - label_rows - button_rows;
+    let overflow = rows.len() > available as usize && available > 1;
+    let content_height = if overflow { available - 1 } else { available };
+    let content = Rect::new(x, area.y + label_rows, width, content_height);
+    app.layout
+        .borrow_mut()
+        .register(Target::TopologySummary, content);
+    let mut pane = ScrollPane {
+        offset: state.summary_scroll,
+    };
+    pane.scroll(0, rows.len(), content_height as usize);
+    let end = (pane.offset + content_height as usize).min(rows.len());
+    for (slot, row) in rows[pane.offset.min(end)..end].iter().enumerate() {
+        let rect = Rect::new(content.x, content.y + slot as u16, width, 1);
+        match row {
+            SummaryRow::Text(line) => frame.render_widget(Paragraph::new(line.clone()), rect),
+            SummaryRow::Basis(index, line) => {
+                let target = Target::TopologyBasis(*index);
+                let focused = app.focus == target;
+                frame.render_widget(
+                    Paragraph::new(if focused {
+                        line.clone().style(theme::selected())
+                    } else {
+                        line.clone()
+                    }),
+                    rect,
+                );
+                app.layout.borrow_mut().register(target, rect);
+            }
+        }
+    }
+    if overflow {
+        let shown_end = pane.offset + content_height as usize;
+        let marker = format!(
+            "{}{} rows {}–{} of {} · PgUp/PgDn Home/End",
+            if pane.offset > 0 { "▲" } else { " " },
+            if shown_end < rows.len() { "▼" } else { " " },
+            pane.offset + 1,
+            shown_end.min(rows.len()),
+            rows.len()
+        );
+        frame.render_widget(
+            Paragraph::new(components::clip_text(&marker, width as usize)).style(theme::muted()),
+            Rect::new(x, content.bottom(), width, 1),
+        );
+    }
+    if let (Some(failure), true) = (failure, button_rows == 1) {
+        let mut labels = vec!["Retry summary", "View logs"];
+        let mut buttons = vec![
+            ButtonId::TopologySummaryRetry,
+            ButtonId::TopologySummaryLogs,
+        ];
+        if failure.kind.needs_models() {
+            labels.push("Models");
+            buttons.push(ButtonId::TopologySummaryModels);
+        }
+        let rects =
+            components::wrapped_action_rects(Rect::new(x, area.bottom() - 1, width, 1), &labels, 1);
+        for ((button, label), rect) in buttons.into_iter().zip(labels).zip(rects) {
+            if rect.width > 0 && rect.height > 0 {
+                draw_button(frame, app, button, label, rect);
+            }
+        }
+    }
+}
+
+/// Draw the Summary/Record tab bar; returns the body below it.
+fn draw_content_tabs(frame: &mut Frame, app: &App, inner: Rect) -> Rect {
+    let tabs = ["Summary", "Record"];
+    let state = &app.topology_state;
+    for (index, rect) in components::tab_rects(
+        Rect::new(inner.x, inner.y, inner.width, 1),
+        &tabs,
+        state.content_tab.index(),
+    )
+    .into_iter()
+    .enumerate()
+    {
+        if rect.width == 0 {
+            continue;
+        }
+        let target = Target::TopologyContentTab(index);
+        components::tab_button(
+            frame,
+            rect,
+            tabs[index],
+            state.content_tab.index() == index,
+            app.focus == target,
+        );
+        app.layout.borrow_mut().register(target, rect);
+    }
+    Rect::new(
+        inner.x,
+        inner.y + 1,
+        inner.width,
+        inner.height.saturating_sub(1),
+    )
+}
+
 fn draw_inspector(frame: &mut Frame, app: &App, layout: &TopologyLayoutResult) {
     let state = &app.topology_state;
-    let title = if state.snapshot.is_none() {
+    let summary_tab = state.content_tab == ContentTab::Summary;
+    let title = if summary_tab {
+        " Neighborhood "
+    } else if state.snapshot.is_none() {
         " Inspector "
     } else if state.selected_edge_id.is_some() {
         " Relationship · selected "
     } else {
         " Inspector · selected "
     };
-    let block = panel(title).border_style(if app.focus == Target::TopologyInspector {
-        theme::accent()
-    } else {
-        Style::default().fg(BORDER)
-    });
+    let block = panel(title).border_style(
+        if matches!(
+            app.focus,
+            Target::TopologyInspector
+                | Target::TopologySummary
+                | Target::TopologyBasis(_)
+                | Target::TopologyContentTab(_)
+        ) {
+            theme::accent()
+        } else {
+            Style::default().fg(BORDER)
+        },
+    );
     let inner = block.inner(layout.inspector_details);
     frame.render_widget(block, layout.inspector_details);
+    let inner = draw_content_tabs(frame, app, inner);
+    if summary_tab {
+        draw_summary(frame, app, inner);
+        draw_relationships(frame, app, layout.inspector_related);
+        return;
+    }
     if let Some(snapshot) = &state.snapshot {
         let action_labels = if state.selected_edge_id.is_some() {
             vec!["Recenter source", "Recenter target"]

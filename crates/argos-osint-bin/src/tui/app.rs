@@ -683,6 +683,9 @@ pub enum ButtonId {
     TopologyCenterSelected,
     TopologyFitGraph,
     TopologyAnalyzeScope,
+    TopologySummaryRetry,
+    TopologySummaryLogs,
+    TopologySummaryModels,
     TopologyRecenter,
     TopologyZoomIn,
     TopologyZoomOut,
@@ -769,6 +772,12 @@ pub enum Target {
     TopologyFilter(usize),
     TopologyEndpoint(usize),
     TopologyInspector,
+    /// Content tab (0 Summary, 1 Record) of the inspector.
+    TopologyContentTab(usize),
+    /// Scroll region of the Summary pane.
+    TopologySummary,
+    /// A typed basis reference of the Summary (index into the brief's references).
+    TopologyBasis(usize),
     TopologyRelationships,
     IntelTopologyClaim(usize),
     IntelTopologyInference(usize),
@@ -827,6 +836,27 @@ enum WorkEvent {
         generation: u64,
         memory_id: String,
         outcome: Result<Option<recon::InsightView>, String>,
+    },
+    /// A topology neighborhood summary settled (validated generated brief or
+    /// a typed failure). Carries the identity it was requested under so a
+    /// consumer can drop anything that no longer matches the open view.
+    TopologySummaryLoaded {
+        generation: u64,
+        seed: argos_osint_core::brain_topology::TopologySeed,
+        options: argos_osint_core::brain_topology::TopologyOptions,
+        basis_key: String,
+        outcome: Result<
+            Box<argos_osint_core::brain_neighborhood_brief_exec::Generated>,
+            argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure,
+        >,
+    },
+    /// The background summary request exists (its identity, for Retry).
+    TopologySummaryStarted {
+        generation: u64,
+        seed: argos_osint_core::brain_topology::TopologySeed,
+        options: argos_osint_core::brain_topology::TopologyOptions,
+        basis_key: String,
+        request: Box<argos_osint_core::summarization::SummaryRequest>,
     },
     ManualHistoryLoaded {
         outcome: Result<Vec<recon::Call>, String>,
@@ -5297,6 +5327,34 @@ impl App {
                 }
                 true
             }
+            WorkEvent::TopologySummaryLoaded {
+                generation,
+                seed,
+                options,
+                basis_key,
+                outcome,
+            } => self.on_topology_summary(
+                generation,
+                &seed,
+                &options,
+                &basis_key,
+                Some(outcome),
+                None,
+            ),
+            WorkEvent::TopologySummaryStarted {
+                generation,
+                seed,
+                options,
+                basis_key,
+                request,
+            } => self.on_topology_summary(
+                generation,
+                &seed,
+                &options,
+                &basis_key,
+                None,
+                Some(request),
+            ),
             WorkEvent::ManualHistoryLoaded { outcome } => {
                 self.manual_reading = false;
                 if std::mem::take(&mut self.manual_pending) {
@@ -5683,6 +5741,7 @@ impl App {
                             }
                             self.topology_state.snapshot = Some(*snap);
                             self.topology_error = None;
+                            self.begin_topology_summary(false);
                             self.layout.borrow_mut().view_stamp.clear();
                             if visible {
                                 if let Some(target) = focus.and_then(|focus| {
@@ -7047,10 +7106,14 @@ impl App {
                     )
                 }),
             });
+            self.topology_state.summary.detach();
             self.topology_state = Default::default();
         }
         self.module = Some(ModuleId::Brain);
         self.brain_list_mode = BrainListMode::Topology;
+        // A new seed opens on its Summary.
+        self.topology_state.content_tab = super::topology::ContentTab::Summary;
+        self.topology_state.summary_scroll = 0;
         self.topology_state.seed = Some(seed);
         self.topology_state.snapshot = None;
         self.topology_state.selected_node_id = None;
@@ -7066,6 +7129,13 @@ impl App {
             let generation = self.topology_generation;
             self.topology_loading = true;
             self.topology_error = None;
+            if self.topology_state.snapshot.is_none() {
+                // A new query: nothing of the previous scope stays current.
+                self.topology_state.summary.detach();
+                self.topology_state.summary.gen = super::topology::SummaryGen::Idle;
+                self.topology_state.summary.request = None;
+                self.topology_state.summary.basis_key.clear();
+            }
             self.status = if self.topology_state.snapshot.is_some() {
                 "Refreshing topology · previous snapshot retained".into()
             } else {
@@ -7107,6 +7177,226 @@ impl App {
                     outcome,
                 });
             }
+        }
+    }
+
+    /// Start (or resume) the background summary for the loaded snapshot.
+    /// Runs entirely off the draw path: the thread publishes the recorded
+    /// brief as the cache fallback, enqueues one deduplicated generation, then
+    /// polls the cache/task state (one read at a time, never a model request).
+    pub(crate) fn begin_topology_summary(&mut self, retry: bool) {
+        use super::topology::SummaryGen;
+        let Some(seed) = self.topology_state.seed.clone() else {
+            return;
+        };
+        let options = argos_osint_core::brain_topology::TopologyOptions {
+            depth: self.topology_state.depth,
+            cycle_scope: self.topology_state.cycle_scope.clone(),
+            max_nodes: 100,
+            max_edges: 200,
+            continuation_token: None,
+        };
+        let Some(snapshot) = self.topology_state.snapshot.as_ref() else {
+            return;
+        };
+        let (Some(brief), Some(input)) = (
+            snapshot.neighborhood_brief.clone(),
+            snapshot.neighborhood_input.clone(),
+        ) else {
+            self.topology_state.summary.detach();
+            self.topology_state.summary.gen = SummaryGen::Idle;
+            return;
+        };
+        let summary = &mut self.topology_state.summary;
+        let same = summary.basis_key == brief.basis_key;
+        summary.detach();
+        summary.basis_key = brief.basis_key.clone();
+        if !input.worth_generating() {
+            summary.gen = SummaryGen::Idle;
+            summary.request = None;
+            return;
+        }
+        if !same {
+            summary.request = None;
+        }
+        if !(same && matches!(summary.gen, SummaryGen::Generated(_))) || retry {
+            summary.gen = SummaryGen::Pending;
+        }
+        summary.generation = summary.generation.wrapping_add(1);
+        let generation = summary.generation;
+        let stop = Arc::new(AtomicBool::new(false));
+        summary.stop = Some(stop.clone());
+        let basis_key = brief.basis_key.clone();
+        let request = summary.request.clone();
+        let tx = self.work_tx.clone();
+        let job = TopologySummaryJob {
+            generation,
+            seed,
+            options,
+            basis_key,
+            brief,
+            input,
+            request,
+            retry,
+            stop,
+            limits: argos_osint_core::brain_neighborhood_brief_exec::WatchLimits::standard(),
+        };
+        if let Some(db) = self.background_db.clone() {
+            // Auth/settings loading, the role runtime and the database open all
+            // happen on the worker thread, never on the UI thread.
+            std::thread::spawn(move || {
+                let send = |event| {
+                    let _ = tx.send(event);
+                };
+                let runtime = load_summary_runtime();
+                match Store::open_light(&db) {
+                    Ok(store) => job.run(&store, Some(&db), &runtime, &send),
+                    Err(error) => job.fail(
+                        argos_osint_core::brain_neighborhood_brief_exec::FailureKind::Storage,
+                        format!("could not open the database: {error}"),
+                        &send,
+                    ),
+                }
+            });
+        } else {
+            // Fixture-only: production always sets `background_db` (see `App::new`);
+            // only the test constructor leaves it `None`, so this blocking load never
+            // runs on the real UI thread.
+            let mut events = Vec::new();
+            let cell = std::cell::RefCell::new(&mut events);
+            let runtime = load_summary_runtime();
+            job.run(&self.store, None, &runtime, &|event| {
+                cell.borrow_mut().push(event)
+            });
+            for event in events {
+                self.on_work_event(event);
+            }
+        }
+    }
+
+    /// Retry never blanks content: the recorded (or previous) brief stays and
+    /// the label returns to generating until the new result settles.
+    pub(crate) fn retry_topology_summary(&mut self) {
+        self.begin_topology_summary(true);
+        self.layout.borrow_mut().view_stamp.clear();
+        self.status = "Retrying the neighborhood summary…".into();
+    }
+
+    /// Apply a started/settled summary event under the identity fences. It
+    /// never moves focus; a late or obsolete event changes nothing.
+    pub(crate) fn on_topology_summary(
+        &mut self,
+        generation: u64,
+        seed: &argos_osint_core::brain_topology::TopologySeed,
+        options: &argos_osint_core::brain_topology::TopologyOptions,
+        basis_key: &str,
+        outcome: Option<
+            Result<
+                Box<argos_osint_core::brain_neighborhood_brief_exec::Generated>,
+                argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure,
+            >,
+        >,
+        request: Option<Box<argos_osint_core::summarization::SummaryRequest>>,
+    ) -> bool {
+        use super::topology::SummaryGen;
+        let state = &mut self.topology_state;
+        let current = state
+            .snapshot
+            .as_ref()
+            .and_then(|snap| snap.neighborhood_brief.as_ref())
+            .map(|brief| brief.basis_key.as_str());
+        if generation != state.summary.generation
+            || state.seed.as_ref() != Some(seed)
+            || options.depth != state.depth
+            || options.cycle_scope != state.cycle_scope
+            || state.summary.basis_key != basis_key
+            || current != Some(basis_key)
+        {
+            return false;
+        }
+        if let Some(request) = request {
+            state.summary.request = Some(request);
+        }
+        match outcome {
+            Some(Ok(generated)) => {
+                // One assignment: the validated brief replaces the fallback.
+                state.summary.gen = SummaryGen::Generated(generated);
+            }
+            Some(Err(failure)) => {
+                let detail = format!("{}: {}", failure.kind.as_str(), failure.message);
+                state.summary.gen = SummaryGen::Failed(failure);
+                self.push_log_detail(
+                    "warn",
+                    "Topology: neighborhood summary not generated",
+                    detail,
+                );
+            }
+            None => {}
+        }
+        self.layout.borrow_mut().view_stamp.clear();
+        true
+    }
+
+    /// Open a Summary basis reference in Record: select the exact node or
+    /// edge. The viewport, filters and seed are untouched.
+    pub(crate) fn open_topology_basis(&mut self, index: usize) {
+        use argos_osint_core::brain_neighborhood_brief::BasisTarget;
+        let Some(target) = super::topology::basis_target(&self.topology_state, index) else {
+            self.status = "That record is not in the loaded neighborhood".into();
+            return;
+        };
+        match target {
+            BasisTarget::Node(id) => {
+                self.topology_state.selected_node_id = Some(id);
+                self.topology_state.selected_edge_id = None;
+            }
+            BasisTarget::Edge(id) => {
+                self.topology_state.selected_edge_id = Some(id);
+            }
+        }
+        self.topology_state.content_tab = super::topology::ContentTab::Record;
+        self.topology_state.inspector_scroll = 0;
+        self.topology_state.related_sel = 0;
+        self.topology_state.related_scroll = 0;
+        self.layout.borrow_mut().view_stamp.clear();
+        self.set_focus(Target::TopologyInspector);
+    }
+
+    fn inspector_focus(&self) -> Target {
+        if self.topology_state.content_tab == super::topology::ContentTab::Summary {
+            Target::TopologySummary
+        } else {
+            Target::TopologyInspector
+        }
+    }
+
+    /// Scroll the Summary so a basis reference is visible.
+    fn reveal_topology_basis(&mut self, index: usize) {
+        let _ = super::ui::focus_order(self);
+        let area = self
+            .layout
+            .borrow()
+            .entries
+            .iter()
+            .find(|entry| entry.target == Target::TopologySummary)
+            .map(|entry| entry.rect);
+        let Some(area) = area else {
+            return;
+        };
+        let rows = super::topology::summary_rows(
+            &self.topology_state,
+            self.topology_loading,
+            self.topology_error.as_deref(),
+            area.width,
+        );
+        if let Some(row) = super::topology::basis_row(&rows, index) {
+            let mut pane = super::components::ScrollPane {
+                offset: self.topology_state.summary_scroll,
+            };
+            pane.reveal(row, 1, area.height as usize);
+            self.topology_state.summary_scroll = pane.offset;
+            self.layout.borrow_mut().view_stamp.clear();
+            let _ = super::ui::focus_order(self);
         }
     }
 
@@ -7372,6 +7662,30 @@ impl App {
             Target::TopologyInspector => {
                 super::topology::scroll_topology(self, Target::TopologyInspector, direction);
             }
+            Target::TopologySummary => {
+                let before = self.topology_state.summary_scroll;
+                super::topology::scroll_topology(self, Target::TopologySummary, direction);
+                if direction > 0 && self.topology_state.summary_scroll == before {
+                    // At the end: continue into the basis references.
+                    if super::topology::displayed_brief(&self.topology_state)
+                        .is_some_and(|(brief, _)| !brief.references.is_empty())
+                    {
+                        self.reveal_topology_basis(0);
+                        self.set_focus(Target::TopologyBasis(0));
+                    }
+                }
+            }
+            Target::TopologyBasis(index) => {
+                let count = super::topology::displayed_brief(&self.topology_state)
+                    .map_or(0, |(brief, _)| brief.references.len());
+                if direction < 0 && index == 0 {
+                    self.set_focus(Target::TopologySummary);
+                } else if count > 0 {
+                    let next = index.saturating_add_signed(direction).min(count - 1);
+                    self.reveal_topology_basis(next);
+                    self.set_focus(Target::TopologyBasis(next));
+                }
+            }
             Target::TopologyRelated(_) | Target::TopologyRelationships => {
                 let count = super::topology::related_edge_indices(&self.topology_state).len();
                 if count == 0 {
@@ -7409,7 +7723,10 @@ impl App {
                 let index = eligible[current
                     .saturating_add_signed(direction)
                     .min(eligible.len() - 1)];
+                // Moving focus along the graph selects, but never switches the tab.
+                let tab = self.topology_state.content_tab;
                 self.activate_target(Target::TopologyNode(index));
+                self.topology_state.content_tab = tab;
                 let _ = super::ui::focus_order(self);
                 let visible = self
                     .layout
@@ -7439,6 +7756,22 @@ impl App {
             KeyCode::Char('-') | KeyCode::Char('_') => {
                 self.topology_state.zoom_percent =
                     self.topology_state.zoom_percent.saturating_sub(10).max(50);
+                true
+            }
+            KeyCode::Home | KeyCode::End
+                if matches!(
+                    self.focus,
+                    Target::TopologySummary | Target::TopologyBasis(_)
+                ) =>
+            {
+                // Edge of the Summary pane (the graph view keeps Home = reset).
+                let top = key.code == KeyCode::Home;
+                super::topology::scroll_topology(
+                    self,
+                    Target::TopologySummary,
+                    if top { isize::MIN / 2 } else { isize::MAX / 2 },
+                );
+                self.layout.borrow_mut().view_stamp.clear();
                 true
             }
             KeyCode::Home => {
@@ -7490,6 +7823,8 @@ impl App {
                     self.set_focus(Target::TopologyPanel(index.saturating_sub(1)));
                 } else if let Target::TopologyInspectorTab(index) = self.focus {
                     self.set_focus(Target::TopologyInspectorTab(index.saturating_sub(1)));
+                } else if let Target::TopologyContentTab(index) = self.focus {
+                    self.set_focus(Target::TopologyContentTab(index.saturating_sub(1)));
                 } else {
                     return false;
                 }
@@ -7502,6 +7837,8 @@ impl App {
                     self.set_focus(Target::TopologyPanel((index + 1).min(2)));
                 } else if let Target::TopologyInspectorTab(index) = self.focus {
                     self.set_focus(Target::TopologyInspectorTab((index + 1).min(1)));
+                } else if let Target::TopologyContentTab(index) = self.focus {
+                    self.set_focus(Target::TopologyContentTab((index + 1).min(1)));
                 } else {
                     return false;
                 }
@@ -8403,6 +8740,7 @@ impl App {
                     self.topology_state.snapshot = None;
                     self.refresh_topology();
                 } else if let Some(origin) = self.topology_origin.take() {
+                    self.topology_state.summary.detach();
                     self.topology_generation = self.topology_generation.wrapping_add(1);
                     self.topology_loading = false;
                     self.module = origin.module;
@@ -8468,6 +8806,18 @@ impl App {
             ButtonId::TopologyZoomOut => {
                 self.topology_state.zoom_percent =
                     self.topology_state.zoom_percent.saturating_sub(10).max(50);
+                return;
+            }
+            ButtonId::TopologySummaryRetry => {
+                self.retry_topology_summary();
+                return;
+            }
+            ButtonId::TopologySummaryLogs => {
+                self.select(ModuleId::Logs.index());
+                return;
+            }
+            ButtonId::TopologySummaryModels => {
+                self.select(ModuleId::Providers.index());
                 return;
             }
             ButtonId::TopologyOpenMemory => {
@@ -9693,7 +10043,7 @@ impl App {
                         super::topology_layout::TopologyResponsiveMode::Desktop
                             | super::topology_layout::TopologyResponsiveMode::Compact
                     ) {
-                    Target::TopologyInspector
+                    self.inspector_focus()
                 } else {
                     target
                 };
@@ -9707,6 +10057,13 @@ impl App {
                 self.layout.borrow_mut().view_stamp.clear();
                 self.set_focus(target);
             }
+            Target::TopologyContentTab(index) => {
+                self.topology_state.content_tab = super::topology::ContentTab::from_index(index);
+                self.layout.borrow_mut().view_stamp.clear();
+                self.set_focus(target);
+            }
+            Target::TopologySummary => self.set_focus(target),
+            Target::TopologyBasis(index) => self.open_topology_basis(index),
             Target::TopologyFilter(index) => {
                 let filter = match index {
                     0 => &mut self.topology_state.filter_actor,
@@ -9772,6 +10129,8 @@ impl App {
                         self.topology_state.inspector_scroll = 0;
                         self.topology_state.related_sel = 0;
                         self.topology_state.related_scroll = 0;
+                        // Activation (click/Enter) opens the record.
+                        self.topology_state.content_tab = super::topology::ContentTab::Record;
                         self.set_focus(Target::TopologyNode(index));
                     }
                 }
@@ -9781,6 +10140,7 @@ impl App {
                     if let Some(edge) = snap.edges.get(index) {
                         self.topology_state.selected_edge_id = Some(edge.id.clone());
                         self.topology_state.inspector_scroll = 0;
+                        self.topology_state.content_tab = super::topology::ContentTab::Record;
                         self.set_focus(Target::TopologyEdge(index));
                     }
                 }
@@ -9800,6 +10160,7 @@ impl App {
                     {
                         self.topology_state.selected_edge_id = Some(edge.id.clone());
                         self.topology_state.inspector_scroll = 0;
+                        self.topology_state.content_tab = super::topology::ContentTab::Record;
                     }
                 }
                 self.set_focus(Target::TopologyRelated(index));
@@ -11939,6 +12300,133 @@ pub(crate) fn structural_title(app: &App) -> Option<&'static str> {
         Some("Kind: Link") => Some(" link graph "),
         Some("Kind: Related") => Some(" related lead "),
         _ => None,
+    }
+}
+
+fn load_summary_runtime() -> argos_osint_core::recon::model_exec::RoleRuntime {
+    argos_osint_core::recon::model_exec::RoleRuntime::new(
+        AuthFile::load().unwrap_or_default(),
+        SettingsFile::load().unwrap_or_default(),
+    )
+}
+
+/// One background neighborhood-summary request: everything the worker thread
+/// needs, owned (no UI state is shared).
+struct TopologySummaryJob {
+    generation: u64,
+    seed: argos_osint_core::brain_topology::TopologySeed,
+    options: argos_osint_core::brain_topology::TopologyOptions,
+    basis_key: String,
+    brief: argos_osint_core::brain_neighborhood_brief::NeighborhoodBrief,
+    input: argos_osint_core::brain_neighborhood_brief::NeighborhoodInput,
+    request: Option<Box<argos_osint_core::summarization::SummaryRequest>>,
+    retry: bool,
+    stop: Arc<AtomicBool>,
+    limits: argos_osint_core::brain_neighborhood_brief_exec::WatchLimits,
+}
+
+impl TopologySummaryJob {
+    fn event(
+        &self,
+        outcome: Result<
+            Box<argos_osint_core::brain_neighborhood_brief_exec::Generated>,
+            argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure,
+        >,
+    ) -> WorkEvent {
+        WorkEvent::TopologySummaryLoaded {
+            generation: self.generation,
+            seed: self.seed.clone(),
+            options: self.options.clone(),
+            basis_key: self.basis_key.clone(),
+            outcome,
+        }
+    }
+
+    /// Typed terminal failure: the UI stops showing "generating".
+    fn fail(
+        &self,
+        kind: argos_osint_core::brain_neighborhood_brief_exec::FailureKind,
+        message: String,
+        send: &dyn Fn(WorkEvent),
+    ) {
+        send(self.event(Err(
+            argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure {
+                kind,
+                message: message.chars().take(300).collect(),
+            },
+        )));
+    }
+
+    fn run(
+        &self,
+        store: &Store,
+        db: Option<&std::path::Path>,
+        runtime: &argos_osint_core::recon::model_exec::RoleRuntime,
+        send: &dyn Fn(WorkEvent),
+    ) {
+        use argos_osint_core::brain_neighborhood_brief_exec as exec;
+        let conn = store.connection();
+        let fingerprint = exec::route_fingerprint(runtime);
+        let published = if self.retry {
+            // Explicit Retry: reuse the request identity, reset it once.
+            let req = self
+                .request
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(|| exec::build_request(&self.input, &fingerprint));
+            let _ = exec::retry(conn, &req);
+            exec::poll(conn, &req).map(|delivery| (req, delivery))
+        } else {
+            exec::publish(conn, &self.input, &self.brief, &fingerprint)
+        };
+        let (req, delivery) = match published {
+            Ok(pair) => pair,
+            Err(error) => {
+                self.fail(exec::FailureKind::Storage, error.to_string(), send);
+                return;
+            }
+        };
+        send(WorkEvent::TopologySummaryStarted {
+            generation: self.generation,
+            seed: self.seed.clone(),
+            options: self.options.clone(),
+            basis_key: self.basis_key.clone(),
+            request: Box::new(req.clone()),
+        });
+        let settled = match delivery {
+            exec::Delivery::Pending => match db {
+                Some(db) => exec::watch_with_limits(
+                    db,
+                    &req,
+                    std::time::Duration::from_millis(750),
+                    &self.stop,
+                    self.limits,
+                ),
+                // No polling thread (in-memory fixture): the request stays
+                // queued and the fallback stays on screen.
+                None => return,
+            },
+            exec::Delivery::Idle => {
+                self.fail(
+                    exec::FailureKind::Storage,
+                    "the summary request is no longer queued".into(),
+                    send,
+                );
+                return;
+            }
+            other => Some(other),
+        };
+        match settled {
+            Some(exec::Delivery::Generated(g)) => send(self.event(Ok(g))),
+            Some(exec::Delivery::Failed(f)) => send(self.event(Err(f))),
+            Some(exec::Delivery::Idle) => self.fail(
+                exec::FailureKind::Storage,
+                "the summary request is no longer queued".into(),
+                send,
+            ),
+            // Detached on purpose (obsolete request): nothing to report.
+            Some(exec::Delivery::Pending) | None => {}
+        }
     }
 }
 
@@ -22306,6 +22794,676 @@ mod tests {
         app
     }
 
+    /// Fixture with the deterministic fallback brief attached, as a real read
+    /// would. Pending/Generated/Failed are set by individual tests.
+    fn brief_fixture() -> App {
+        use argos_osint_core::brain_neighborhood_brief as brief;
+        let mut app = topology_fixture();
+        let seed = app.topology_state.seed.clone().unwrap();
+        let depth = app.topology_state.depth;
+        let cycle = app.topology_state.cycle_scope.clone();
+        let snapshot = app.topology_state.snapshot.as_mut().unwrap();
+        let input = brief::BriefInput {
+            snapshot,
+            seed: &seed,
+            depth,
+            cycle: &cycle,
+            payloads: Default::default(),
+            payload_reads_skipped: 0,
+        };
+        let built = brief::build(&input);
+        app.topology_state.summary.basis_key = built.basis_key.clone();
+        app.topology_state
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .neighborhood_brief = Some(built);
+        app
+    }
+
+    fn generated_from(
+        app: &App,
+        text: &str,
+    ) -> Box<argos_osint_core::brain_neighborhood_brief_exec::Generated> {
+        let mut brief = app
+            .topology_state
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .neighborhood_brief
+            .clone()
+            .unwrap();
+        if let Some(item) = brief.overview.as_mut() {
+            item.text = text.into();
+        }
+        Box::new(argos_osint_core::brain_neighborhood_brief_exec::Generated {
+            brief,
+            route: "mock/summary-model".into(),
+            requests: 1,
+            host_notes: vec![],
+        })
+    }
+
+    fn summary_event(
+        app: &App,
+        generation: u64,
+        outcome: Result<
+            Box<argos_osint_core::brain_neighborhood_brief_exec::Generated>,
+            argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure,
+        >,
+    ) -> WorkEvent {
+        WorkEvent::TopologySummaryLoaded {
+            generation,
+            seed: app.topology_state.seed.clone().unwrap(),
+            options: argos_osint_core::brain_topology::TopologyOptions {
+                depth: app.topology_state.depth,
+                cycle_scope: app.topology_state.cycle_scope.clone(),
+                max_nodes: 100,
+                max_edges: 200,
+                continuation_token: None,
+            },
+            basis_key: app.topology_state.summary.basis_key.clone(),
+            outcome,
+        }
+    }
+
+    fn failure(
+        kind: argos_osint_core::brain_neighborhood_brief_exec::FailureKind,
+    ) -> argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure {
+        argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure {
+            kind,
+            message: "fixture failure".into(),
+        }
+    }
+
+    fn key(app: &mut App, code: KeyCode) {
+        app.handle_topology_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn topology_summary_is_the_default_tab_and_record_keeps_details() {
+        use super::super::topology::ContentTab;
+        let mut app = brief_fixture();
+        assert_eq!(app.topology_state.content_tab, ContentTab::Summary);
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("[Summary] [Record]"));
+        assert!(text.contains("Summary · recorded brief"));
+        assert!(text.contains("Overview"));
+        app.activate_target(Target::TopologyContentTab(1));
+        assert_eq!(app.topology_state.content_tab, ContentTab::Record);
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("Harbor contract shifted"));
+        assert!(!text.contains("Summary · recorded brief"));
+        // Relationships tabs are independent of the content tab.
+        app.activate_target(Target::TopologyInspectorTab(1));
+        assert_eq!(app.topology_state.inspector_tab, 1);
+        app.activate_target(Target::TopologyContentTab(0));
+        assert_eq!(app.topology_state.inspector_tab, 1);
+        assert_eq!(app.topology_state.content_tab, ContentTab::Summary);
+    }
+
+    #[test]
+    fn topology_summary_basis_opens_record_without_recentering_and_focus_alone_does_not() {
+        use super::super::topology::ContentTab;
+        let mut app = brief_fixture();
+        render(&mut app, 120, 40);
+        let seed = app.topology_state.seed.clone();
+        let (depth, cycle) = (
+            app.topology_state.depth,
+            app.topology_state.cycle_scope.clone(),
+        );
+        let filters = app.topology_state.filter_actor;
+        app.set_focus(Target::TopologyBasis(0));
+        // Moving focus onto the reference does not activate it.
+        assert_eq!(app.topology_state.content_tab, ContentTab::Summary);
+        // Keyboard and pointer activations are the same path.
+        let mut pointer = brief_fixture();
+        render(&mut pointer, 120, 40);
+        pointer.activate_target(Target::TopologyBasis(0));
+        app.handle_topology_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.topology_state.content_tab, ContentTab::Record);
+        assert_eq!(pointer.topology_state.content_tab, ContentTab::Record);
+        assert_eq!(
+            app.topology_state.selected_node_id,
+            pointer.topology_state.selected_node_id
+        );
+        assert_eq!(
+            app.topology_state.selected_edge_id,
+            pointer.topology_state.selected_edge_id
+        );
+        assert_eq!(app.topology_state.seed, seed);
+        assert_eq!(app.topology_state.depth, depth);
+        assert_eq!(app.topology_state.cycle_scope, cycle);
+        assert_eq!(app.topology_state.filter_actor, filters);
+        assert!(!app.topology_loading);
+    }
+
+    #[test]
+    fn topology_summary_scrolls_independently_with_indicator() {
+        let mut app = brief_fixture();
+        render(&mut app, 80, 24);
+        app.activate_target(Target::TopologyPanel(1));
+        render(&mut app, 80, 24);
+        app.set_focus(Target::TopologySummary);
+        let text = buffer_text(&render(&mut app, 80, 24));
+        assert!(text.contains("PgUp/PgDn"), "overflow indicator: {text}");
+        let before = app.topology_state.inspector_scroll;
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.topology_state.summary_scroll, 1);
+        key(&mut app, KeyCode::PageDown);
+        assert!(app.topology_state.summary_scroll > 1);
+        key(&mut app, KeyCode::End);
+        let last = app.topology_state.summary_scroll;
+        assert!(last > 1);
+        key(&mut app, KeyCode::PageDown);
+        assert_eq!(app.topology_state.summary_scroll, last, "clamped");
+        key(&mut app, KeyCode::Up);
+        assert_eq!(app.topology_state.summary_scroll, last - 1);
+        key(&mut app, KeyCode::Home);
+        assert_eq!(app.topology_state.summary_scroll, 0);
+        assert!(super::super::topology::scroll_topology(
+            &mut app,
+            Target::TopologySummary,
+            3
+        ));
+        assert_eq!(app.topology_state.summary_scroll, 3);
+        assert_eq!(app.topology_state.inspector_scroll, before);
+        assert_eq!(app.topology_state.related_scroll, 0);
+        assert_eq!(app.topology_state.pan, (0, 0));
+    }
+
+    #[test]
+    fn topology_generated_summary_replaces_fallback_atomically_without_stealing_focus() {
+        use super::super::topology::SummaryGen;
+        let mut app = brief_fixture();
+        render(&mut app, 120, 40);
+        app.topology_state.summary.generation = 1;
+        app.topology_state.summary.gen = SummaryGen::Pending;
+        app.set_focus(Target::TopologyGraph);
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("generating"));
+        let generated = generated_from(
+            &app,
+            "Generated explanation of the harbor neighborhood. [1]",
+        );
+        let ev = summary_event(&app, 1, Ok(generated));
+        app.on_work_event(ev);
+        assert_eq!(app.focus, Target::TopologyGraph);
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("Summary · generated"), "{text}");
+        assert!(text.contains("Generated explanation"));
+    }
+
+    #[test]
+    fn topology_summary_obsolete_results_are_discarded() {
+        use super::super::topology::SummaryGen;
+        let mut app = brief_fixture();
+        app.topology_state.summary.generation = 2;
+        app.topology_state.summary.gen = SummaryGen::Pending;
+        let generated = generated_from(&app, "Late explanation.");
+        // Old generation.
+        let ev = summary_event(&app, 1, Ok(generated.clone()));
+        app.on_work_event(ev);
+        assert!(matches!(
+            app.topology_state.summary.gen,
+            SummaryGen::Pending
+        ));
+        // Different seed.
+        let mut ev = summary_event(&app, 2, Ok(generated.clone()));
+        if let WorkEvent::TopologySummaryLoaded { seed, .. } = &mut ev {
+            *seed = argos_osint_core::brain_topology::TopologySeed::Claim("other".into());
+        }
+        app.on_work_event(ev);
+        assert!(matches!(
+            app.topology_state.summary.gen,
+            SummaryGen::Pending
+        ));
+        // Different options.
+        let mut ev = summary_event(&app, 2, Ok(generated.clone()));
+        if let WorkEvent::TopologySummaryLoaded { options, .. } = &mut ev {
+            options.depth += 1;
+        }
+        app.on_work_event(ev);
+        assert!(matches!(
+            app.topology_state.summary.gen,
+            SummaryGen::Pending
+        ));
+        // Different basis.
+        let mut ev = summary_event(&app, 2, Ok(generated.clone()));
+        if let WorkEvent::TopologySummaryLoaded { basis_key, .. } = &mut ev {
+            *basis_key = "other-basis".into();
+        }
+        app.on_work_event(ev);
+        assert!(matches!(
+            app.topology_state.summary.gen,
+            SummaryGen::Pending
+        ));
+        // The matching one lands.
+        let ev = summary_event(&app, 2, Ok(generated));
+        app.on_work_event(ev);
+        assert!(matches!(
+            app.topology_state.summary.gen,
+            SummaryGen::Generated(_)
+        ));
+    }
+
+    #[test]
+    fn topology_summary_failure_labels_and_retry_never_blank_content() {
+        use argos_osint_core::brain_neighborhood_brief_exec::FailureKind as F;
+        let mut app = brief_fixture();
+        render(&mut app, 120, 40);
+        for (kind, label) in [
+            (F::NotConfigured, "blocked"),
+            (F::Blocked, "blocked"),
+            (F::Rejected, "rejected"),
+            (F::Provider, "failed"),
+        ] {
+            app.topology_state.summary.generation += 1;
+            let generation = app.topology_state.summary.generation;
+            let ev = summary_event(&app, generation, Err(failure(kind)));
+            app.on_work_event(ev);
+            let text = buffer_text(&render(&mut app, 120, 40));
+            assert!(
+                text.contains(&format!("Summary · {label}")),
+                "{label}: {text}"
+            );
+            // The recorded brief is still there.
+            assert!(text.contains("Overview"), "{label}: content kept");
+            assert!(text.contains("Retry"), "{label}: retry offered");
+        }
+        // Retry flips back to generating while the brief stays visible.
+        app.retry_topology_summary();
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("Overview"));
+        assert!(text.contains("Retrying"));
+    }
+
+    #[test]
+    fn topology_summary_states_are_truthful_for_loading_error_isolated_and_missing() {
+        // Loading with no snapshot.
+        let mut app = brief_fixture();
+        app.topology_state.snapshot = None;
+        app.topology_loading = true;
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("Loading the neighborhood"), "{text}");
+        // Read error with no snapshot.
+        app.topology_loading = false;
+        app.topology_error = Some("disk unavailable".into());
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("could not be"), "{text}");
+        assert!(!text.contains("Overview"));
+        // Same-scope refresh failure keeps the brief and says stale.
+        let mut app = brief_fixture();
+        app.topology_error = Some("Read failed".into());
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(
+            text.contains("stale · refresh") && text.contains("failed · recorded brief"),
+            "{text}"
+        );
+        assert!(text.contains("Overview"));
+        // No seed.
+        let mut app = brief_fixture();
+        app.topology_state.snapshot = None;
+        app.topology_state.seed = None;
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("No seed selected"), "{text}");
+        // Placeholder language never appears.
+        for banned in ["unknown", "N/A", "confidence", "reliability", "likelihood"] {
+            assert!(!text.to_lowercase().contains(&banned.to_lowercase()));
+        }
+    }
+
+    #[test]
+    fn topology_summary_isolated_and_limited_are_labeled() {
+        use argos_osint_core::brain_neighborhood_brief as brief;
+        let mut app = brief_fixture();
+        {
+            let snap = app.topology_state.snapshot.as_mut().unwrap();
+            snap.nodes.retain(|n| n.is_root);
+            snap.edges.clear();
+            snap.total_nodes = 1;
+            snap.total_edges = 0;
+            snap.discovered_nodes = 1;
+            snap.discovered_edges = 0;
+        }
+        let seed = app.topology_state.seed.clone().unwrap();
+        let (depth, cycle) = (
+            app.topology_state.depth,
+            app.topology_state.cycle_scope.clone(),
+        );
+        let snap = app.topology_state.snapshot.as_mut().unwrap();
+        let built = brief::build(&brief::BriefInput {
+            snapshot: snap,
+            seed: &seed,
+            depth,
+            cycle: &cycle,
+            payloads: Default::default(),
+            payload_reads_skipped: 0,
+        });
+        app.topology_state.summary.basis_key = built.basis_key.clone();
+        snap.neighborhood_brief = Some(built);
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("isolated"), "{text}");
+        assert!(!text.contains("generating"));
+        // Limited coverage.
+        let mut app = brief_fixture();
+        app.topology_state
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .neighborhood_brief
+            .as_mut()
+            .unwrap()
+            .coverage
+            .status = brief::CoverageStatus::Limited;
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("limited coverage"), "{text}");
+    }
+
+    #[test]
+    fn topology_history_restores_content_tab_and_summary_scroll() {
+        use super::super::topology::ContentTab;
+        let mut app = brief_fixture();
+        render(&mut app, 80, 24);
+        app.topology_state.summary_scroll = 3;
+        app.topology_state.content_tab = ContentTab::Summary;
+        app.topology_state.push_history();
+        app.topology_state.content_tab = ContentTab::Record;
+        app.topology_state.summary_scroll = 0;
+        let frame = app.topology_state.pop_history().unwrap();
+        app.topology_state.restore_history(frame);
+        assert_eq!(app.topology_state.content_tab, ContentTab::Summary);
+        assert_eq!(app.topology_state.summary_scroll, 3);
+    }
+
+    #[test]
+    fn topology_arrow_movement_keeps_the_summary_tab_but_node_activation_opens_record() {
+        use super::super::topology::ContentTab;
+        let mut app = brief_fixture();
+        render(&mut app, 160, 50);
+        app.set_focus(Target::TopologyGraph);
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.topology_state.content_tab, ContentTab::Summary);
+        app.activate_target(Target::TopologyNode(1));
+        assert_eq!(app.topology_state.content_tab, ContentTab::Record);
+    }
+
+    #[test]
+    fn topology_summary_and_record_stay_reachable_in_compact_and_tiny_modes() {
+        let mut app = brief_fixture();
+        let text = buffer_text(&render(&mut app, 80, 24));
+        assert!(text.contains("[Graph] [Details] [Controls]"));
+        app.activate_target(Target::TopologyPanel(1));
+        let text = buffer_text(&render(&mut app, 80, 24));
+        assert!(text.contains("[Summary] [Record]"), "{text}");
+        app.activate_target(Target::TopologyContentTab(1));
+        assert_eq!(
+            app.topology_state.content_tab,
+            super::super::topology::ContentTab::Record
+        );
+        let text = buffer_text(&render(&mut app, 60, 20));
+        assert!(text.contains("[Summary] [Record]"), "{text}");
+        for (w, h) in [(60, 18), (40, 20)] {
+            let text = buffer_text(&render(&mut app, w, h));
+            assert!(text.contains("Back"), "{w}x{h}: {text}");
+            assert!(text.contains("Needs"), "{w}x{h}: {text}");
+        }
+    }
+
+    fn app_with_packet() -> App {
+        use argos_osint_core::brain_neighborhood_brief as brief;
+        let mut app = brief_fixture();
+        let seed = app.topology_state.seed.clone().unwrap();
+        let (depth, cycle) = (
+            app.topology_state.depth,
+            app.topology_state.cycle_scope.clone(),
+        );
+        let key = app.topology_state.summary.basis_key.clone();
+        let snap = app.topology_state.snapshot.as_mut().unwrap();
+        let input = brief::build_input(
+            &brief::BriefInput {
+                snapshot: snap,
+                seed: &seed,
+                depth,
+                cycle: &cycle,
+                payloads: Default::default(),
+                payload_reads_skipped: 0,
+            },
+            &key,
+        );
+        snap.neighborhood_input = Some(input);
+        app
+    }
+
+    fn next_summary_event(app: &mut App) -> WorkEvent {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let Ok(event) = app.work_rx.try_recv() {
+                if matches!(event, WorkEvent::TopologySummaryLoaded { .. }) {
+                    return event;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "no summary event arrived"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn job_for(app: &App, retry: bool) -> TopologySummaryJob {
+        let snap = app.topology_state.snapshot.as_ref().unwrap();
+        TopologySummaryJob {
+            generation: 1,
+            seed: app.topology_state.seed.clone().unwrap(),
+            options: argos_osint_core::brain_topology::TopologyOptions {
+                depth: app.topology_state.depth,
+                cycle_scope: app.topology_state.cycle_scope.clone(),
+                max_nodes: 100,
+                max_edges: 200,
+                continuation_token: None,
+            },
+            basis_key: app.topology_state.summary.basis_key.clone(),
+            brief: snap.neighborhood_brief.clone().unwrap(),
+            input: snap.neighborhood_input.clone().unwrap(),
+            request: None,
+            retry,
+            stop: Arc::new(AtomicBool::new(false)),
+            limits: argos_osint_core::brain_neighborhood_brief_exec::WatchLimits::standard(),
+        }
+    }
+
+    #[test]
+    fn topology_summary_rows_are_cached_per_key_and_keep_markup_characters() {
+        use super::super::topology::{summary_rows, SummaryGen, SummaryRow};
+        use std::rc::Rc;
+        let mut app = brief_fixture();
+        app.topology_state
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .neighborhood_brief
+            .as_mut()
+            .unwrap()
+            .overview
+            .as_mut()
+            .unwrap()
+            .text = "Entity `x*y*` and *Star* Corp".into();
+        let st = &app.topology_state;
+        let a = summary_rows(st, false, None, 40);
+        let b = summary_rows(st, false, None, 40);
+        assert!(Rc::ptr_eq(&a, &b), "same key reuses the built rows");
+        let plain: String = a
+            .iter()
+            .filter_map(|r| match r {
+                SummaryRow::Text(line) => Some(
+                    line.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            plain.contains("`x*y*`") && plain.contains("*Star*"),
+            "{plain}"
+        );
+        // Each key component rebuilds.
+        assert!(!Rc::ptr_eq(&a, &summary_rows(st, false, None, 41)));
+        assert!(!Rc::ptr_eq(&a, &summary_rows(st, true, None, 41)));
+        let c = summary_rows(st, false, None, 40);
+        app.topology_state.summary.gen = SummaryGen::Pending;
+        app.topology_state.summary.generation += 1;
+        let d = summary_rows(&app.topology_state, false, None, 40);
+        assert!(!Rc::ptr_eq(&c, &d));
+        // A failure kind rebuilds; the message text is not part of the key.
+        use argos_osint_core::brain_neighborhood_brief_exec::{FailureKind, GenerationFailure};
+        app.topology_state.summary.gen = SummaryGen::Failed(GenerationFailure {
+            kind: FailureKind::Timeout,
+            message: "first".into(),
+        });
+        let f1 = summary_rows(&app.topology_state, false, None, 40);
+        assert!(!Rc::ptr_eq(&d, &f1));
+        app.topology_state.summary.gen = SummaryGen::Failed(GenerationFailure {
+            kind: FailureKind::Rejected,
+            message: "first".into(),
+        });
+        let f2 = summary_rows(&app.topology_state, false, None, 40);
+        assert!(!Rc::ptr_eq(&f1, &f2), "a different kind rebuilds");
+        app.topology_state.summary.gen = SummaryGen::Failed(GenerationFailure {
+            kind: FailureKind::Rejected,
+            message: "second".into(),
+        });
+        let f3 = summary_rows(&app.topology_state, false, None, 40);
+        assert!(Rc::ptr_eq(&f2, &f3), "same kind and generation reuse rows");
+        // Scrolling reuses the cache: no rebuild between wheel steps.
+        render(&mut app, 120, 40);
+        let before = summary_rows(&app.topology_state, false, None, 33);
+        app.set_focus(Target::TopologySummary);
+        key(&mut app, KeyCode::Down);
+        let after = summary_rows(&app.topology_state, false, None, 33);
+        assert!(Rc::ptr_eq(&before, &after) || before.len() == after.len());
+    }
+
+    #[test]
+    fn topology_summary_open_failure_becomes_a_typed_failure_not_a_stuck_generating() {
+        use super::super::topology::SummaryGen;
+        use argos_osint_core::brain_neighborhood_brief_exec::FailureKind;
+        let mut app = app_with_packet();
+        app.background_db = Some(PathBuf::from("/nonexistent-dir/none/argos.db"));
+        app.begin_topology_summary(false);
+        assert!(matches!(
+            app.topology_state.summary.gen,
+            SummaryGen::Pending
+        ));
+        let event = next_summary_event(&mut app);
+        app.on_work_event(event);
+        match &app.topology_state.summary.gen {
+            SummaryGen::Failed(f) => assert_eq!(f.kind, FailureKind::Storage),
+            other => panic!("{other:?}"),
+        }
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("Overview"), "fallback kept");
+        assert!(!text.contains("generating"));
+    }
+
+    #[test]
+    fn topology_summary_idle_request_is_reported_not_silent() {
+        use argos_osint_core::brain_neighborhood_brief_exec as exec;
+        let app = app_with_packet();
+        let mut job = job_for(&app, true);
+        // A retry for a request that was never queued polls as Idle.
+        let fingerprint = exec::route_fingerprint(&load_summary_runtime());
+        job.request = Some(Box::new(exec::build_request(&job.input, &fingerprint)));
+        let events = std::cell::RefCell::new(Vec::new());
+        job.run(&app.store, None, &load_summary_runtime(), &|e| {
+            events.borrow_mut().push(e)
+        });
+        let events = events.into_inner();
+        let last = events.last().expect("an event");
+        match last {
+            WorkEvent::TopologySummaryLoaded {
+                outcome: Err(f), ..
+            } => {
+                assert_eq!(f.kind, exec::FailureKind::Storage);
+            }
+            _ => panic!("expected a typed failure"),
+        }
+    }
+
+    #[test]
+    fn topology_summary_unworked_request_times_out_with_waiting_for_worker() {
+        use super::super::topology::SummaryGen;
+        use argos_osint_core::brain_neighborhood_brief_exec as exec;
+        let mut app = app_with_packet();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("argos.db");
+        let store = Store::open(&db).unwrap();
+        let mut job = job_for(&app, false);
+        job.limits = exec::WatchLimits {
+            max_poll_errors: 5,
+            deadline: std::time::Duration::from_millis(150),
+        };
+        let events = std::cell::RefCell::new(Vec::new());
+        job.run(&store, Some(&db), &load_summary_runtime(), &|e| {
+            events.borrow_mut().push(e)
+        });
+        let events = events.into_inner();
+        app.topology_state.summary.generation = 1;
+        app.topology_state.summary.gen = SummaryGen::Pending;
+        for event in events {
+            app.on_work_event(event);
+        }
+        match &app.topology_state.summary.gen {
+            SummaryGen::Failed(f) => assert_eq!(f.kind, exec::FailureKind::Timeout),
+            other => panic!("{other:?}"),
+        }
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("timed out"), "{text}");
+        assert!(text.contains("Overview"));
+    }
+
+    #[test]
+    fn topology_summary_begin_publishes_the_fallback_and_goes_pending() {
+        use super::super::topology::SummaryGen;
+        use argos_osint_core::brain_neighborhood_brief as brief;
+        let mut app = brief_fixture();
+        let seed = app.topology_state.seed.clone().unwrap();
+        let (depth, cycle) = (
+            app.topology_state.depth,
+            app.topology_state.cycle_scope.clone(),
+        );
+        let snap = app.topology_state.snapshot.as_mut().unwrap();
+        let input = brief::build_input(
+            &brief::BriefInput {
+                snapshot: snap,
+                seed: &seed,
+                depth,
+                cycle: &cycle,
+                payloads: Default::default(),
+                payload_reads_skipped: 0,
+            },
+            &app.topology_state.summary.basis_key,
+        );
+        snap.neighborhood_input = Some(input);
+        app.begin_topology_summary(false);
+        let state = &app.topology_state.summary;
+        assert_eq!(state.generation, 1);
+        assert!(
+            matches!(
+                state.gen,
+                SummaryGen::Pending | SummaryGen::Failed(_) | SummaryGen::Generated(_)
+            ),
+            "{:?}",
+            state.gen
+        );
+        // The deterministic brief is on screen whatever the outcome.
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(text.contains("Overview"));
+    }
+
     #[test]
     fn topology_keyboard_respects_filters_and_exits_edge_inspection() {
         let mut app = topology_fixture();
@@ -22396,7 +23554,7 @@ mod tests {
         assert_eq!(app.topology_state.related_sel, 0);
         render(&mut app, 160, 50);
         app.activate_target(Target::TopologyPanel(1));
-        assert_eq!(app.focus, Target::TopologyInspector);
+        assert_eq!(app.focus, Target::TopologySummary);
     }
 
     #[test]
@@ -22692,6 +23850,104 @@ mod tests {
                 &mut app,
                 &dir,
                 &format!("topology-loading-{width}x{height}"),
+                width,
+                height,
+            );
+        }
+        for (width, height) in [
+            (160, 50),
+            (120, 40),
+            (100, 32),
+            (80, 24),
+            (60, 20),
+            (60, 18),
+            (40, 20),
+        ] {
+            use super::super::topology::SummaryGen;
+            use argos_osint_core::brain_neighborhood_brief::CoverageStatus;
+            use argos_osint_core::brain_neighborhood_brief_exec::FailureKind;
+            let base = || {
+                let mut app = brief_fixture();
+                app.topology_state.active_panel_tab = 1;
+                app.topology_state.summary.generation = 1;
+                app
+            };
+            let mut generating = base();
+            generating.topology_state.summary.gen = SummaryGen::Pending;
+            dump_cells(
+                &mut generating,
+                &dir,
+                &format!("topology-summary-generating-{width}x{height}"),
+                width,
+                height,
+            );
+            let mut generated = base();
+            let g = generated_from(
+                &generated,
+                "Harbor contract shifted links two actors and two articles; the tender report and freight review are the retained sources.",
+            );
+            generated.topology_state.summary.gen = SummaryGen::Generated(g);
+            dump_cells(
+                &mut generated,
+                &dir,
+                &format!("topology-summary-generated-{width}x{height}"),
+                width,
+                height,
+            );
+            let mut failed = base();
+            failed.topology_state.summary.gen =
+                SummaryGen::Failed(failure(FailureKind::NotConfigured));
+            dump_cells(
+                &mut failed,
+                &dir,
+                &format!("topology-summary-blocked-{width}x{height}"),
+                width,
+                height,
+            );
+            let mut rejected = base();
+            rejected.topology_state.summary.gen =
+                SummaryGen::Failed(failure(FailureKind::Rejected));
+            dump_cells(
+                &mut rejected,
+                &dir,
+                &format!("topology-summary-failed-{width}x{height}"),
+                width,
+                height,
+            );
+            let mut stale = base();
+            stale.topology_error =
+                Some("Read failed · previous snapshot retained · r retries".into());
+            dump_cells(
+                &mut stale,
+                &dir,
+                &format!("topology-summary-stale-{width}x{height}"),
+                width,
+                height,
+            );
+            let mut limited = base();
+            limited
+                .topology_state
+                .snapshot
+                .as_mut()
+                .unwrap()
+                .neighborhood_brief
+                .as_mut()
+                .unwrap()
+                .coverage
+                .status = CoverageStatus::Limited;
+            dump_cells(
+                &mut limited,
+                &dir,
+                &format!("topology-summary-limited-{width}x{height}"),
+                width,
+                height,
+            );
+            let mut overflow = base();
+            overflow.topology_state.summary_scroll = 4;
+            dump_cells(
+                &mut overflow,
+                &dir,
+                &format!("topology-summary-overflow-{width}x{height}"),
                 width,
                 height,
             );

@@ -32,6 +32,8 @@ pub mod brain_browse;
 pub mod brain_kinds;
 #[cfg_attr(not(feature = "lancedb"), path = "brain_lance_off.rs")]
 pub mod brain_lance;
+pub mod brain_neighborhood_brief;
+pub mod brain_neighborhood_brief_exec;
 pub mod brain_query;
 pub mod brain_schema;
 pub mod brain_scope;

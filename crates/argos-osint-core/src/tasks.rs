@@ -204,6 +204,7 @@ pub const SUMMARY_OPERATIONS: &[&str] = &[
     "section_digest",
     "atlas_brief",
     "article_description",
+    "topology_neighborhood",
     "summarization",
 ];
 
@@ -2691,5 +2692,40 @@ mod tests {
         let (claimed, work) = claim_index_work(&conn, "w", 30, &now).unwrap().unwrap();
         assert_eq!(work.operation, "index_rebuild");
         assert_eq!(claimed.operation, "index_rebuild");
+    }
+
+    #[test]
+    fn summary_pool_ineligible_heads_do_not_starve_fresh_summary_work() {
+        let conn = mem();
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::days(5)).to_rfc3339();
+        let now = now.to_rfc3339();
+        // Older, ineligible heads: a stale job, a cancelled job, a retired job.
+        job(&conn, "j-stale", &old);
+        task(&conn, "t-stale", "j-stale", "atlas_brief", &old);
+        job(&conn, "j-cancel", &old);
+        task(&conn, "t-cancel", "j-cancel", "atlas_brief", &old);
+        conn.execute(
+            "UPDATE argos_jobs SET cancel_requested=1 WHERE id='j-cancel'",
+            [],
+        )
+        .unwrap();
+        job(&conn, "j-retired", &old);
+        task(&conn, "t-retired", "j-retired", "atlas_brief", &old);
+        conn.execute(
+            "INSERT INTO argos_job_retirements(job_id,retired_at,reason) VALUES('j-retired',?1,'t')",
+            [&now],
+        )
+        .unwrap();
+        // Fresh summary work enqueued later must still be claimed.
+        job(&conn, "j-fresh", &now);
+        task(&conn, "t-fresh", "j-fresh", "atlas_brief", &now);
+        let got = claim_next_in(&conn, &[POOL_SUMMARY], "sum", 30, &now)
+            .unwrap()
+            .expect("fresh summary task must not be starved by ineligible heads");
+        assert_eq!(got.id, "t-fresh");
+        assert!(claim_next_in(&conn, &[POOL_SUMMARY], "sum", 30, &now)
+            .unwrap()
+            .is_none());
     }
 }

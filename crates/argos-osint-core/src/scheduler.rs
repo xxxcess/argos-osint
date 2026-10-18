@@ -264,41 +264,156 @@ pub fn drain_index_once(
     Ok(done)
 }
 
+/// One finished summary flush task, with its truthful terminal outcome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlushOutcome {
+    pub task_id: String,
+    pub operation: String,
+    pub cache_key: String,
+    pub tag: String,
+    /// A complete generated (non-fallback) summary is cached. `llm_fallback`,
+    /// rejections and failures are not success.
+    pub generated: bool,
+    /// The lease was lost; the task was neither published nor completed.
+    pub stale: bool,
+}
+
 /// Drain pending summarization flush tasks from the summary pool only.
 ///
 /// When `secret` is `Some`, runs [`crate::summarization::try_live_summary_upgrade`]
 /// (2-attempt `complete_summary`). When `None`, keeps deterministic cache and
 /// records `cached_deterministic_no_secret` — never invents network success.
 /// Errors are recorded as typed failures under the shared retry policy, never
-/// as a completed result string.
+/// as a completed result string. Topology neighborhood tasks need the whole
+/// role chain; use [`drain_summary_flush_with_runtime`].
 pub fn drain_summary_flush(
     conn: &Connection,
     owner: &str,
     secret: Option<&crate::secrets::ProviderSecret>,
 ) -> Result<usize> {
-    let mut done = 0usize;
+    Ok(
+        drain_summary_flush_with_runtime(conn, owner, secret, None, None, DEFAULT_LEASE_SECS)?
+            .len(),
+    )
+}
+
+/// Role-aware drain. Topology neighborhood tasks receive the worker's full
+/// `RoleRuntime` (every route of the Summarization chain) and are generated,
+/// validated, published and completed under the lease fence. Other modes keep
+/// the single-secret path. Returns each task's terminal outcome.
+pub fn drain_summary_flush_with_runtime(
+    conn: &Connection,
+    owner: &str,
+    secret: Option<&crate::secrets::ProviderSecret>,
+    runtime: Option<&crate::recon::model_exec::RoleRuntime>,
+    db_path: Option<&std::path::Path>,
+    lease_secs: i64,
+) -> Result<Vec<FlushOutcome>> {
+    drain_summary_flush_lazy(
+        conn,
+        owner,
+        Lazy::given(secret),
+        Lazy::given(runtime),
+        db_path,
+        lease_secs,
+    )
+}
+
+/// A dependency that is either supplied or loaded on first use. The idle
+/// worker tick therefore reads no auth/settings files: they load only after a
+/// summary task has actually been claimed, once per drain.
+pub(crate) struct Lazy<'a, T> {
+    given: Option<Option<&'a T>>,
+    load: Option<fn() -> Option<T>>,
+    cell: std::cell::OnceCell<Option<T>>,
+}
+
+impl<'a, T> Lazy<'a, T> {
+    pub(crate) fn given(value: Option<&'a T>) -> Self {
+        Self {
+            given: Some(value),
+            load: None,
+            cell: std::cell::OnceCell::new(),
+        }
+    }
+
+    pub(crate) fn loaded_on_demand(load: fn() -> Option<T>) -> Self {
+        Self {
+            given: None,
+            load: Some(load),
+            cell: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn get(&self) -> Option<&T> {
+        if let Some(value) = self.given {
+            return value;
+        }
+        self.cell
+            .get_or_init(|| self.load.and_then(|load| load()))
+            .as_ref()
+    }
+}
+
+pub(crate) fn drain_summary_flush_lazy(
+    conn: &Connection,
+    owner: &str,
+    secret: Lazy<crate::secrets::ProviderSecret>,
+    runtime: Lazy<crate::recon::model_exec::RoleRuntime>,
+    db_path: Option<&std::path::Path>,
+    lease_secs: i64,
+) -> Result<Vec<FlushOutcome>> {
+    let mut outcomes = Vec::new();
     for _ in 0..8 {
         let now = chrono::Utc::now().to_rfc3339();
-        let Some(claimed) = tasks::claim_next_in(
-            conn,
-            &[tasks::POOL_SUMMARY],
-            owner,
-            DEFAULT_LEASE_SECS,
-            &now,
-        )?
+        let Some(claimed) =
+            tasks::claim_next_in(conn, &[tasks::POOL_SUMMARY], owner, lease_secs, &now)?
         else {
             break;
         };
+        let outcome = |tag: &str, generated: bool, stale: bool| FlushOutcome {
+            task_id: claimed.id.clone(),
+            operation: claimed.operation.clone(),
+            cache_key: claimed.input_hash.clone(),
+            tag: tag.to_string(),
+            generated,
+            stale,
+        };
+        if claimed.operation == crate::brain_neighborhood_brief_exec::OPERATION {
+            match crate::brain_neighborhood_brief_exec::run_claimed(
+                conn,
+                &claimed,
+                runtime.get(),
+                db_path,
+                lease_secs,
+            ) {
+                Ok(o) => outcomes.push(outcome(&o.tag, o.generated, o.stale)),
+                Err(error) => {
+                    let finished = chrono::Utc::now().to_rfc3339();
+                    tasks::fail_claimed(
+                        conn,
+                        &claimed,
+                        OperationKind::Summarization,
+                        &error,
+                        &finished,
+                    )?;
+                    outcomes.push(outcome("storage_failed", false, false));
+                }
+            }
+            continue;
+        }
         // Typed routing of failures: a missing request is permanent (nothing to
         // upgrade); storage errors are not provider errors and are not retried
         // blindly. No error text is ever stored as a completion result.
         let result = match crate::summarization::load_flush_request(conn, &claimed.input_hash) {
-            Ok(Some(_)) => {
-                crate::summarization::try_live_summary_upgrade(conn, secret, &claimed.input_hash)
-                    .map_err(|err| {
-                        tasks::TaskError::new(tasks::ErrorCategory::Unknown, format!("{err:#}"))
-                    })
-            }
+            Ok(Some(_)) => crate::summarization::try_live_summary_upgrade(
+                conn,
+                secret.get(),
+                &claimed.input_hash,
+            )
+            .map_err(|err| {
+                tasks::TaskError::new(tasks::ErrorCategory::Unknown, format!("{err:#}"))
+            }),
             Ok(None) => Err(tasks::TaskError::new(
                 tasks::ErrorCategory::Unknown,
                 format!("flush request missing for {}", claimed.input_hash),
@@ -310,8 +425,9 @@ pub fn drain_summary_flush(
         };
         let finished = chrono::Utc::now().to_rfc3339();
         match result {
-            Ok((_, tag)) => {
+            Ok((summary, tag)) => {
                 tasks::complete_claimed(conn, &claimed, tag, &finished)?;
+                outcomes.push(outcome(tag, !summary.fallback, false));
             }
             Err(error) => {
                 tasks::fail_claimed(
@@ -321,16 +437,24 @@ pub fn drain_summary_flush(
                     &error,
                     &finished,
                 )?;
+                outcomes.push(outcome("failed", false, false));
             }
         }
-        done += 1;
     }
-    Ok(done)
+    Ok(outcomes)
 }
 
 /// Drain without a provider secret (deterministic cache only).
 pub fn drain_summary_flush_cached(conn: &Connection, owner: &str) -> Result<usize> {
     drain_summary_flush(conn, owner, None)
+}
+
+/// The worker's full role runtime (all routes), when auth and settings load.
+fn load_role_runtime() -> Option<crate::recon::model_exec::RoleRuntime> {
+    Some(crate::recon::model_exec::RoleRuntime::new(
+        crate::secrets::AuthFile::load().ok()?,
+        crate::provider::SettingsFile::load().ok()?,
+    ))
 }
 
 fn load_summarization_secret() -> Option<crate::secrets::ProviderSecret> {
@@ -452,7 +576,7 @@ impl WorkerPool {
                         tasks::retire_atlas_insight_work(&conn, &chrono::Utc::now().to_rfc3339());
                     // Best-effort: load summarization role secret when configured.
                     // Never invents success when auth/settings/secret are missing.
-                    let secret = load_summarization_secret();
+                    // Loaded lazily, only once a summary task is claimed.
                     // Service-health row; batches/tasks supply the job history.
                     if loops.is_multiple_of(40) {
                         let now = chrono::Utc::now().to_rfc3339();
@@ -468,7 +592,14 @@ impl WorkerPool {
                         }
                     }
                     loops = loops.wrapping_add(1);
-                    let _ = drain_summary_flush(&conn, &owner, secret.as_ref());
+                    let _ = drain_summary_flush_lazy(
+                        &conn,
+                        &owner,
+                        Lazy::loaded_on_demand(load_summarization_secret),
+                        Lazy::loaded_on_demand(load_role_runtime),
+                        Some(&db_path),
+                        DEFAULT_LEASE_SECS,
+                    );
                     std::thread::sleep(Duration::from_millis(750));
                 }
             })
@@ -820,6 +951,38 @@ mod tests {
             &now,
         )
         .unwrap());
+    }
+
+    static LOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn counting_secret() -> Option<crate::secrets::ProviderSecret> {
+        LOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        None
+    }
+    fn counting_runtime() -> Option<crate::recon::model_exec::RoleRuntime> {
+        LOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        None
+    }
+
+    #[test]
+    fn an_idle_summary_tick_loads_no_secret_or_role_runtime() {
+        let conn = Connection::open_in_memory().unwrap();
+        tasks::migrate_tables(&conn).unwrap();
+        LOADS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let out = drain_summary_flush_lazy(
+            &conn,
+            "worker",
+            Lazy::loaded_on_demand(counting_secret),
+            Lazy::loaded_on_demand(counting_runtime),
+            None,
+            DEFAULT_LEASE_SECS,
+        )
+        .unwrap();
+        assert!(out.is_empty());
+        assert_eq!(
+            LOADS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "idle ticks must not read auth/settings"
+        );
     }
 
     #[test]

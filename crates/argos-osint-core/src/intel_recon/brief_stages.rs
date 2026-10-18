@@ -2029,7 +2029,14 @@ pub async fn run_claimed(
                 if done.load(Ordering::Acquire) {
                     break;
                 }
-                let renewed = renew(&db, &c, lease);
+                // A single refused or late renewal under load is retried once
+                // before the lease is declared lost; a stolen or expired lease
+                // is refused both times.
+                let mut renewed = renew(&db, &c, lease);
+                if !renewed {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    renewed = renew(&db, &c, lease);
+                }
                 if !renewed {
                     note_heartbeat(&db, &c.id, "lease renewal failed; stage cancelled");
                     lost.store(true, Ordering::Release);

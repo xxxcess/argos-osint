@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300" role="img" aria-labelledby="topology-summary-states-title topology-summary-states-desc">
+<title id="topology-summary-states-title">Argos Topology Neighborhood Summary States</title>
+<desc id="topology-summary-states-desc">The fallback brief is always shown. Idle becomes Pending when a request is queued. A complete validated result moves Pending to Generated. Failure, rejection, a blocked route or a deadline moves Pending to Failed while the fallback stays visible. Retry moves Failed back to Pending without blanking content. A changed basis, scope or failed refresh marks Generated or Fallback content Stale until a matching result arrives.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#4f5d75"/></marker></defs>
+<rect width="800" height="300" fill="#f5f5f5"/>
+<g fill="none" stroke="#4f5d75" marker-end="url(#arrow)">
+<path d="M170 90 H230"/>
+<path d="M370 90 H430"/>
+<path d="M300 130 V190 H430"/>
+<path d="M500 220 V245 H260 V130"/>
+<path d="M570 90 H640"/>
+</g>
+<g font-family="Geist,system-ui,sans-serif" font-size="13" fill="#2d3142" text-anchor="middle">
+<rect x="30" y="50" width="140" height="80" rx="6" fill="#fff" stroke="#2d3142"/>
+<text x="100" y="82">Idle</text>
+<text x="100" y="102" font-size="11" fill="#4f5d75">Fallback shown</text>
+<text x="100" y="118" font-size="11" fill="#4f5d75">isolated: no request</text>
+<rect x="230" y="50" width="140" height="80" rx="6" fill="#fff4ee" stroke="#eb6c36"/>
+<text x="300" y="82">Pending</text>
+<text x="300" y="102" font-size="11" fill="#4f5d75">generating…</text>
+<text x="300" y="118" font-size="11" fill="#4f5d75">fallback stays</text>
+<rect x="430" y="50" width="140" height="80" rx="6" fill="#fff4ee" stroke="#eb6c36"/>
+<text x="500" y="82">Generated</text>
+<text x="500" y="102" font-size="11" fill="#4f5d75">validated, atomic</text>
+<text x="500" y="118" font-size="11" fill="#4f5d75">replaces fallback</text>
+<rect x="430" y="160" width="140" height="60" rx="6" fill="#fff" stroke="#2d3142"/>
+<text x="500" y="186">Failed</text>
+<text x="500" y="202" font-size="11" fill="#4f5d75">blocked · rejected</text>
+<text x="500" y="214" font-size="11" fill="#4f5d75">timed out</text>
+<rect x="640" y="50" width="140" height="80" rx="6" fill="#fff" stroke="#2d3142"/>
+<text x="710" y="82">Stale</text>
+<text x="710" y="102" font-size="11" fill="#4f5d75">refresh failed or</text>
+<text x="710" y="118" font-size="11" fill="#4f5d75">new scope loading</text>
+<text x="200" y="82" font-size="11" fill="#4f5d75">queue</text>
+<text x="400" y="82" font-size="11" fill="#4f5d75">valid</text>
+<text x="365" y="182" font-size="11" fill="#4f5d75">failure</text>
+<text x="605" y="82" font-size="11" fill="#4f5d75">stale</text>
+<text x="520" y="262" font-size="11" fill="#4f5d75">Retry summary: same request, content kept, back to Pending</text>
+<text x="400" y="288" font-size="11" fill="#4f5d75">Selection, filters, pan and zoom never change the state</text>
+</g>
+</svg>

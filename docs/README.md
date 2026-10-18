@@ -16,6 +16,7 @@ Deep investigation: [architecture.md](architecture.md). Keys and roles: [provide
 | [profile-analytics-dashboard.md](profile-analytics-dashboard.md) | Profile's 20 primary views, simultaneous dashboard, shared layout/components and viewport acceptance |
 | [profile-dashboard-and-search.md](profile-dashboard-and-search.md) | Profile metric dictionary/history, portable configuration and named search engines |
 | [topology-mapper.md](topology-mapper.md) | Seeded Brain/Intel topology, Graph first layout, provenance, bounds and targeted list density |
+| [topology-scope-summary-plan.md](topology-scope-summary-plan.md) | Final neighborhood-summary design, concept-to-record mapping and Summary sizing |
 | [nlp-preprocessing.md](nlp-preprocessing.md) | Local NLP, immutable evidence, selection, cache and verification |
 | [concepts.md](concepts.md) | Glossary: apps vs IDs, roles, bindings, Intel jobs, schema |
 | [conventions.md](conventions.md) | TUI, schema, tests, agent scratch, planning files |

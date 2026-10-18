@@ -133,6 +133,19 @@ impl Deadlines {
         }
     }
 
+    /// Structured Summarization operations (`TimeoutProfile::SUMMARIZATION`).
+    pub const fn summarization() -> Self {
+        let p = crate::provider_request::TimeoutProfile::SUMMARIZATION;
+        Self {
+            connect: Duration::from_secs(p.connection),
+            first_response: Duration::from_secs(p.first_response),
+            idle: Duration::from_secs(p.stream_inactivity),
+            total: Duration::from_secs(p.attempt_execution),
+            first_output: None,
+            model_inactivity: None,
+        }
+    }
+
     /// Native bounded decisions keep their own short policy.
     pub const fn native_decision() -> Self {
         Self::ordinary()
@@ -1230,6 +1243,12 @@ pub mod mock {
 
     /// Serve `script` in order (the last reply repeats).
     pub async fn serve(script: Vec<Reply>) -> Server {
+        serve_delayed(std::time::Duration::ZERO, script).await
+    }
+
+    /// Like [`serve`], but every reply is held back for `delay` after the
+    /// request has been read (a slow provider).
+    pub async fn serve_delayed(delay: std::time::Duration, script: Vec<Reply>) -> Server {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let hits = Arc::new(AtomicUsize::new(0));
@@ -1265,6 +1284,9 @@ pub mod mock {
                             body.len() + 4096
                         ),
                     };
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
                     let _ = socket.write_all(bytes.as_bytes()).await;
                     let _ = socket.shutdown().await;
                 });

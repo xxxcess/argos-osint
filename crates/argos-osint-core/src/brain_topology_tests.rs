@@ -1590,3 +1590,105 @@ fn topology_user_claim_assessment_status_distinguishes_unassessed_from_receipts(
         "unassessed"
     );
 }
+
+#[test]
+fn topology_neighborhood_brief_is_built_with_the_snapshot_without_writes() {
+    let s = Store::memory().unwrap();
+    let a = claim(&s, "The port closed after the attack");
+    let b = claim(&s, "Harbor traffic was rerouted");
+    let link = connect(&s, &b, &a);
+    let org = actor(&s, "Harbor Authority", "scope-a");
+    for m in [&a, &b] {
+        actors::add_memory_actor_ref(
+            &s.conn,
+            m,
+            &org,
+            "subject",
+            crate::memory_metadata::IdentityState::Provisional,
+            &serde_json::json!({"binding":org}),
+        )
+        .unwrap();
+    }
+    let writes_before: i64 = s
+        .conn
+        .query_row("SELECT total_changes()", [], |r| r.get(0))
+        .unwrap();
+    let seed = TopologySeed::Claim(a.clone());
+    let snap = s
+        .topology_snapshot(&seed, &TopologyOptions::default())
+        .unwrap();
+    let again = s
+        .topology_snapshot(&seed, &TopologyOptions::default())
+        .unwrap();
+    let writes_after: i64 = s
+        .conn
+        .query_row("SELECT total_changes()", [], |r| r.get(0))
+        .unwrap();
+    let brief = snap.neighborhood_brief.as_ref().expect("brief");
+    let packet = snap.neighborhood_input.as_ref().expect("packet");
+    assert_eq!(brief.basis_key, packet.basis_key);
+    assert_eq!(
+        brief.basis_key,
+        again.neighborhood_brief.as_ref().unwrap().basis_key
+    );
+    assert!(brief.overview.is_some());
+    assert!(brief.connections.iter().any(|c| c.edge_ids.contains(&link)));
+    assert!(brief.verify(&snap).is_empty(), "{:?}", brief.verify(&snap));
+    assert!(packet.worth_generating());
+    assert_eq!(
+        writes_before, writes_after,
+        "building the brief writes nothing"
+    );
+    // A different depth is a different neighborhood and a different basis.
+    let shallow = s
+        .topology_snapshot(
+            &seed,
+            &TopologyOptions {
+                depth: 1,
+                ..TopologyOptions::default()
+            },
+        )
+        .unwrap();
+    let deep = s
+        .topology_snapshot(
+            &seed,
+            &TopologyOptions {
+                depth: 3,
+                ..TopologyOptions::default()
+            },
+        )
+        .unwrap();
+    assert_ne!(
+        shallow.neighborhood_brief.unwrap().basis_key,
+        deep.neighborhood_brief.unwrap().basis_key
+    );
+}
+
+#[test]
+fn topology_link_seed_and_missing_seed_briefs() {
+    let s = Store::memory().unwrap();
+    let a = claim(&s, "Alpha said the road opened");
+    let b = claim(&s, "Beta said the road stayed shut");
+    let link = connect(&s, &a, &b);
+    let snap = s
+        .topology_snapshot(
+            &TopologySeed::Link(link.clone()),
+            &TopologyOptions::default(),
+        )
+        .unwrap();
+    let brief = snap.neighborhood_brief.unwrap();
+    assert!(brief.overview.unwrap().text.contains("recorded link"));
+    let gone = s
+        .topology_snapshot(
+            &TopologySeed::Claim("does-not-exist".into()),
+            &TopologyOptions::default(),
+        )
+        .unwrap();
+    let brief = gone.neighborhood_brief.unwrap();
+    assert_eq!(
+        brief.coverage.status,
+        crate::brain_neighborhood_brief::CoverageStatus::Missing
+    );
+    assert!(brief.connections.is_empty() && brief.interpretation.is_empty());
+    assert!(gone.neighborhood_input.is_none());
+}

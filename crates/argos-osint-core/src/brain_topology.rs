@@ -311,4 +311,12 @@ pub struct TopologySnapshot {
     pub unresolved_endpoints: Vec<String>,
     #[serde(default)]
     pub exploration_exhausted: bool,
+    /// Deterministic, read-only explanation of the loaded neighborhood,
+    /// assembled inside the topology read transaction.
+    #[serde(default)]
+    pub neighborhood_brief: Option<crate::brain_neighborhood_brief::NeighborhoodBrief>,
+    /// Frozen typed packet for the generated explanation (absent when the
+    /// seed is missing).
+    #[serde(default)]
+    pub neighborhood_input: Option<crate::brain_neighborhood_brief::NeighborhoodInput>,
 }

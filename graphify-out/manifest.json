@@ -30,9 +30,9 @@
     "semantic_hash": "769b9d268d68d2b876cb64cebcc855f9"
   },
   "crates/argos-osint-bin/src/tui/app.rs": {
-    "mtime": 1792323642.211709,
-    "seen": 1792327129.8971674,
-    "ast_hash": "6c9d25af649a25197a27643e2e70e3f7",
+    "mtime": 1792327291.884204,
+    "seen": 1792330963.0218978,
+    "ast_hash": "3bb46aeb12005d5ba8a4517b84f4350b",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/jobs.rs": {
@@ -450,9 +450,9 @@
     "semantic_hash": "45cdfb0c86f1dbcab829532eea338d48"
   },
   "crates/argos-osint-core/src/summarization.rs": {
-    "mtime": 1792321361.8722394,
-    "seen": 1792327129.8974073,
-    "ast_hash": "e02d88c2da3c25136f237eebeeea4a7f",
+    "mtime": 1792327291.892204,
+    "seen": 1792330963.0262673,
+    "ast_hash": "e04d41512a147d340d15d763f16d8d62",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/summarization/exec.rs": {
@@ -3186,9 +3186,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/topology.rs": {
-    "mtime": 1792320620.0002394,
-    "seen": 1792327129.8971958,
-    "ast_hash": "26cfaff69e0b0399bd1d646006964091",
+    "mtime": 1792327291.888204,
+    "seen": 1792330963.0223367,
+    "ast_hash": "eadb302e77519f37290d829d6fab0901",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/topology_layout.rs": {
@@ -3504,27 +3504,27 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain_neighborhood_brief.rs": {
-    "mtime": 1792320620.0322394,
-    "seen": 1792327129.8972344,
-    "ast_hash": "66cee3c6e002b5f319f7e45b1b953666",
+    "mtime": 1792327291.888204,
+    "seen": 1792330963.0228922,
+    "ast_hash": "1e66b5bd98c369a556d3e1baf2d86f3e",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain_neighborhood_brief_exec.rs": {
-    "mtime": 1792320620.0322394,
-    "seen": 1792327129.8972354,
-    "ast_hash": "43b03e12174cd973f0071c8826c74e58",
+    "mtime": 1792327291.892204,
+    "seen": 1792330963.0228941,
+    "ast_hash": "fee9245dd6a2d7cc186cb8c827a4d151",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain_neighborhood_brief_exec_tests.rs": {
-    "mtime": 1792320620.0322394,
-    "seen": 1792327129.8972368,
-    "ast_hash": "f4c775e4e5b0c1920e6745bca8c56a23",
+    "mtime": 1792327291.892204,
+    "seen": 1792330963.0228953,
+    "ast_hash": "ba6e5c7b6b6d65337f56c408934295c5",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain_neighborhood_brief_tests.rs": {
-    "mtime": 1792320620.0322394,
-    "seen": 1792327129.8972378,
-    "ast_hash": "69c797476fa884ef5a8e2a0e56ec0544",
+    "mtime": 1792327291.892204,
+    "seen": 1792330963.0228965,
+    "ast_hash": "e5a7ac54ee475da672667fbf7273804f",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_configured_live_tests.rs": {
@@ -3783,6 +3783,48 @@
     "mtime": 1792323663.4197092,
     "seen": 1792327129.8976812,
     "ast_hash": "5a362039db2e0b56dc7d692d1753b72d",
+    "semantic_hash": ""
+  },
+  "docs/screens/neighborhood-summary-ids/README.md": {
+    "mtime": 1792327291.892204,
+    "seen": 1792330963.0292425,
+    "ast_hash": "8999457da1495d47d91d0b4326a22e16",
+    "semantic_hash": ""
+  },
+  "docs/screens/neighborhood-summary-ids/topology-summary-generated-120x40.png": {
+    "mtime": 1792327291.896204,
+    "seen": 1792330963.031539,
+    "ast_hash": "06bba1945682010792686e239db8c093",
+    "semantic_hash": ""
+  },
+  "docs/screens/neighborhood-summary-ids/topology-summary-generated-80x24.png": {
+    "mtime": 1792327291.896204,
+    "seen": 1792330963.0315402,
+    "ast_hash": "c29525cf7b1daff537ee252cdb04bab2",
+    "semantic_hash": ""
+  },
+  "docs/screens/neighborhood-summary-ids/topology-summary-host-note-120x40.png": {
+    "mtime": 1792327291.896204,
+    "seen": 1792330963.0315416,
+    "ast_hash": "6866be84c3d0dac850b4954f47340198",
+    "semantic_hash": ""
+  },
+  "docs/screens/neighborhood-summary-ids/topology-summary-host-note-80x24.png": {
+    "mtime": 1792327291.900204,
+    "seen": 1792330963.0315425,
+    "ast_hash": "54f07f19a8307c469885e1f471095d96",
+    "semantic_hash": ""
+  },
+  "docs/screens/neighborhood-summary-ids/topology-summary-rejected-key-120x40.png": {
+    "mtime": 1792327291.900204,
+    "seen": 1792330963.0315435,
+    "ast_hash": "b51656273e6b680c7e9ca40e904a6d8f",
+    "semantic_hash": ""
+  },
+  "docs/screens/neighborhood-summary-ids/topology-summary-rejected-key-80x24.png": {
+    "mtime": 1792327291.900204,
+    "seen": 1792330963.0315447,
+    "ast_hash": "b250b3e59772e531ce515d8438dfa72d",
     "semantic_hash": ""
   }
 }

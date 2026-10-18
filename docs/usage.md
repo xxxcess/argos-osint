@@ -209,7 +209,7 @@ State: `~/.argos` (`ARGOS_HOME` overrides).
 
 | Path | Contents |
 | --- | --- |
-| `argos.db` | SQLite, `user_version` 26, additive migrations |
+| `argos.db` | SQLite, `user_version` 43 (`SCHEMA_VERSION` in `store.rs`), additive migrations |
 | `memory_lancedb/` | Brain vectors |
 | `config.toml` | Role defaults |
 | `auth.json` | Credentials (owner-only on Unix) |

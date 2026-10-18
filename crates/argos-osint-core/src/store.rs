@@ -41,7 +41,9 @@ pub struct GraphSummary {
 /// complete summary-result envelopes; existing facts are preserved unchanged.
 /// 37 adds the unified Brain graph (typed kinds, actors, endpoints) and brief
 /// stage timings; `atomic_claim` memories migrate to claim/inference in place.
-pub const SCHEMA_VERSION: i64 = 42;
+/// 43 drops the unused `argos_graph_explanations` table (the graph explanation
+/// feature was removed); `memory_graph_summaries` is left alone.
+pub const SCHEMA_VERSION: i64 = 43;
 
 /// Soft hint only: sync rebuild above this size is skipped in favor of an
 /// asynchronous `argos_index_changes` rebuild enqueue (no manual reindex required).
@@ -996,6 +998,15 @@ impl Store {
                 crate::brain_schema::migrate(&self.conn)?;
                 self.conn.pragma_update(None, "user_version", 42)?;
             }
+            if version < 43 {
+                self.conn
+                    .execute_batch("DROP TABLE IF EXISTS argos_graph_explanations")?;
+                self.conn.pragma_update(None, "user_version", 43)?;
+            }
+            // Idempotent and cheap: also clears the orphan from databases that
+            // reached user_version 43 through an earlier, reverted 43.
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS argos_graph_explanations")?;
 
             // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
             if version < 26 {

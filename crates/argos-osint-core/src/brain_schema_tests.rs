@@ -189,3 +189,78 @@ fn schema_41_upgrade_adds_actor_maintenance_without_changing_evidence() {
             .unwrap());
     }
 }
+
+fn user_version(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [name],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap()
+        > 0
+}
+
+#[test]
+fn schema_is_43_on_a_fresh_database_without_the_graph_explanation_table() {
+    let (_d, store) = store();
+    assert_eq!(crate::store::SCHEMA_VERSION, 43);
+    assert_eq!(user_version(&store.conn), 43);
+    assert!(!table_exists(&store.conn, "argos_graph_explanations"));
+}
+
+#[test]
+fn a_42_database_migrates_to_43_and_drops_the_orphan_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("argos.db");
+    {
+        let store = Store::open(&path).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TABLE argos_graph_explanations (memory_id TEXT PRIMARY KEY, summary TEXT);
+                 INSERT INTO argos_graph_explanations VALUES ('m1','old');
+                 PRAGMA user_version = 42;",
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(user_version(&store.conn), 43);
+    assert!(!table_exists(&store.conn, "argos_graph_explanations"));
+    assert!(table_exists(&store.conn, "memory_graph_summaries"));
+}
+
+#[test]
+fn a_database_already_at_43_opens_cleanly_and_keeps_unrelated_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("argos.db");
+    {
+        let store = Store::open(&path).unwrap();
+        // Shape left by an earlier, reverted schema 43.
+        store
+            .conn
+            .execute_batch(
+                "CREATE TABLE topology_scope_summaries (digest TEXT PRIMARY KEY, seed_ref TEXT NOT NULL DEFAULT '');
+                 INSERT INTO topology_scope_summaries VALUES ('d1','m1');
+                 CREATE TABLE argos_graph_explanations (memory_id TEXT PRIMARY KEY);",
+            )
+            .unwrap();
+        assert_eq!(user_version(&store.conn), 43);
+    }
+    for _ in 0..2 {
+        let store = Store::open(&path).unwrap();
+        assert_eq!(user_version(&store.conn), 43);
+        assert!(!table_exists(&store.conn, "argos_graph_explanations"));
+        let kept: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM topology_scope_summaries", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(kept, 1, "the leftover topology table is not touched");
+    }
+}

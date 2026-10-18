@@ -6851,10 +6851,11 @@ fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
         if let Some(insight) = &app.selected_insight {
             memory_anchors_text(insight)
         } else {
-            "Find filters saved memory. Select an investigation insight to read its anchors.".into()
+            "Find filters saved memory. Enter opens the selected memory in the topology mapper."
+                .into()
         }
     } else {
-        "Find filters saved memory. Select an investigation insight to read its anchors.".into()
+        "Find filters saved memory. Enter opens the selected memory in the topology mapper.".into()
     };
     let recall_content = recalled.clone();
     let recall_w = inset(layout.recall).width.max(1) as usize;

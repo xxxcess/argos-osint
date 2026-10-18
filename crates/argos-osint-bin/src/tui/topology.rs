@@ -892,8 +892,10 @@ fn draw_graph_annotations(
     };
     let mut lines = vec![Line::styled(
         format!(
-            "Within {} hops · {scope} · {}%",
-            state.depth, state.zoom_percent
+            "Within {} hop{} · {scope} · {}%",
+            state.depth,
+            if state.depth == 1 { "" } else { "s" },
+            state.zoom_percent
         ),
         theme::muted(),
     )];

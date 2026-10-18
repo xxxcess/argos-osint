@@ -21181,6 +21181,63 @@ mod tests {
     }
 
     #[test]
+    fn dump_memory_enter_topology_screens() {
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        for (text, conversation) in [
+            ("Harbor contract shifted to Aster Logistics", "ship-a"),
+            ("Aster Logistics owns two Baltic freight routes", "ship-a"),
+            ("Capacity fell 18% after the tender", "ship-b"),
+        ] {
+            app.store
+                .add_user_claim(
+                    text,
+                    "fact",
+                    MemorySource {
+                        app: "test".into(),
+                        conversation_id: conversation.into(),
+                        message_id: None,
+                        reference: None,
+                    },
+                )
+                .unwrap();
+        }
+        app.reload_memories();
+        app.memory_sel = 0;
+        app.set_focus(Target::Memory(0));
+        let sizes = [(120u16, 40u16), (80, 24)];
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        if let Some(dir) = &dir {
+            std::fs::create_dir_all(dir).unwrap();
+            for (w, h) in sizes {
+                dump_cells(&mut app, dir, &format!("memory-list-{w}x{h}"), w, h);
+            }
+        }
+        app.on_enter();
+        assert_eq!(app.brain_list_mode, BrainListMode::Topology);
+        assert_eq!(app.topology_state.depth, 1);
+        for _ in 0..100 {
+            pump(&mut app);
+            if app.topology_state.snapshot.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(app.topology_state.snapshot.is_some(), "topology loaded");
+        if let Some(dir) = &dir {
+            for (w, h) in sizes {
+                dump_cells(
+                    &mut app,
+                    dir,
+                    &format!("memory-enter-topology-{w}x{h}"),
+                    w,
+                    h,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn an_old_session_with_a_memory_id_resumes_at_the_brain_list() {
         let mut app = app();
         let json = r#"{"module":"brain","intel_page":null,"intel_article_id":null,

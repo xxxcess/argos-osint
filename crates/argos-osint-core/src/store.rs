@@ -12,9 +12,7 @@ use crate::brain::{hybrid_recall, normalize_category, recall, Memory, MemorySour
 use crate::brain_lance::{self, BrainIndex};
 use crate::profile_stats;
 
-mod graph_summaries;
 mod publication;
-pub use graph_summaries::{ExplanationRecord, GraphSummaryEntry, SaveOutcome, SummaryKey};
 pub(crate) use publication::{bump_memories_changed, enqueue_memory_index_on, tombstone_runs};
 pub use publication::{
     memory_revision, payload_revision, retag_source, CoverageReport, MemoriesChanged,
@@ -673,7 +671,6 @@ impl Store {
             }
             // Additive, idempotent: revision-aware graph summary cache and
             // the latest explanation diagnostic.
-            graph_summaries::migrate(&self.conn)?;
 
             // Additive, idempotent: persist view-only intel link explanations.
             self.conn.execute_batch(

@@ -126,7 +126,7 @@ async fn malformed_and_empty_answers_are_failures_that_keep_the_fallback_within_
 
 #[tokio::test]
 async fn unknown_references_are_rejected_not_stored() {
-    let bad = good().replace("\"N2\"", "\"N42\"");
+    let bad = good().replace("[\"N2\",\"E3\"]", "[\"N42\"]");
     let server = mock::serve(vec![
         mock::ok_json(&bad, "stop"),
         mock::ok_json(&bad, "stop"),
@@ -611,4 +611,57 @@ fn the_standard_deadline_is_the_attempt_budget_plus_a_margin() {
     let limits = WatchLimits::standard();
     assert_eq!(limits.deadline, Duration::from_secs(90 * 2 + 60));
     assert!(limits.max_poll_errors >= 2);
+}
+
+#[tokio::test]
+async fn a_cited_record_id_alone_fails_naming_the_key_without_extra_requests() {
+    let bad = good().replace("[\"N2\",\"E3\"]", "[\"b23\"]");
+    let server = mock::serve(vec![
+        mock::ok_json(&bad, "stop"),
+        mock::ok_json(&good(), "stop"),
+    ])
+    .await;
+    let rt = runtime(&server.base_url, "fixture");
+    let store = Store::memory().unwrap();
+    let f = rich();
+    let (input, fallback) = (input_of(&f), brief_of(&f));
+    let (req, _) = publish(&store.conn, &input, &fallback, &route_fingerprint(&rt)).unwrap();
+    let flush = load_flush_request(&store.conn, &req.cache_key())
+        .unwrap()
+        .unwrap();
+    let err = generate(&rt, None, "op-key", None, &flush, &cancel())
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, FailureKind::Rejected);
+    assert!(
+        err.message.contains("unknown reference \"b23\""),
+        "the failure must name the bad key: {}",
+        err.message
+    );
+    // No repair round trip: exactly one model request was spent.
+    let seen = server.requests.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+}
+
+#[tokio::test]
+async fn a_cited_record_id_next_to_a_real_reference_is_stored_with_a_host_note() {
+    let ok = good().replace("[\"N2\",\"E3\"]", "[\"b23\",\"N2\",\"E3\"]");
+    let server = mock::serve(vec![mock::ok_json(&ok, "stop")]).await;
+    let rt = runtime(&server.base_url, "fixture");
+    let store = Store::memory().unwrap();
+    let f = rich();
+    let (input, fallback) = (input_of(&f), brief_of(&f));
+    let (req, _) = publish(&store.conn, &input, &fallback, &route_fingerprint(&rt)).unwrap();
+    let flush = load_flush_request(&store.conn, &req.cache_key())
+        .unwrap()
+        .unwrap();
+    let g = generate(&rt, None, "op-note", None, &flush, &cancel())
+        .await
+        .unwrap();
+    assert_eq!(g.requests, 1);
+    assert!(
+        g.host_notes.iter().any(|n| n.contains("b23")),
+        "{:?}",
+        g.host_notes
+    );
 }

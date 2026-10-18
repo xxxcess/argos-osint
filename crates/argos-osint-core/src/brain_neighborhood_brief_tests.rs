@@ -973,3 +973,187 @@ fn a_raw_id_in_basis_is_reported_by_key_and_sinks_only_that_key() {
     let err = validate_generated(&input, &brief_at(&f, 2), &alone).unwrap_err();
     assert!(err.contains("b23"), "{err}");
 }
+
+#[test]
+fn schema_basis_enum_is_exactly_the_packet_reference_set() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    let schema = output_schema(&input);
+    let want: Vec<String> = packet_refs(&input);
+    assert!(
+        want.len() >= 10 && want.contains(&"N6".to_string()) && want.contains(&"E8".to_string())
+    );
+    for block in ["overview", "connections", "interpretation", "limits"] {
+        let got: Vec<String> = schema["properties"][block]["items"]["properties"]["basis"]["items"]
+            ["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(got, want, "{block}");
+    }
+    assert!(!serde_json::to_string(&schema).unwrap().contains("b23"));
+}
+
+#[test]
+fn model_task_forbids_citing_record_ids() {
+    assert!(MODEL_TASK.contains("never write record ids"));
+}
+
+const INTERP: &str = "A stored inference with support state supported reads the claims together; it is a stored interpretation, not a verified conclusion.";
+
+#[test]
+fn a_cited_record_id_is_dropped_with_a_host_note_when_a_real_reference_remains() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    let raw = with("interpretation", INTERP, &["b23", "N4"]);
+    let ok = validate_generated(&input, &brief_at(&f, 2), &raw).unwrap();
+    assert!(
+        ok.host_notes.iter().any(|n| n.contains("\"b23\"")),
+        "{:?}",
+        ok.host_notes
+    );
+    assert_eq!(ok.brief.interpretation[0].node_ids, vec!["i1".to_string()]);
+}
+
+#[test]
+fn a_record_id_alone_is_rejected_and_the_key_is_named() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    let raw = with("interpretation", INTERP, &["b23"]);
+    let err = validate_generated(&input, &brief_at(&f, 2), &raw).unwrap_err();
+    assert!(err.contains("unknown reference \"b23\""), "{err}");
+    assert!(
+        err.contains("N1") && err.contains("no valid basis"),
+        "{err}"
+    );
+    // An item that cites nothing at all is still rejected.
+    let none = with("interpretation", INTERP, &[]);
+    assert!(validate_generated(&input, &brief_at(&f, 2), &none)
+        .unwrap_err()
+        .contains("without a basis"));
+}
+
+#[test]
+fn reference_keys_are_normalized_before_lookup() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    for key in ["n4", " N4 ", "[N4]", "(n4)", "N4."] {
+        let raw = with("interpretation", INTERP, &[key]);
+        let ok = validate_generated(&input, &brief_at(&f, 2), &raw)
+            .unwrap_or_else(|e| panic!("{key:?}: {e}"));
+        assert!(
+            ok.host_notes.iter().all(|n| !n.contains("ignored")),
+            "{key:?}"
+        );
+        assert_eq!(ok.brief.interpretation[0].node_ids, vec!["i1".to_string()]);
+    }
+}
+
+#[test]
+fn unsupported_claims_are_still_rejected_next_to_a_dropped_key() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    let raw = with(
+        "interpretation",
+        "A stored inference proves the harbor operator coordinated both claims, a stored interpretation only.",
+        &["b23", "N4"],
+    );
+    assert!(validate_generated(&input, &brief_at(&f, 2), &raw)
+        .unwrap_err()
+        .contains("unsupported assertion"));
+}
+
+#[test]
+fn depth_one_two_and_three_fixtures_all_validate_without_ids_in_the_prompt() {
+    for depth in [1usize, 2, 3] {
+        let f = with_raw_ids(depth);
+        let input = input_at(&f, depth);
+        let prompt = input.prompt_json().to_lowercase();
+        for id in [
+            "b23", "\"c1\"", "\"c2\"", "\"i1\"", "\"l2\"", "art-1", "run-1",
+        ] {
+            assert!(!prompt.contains(id), "depth {depth}: {id} leaked: {prompt}");
+        }
+        let raw = with("interpretation", INTERP, &["b23", "N4"]);
+        let ok = validate_generated(&input, &brief_at(&f, depth), &raw);
+        assert!(ok.is_ok(), "depth {depth}: {ok:?}");
+    }
+}
+
+#[test]
+fn raw_ids_in_every_payload_field_become_packet_references_or_disappear() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    let prompt = input.prompt_json();
+    // Known records are aliased to their packet reference in free text.
+    assert!(
+        prompt.contains("N6 shows insurers paused cover"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("N1 and N3 name the same harbor operator"));
+    // Link endpoints no longer carry ids; premises are refs.
+    assert!(!prompt.contains("\"memory_id\":\"c") && !prompt.contains("\"memory_id\":\"b23\""));
+    assert!(prompt.contains("\"memory_id\":\"N6\""), "{prompt}");
+    assert!(
+        prompt.contains("\"premise_claims\":[\"N1\",\"N3\",\"N6\"]"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn premises_outside_the_view_are_counted_not_named() {
+    let f = with_raw_ids(1);
+    let input = input_at(&f, 1);
+    let prompt = input.prompt_json();
+    assert!(prompt.contains("\"outside_this_view\":1"), "{prompt}");
+    assert!(!prompt.to_lowercase().contains("b23"));
+}
+
+#[test]
+fn the_packet_size_cap_keeps_references_stable_and_id_free() {
+    let mut f = with_raw_ids(2);
+    for k in 0..90 {
+        let id = format!("x{k:03}");
+        f.snapshot.nodes.push(node(
+            &id,
+            TopologyNodeKind::Claim,
+            &format!("Filler claim {k}"),
+            1 + k % 2,
+        ));
+        f.snapshot
+            .edges
+            .push(edge(&format!("e-{id}"), &id, "c1", TopologyEdgeKind::Link));
+        f.payloads.insert(
+            format!("e-{id}"),
+            link(
+                &id,
+                "c1",
+                "supports",
+                &format!("{} b23 {id}", "filler ".repeat(80)),
+            ),
+        );
+    }
+    let input = input_at(&f, 2);
+    assert!(input.prompt_json().len() <= PACKET_BYTES_MAX);
+    assert!(input.omissions.iter().any(|o| o.contains("left out")));
+    let mut sorted: Vec<&TopologyNode> = f.snapshot.nodes.iter().collect();
+    sorted.sort_by(|a, b| (!a.is_root, a.min_hops, &a.id).cmp(&(!b.is_root, b.min_hops, &b.id)));
+    for n in &input.nodes {
+        let pos = sorted.iter().position(|s| s.id == n.node.id).unwrap();
+        assert_eq!(n.reference, format!("N{}", pos + 1));
+    }
+    assert_eq!(input.nodes[0].reference, "N1");
+    let prompt = input.prompt_json().to_lowercase();
+    assert!(
+        !prompt.contains("b23") && !prompt.contains("\"x0"),
+        "ids leaked"
+    );
+    let want = packet_refs(&input);
+    let schema = output_schema(&input);
+    assert_eq!(
+        schema["properties"]["connections"]["items"]["properties"]["basis"]["items"]["enum"],
+        serde_json::json!(want)
+    );
+}

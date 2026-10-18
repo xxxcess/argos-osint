@@ -386,7 +386,7 @@ pub async fn generate(
         ChatMessage {
             role: "system".into(),
             content: format!(
-                "{} Reply with one JSON object with arrays overview, connections, interpretation and limits; each item is {{\"text\": string, \"basis\": [packet refs such as N1 or E2]}}.",
+                "{} Reply with one JSON object with arrays overview, connections, interpretation and limits; each item is {{\"text\": string, \"basis\": [packet refs such as N1 or E2 only; never record ids]}}.",
                 crate::summarization::system_prompt(SummarizationMode::TopologyNeighborhood)
             ),
             tool_call_id: None,
@@ -404,7 +404,7 @@ pub async fn generate(
         .with_input_revision(&input.basis_key)
         .for_summarization(ResponseContract::GeneratedJson {
             name: "topology_neighborhood_brief".into(),
-            schema: Some(output_schema()),
+            schema: Some(output_schema(&input)),
         });
     if let Some((id, epoch)) = task {
         scope = scope.with_task(id).with_task_epoch(epoch);

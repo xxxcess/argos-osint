@@ -1268,7 +1268,7 @@ pub(crate) mod tests;
 // ------------------------------------------------------- model input packet
 
 /// Version of the packet shape and the model output contract.
-pub const PACKET_VERSION: u32 = 1;
+pub const PACKET_VERSION: u32 = 2;
 /// Upper bound on the serialized packet sent to a model.
 pub const PACKET_BYTES_MAX: usize = 36_000;
 const FIELD_CHARS_MAX: usize = 600;
@@ -1307,6 +1307,159 @@ pub struct NeighborhoodInput {
     pub omissions: Vec<String>,
 }
 
+/// Record ids the model must never see: every id in the snapshot and in the
+/// record payloads maps to the packet reference of the record it names (or to
+/// a neutral phrase when the record is outside the packet), so the model can
+/// only ever copy a `N…`/`E…` reference.
+#[derive(Default)]
+struct IdAliases {
+    /// ASCII-lowercased id → replacement text.
+    map: BTreeMap<String, String>,
+    /// Ids in descending length, so a longer id is replaced before a prefix of it.
+    order: Vec<String>,
+}
+
+const OUTSIDE_RECORD: &str = "a record outside this view";
+/// Payload keys whose string value is a record id.
+const ID_KEYS: &[&str] = &["memory_id", "article_id", "source_id", "actor_id"];
+/// Payload keys that only carry opaque revisions or provenance ids.
+const DROP_KEYS: &[&str] = &["run_id", "revision", "origin", "promoted_from"];
+const ID_LIST_KEYS: &[&str] = &["premise_claims", "shared_actors"];
+const DROP_LIST_KEYS: &[&str] = &["source_revisions"];
+
+fn scrubbable(id: &str) -> bool {
+    id.len() >= 2 && !id.chars().all(|c| c.is_ascii_digit())
+}
+
+impl IdAliases {
+    fn add(&mut self, id: &str, alias: &str) {
+        if scrubbable(id) {
+            self.map
+                .entry(id.to_ascii_lowercase())
+                .or_insert_with(|| alias.to_string());
+        }
+    }
+
+    fn finish(&mut self) {
+        let mut ids: Vec<String> = self.map.keys().cloned().collect();
+        ids.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+        self.order = ids;
+    }
+
+    fn alias(&self, id: &str) -> Option<&str> {
+        self.map.get(&id.to_ascii_lowercase()).map(String::as_str)
+    }
+
+    /// Collect ids from payload id fields (they are outside the packet unless
+    /// the snapshot already named them).
+    fn collect(&mut self, v: &serde_json::Value) {
+        match v {
+            serde_json::Value::Object(o) => {
+                for (k, x) in o {
+                    match x {
+                        serde_json::Value::String(s) if ID_KEYS.contains(&k.as_str()) => {
+                            self.add(s, OUTSIDE_RECORD)
+                        }
+                        serde_json::Value::Array(a) if ID_LIST_KEYS.contains(&k.as_str()) => {
+                            for y in a {
+                                if let Some(s) = y.as_str() {
+                                    self.add(s, OUTSIDE_RECORD);
+                                }
+                            }
+                        }
+                        _ => self.collect(x),
+                    }
+                }
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|x| self.collect(x)),
+            _ => {}
+        }
+    }
+
+    /// Replace whole-token occurrences of any known id in free text.
+    fn scrub_text(&self, text: &str) -> String {
+        let lower = text.to_ascii_lowercase();
+        let bytes = lower.as_bytes();
+        let boundary = |b: u8| !(b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        'scan: while i < text.len() {
+            if text.is_char_boundary(i) && (i == 0 || boundary(bytes[i - 1])) {
+                for id in &self.order {
+                    if lower[i..].starts_with(id.as_str())
+                        && lower
+                            .as_bytes()
+                            .get(i + id.len())
+                            .is_none_or(|b| boundary(*b))
+                    {
+                        out.push_str(&self.map[id]);
+                        i += id.len();
+                        continue 'scan;
+                    }
+                }
+            }
+            let ch = text[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+        out
+    }
+
+    /// Rewrite a record payload for the model: id fields become packet
+    /// references (or disappear), and every id in free text is aliased.
+    fn scrub_value(&self, v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::String(s) => *s = self.scrub_text(s),
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|x| self.scrub_value(x)),
+            serde_json::Value::Object(o) => {
+                let mut outside = 0usize;
+                let keys: Vec<String> = o.keys().cloned().collect();
+                for k in keys {
+                    if DROP_KEYS.contains(&k.as_str()) || DROP_LIST_KEYS.contains(&k.as_str()) {
+                        o.remove(&k);
+                    } else if ID_KEYS.contains(&k.as_str()) {
+                        let alias = o
+                            .get(&k)
+                            .and_then(|x| x.as_str())
+                            .and_then(|s| self.alias(s))
+                            .filter(|a| *a != OUTSIDE_RECORD)
+                            .map(str::to_string);
+                        match alias {
+                            Some(a) => {
+                                o.insert(k, serde_json::Value::String(a));
+                            }
+                            None => {
+                                o.remove(&k);
+                            }
+                        }
+                    } else if ID_LIST_KEYS.contains(&k.as_str()) {
+                        if let Some(serde_json::Value::Array(a)) = o.get(&k) {
+                            let refs: Vec<serde_json::Value> = a
+                                .iter()
+                                .filter_map(|x| x.as_str())
+                                .filter_map(|s| self.alias(s))
+                                .filter(|a| *a != OUTSIDE_RECORD)
+                                .map(|a| serde_json::Value::String(a.to_string()))
+                                .collect();
+                            outside += a.len() - refs.len();
+                            o.insert(k, serde_json::Value::Array(refs));
+                        }
+                    } else if let Some(x) = o.get_mut(&k) {
+                        self.scrub_value(x);
+                    }
+                }
+                if outside > 0 {
+                    o.insert(
+                        "outside_this_view".into(),
+                        serde_json::Value::from(outside as u64),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn trim_value(v: &mut serde_json::Value, shortened: &mut usize) {
     match v {
         serde_json::Value::String(s) => {
@@ -1339,9 +1492,37 @@ pub fn build_input(input: &BriefInput, basis_key: &str) -> NeighborhoodInput {
     nodes.sort_by(|a, b| (!a.is_root, a.min_hops, &a.id).cmp(&(!b.is_root, b.min_hops, &b.id)));
     let mut edges: Vec<&TopologyEdge> = snap.edges.iter().collect();
     edges.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut aliases = IdAliases::default();
+    for p in input.payloads.values() {
+        if let Ok(v) = serde_json::to_value(p) {
+            aliases.collect(&v);
+        }
+    }
+    for (i, n) in nodes.iter().enumerate() {
+        let r = format!("N{}", i + 1);
+        aliases.map.remove(&n.id.to_ascii_lowercase());
+        for id in std::iter::once(&n.id)
+            .chain(&n.member_ids)
+            .chain(std::iter::once(&n.article_id))
+        {
+            aliases.map.remove(&id.to_ascii_lowercase());
+            aliases.add(id, &r);
+        }
+        aliases.add(&n.run_id, OUTSIDE_RECORD);
+    }
+    for (i, e) in edges.iter().enumerate() {
+        let r = format!("E{}", i + 1);
+        for id in std::iter::once(&e.id).chain(&e.member_ids) {
+            aliases.map.remove(&id.to_ascii_lowercase());
+            aliases.add(id, &r);
+        }
+    }
+    aliases.finish();
+    let aliases = aliases;
     let payload_of = |id: &str, shortened: &mut usize| {
         input.payloads.get(id).and_then(|p| {
             let mut v = serde_json::to_value(p).ok()?;
+            aliases.scrub_value(&mut v);
             trim_value(&mut v, shortened);
             Some(v)
         })
@@ -1351,6 +1532,7 @@ pub fn build_input(input: &BriefInput, basis_key: &str) -> NeighborhoodInput {
         .enumerate()
         .map(|(i, n)| {
             let mut lite = (*n).clone();
+            lite.label = aliases.scrub_text(&lite.label);
             lite.detail = String::new();
             lite.passages.clear();
             PacketNode {
@@ -1365,6 +1547,8 @@ pub fn build_input(input: &BriefInput, basis_key: &str) -> NeighborhoodInput {
         .enumerate()
         .map(|(i, e)| {
             let mut lite = (*e).clone();
+            lite.label = aliases.scrub_text(&lite.label);
+            lite.rationale = aliases.scrub_text(&lite.rationale);
             lite.receipts.truncate(RECEIPTS_MAX);
             PacketEdge {
                 reference: format!("E{}", i + 1),
@@ -1377,7 +1561,7 @@ pub fn build_input(input: &BriefInput, basis_key: &str) -> NeighborhoodInput {
         packet_version: PACKET_VERSION,
         basis_key: basis_key.to_string(),
         seed: input.seed.clone(),
-        seed_label: snap.root_label.clone(),
+        seed_label: aliases.scrub_text(&snap.root_label),
         depth: input.depth,
         cycle: input.cycle.clone(),
         coverage: coverage_of(input),
@@ -1545,15 +1729,40 @@ fn cycle_label(c: &CycleScope) -> &'static str {
     }
 }
 
-/// The JSON schema of the model's structured brief.
-pub fn output_schema() -> serde_json::Value {
+/// The packet's citable references (`N1`…, `E1`…), in packet order.
+pub fn packet_refs(input: &NeighborhoodInput) -> Vec<String> {
+    input
+        .nodes
+        .iter()
+        .map(|n| n.reference.clone())
+        .chain(input.edges.iter().map(|e| e.reference.clone()))
+        .collect()
+}
+
+/// Strict structured-output providers cap the total number of enum values
+/// in a schema (about 500). The item schema appears in four blocks, so the
+/// enum is used only while `4 × refs` stays under this budget; above it the
+/// basis is pinned by pattern instead (`$ref`/`$defs` is not relied on: the
+/// provider adapters pass the schema through verbatim and not every route
+/// accepts it).
+pub const BASIS_ENUM_BUDGET: usize = 400;
+
+/// The JSON schema of the model's structured brief. `basis` entries are
+/// limited to this packet's references, so a model cannot cite a record id.
+pub fn output_schema(input: &NeighborhoodInput) -> serde_json::Value {
+    let refs = packet_refs(input);
+    let basis_item = if refs.len() * 4 <= BASIS_ENUM_BUDGET {
+        serde_json::json!({"type": "string", "enum": refs})
+    } else {
+        serde_json::json!({"type": "string", "pattern": "^[NE][0-9]{1,4}$"})
+    };
     let item = serde_json::json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["text", "basis"],
         "properties": {
             "text": {"type": "string"},
-            "basis": {"type": "array", "items": {"type": "string"}}
+            "basis": {"type": "array", "items": basis_item}
         }
     });
     let list = |max: usize| serde_json::json!({"type": "array", "maxItems": max, "items": item});
@@ -1654,6 +1863,14 @@ fn first_words(label: &str, n: usize) -> String {
         .to_lowercase()
 }
 
+/// Canonical form of a model-written reference: `[n2]`, ` e3. ` → `N2`, `E3`.
+fn normalize_ref(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|c: char| matches!(c, '[' | ']' | '(' | ')' | '.' | ',' | ';' | ':'))
+        .trim()
+        .to_ascii_uppercase()
+}
+
 /// Validate a model's raw answer against the packet. Nothing is returned
 /// unless the whole answer passes; host-owned parts (seed, key, counts,
 /// coverage, required caveats and pinned contradictions) come from the
@@ -1696,7 +1913,8 @@ pub fn validate_generated(
 
     let convert = |block: &str,
                    raw_items: &[RawItem],
-                   total_words: &mut usize|
+                   total_words: &mut usize,
+                   host_notes: &mut Vec<String>|
      -> Result<Vec<BriefItem>, String> {
         let mut out = Vec::new();
         for r in raw_items {
@@ -1713,8 +1931,9 @@ pub fn validate_generated(
             let mut edge_ids = Vec::new();
             let mut nodes_cited: Vec<&PacketNode> = Vec::new();
             let mut edges_cited: Vec<&PacketEdge> = Vec::new();
+            let mut unknown: Vec<String> = Vec::new();
             for r in &r.basis {
-                let key = r.trim();
+                let key = normalize_ref(r);
                 if let Some(n) = input.nodes.iter().find(|n| n.reference == key) {
                     node_ids.push(n.node.id.clone());
                     nodes_cited.push(n);
@@ -1722,10 +1941,26 @@ pub fn validate_generated(
                     edge_ids.push(e.edge.id.clone());
                     edges_cited.push(e);
                 } else {
-                    return Err(format!("{block}: unknown reference {key:?}"));
+                    unknown.push(r.trim().to_string());
                 }
             }
-            if block != "limits" && nodes_cited.is_empty() && edges_cited.is_empty() {
+            let cited_nothing = nodes_cited.is_empty() && edges_cited.is_empty();
+            if !unknown.is_empty() {
+                if block != "limits" && cited_nothing {
+                    return Err(format!(
+                        "{block}: unknown reference {} (cite only packet references such as N1 or E2); no valid basis remains",
+                        unknown
+                            .iter()
+                            .map(|k| format!("{k:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                for k in &unknown {
+                    host_notes.push(format!("{block}: ignored unknown basis reference {k:?}"));
+                }
+            }
+            if block != "limits" && cited_nothing {
                 return Err(format!("{block}: item without a basis reference"));
             }
             let lower = text.to_lowercase();
@@ -1824,10 +2059,25 @@ pub fn validate_generated(
         Ok(out)
     };
 
-    let mut overview = convert("overview", &parsed.overview, &mut total_words)?;
-    let mut connections = convert("connections", &parsed.connections, &mut total_words)?;
-    let interpretation = convert("interpretation", &parsed.interpretation, &mut total_words)?;
-    let mut limits = convert("limits", &parsed.limits, &mut total_words)?;
+    let mut overview = convert(
+        "overview",
+        &parsed.overview,
+        &mut total_words,
+        &mut host_notes,
+    )?;
+    let mut connections = convert(
+        "connections",
+        &parsed.connections,
+        &mut total_words,
+        &mut host_notes,
+    )?;
+    let interpretation = convert(
+        "interpretation",
+        &parsed.interpretation,
+        &mut total_words,
+        &mut host_notes,
+    )?;
+    let mut limits = convert("limits", &parsed.limits, &mut total_words, &mut host_notes)?;
     model_items += overview.len() + connections.len() + interpretation.len() + limits.len();
     if model_items == 0 || (connections.is_empty() && interpretation.is_empty()) {
         return Err("no meaningful content".into());
@@ -1950,7 +2200,7 @@ fn quoted(text: &str) -> Vec<String> {
 }
 
 /// The task given to the model; the packet follows as the user message.
-pub const MODEL_TASK: &str = "Explain what stands out around this seed and why its supplied neighborhood matters. Use only the packet. Return Overview, Connections, Interpretation, and Limits as structured brief items with exact basis references. Preserve attribution, uncertainty, existing inference limitations, tentative leads, and material contradictions. Target 120–180 words. Do not create facts, sources, relationships, or new investigative conclusions.";
+pub const MODEL_TASK: &str = "Explain what stands out around this seed and why its supplied neighborhood matters. Use only the packet. Return Overview, Connections, Interpretation, and Limits as structured brief items. Cite records only by their packet references (N1…, E1…) in basis; never write record ids or other identifiers, in basis or in text. Preserve attribution, uncertainty, existing inference limitations, tentative leads, and material contradictions. Target 120–180 words. Do not create facts, sources, relationships, or new investigative conclusions.";
 
 fn seed_kind(seed: &TopologySeed) -> String {
     format!("{seed:?}")

@@ -78,7 +78,7 @@ impl SummarizationMode {
     /// Prompt version string included in cache keys.
     pub fn prompt_version(self) -> &'static str {
         if self == Self::TopologyNeighborhood {
-            return "topology-neighborhood.p1.o1";
+            return "topology-neighborhood.p2.o1";
         }
         "summarization.v2"
     }

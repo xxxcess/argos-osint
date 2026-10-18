@@ -20305,6 +20305,68 @@ mod tests {
         })
     }
 
+    fn host_noted(
+        app: &App,
+        notes: &[&str],
+    ) -> Box<argos_osint_core::brain_neighborhood_brief_exec::Generated> {
+        let mut g = generated_from(
+            app,
+            "Harbor contract shifted links two actors and two articles; the tender report and freight review are the retained sources.",
+        );
+        g.host_notes = notes.iter().map(|n| n.to_string()).collect();
+        g
+    }
+
+    #[test]
+    fn generated_summary_shows_one_dim_host_note_line_at_80x24_and_120x40() {
+        use super::super::topology::SummaryGen;
+        for (width, height) in [(120u16, 40u16), (80, 24)] {
+            let mut app = brief_fixture();
+            app.topology_state.active_panel_tab = 1;
+            app.topology_state.summary.generation = 1;
+            let g = host_noted(
+                &app,
+                &["connections: ignored unknown basis reference \"b23\""],
+            );
+            app.topology_state.summary.gen = SummaryGen::Generated(g);
+            let text = buffer_text(&render(&mut app, width, height));
+            assert!(
+                text.contains("Ignored unknown reference b23"),
+                "{width}x{height}: {text}"
+            );
+            // It sits above the brief text, so it is on screen without scrolling.
+            let note = text.find("Ignored unknown reference").unwrap();
+            let overview = text.find("Overview").unwrap();
+            assert!(note < overview, "{width}x{height}");
+            // Several keys collapse into one line.
+            let g = host_noted(
+                &app,
+                &[
+                    "connections: ignored unknown basis reference \"b23\"",
+                    "interpretation: ignored unknown basis reference \"b24\"",
+                    "overview: ignored unknown basis reference \"b23\"",
+                    "limits: ignored unknown basis reference \"zz9\"",
+                    "limits: ignored unknown basis reference \"q1\"",
+                ],
+            );
+            app.topology_state.summary.generation += 1;
+            app.topology_state.summary.gen = SummaryGen::Generated(g);
+            let text = buffer_text(&render(&mut app, width, height));
+            let want = if width >= 100 {
+                "Ignored 4 unknown references"
+            } else {
+                "Ignored 4 unknown references: b23, b24, zz9, …"
+            };
+            assert!(text.contains(want), "{width}x{height}: {text}");
+            // No notes, no line.
+            let g = host_noted(&app, &[]);
+            app.topology_state.summary.generation += 1;
+            app.topology_state.summary.gen = SummaryGen::Generated(g);
+            let text = buffer_text(&render(&mut app, width, height));
+            assert!(!text.contains("Ignored"), "{width}x{height}");
+        }
+    }
+
     fn summary_event(
         app: &App,
         generation: u64,
@@ -21487,6 +21549,33 @@ mod tests {
                 &mut rejected,
                 &dir,
                 &format!("topology-summary-failed-{width}x{height}"),
+                width,
+                height,
+            );
+            let mut cited = base();
+            cited.topology_state.summary.gen = SummaryGen::Failed(
+                argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure {
+                    kind: FailureKind::Rejected,
+                    message: "model operation stopped: validation/invalid_result: validation failed: brief rejected: connections: unknown reference \"b23\" (cite only packet references such as N1 or E2); no valid basis remains (1 dispatched attempts): route 0 fail: the answer was not a usable summary".into(),
+                },
+            );
+            dump_cells(
+                &mut cited,
+                &dir,
+                &format!("topology-summary-rejected-key-{width}x{height}"),
+                width,
+                height,
+            );
+            let mut noted = base();
+            let g = host_noted(
+                &noted,
+                &["connections: ignored unknown basis reference \"b23\""],
+            );
+            noted.topology_state.summary.gen = SummaryGen::Generated(g);
+            dump_cells(
+                &mut noted,
+                &dir,
+                &format!("topology-summary-host-note-{width}x{height}"),
                 width,
                 height,
             );

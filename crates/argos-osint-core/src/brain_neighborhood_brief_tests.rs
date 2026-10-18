@@ -878,3 +878,365 @@ fn fenced_json_is_accepted_and_overlong_output_is_not() {
         serde_json::json!([{"text": format!("stored inference {long}"), "basis": ["N4"]}]);
     assert!(check(&v.to_string()).unwrap_err().contains("too long"));
 }
+
+// ----------------------------------------- model-cited record ids (regression)
+
+/// A fixture whose stored Inference reasoning names raw record ids, with the
+/// cited record `b23` two hops out. `depth` limits how far the snapshot reaches.
+pub(crate) fn with_raw_ids(depth: usize) -> Fixture {
+    let mut f = rich();
+    let mut b23 = node(
+        "b23",
+        TopologyNodeKind::Claim,
+        "Insurers paused port cover",
+        2,
+    );
+    b23.status = "extraction assessed".into();
+    f.snapshot.nodes.push(b23);
+    f.snapshot
+        .edges
+        .push(edge("l2", "b23", "c2", TopologyEdgeKind::Link));
+    f.payloads.insert(
+        "l2".into(),
+        link("b23", "c2", "supports", "Same port, same week"),
+    );
+    f.payloads.insert(
+        "i1".into(),
+        MemoryPayload::Inference(InferencePayload {
+            premise_claims: vec!["c1".into(), "c2".into(), "b23".into()],
+            actors: vec![],
+            reasoning: "Reasoning: b23 shows insurers paused cover, and c1 and c2 name the same harbor operator".into(),
+            limitations: "Only two retained articles; no shipping data".into(),
+            support_state: "supported".into(),
+            coverage_receipt: "coverage-1".into(),
+        }),
+    );
+    f.snapshot.nodes.retain(|n| n.min_hops <= depth);
+    let keep: BTreeSet<String> = f.snapshot.nodes.iter().map(|n| n.id.clone()).collect();
+    f.snapshot
+        .edges
+        .retain(|e| keep.contains(&e.from) && keep.contains(&e.to));
+    f
+}
+
+fn input_at(f: &Fixture, depth: usize) -> NeighborhoodInput {
+    let b = BriefInput {
+        snapshot: &f.snapshot,
+        seed: &f.seed,
+        depth,
+        cycle: &CycleScope::AllRetained,
+        payloads: f.payloads.clone(),
+        payload_reads_skipped: 0,
+    };
+    build_input(&b, &build(&b).basis_key)
+}
+
+fn brief_at(f: &Fixture, depth: usize) -> NeighborhoodBrief {
+    build(&BriefInput {
+        snapshot: &f.snapshot,
+        seed: &f.seed,
+        depth,
+        cycle: &CycleScope::AllRetained,
+        payloads: f.payloads.clone(),
+        payload_reads_skipped: 0,
+    })
+}
+
+#[test]
+fn a_model_that_copies_a_raw_record_id_into_basis_does_not_sink_the_answer() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    // The id reaches the model today, so a faithful model copies it.
+    let prompt = input.prompt_json().to_lowercase();
+    assert!(
+        !prompt.contains("b23"),
+        "the model-facing packet must not contain raw record ids"
+    );
+    let raw = with(
+        "interpretation",
+        "A stored inference with support state supported reads the claims together; it is a stored interpretation, not a verified conclusion.",
+        &["b23", "N4"],
+    );
+    let ok = validate_generated(&input, &brief_at(&f, 2), &raw);
+    assert!(ok.is_ok(), "{ok:?}");
+}
+
+#[test]
+fn a_raw_id_in_basis_is_reported_by_key_and_sinks_only_that_key() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    let text = "A stored inference with support state supported reads the claims together; it is a stored interpretation, not a verified conclusion.";
+    let both = with("interpretation", text, &["b23", "N4"]);
+    let ok = validate_generated(&input, &brief_at(&f, 2), &both);
+    assert!(ok.is_ok(), "{ok:?}");
+    let alone = with("interpretation", text, &["b23"]);
+    let err = validate_generated(&input, &brief_at(&f, 2), &alone).unwrap_err();
+    assert!(err.contains("b23"), "{err}");
+}
+
+#[test]
+fn schema_basis_enum_is_exactly_the_packet_reference_set() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    let schema = output_schema(&input);
+    let want: Vec<String> = packet_refs(&input);
+    assert!(
+        want.len() >= 10 && want.contains(&"N6".to_string()) && want.contains(&"E8".to_string())
+    );
+    for block in ["overview", "connections", "interpretation", "limits"] {
+        let got: Vec<String> = schema["properties"][block]["items"]["properties"]["basis"]["items"]
+            ["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(got, want, "{block}");
+    }
+    assert!(!serde_json::to_string(&schema).unwrap().contains("b23"));
+}
+
+#[test]
+fn model_task_forbids_citing_record_ids() {
+    assert!(MODEL_TASK.contains("never write record ids"));
+}
+
+const INTERP: &str = "A stored inference with support state supported reads the claims together; it is a stored interpretation, not a verified conclusion.";
+
+#[test]
+fn a_cited_record_id_is_dropped_with_a_host_note_when_a_real_reference_remains() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    let raw = with("interpretation", INTERP, &["b23", "N4"]);
+    let ok = validate_generated(&input, &brief_at(&f, 2), &raw).unwrap();
+    assert!(
+        ok.host_notes.iter().any(|n| n.contains("\"b23\"")),
+        "{:?}",
+        ok.host_notes
+    );
+    assert_eq!(ok.brief.interpretation[0].node_ids, vec!["i1".to_string()]);
+}
+
+#[test]
+fn a_record_id_alone_is_rejected_and_the_key_is_named() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    let raw = with("interpretation", INTERP, &["b23"]);
+    let err = validate_generated(&input, &brief_at(&f, 2), &raw).unwrap_err();
+    assert!(err.contains("unknown reference \"b23\""), "{err}");
+    assert!(
+        err.contains("N1") && err.contains("no valid basis"),
+        "{err}"
+    );
+    // An item that cites nothing at all is still rejected.
+    let none = with("interpretation", INTERP, &[]);
+    assert!(validate_generated(&input, &brief_at(&f, 2), &none)
+        .unwrap_err()
+        .contains("without a basis"));
+}
+
+#[test]
+fn reference_keys_are_normalized_before_lookup() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    for key in ["n4", " N4 ", "[N4]", "(n4)", "N4."] {
+        let raw = with("interpretation", INTERP, &[key]);
+        let ok = validate_generated(&input, &brief_at(&f, 2), &raw)
+            .unwrap_or_else(|e| panic!("{key:?}: {e}"));
+        assert!(
+            ok.host_notes.iter().all(|n| !n.contains("ignored")),
+            "{key:?}"
+        );
+        assert_eq!(ok.brief.interpretation[0].node_ids, vec!["i1".to_string()]);
+    }
+}
+
+#[test]
+fn unsupported_claims_are_still_rejected_next_to_a_dropped_key() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    let raw = with(
+        "interpretation",
+        "A stored inference proves the harbor operator coordinated both claims, a stored interpretation only.",
+        &["b23", "N4"],
+    );
+    assert!(validate_generated(&input, &brief_at(&f, 2), &raw)
+        .unwrap_err()
+        .contains("unsupported assertion"));
+}
+
+#[test]
+fn depth_one_two_and_three_fixtures_all_validate_without_ids_in_the_prompt() {
+    for depth in [1usize, 2, 3] {
+        let f = with_raw_ids(depth);
+        let input = input_at(&f, depth);
+        let prompt = input.prompt_json().to_lowercase();
+        for id in [
+            "b23", "\"c1\"", "\"c2\"", "\"i1\"", "\"l2\"", "art-1", "run-1",
+        ] {
+            assert!(!prompt.contains(id), "depth {depth}: {id} leaked: {prompt}");
+        }
+        let raw = with("interpretation", INTERP, &["b23", "N4"]);
+        let ok = validate_generated(&input, &brief_at(&f, depth), &raw);
+        assert!(ok.is_ok(), "depth {depth}: {ok:?}");
+    }
+}
+
+#[test]
+fn raw_ids_in_every_payload_field_become_packet_references_or_disappear() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    let prompt = input.prompt_json();
+    // Known records are aliased to their packet reference in free text.
+    assert!(
+        prompt.contains("N6 shows insurers paused cover"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("N1 and N3 name the same harbor operator"));
+    // Link endpoints no longer carry ids; premises are refs.
+    assert!(!prompt.contains("\"memory_id\":\"c") && !prompt.contains("\"memory_id\":\"b23\""));
+    assert!(prompt.contains("\"memory_id\":\"N6\""), "{prompt}");
+    assert!(
+        prompt.contains("\"premise_claims\":[\"N1\",\"N3\",\"N6\"]"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn premises_outside_the_view_are_counted_not_named() {
+    let f = with_raw_ids(1);
+    let input = input_at(&f, 1);
+    let prompt = input.prompt_json();
+    assert!(prompt.contains("\"outside_this_view\":1"), "{prompt}");
+    assert!(!prompt.to_lowercase().contains("b23"));
+}
+
+#[test]
+fn the_packet_size_cap_keeps_references_stable_and_id_free() {
+    let mut f = with_raw_ids(2);
+    for k in 0..90 {
+        let id = format!("x{k:03}");
+        f.snapshot.nodes.push(node(
+            &id,
+            TopologyNodeKind::Claim,
+            &format!("Filler claim {k}"),
+            1 + k % 2,
+        ));
+        f.snapshot
+            .edges
+            .push(edge(&format!("e-{id}"), &id, "c1", TopologyEdgeKind::Link));
+        f.payloads.insert(
+            format!("e-{id}"),
+            link(
+                &id,
+                "c1",
+                "supports",
+                &format!("{} b23 {id}", "filler ".repeat(80)),
+            ),
+        );
+    }
+    let input = input_at(&f, 2);
+    assert!(input.prompt_json().len() <= PACKET_BYTES_MAX);
+    assert!(input.omissions.iter().any(|o| o.contains("left out")));
+    let mut sorted: Vec<&TopologyNode> = f.snapshot.nodes.iter().collect();
+    sorted.sort_by(|a, b| (!a.is_root, a.min_hops, &a.id).cmp(&(!b.is_root, b.min_hops, &b.id)));
+    for n in &input.nodes {
+        let pos = sorted.iter().position(|s| s.id == n.node.id).unwrap();
+        assert_eq!(n.reference, format!("N{}", pos + 1));
+    }
+    assert_eq!(input.nodes[0].reference, "N1");
+    let prompt = input.prompt_json().to_lowercase();
+    assert!(
+        !prompt.contains("b23") && !prompt.contains("\"x0"),
+        "ids leaked"
+    );
+    let want = packet_refs(&input);
+    let schema = output_schema(&input);
+    // 90+ refs inlined four times would exceed the strict-provider enum budget,
+    // so the basis is pinned by pattern; the refs themselves are unchanged.
+    let basis = &schema["properties"]["connections"]["items"]["properties"]["basis"]["items"];
+    if want.len() * 4 <= BASIS_ENUM_BUDGET {
+        assert_eq!(basis["enum"], serde_json::json!(want));
+    } else {
+        assert!(basis.get("enum").is_none() && basis["pattern"].is_string());
+    }
+}
+
+fn enum_values_in(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Object(o) => o
+            .iter()
+            .map(|(k, x)| {
+                if k == "enum" {
+                    x.as_array().map_or(0, Vec::len)
+                } else {
+                    enum_values_in(x)
+                }
+            })
+            .sum(),
+        serde_json::Value::Array(a) => a.iter().map(enum_values_in).sum(),
+        _ => 0,
+    }
+}
+
+#[test]
+fn schema_stays_under_the_strict_provider_enum_cap_at_the_maximum_ref_count() {
+    // The topology maximum: 100 nodes and 200 edges, so 300 refs. Inlined four
+    // times that would be 1200 enum values, far above the ~500 provider cap.
+    let opts = crate::brain_topology::TopologyOptions::default();
+    let mut f = rich();
+    for k in 0..(opts.max_nodes - f.snapshot.nodes.len()) {
+        f.snapshot.nodes.push(node(
+            &format!("m{k:03}"),
+            TopologyNodeKind::Claim,
+            &format!("Filler {k}"),
+            1,
+        ));
+    }
+    for k in 0..(opts.max_edges - f.snapshot.edges.len()) {
+        f.snapshot.edges.push(edge(
+            &format!("f{k:03}"),
+            &format!("m{:03}", k % 90),
+            "c1",
+            TopologyEdgeKind::Link,
+        ));
+    }
+    let input = input_at(&f, 2);
+    let refs = packet_refs(&input);
+    // The 36 kB packet cap itself bounds the ref count (244 for these minimal
+    // records, below the 300 topology maximum).
+    assert!(refs.len() > 200 && refs.len() <= opts.max_nodes + opts.max_edges);
+    let schema = output_schema(&input);
+    assert!(
+        enum_values_in(&schema) <= 500,
+        "{} enum values",
+        enum_values_in(&schema)
+    );
+    let basis = &schema["properties"]["interpretation"]["items"]["properties"]["basis"]["items"];
+    assert!(basis.get("enum").is_none());
+    let re = basis["pattern"].as_str().unwrap();
+    assert_eq!(re, "^[NE][0-9]{1,4}$");
+    // Every real ref matches the pattern shape; record ids do not.
+    assert!(refs
+        .iter()
+        .all(|r| r.len() <= 5 && r[1..].chars().all(|c| c.is_ascii_digit())));
+    assert!(!"b23".starts_with(['N', 'E']));
+    // Small packets keep the exact enum, within budget.
+    let small = output_schema(&input_at(&rich(), 2));
+    assert!(enum_values_in(&small) <= BASIS_ENUM_BUDGET);
+    assert!(enum_values_in(&small) > 0);
+}
+
+#[test]
+fn a_non_inference_ref_plus_an_unknown_key_still_fails_interpretation() {
+    let f = with_raw_ids(2);
+    let input = input_at(&f, 2);
+    // N1 is a Claim (not an Inference); b23 is dropped, leaving one valid
+    // non-Inference ref, which cannot carry an interpretation.
+    let raw = with("interpretation", INTERP, &["N1", "b23"]);
+    let err = validate_generated(&input, &brief_at(&f, 2), &raw).unwrap_err();
+    assert!(
+        err.contains("no stored inference or tentative lead cited"),
+        "{err}"
+    );
+}

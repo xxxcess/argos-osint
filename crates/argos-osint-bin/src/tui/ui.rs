@@ -11040,11 +11040,6 @@ fn draw_resume_session(frame: &mut Frame, app: &App, session: &LastViewSession) 
             Span::styled("Screen  ", theme::dim()),
             Span::styled(fit(t_title, inner.width as usize - 12), theme::text()),
         ]));
-    } else if let Some(mem) = &session.memory_title {
-        lines.push(Line::from(vec![
-            Span::styled("Screen  ", theme::dim()),
-            Span::styled(fit(mem, inner.width as usize - 12), theme::text()),
-        ]));
     } else if let Some(page) = &session.atlas_page {
         lines.push(Line::from(vec![
             Span::styled("Screen  ", theme::dim()),

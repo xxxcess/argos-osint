@@ -21181,6 +21181,25 @@ mod tests {
     }
 
     #[test]
+    fn an_old_session_with_a_memory_id_resumes_at_the_brain_list() {
+        let mut app = app();
+        let json = r#"{"module":"brain","intel_page":null,"intel_article_id":null,
+            "intel_article_title":null,"recon_thread_id":null,"recon_thread_title":null,
+            "memory_id":"gone-or-not","memory_title":"Old detail view","atlas_page":null,
+            "osint_tool_id":null,"providers_page":null,"updated_at":"2026-10-01T12:00:00Z"}"#;
+        app.store.app_state_set("last_view_session", json).unwrap();
+        let session = app
+            .load_last_view_session()
+            .expect("old session still loads");
+        assert_eq!(session.memory_id.as_deref(), Some("gone-or-not"));
+        app.overlay = Overlay::ResumeSession(Box::new(session));
+        app.activate_button(ButtonId::ResumeSessionConfirm);
+        assert_eq!(app.module, Some(ModuleId::Brain));
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
+        assert!(app.topology_state.snapshot.is_none());
+    }
+
+    #[test]
     fn enter_on_a_memory_opens_the_topology_at_one_hop_and_intel_entries_at_two() {
         use argos_osint_core::brain_topology::TopologySeed;
         let mut app = app();

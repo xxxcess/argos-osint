@@ -30,9 +30,9 @@
     "semantic_hash": "769b9d268d68d2b876cb64cebcc855f9"
   },
   "crates/argos-osint-bin/src/tui/app.rs": {
-    "mtime": 1792258871.6557682,
-    "seen": 1792259380.2597744,
-    "ast_hash": "1adce811ff7c2d8e6f43db3772759f2e",
+    "mtime": 1792294363.472685,
+    "seen": 1792294385.5113096,
+    "ast_hash": "cc7978259ba4b0ffeb32037b7316d111",
     "semantic_hash": ""
   },
   "crates/argos-osint-bin/src/tui/brain_detail.rs": {
@@ -102,9 +102,9 @@
     "semantic_hash": "28c3293556d4f43b0d509e809b8629dd"
   },
   "crates/argos-osint-bin/src/tui/ui.rs": {
-    "mtime": 1792238879.5855684,
-    "seen": 1792240372.5386443,
-    "ast_hash": "10b0b4df22ef57692c8504f24f5e16b7",
+    "mtime": 1792294363.4766853,
+    "seen": 1792294385.5121357,
+    "ast_hash": "211af709442f9f007694f373f8cf88d6",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/Cargo.toml": {
@@ -450,9 +450,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/scheduler.rs": {
-    "mtime": 1792250295.9138932,
-    "seen": 1792250868.7843935,
-    "ast_hash": "ed1c9ba011ac5ab3489288f075062259",
+    "mtime": 1792294363.4806852,
+    "seen": 1792294385.5172966,
+    "ast_hash": "40df70bec5c40afc0c5bdd830bfcaffb",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/secrets.rs": {
@@ -498,9 +498,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/tasks.rs": {
-    "mtime": 1792235575.8185914,
-    "seen": 1792240372.538895,
-    "ast_hash": "5e5cb85b0caab8ae7871fb4b17ebf682",
+    "mtime": 1792294363.4846852,
+    "seen": 1792294385.5174854,
+    "ast_hash": "8cca15d395907219d5c38e5e9548fdba",
     "semantic_hash": ""
   },
   "scripts/render_tui_cells.py": {
@@ -2526,9 +2526,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_pipeline.rs": {
-    "mtime": 1792235250.7945914,
-    "seen": 1792240372.5387232,
-    "ast_hash": "eb6772f192f8e173232daf9d5375c167",
+    "mtime": 1792294363.4806852,
+    "seen": 1792294385.5137556,
+    "ast_hash": "94e61e999ad45354dc2b1bb1c61d8516",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_pipeline_tests.rs": {
@@ -2544,9 +2544,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/brief_stages_tests.rs": {
-    "mtime": 1792250293.5458932,
-    "seen": 1792250868.7818396,
-    "ast_hash": "03c7c2a5af14fa9ad2955ceb78cb0fd8",
+    "mtime": 1792294363.4806852,
+    "seen": 1792294385.5138156,
+    "ast_hash": "c6a878d19aa6e92b8a5494fe43e5b1f8",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/intel_recon/clean_body.rs": {
@@ -3240,9 +3240,9 @@
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain_scope_tests.rs": {
-    "mtime": 1792235250.7945914,
-    "seen": 1792240372.53869,
-    "ast_hash": "ab551c46533315605ea6a1688ee9fdd7",
+    "mtime": 1792294363.4766853,
+    "seen": 1792294385.513066,
+    "ast_hash": "1561075d5ce1734ec01d895ab40de888",
     "semantic_hash": ""
   },
   "crates/argos-osint-core/src/brain_topology.rs": {
@@ -3699,6 +3699,42 @@
     "mtime": 1792255914.035049,
     "seen": 1792259380.267987,
     "ast_hash": "64c7343eb3c82f28b7959cb3c83a62f4",
+    "semantic_hash": ""
+  },
+  "crates/argos-osint-core/tests/brief_drainer_real.rs": {
+    "mtime": 1792294363.4846852,
+    "seen": 1792294385.5175152,
+    "ast_hash": "482491bcce6135015f2dea7340216c7b",
+    "semantic_hash": ""
+  },
+  "docs/screens/brief-stage-errors/inferences-failed-after-80x24.png": {
+    "mtime": 1792294363.4846852,
+    "seen": 1792294385.5227754,
+    "ast_hash": "0aea82f6aa3df873d87b31e7e99be2c7",
+    "semantic_hash": ""
+  },
+  "docs/screens/brief-stage-errors/no-provider-after-120x40.png": {
+    "mtime": 1792294363.4926853,
+    "seen": 1792294385.5227768,
+    "ast_hash": "aee687cf576bcb8d44d3c56964dbd461",
+    "semantic_hash": ""
+  },
+  "docs/screens/brief-stage-errors/no-provider-after-160x50.png": {
+    "mtime": 1792294363.4926853,
+    "seen": 1792294385.522779,
+    "ast_hash": "7352b794a96dcdc20865e569f9cb077b",
+    "semantic_hash": ""
+  },
+  "docs/screens/brief-stage-errors/no-provider-before-120x40.png": {
+    "mtime": 1792294363.4926853,
+    "seen": 1792294385.5227804,
+    "ast_hash": "970b129ec8c6383142ee5c53df25a2e6",
+    "semantic_hash": ""
+  },
+  "docs/screens/brief-stage-errors/no-provider-before-160x50.png": {
+    "mtime": 1792294363.4966853,
+    "seen": 1792294385.5227814,
+    "ast_hash": "19eaa5222c740013380668d75cd9c3b1",
     "semantic_hash": ""
   }
 }

@@ -67,11 +67,6 @@ pub(crate) fn body_rect(app: &App) -> Rect {
     chrome(app.screen, app).body
 }
 
-/// Memory detail rectangles for the current screen and focus (draw, hit, scroll).
-pub(crate) fn detail_areas(app: &App) -> super::brain_detail::DetailAreas {
-    super::brain_detail::areas_for(app, body_rect(app))
-}
-
 fn chrome(area: Rect, app: &App) -> Chrome {
     let composer_h = composer_height(area, app);
     let header_h = TAB_H;
@@ -1877,10 +1872,6 @@ fn wrapped_line_count(text: &str, width: usize) -> usize {
     .len()
 }
 
-pub(crate) fn center_line(value: &str, width: usize) -> String {
-    center_text(value, width)
-}
-
 fn center_text(value: &str, width: usize) -> String {
     let shown = fit(value, width);
     let pad = width.saturating_sub(super::components::text_width(&shown)) / 2;
@@ -2825,13 +2816,6 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
             nudge(&mut app.scrolls.detail, delta * 3, max);
         }
         Region::Recall => nudge(&mut app.scrolls.recall, delta * 3, 10_000),
-        Region::Path => nudge(&mut app.scrolls.path, delta, 10_000),
-        Region::Related => {
-            let area = detail_areas(app).related;
-            let max = super::brain_detail::related_scroll_max(&app.brain_detail.related, area);
-            nudge(&mut app.brain_detail.related.scroll, delta * 2, max);
-        }
-        Region::Summary => nudge(&mut app.scrolls.summary, delta * 3, 10_000),
         Region::AtlasFeed => shift_atlas_feed(app, delta * 3),
         Region::AtlasOrigins => {
             let max = if app.atlas_page == AtlasPage::Runs && !app.atlas_news {
@@ -2853,7 +2837,6 @@ pub fn scroll_at(app: &mut App, x: u16, y: u16, delta: i32) {
                 let rows = super::related_articles::rows(
                     &app.intel_related,
                     center.width.saturating_sub(2) as usize,
-                    false,
                 );
                 let max = rows
                     .len()
@@ -2995,16 +2978,6 @@ pub fn page(app: &mut App, direction: i32) {
         Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::List => {
             nudge(&mut app.scrolls.recall, direction * 6, 10_000);
         }
-        Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::Graph => match app.focus {
-            Target::RelatedRow(_) => {
-                let area = detail_areas(app).related;
-                let max = super::brain_detail::related_scroll_max(&app.brain_detail.related, area);
-                let room = (super::brain_detail::inner(area).height / 2).max(1) as i32;
-                nudge(&mut app.brain_detail.related.scroll, direction * room, max);
-            }
-            Target::DetailPath => nudge(&mut app.scrolls.path, direction * 4, 10_000),
-            _ => nudge(&mut app.scrolls.summary, direction * 4, 10_000),
-        },
         Some(ModuleId::Brain) => {}
         Some(ModuleId::Osint) if matches!(app.focus, Target::Tool(_) | Target::ToolCategory(_)) => {
             let room = (tool_room(app) / 2).max(1) as i32;
@@ -3141,7 +3114,6 @@ pub fn page(app: &mut App, direction: i32) {
                     let rows = super::related_articles::rows(
                         &app.intel_related,
                         center.width.saturating_sub(2) as usize,
-                        false,
                     );
                     let max = rows
                         .len()
@@ -3221,9 +3193,6 @@ enum Region {
     AtlasFeed,
     AtlasRuns,
     AtlasNews,
-    Path,
-    Related,
-    Summary,
     IntelExtracted,
     IntelBrief,
     IntelFull,
@@ -3249,18 +3218,6 @@ fn region_at(app: &App, x: u16, y: u16) -> Region {
             let (_, list, _) = dashboard_areas(body);
             if contains(list, x, y) {
                 Region::Threads
-            } else {
-                Region::None
-            }
-        }
-        Some(ModuleId::Brain) if app.brain_list_mode == BrainListMode::Graph => {
-            let areas = detail_areas(app);
-            if contains(areas.path, x, y) {
-                Region::Path
-            } else if contains(areas.related, x, y) {
-                Region::Related
-            } else if contains(areas.summary, x, y) {
-                Region::Summary
             } else {
                 Region::None
             }
@@ -4123,29 +4080,6 @@ fn brain_hit(app: &App, body: Rect, x: u16, y: u16) -> Option<Target> {
     if app.brain_list_mode == BrainListMode::Topology {
         return app.layout.borrow().target_at(x, y);
     }
-    if app.brain_list_mode == BrainListMode::Graph {
-        let areas = super::brain_detail::areas_for(app, body);
-        if contains(areas.back, x, y) {
-            return Some(Target::Button(ButtonId::BrainDetailBack));
-        }
-        if contains(areas.path, x, y) {
-            return Some(Target::DetailPath);
-        }
-        if contains(areas.related, x, y) {
-            return super::brain_detail::related_at(&app.brain_detail.related, areas.related, x, y)
-                .map(Target::RelatedRow);
-        }
-        if contains(areas.summary, x, y) {
-            if let Some(failure) = &app.summary_failure {
-                let inner = super::graph::summary_inner(areas.summary);
-                if let Some(button) = super::summary_card::button_at(app, failure, inner, x, y) {
-                    return Some(Target::Button(button));
-                }
-            }
-            return Some(Target::DetailSummary);
-        }
-        return None;
-    }
     if app.brain_list_mode == BrainListMode::Create {
         let form = brain_form(body);
         if contains(form.app, x, y) {
@@ -4995,12 +4929,7 @@ pub(super) fn draw_button_state(
     }
     if matches!(
         button,
-        ButtonId::FallbackTab(_)
-            | ButtonId::AtlasWorld
-            | ButtonId::AtlasNews
-            | ButtonId::BrainRelatedFirst
-            | ButtonId::BrainRelatedSecond
-            | ButtonId::BrainRelatedThird
+        ButtonId::FallbackTab(_) | ButtonId::AtlasWorld | ButtonId::AtlasNews
     ) {
         super::components::tab_button(
             frame,
@@ -5521,15 +5450,6 @@ fn header_detail(app: &App) -> String {
             BrainListMode::List => "memories".into(),
             BrainListMode::Create => "new memory".into(),
             BrainListMode::Topology => "topology".into(),
-            BrainListMode::Graph => {
-                if let Some(title) = super::app::structural_title(app) {
-                    title.trim().into()
-                } else if app.detail_claim() {
-                    "claim path".into()
-                } else {
-                    "recon path".into()
-                }
-            }
         },
         Some(ModuleId::Atlas) if app.atlas_page == AtlasPage::Runs => "history".into(),
         Some(ModuleId::Atlas) => app.atlas_status.clone(),
@@ -5581,9 +5501,6 @@ fn footer_line(app: &App) -> Paragraph<'static> {
                 "↑↓ open · Ctrl+N new · Ctrl+K · Esc home"
             }
             (Some(ModuleId::Recon), _) => "Tab next · Enter · Ctrl+K · Esc list",
-            (Some(ModuleId::Brain), _) if app.brain_list_mode == BrainListMode::Graph => {
-                "Tab section · ↑↓ select · Enter open related · Esc back · Ctrl+K"
-            }
             (Some(ModuleId::Atlas), _) if app.atlas_news || app.atlas_page == AtlasPage::Live => {
                 "Tab next · Enter · Ctrl+K · Esc history"
             }
@@ -6799,10 +6716,6 @@ fn draw_osint(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_brain(frame: &mut Frame, app: &App, area: Rect) {
     if app.brain_list_mode == BrainListMode::Topology {
         super::topology::draw_topology(frame, app, area);
-        return;
-    }
-    if app.brain_list_mode == BrainListMode::Graph {
-        super::graph::draw(frame, app, area);
         return;
     }
     if app.brain_list_mode == BrainListMode::Create {
@@ -9100,11 +9013,8 @@ pub fn reveal_intel_related(app: &mut App, index: usize) {
         return;
     };
     let room = layout.related.height.saturating_sub(3).max(1) as usize;
-    let rows = super::related_articles::rows(
-        &app.intel_related,
-        center.width.saturating_sub(2) as usize,
-        false,
-    );
+    let rows =
+        super::related_articles::rows(&app.intel_related, center.width.saturating_sub(2) as usize);
     let top = rows
         .iter()
         .position(|(_, t)| *t == Some(Target::IntelRelatedArticle(index)))
@@ -9172,11 +9082,8 @@ fn draw_intel_related(frame: &mut Frame, app: &App, viewport: Rect, area: AbsRec
     } else {
         " Related "
     };
-    let rows = super::related_articles::rows(
-        &app.intel_related,
-        area.width.saturating_sub(2) as usize,
-        false,
-    );
+    let rows =
+        super::related_articles::rows(&app.intel_related, area.width.saturating_sub(2) as usize);
     let more = app.intel_related.page.has_more;
     let room = area.height.saturating_sub(2 + u16::from(more));
     let lines = rows

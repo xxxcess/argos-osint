@@ -1,7 +1,5 @@
 //! App state and keyboard routing for the Argos terminal shell.
 
-use super::brain_detail::RelatedTab;
-use super::brain_detail::{AssociationItem, AssociationTarget};
 use super::tracked;
 use super::ui::nudge;
 use anyhow::Result;
@@ -215,8 +213,6 @@ pub struct Scrolls {
     pub insights: u16,
     pub popup: u16,
     pub recall: u16,
-    pub path: u16,
-    pub summary: u16,
     pub intel_list: u16,
     /// Vertical offset of the Briefing Focus center stack.
     pub intel_brief: u16,
@@ -322,7 +318,6 @@ impl ProviderPage {
 pub enum BrainListMode {
     List,
     Create,
-    Graph,
     Topology,
 }
 
@@ -625,23 +620,7 @@ pub enum ButtonId {
     /// Toggle Related articles between all retained cycles and this cycle.
     RelatedScope,
     BrainBack,
-    /// Back in the memory detail history (or to the Brain list).
-    BrainDetailBack,
-    BrainRelatedFirst,
-    BrainRelatedSecond,
-    BrainRelatedThird,
-    BrainAssociationsMore,
     IntelRelatedMore,
-    /// Summary failure card: toggle the sanitized cause chain and attempts.
-    SummaryDetails,
-    /// Summary failure card: Logs filtered to the failed job.
-    SummaryLogs,
-    /// Summary failure card: the failed job in Jobs.
-    SummaryJob,
-    /// Summary failure card: a fresh, linked execution.
-    SummaryRetry,
-    /// Summary failure card: Models → Defaults with Summarization selected.
-    SummaryModels,
     /// Logs: clear durable events only (jobs, results, memories are kept).
     ClearLog,
     JobsStatus,
@@ -671,7 +650,6 @@ pub enum ButtonId {
     RefreshHardware,
     ResumeSessionConfirm,
     ResumeSessionDismiss,
-    BrainMapTopology,
     TopologyBack,
     TopologyOpenMemory,
     TopologyViewEvidence,
@@ -740,13 +718,7 @@ pub enum Target {
     IntelTab(usize),
     /// One Intel bulletin article row.
     IntelArticle(usize),
-    /// The path graph section of the memory detail (scroll focus).
-    DetailPath,
-    /// One Related memory row in the memory detail.
-    RelatedRow(usize),
     IntelRelatedArticle(usize),
-    /// The Summary section of the memory detail (scroll focus).
-    DetailSummary,
     Choice(usize),
     CloseOverlay,
     Tab(usize),
@@ -805,16 +777,6 @@ enum ProviderEvent {
         page: ProviderPage,
         result: Result<String, String>,
     },
-}
-
-#[derive(Debug)]
-struct LoadedBrainDetail {
-    memory: Memory,
-    graph: recon::MemoryGraph,
-    typed: Vec<String>,
-    insight: Option<recon::InsightView>,
-    claim: bool,
-    associations: argos_osint_core::brain_browse::Associations,
 }
 
 #[derive(Debug)]
@@ -902,10 +864,6 @@ enum WorkEvent {
         run_id: String,
         outcome: Result<bool, String>,
     },
-    BrainDetailLoaded {
-        generation: u64,
-        outcome: Result<Box<LoadedBrainDetail>, String>,
-    },
     TopologyLoaded {
         generation: u64,
         seed: argos_osint_core::brain_topology::TopologySeed,
@@ -970,14 +928,6 @@ enum WorkEvent {
     AnswerNote {
         thread_id: String,
         text: String,
-    },
-    GraphSummary {
-        report: Box<argos_osint_core::graph_explanation::ExplainReport>,
-    },
-    Related {
-        request: u64,
-        memory_id: String,
-        outcome: std::result::Result<Vec<AssociationItem>, String>,
     },
     Atlas(atlas::AtlasEvent),
     AtlasDone {
@@ -1051,6 +1001,8 @@ impl LayoutRegistry {
             .map(|e| e.target)
     }
 }
+
+const RELATED_BACK_CAP: usize = 32;
 
 #[derive(Clone)]
 enum RelatedArticleBack {
@@ -1317,7 +1269,6 @@ pub struct App {
     pub(crate) intel_publisher_prior: Option<argos_osint_core::atlas_metadata::PublisherPrior>,
     pub(crate) intel_related: super::related_articles::ArticleRelatedView,
     related_back: Vec<RelatedArticleBack>,
-    brain_destination_back: Option<super::brain_detail::DetailSnapshot>,
     pub(crate) intel_link_explanations: HashMap<(String, String), String>,
     pub gnews_key: String,
     pub gnews_fallback: String,
@@ -1327,16 +1278,11 @@ pub struct App {
     pub currents_fallback: String,
     pub whoxy_key: String,
     pub whoxy_fallback: String,
-    pub brain_graph: recon::MemoryGraph,
     /// Typed payload lines of the open memory (kind header first).
-    pub brain_typed: Vec<String>,
     /// Brain list kind filter; `None` = default evidence listing.
     pub brain_kind: Option<argos_osint_core::memory_metadata::MemoryKind>,
     /// Related articles scope shared by Intel and Brain (all cycles default).
     pub related_scope: RelatedScope,
-    brain_graph_for: Option<String>,
-    /// Open memory detail (graph, Related, Summary), independent of `memory_sel`.
-    pub brain_detail: super::brain_detail::BrainDetail,
     /// Brain Memory Topology interactive state.
     pub topology_state: super::topology::TopologyState,
     topology_origin: Option<TopologyOrigin>,
@@ -1380,20 +1326,6 @@ pub struct App {
     brain_reading: Option<u64>,
     brain_dirty: bool,
     brain_prefer: Option<String>,
-    brain_detail_generation: u64,
-    brain_detail_reading: bool,
-    brain_detail_target: Option<String>,
-    brain_detail_restore: Option<super::brain_detail::DetailSnapshot>,
-    brain_detail_back: bool,
-    brain_associations: Option<argos_osint_core::brain_browse::Associations>,
-    brain_detail_claim: bool,
-    pub graph_summary: String,
-    graph_summary_pending: Option<String>,
-    /// Request id of the newest graph explanation; older completions are ignored.
-    graph_summary_request: String,
-    /// Failed graph explanation for the open memory (inline card).
-    pub summary_failure: Option<super::summary_card::SummaryFailure>,
-    pub summary_details_open: bool,
     pub hits: Vec<ScoredMemory>,
     pub auth: AuthFile,
     pub settings: SettingsFile,
@@ -1773,14 +1705,9 @@ impl App {
             intel_publisher_prior: None,
             intel_related: Default::default(),
             related_back: Vec::new(),
-            brain_destination_back: None,
             intel_link_explanations: HashMap::new(),
-            brain_graph: recon::MemoryGraph::default(),
-            brain_typed: Vec::new(),
             brain_kind: None,
             related_scope: RelatedScope::default(),
-            brain_graph_for: None,
-            brain_detail: Default::default(),
             topology_state: Default::default(),
             topology_origin: None,
             topology_generation: 0,
@@ -1820,18 +1747,6 @@ impl App {
             brain_reading: None,
             brain_dirty: true,
             brain_prefer: None,
-            brain_detail_generation: 0,
-            brain_detail_reading: false,
-            brain_detail_target: None,
-            brain_detail_restore: None,
-            brain_detail_back: false,
-            brain_associations: None,
-            brain_detail_claim: true,
-            graph_summary: String::new(),
-            graph_summary_pending: None,
-            graph_summary_request: String::new(),
-            summary_failure: None,
-            summary_details_open: false,
             hits: Vec::new(),
             auth,
             settings,
@@ -2212,12 +2127,7 @@ impl App {
                     }
                 }
             }
-            ModuleId::Brain => {
-                if let Some(mem) = &self.brain_detail.memory {
-                    session.memory_id = Some(mem.id.clone());
-                    session.memory_title = Some(mem.text.lines().next().unwrap_or("").to_string());
-                }
-            }
+            ModuleId::Brain => {}
             ModuleId::Atlas => {
                 session.atlas_page = Some(match self.atlas_page {
                     AtlasPage::Live => "live".to_string(),
@@ -2293,9 +2203,6 @@ impl App {
             }
             ModuleId::Brain => {
                 self.reload_memories();
-                if let Some(mem_id) = &session.memory_id {
-                    let _ = self.open_memory_detail(mem_id);
-                }
             }
             ModuleId::Atlas => {
                 if session.atlas_page.as_deref() == Some("runs") {
@@ -2870,11 +2777,7 @@ impl App {
                 self.activate_button(ButtonId::ClearLog);
             }
             "brain-pin" => self.activate_button(ButtonId::Pin),
-            "brain-back" => self.activate_button(ButtonId::BrainDetailBack),
-            "brain-summary-retry" => self.activate_button(ButtonId::SummaryRetry),
-            "brain-summary-logs" => self.activate_button(ButtonId::SummaryLogs),
-            "brain-summary-job" => self.activate_button(ButtonId::SummaryJob),
-            "brain-summary-model" => self.activate_button(ButtonId::SummaryModels),
+            "brain-back" => self.activate_button(ButtonId::BrainBack),
             "jobs-logs" => self.activate_button(ButtonId::JobsViewLogs),
             "jobs-retry" => self.activate_button(ButtonId::JobsRetry),
             "jobs-cancel" => self.activate_button(ButtonId::JobsCancel),
@@ -3235,9 +3138,7 @@ impl App {
         if ModuleId::ALL[index] != ModuleId::Jobs {
             self.pending_job = None;
         }
-        self.brain_detail_target = None;
-        self.brain_detail_generation = self.brain_detail_generation.wrapping_add(1);
-        self.flush_draft();
+
         let _ = self.flush_home_draft();
         self.launcher_sel = index;
         self.module = Some(ModuleId::ALL[index]);
@@ -3496,39 +3397,6 @@ impl App {
             Target::Field(field) => self.field(field).chars().count(),
             _ => 0,
         };
-        self.sync_selected_insight();
-    }
-
-    fn sync_selected_insight(&mut self) {
-        if self.background_db.is_some() && self.brain_list_mode == BrainListMode::List {
-            self.brain_preview_target = if self.module == Some(ModuleId::Brain)
-                && matches!(self.focus, Target::Memory(_))
-            {
-                self.memories
-                    .get(self.memory_sel)
-                    .filter(|m| !m.id.starts_with("actor-group:"))
-                    .map(|m| m.id.clone())
-            } else {
-                None
-            };
-            if self.brain_preview_for == self.brain_preview_target {
-                return;
-            }
-            self.selected_insight = None;
-            self.request_brain_preview();
-            return;
-        }
-        if self.module != Some(ModuleId::Brain) || self.brain_list_mode != BrainListMode::List {
-            return;
-        }
-        if !matches!(self.focus, Target::Memory(_)) {
-            self.selected_insight = None;
-            return;
-        }
-        self.selected_insight = self
-            .memories
-            .get(self.memory_sel)
-            .and_then(|memory| self.store.insight_for_memory(&memory.id).ok().flatten());
     }
 
     fn refresh_threads(&mut self) -> Result<()> {
@@ -5383,9 +5251,6 @@ impl App {
                 self.memories_deleting.remove(&memory_id);
                 match outcome {
                     Ok(_) => {
-                        if self.brain_detail.memory_id() == Some(memory_id.as_str()) {
-                            self.leave_brain_detail();
-                        }
                         self.brain_cache.retain(|m| m.id != memory_id);
                         self.filter_memory_cache();
                         self.reload_memories();
@@ -5694,13 +5559,6 @@ impl App {
                 }
                 true
             }
-            WorkEvent::BrainDetailLoaded {
-                generation,
-                outcome,
-            } => {
-                self.on_brain_detail_loaded(generation, outcome);
-                true
-            }
             WorkEvent::TopologyLoaded {
                 generation,
                 seed,
@@ -5962,12 +5820,6 @@ impl App {
                 }
                 true
             }
-            WorkEvent::GraphSummary { report } => self.on_graph_summary(*report),
-            WorkEvent::Related {
-                request,
-                memory_id,
-                outcome,
-            } => self.on_related(request, &memory_id, outcome),
             WorkEvent::Atlas(event) => {
                 self.on_atlas(event);
                 self.module == Some(ModuleId::Atlas)
@@ -6698,72 +6550,13 @@ impl App {
         self.reload_memories_selecting(Some(memory.id.clone()));
         self.brain_insight.clear();
         self.brain_list_mode = BrainListMode::List;
-        self.brain_graph_for = None;
-        self.sync_graph();
         self.set_focus(Target::Memory(self.memory_sel));
         Ok("Insight saved with source".into())
-    }
-
-    /// Graph of the selected list row (list mode only; the detail view owns its graph).
-    fn sync_graph(&mut self) {
-        // List rows do not display graphs. Production reads belong to detail
-        // loading, so arrow keys and refresh completion never query a graph.
-        if self.background_db.is_some() && self.brain_list_mode == BrainListMode::List {
-            return;
-        }
-        if self.brain_list_mode == BrainListMode::Graph {
-            return;
-        }
-        let id = self
-            .memories
-            .get(self.memory_sel)
-            .map(|memory| memory.id.clone());
-        if self.brain_graph_for == id {
-            return;
-        }
-        self.brain_graph_for = id.clone();
-        self.scrolls.path = 0;
-        self.brain_graph = match &id {
-            Some(id) => self.store.graph_for_memory(id).unwrap_or_default(),
-            None => recon::MemoryGraph::default(),
-        };
-    }
-
-    /// Claim mode follows the open detail memory's own provenance and graph.
-    pub(crate) fn detail_claim(&self) -> bool {
-        if self
-            .brain_detail
-            .memory_id()
-            .is_some_and(|id| id.starts_with("actor-group:"))
-        {
-            return false;
-        }
-        if self.background_db.is_some() {
-            return self.brain_detail_claim;
-        }
-        // Typed source-claim/inference semantics win over placement heuristics.
-        if let Some(kind) = self
-            .brain_detail
-            .memory
-            .as_ref()
-            .and_then(|memory| self.store.memory_insight_kind(&memory.id))
-        {
-            return kind == "claim";
-        }
-        self.brain_graph.is_claim_path()
-            || self
-                .brain_detail
-                .memory
-                .as_ref()
-                .is_some_and(|memory| memory.source.app == "atlas")
     }
 
     /// Memories for the list plus the total, honoring Find. Errors are returned,
     /// never turned into an empty list.
     fn load_memory_list(&self) -> Result<(Vec<Memory>, usize)> {
-        if let Some(fault) = super::brain_detail::read_fault() {
-            anyhow::bail!(fault);
-        }
         let list = self
             .store
             .brain_browse_memories(self.brain_kind, self.brain_query.trim())?;
@@ -6978,62 +6771,6 @@ impl App {
                 Target::Memory(self.memory_sel)
             };
         }
-        if self.brain_list_mode == BrainListMode::Graph {
-            self.refresh_open_detail();
-        } else {
-            self.brain_graph_for = None;
-            self.sync_graph();
-            self.sync_selected_insight();
-        }
-    }
-
-    /// The open detail memory changed or vanished in another writer.
-    fn refresh_open_detail(&mut self) {
-        let Some(id) = self.brain_detail.memory_id().map(str::to_string) else {
-            return;
-        };
-        if self.background_db.is_some() {
-            // A database refresh must not replace an in-flight destination
-            // chosen by the user with the record still visible underneath it.
-            if self.brain_detail_target.is_some() {
-                return;
-            }
-            self.request_brain_detail(&id);
-            self.brain_detail_restore = self.detail_snapshot();
-            return;
-        }
-        if id.starts_with("actor-group:") {
-            return;
-        }
-        match self.store.get_memory(&id) {
-            Ok(Some(memory)) => self.brain_detail.memory = Some(memory),
-            Ok(None) => {
-                self.leave_brain_detail();
-                self.status = "The open memory was deleted".into();
-            }
-            Err(_) => {}
-        }
-    }
-
-    fn leave_brain_detail(&mut self) {
-        self.brain_detail_target = None;
-        self.brain_detail_generation = self.brain_detail_generation.wrapping_add(1);
-        self.brain_associations = None;
-        self.brain_list_mode = BrainListMode::List;
-        self.brain_detail.memory = None;
-        self.brain_detail.history.clear();
-        self.brain_detail.related = Default::default();
-        self.graph_summary.clear();
-        self.summary_failure = None;
-        self.summary_details_open = false;
-        self.brain_graph_for = None;
-        self.sync_graph();
-        self.set_focus(if self.memories.is_empty() {
-            Target::Button(ButtonId::CreateMemory)
-        } else {
-            Target::Memory(self.memory_sel)
-        });
-        self.status = "Memories".into();
     }
 
     /// Enter on a memory: open the topology mapper seeded with that memory at
@@ -7068,29 +6805,6 @@ impl App {
         self.open_topology(seed, Some(1));
     }
 
-    fn detail_snapshot(&self) -> Option<super::brain_detail::DetailSnapshot> {
-        Some(super::brain_detail::DetailSnapshot {
-            memory_id: self.brain_detail.memory_id()?.to_string(),
-            compact_page: self.compact_pages[ModuleId::Brain.index()],
-            related_sel: self.brain_detail.related.sel,
-            related_scroll: self.brain_detail.related.scroll,
-            tab: self.brain_detail.related.tab,
-            cursors: self.brain_detail.related.cursors,
-            page_sizes: self.brain_detail.related.page_sizes,
-            selected_keys: {
-                let mut keys = self.brain_detail.related.selected_keys.clone();
-                keys[self.brain_detail.related.tab.index()] = self
-                    .brain_detail
-                    .selected_related()
-                    .map(|item| item.key.clone());
-                keys
-            },
-            path_scroll: self.scrolls.path,
-            summary_scroll: self.scrolls.summary,
-            focus: self.focus,
-        })
-    }
-
     /// Open the topology mapper on `seed`. `depth` is the starting hop count
     /// for a fresh mapper (None keeps the default of 2); an in-place recenter
     /// or history step never changes the depth.
@@ -7110,12 +6824,6 @@ impl App {
         } else {
             self.topology_origin_label = if self.module == Some(ModuleId::Intel) {
                 "Intel · Focus brief".into()
-            } else if self
-                .brain_detail
-                .memory_id()
-                .is_some_and(|id| id.starts_with("actor-group:"))
-            {
-                "Brain · actor group graph".into()
             } else {
                 "Brain · memories".into()
             };
@@ -7889,106 +7597,6 @@ impl App {
         }
     }
 
-    /// One transition for every memory link (Brain list, Related, others).
-    /// Fetches the destination by id, even when Find hides it. On failure the
-    /// current view stays intact. Returns whether the detail opened.
-    pub(crate) fn open_memory_detail(&mut self, memory_id: &str) -> bool {
-        if self.background_db.is_some() {
-            self.request_brain_detail(memory_id);
-            return true;
-        }
-        if memory_id.starts_with("actor-group:") {
-            return self.open_actor_group(memory_id);
-        }
-        if !self.store.is_browse_claim(memory_id).unwrap_or(false) {
-            self.status = "That record is unavailable in Brain".into();
-            return false;
-        }
-        let memory = match self.store.get_memory(memory_id) {
-            Ok(Some(memory)) => memory,
-            Ok(None) => {
-                self.reload_memories();
-                self.status = "That memory no longer exists; the list was refreshed".into();
-                return false;
-            }
-            Err(err) => {
-                self.status = format!("Could not open that memory: {err}");
-                return false;
-            }
-        };
-        let graph = match self.store.graph_for_memory(&memory.id) {
-            Ok(graph) => graph,
-            Err(err) => {
-                self.status = format!("Could not load that memory's graph: {err}");
-                return false;
-            }
-        };
-        if self.brain_list_mode == BrainListMode::Graph {
-            if let Some(snapshot) = self.detail_snapshot() {
-                if snapshot.memory_id != memory.id {
-                    self.brain_detail.push(snapshot);
-                }
-            }
-        } else {
-            self.brain_detail.history.clear();
-        }
-        self.show_detail(memory, graph, None);
-        true
-    }
-
-    pub(crate) fn open_actor_group(&mut self, key: &str) -> bool {
-        if self.background_db.is_some() {
-            self.request_brain_detail(key);
-            return true;
-        }
-        let group = match self.store.actor_group(key) {
-            Ok(Some(group)) => group,
-            _ => {
-                self.status = "That actor group is unavailable".into();
-                return false;
-            }
-        };
-        let graph = match self.store.actor_group_graph(&group) {
-            Ok(graph) => graph,
-            Err(e) => {
-                self.status = format!("Could not load actor associations: {e}");
-                return false;
-            }
-        };
-        if let Some(snapshot) = self.detail_snapshot() {
-            if snapshot.memory_id != group.key() {
-                self.brain_detail.push(snapshot);
-            }
-        }
-        let memory = Memory {
-            id: group.key(),
-            text: group.display_name,
-            category: "actor group".into(),
-            pinned: false,
-            created_at: String::new(),
-            source: MemorySource {
-                app: "brain-actor-group".into(),
-                conversation_id: group.name_key,
-                message_id: None,
-                reference: serde_json::to_string(&group.actor_ids).ok(),
-            },
-        };
-        self.show_detail(memory, graph, None);
-        true
-    }
-
-    fn request_brain_detail(&mut self, id: &str) {
-        if self.brain_detail_reading && self.brain_detail_target.as_deref() == Some(id) {
-            return;
-        }
-        self.brain_detail_restore = None;
-        self.brain_detail_back = false;
-        self.brain_detail_target = Some(id.to_string());
-        self.brain_detail_generation = self.brain_detail_generation.wrapping_add(1);
-        self.start_brain_detail_read();
-        self.status = "Loading Brain detail…".into();
-    }
-
     pub(crate) fn brain_refreshing(&self) -> bool {
         self.brain_reading.is_some()
     }
@@ -7998,326 +7606,6 @@ impl App {
     }
     pub(crate) fn atlas_news_loading(&self) -> bool {
         self.atlas_articles_reading
-    }
-
-    fn start_brain_detail_read(&mut self) {
-        if self.brain_detail_reading || self.module != Some(ModuleId::Brain) {
-            return;
-        }
-        let (Some(db), Some(id)) = (self.background_db.clone(), self.brain_detail_target.clone())
-        else {
-            return;
-        };
-        self.brain_detail_reading = true;
-        let generation = self.brain_detail_generation;
-        let tx = self.work_tx.clone();
-        std::thread::spawn(move || {
-            let outcome = Store::open_profile_reader(&db)
-                .and_then(|store| {
-                    store.connection().execute_batch("BEGIN")?;
-                    load_brain_detail(&store, &id).map(Box::new)
-                })
-                .map_err(|e| e.to_string());
-            let _ = tx.send(WorkEvent::BrainDetailLoaded {
-                generation,
-                outcome,
-            });
-        });
-    }
-
-    fn on_brain_detail_loaded(
-        &mut self,
-        generation: u64,
-        outcome: Result<Box<LoadedBrainDetail>, String>,
-    ) {
-        self.brain_detail_reading = false;
-        if generation != self.brain_detail_generation {
-            self.start_brain_detail_read();
-            return;
-        }
-        if self.module != Some(ModuleId::Brain) || self.brain_detail_target.take().is_none() {
-            return;
-        }
-        match outcome {
-            Ok(detail) => {
-                let restore = self.brain_detail_restore.take();
-                if self.brain_detail_back {
-                    self.brain_detail.history.pop();
-                } else if restore.is_none() {
-                    if let Some(snapshot) = self.detail_snapshot() {
-                        if snapshot.memory_id != detail.memory.id {
-                            self.brain_detail.push(snapshot);
-                        }
-                    } else {
-                        self.brain_detail.history.clear();
-                    }
-                }
-                self.brain_associations = Some(detail.associations);
-                self.brain_typed = detail.typed;
-                self.selected_insight = detail.insight;
-                self.brain_detail_claim = detail.claim;
-                self.show_detail(detail.memory, detail.graph, restore.as_ref());
-                self.status = "Brain detail".into();
-            }
-            Err(error) => {
-                if error == "claim unavailable" || error == "actor unavailable" {
-                    if self.brain_detail_back {
-                        self.brain_detail.history.pop();
-                        self.detail_back();
-                        return;
-                    }
-                    if self.brain_detail_restore.is_some() {
-                        self.leave_brain_detail();
-                    }
-                }
-                self.status = format!("Could not load Brain detail: {error}");
-                self.push_log_detail("error", "Brain: could not load detail", error);
-            }
-        }
-    }
-
-    fn show_detail(
-        &mut self,
-        memory: Memory,
-        graph: recon::MemoryGraph,
-        restore: Option<&super::brain_detail::DetailSnapshot>,
-    ) {
-        self.brain_list_mode = BrainListMode::Graph;
-        self.brain_graph = graph;
-        if self.background_db.is_none() {
-            self.brain_typed = argos_osint_core::brain_kinds::typed_detail(&self.store, &memory.id)
-                .unwrap_or_default();
-            self.selected_insight = self.store.insight_for_memory(&memory.id).ok().flatten();
-        }
-        self.brain_graph_for = Some(memory.id.clone());
-        self.graph_summary.clear();
-        self.summary_failure = None;
-        self.summary_details_open = false;
-        self.scrolls.path = restore.map_or(0, |s| s.path_scroll);
-        self.scrolls.summary = restore.map_or(0, |s| s.summary_scroll);
-        self.brain_detail.memory = Some(memory.clone());
-        let request = self.brain_detail.begin_related(
-            restore.map_or(0, |s| s.related_sel),
-            restore.map_or(0, |s| s.related_scroll),
-        );
-        let actor = memory.id.starts_with("actor-group:");
-        self.compact_pages[ModuleId::Brain.index()] = restore.map_or(0, |s| s.compact_page);
-        self.brain_detail.related.tab = restore.map_or(
-            if actor {
-                RelatedTab::Claims
-            } else {
-                RelatedTab::Actors
-            },
-            |s| s.tab,
-        );
-        self.brain_detail.related.cursors = restore.map_or([(0, 0); 3], |s| s.cursors);
-        self.brain_detail.related.page_sizes = restore.map_or([20; 3], |s| s.page_sizes);
-        self.brain_detail.related.selected_keys =
-            restore.map_or([None, None, None], |s| s.selected_keys.clone());
-        self.request_related(request, &memory.id);
-        if actor {
-            let a = self.brain_associations.clone().unwrap_or_else(|| {
-                self.store
-                    .actor_group(&memory.id)
-                    .ok()
-                    .flatten()
-                    .and_then(|g| self.store.actor_group_associations(&g).ok())
-                    .unwrap_or_default()
-            });
-            self.graph_summary = format!(
-                "{} claims · {} threads · {} articles",
-                a.claims.len(),
-                a.threads.len(),
-                a.articles.len()
-            );
-            self.brain_typed = vec![self.graph_summary.clone()];
-            self.graph_summary_pending = None;
-        } else {
-            self.load_or_request_summary(&memory);
-        }
-        let focus = restore.map_or(Target::DetailPath, |s| s.focus);
-        self.set_focus(match focus {
-            Target::RelatedRow(_) => Target::RelatedRow(self.brain_detail.related.sel),
-            other => other,
-        });
-    }
-
-    /// Related items for `memory_id`: on a blocking worker in the live app, inline
-    /// otherwise. Late results for another request or memory are dropped.
-    fn request_related(&mut self, request: u64, memory_id: &str) {
-        let tab = self.brain_detail.related.tab;
-        if self.background_db.is_some() {
-            if let Some(a) = &self.brain_associations {
-                self.on_related(
-                    request,
-                    memory_id,
-                    Ok(association_rows_from(a.clone(), tab)),
-                );
-                return;
-            }
-        }
-        if let (Ok(_), Some(db)) = (tokio::runtime::Handle::try_current(), tracked::db_path()) {
-            let tx = self.work_tx.clone();
-            let memory_id = memory_id.to_string();
-            tokio::task::spawn_blocking(move || {
-                let outcome = Store::open_profile_reader(&db)
-                    .and_then(|store| association_rows(&store, &memory_id, tab))
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(WorkEvent::Related {
-                    request,
-                    memory_id,
-                    outcome,
-                });
-            });
-            return;
-        }
-        let outcome = association_rows(&self.store, memory_id, tab).map_err(|e| e.to_string());
-        self.on_related(request, memory_id, outcome);
-    }
-
-    fn on_related(
-        &mut self,
-        request: u64,
-        memory_id: &str,
-        outcome: std::result::Result<Vec<AssociationItem>, String>,
-    ) -> bool {
-        if !self
-            .brain_detail
-            .finish_related(request, memory_id, outcome)
-        {
-            return false;
-        }
-        let area = super::ui::detail_areas(self).related;
-        super::brain_detail::reveal_related(&mut self.brain_detail.related, area);
-        if matches!(self.focus, Target::RelatedRow(_)) {
-            self.focus = Target::RelatedRow(self.brain_detail.related.sel);
-        }
-        true
-    }
-
-    fn select_brain_related_tab(&mut self, index: usize) {
-        let Some(id) = self.brain_detail.memory_id().map(str::to_string) else {
-            return;
-        };
-        let actor = id.starts_with("actor-group:");
-        let tabs: &[RelatedTab] = if actor {
-            &[
-                RelatedTab::Claims,
-                RelatedTab::Threads,
-                RelatedTab::Articles,
-            ]
-        } else {
-            &[RelatedTab::Actors, RelatedTab::Sources]
-        };
-        let Some(tab) = tabs.get(index).copied() else {
-            return;
-        };
-        let view = &mut self.brain_detail.related;
-        view.cursors[view.tab.index()] = (view.sel, view.scroll);
-        view.selected_keys[view.tab.index()] =
-            view.items.get(view.sel).map(|item| item.key.clone());
-        view.tab = tab;
-        let (sel, scroll) = view.cursors[index];
-        let request = self.brain_detail.begin_related(sel, scroll);
-        self.request_related(request, &id);
-    }
-
-    /// Back: the previous detail memory with its selection, focus, and scroll;
-    /// at the first detail, the Brain list with its Find and selection.
-    fn detail_back(&mut self) {
-        if self.background_db.is_some() {
-            if let Some(snapshot) = self.brain_detail.history.last().cloned() {
-                self.request_brain_detail(&snapshot.memory_id);
-                self.brain_detail_restore = Some(snapshot);
-                self.brain_detail_back = true;
-            } else {
-                self.leave_brain_detail();
-            }
-            return;
-        }
-        while let Some(snapshot) = self.brain_detail.history.pop() {
-            if snapshot.memory_id.starts_with("actor-group:") {
-                let depth = self.brain_detail.history.len();
-                if self.open_actor_group(&snapshot.memory_id) {
-                    self.brain_detail.history.truncate(depth);
-                    if let Some(memory) = self.brain_detail.memory.clone() {
-                        self.show_detail(memory, self.brain_graph.clone(), Some(&snapshot));
-                    }
-                    return;
-                }
-                continue;
-            }
-            let Ok(Some(memory)) = self.store.get_memory(&snapshot.memory_id) else {
-                continue;
-            };
-            let graph = self.store.graph_for_memory(&memory.id).unwrap_or_default();
-            self.show_detail(memory, graph, Some(&snapshot));
-            self.status = "Back".into();
-            return;
-        }
-        self.leave_brain_detail();
-    }
-
-    /// Selection only; never navigates or starts a summary.
-    fn move_related(&mut self, delta: i32) {
-        let len = self.brain_detail.related.items.len().min(
-            self.brain_detail.related.page_sizes[self.brain_detail.related.tab.index()].max(20),
-        );
-        if len == 0 {
-            return;
-        }
-        let next = (self.brain_detail.related.sel as i32 + delta).clamp(0, len as i32 - 1) as usize;
-        self.brain_detail.related.sel = next;
-        let area = super::ui::detail_areas(self).related;
-        super::brain_detail::reveal_related(&mut self.brain_detail.related, area);
-        self.set_focus(Target::RelatedRow(next));
-    }
-
-    fn open_selected_related(&mut self) {
-        let Some(item) = self.brain_detail.selected_related().cloned() else {
-            return;
-        };
-        match item.target {
-            AssociationTarget::Claim(id) => {
-                self.open_memory_detail(&id);
-            }
-            AssociationTarget::ActorGroup(key) => {
-                self.open_actor_group(&key);
-            }
-            AssociationTarget::Thread(id) => {
-                if self.store.get_thread(&id).ok().flatten().is_none() {
-                    self.status = "That thread is unavailable".into();
-                    return;
-                }
-                self.brain_destination_back = self.detail_snapshot();
-                if let Err(e) = self.enter_investigation(&id) {
-                    self.brain_destination_back = None;
-                    self.status = e.to_string();
-                }
-            }
-            AssociationTarget::Article {
-                run_id,
-                article_id,
-                revision,
-            } => {
-                let Some(article) = self
-                    .store
-                    .atlas_article(&run_id, &article_id)
-                    .ok()
-                    .flatten()
-                    .filter(|a| argos_osint_core::atlas_metadata::input_hash(a) == revision)
-                else {
-                    self.status =
-                        "That source article is unavailable; select the tab to refresh".into();
-                    return;
-                };
-                self.brain_destination_back = self.detail_snapshot();
-                if let Err(e) = self.open_intel_briefing_for(article) {
-                    self.brain_destination_back = None;
-                    self.status = e.to_string();
-                }
-            }
-        }
     }
 
     fn open_related_article(&mut self, index: usize) {
@@ -8358,7 +7646,7 @@ impl App {
             }
         };
         self.intel_related.sel = index;
-        if self.related_back.len() == super::brain_detail::HISTORY_CAP {
+        if self.related_back.len() == RELATED_BACK_CAP {
             self.related_back.remove(0);
         }
         self.related_back.push(back);
@@ -8404,265 +7692,6 @@ impl App {
         Ok("Related articles loaded".into())
     }
 
-    fn load_or_request_summary(&mut self, memory: &Memory) {
-        self.request_summary(memory, false);
-    }
-
-    /// Graph explanation for the open memory: a valid cached summary, the
-    /// running execution, the saved failure (inside the retry cooldown), or a
-    /// new budgeted execution. `explicit` is Brain → Retry summary.
-    fn request_summary(&mut self, memory: &Memory, explicit: bool) {
-        use argos_osint_core::graph_explanation::{self as ge, Cached, ExplainRequest, Gate};
-        use argos_osint_core::provider_diag::{Category, ProviderFailure, Stage};
-        let claim = self.detail_claim();
-        let title = if claim { "Claim path" } else { "Recon path" };
-        let focus = recon::recon_path(&self.brain_graph)
-            .bands
-            .first()
-            .map(|band| band.directive_id.clone())
-            .unwrap_or_default();
-        if self.brain_graph.is_empty() {
-            self.summary_failure = None;
-            self.graph_summary = if claim {
-                "This memory has no claim path.".into()
-            } else {
-                "This memory has no investigation graph.".into()
-            };
-            self.status = title.into();
-            return;
-        }
-        if self.graph_summary_pending.as_deref() == Some(memory.id.as_str()) {
-            if !explicit {
-                self.graph_summary = self.summary_body(memory, "Writing graph summary…");
-            }
-            self.status = "Graph summary is already being written".into();
-            return;
-        }
-        let secret = match provider::role_secret(&self.auth, &self.settings, "summarization") {
-            Ok(secret) => secret,
-            Err(err) => {
-                let failure = ProviderFailure::from_error(
-                    Stage::Configuration,
-                    Category::Configuration,
-                    err.as_ref(),
-                );
-                self.summary_failure = Some(super::summary_card::SummaryFailure::local(
-                    &memory.id, &failure,
-                ));
-                self.graph_summary = self.summary_body(memory, "");
-                self.status = "Graph summary unavailable · configure Summarization".into();
-                return;
-            }
-        };
-        let retry_of = self
-            .summary_failure
-            .as_ref()
-            .filter(|f| f.memory_id == memory.id && !f.job_id.is_empty())
-            .map(|f| f.job_id.clone());
-        let req = ExplainRequest {
-            memory_id: memory.id.clone(),
-            memory_text: memory.text.clone(),
-            focus,
-            claim,
-            system: summary_system(claim),
-            graph_brief: recon::graph_brief(&self.brain_graph),
-            request_id: argos_osint_core::job_registry::new_job_id("graph-request"),
-            retry_of,
-            stop_flag: Arc::new(AtomicBool::new(false)),
-        };
-        let key = req.key(&secret);
-        match ge::cached(&self.store, &memory.id, &key) {
-            Ok(Cached::Valid(text)) if !explicit => {
-                self.summary_failure = None;
-                self.graph_summary = text;
-                self.status = title.into();
-                return;
-            }
-            Ok(_) => {}
-            Err(err) => {
-                self.push_log("warn", format!("Graph summary cache unreadable: {err:#}"));
-            }
-        }
-        match ge::gate(&self.store, &memory.id, &key, explicit) {
-            Gate::Running(_) => {
-                self.graph_summary = self.summary_body(memory, "Writing graph summary…");
-                self.status = "Graph summary is already being written".into();
-                return;
-            }
-            Gate::CoolingDown(rec) => {
-                self.summary_failure = Some(super::summary_card::SummaryFailure::from_record(&rec));
-                self.graph_summary = self.summary_body(memory, "");
-                self.status = "Graph summary failed · Retry summary to try again".into();
-                return;
-            }
-            Gate::Ready => {}
-        }
-        let (Ok(runtime), Some(db)) = (tokio::runtime::Handle::try_current(), tracked::db_path())
-        else {
-            self.graph_summary = self.summary_body(memory, "");
-            self.status = "Graph summary unavailable: no background runtime".into();
-            return;
-        };
-        self.summary_failure = None;
-        self.summary_details_open = false;
-        self.graph_summary_pending = Some(memory.id.clone());
-        self.graph_summary_request = req.request_id.clone();
-        self.graph_summary = self.summary_body(memory, "Writing graph summary…");
-        self.status = if explicit {
-            "Retrying graph summary…".into()
-        } else {
-            "Writing graph summary…".into()
-        };
-        let tx = self.work_tx.clone();
-        runtime.spawn(async move {
-            let mut opts = argos_osint_core::summarization::ExecOptions::for_secret(&secret);
-            if cfg!(test) {
-                opts.max_backoff = std::time::Duration::from_millis(20);
-            }
-            let report = ge::explain(&db, &secret, &req, &opts, ge::Faults::default()).await;
-            let _ = tx.send(WorkEvent::GraphSummary {
-                report: Box::new(report),
-            });
-        });
-    }
-
-    /// Body of the summary pane when no current summary exists: an optional
-    /// status line, then the last valid summary (labeled as an earlier
-    /// result) or the deterministic basic explanation.
-    fn summary_body(&self, memory: &Memory, status: &str) -> String {
-        let mut out = String::new();
-        if !status.is_empty() {
-            out.push_str(&format!("_{status}_\n\n"));
-        }
-        match self.store.graph_summary_entry(&memory.id) {
-            Ok(Some(entry)) => {
-                out.push_str("_Earlier result — written before the evidence, memory text, focus, model or prompt last changed._\n\n");
-                out.push_str(&entry.summary);
-            }
-            _ => out.push_str(&argos_osint_core::graph_explanation::basic_explanation(
-                &self.brain_graph,
-                &memory.text,
-            )),
-        }
-        out
-    }
-
-    /// A finished graph explanation. The job, events and diagnostic record
-    /// were persisted before this was sent.
-    fn on_graph_summary(
-        &mut self,
-        report: argos_osint_core::graph_explanation::ExplainReport,
-    ) -> bool {
-        use argos_osint_core::graph_explanation::ExplainOutcome;
-        let newest = report.request_id == self.graph_summary_request;
-        if newest && self.graph_summary_pending.as_deref() == Some(report.memory_id.as_str()) {
-            self.graph_summary_pending = None;
-        }
-        if let Some(err) = &report.logging_error {
-            self.push_log("warn", format!("Graph summary logging incomplete: {err}"));
-        }
-        let viewing = newest
-            && self.brain_list_mode == BrainListMode::Graph
-            && self.brain_detail.memory_id() == Some(report.memory_id.as_str());
-        if !viewing {
-            return false;
-        }
-        let memory = self.brain_detail.memory.clone();
-        match &report.outcome {
-            ExplainOutcome::Saved(text) => {
-                self.summary_failure = None;
-                self.summary_details_open = false;
-                self.graph_summary = text.clone();
-                self.status = "Graph summary saved".into();
-            }
-            ExplainOutcome::Superseded(why) => {
-                if let Some(memory) = &memory {
-                    self.graph_summary = self.summary_body(memory, "");
-                }
-                self.status = format!("Graph summary discarded: {why}");
-            }
-            ExplainOutcome::Failed(failure) => {
-                self.summary_failure = Some(super::summary_card::SummaryFailure::from_report(
-                    &report, failure,
-                ));
-                if let Some(memory) = &memory {
-                    self.graph_summary = self.summary_body(memory, "");
-                }
-                self.status = format!("Graph summary failed: {}", failure.category.reason());
-            }
-        }
-        true
-    }
-
-    /// Brain summary card actions.
-    fn activate_summary_card(&mut self, button: ButtonId) -> Result<String> {
-        let Some(failure) = self.summary_failure.clone() else {
-            return Ok("No summary failure".into());
-        };
-        match button {
-            ButtonId::SummaryDetails => {
-                self.summary_details_open = !self.summary_details_open;
-                self.scrolls.summary = 0;
-                Ok(if self.summary_details_open {
-                    "Summary failure details".into()
-                } else {
-                    "Details hidden".into()
-                })
-            }
-            ButtonId::SummaryLogs => {
-                self.logs.job = failure.job_id.clone();
-                self.logs.back_to_job = Some(failure.job_id.clone());
-                self.logs.open.clear();
-                self.logs.follow = false;
-                self.select(ModuleId::Logs.index());
-                self.logs.reload(&self.store);
-                if let Some(index) = self
-                    .logs
-                    .rows
-                    .iter()
-                    .position(|row| row.id == failure.event_id)
-                {
-                    self.logs.select(index);
-                    self.logs.open.insert(failure.event_id.clone());
-                    Ok(format!(
-                        "Logs for job {}",
-                        super::logs::short_id(&failure.job_id)
-                    ))
-                } else {
-                    // Events expire after the retention window; the job row and
-                    // the saved diagnostic (View details) keep the error summary.
-                    Ok(format!(
-                        "Log detail for job {} has expired (24 h retention) · the job keeps its error summary; Brain → View details keeps the cause chain",
-                        super::logs::short_id(&failure.job_id)
-                    ))
-                }
-            }
-            ButtonId::SummaryJob => self.open_job(&failure.job_id),
-            ButtonId::SummaryRetry => {
-                let Some(memory) = self.brain_detail.memory.clone() else {
-                    return Ok("Open a memory first".into());
-                };
-                self.request_summary(&memory, true);
-                Ok(self.status.clone())
-            }
-            ButtonId::SummaryModels => {
-                self.select(ModuleId::Providers.index());
-                self.provider_page = ProviderPage::Defaults;
-                self.compact_pages[ModuleId::Providers.index()] = 1;
-                if self.defaults_role != DefaultsRole::Summarization {
-                    self.defaults_role = DefaultsRole::Summarization;
-                    self.model_catalog.clear();
-                    self.catalog_for.clear();
-                }
-                self.set_focus(Target::Button(ButtonId::DefaultRole(
-                    DefaultsRole::Summarization,
-                )));
-                Ok("Models · Summarization".into())
-            }
-            _ => Ok(String::new()),
-        }
-    }
-
     fn activate_button(&mut self, button: ButtonId) {
         let result = match button {
             ButtonId::Send => {
@@ -8698,79 +7727,16 @@ impl App {
                 return;
             }
             ButtonId::BrainBack => {
-                self.leave_brain_detail();
-                return;
-            }
-            ButtonId::SummaryDetails
-            | ButtonId::SummaryLogs
-            | ButtonId::SummaryJob
-            | ButtonId::SummaryRetry
-            | ButtonId::SummaryModels => self.activate_summary_card(button),
-            ButtonId::BrainRelatedFirst => {
-                self.select_brain_related_tab(0);
-                return;
-            }
-            ButtonId::BrainRelatedSecond => {
-                self.select_brain_related_tab(1);
-                return;
-            }
-            ButtonId::BrainAssociationsMore => {
-                let view = &mut self.brain_detail.related;
-                view.page_sizes[view.tab.index()] =
-                    view.page_sizes[view.tab.index()].max(20).saturating_add(20);
-                return;
-            }
-            ButtonId::BrainRelatedThird => {
-                self.select_brain_related_tab(2);
+                self.brain_list_mode = BrainListMode::List;
+                self.set_focus(if self.memories.is_empty() {
+                    Target::Button(ButtonId::CreateMemory)
+                } else {
+                    Target::Memory(self.memory_sel)
+                });
+                self.status = "Memories".into();
                 return;
             }
             ButtonId::IntelRelatedMore => self.more_related_articles(),
-            ButtonId::BrainDetailBack => {
-                self.detail_back();
-                return;
-            }
-            ButtonId::BrainMapTopology => {
-                if let Some(id) = self.brain_detail.memory_id() {
-                    let seed = if id.starts_with("actor-group:") {
-                        let name_key = id.trim_start_matches("actor-group:").to_string();
-                        argos_osint_core::brain_topology::TopologySeed::ActorGroup {
-                            name_key,
-                            member_ids: self
-                                .brain_detail
-                                .memory
-                                .as_ref()
-                                .and_then(|m| m.source.reference.as_deref())
-                                .and_then(|s| serde_json::from_str(s).ok())
-                                .unwrap_or_default(),
-                        }
-                    } else if id.starts_with("actor:") {
-                        argos_osint_core::brain_topology::TopologySeed::Actor(id.to_string())
-                    } else {
-                        use argos_osint_core::brain_topology::TopologySeed;
-                        let kind = self
-                            .selected_insight
-                            .as_ref()
-                            .filter(|insight| insight.memory_id == id)
-                            .map(|insight| {
-                                insight
-                                    .metadata
-                                    .as_ref()
-                                    .map_or(insight.classification.as_str(), |metadata| {
-                                        metadata.insight_kind.as_str()
-                                    })
-                            });
-                        match kind {
-                            Some("inference") => TopologySeed::Inference(id.to_string()),
-                            Some("link") => TopologySeed::Link(id.to_string()),
-                            Some("related") => TopologySeed::Related(id.to_string()),
-                            Some("actor") => TopologySeed::Actor(id.to_string()),
-                            _ => TopologySeed::Claim(id.to_string()),
-                        }
-                    };
-                    self.open_topology(seed, None);
-                }
-                return;
-            }
             ButtonId::TopologyBack => {
                 if let Some(frame) = self.topology_state.pop_history() {
                     self.topology_state.restore_history(frame);
@@ -8813,19 +7779,7 @@ impl App {
                     if !unchanged && self.module == Some(ModuleId::Intel) {
                         self.intel_page = IntelPage::Bulletin;
                         self.set_focus(Target::IntelArticle(self.intel_sel));
-                    } else if self.module == Some(ModuleId::Brain)
-                        && self.brain_list_mode == BrainListMode::Graph
-                    {
-                        if self.brain_detail.memory.is_some() {
-                            self.refresh_open_detail();
-                        } else {
-                            self.leave_brain_detail();
-                            self.status = "Origin memory is unavailable · returned to Brain".into();
-                        }
                     }
-                } else if self.brain_detail.memory.is_some() {
-                    self.brain_list_mode = BrainListMode::Graph;
-                    self.set_focus(Target::Button(ButtonId::BrainDetailBack));
                 } else {
                     self.brain_list_mode = BrainListMode::List;
                     self.set_focus(Target::Memory(self.memory_sel));
@@ -8963,11 +7917,7 @@ impl App {
             }
             ButtonId::Add => self.save_insight(),
             ButtonId::Pin => {
-                let Some(memory) = (if self.brain_list_mode == BrainListMode::Graph {
-                    self.brain_detail.memory.as_ref()
-                } else {
-                    self.memories.get(self.memory_sel)
-                }) else {
+                let Some(memory) = self.memories.get(self.memory_sel) else {
                     self.status = "No memory selected".into();
                     return;
                 };
@@ -8983,11 +7933,7 @@ impl App {
                     })
             }
             ButtonId::Delete => {
-                let Some(memory) = (if self.brain_list_mode == BrainListMode::Graph {
-                    self.brain_detail.memory.as_ref()
-                } else {
-                    self.memories.get(self.memory_sel)
-                }) else {
+                let Some(memory) = self.memories.get(self.memory_sel) else {
                     self.status = "No memory selected".into();
                     return;
                 };
@@ -9977,7 +8923,6 @@ impl App {
             }
             Target::Memory(index) => {
                 self.memory_sel = index;
-                self.sync_graph();
                 self.set_focus(target);
             }
             Target::Thread(index) => {
@@ -10043,19 +8988,6 @@ impl App {
                 self.set_focus(Target::AtlasCycleStats);
             }
             Target::IntelRelatedArticle(index) => self.open_related_article(index),
-            Target::RelatedRow(index) => {
-                // A click opens the row under the pointer immediately.
-                if index < self.brain_detail.related.items.len() {
-                    self.brain_detail.related.sel = index;
-                    self.set_focus(Target::RelatedRow(index));
-                    self.open_selected_related();
-                }
-            }
-            Target::DetailPath => {
-                self.set_focus(target);
-                self.activate_button(ButtonId::BrainMapTopology);
-            }
-            Target::DetailSummary => self.set_focus(target),
             Target::IntelTopologyClaim(index) => {
                 self.focus = target;
                 self.open_intel_topology(index, false);
@@ -10519,22 +9451,6 @@ impl App {
         Ok("Recon started".into())
     }
 
-    fn open_insight_source(&mut self) -> Result<()> {
-        let insight = self
-            .selected_insight
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Select an investigation insight"))?;
-        let id = insight
-            .sources
-            .iter()
-            .filter_map(|s| s.thread_id.as_ref())
-            .find(|id| self.store.get_thread(id).ok().flatten().is_some())
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("No surviving source thread"))?;
-        self.enter_investigation(&id)?;
-        Ok(())
-    }
-
     fn request_thread_delete(&mut self) -> Result<String> {
         let id = self
             .selected_thread
@@ -10607,10 +9523,6 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
-        if key.code == KeyCode::Esc && self.brain_detail_target.is_some() {
-            self.brain_detail_target = None;
-            self.brain_detail_generation = self.brain_detail_generation.wrapping_add(1);
-        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
             return self.on_interrupt();
@@ -10912,13 +9824,6 @@ impl App {
             let _ = self.reopen_closed_tab();
             return true;
         }
-        if ctrl && key.code == KeyCode::Char('o') && self.module == Some(ModuleId::Brain) {
-            let opened = self
-                .open_insight_source()
-                .map(|_| "Source thread opened".into());
-            self.report(opened);
-            return true;
-        }
         if key.modifiers.contains(KeyModifiers::ALT)
             && matches!(key.code, KeyCode::Left | KeyCode::Right)
         {
@@ -11192,54 +10097,6 @@ impl App {
             self.activate_target(Target::CloseOverlay);
             return;
         }
-        if matches!(self.module, Some(ModuleId::Recon) | Some(ModuleId::Intel))
-            && self.brain_destination_back.is_some()
-            && (self.module == Some(ModuleId::Recon) || self.related_back.is_empty())
-        {
-            let snapshot = self.brain_destination_back.take().unwrap();
-            if self.module == Some(ModuleId::Recon) {
-                self.flush_draft();
-            }
-            self.module = Some(ModuleId::Brain);
-            self.launcher_sel = ModuleId::Brain.index();
-            if self.background_db.is_some() {
-                self.request_brain_detail(&snapshot.memory_id);
-                self.brain_detail_restore = Some(snapshot);
-                return;
-            }
-            let restored = if snapshot.memory_id.starts_with("actor-group:") {
-                let depth = self.brain_detail.history.len();
-                let opened = self.open_actor_group(&snapshot.memory_id);
-                self.brain_detail.history.truncate(depth);
-                if opened {
-                    self.brain_detail
-                        .memory
-                        .clone()
-                        .map(|memory| (memory, self.brain_graph.clone()))
-                } else {
-                    None
-                }
-            } else {
-                self.store
-                    .get_memory(&snapshot.memory_id)
-                    .ok()
-                    .flatten()
-                    .filter(|m| self.store.is_browse_claim(&m.id).unwrap_or(false))
-                    .map(|memory| {
-                        let graph = self.store.graph_for_memory(&memory.id).unwrap_or_default();
-                        (memory, graph)
-                    })
-            };
-            if let Some((memory, graph)) = restored {
-                self.show_detail(memory, graph, Some(&snapshot));
-            } else {
-                self.leave_brain_detail();
-                self.status = "Previous Brain record is unavailable".into();
-                return;
-            }
-            self.status = "Back".into();
-            return;
-        }
         if self.module.is_none() {
             if self.focus == Target::Field(FieldId::Composer) {
                 self.set_focus(Target::App(self.launcher_sel));
@@ -11268,12 +10125,8 @@ impl App {
             self.activate_button(ButtonId::TopologyBack);
             return;
         }
-        if self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Graph {
-            self.detail_back();
-            return;
-        }
         if self.module == Some(ModuleId::Brain) && self.brain_list_mode != BrainListMode::List {
-            self.leave_brain_detail();
+            self.activate_button(ButtonId::BrainBack);
             return;
         }
         if self.module == Some(ModuleId::Atlas) && self.atlas_news {
@@ -11352,7 +10205,6 @@ impl App {
             Target::Field(_) => self.focus_next(false),
             Target::Transcript => self.enter_chat(),
             Target::Memory(_) => self.open_memory_graph(),
-            Target::RelatedRow(_) => self.open_selected_related(),
             Target::AtlasFeed(_) => self.open_atlas_article(),
             Target::AtlasHistory(_) => self.open_atlas_news(),
             Target::AtlasArticle(_) => self.open_saved_article(),
@@ -11409,19 +10261,6 @@ impl App {
     }
 
     fn move_vertical(&mut self, delta: i32) {
-        if self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Graph {
-            match self.focus {
-                Target::RelatedRow(_) => self.move_related(delta),
-                Target::DetailSummary => {
-                    self.scrolls.summary = add_scroll(self.scrolls.summary, delta);
-                }
-                Target::DetailPath => {
-                    self.scrolls.path = add_scroll(self.scrolls.path, delta);
-                }
-                _ => {}
-            }
-            return;
-        }
         match self.focus {
             Target::Field(FieldId::Composer) => self.move_composer_line(delta),
             Target::Field(FieldId::ReconSearch) | Target::Thread(_) => self.move_thread(delta),
@@ -11570,7 +10409,6 @@ impl App {
         self.memory_sel = next;
         let room = super::ui::memory_room_for(self);
         super::ui::reveal_index(&mut self.scrolls.memories, next, room);
-        self.sync_graph();
         self.set_focus(Target::Memory(next));
     }
 
@@ -12095,22 +10933,6 @@ pub async fn run(mut app: App) -> Result<()> {
     }
 }
 
-fn summary_system(claim: bool) -> String {
-    let mode = argos_osint_core::summarization::system_prompt(
-        argos_osint_core::summarization::SummarizationMode::GraphExplanation,
-    );
-    let detail = if claim {
-        "The claim path lists the concluding relation and the articles that support it as hard evidence, each with its published time. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how those articles support the relation and why the concluding insight is a fact or an inference. A fact means both spans are in an article title. An inference means a span is only in the description, or the article is context. Use only the graph and the memory. Do not invent sources, times, or outcomes. No bullet list."
-    } else {
-        "The recon path already keeps only the directive this insight rests on, with the subjects and evidence that contributed to it. Write Markdown, not a fenced block. Start with one ## heading that states the relation: entity, predicate, and object, with the predicate and object in **bold**. Follow with one paragraph of how that directive and the contributing evidence support the relation, and why the concluding insight is a fact or an inference. A fact rests on a tool result that states the relation. An inference is drawn when the evidence does not state it directly. Use only the graph and the memory. Do not mention directives that are absent from the recon path. Do not invent sources or outcomes. No bullet list."
-    };
-    format!(
-        "{mode}
-
-{detail}"
-    )
-}
-
 fn work_event(thread_id: &str, event: recon::TurnEvent) -> WorkEvent {
     let thread_id = thread_id.to_string();
     match event {
@@ -12186,132 +11008,6 @@ fn mouse_dirties(kind: MouseEventKind) -> bool {
     )
 }
 
-/// Button/title label for the Brain kind filter.
-pub(crate) fn association_rows(
-    store: &Store,
-    id: &str,
-    tab: RelatedTab,
-) -> Result<Vec<AssociationItem>> {
-    let a = if id.starts_with("actor-group:") {
-        let g = store
-            .actor_group(id)?
-            .ok_or_else(|| anyhow::anyhow!("actor unavailable"))?;
-        store.actor_group_associations(&g)?
-    } else {
-        store.claim_associations(id)?
-    };
-    Ok(association_rows_from(a, tab))
-}
-
-fn association_rows_from(
-    a: argos_osint_core::brain_browse::Associations,
-    tab: RelatedTab,
-) -> Vec<AssociationItem> {
-    let row = |memory_id: String, title: String, reason: &str, target: AssociationTarget| {
-        AssociationItem {
-            key: memory_id,
-            title,
-            reason: reason.into(),
-            target,
-        }
-    };
-    let mut rows = Vec::new();
-    match tab {
-        RelatedTab::Claims => {
-            for m in a.claims {
-                rows.push(row(
-                    m.id.clone(),
-                    m.text,
-                    "claim references this name group",
-                    AssociationTarget::Claim(m.id),
-                ));
-            }
-        }
-        RelatedTab::Actors => {
-            for g in a.actors {
-                rows.push(row(
-                    g.key(),
-                    g.display_name.clone(),
-                    "referenced actor",
-                    AssociationTarget::ActorGroup(g.key()),
-                ));
-            }
-        }
-        RelatedTab::Threads | RelatedTab::Sources => {
-            for (id, title) in a.threads {
-                rows.push(row(
-                    format!("thread:{id}"),
-                    title,
-                    "origin investigation",
-                    AssociationTarget::Thread(id),
-                ));
-            }
-        }
-        RelatedTab::Articles => {}
-    }
-    if matches!(tab, RelatedTab::Articles | RelatedTab::Sources) {
-        for a in a.articles {
-            rows.push(row(
-                format!("article:{}/{}", a.article.run_id, a.article.id),
-                a.article.title.clone(),
-                "retained source article",
-                AssociationTarget::Article {
-                    run_id: a.article.run_id.clone(),
-                    article_id: a.article.id.clone(),
-                    revision: argos_osint_core::atlas_metadata::input_hash(&a.article),
-                },
-            ));
-        }
-    }
-    rows
-}
-
-fn load_brain_detail(store: &Store, id: &str) -> Result<LoadedBrainDetail> {
-    if id.starts_with("actor-group:") {
-        let g = store
-            .actor_group(id)?
-            .ok_or_else(|| anyhow::anyhow!("actor unavailable"))?;
-        let associations = store.actor_group_associations(&g)?;
-        let graph = Store::actor_group_graph_from(&g, associations.clone());
-        let memory = Memory {
-            id: g.key(),
-            text: g.display_name,
-            category: "actor group".into(),
-            pinned: false,
-            created_at: String::new(),
-            source: MemorySource {
-                app: "brain-actor-group".into(),
-                conversation_id: g.name_key,
-                message_id: None,
-                reference: serde_json::to_string(&g.actor_ids).ok(),
-            },
-        };
-        Ok(LoadedBrainDetail {
-            memory,
-            graph,
-            typed: Vec::new(),
-            insight: None,
-            claim: false,
-            associations,
-        })
-    } else {
-        anyhow::ensure!(store.is_browse_claim(id)?, "claim unavailable");
-        let memory = store
-            .get_memory(id)?
-            .ok_or_else(|| anyhow::anyhow!("claim unavailable"))?;
-        Ok(LoadedBrainDetail {
-            graph: store.graph_for_memory(id)?,
-            typed: argos_osint_core::brain_kinds::typed_detail(store, id)?,
-            insight: store.insight_for_memory(id)?,
-            claim: store
-                .memory_insight_kind(id)
-                .is_none_or(|kind| kind == "claim"),
-            associations: store.claim_associations(id)?,
-            memory,
-        })
-    }
-}
-
 pub(crate) fn brain_kind_label(
     kind: Option<argos_osint_core::memory_metadata::MemoryKind>,
 ) -> &'static str {
@@ -12320,23 +11016,6 @@ pub(crate) fn brain_kind_label(
         Some(argos_osint_core::memory_metadata::MemoryKind::Claim) => "Claims",
         Some(argos_osint_core::memory_metadata::MemoryKind::Actor) => "Actors",
         _ => "Unavailable",
-    }
-}
-
-/// Path-pane title for Actor/Link/Related details (`None` for claim/recon).
-pub(crate) fn structural_title(app: &App) -> Option<&'static str> {
-    if app
-        .brain_detail
-        .memory_id()
-        .is_some_and(|id| id.starts_with("actor-group:"))
-    {
-        return Some(" actor group ");
-    }
-    match app.brain_typed.first().map(String::as_str) {
-        Some("Kind: Actor") => Some(" actor graph "),
-        Some("Kind: Link") => Some(" link graph "),
-        Some("Kind: Related") => Some(" related lead "),
-        _ => None,
     }
 }
 
@@ -12672,13 +11351,8 @@ mod tests {
             intel_publisher_prior: None,
             intel_related: Default::default(),
             related_back: Vec::new(),
-            brain_destination_back: None,
-            brain_graph: recon::MemoryGraph::default(),
-            brain_typed: Vec::new(),
             brain_kind: None,
             related_scope: RelatedScope::default(),
-            brain_graph_for: None,
-            brain_detail: Default::default(),
             topology_state: Default::default(),
             topology_origin: None,
             topology_generation: 0,
@@ -12718,18 +11392,6 @@ mod tests {
             brain_reading: None,
             brain_dirty: false,
             brain_prefer: None,
-            brain_detail_generation: 0,
-            brain_detail_reading: false,
-            brain_detail_target: None,
-            brain_detail_restore: None,
-            brain_detail_back: false,
-            brain_associations: None,
-            brain_detail_claim: true,
-            graph_summary: String::new(),
-            graph_summary_pending: None,
-            graph_summary_request: String::new(),
-            summary_failure: None,
-            summary_details_open: false,
             hits: Vec::new(),
             auth: AuthFile::default(),
             settings: SettingsFile::default(),
@@ -12879,25 +11541,8 @@ mod tests {
         assert!(!listed
             .iter()
             .any(|target| matches!(target, Target::Field(FieldId::BrainInsight))));
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.brain_list_mode, BrainListMode::Graph);
-        assert_eq!(
-            app.focus,
-            Target::DetailPath,
-            "detail opens with the graph section focused"
-        );
-        assert!(app
-            .brain_graph
-            .nodes
-            .iter()
-            .any(|n| n.kind == recon::GraphNodeKind::Finding));
-        assert!(app.graph_summary.contains("Atlas launch"));
-        assert!(app.graph_summary_pending.is_none());
-        let sel = app.memory_sel;
-        let graph_for = app.brain_graph_for.clone();
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.memory_sel, sel);
-        assert_eq!(app.brain_graph_for, graph_for);
+        app.on_enter();
+        assert_eq!(app.brain_list_mode, BrainListMode::Topology);
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.brain_list_mode, BrainListMode::List);
         click(&mut app, Target::Field(FieldId::BrainQuery));
@@ -13041,38 +11686,6 @@ mod tests {
         app.on_esc();
         assert_eq!(app.overlay, Overlay::None);
         assert_eq!(app.intel_page, IntelPage::Bulletin);
-    }
-
-    #[test]
-    fn brain_thread_association_back_restores_the_original_group_and_tab() {
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 140, 40);
-        brain_world(&app);
-        let thread = app.store.new_thread("Ana Ruiz investigation").unwrap();
-        app.store.set_recall_insights(&thread.id, true).unwrap();
-        app.store
-            .record_thread_actor(&thread.id, "Ana Ruiz", "person")
-            .unwrap();
-        let ids = claim_fixture(&app);
-        app.select(ModuleId::Brain.index());
-        assert!(app.open_actor_group("actor-group:ana ruiz"));
-        app.select_brain_related_tab(1);
-        app.brain_detail.related.page_sizes[1] = 40;
-        app.set_focus(Target::RelatedRow(0));
-        app.scrolls.path = 3;
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.module, Some(ModuleId::Recon));
-        assert_eq!(app.selected_thread.as_deref(), Some(thread.id.as_str()));
-        // A visit to another Brain detail must not replace the saved launcher.
-        assert!(app.open_memory_detail(&ids[0]));
-        app.module = Some(ModuleId::Recon);
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.module, Some(ModuleId::Brain));
-        assert_eq!(app.brain_detail.memory_id(), Some("actor-group:ana ruiz"));
-        assert_eq!(app.brain_detail.related.tab, RelatedTab::Threads);
-        assert_eq!(app.brain_detail.related.page_sizes[1], 40);
-        assert_eq!(app.scrolls.path, 3);
-        assert_eq!(app.focus, Target::RelatedRow(0));
     }
 
     #[test]
@@ -14895,184 +13508,6 @@ mod tests {
     }
 
     #[test]
-    fn claim_detail_has_graph_above_actors_and_summary_and_restores_navigation() {
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 140, 40);
-        let ids = claim_fixture(&app);
-        app.select(ModuleId::Brain.index());
-        assert!(app.open_memory_detail(&ids[0]));
-        let areas = super::super::ui::detail_areas(&app);
-        assert!(!areas.stacked);
-        assert!(areas.path.y < areas.related.y);
-        assert_eq!(areas.related.y, areas.summary.y);
-        assert_eq!(app.brain_detail.related.tab, RelatedTab::Actors);
-        let items = app.brain_detail.related.items.clone();
-        assert!(!items.is_empty());
-        assert!(items
-            .iter()
-            .all(|i| matches!(i.target, AssociationTarget::ActorGroup(_))));
-        render(&mut app, 140, 40);
-        click(&mut app, Target::RelatedRow(0));
-        assert!(app
-            .brain_detail
-            .memory_id()
-            .unwrap()
-            .starts_with("actor-group:"));
-        assert_eq!(app.brain_detail.related.tab, RelatedTab::Claims);
-        app.activate_button(ButtonId::Pin);
-        app.activate_button(ButtonId::Delete);
-        assert!(app.status.contains("read-only"));
-        assert!(app
-            .store
-            .get_memory(&ids[0])
-            .unwrap()
-            .is_some_and(|m| !m.pinned));
-        let generation = app.brain_detail.related.request;
-        assert!(!app.on_related(generation - 1, &ids[0], Ok(Vec::new())));
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.brain_detail.memory_id(), Some(ids[0].as_str()));
-        assert_eq!(app.brain_detail.related.tab, RelatedTab::Actors);
-        app.select_brain_related_tab(1);
-        assert!(app.brain_detail.related.items.iter().all(|i| matches!(
-            i.target,
-            AssociationTarget::Article { .. } | AssociationTarget::Thread(_)
-        )));
-        render(&mut app, 140, 40);
-        click(&mut app, Target::RelatedRow(0));
-        assert_eq!(app.module, Some(ModuleId::Intel));
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.module, Some(ModuleId::Brain));
-        assert_eq!(app.brain_detail.related.tab, RelatedTab::Sources);
-        assert_eq!(app.brain_detail.memory_id(), Some(ids[0].as_str()));
-        assert_eq!(app.focus, Target::RelatedRow(0));
-    }
-
-    #[test]
-    fn narrow_claim_detail_stacks_related_above_summary_and_keeps_both_reachable() {
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 64, 32);
-        let ids = claim_fixture(&app);
-        app.select(ModuleId::Brain.index());
-        assert!(app.open_memory_detail(&ids[0]));
-        let areas = super::super::ui::detail_areas(&app);
-        assert!(areas.stacked);
-        assert!(areas.related.height >= 3 && areas.summary.height >= 3);
-        app.set_focus(Target::DetailSummary);
-        let focused = super::super::ui::detail_areas(&app);
-        assert!(focused.summary.height > focused.related.height);
-        let text = buffer_text(&render(&mut app, 64, 32));
-        assert!(text.contains("Claim") && text.contains("Source"), "{text}");
-        click(&mut app, Target::RelatedRow(0));
-        assert!(app
-            .brain_detail
-            .memory_id()
-            .unwrap()
-            .starts_with("actor-group:"));
-        click(&mut app, Target::Button(ButtonId::BrainDetailBack));
-        assert_eq!(app.brain_detail.memory_id(), Some(ids[0].as_str()));
-    }
-
-    #[test]
-    fn brain_refresh_keeps_selection_and_find_and_shows_read_errors() {
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 120, 34);
-        let add = |app: &App, text: &str| {
-            let memory = app
-                .store
-                .add_memory(
-                    text,
-                    "fact",
-                    false,
-                    MemorySource {
-                        app: "manual".into(),
-                        conversation_id: "c".into(),
-                        message_id: None,
-                        reference: None,
-                    },
-                )
-                .unwrap();
-            app.store.mark_user_claim(&memory.id).unwrap();
-            memory.id
-        };
-        add(&app, "alpha one");
-        add(&app, "beta two");
-        let keep = add(&app, "alpha three");
-        // Entering Brain loads memories committed elsewhere.
-        app.select(ModuleId::Brain.index());
-        assert_eq!(app.memories.len(), 3);
-        let row = app.memories.iter().position(|m| m.id == keep).unwrap();
-        app.memory_sel = row;
-        app.set_focus(Target::Memory(row));
-        add(&app, "alpha four");
-        add(&app, "gamma five");
-        app.reload_memories();
-        assert_eq!(
-            app.memories[app.memory_sel].id, keep,
-            "selection follows the id"
-        );
-        assert_eq!(app.focus, Target::Memory(app.memory_sel));
-
-        // Find stays active; the title says it filters.
-        app.brain_query = "alpha".into();
-        app.reload_memories();
-        assert_eq!(app.memories[app.memory_sel].id, keep);
-        let text = buffer_text(&render(&mut app, 120, 34));
-        assert!(text.contains("Find active · 3 of 5"), "{text}");
-        add(&app, "delta six");
-        app.reload_memories();
-        assert_eq!(
-            app.brain_query, "alpha",
-            "a hidden new memory does not clear Find"
-        );
-        assert_eq!(app.memory_total, 6);
-
-        // No matches is distinct from no memories.
-        app.brain_query = "zzz".into();
-        app.reload_memories();
-        let text = buffer_text(&render(&mut app, 120, 34));
-        assert!(
-            text.contains("No memories match") && text.contains("Find is still active"),
-            "{text}"
-        );
-
-        // A read failure keeps the last good list and says so.
-        app.brain_query = "alpha".into();
-        app.reload_memories();
-        let shown = app.memories.clone();
-        super::super::brain_detail::testing::fail_reads(Some("disk I/O error"));
-        add(&app, "alpha seven");
-        app.reload_memories();
-        assert_eq!(app.memories, shown, "last good list kept");
-        assert_eq!(app.memory_error.as_deref(), Some("disk I/O error"));
-        let text = buffer_text(&render(&mut app, 120, 34));
-        assert!(
-            text.contains("read failed · showing last loaded list"),
-            "{text}"
-        );
-        assert!(events(&app)
-            .iter()
-            .any(|e| e.message.contains("could not read memories")));
-        // With nothing loaded yet, the failure is shown instead of an empty list.
-        let mut fresh = super::tests::app();
-        fresh.screen = Rect::new(0, 0, 120, 34);
-        fresh.memories_loaded = false;
-        fresh.select(ModuleId::Brain.index());
-        let text = buffer_text(&render(&mut fresh, 120, 34));
-        assert!(
-            text.contains("Could not read memories: disk I/O error"),
-            "{text}"
-        );
-        super::super::brain_detail::testing::fail_reads(None);
-        app.reload_memories();
-        assert!(app.memory_error.is_none());
-        assert_eq!(app.memories.len(), 4);
-        let mut empty = super::tests::app();
-        empty.select(ModuleId::Brain.index());
-        let text = buffer_text(&render(&mut empty, 120, 34));
-        assert!(text.contains("No memories yet"), "{text}");
-    }
-
-    #[test]
     fn atlas_history_resume_is_offered_only_for_resumable_cycles_without_repair() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 140, 44);
@@ -15130,12 +13565,11 @@ mod tests {
             .any(|command| command.id == "atlas-repair"));
     }
 
-    fn related_ui_fixture(app: &mut App) -> (String, AtlasArticleRow) {
-        let ids = claim_fixture(app);
-        brain_world(app);
-        let article = app.store.atlas_article("run-1012", "k1").unwrap().unwrap();
-        let page = app
-            .store
+    fn related_page(
+        app: &App,
+        article: &AtlasArticleRow,
+    ) -> argos_osint_core::related_articles::RelatedArticlePage {
+        app.store
             .related_articles_global(
                 &article.run_id,
                 &article.id,
@@ -15144,11 +13578,13 @@ mod tests {
                 20,
             )
             .unwrap()
-            .into_page(0);
-        assert!(app.open_memory_detail(&ids[0]));
-        app.brain_detail.related.tab = RelatedTab::Articles;
-        app.brain_detail.related.articles.page = page;
-        app.compact_pages[ModuleId::Brain.index()] = 2;
+            .into_page(0)
+    }
+
+    fn related_ui_fixture(app: &mut App) -> (String, AtlasArticleRow) {
+        let ids = claim_fixture(app);
+        brain_world(app);
+        let article = app.store.atlas_article("run-1012", "k1").unwrap().unwrap();
         (ids[0].clone(), article)
     }
 
@@ -15157,12 +13593,13 @@ mod tests {
         let mut app = app();
         app.screen = Rect::new(0, 0, 160, 50);
         let (_, article) = related_ui_fixture(&mut app);
+        let page = related_page(&app, &article);
         app.open_intel_briefing_for(article).unwrap();
         assert!(
             super::super::ui::focus_order(&app).contains(&Target::Button(ButtonId::RelatedScope)),
             "offscreen Related must be reachable"
         );
-        let row = app.brain_detail.related.articles.page.rows[0].clone();
+        let row = page.rows[0].clone();
         app.intel_related.page.rows = (0..30).map(|_| row.clone()).collect();
         app.intel_related.page.total = 30;
         app.set_focus(Target::IntelRelatedArticle(0));
@@ -15181,8 +13618,12 @@ mod tests {
         let mut app = app();
         app.screen = Rect::new(0, 0, 160, 50);
         let (_, article) = related_ui_fixture(&mut app);
+        let page = related_page(&app, &article);
         app.open_intel_briefing_for(article.clone()).unwrap();
-        let related = app.brain_detail.related.articles.clone();
+        let related = super::super::related_articles::ArticleRelatedView {
+            page,
+            ..Default::default()
+        };
         assert!(!related.page.rows.is_empty());
         app.intel_related = related;
         app.scrolls.intel_full = 17;
@@ -15192,189 +13633,6 @@ mod tests {
         assert_eq!(app.intel_articles[app.intel_sel].id, article.id);
         assert_eq!(app.scrolls.intel_full, 17);
         assert_eq!(app.focus, Target::IntelRelatedArticle(0));
-    }
-
-    #[test]
-    fn related_article_navigation_checks_exact_identity_and_restores_memory() {
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 120, 40);
-        let ids = claim_fixture(&app);
-        assert!(app.open_memory_detail(&ids[0]));
-        app.module = Some(ModuleId::Brain);
-        app.select_brain_related_tab(1);
-        let item = app.brain_detail.related.items[0].clone();
-        let AssociationTarget::Article {
-            run_id, article_id, ..
-        } = item.target
-        else {
-            panic!("article source")
-        };
-        let mut article = app
-            .store
-            .atlas_article(&run_id, &article_id)
-            .unwrap()
-            .unwrap();
-        article.title = "Replacement revision".into();
-        app.store.atlas_upsert_article(&article).unwrap();
-        app.brain_detail.related.sel = 0;
-        app.open_selected_related();
-        assert_eq!(app.module, Some(ModuleId::Brain));
-        assert!(app.status.contains("unavailable"));
-        app.select_brain_related_tab(1);
-        app.set_focus(Target::RelatedRow(0));
-        app.open_selected_related();
-        assert_eq!(app.module, Some(ModuleId::Intel));
-        assert_eq!(app.intel_articles[app.intel_sel].run_id, run_id);
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.module, Some(ModuleId::Brain));
-        assert_eq!(app.focus, Target::RelatedRow(0));
-    }
-
-    #[test]
-    fn dump_atlas_related_screens() {
-        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
-        let mut app = app();
-        let (_, article) = related_ui_fixture(&mut app);
-        for n in 0..42 {
-            let mut candidate = article.clone();
-            candidate.id = format!("related-overflow-{n}");
-            candidate.url = format!("https://news.example/related-overflow-{n}");
-            candidate.title=format!("Ana Ruiz announces a long cross-border ferry transport agreement with the Baltic regional ports authority {n}");
-            app.store.atlas_upsert_article(&candidate).unwrap();
-            let mut metadata =
-                argos_osint_core::atlas_metadata::ArticleMetadata::pending(&candidate);
-            metadata.entity_state = argos_osint_core::atlas_metadata::MetadataState::Complete;
-            for (name, kind) in [("Ana Ruiz", "person"), ("Baltic", "place")] {
-                let start = candidate.title.find(name).unwrap();
-                metadata
-                    .mentions
-                    .push(argos_osint_core::atlas_metadata::ArticleMention {
-                        type_hint: kind.into(),
-                        comparison_key: name.to_lowercase(),
-                        field: "title".into(),
-                        start_byte: start,
-                        end_byte: start + name.len(),
-                        original_text: name.into(),
-                    });
-            }
-            app.store.atlas_save_metadata(&metadata).unwrap();
-        }
-        argos_osint_core::related_articles::build(&app.store, &article.run_id).unwrap();
-        app.brain_detail.related.articles.page = app
-            .store
-            .related_articles_global(
-                &article.run_id,
-                &article.id,
-                RelatedScope::AllRetained,
-                None,
-                20,
-            )
-            .unwrap()
-            .into_page(0);
-        assert!(app.brain_detail.related.articles.page.total > 40);
-        assert!(app.brain_detail.related.articles.page.has_more);
-        for (width, height) in [
-            (160, 50),
-            (120, 40),
-            (100, 32),
-            (80, 24),
-            (60, 18),
-            (40, 20),
-        ] {
-            app.screen = Rect::new(0, 0, width, height);
-            app.open_intel_briefing_for(article.clone()).unwrap();
-            app.intel_related = app.brain_detail.related.articles.clone();
-            app.compact_pages[ModuleId::Intel.index()] = 1;
-            render(&mut app, width, height);
-            super::super::ui::reveal_intel_related(&mut app, 0);
-            app.set_focus(Target::IntelRelatedArticle(0));
-            let text = buffer_text(&render(&mut app, width, height));
-            if width >= 60 {
-                assert!(text.contains("Related"), "{text}");
-            }
-            if let Some(dir) = &dir {
-                dump_cells(
-                    &mut app,
-                    dir,
-                    &format!("intel-related-articles-{width}x{height}"),
-                    width,
-                    height,
-                );
-            }
-            app.overlay = Overlay::Help;
-            if let Some(dir) = &dir {
-                dump_cells(
-                    &mut app,
-                    dir,
-                    &format!("intel-help-{width}x{height}"),
-                    width,
-                    height,
-                );
-            }
-            app.overlay = Overlay::None;
-            for state in ["empty", "loading", "unavailable"] {
-                app.intel_related = Default::default();
-                app.intel_related.loading = state == "loading";
-                if state == "unavailable" {
-                    app.intel_related.error = Some("metadata unavailable".into());
-                }
-                if let Some(dir) = &dir {
-                    dump_cells(
-                        &mut app,
-                        dir,
-                        &format!("intel-related-{state}-{width}x{height}"),
-                        width,
-                        height,
-                    );
-                }
-            }
-            // Keep the pre-existing Atlas Coverage fixture for other reviews.
-            app.select(ModuleId::Atlas.index());
-            app.atlas_page = AtlasPage::Live;
-            app.compact_pages[ModuleId::Atlas.index()] = 1;
-            app.atlas_status = "Native metadata settled".into();
-            app.atlas_stats.coverage.articles = 12;
-            app.atlas_stats.coverage.classified = 12;
-            app.atlas_stats.coverage.entities_available = 10;
-            app.atlas_stats.coverage.publishers_available = 6;
-            app.atlas_stats.coverage.related_pairs = 4;
-            if let Some(dir) = &dir {
-                dump_cells(
-                    &mut app,
-                    dir,
-                    &format!("atlas-coverage-{width}x{height}"),
-                    width,
-                    height,
-                );
-            }
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn dump_phase5b_screens() {
-        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
-            return;
-        };
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 140, 40);
-        let ids = claim_fixture(&app);
-        app.select(ModuleId::Brain.index());
-        app.brain_query = "engine fire".into();
-        app.reload_memories();
-        assert!(app.open_memory_detail(&ids[0]));
-        app.brain_detail.related.tab = RelatedTab::Actors;
-        // Fixture summary (the test app has no Summarization account).
-        app.graph_summary = "## Northwind halted Baltic crossings\n\nTwo **Baltic Wire** articles in cycle 04:12 support the halt. A later board decision **revises** it to a partial suspension, so the claim is a *dated fact*, not current status.\n\n- Evidence: 2 articles, 1 cycle\n- Related: 1 revision, 2 linked claims".into();
-        app.status = "Claim path".into();
-        app.brain_detail.related.tab = RelatedTab::Actors;
-        while !matches!(app.focus, Target::RelatedRow(_)) {
-            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        }
-        dump_cells(&mut app, &dir, "brain-claim-detail", 140, 40);
-        app.screen = Rect::new(0, 0, 64, 32);
-        dump_cells(&mut app, &dir, "brain-claim-detail-narrow", 64, 32);
     }
 
     /// `ARGOS_SCREEN_DIR=… cargo test -p argos-osint-bin dump_defaults_popup_screens -- --ignored`
@@ -15980,349 +14238,6 @@ mod tests {
         (k1, k4)
     }
 
-    fn open_kind(app: &mut App, kind: argos_osint_core::memory_metadata::MemoryKind) {
-        app.select(ModuleId::Brain.index());
-        app.brain_kind = Some(kind);
-        app.reload_memories();
-    }
-
-    #[test]
-    fn brain_kind_filter_cycles_claims_actors_with_unique_names_and_read_only_graphs() {
-        use argos_osint_core::memory_metadata::MemoryKind;
-        let mut app = app();
-        brain_world(&app);
-        app.select(ModuleId::Brain.index());
-        let groups = app.store.actor_groups().unwrap();
-        assert_eq!(app.memories.len(), groups.len());
-        let mut seen = Vec::new();
-        for _ in 0..3 {
-            app.cycle_brain_kind();
-            seen.push(app.brain_kind);
-        }
-        assert_eq!(
-            seen,
-            vec![Some(MemoryKind::Claim), Some(MemoryKind::Actor), None]
-        );
-        let key = groups
-            .iter()
-            .find(|g| g.display_name == "Ana Ruiz")
-            .unwrap()
-            .key();
-        assert!(app.open_actor_group(&key));
-        assert_eq!(app.brain_detail.related.tab, RelatedTab::Claims);
-        app.select_brain_related_tab(2);
-        assert_eq!(app.brain_detail.related.items.len(), 3);
-        let text = buffer_text(&render(&mut app, 160, 50));
-        assert!(
-            text.contains("Entity") && text.contains("Articles"),
-            "{text}"
-        );
-        let order = super::super::ui::focus_order(&app);
-        assert!(order.contains(&Target::DetailPath));
-        assert!(!app.open_memory_detail(&groups[0].actor_ids[0]));
-        assert_eq!(app.brain_detail.memory_id(), Some(key.as_str()));
-    }
-
-    #[test]
-    fn actor_associations_deduplicate_urls_across_retained_cycles() {
-        let mut app = app();
-        brain_world(&app);
-        let group = app
-            .store
-            .actor_groups()
-            .unwrap()
-            .into_iter()
-            .find(|g| g.display_name == "Ana Ruiz")
-            .unwrap();
-        let a = app.store.actor_group_associations(&group).unwrap();
-        assert_eq!(a.articles.len(), 3);
-        assert_eq!(
-            a.articles
-                .iter()
-                .map(|a| a.occurrences.len())
-                .sum::<usize>(),
-            4
-        );
-        app.open_actor_group(&group.key());
-        app.select_brain_related_tab(2);
-        let all = app.brain_detail.related.items.len();
-        app.toggle_related_scope();
-        assert_eq!(
-            app.brain_detail.related.items.len(),
-            all,
-            "Brain is always all retained origins"
-        );
-    }
-
-    #[test]
-    fn brain_related_tabs_keep_independent_selection_and_scroll() {
-        let mut app = app();
-        brain_world(&app);
-        let group = app
-            .store
-            .actor_groups()
-            .unwrap()
-            .into_iter()
-            .find(|g| g.display_name == "Ana Ruiz")
-            .unwrap();
-        assert!(app.open_actor_group(&group.key()));
-        app.select_brain_related_tab(2);
-        app.brain_detail.related.sel = 2;
-        app.brain_detail.related.scroll = 3;
-        app.select_brain_related_tab(0);
-        assert_eq!(app.brain_detail.related.sel, 0);
-        app.select_brain_related_tab(2);
-        assert_eq!(app.brain_detail.related.sel, 2);
-        assert_eq!(app.brain_detail.related.scroll, 3);
-    }
-
-    #[test]
-    #[ignore]
-    fn dump_brain_phase5_screens() {
-        use argos_osint_core::memory_metadata::MemoryKind;
-        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
-            return;
-        };
-        std::fs::create_dir_all(&dir).unwrap();
-        for (width, height) in [(160, 50), (120, 40)] {
-            let mut app = app();
-            brain_world(&app);
-            open_kind(&mut app, MemoryKind::Related);
-            let lead = app.memories[0].id.clone();
-            assert!(app.open_memory_detail(&lead));
-            app.brain_detail.related.tab = RelatedTab::Articles;
-            dump_cells(
-                &mut app,
-                &dir,
-                &format!("related-scope-all-{width}x{height}"),
-                width,
-                height,
-            );
-            app.toggle_related_scope();
-            dump_cells(
-                &mut app,
-                &dir,
-                &format!("related-scope-cycle-{width}x{height}"),
-                width,
-                height,
-            );
-            let mut app = self::app();
-            brain_world(&app);
-            let stats = serde_json::to_value(argos_osint_core::atlas::RunStats {
-                contract_version: argos_osint_core::atlas_work::COLLECTION_CONTRACT.into(),
-                coverage: argos_osint_core::atlas::CoverageStats {
-                    articles: 3,
-                    classified: 3,
-                    entities_available: 3,
-                    publishers_available: 3,
-                    related_pairs: 2,
-                    actor_indexed: 2,
-                    actor_index_failed: 1,
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-            .unwrap();
-            app.store
-                .atlas_insert_run(
-                    "run-1014",
-                    r#"{"phase":6,"chunk":0,"leg":"actor_articles","country":0,"from":""}"#,
-                    &stats.to_string(),
-                )
-                .unwrap();
-            app.store
-                .atlas_set_state(
-                    "run-1014",
-                    "partial",
-                    "Classification 3/3 · legacy unk 0 · entities 3 · publisher priors 3 · Related 2 · actors indexed 2/3 (zero-actor 0, failed 1) · acquisition failures 0",
-                    true,
-                )
-                .unwrap();
-            app.select(ModuleId::Atlas.index());
-            if let Some(i) = app.atlas_runs.iter().position(|r| r.id == "run-1014") {
-                app.atlas_run_sel = i;
-            }
-            dump_cells(
-                &mut app,
-                &dir,
-                &format!("atlas-phase6-partial-{width}x{height}"),
-                width,
-                height,
-            );
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn dump_brain_kind_screens() {
-        use argos_osint_core::memory_metadata::MemoryKind;
-        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
-            return;
-        };
-        std::fs::create_dir_all(&dir).unwrap();
-        for (width, height) in [
-            (160, 50),
-            (120, 40),
-            (100, 32),
-            (80, 24),
-            (60, 18),
-            (40, 20),
-        ] {
-            let mut app = app();
-            brain_world(&app);
-            let group = app.store.actor_group("ana ruiz").unwrap().unwrap();
-            let thread = app
-                .store
-                .new_thread("Ana Ruiz maritime investigation")
-                .unwrap();
-            app.store.set_recall_insights(&thread.id, true).unwrap();
-            app.store
-                .record_thread_actor(&thread.id, "Ana Ruiz", "person")
-                .unwrap();
-            for n in 0..42 {
-                let id = format!("overflow-{n}");
-                app.store.atlas_upsert_article(&AtlasArticleRow {run_id:"run-1013".into(),id:id.clone(),title:format!("Ana Ruiz and Northwind Ferries discuss a long cross-border maritime transport agreement in Baltic {n}"),url:format!("https://news.example/overflow-{n}"),..Default::default()}).unwrap();
-                let article = app.store.atlas_article("run-1013", &id).unwrap().unwrap();
-                let mut metadata =
-                    argos_osint_core::atlas_metadata::ArticleMetadata::pending(&article);
-                metadata.entity_state = argos_osint_core::atlas_metadata::MetadataState::Complete;
-                for (name, kind) in [("Ana Ruiz", "person"), ("Baltic", "place")] {
-                    let start = article.title.find(name).unwrap();
-                    metadata
-                        .mentions
-                        .push(argos_osint_core::atlas_metadata::ArticleMention {
-                            type_hint: kind.into(),
-                            comparison_key: name.to_lowercase(),
-                            field: "title".into(),
-                            start_byte: start,
-                            end_byte: start + name.len(),
-                            original_text: name.into(),
-                        });
-                }
-                app.store.atlas_save_metadata(&metadata).unwrap();
-                argos_osint_core::brain_actors::record_mention(
-                    app.store.connection(),
-                    &group.actor_ids[0],
-                    "article",
-                    "run-1013",
-                    &id,
-                    "",
-                    &serde_json::json!([]),
-                    "fixture",
-                )
-                .unwrap();
-            }
-            argos_osint_core::related_articles::build(&app.store, "run-1013").unwrap();
-            assert!(
-                app.store
-                    .actor_group_associations(&group)
-                    .unwrap()
-                    .articles
-                    .len()
-                    > 40,
-                "capture must exercise association overflow"
-            );
-            let ids = claim_fixture(&app);
-            app.select(ModuleId::Brain.index());
-            dump_cells(
-                &mut app,
-                &dir,
-                &format!("brain-list-all-{width}x{height}"),
-                width,
-                height,
-            );
-            app.overlay = Overlay::Help;
-            dump_cells(
-                &mut app,
-                &dir,
-                &format!("brain-help-{width}x{height}"),
-                width,
-                height,
-            );
-            app.overlay = Overlay::None;
-            for kind in [MemoryKind::Claim, MemoryKind::Actor] {
-                open_kind(&mut app, kind);
-                dump_cells(
-                    &mut app,
-                    &dir,
-                    &format!("brain-list-{}-{width}x{height}", kind.as_str()),
-                    width,
-                    height,
-                );
-            }
-            let key = app
-                .store
-                .actor_groups()
-                .unwrap()
-                .into_iter()
-                .find(|g| g.display_name == "Ana Ruiz")
-                .unwrap()
-                .key();
-            assert!(app.open_actor_group(&key));
-            for tab in 0..3 {
-                app.select_brain_related_tab(tab);
-                app.compact_pages[ModuleId::Brain.index()] = 2;
-                app.set_focus(Target::RelatedRow(0));
-                dump_cells(
-                    &mut app,
-                    &dir,
-                    &format!("brain-actor-tab{tab}-{width}x{height}"),
-                    width,
-                    height,
-                );
-            }
-            app.compact_pages[ModuleId::Brain.index()] = 0;
-            app.set_focus(Target::DetailPath);
-            dump_cells(
-                &mut app,
-                &dir,
-                &format!("brain-actor-graph-{width}x{height}"),
-                width,
-                height,
-            );
-            assert!(app.open_memory_detail(&ids[0]));
-            app.graph_summary="Northwind Ferries halted crossings after an engine fire. This attributed claim retains its article sources and entity references.".into();
-            app.summary_failure = None;
-            dump_cells(
-                &mut app,
-                &dir,
-                &format!("brain-claim-split-{width}x{height}"),
-                width,
-                height,
-            );
-            for tab in 0..2 {
-                app.select_brain_related_tab(tab);
-                app.compact_pages[ModuleId::Brain.index()] = 2;
-                app.set_focus(Target::RelatedRow(0));
-                dump_cells(
-                    &mut app,
-                    &dir,
-                    &format!("brain-claim-tab{tab}-{width}x{height}"),
-                    width,
-                    height,
-                );
-            }
-            for (state, label) in [
-                (super::super::brain_detail::RelatedState::Loading, "loading"),
-                (
-                    super::super::brain_detail::RelatedState::Failed("retry".into()),
-                    "error",
-                ),
-                (super::super::brain_detail::RelatedState::Ready, "empty"),
-            ] {
-                app.brain_detail.related.state = state;
-                app.brain_detail.related.items.clear();
-                dump_cells(
-                    &mut app,
-                    &dir,
-                    &format!("brain-associations-{label}-{width}x{height}"),
-                    width,
-                    height,
-                );
-            }
-        }
-    }
-
     fn dump_cells(app: &mut App, dir: &str, name: &str, width: u16, height: u16) {
         let buffer = render(app, width, height);
         let mut cells = Vec::new();
@@ -16544,49 +14459,6 @@ mod tests {
         assert_eq!(app.jobs.selected().unwrap().id, destination);
         assert_eq!(app.focus, Target::JobRow(app.jobs.sel));
         assert!(app.pending_job.is_none());
-    }
-
-    #[test]
-    fn brain_async_detail_back_and_escape_drop_late_navigation() {
-        let mut app = app();
-        brain_world(&app);
-        let groups = app.store.actor_groups().unwrap();
-        let first = groups[0].key();
-        let second = groups[1].key();
-        let a = load_brain_detail(&app.store, &first).unwrap();
-        let b = load_brain_detail(&app.store, &second).unwrap();
-        app.module = Some(ModuleId::Brain);
-        app.background_db = Some(PathBuf::from("controlled-worker"));
-        app.brain_detail_reading = true;
-        app.brain_detail_target = Some(first.clone());
-        app.on_brain_detail_loaded(0, Ok(Box::new(a)));
-        assert_eq!(app.brain_detail.memory_id(), Some(first.as_str()));
-        app.scrolls.path = 2;
-        app.brain_detail_reading = true;
-        app.brain_detail_target = Some(second.clone());
-        app.refresh_open_detail();
-        assert_eq!(
-            app.brain_detail_target.as_deref(),
-            Some(second.as_str()),
-            "refresh preserves pending navigation"
-        );
-        app.on_brain_detail_loaded(0, Ok(Box::new(b)));
-        assert_eq!(app.brain_detail.history.len(), 1);
-        let snapshot = app.brain_detail.history.last().unwrap().clone();
-        app.brain_detail_restore = Some(snapshot.clone());
-        app.brain_detail_back = true;
-        app.brain_detail_reading = true;
-        app.brain_detail_target = Some(first.clone());
-        let a = load_brain_detail(&app.store, &first).unwrap();
-        app.on_brain_detail_loaded(0, Ok(Box::new(a)));
-        assert!(app.brain_detail.history.is_empty());
-        assert_eq!(app.scrolls.path, snapshot.path_scroll);
-        let a = load_brain_detail(&app.store, &second).unwrap();
-        app.brain_detail_reading = true;
-        app.brain_detail_target = Some(second);
-        app.leave_brain_detail();
-        app.on_brain_detail_loaded(0, Ok(Box::new(a)));
-        assert_eq!(app.brain_list_mode, BrainListMode::List);
     }
 
     #[test]
@@ -17861,337 +15733,6 @@ mod tests {
     }
 
     #[test]
-    fn brain_derivation_labels_keep_kind_stance_and_history_separate() {
-        let mut app = app();
-        let ids = claim_fixture(&app);
-        app.select(ModuleId::Brain.index());
-        app.reload_memories();
-        assert!(app.open_memory_detail(&ids[0]));
-        let original = app.selected_insight.clone().unwrap();
-        let articles = app.store.atlas_list_articles("run-0412").unwrap();
-        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
-        for (kind, lifecycle, relation) in [
-            ("claim", "active", "contradicts"),
-            ("inference", "pending", "insufficient"),
-            ("inference", "previous", "supports"),
-        ] {
-            let mut insight = original.clone();
-            insight.metadata = Some(argos_osint_core::brain_query::InsightMetadata {
-                insight_kind: kind.into(),
-                lifecycle: lifecycle.into(),
-                snapshot_id: "fixture".into(),
-                revision: "fixture".into(),
-                assessment: argos_osint_core::investigation::insights::Assessment {
-                    fidelity: "faithful".into(),
-                    relation: relation.into(),
-                    threshold_passed: true,
-                    rationale: "Original source assertion; world corroboration is separate.".into(),
-                    gaps: vec![],
-                },
-            });
-            app.brain_graph = argos_osint_core::recon::build_claim_graph(&insight, &articles);
-            app.selected_insight = Some(insight);
-            for (width, height) in [(140, 40), (80, 24), (64, 32)] {
-                let text = buffer_text(&render(&mut app, width, height));
-                assert!(
-                    !text.contains("0%"),
-                    "new derivations cannot display an invented confidence"
-                );
-                if width == 140 {
-                    assert!(text.contains(lifecycle), "{text}");
-                }
-                if let Some(dir) = &dir {
-                    dump_cells(
-                        &mut app,
-                        dir,
-                        &format!("brain-insight-{kind}-{lifecycle}-{width}x{height}"),
-                        width,
-                        height,
-                    );
-                }
-            }
-        }
-    }
-
-    /// Phase 7 fixture: a claim memory whose Summarization role points at a
-    /// scripted local provider; jobs/events go to the test database.
-    struct SummaryFx {
-        _dir: tempfile::TempDir,
-        db: std::path::PathBuf,
-        rt: tokio::runtime::Runtime,
-        server: argos_osint_core::provider_attempt::mock::Server,
-        ids: Vec<String>,
-    }
-
-    fn summary_fixture(
-        app: &mut App,
-        script: Vec<argos_osint_core::provider_attempt::mock::Reply>,
-    ) -> SummaryFx {
-        use argos_osint_core::provider_attempt::mock;
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("argos.db");
-        app.store = Store::open(&db).unwrap();
-        super::super::tracked::testing::use_db(Some(db.clone()));
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let server = rt.block_on(mock::serve(script));
-        app.auth.set_account(mock::secret(&server.base_url));
-        app.settings.defaults.summarization = argos_osint_core::provider::ModelAssignment {
-            provider: "openrouter".into(),
-            model: "mock-model".into(),
-            ..Default::default()
-        };
-        let ids = claim_fixture(app);
-        app.select(ModuleId::Brain.index());
-        app.reload_memories();
-        SummaryFx {
-            _dir: dir,
-            db,
-            rt,
-            server,
-            ids,
-        }
-    }
-
-    /// Pump work events until the pending graph summary settles.
-    fn settle_summary(app: &mut App, fx: &SummaryFx) {
-        for _ in 0..400 {
-            fx.rt
-                .block_on(tokio::time::sleep(Duration::from_millis(25)));
-            pump(app);
-            if app.graph_summary_pending.is_none() {
-                return;
-            }
-        }
-        panic!("graph summary never finished: {}", app.status);
-    }
-
-    fn graph_jobs(fx: &SummaryFx) -> Vec<(String, String, String)> {
-        Store::open(&fx.db)
-            .unwrap()
-            .graph_explanation_jobs(&fx.ids[0])
-            .unwrap()
-    }
-
-    const AUTH_401: &str = r#"{"error":{"message":"Incorrect API key provided: sk-mocksecretvalue12345","code":"invalid_api_key"}}"#;
-
-    #[test]
-    fn brain_summary_failure_card_explains_links_and_retries_in_place() {
-        use argos_osint_core::provider_attempt::mock::Reply;
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 140, 40);
-        let fx = summary_fixture(&mut app, vec![Reply::Json(401, AUTH_401.into())]);
-        let _enter = fx.rt.enter();
-        assert!(app.open_memory_detail(&fx.ids[0]));
-        settle_summary(&mut app, &fx);
-        let failure = app.summary_failure.clone().expect("failure card");
-        assert!(failure.needs_config, "{failure:?}");
-        assert!(failure
-            .guidance
-            .as_deref()
-            .unwrap_or("")
-            .contains("Providers"));
-        assert_eq!(
-            fx.server.hits(),
-            4,
-            "401 consumes the primary attempt budget"
-        );
-        assert!(!failure.event_id.is_empty() && !failure.job_id.is_empty());
-        assert!(app
-            .graph_summary
-            .contains(argos_osint_core::graph_explanation::BASIC_HEADING));
-        let text = buffer_text(&render(&mut app, 140, 40));
-        for want in [
-            "AI summary failed",
-            "View details",
-            "View logs",
-            "View job",
-            "Retry summary",
-            "Open Models",
-        ] {
-            assert!(text.contains(want), "missing {want}: {text}");
-        }
-        assert!(!text.contains("sk-mocksecretvalue12345"));
-        assert!(!text.contains("Leave and open"));
-        let order = super::super::ui::focus_order(&app);
-        assert!(order.contains(&Target::Button(ButtonId::SummaryRetry)));
-
-        click(&mut app, Target::Button(ButtonId::SummaryDetails));
-        assert!(app.summary_details_open);
-        let text = buffer_text(&render(&mut app, 140, 40));
-        assert!(text.contains("Stage: response"), "{text}");
-        assert!(text.contains("HTTP 401"), "{text}");
-
-        // Reopening inside the cooldown shows the saved failure; no new job or request.
-        app.leave_brain_detail();
-        assert!(app.open_memory_detail(&fx.ids[0]));
-        assert!(app.graph_summary_pending.is_none());
-        assert!(app.summary_failure.as_ref().is_some_and(|f| f.from_record));
-        assert_eq!((graph_jobs(&fx).len(), fx.server.hits()), (1, 4));
-
-        // Retry: fresh budget, linked to the failed job, without leaving Brain.
-        render(&mut app, 140, 40);
-        click(&mut app, Target::Button(ButtonId::SummaryRetry));
-        assert_eq!(app.module, Some(ModuleId::Brain));
-        settle_summary(&mut app, &fx);
-        let jobs = graph_jobs(&fx);
-        assert_eq!(jobs.len(), 2);
-        assert_eq!(jobs[1].2, jobs[0].0, "retry correlates to the failed job");
-        assert_eq!(fx.server.hits(), 8);
-        assert_eq!(app.module, Some(ModuleId::Brain));
-
-        // View logs: filtered to the job, failure event selected.
-        let failure = app.summary_failure.clone().unwrap();
-        render(&mut app, 140, 40);
-        click(&mut app, Target::Button(ButtonId::SummaryLogs));
-        assert_eq!(app.module, Some(ModuleId::Logs));
-        assert_eq!(app.logs.job, failure.job_id);
-        assert_eq!(
-            app.logs.selected().map(|r| r.id.clone()),
-            Some(failure.event_id.clone())
-        );
-
-        // After the events expire (simulated by clearing them), the link says
-        // so; the job and the saved diagnostic keep the error summary.
-        app.store.clear_events().unwrap();
-        app.activate_button(ButtonId::SummaryLogs);
-        assert!(app.status.contains("expired"), "{}", app.status);
-        let rec = app
-            .store
-            .graph_explanation_record(&fx.ids[0])
-            .unwrap()
-            .unwrap();
-        assert_eq!(rec.state, "failed");
-        assert!(rec.diagnostic_json.contains("invalid_api_key"));
-
-        // Open Models focuses the Summarization role.
-        app.activate_button(ButtonId::SummaryModels);
-        assert_eq!(app.module, Some(ModuleId::Providers));
-        assert_eq!(app.provider_page, ProviderPage::Defaults);
-        assert_eq!(app.defaults_role, DefaultsRole::Summarization);
-
-        // View job opens the failed job in Jobs.
-        app.activate_button(ButtonId::SummaryJob);
-        assert_eq!(app.module, Some(ModuleId::Jobs));
-        assert_eq!(
-            app.jobs.selected().map(|j| j.id.clone()),
-            Some(failure.job_id.clone())
-        );
-
-        // The memory is untouched.
-        assert!(app.store.get_memory(&fx.ids[0]).unwrap().is_some());
-        super::super::tracked::testing::use_db(None);
-    }
-
-    #[test]
-    fn saved_summary_is_reused_until_its_inputs_change_then_shown_as_earlier() {
-        use argos_osint_core::provider_attempt::mock::{ok_json, Reply};
-        let good =
-            "## Northwind **halted** Baltic crossings\n\nTwo Baltic Wire articles state the halt.";
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 140, 40);
-        let fx = summary_fixture(
-            &mut app,
-            vec![ok_json(good, "stop"), Reply::Json(503, "{}".into())],
-        );
-        let _enter = fx.rt.enter();
-        assert!(app.open_memory_detail(&fx.ids[0]));
-        settle_summary(&mut app, &fx);
-        assert_eq!(
-            app.graph_summary, good,
-            "status={} failure={:?}",
-            app.status, app.summary_failure
-        );
-        assert!(app.summary_failure.is_none());
-        // Reopen: valid cache, no request.
-        app.leave_brain_detail();
-        assert!(app.open_memory_detail(&fx.ids[0]));
-        assert_eq!((app.graph_summary.as_str(), fx.server.hits()), (good, 1));
-        // Change the memory text: the old summary is only an earlier result.
-        let memory = app.store.get_memory(&fx.ids[0]).unwrap().unwrap();
-        app.store
-            .update_memory(
-                &memory.id,
-                &format!("{} (revised)", memory.text),
-                &memory.category,
-                memory.pinned,
-            )
-            .unwrap();
-        app.leave_brain_detail();
-        app.reload_memories();
-        assert!(app.open_memory_detail(&fx.ids[0]));
-        assert!(
-            app.graph_summary.contains("Earlier result"),
-            "{}",
-            app.graph_summary
-        );
-        settle_summary(&mut app, &fx);
-        assert!(app.summary_failure.is_some());
-        assert!(
-            app.graph_summary.contains("Earlier result")
-                && app.graph_summary.contains("Baltic Wire")
-        );
-        assert_eq!(
-            fx.server.hits(),
-            5,
-            "503 consumes the primary budget after the first success: 1 + 4"
-        );
-        super::super::tracked::testing::use_db(None);
-    }
-
-    #[test]
-    fn late_summary_completions_are_ignored() {
-        use argos_osint_core::graph_explanation::{ExplainOutcome, ExplainReport};
-        let mut app = app();
-        app.graph_summary_request = "req-new".into();
-        app.graph_summary_pending = Some("m1".into());
-        let stale = ExplainReport {
-            request_id: "req-old".into(),
-            memory_id: "m1".into(),
-            job_id: "job-old".into(),
-            cache_key: String::new(),
-            outcome: ExplainOutcome::Saved("old text that must not appear".into()),
-            attempts: Vec::new(),
-            admission_wait_ms: 0,
-            fallback_reason: None,
-            event_id: String::new(),
-            logging_error: None,
-        };
-        assert!(!app.on_graph_summary(stale));
-        assert_eq!(app.graph_summary_pending.as_deref(), Some("m1"));
-        assert!(!app.graph_summary.contains("old text"));
-    }
-
-    /// Cell dumps of the Brain summary failure card for PNG rendering.
-    #[test]
-    #[ignore]
-    fn dump_phase7_screens() {
-        use argos_osint_core::provider_attempt::mock::Reply;
-        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
-            return;
-        };
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 140, 40);
-        let fx = summary_fixture(&mut app, vec![Reply::Json(401, AUTH_401.into())]);
-        let _enter = fx.rt.enter();
-        app.brain_query = "engine fire".into();
-        app.reload_memories();
-        assert!(app.open_memory_detail(&fx.ids[0]));
-        settle_summary(&mut app, &fx);
-        assert!(app.summary_failure.is_some());
-        render(&mut app, 140, 40);
-        app.set_focus(Target::Button(ButtonId::SummaryRetry));
-        dump_cells(&mut app, &dir, "brain-summary-failure", 140, 40);
-        click(&mut app, Target::Button(ButtonId::SummaryDetails));
-        dump_cells(&mut app, &dir, "brain-summary-failure-details", 140, 40);
-        super::super::tracked::testing::use_db(None);
-    }
-
-    #[test]
     fn pointer_and_chords_do_not_switch_apps_on_their_own() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 80, 24);
@@ -18760,78 +16301,6 @@ mod tests {
         click(&mut app, Target::Button(ButtonId::AtlasDelete));
         assert_eq!(app.atlas_runs.len(), 1);
         assert!(app.status.contains("Pause"));
-    }
-
-    #[test]
-    fn brain_article_source_opens_intel_brief() {
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 120, 42);
-        app.store.atlas_insert_run("run-brain", "{}", "{}").unwrap();
-        app.store
-            .atlas_upsert_article(&AtlasArticleRow {
-                run_id: "run-brain".into(),
-                id: "art-brain".into(),
-                title: "Claim source article".into(),
-                description: "Body for the claim.".into(),
-                url: "https://example.com/art-brain".into(),
-                country: "us".into(),
-                source_name: "Wire".into(),
-                source_domain: "example.com".into(),
-                author: String::new(),
-                image_url: String::new(),
-                published_at: chrono::Utc::now().to_rfc3339(),
-                provider: "newsapi".into(),
-                temperature: 0.9,
-                category: "military".into(),
-                seen_at: chrono::Utc::now().to_rfc3339(),
-            })
-            .unwrap();
-        app.module = Some(ModuleId::Brain);
-        app.brain_list_mode = BrainListMode::Graph;
-        app.brain_graph = recon::MemoryGraph {
-            nodes: vec![
-                recon::GraphNode {
-                    id: "investigation:1".into(),
-                    kind: recon::GraphNodeKind::Investigation,
-                    label: "Troop movements".into(),
-                    detail: String::new(),
-                    tags: Vec::new(),
-                    article_id: String::new(),
-                    run_id: String::new(),
-                    published_at: String::new(),
-                },
-                recon::GraphNode {
-                    id: "directive:verify".into(),
-                    kind: recon::GraphNodeKind::Directive,
-                    label: "Verify claim".into(),
-                    detail: "Check the report".into(),
-                    tags: Vec::new(),
-                    article_id: String::new(),
-                    run_id: String::new(),
-                    published_at: String::new(),
-                },
-                recon::GraphNode {
-                    id: "evidence:1".into(),
-                    kind: recon::GraphNodeKind::Evidence,
-                    label: "Claim source article".into(),
-                    detail: "Wire report".into(),
-                    tags: vec!["verify".into()],
-                    article_id: "art-brain".into(),
-                    run_id: "run-brain".into(),
-                    published_at: String::new(),
-                },
-            ],
-            edges: Vec::new(),
-        };
-        render(&mut app, 120, 42);
-        // This test covers the explicit source article route. Graph activation
-        // is independently covered by the seeded topology entry tests.
-        app.set_focus(Target::DetailPath);
-        app.open_claim_article("run-brain", "art-brain").unwrap();
-        assert_eq!(app.module, Some(ModuleId::Intel));
-        assert_eq!(app.intel_page, IntelPage::Briefing);
-        assert_eq!(app.intel_articles[app.intel_sel].id, "art-brain");
-        assert_eq!(app.intel_category, "military");
     }
 
     #[test]
@@ -22654,51 +20123,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_topology_entry_uses_its_loaded_kind_instead_of_generic_nonclaim_state() {
-        for (kind, prefix) in [
-            ("inference", "inference:"),
-            ("link", "link:"),
-            ("related", "related:"),
-            ("legacy", "claim:"),
-        ] {
-            let mut app = app();
-            app.module = Some(ModuleId::Brain);
-            let memory = app
-                .store
-                .add_user_claim(
-                    "Loaded detail fixture",
-                    "fact",
-                    MemorySource {
-                        app: "test".into(),
-                        conversation_id: "typed-map".into(),
-                        message_id: None,
-                        reference: None,
-                    },
-                )
-                .unwrap();
-            assert!(app.open_memory_detail(&memory.id));
-            app.brain_detail_claim = false;
-            app.selected_insight = Some(recon::InsightView {
-                metadata: None,
-                memory_id: memory.id.clone(),
-                entity: String::new(),
-                predicate: String::new(),
-                object_value: String::new(),
-                topic: String::new(),
-                classification: kind.into(),
-                confidence: 0.0,
-                sources: vec![],
-                related: vec![],
-            });
-            app.activate_button(ButtonId::BrainMapTopology);
-            assert_eq!(
-                app.topology_state.seed.as_ref().unwrap().key(),
-                format!("{prefix}{}", memory.id)
-            );
-        }
-    }
-
-    #[test]
     fn topology_graph_wheel_and_pages_pan_the_same_canvas() {
         let mut app = topology_fixture();
         render(&mut app, 160, 50);
@@ -23730,9 +21154,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(app.open_memory_detail(&claim.id));
-        app.scrolls.path = 7;
-        app.activate_target(Target::DetailPath);
+        app.open_topology(TopologySeed::Claim(claim.id.clone()), None);
         assert_eq!(app.brain_list_mode, BrainListMode::Topology);
         let snap = app.topology_state.snapshot.as_ref().unwrap();
         assert_eq!(snap.root_id, claim.id);
@@ -23755,8 +21177,7 @@ mod tests {
         assert_eq!(app.status, "Intel context");
         app.module = Some(ModuleId::Brain);
         app.activate_button(ButtonId::TopologyBack);
-        assert_eq!(app.brain_list_mode, BrainListMode::Graph);
-        assert_eq!(app.scrolls.path, 7);
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
     }
 
     #[test]
@@ -23850,18 +21271,14 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(app.open_memory_detail(&claim.id));
-        app.activate_target(Target::DetailPath);
+        app.open_topology(
+            argos_osint_core::brain_topology::TopologySeed::Claim(claim.id.clone()),
+            None,
+        );
         app.intel_articles.clear();
         app.activate_button(ButtonId::TopologyBack);
-        assert_eq!(app.brain_list_mode, BrainListMode::Graph);
-        assert!(!app.status.contains("Origin article"));
-        app.activate_target(Target::DetailPath);
-        app.store.delete_memory(&claim.id).unwrap();
-        app.activate_button(ButtonId::TopologyBack);
         assert_eq!(app.brain_list_mode, BrainListMode::List);
-        assert!(app.brain_detail.memory.is_none());
-        assert!(app.status.contains("deleted"));
+        assert!(!app.status.contains("Origin article"));
 
         app.module = Some(ModuleId::Intel);
         app.intel_page = IntelPage::Briefing;

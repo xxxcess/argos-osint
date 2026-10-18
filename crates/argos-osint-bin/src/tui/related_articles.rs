@@ -22,11 +22,7 @@ pub fn basis_text(basis: &[String]) -> String {
     }
 }
 
-pub fn rows(
-    view: &ArticleRelatedView,
-    width: usize,
-    brain: bool,
-) -> Vec<(Line<'static>, Option<Target>)> {
+pub fn rows(view: &ArticleRelatedView, width: usize) -> Vec<(Line<'static>, Option<Target>)> {
     let scope = if view.page.coverage == "this cycle" {
         "This cycle"
     } else {
@@ -102,11 +98,7 @@ pub fn rows(
         if index > 0 {
             lines.push((Line::raw(""), None));
         }
-        let target = if brain {
-            Target::RelatedRow(index)
-        } else {
-            Target::IntelRelatedArticle(index)
-        };
+        let target = Target::IntelRelatedArticle(index);
         let style = if index == view.sel {
             theme::selected()
         } else {

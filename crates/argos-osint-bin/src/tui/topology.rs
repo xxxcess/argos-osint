@@ -1126,13 +1126,32 @@ fn brief_lines(brief: &NeighborhoodBrief, width: u16) -> Vec<Line<'static>> {
     out
 }
 
+/// Longest reason shown in the failure banner.
+const FAILURE_REASON_MAX: usize = 240;
+
+/// The part of a failure message worth showing: everything up to and
+/// including `brief rejected:` is wrapper text, and the trailing attempt
+/// bookkeeping repeats the reason. The offending key stays visible.
+fn failure_reason(message: &str) -> String {
+    const MARK: &str = "brief rejected:";
+    let mut s = match message.find(MARK) {
+        Some(i) => message[i + MARK.len()..].trim_start(),
+        None => message.trim(),
+    };
+    if let Some(i) = s.find(" dispatched attempt") {
+        if let Some(j) = s[..i].rfind(" (") {
+            s = s[..j].trim_end();
+        }
+    }
+    if s.chars().count() <= FAILURE_REASON_MAX {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(FAILURE_REASON_MAX - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
 fn failure_note(failure: &GenerationFailure) -> String {
-    let reason: String = failure
-        .message
-        .trim_start_matches("brief rejected: ")
-        .chars()
-        .take(120)
-        .collect();
+    let reason = failure_reason(&failure.message);
     match failure.kind {
         FailureKind::NotConfigured => {
             "No usable Summarization model is configured; showing the recorded brief. Set one in Models."
@@ -1923,6 +1942,41 @@ fn draw_controls_page(frame: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rejected(message: &str) -> GenerationFailure {
+        GenerationFailure {
+            kind: FailureKind::Rejected,
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn failure_banner_keeps_the_offending_key_and_drops_the_wrapper_text() {
+        let wrapped = "model operation stopped: validation/invalid_result: validation failed: brief rejected: connections: unknown reference \"b23\" (cite only packet references such as N1 or E2); no valid basis remains (1 dispatched attempts): route 0 fail: the answer was not a usable summary: validation failed: brief rejected: connections: unknown reference \"b23\"";
+        let note = failure_note(&rejected(wrapped));
+        assert!(note.contains("unknown reference \"b23\""), "{note}");
+        assert!(!note.contains("model operation stopped"), "{note}");
+        assert!(!note.contains("validation failed"), "{note}");
+        assert!(!note.contains("dispatched attempts"), "{note}");
+        // A bare reason (no wrapper) is unchanged.
+        assert_eq!(
+            failure_reason("brief rejected: interpretation: number 9 is not in the record"),
+            "interpretation: number 9 is not in the record"
+        );
+        assert_eq!(failure_reason("route refused"), "route refused");
+    }
+
+    #[test]
+    fn failure_reason_is_capped_at_240_chars_with_the_key_first() {
+        let long = format!(
+            "brief rejected: overview: unknown reference \"zz9\" {}",
+            "x".repeat(600)
+        );
+        let reason = failure_reason(&long);
+        assert_eq!(reason.chars().count(), FAILURE_REASON_MAX);
+        assert!(reason.starts_with("overview: unknown reference \"zz9\""));
+        assert!(reason.ends_with('…'));
+    }
 
     #[test]
     fn retained_origin_supplies_cycle_when_canonical_root_has_no_cycle() {

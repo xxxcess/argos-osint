@@ -159,3 +159,45 @@ All tests run against a real RocksDB-backed server (`scripts/test_surreal.py`, u
 3. **EXPLAIN stability:** is it acceptable for the plan test to fall back to an order-correctness assertion if 3.3.4 does not report index-ordered scans?
 4. **Unknown-commit receipts:** do they apply to all job writes (adds one record per tx) or only to claims and stage commits?
 5. **Large subtree cancel (#3):** is a multi-tx split with `cancel_requested` set first acceptable, versus one big tx?
+
+## Phase 1 follow-up (after bfe2045)
+
+### DISKANN commit conflicts
+`CREATE memory_embeddings` failed in the server leg with "Transaction conflict:
+Resource busy" (3/25 loop runs). DISKANN writes on RocksDB conflict with
+background index compaction; this is retryable and the server does not retry
+it (SurrealDB 3.2 notes). This is inherent, not a bug in our query. All embedding
+writes now go through `storage::embeddings::put` (idempotent UPSERT on
+`run_tx`). Test: `concurrent_diskann_inserts_with_filtered_search` (4 writers x
+40 inserts alongside filtered KNN). After the fix: 0 conflict failures, 0-5 retries/run.
+
+### Test server port race
+`free_port` released the port before surreal bound it; a losing server exited
+with "Address already in use" while the probe reached another test's server.
+`launch()` now waits for its own child's "Started web server" line and relaunches
+on a fresh port (up to 5 times).
+
+### Counters, outbox, process registry (built in P1)
+- `counters`: single hot record per counter; `HOT_RECORD_POLICY` = 16 attempts
+  (8 concurrent allocators peaked at 9 retries). Replay via `tx_receipt:[op_key]`.
+- `outbox`: `index_change:[op_key]`, seq from the `index_change` counter, written
+  in the same transaction as the change; replay returns the existing seq; `ack`
+  is fenced by revision/generation.
+- `processes`: heartbeat registry; `recover_orphans` requeues running tasks of
+  owners stale > 30 s via the reaper's shared `requeue_running_in` (epoch-fenced),
+  and skips when this process's own beat is stale (outage, not dead owners).
+
+### P2: stop-batch `$j IN ancestors` does not use `job_ancestors`
+EXPLAIN FULL on 3.3.4 (300 jobs, `DEFINE INDEX job_ancestors ON job FIELDS
+ancestors`): `$j IN ancestors`, `ancestors CONTAINS $j`, `CONTAINSANY [$j]`,
+`?= $j` and `= $j` all plan as **TableScan** with the predicate as a filter.
+Stop-job cost is O(all jobs) per batch. P2: replace with a `job_ancestor`
+(job, ancestor) link table indexed on `ancestor` and queried by scalar
+equality (verify its plan with EXPLAIN before adopting), or recheck after upgrading.
+
+### Flake: eight-client race p99
+Embedded run 15 at caa733b: `pool guard too hot: p99=4 exhausted=0`
+(storage_jobs.rs, bound p99<=3; claims=200 p50=0 max=4). There was no correctness
+failure. Cause: the oldest-task and alternating-pool tests ran in parallel, so
+24 clients were on the box against a bound defined for 8. The many-client tests
+now share a mutex (8aefa09); the bound is unchanged.

@@ -35,6 +35,18 @@ pub(crate) struct Engine {
     runtime: rquickjs::Runtime,
     #[cfg(feature = "nlp")]
     guard: Arc<Mutex<Guard>>,
+    /// Source of "now" for the parse budgets (1 s per chunk, 10 s per
+    /// document). Production uses [`wall_clock`]; tests inject a fake one.
+    #[cfg(feature = "nlp")]
+    clock: Clock,
+}
+
+/// Time source for the engine's parse budgets.
+pub(crate) type Clock = Arc<dyn Fn() -> std::time::Instant + Send + Sync>;
+
+/// The production clock: real monotonic wall time.
+pub(crate) fn wall_clock() -> Clock {
+    Arc::new(std::time::Instant::now)
 }
 impl Engine {
     pub(crate) fn actor_names(&mut self, names: &[String]) -> Result<Vec<String>, String> {
@@ -47,7 +59,7 @@ impl Engine {
             {
                 let mut guard = self.guard.lock().unwrap();
                 guard.cancel = Arc::new(AtomicBool::new(false));
-                guard.deadline = Instant::now() + Duration::from_secs(2);
+                guard.deadline = (self.clock)() + Duration::from_secs(2);
             }
             self.context.with(|ctx| {
                 let f: rquickjs::Function = ctx
@@ -61,17 +73,31 @@ impl Engine {
         }
     }
     pub fn new() -> Result<Self, String> {
+        Self::with_clock(wall_clock())
+    }
+    /// Like [`Engine::new`], with the parse budgets measured on `clock`.
+    pub(crate) fn with_clock(clock: Clock) -> Result<Self, String> {
         #[cfg(feature = "nlp")]
         {
-            Self::with_assets(CORE, DATES, include_str!("bridge.js"))
+            Self::with_assets_and_clock(CORE, DATES, include_str!("bridge.js"), clock)
         }
         #[cfg(not(feature = "nlp"))]
         {
+            let _ = clock;
             Ok(Self {})
         }
     }
     #[cfg(feature = "nlp")]
     fn with_assets(core: &str, dates: &str, bridge: &str) -> Result<Self, String> {
+        Self::with_assets_and_clock(core, dates, bridge, wall_clock())
+    }
+    #[cfg(feature = "nlp")]
+    fn with_assets_and_clock(
+        core: &str,
+        dates: &str,
+        bridge: &str,
+        clock: Clock,
+    ) -> Result<Self, String> {
         {
             if cache::hash(core)
                 != "61e2541597f27c592947e5059c083548f24aa6fba14cf2b109a00db44de6ca57"
@@ -85,12 +111,13 @@ impl Engine {
             runtime.set_max_stack_size(1024 * 1024);
             let guard = Arc::new(Mutex::new(Guard {
                 cancel: Arc::new(AtomicBool::new(false)),
-                deadline: Instant::now() + Duration::from_secs(10),
+                deadline: clock() + Duration::from_secs(10),
             }));
             let interrupt = guard.clone();
+            let handler_clock = clock.clone();
             runtime.set_interrupt_handler(Some(Box::new(move || {
                 let g = interrupt.lock().unwrap();
-                g.cancel.load(Ordering::Acquire) || Instant::now() >= g.deadline
+                g.cancel.load(Ordering::Acquire) || handler_clock() >= g.deadline
             })));
             let context = rquickjs::Context::full(&runtime).map_err(|e| e.to_string())?;
             context
@@ -106,6 +133,7 @@ impl Engine {
                 context,
                 runtime,
                 guard,
+                clock,
             })
         }
     }
@@ -140,7 +168,7 @@ impl Engine {
                 a.status = Status::Unsupported;
                 return a;
             }
-            let document_deadline = Instant::now() + Duration::from_secs(10);
+            let document_deadline = (self.clock)() + Duration::from_secs(10);
             let mut parsed_dates: std::collections::HashMap<String, Option<String>> =
                 std::collections::HashMap::new();
             for (span, split) in chunks(&source.prose) {
@@ -148,7 +176,7 @@ impl Engine {
                     a.status = Status::Cancelled;
                     break;
                 }
-                if Instant::now() >= document_deadline {
+                if (self.clock)() >= document_deadline {
                     a.status = Status::Timeout;
                     break;
                 }
@@ -156,7 +184,7 @@ impl Engine {
                 {
                     let mut g = self.guard.lock().unwrap();
                     g.cancel = cancel.clone();
-                    g.deadline = document_deadline.min(Instant::now() + Duration::from_secs(1));
+                    g.deadline = document_deadline.min((self.clock)() + Duration::from_secs(1));
                 }
                 let dto = self.context.with(|ctx| -> Result<JsAnnotation, String> {
                     let f: rquickjs::Function = ctx
@@ -176,7 +204,7 @@ impl Engine {
                             Status::TooLarge
                         } else if cancel.load(Ordering::Acquire) {
                             Status::Cancelled
-                        } else if Instant::now() >= self.guard.lock().unwrap().deadline {
+                        } else if (self.clock)() >= self.guard.lock().unwrap().deadline {
                             Status::Timeout
                         } else {
                             Status::Failed
@@ -278,7 +306,7 @@ impl Engine {
                         valid = false;
                     }
                 }
-                if Instant::now() >= self.guard.lock().unwrap().deadline {
+                if (self.clock)() >= self.guard.lock().unwrap().deadline {
                     a.status = if cancel.load(Ordering::Acquire) {
                         Status::Cancelled
                     } else {
@@ -301,7 +329,7 @@ impl Engine {
             }
             if cancel.load(Ordering::Acquire) {
                 a.status = Status::Cancelled;
-            } else if Instant::now() >= document_deadline {
+            } else if (self.clock)() >= document_deadline {
                 a.status = Status::Timeout;
             }
             a.sentences.sort_by_key(|s| s.span);
@@ -430,6 +458,16 @@ fn invalid_calendar(phrase: &str) -> bool {
 #[cfg(all(test, feature = "nlp"))]
 mod tests {
     use super::*;
+
+    /// A clock frozen at creation that moves only through the returned
+    /// `advance` function.
+    pub(crate) fn fake_clock() -> (Clock, impl Fn(Duration)) {
+        let base = Instant::now();
+        let offset = Arc::new(Mutex::new(Duration::ZERO));
+        let read = offset.clone();
+        let clock: Clock = Arc::new(move || base + *read.lock().unwrap());
+        (clock, move |by| *offset.lock().unwrap() += by)
+    }
     #[test]
     fn chunk_limits_and_interrupt() {
         let text = "😀中e\u{301}".repeat(3000);
@@ -439,9 +477,13 @@ mod tests {
             .all(|(r, _)| r.slice(&text).is_some_and(|s| s.len() <= 8192)));
         assert!(chunks.iter().any(|(_, split)| *split));
         let cold = Instant::now();
-        let mut engine = Engine::new().unwrap();
+        // A fake clock that only moves when the test says so: the budgets
+        // below can't expire because the host is busy.
+        let (clock, advance) = fake_clock();
+        let mut engine = Engine::with_clock(clock.clone()).unwrap();
         eprintln!("parser startup_ms={}", cold.elapsed().as_millis());
-        engine.guard.lock().unwrap().deadline = Instant::now() + Duration::from_millis(10);
+        engine.guard.lock().unwrap().deadline = clock() + Duration::from_millis(10);
+        advance(Duration::from_millis(11));
         // The interrupt must stop the loop promptly in terms of work done:
         // bound the thread's CPU time, which (unlike wall time) does not grow
         // while a loaded host keeps this thread off-CPU.
@@ -452,7 +494,7 @@ mod tests {
         });
         assert!(interrupted.is_err());
         assert!(spent < Duration::from_secs(1), "spent {spent:?}");
-        engine = Engine::new().unwrap();
+        engine = Engine::with_clock(clock).unwrap();
         let source = Source::derived("recovery", "1", "Alice Smith said tomorrow.");
         assert_eq!(
             engine

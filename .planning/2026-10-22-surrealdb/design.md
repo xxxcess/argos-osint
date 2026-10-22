@@ -110,15 +110,30 @@ atomically (temp file, fsync, rename). A documented manual step is
 equivalent: place a 3.3.4 binary there and run `argos storage install
 --from <path>`, which verifies the same hash. Ordinary startup never
 downloads; a missing or wrong binary is a clear error naming the command.
-Pinned assets (official v3.3.4 release; no vendor checksum file exists, so
-the hashes were computed from the assets on 2026-10-22):
+Pinned assets (official v3.3.4 release, HTTPS from github.com only). No
+vendor checksum file exists. Each hash was obtained three ways on
+2026-10-22 and all agree: SHA-256 of a `browser_download_url` fetch
+(github.com, redirected to the release CDN), SHA-256 of a separate fetch
+through the API asset endpoint (`api.github.com/.../releases/assets/<id>`,
+`Accept: application/octet-stream`), and GitHub's own server-side `digest`
+field for the asset. Download URL pattern:
+`https://github.com/surrealdb/surrealdb/releases/download/v3.3.4/surreal-v3.3.4.<asset>.tgz`.
 
-| OS / arch | Asset | Archive size | SHA-256 |
-|---|---|---:|---|
-| Linux x86_64 | linux-amd64.tgz | 105,385,846 B | `6593071833ad9c85cf533cf70b1643eb08966c868f8624001e30839ea29a2689` |
-| Linux aarch64 | linux-arm64.tgz | 98,086,044 B | `978262fd9d1f3adfc5791031663855baf0a3cf8a89883428109734ba5a065811` |
-| macOS arm64 | darwin-arm64.tgz | 91,843,710 B | `d0b0afc47948a46ceac9db178d2a10a7eb21e1c4f219a74b3573c850122ed9fb` |
-| macOS Intel | darwin-amd64.tgz | 102,240,575 B | `0723b555340da2cee1e0cff6f95552438536eab8d984b91f227b3ce2d52a5006` |
+| OS / arch | Asset | Archive | Unpacked `surreal` | SHA-256 (archive) |
+|---|---|---:|---:|---|
+| Linux x86_64 | linux-amd64 | 105,385,846 B | 351,910,792 B | `6593071833ad9c85cf533cf70b1643eb08966c868f8624001e30839ea29a2689` |
+| Linux aarch64 | linux-arm64 | 98,086,044 B | 307,731,032 B | `978262fd9d1f3adfc5791031663855baf0a3cf8a89883428109734ba5a065811` |
+| macOS arm64 | darwin-arm64 | 91,843,710 B | 295,688,480 B | `d0b0afc47948a46ceac9db178d2a10a7eb21e1c4f219a74b3573c850122ed9fb` |
+| macOS Intel | darwin-amd64 | 102,240,575 B | 336,849,772 B | `0723b555340da2cee1e0cff6f95552438536eab8d984b91f227b3ce2d52a5006` |
+
+A CI job in a later phase repeats the fetch-and-hash from the runner's
+network so the pin is also confirmed from a different network path.
+
+**Locks are OS advisory locks.** `server.lock` and the embedded
+`storage/embedded.lock` are held with `flock` (via `fs2`/`fs4`), released
+automatically by the kernel when the holder dies. They are not pid files:
+the pid written inside is informational only, for the error text, and is
+never used to decide ownership.
 
 **Discovery.** A client takes `server.lock`, reads `server.json`, and treats
 the server as live only if the pid exists, the port accepts on 127.0.0.1,
@@ -147,7 +162,8 @@ sign-in, identity read, schema ledger at the expected version. Timeouts
 are bounded (30 s start). Unavailable is a distinct error from "dead
 owner"; it never triggers a reset or a SQLite fallback.
 
-**Shutdown.** Each client writes `clients/<pid>` and refreshes it with the
+**Shutdown.** Each client writes `clients/<pid>` atomically (temp file in
+the same directory, fsync, rename) and refreshes it with the
 existing 5 s process heartbeat. On exit a client removes its lease; the
 last client (no live leases after a short grace) sends SIGTERM, waits for
 exit, and removes `server.json`. Crashed clients are pruned by pid check
@@ -161,5 +177,13 @@ least-privilege `argos` database-user secrets into `credentials.json`
 in as the `argos` user; root is only for bootstrap/reset. Secrets are
 never printed, logged or put in argv; `argos storage status` shows only
 whether they exist.
+
+**Lifecycle tests (with the lifecycle code, P4):** adopt a live server
+after a stale `server.json` (dead pid / closed port); refuse to adopt a
+port answering with the wrong identity; the last client exiting stops the
+server and removes `server.json`, while another live lease keeps it
+running; a second process opening an embedded home fails with the "Argos
+home in use" error while the first holds the lock, and succeeds after the
+first exits (including after a crash, since `flock` is released).
 
 **Windows** is out of scope (Argos supports the four targets above).

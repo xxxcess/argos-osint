@@ -55,6 +55,11 @@ verified.
 
 - [x] Wipe vs import decided: wipe, no import (user, 2026-10-22)
 - [ ] Server lifecycle per design.md: `argos storage install|start|stop|status`
+- [x] Pinned 3.3.4 SHA-256 per OS confirmed by two independent HTTPS fetches + GitHub asset digest (box)
+- [ ] Same hashes re-confirmed from a CI runner network
+- [ ] `server.lock` and `embedded.lock` as OS advisory locks (`flock`), pid informational only
+- [ ] `clients/<pid>` leases written atomically (temp + fsync + rename)
+- [ ] Tests: stale `server.json` adopt; wrong-identity port refused; last client stops server; second embedded process fails
 - [ ] `argos storage init --mode server|embedded`; `status` shows mode; `reset --yes` in both modes
 - [ ] CLI/TUI workers, Profile (20 views), Jobs, telemetry, summaries, NLP artifacts
 - [ ] `argos storage status`, `init`, `reset --yes` with resumable phases

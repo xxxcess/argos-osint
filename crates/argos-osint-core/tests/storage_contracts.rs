@@ -554,13 +554,44 @@ async fn concurrent_diskann_inserts_with_filtered_search() {
     };
     let db = server.root("argos", "contracts").await;
     define_embeddings(&db).await;
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let searches = std::sync::Arc::new(AtomicUsize::new(0));
+    // Searches start before any insert.
+    let reader = {
+        let client = server.root("argos", "contracts").await;
+        let (stop, searches) = (stop.clone(), searches.clone());
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                let hits: Vec<Hit> = client
+                    .query("SELECT key, kind, vector::distance::knn() AS d FROM memory_embeddings WHERE kind = 'claim' AND embedding <|3,40|> $q ORDER BY d")
+                    .bind(("q", unit(0)))
+                    .await
+                    .unwrap()
+                    .check()
+                    .unwrap()
+                    .take(0)
+                    .unwrap();
+                assert!(hits.iter().all(|h| h.kind == "claim"), "{hits:?}");
+                searches.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+    };
     let mut writers = Vec::new();
     for w in 0..4usize {
         let client = server.root("argos", "contracts").await;
+        let done_searches = searches.clone();
         writers.push(tokio::spawn(async move {
             let mut retries = 0;
             for i in 0..40usize {
+                // Insert i waits for search i: every insert overlaps the
+                // searches, however fast the writers run.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                while done_searches.load(Ordering::Relaxed) < i {
+                    // A failed reader stops counting; fail rather than hang.
+                    assert!(std::time::Instant::now() < deadline, "searches stalled");
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
                 let n = w * 40 + i;
                 let (key, v) = (format!("c{n:03}"), unit(n));
                 let kind = ["claim", "actor"][n % 2];
@@ -572,34 +603,18 @@ async fn concurrent_diskann_inserts_with_filtered_search() {
             retries
         }));
     }
-    let reader = {
-        let client = server.root("argos", "contracts").await;
-        let stop = stop.clone();
-        tokio::spawn(async move {
-            let mut searches = 0;
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                let hits: Vec<Hit> = client
-                    .query("SELECT key, kind, vector::distance::knn() AS d FROM memory_embeddings WHERE kind = 'claim' AND embedding <|3,40|> $q ORDER BY d")
-                    .bind(("q", unit(0)))
-                    .await
-                    .unwrap()
-                    .check()
-                    .unwrap()
-                    .take(0)
-                    .unwrap();
-                assert!(hits.iter().all(|h| h.kind == "claim"), "{hits:?}");
-                searches += 1;
-            }
-            searches
-        })
-    };
     let mut retries = 0;
     for w in writers {
         retries += w.await.unwrap();
     }
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    let searches = reader.await.unwrap();
+    stop.store(true, Ordering::Relaxed);
+    reader.await.unwrap();
+    let searches = searches.load(Ordering::Relaxed);
     eprintln!("DISKANN-CONCURRENT retries={retries} searches={searches}");
+    assert!(
+        searches >= 40,
+        "only {searches} searches overlapped the inserts"
+    );
     assert_eq!(count(&db, "memory_embeddings").await, 160);
     for n in [0usize, 77, 158] {
         let hits: Vec<Hit> = db

@@ -442,12 +442,16 @@ mod tests {
         let mut engine = Engine::new().unwrap();
         eprintln!("parser startup_ms={}", cold.elapsed().as_millis());
         engine.guard.lock().unwrap().deadline = Instant::now() + Duration::from_millis(10);
-        let started = Instant::now();
-        let interrupted = engine
-            .context
-            .with(|ctx| ctx.eval::<(), _>("while(true) {}"));
+        // The interrupt must stop the loop promptly in terms of work done:
+        // bound the thread's CPU time, which (unlike wall time) does not grow
+        // while a loaded host keeps this thread off-CPU.
+        let (interrupted, spent) = crate::test_clock::cpu_timed(|| {
+            engine
+                .context
+                .with(|ctx| ctx.eval::<(), _>("while(true) {}"))
+        });
         assert!(interrupted.is_err());
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(spent < Duration::from_secs(1), "spent {spent:?}");
         engine = Engine::new().unwrap();
         let source = Source::derived("recovery", "1", "Alice Smith said tomorrow.");
         assert_eq!(

@@ -18,12 +18,13 @@ verified.
 - [ ] Local matrix on final head (see PR body for results)
 - [ ] CI: toolchain 1.95 action + `surreal` clippy/test + contract suite on all four jobs. **Blocked:** the box's GitHub token lacks the `workflow` scope, so `.github/workflows/ci.yml` cannot be pushed from here. Patch prepared.
 - [ ] CI green on all four jobs with the contract suite (depends on the item above)
+- [x] Server lifecycle design written (design.md); not implemented
 - [x] Existing `argos.db`, sidecars and `memory_lancedb/` untouched
 - [ ] Release binary size and clean build time, before vs after (see PR body)
 
 ## P1 — storage traits + job system (spec steps 2–4)
 
-- [ ] Decide server vs embedded (pending user)
+- [x] Server vs embedded decided: shared loopback server (user, 2026-10-22)
 - [ ] Fresh versioned schema files, checksummed ledger, database identity, reset epoch
 - [ ] Typed key codec with round-trip/collision tests
 - [ ] Async repository boundary; no raw connections
@@ -47,7 +48,8 @@ verified.
 
 ## P4 — TUI/CLI + storage commands (spec steps 7–9)
 
-- [ ] Decide wipe vs import (pending user; spec assumes wipe)
+- [x] Wipe vs import decided: wipe, no import (user, 2026-10-22)
+- [ ] Server lifecycle per design.md: `argos storage install|start|stop|status|init|reset --yes`
 - [ ] CLI/TUI workers, Profile (20 views), Jobs, telemetry, summaries, NLP artifacts
 - [ ] `argos storage status`, `init`, `reset --yes` with resumable phases
 - [ ] Fresh population checks; two-session operation; restart reads

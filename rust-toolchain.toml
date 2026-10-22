@@ -1,2 +1,5 @@
 [toolchain]
 channel = "1.95.0"
+# CI installs clippy only for the action's toolchain; list it here so rustup
+# adds it to the pinned one.
+components = ["clippy", "rustfmt"]

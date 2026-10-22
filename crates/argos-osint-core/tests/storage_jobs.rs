@@ -141,6 +141,57 @@ async fn stop_batch_reads_descendants_through_the_ancestor_index() {
     assert!(!plan.contains("TableScan"), "{plan}");
 }
 
+async fn link_count(db: &Surreal<Any>) -> i64 {
+    scalar(db, "RETURN count(SELECT * FROM job_ancestor)").await
+}
+
+#[tokio::test]
+async fn ancestor_links_commit_with_the_job_or_not_at_all() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "ancestor_atomic").await;
+    let now = Utc::now();
+    jobs::create_job(&db, &job("a", None, now), &[]).await.unwrap();
+    // A conflicting link row makes the link CREATE fail after the job CREATE.
+    db.query("CREATE job_ancestor:['a','c'] SET ancestor = job:a, job = job:a, root = job:a")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(jobs::create_job(&db, &job("c", Some("a"), now), &[]).await.is_err());
+    let c: i64 = scalar(&db, "RETURN count(SELECT * FROM job:c)").await;
+    assert_eq!(c, 0, "job committed without its links");
+    jobs::create_job(&db, &job("d", Some("a"), now), &[]).await.unwrap();
+    let d: i64 = scalar(&db, "RETURN count(SELECT * FROM job_ancestor WHERE job = job:d)").await;
+    assert_eq!(d, 1);
+}
+
+#[tokio::test]
+async fn deleting_a_job_removes_its_ancestor_links() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "ancestor_delete").await;
+    let now = Utc::now();
+    jobs::create_job(&db, &job("a", None, now), &[]).await.unwrap();
+    jobs::create_job(&db, &job("a1", Some("a"), now), &[]).await.unwrap();
+    jobs::create_job(&db, &job("a2", Some("a1"), now), &[]).await.unwrap();
+    assert_eq!(link_count(&db).await, 3); // a>a1, a>a2, a1>a2
+    db.query("DELETE job:a1").await.unwrap().check().unwrap();
+    // a1's own link and its link as a2's ancestor are gone; a>a2 stays.
+    let left: Vec<String> = {
+        let mut r = db
+            .query("SELECT VALUE record::id(ancestor) + '>' + record::id(job) FROM job_ancestor")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        r.take(0).unwrap()
+    };
+    assert_eq!(left, vec!["a>a2".to_string()]);
+}
+
 #[tokio::test]
 async fn claim_scan_uses_task_claim_order_index() {
     let Some(server) = Server::start() else {

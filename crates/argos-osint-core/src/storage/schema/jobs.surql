@@ -29,6 +29,12 @@ DEFINE FIELD IF NOT EXISTS job ON job_ancestor TYPE record<job>;
 DEFINE FIELD IF NOT EXISTS root ON job_ancestor TYPE record<job>;
 DEFINE INDEX IF NOT EXISTS job_ancestor_ancestor ON job_ancestor FIELDS ancestor;
 DEFINE INDEX IF NOT EXISTS job_ancestor_root ON job_ancestor FIELDS root;
+DEFINE INDEX IF NOT EXISTS job_ancestor_job ON job_ancestor FIELDS job;
+-- Deleting a job by any path drops its links in the same transaction.
+DEFINE EVENT IF NOT EXISTS job_ancestor_cleanup ON job WHEN $event = "DELETE" THEN {
+    DELETE job_ancestor WHERE job = $before.id RETURN NONE;
+    DELETE job_ancestor WHERE ancestor = $before.id RETURN NONE;
+};
 
 DEFINE TABLE IF NOT EXISTS task SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS job ON task TYPE record<job>;

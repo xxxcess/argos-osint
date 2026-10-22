@@ -8,10 +8,15 @@ stops it, then runs `tests/storage_contracts.rs` with ARGOS_SURREAL_BIN set and
 ARGOS_SURREAL_REQUIRED=1, so a missing server is a failure rather than a skip.
 Each contract test starts and stops its own server in its own temp directory.
 
+`--mode embedded` instead runs the same suite against an in-process RocksDB
+datastore (`--features embedded`, ARGOS_SURREAL_MODE=embedded); no server is
+downloaded. `--mode both` (default) runs server mode, then embedded mode.
+
 Never touches an Argos home, argos.db or memory_lancedb/.
 
 Usage:
-  python3 scripts/test_surreal.py            # fetch, smoke, run contracts
+  python3 scripts/test_surreal.py            # server + embedded contracts
+  python3 scripts/test_surreal.py --mode server
   python3 scripts/test_surreal.py --fetch-only
   python3 scripts/test_surreal.py --cargo cargo   # CI: plain cargo, no agent target dir
 Options: --cache-dir DIR (default ~/.cache/argos-surreal), --bin PATH (skip download).
@@ -142,22 +147,35 @@ def main():
     parser.add_argument("--cache-dir", type=Path, default=Path.home() / ".cache" / "argos-surreal")
     parser.add_argument("--bin", type=Path, help="use this surreal binary instead of downloading")
     parser.add_argument("--fetch-only", action="store_true")
+    parser.add_argument("--mode", choices=("server", "embedded", "both"), default="both")
     parser.add_argument("--cargo", default="agent", help="'agent' (scripts/agent_cargo.py) or a cargo executable")
     args, extra = parser.parse_known_args()
-    binary = args.bin.resolve() if args.bin else fetch(args.cache_dir)
-    print(f"test-surreal: server binary {binary}", flush=True)
-    if args.fetch_only:
-        return
-    smoke(binary)
     cargo = [sys.executable, str(ROOT / "scripts" / "agent_cargo.py")] if args.cargo == "agent" else [args.cargo]
-    command = [*cargo, "test", "-p", "argos-osint-core", "--locked", "--no-default-features",
-               "--features", "surreal", "--test", "storage_contracts", *extra, "--", "--nocapture"]
-    env = {**os.environ, "ARGOS_SURREAL_BIN": str(binary), "ARGOS_SURREAL_REQUIRED": "1"}
-    for name in ("SURREAL_USER", "SURREAL_PASS"):
-        env.pop(name, None)
-    print("test-surreal: " + " ".join(command), flush=True)
-    sys.exit(subprocess.run(command, cwd=ROOT, env=env).returncode)
-
+    modes = ("server", "embedded") if args.mode == "both" else (args.mode,)
+    binary = None
+    if "server" in modes:
+        binary = args.bin.resolve() if args.bin else fetch(args.cache_dir)
+        print(f"test-surreal: server binary {binary}", flush=True)
+        if args.fetch_only:
+            return
+        smoke(binary)
+    elif args.fetch_only:
+        return
+    for mode in modes:
+        feature = "surreal" if mode == "server" else "embedded"
+        command = [*cargo, "test", "-p", "argos-osint-core", "--locked", "--no-default-features",
+                   "--features", feature, "--test", "storage_contracts", *extra, "--", "--nocapture"]
+        env = {**os.environ, "ARGOS_SURREAL_MODE": mode, "ARGOS_SURREAL_REQUIRED": "1"}
+        if binary:
+            env["ARGOS_SURREAL_BIN"] = str(binary)
+        for name in ("SURREAL_USER", "SURREAL_PASS"):
+            env.pop(name, None)
+        print(f"test-surreal: [{mode}] " + " ".join(command), flush=True)
+        started = time.time()
+        code = subprocess.run(command, cwd=ROOT, env=env).returncode
+        print(f"test-surreal: [{mode}] exit {code} in {time.time() - started:.0f}s", flush=True)
+        if code:
+            sys.exit(code)
 
 if __name__ == "__main__":
     main()

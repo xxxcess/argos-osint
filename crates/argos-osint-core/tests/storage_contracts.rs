@@ -4,10 +4,16 @@
 //! with RocksDB on disk, sync on every commit and versioning off. Each test
 //! starts its own server in a fresh temporary directory and stops it at the end.
 //!
-//! The server binary comes from `ARGOS_SURREAL_BIN`; `scripts/test_surreal.py`
-//! downloads, verifies and passes it. Without it every test prints a skip
-//! message and passes, unless `ARGOS_SURREAL_REQUIRED=1`, which turns a missing
-//! server into a failure (CI sets it).
+//! Two modes, both through `Surreal<Any>`, selected by `ARGOS_SURREAL_MODE`:
+//!
+//! - `server` (default): the server binary comes from `ARGOS_SURREAL_BIN`;
+//!   `scripts/test_surreal.py` downloads, verifies and passes it. Without it
+//!   every test prints a skip message and passes, unless
+//!   `ARGOS_SURREAL_REQUIRED=1`, which turns a missing server into a failure
+//!   (CI sets it).
+//! - `embedded` (needs the `embedded` feature): an in-process RocksDB datastore
+//!   in a temp dir; "restart" drops every client and reopens the directory.
+//!   The authentication contract does not apply (no network sign-in).
 //!
 //! Nothing here touches an Argos home, `argos.db` or `memory_lancedb/`.
 #![cfg(feature = "surreal")]
@@ -17,7 +23,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use surrealdb::engine::remote::ws::{Client, Ws};
+use std::sync::Mutex;
+
+use surrealdb::engine::any::{connect, Any};
 use surrealdb::opt::auth::Root;
 use surrealdb::types::{QueryError, SurrealValue};
 use surrealdb::Surreal;
@@ -44,6 +52,9 @@ const PROFILE: &[(&str, &str)] = &[
 ];
 
 struct Server {
+    embedded: bool,
+    /// Embedded mode: the one open datastore, cloned for every caller.
+    client: Mutex<Option<Surreal<Any>>>,
     bin: PathBuf,
     dir: tempfile::TempDir,
     port: u16,
@@ -54,6 +65,25 @@ struct Server {
 impl Server {
     /// Start a server, or return `None` (skip) when no binary is configured.
     fn start() -> Option<Server> {
+        match std::env::var("ARGOS_SURREAL_MODE").as_deref() {
+            Ok("embedded") => {
+                assert!(
+                    cfg!(feature = "embedded"),
+                    "ARGOS_SURREAL_MODE=embedded needs `--features embedded`"
+                );
+                return Some(Server {
+                    embedded: true,
+                    client: Mutex::new(None),
+                    bin: PathBuf::new(),
+                    dir: tempfile::tempdir().expect("temp dir"),
+                    port: 0,
+                    password: String::new(),
+                    child: None,
+                });
+            }
+            Ok("server") | Err(_) => {}
+            Ok(other) => panic!("ARGOS_SURREAL_MODE must be server or embedded, not {other:?}"),
+        }
         let required = std::env::var("ARGOS_SURREAL_REQUIRED").as_deref() == Ok("1");
         let bin = match std::env::var_os("ARGOS_SURREAL_BIN").map(PathBuf::from) {
             Some(bin) if bin.is_file() => bin,
@@ -84,6 +114,8 @@ impl Server {
         );
         let password = format!("argos-test-{}-{}", std::process::id(), nanos());
         let mut server = Server {
+            embedded: false,
+            client: Mutex::new(None),
             bin,
             dir: tempfile::tempdir().expect("temp dir"),
             port: free_port(),
@@ -99,6 +131,9 @@ impl Server {
     }
 
     fn launch(&mut self) {
+        if self.embedded {
+            return;
+        }
         let url = format!(
             "rocksdb://{}?versioned=false&sync=every",
             self.data_path().display()
@@ -136,6 +171,8 @@ impl Server {
 
     /// Graceful stop (SIGTERM on Unix), waiting for the process to exit.
     fn stop(&mut self) {
+        // Embedded: dropping the last client closes the datastore.
+        self.client.lock().expect("client lock").take();
         if let Some(mut child) = self.child.take() {
             terminate(&child);
             let deadline = Instant::now() + Duration::from_secs(30);
@@ -158,8 +195,33 @@ impl Server {
         self.launch();
     }
 
-    async fn root(&self, ns: &str, db: &str) -> Surreal<Client> {
-        let client = Surreal::new::<Ws>(format!("127.0.0.1:{}", self.port))
+    async fn root(&self, ns: &str, db: &str) -> Surreal<Any> {
+        if self.embedded {
+            if let Some(client) = self.client.lock().expect("client lock").clone() {
+                client.use_ns(ns).use_db(db).await.expect("use ns/db");
+                return client;
+            }
+            let url = format!(
+                "rocksdb://{}?versioned=false&sync=every",
+                self.data_path().display()
+            );
+            // A just-dropped datastore may release its RocksDB lock a moment later.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let client = loop {
+                match connect(url.as_str()).await {
+                    Ok(client) => break client,
+                    Err(error) if Instant::now() < deadline => {
+                        eprintln!("embedded reopen retry: {error}");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(error) => panic!("open embedded datastore: {error}"),
+                }
+            };
+            client.use_ns(ns).use_db(db).await.expect("use ns/db");
+            *self.client.lock().expect("client lock") = Some(client.clone());
+            return client;
+        }
+        let client = connect(format!("ws://127.0.0.1:{}", self.port))
             .await
             .expect("connect");
         client
@@ -206,7 +268,7 @@ fn nanos() -> u128 {
         .unwrap_or_default()
 }
 
-async fn count(db: &Surreal<Client>, table: &str) -> i64 {
+async fn count(db: &Surreal<Any>, table: &str) -> i64 {
     let mut response = db
         .query(format!("RETURN count(SELECT * FROM {table})"))
         .await
@@ -229,9 +291,13 @@ async fn authentication_rejects_bad_and_missing_credentials() {
     let Some(server) = Server::start() else {
         return;
     };
-    let address = format!("127.0.0.1:{}", server.port);
+    if server.embedded {
+        eprintln!("storage_contracts: authentication is not applicable in embedded mode");
+        return;
+    }
+    let address = format!("ws://127.0.0.1:{}", server.port);
 
-    let wrong = Surreal::new::<Ws>(address.as_str()).await.expect("connect");
+    let wrong = connect(address.as_str()).await.expect("connect");
     let error = wrong
         .signin(Root {
             username: "root".into(),
@@ -257,7 +323,7 @@ async fn authentication_rejects_bad_and_missing_credentials() {
         .check()
         .unwrap();
 
-    let anonymous = Surreal::new::<Ws>(address.as_str()).await.expect("connect");
+    let anonymous = connect(address.as_str()).await.expect("connect");
     anonymous
         .use_ns("argos")
         .use_db("contracts")
@@ -401,16 +467,34 @@ async fn concurrent_writes_surface_a_retryable_conflict() {
         conflict.kind_str(),
         conflict.message()
     );
-    assert!(
-        conflict.is_query(),
-        "conflict kind: {}",
-        conflict.kind_str()
-    );
-    assert_eq!(
-        conflict.query_details(),
-        Some(&QueryError::TransactionConflict),
-        "a write conflict must be the structured, retryable TransactionConflict"
-    );
+    if server.embedded {
+        // Known gap, SurrealDB 3.3.4 embedded engine: the same conflict comes back
+        // as kind `Internal` with no details; only the message says it can be
+        // retried. Repositories must classify it themselves in embedded mode.
+        // Pinned so a fix in a later SDK is noticed.
+        assert!(
+            conflict.is_internal(),
+            "embedded conflict kind: {}",
+            conflict.kind_str()
+        );
+        assert!(
+            conflict.message().contains("Transaction conflict")
+                && conflict.message().contains("can be retried"),
+            "{}",
+            conflict.message()
+        );
+    } else {
+        assert!(
+            conflict.is_query(),
+            "conflict kind: {}",
+            conflict.kind_str()
+        );
+        assert_eq!(
+            conflict.query_details(),
+            Some(&QueryError::TransactionConflict),
+            "a write conflict must be the structured, retryable TransactionConflict"
+        );
+    }
 
     let mut response = first
         .query("SELECT VALUE owner FROM ONLY lease:scheduler; SELECT VALUE epoch FROM ONLY lease:scheduler")
@@ -450,7 +534,7 @@ struct Hit {
     d: f64,
 }
 
-async fn define_embeddings(db: &Surreal<Client>) {
+async fn define_embeddings(db: &Surreal<Any>) {
     db.query(
         "DEFINE TABLE memory_embeddings SCHEMAFULL;
          DEFINE FIELD key ON memory_embeddings TYPE string;
@@ -587,7 +671,7 @@ async fn committed_data_and_indexes_survive_a_server_restart() {
     assert_on_disk(&server.data_path());
     let log = server.log();
     assert!(
-        log.contains("Sync mode: every transaction commit"),
+        server.embedded || log.contains("Sync mode: every transaction commit"),
         "sync mode not applied:\n{log}"
     );
 

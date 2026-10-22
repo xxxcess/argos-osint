@@ -2357,10 +2357,8 @@ fn expand_dork_children(
         record_grounding(plan, &step_id, &grounds);
     }
 
-    let mut insert_pos = index + 1;
-    for child in children {
+    for (insert_pos, child) in (index + 1..).zip(children) {
         plan.calls.insert(insert_pos, child);
-        insert_pos += 1;
     }
 }
 

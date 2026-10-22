@@ -2723,21 +2723,17 @@ impl App {
             "prev-tab" => {
                 let _ = self.prev_tab();
             }
-            "close-tab" => {
-                if self.tab_sel > 0 {
-                    let _ = self.close_tab(self.tab_sel);
-                }
+            "close-tab" if self.tab_sel > 0 => {
+                let _ = self.close_tab(self.tab_sel);
             }
             "reopen-tab" => {
                 let _ = self.reopen_closed_tab();
             }
-            "rename-investigation" => {
-                if self.selected_thread.is_some() {
-                    self.recon_chat = false;
-                    self.input = ":rename ".into();
-                    self.cursor = 8;
-                    self.set_focus(Target::Field(FieldId::Composer));
-                }
+            "rename-investigation" if self.selected_thread.is_some() => {
+                self.recon_chat = false;
+                self.input = ":rename ".into();
+                self.cursor = 8;
+                self.set_focus(Target::Field(FieldId::Composer));
             }
             "sessions" => {
                 self.module = Some(ModuleId::Recon);
@@ -18428,7 +18424,7 @@ mod tests {
         let section_bottom = brief_y + brief_h as i32 - 1;
         // The image column stays inside the brief article section.
         assert!(image_x > brief_x, "{geo:?}");
-        assert!(image_x + image_w <= brief_x + brief_w - 1, "{geo:?}");
+        assert!(image_x + image_w < brief_x + brief_w, "{geo:?}");
         assert!(image_y > brief_y, "{geo:?}");
         assert!(image_bottom <= section_bottom, "{geo:?}");
         // The image column is strictly left of the brief prose.

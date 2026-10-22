@@ -1566,10 +1566,8 @@ impl Store {
             return;
         };
         match brain_lance::serving_table_name(&self.conn) {
-            Ok(Some(name)) if !name.is_empty() => {
-                if index.serving_table_name() != name {
-                    index.set_serving_table(&name);
-                }
+            Ok(Some(name)) if !name.is_empty() && index.serving_table_name() != name => {
+                index.set_serving_table(&name);
             }
             _ => {}
         }

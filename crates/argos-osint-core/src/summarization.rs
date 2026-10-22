@@ -190,20 +190,16 @@ pub fn validate_result(
         return Err("empty summarization output".into());
     }
     match mode {
-        SummarizationMode::InvestigationTitle => {
-            if text.chars().count() > 80 {
-                return Err("title exceeds length budget".into());
-            }
+        SummarizationMode::InvestigationTitle if text.chars().count() > 80 => {
+            return Err("title exceeds length budget".into());
         }
         SummarizationMode::TopologyNeighborhood => {
             serde_json::from_str::<crate::brain_neighborhood_brief::NeighborhoodBrief>(text)
                 .map_err(|e| format!("malformed neighborhood brief: {e}"))?;
             return Ok(());
         }
-        SummarizationMode::PageEvidence => {
-            if text.chars().count() < 20 {
-                return Err("summary too short to be useful".into());
-            }
+        SummarizationMode::PageEvidence if text.chars().count() < 20 => {
+            return Err("summary too short to be useful".into());
         }
         _ => {}
     }

@@ -2853,7 +2853,7 @@ impl Reader<'_> {
         let mut rows: Vec<TemperatureChange> = per_origin
             .into_iter()
             .filter_map(|(origin, mut snaps)| {
-                snaps.sort_by(|a, b| a.at.cmp(&b.at));
+                snaps.sort_by_key(|a| a.at);
                 let latest = snaps.last()?;
                 let current = latest.payload.get("temperature").and_then(Json::as_f64);
                 let tier = latest

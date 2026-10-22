@@ -901,3 +901,102 @@ async fn exactly_one_scheduler_wins_and_takes_over_after_expiry() {
         .value;
     assert!(take.elected && take.epoch == 2);
 }
+
+// --- claim window: approximately FIFO, never across a priority level ---------
+
+#[tokio::test]
+async fn claim_window_never_crosses_a_priority_level() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "prio").await;
+    let now = Utc::now();
+    // Buckets smaller and larger than the 32-task window, interleaved by age.
+    let mut specs = Vec::new();
+    for i in 0..60 {
+        let priority = match i % 6 {
+            0 => 0,
+            1 | 2 => 2,
+            _ => 1,
+        };
+        specs.push((
+            format!("p{i:03}"),
+            priority,
+            now - Duration::seconds(600 - i),
+        ));
+    }
+    let tasks: Vec<NewTask> = specs
+        .iter()
+        .map(|(id, p, at)| task(id, "prio", "p", *p, *at))
+        .collect();
+    jobs::create_job(&db, &job("prio", None, now), &tasks)
+        .await
+        .unwrap();
+    // Every shard takes turns, so every offset in the window is exercised.
+    let mut seen = Vec::new();
+    for n in 0.. {
+        let owner = format!("w{}", n % 8);
+        match claim(&db, "p", &owner, now).await {
+            Some(t) => seen.push(specs.iter().find(|(id, _, _)| *id == t.id).unwrap().1),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 60);
+    assert!(
+        seen.windows(2).all(|w| w[0] <= w[1]),
+        "a lower-priority task was claimed while a higher one was queued: {seen:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn oldest_queued_task_is_claimed_within_the_window() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "fifo").await;
+    let now = Utc::now();
+    let ids: Vec<String> = (0..200).map(|i| format!("f{i:03}")).collect();
+    // f000 is the oldest; ids are inserted newest first so storage order
+    // does not favour it.
+    let tasks: Vec<NewTask> = ids
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(i, id)| task(id, "fifo", "p", 0, now - Duration::seconds(1000 - i as i64)))
+        .collect();
+    jobs::create_job(&db, &job("fifo", None, now), &tasks)
+        .await
+        .unwrap();
+    let seq = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut handles = Vec::new();
+    for c in 0..8 {
+        let client = server.root("argos", "fifo").await;
+        let seq = seq.clone();
+        handles.push(tokio::spawn(async move {
+            let owner = format!("w{c}");
+            let mut got = Vec::new();
+            for n in 0.. {
+                let key = format!("claim:{owner}:{n}");
+                match jobs::claim_next(&client, "p", &owner, LEASE, now, &key).await {
+                    Ok(c) => match c.value {
+                        Some(t) => {
+                            let at = seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            got.push((at, t.id));
+                        }
+                        None => break,
+                    },
+                    Err(TxError::Contention { .. }) => {}
+                    Err(e) => panic!("claim failed: {e}"),
+                }
+            }
+            got
+        }));
+    }
+    let mut all = Vec::new();
+    for h in handles {
+        all.extend(h.await.unwrap());
+    }
+    assert_eq!(all.len(), 200);
+    let (at, _) = all.iter().find(|(_, id)| id == "f000").unwrap();
+    assert!(*at < 32, "oldest task claimed only at claim {at}");
+}

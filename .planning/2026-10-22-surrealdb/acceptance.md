@@ -19,7 +19,7 @@ verified.
 - [x] Contract suite passes locally, server mode (real 3.3.4 disk server) and embedded mode, Linux x86_64
 - [x] Embedded mode: auth not applicable; raw conflict is kind Internal, normalized to the structured conflict
 - [ ] Local matrix on final head (see PR body for results)
-- [ ] CI: toolchain 1.95 action, dependency check, `surreal` and `embedded` clippy, contract suite in server and embedded mode on all four jobs. **Blocked:** the box's GitHub token lacks the `workflow` scope, so `.github/workflows/ci.yml` cannot be pushed from here. Patch prepared.
+- [ ] CI: toolchain 1.95 action, dependency check, `surreal` and `embedded` clippy, contract suite in server and embedded mode on all four jobs. CI green on 4 jobs; contract-suite CI pending the workflow push.
 - [ ] CI green on all four jobs with the contract suite (depends on the item above)
 - [x] Server lifecycle design written (design.md); not implemented
 - [x] Existing `argos.db`, sidecars and `memory_lancedb/` untouched

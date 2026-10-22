@@ -41,6 +41,8 @@ pub struct Server {
     pub bin: PathBuf,
     pub dir: tempfile::TempDir,
     pub port: u16,
+    /// Relaunches after losing a port race (see `launch`).
+    port_retries: u32,
     pub password: String,
     pub child: Option<Child>,
 }
@@ -60,6 +62,7 @@ impl Server {
                     bin: PathBuf::new(),
                     dir: tempfile::tempdir().expect("temp dir"),
                     port: 0,
+                    port_retries: 0,
                     password: String::new(),
                     child: None,
                 });
@@ -102,6 +105,7 @@ impl Server {
             bin,
             dir: tempfile::tempdir().expect("temp dir"),
             port: free_port(),
+            port_retries: 0,
             password,
             child: None,
         };
@@ -136,9 +140,30 @@ impl Server {
         for (key, value) in PROFILE {
             command.env(key, value);
         }
-        self.child = Some(command.spawn().expect("spawn surreal"));
+        let mut child = command.spawn().expect("spawn surreal");
+        // Ready means *our* child logged that it is listening. A bare TCP
+        // probe is not enough: `free_port` releases its port before the
+        // server binds it, so a parallel test can take the same port, our
+        // server then exits with "Address already in use", and the probe
+        // connects to the other test's server, which goes away when that
+        // test ends ("Connection refused" mid-test).
+        let ready = format!("Started web server on 127.0.0.1:{}", self.port);
         let deadline = Instant::now() + Duration::from_secs(30);
-        while TcpStream::connect(("127.0.0.1", self.port)).is_err() {
+        loop {
+            if let Some(status) = child.try_wait().expect("wait") {
+                let log = self.log();
+                assert!(
+                    log.contains("Address already in use") && self.port_retries < 5,
+                    "server exited ({status}):\n{log}"
+                );
+                // Lost the port race: take a new port and start again.
+                self.port_retries += 1;
+                self.port = free_port();
+                return self.launch();
+            }
+            if self.log().contains(&ready) && TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
+                break;
+            }
             assert!(
                 Instant::now() < deadline,
                 "server did not listen:\n{}",
@@ -146,6 +171,7 @@ impl Server {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+        self.child = Some(child);
     }
 
     pub fn log(&self) -> String {

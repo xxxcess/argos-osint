@@ -164,11 +164,13 @@ impl Server {
             if self.log().contains(&ready) && TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
                 break;
             }
-            assert!(
-                Instant::now() < deadline,
-                "server did not listen:\n{}",
-                self.log()
-            );
+            if Instant::now() >= deadline {
+                // Kill it before failing: the child is not yet in
+                // self.child, so Drop would leave it running.
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("server did not listen:\n{}", self.log());
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
         self.child = Some(child);

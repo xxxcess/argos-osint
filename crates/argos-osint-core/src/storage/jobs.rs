@@ -51,6 +51,10 @@ pub const CLAIM_MAX_PAGES: i64 = 2;
 /// in one job tree conflict on `job_guard:[root]`, so exclusivity holds.
 pub const POOL_GUARD_SHARDS: u64 = 8;
 
+/// One claim in this many (per process) starts at the queue head.
+const HEAD_EVERY: u64 = 8;
+static CLAIM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Stable shard of `owner` (FNV-1a), used for its pool guard and to rotate
 /// its candidate order so concurrent workers try different queue heads.
 pub fn claim_shard(owner: &str) -> u64 {
@@ -81,17 +85,19 @@ pub const CLAIM_CANDIDATES_SURQL: &str = "SELECT record::id(id) AS id, priority,
 
 /// Order in which one worker tries a page of candidates: eligible rows only,
 /// approximately FIFO. Only the leading run of eligible rows that share the
-/// best priority is rotated by the worker's shard offset, so the window never
+/// best priority is rotated by the claim's slot offset (`None` = the head), so the window never
 /// crosses a priority level: a lower-priority task is tried only after every
 /// eligible higher-priority row in the page. Rows blocked on dependencies are
 /// not eligible, so they cannot hold back the work they wait on.
-fn claim_order(candidates: Vec<Candidate>, shard: u64) -> Vec<Candidate> {
+fn claim_order(candidates: Vec<Candidate>, slot: Option<u64>) -> Vec<Candidate> {
     let mut eligible: Vec<Candidate> = candidates.into_iter().filter(|c| c.eligible()).collect();
     let Some(top) = eligible.first().map(|c| c.priority) else {
         return eligible;
     };
     let bucket = eligible.iter().take_while(|c| c.priority == top).count();
-    let turn = (shard as usize * bucket / POOL_GUARD_SHARDS as usize) % bucket;
+    let turn = slot.map_or(0, |s| {
+        ((s as usize + 1) * bucket / (POOL_GUARD_SHARDS as usize + 1)) % bucket
+    });
     eligible[..bucket].rotate_left(turn);
     eligible
 }
@@ -450,12 +456,24 @@ async fn claim(
     now: DateTime<Utc>,
     op_key: &str,
 ) -> Result<Committed<Option<ClaimedTask>>, TxError> {
-    run_tx(db, RetryPolicy::default(), |tx| async move {
-        claim_in(&tx, pool, task_id, owner, lease_secs, now, op_key).await
+    // One claim in HEAD_EVERY (per process) starts at the queue head; the
+    // others start at the worker's own slot, and no slot is the head. So the
+    // oldest task is reached within a bounded number of claims whichever
+    // workers are alive or fast, and head claims rarely meet each other.
+    let seq = CLAIM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let head = seq.is_multiple_of(HEAD_EVERY);
+    let tries = std::sync::atomic::AtomicU32::new(0);
+    run_tx(db, RetryPolicy::default(), |tx| {
+        // A head claim that lost a conflict retries from its own slot, so
+        // retries never pile up on the head.
+        let first = tries.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0;
+        let slot = (!(head && first)).then(|| claim_shard(owner));
+        async move { claim_in(&tx, pool, task_id, owner, lease_secs, now, op_key, slot).await }
     })
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn claim_in(
     tx: &Tx,
     pool: &str,
@@ -464,6 +482,7 @@ async fn claim_in(
     lease_secs: i64,
     now: DateTime<Utc>,
     op_key: &str,
+    slot: Option<u64>,
 ) -> Result<Option<ClaimedTask>, TxError> {
     let now_s = ts(now);
     let shard = claim_shard(owner);
@@ -528,7 +547,7 @@ async fn claim_in(
         if candidates.is_empty() {
             break;
         }
-        for c in &claim_order(candidates, shard) {
+        for c in &claim_order(candidates, slot) {
             if c.pool == POOL_INTEL_BRIEF {
                 // A dependent stage runs alone in its job; independent roots
                 // run together (CLAIM_ELIGIBLE parity).

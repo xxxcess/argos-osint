@@ -15,6 +15,7 @@ path = "src/main.rs"
 default = ["lancedb", "nlp"]
 nlp = ["argos-osint-core/nlp"]
 lancedb = ["argos-osint-core/lancedb"]
+surreal = ["argos-osint-core/surreal"]
 
 [dependencies]
 anyhow.workspace = true

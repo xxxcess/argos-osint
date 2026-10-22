@@ -21,6 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 strsim.workspace = true
+surrealdb = { workspace = true, optional = true }
 sysinfo.workspace = true
 tokio.workspace = true
 tempfile.workspace = true
@@ -35,6 +36,8 @@ default = ["lancedb", "nlp"]
 nlp = ["dep:rquickjs"]
 # Local LanceDB vector index. CI builds with `--no-default-features` and skips this.
 lancedb = ["dep:lancedb"]
+# Remote-only SurrealDB client for the storage migration. Not in default builds.
+surreal = ["dep:surrealdb"]
 # Test/screenshot fixtures used by the binary's tests. Never enabled in release builds.
 fixtures = []
 # Paused-time Tokio tests (`tokio::time::pause`).

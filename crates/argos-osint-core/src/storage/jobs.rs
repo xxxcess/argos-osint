@@ -117,27 +117,30 @@ fn claim_order(candidates: Vec<Candidate>, slot: Option<u64>) -> Vec<Candidate> 
     eligible
 }
 
-fn ts(t: DateTime<Utc>) -> String {
+pub(crate) fn ts(t: DateTime<Utc>) -> String {
     t.to_rfc3339()
 }
 
-fn rid(table: &str, key: &str) -> RecordId {
+pub(crate) fn rid(table: &str, key: &str) -> RecordId {
     RecordId::new(table, key.to_string())
 }
 
-async fn run(tx: &Tx, query: surrealdb::method::Query<'_, Any>) -> Result<IndexedResults, TxError> {
+pub(crate) async fn run(
+    tx: &Tx,
+    query: surrealdb::method::Query<'_, Any>,
+) -> Result<IndexedResults, TxError> {
     let _ = tx;
     Ok(query.await?.check()?)
 }
 
-fn take<T: SurrealValue>(res: &mut IndexedResults, i: usize) -> Result<T, TxError>
+pub(crate) fn take<T: SurrealValue>(res: &mut IndexedResults, i: usize) -> Result<T, TxError>
 where
     usize: surrealdb::opt::QueryResult<T>,
 {
     res.take::<T>(i).map_err(TxError::from)
 }
 
-async fn bump(tx: &Tx, table: &str, key: &str) -> Result<(), TxError> {
+pub(crate) async fn bump(tx: &Tx, table: &str, key: &str) -> Result<(), TxError> {
     run(
         tx,
         tx.query("UPSERT $g SET rev = (rev ?? 0) + 1 RETURN NONE")

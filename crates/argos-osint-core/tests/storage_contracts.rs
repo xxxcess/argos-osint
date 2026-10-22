@@ -274,19 +274,23 @@ struct Hit {
 }
 
 async fn define_embeddings(db: &Surreal<Any>) {
-    db.query(
-        "DEFINE TABLE memory_embeddings SCHEMAFULL;
-         DEFINE FIELD key ON memory_embeddings TYPE string;
-         DEFINE FIELD kind ON memory_embeddings TYPE string;
-         DEFINE FIELD generation ON memory_embeddings TYPE int;
-         DEFINE FIELD embedding ON memory_embeddings TYPE array<float, 384>;
-         DEFINE INDEX memory_embedding_diskann ON memory_embeddings
-           FIELDS embedding DISKANN DIMENSION 384 DIST COSINE TYPE F32;",
-    )
-    .await
-    .unwrap()
-    .check()
-    .expect("define DISKANN index");
+    storage::embeddings::apply_schema(db)
+        .await
+        .expect("define DISKANN index");
+}
+
+fn row<'a>(
+    key: &'a str,
+    kind: &'a str,
+    generation: i64,
+    v: &'a [f32],
+) -> storage::embeddings::Embedding<'a> {
+    storage::embeddings::Embedding {
+        key,
+        kind,
+        generation,
+        embedding: v,
+    }
 }
 
 #[tokio::test]
@@ -299,15 +303,11 @@ async fn diskann_f32_384_cosine_filtered_search() {
 
     let kinds = ["claim", "actor", "inference"];
     for i in 0..60 {
-        db.query("CREATE memory_embeddings SET key = $key, kind = $kind, generation = $generation, embedding = $embedding")
-            .bind(("key", format!("m{i:02}")))
-            .bind(("kind", kinds[i % 3].to_string()))
-            .bind(("generation", if i % 5 == 0 { 1i64 } else { 2i64 }))
-            .bind(("embedding", unit(i)))
+        let (key, v) = (format!("m{i:02}"), unit(i));
+        let generation = if i % 5 == 0 { 1 } else { 2 };
+        storage::embeddings::put(&db, &row(&key, kinds[i % 3], generation, &v))
             .await
-            .unwrap()
-            .check()
-            .unwrap();
+            .expect("embedding write (compaction conflicts are retried)");
     }
 
     let info = db
@@ -385,19 +385,24 @@ async fn committed_data_and_indexes_survive_a_server_restart() {
     {
         let db = server.root("argos", "contracts").await;
         define_embeddings(&db).await;
-        let tx = db.clone().begin().await.unwrap();
-        tx.query("CREATE note:keep SET body = 'survives'")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        tx.query("CREATE memory_embeddings SET key = 'm1', kind = 'claim', generation = 1, embedding = $e")
-            .bind(("e", unit(1)))
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        tx.commit().await.unwrap();
+        // One transaction for the note and the DISKANN write, through the
+        // retry runner: a concurrent index compaction can conflict with it.
+        let e = unit(1);
+        storage::tx::run_tx(&db, storage::tx::RetryPolicy::default(), |tx| {
+            let e = e.clone();
+            async move {
+                tx.query("UPSERT note:keep SET body = 'survives'")
+                    .await?
+                    .check()?;
+                tx.query("UPSERT memory_embeddings:m1 SET key = 'm1', kind = 'claim', generation = 1, embedding = $e")
+                    .bind(("e", e))
+                    .await?
+                    .check()?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
         let tx = db.clone().begin().await.unwrap();
         tx.query("CREATE note:drop SET body = 'cancelled'")
             .await
@@ -537,4 +542,79 @@ async fn statement_errors_are_structured() {
         .check();
     assert!(checked.is_err(), "check() must surface the statement error");
     assert_eq!(count(&db, "actor").await, 1);
+}
+
+/// DISKANN inserts from several writers run alongside filtered searches. The
+/// engine's background compaction conflicts with some inserts; every write
+/// must still land through the retry runner, and searches must keep working.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn concurrent_diskann_inserts_with_filtered_search() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = server.root("argos", "contracts").await;
+    define_embeddings(&db).await;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut writers = Vec::new();
+    for w in 0..4usize {
+        let client = server.root("argos", "contracts").await;
+        writers.push(tokio::spawn(async move {
+            let mut retries = 0;
+            for i in 0..40usize {
+                let n = w * 40 + i;
+                let (key, v) = (format!("c{n:03}"), unit(n));
+                let kind = ["claim", "actor"][n % 2];
+                let done = storage::embeddings::put(&client, &row(&key, kind, 2, &v))
+                    .await
+                    .unwrap_or_else(|e| panic!("write {key}: {e}"));
+                retries += done.retries;
+            }
+            retries
+        }));
+    }
+    let reader = {
+        let client = server.root("argos", "contracts").await;
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            let mut searches = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let hits: Vec<Hit> = client
+                    .query("SELECT key, kind, vector::distance::knn() AS d FROM memory_embeddings WHERE kind = 'claim' AND embedding <|3,40|> $q ORDER BY d")
+                    .bind(("q", unit(0)))
+                    .await
+                    .unwrap()
+                    .check()
+                    .unwrap()
+                    .take(0)
+                    .unwrap();
+                assert!(hits.iter().all(|h| h.kind == "claim"), "{hits:?}");
+                searches += 1;
+            }
+            searches
+        })
+    };
+    let mut retries = 0;
+    for w in writers {
+        retries += w.await.unwrap();
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let searches = reader.await.unwrap();
+    eprintln!("DISKANN-CONCURRENT retries={retries} searches={searches}");
+    assert_eq!(count(&db, "memory_embeddings").await, 160);
+    for n in [0usize, 77, 158] {
+        let hits: Vec<Hit> = db
+            .query("SELECT key, kind, vector::distance::knn() AS d FROM memory_embeddings WHERE kind = $k AND embedding <|1,40|> $q")
+            .bind(("k", ["claim", "actor"][n % 2]))
+            .bind(("q", unit(n)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(
+            hits.first().map(|h| h.key.clone()),
+            Some(format!("c{n:03}"))
+        );
+    }
 }

@@ -71,9 +71,10 @@ Goal: replace SQLite + LanceDB with one local, disk-backed SurrealDB 3.3.4
 7a. **Embedded conflicts are not structured.** The embedded 3.3.4 engine
    returns a write conflict as kind `Internal` with no details (message
    "Transaction conflict: Resource busy. This transaction can be retried");
-   the server returns `Query` / `QueryError::TransactionConflict`. P1's retry
-   helper must classify embedded conflicts by message until the SDK fixes it;
-   the contract test pins both behaviours.
+   the server returns `Query` / `QueryError::TransactionConflict`. `storage::error::normalize`
+   maps it to the structured form (message match on "Transaction conflict"
+   and "can be retried"); the contract test asserts the raw embedded kind and
+   the normalized result in both modes.
 7b. **Embedded reopen lag.** Dropping the last embedded client releases the
    RocksDB `LOCK` asynchronously; an immediate reopen in the same process
    can fail with "lock hold by current process". The test harness retries

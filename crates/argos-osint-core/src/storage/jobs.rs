@@ -51,9 +51,21 @@ pub const CLAIM_MAX_PAGES: i64 = 2;
 /// in one job tree conflict on `job_guard:[root]`, so exclusivity holds.
 pub const POOL_GUARD_SHARDS: u64 = 8;
 
-/// One claim in this many (per process) starts at the queue head.
+/// One claim in this many (per pool, per process) starts at the queue head.
 const HEAD_EVERY: u64 = 8;
-static CLAIM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Claim counters per pool. Per pool, so claims in one pool cannot absorb
+/// every head turn of another (a process-wide counter alternating between
+/// two pools could land every head claim on one of them).
+static CLAIM_SEQ: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn next_claim_seq(pool: &str) -> u64 {
+    let mut seqs = CLAIM_SEQ.lock().unwrap_or_else(|e| e.into_inner());
+    let n = seqs.entry(pool.to_string()).or_insert(0);
+    let seq = *n;
+    *n += 1;
+    seq
+}
 
 /// Stable shard of `owner` (FNV-1a), used for its pool guard and to rotate
 /// its candidate order so concurrent workers try different queue heads.
@@ -456,11 +468,11 @@ async fn claim(
     now: DateTime<Utc>,
     op_key: &str,
 ) -> Result<Committed<Option<ClaimedTask>>, TxError> {
-    // One claim in HEAD_EVERY (per process) starts at the queue head; the
+    // One claim in HEAD_EVERY (per pool) starts at the queue head; the
     // others start at the worker's own slot, and no slot is the head. So the
     // oldest task is reached within a bounded number of claims whichever
     // workers are alive or fast, and head claims rarely meet each other.
-    let seq = CLAIM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let seq = next_claim_seq(pool);
     let head = seq.is_multiple_of(HEAD_EVERY);
     let tries = std::sync::atomic::AtomicU32::new(0);
     run_tx(db, RetryPolicy::default(), |tx| {

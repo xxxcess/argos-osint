@@ -16,6 +16,8 @@ use surrealdb::types::SurrealValue;
 use surrealdb::Surreal;
 
 const LEASE: i64 = 30;
+/// Per pool, one claim in eight (jobs::HEAD_EVERY) starts at the head.
+const HEAD_BOUND: usize = 8;
 
 async fn fresh(server: &Server, name: &str) -> Surreal<Any> {
     let db = server.root("argos", name).await;
@@ -999,4 +1001,119 @@ async fn oldest_queued_task_is_claimed_within_the_window() {
     assert_eq!(all.len(), 200);
     let (at, _) = all.iter().find(|(_, id)| id == "f000").unwrap();
     assert!(*at < 32, "oldest task claimed only at claim {at}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn alternating_two_pools_keeps_each_pools_starvation_bound() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "alt").await;
+    let now = Utc::now();
+    let pools = ["alt_a", "alt_b"];
+    let ids: Vec<(String, &str, i64)> = pools
+        .iter()
+        .flat_map(|p| (0..100).map(move |i| (format!("{p}{i:03}"), *p, i)))
+        .collect();
+    // Oldest first by created_at, inserted newest first.
+    let tasks: Vec<NewTask> = ids
+        .iter()
+        .rev()
+        .map(|(id, p, i)| task(id, "alt", p, 0, now - Duration::seconds(1000 - i)))
+        .collect();
+    jobs::create_job(&db, &job("alt", None, now), &tasks)
+        .await
+        .unwrap();
+    let seqs = std::sync::Arc::new([
+        std::sync::atomic::AtomicUsize::new(0),
+        std::sync::atomic::AtomicUsize::new(0),
+    ]);
+    let mut handles = Vec::new();
+    for c in 0..8 {
+        let client = server.root("argos", "alt").await;
+        let seqs = seqs.clone();
+        handles.push(tokio::spawn(async move {
+            let owner = format!("w{c}");
+            let mut got = Vec::new();
+            let mut empty = [false, false];
+            for n in 0.. {
+                let which = n % 2;
+                if empty[0] && empty[1] {
+                    break;
+                }
+                if empty[which] {
+                    continue;
+                }
+                let key = format!("claim:{owner}:{n}");
+                match jobs::claim_next(&client, pools[which], &owner, LEASE, now, &key).await {
+                    Ok(r) => match r.value {
+                        Some(t) => {
+                            let at = seqs[which].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            got.push((which, at, t.id));
+                        }
+                        None => empty[which] = true,
+                    },
+                    Err(TxError::Contention { .. }) => {}
+                    Err(e) => panic!("claim failed: {e}"),
+                }
+            }
+            got
+        }));
+    }
+    let mut all = Vec::new();
+    for h in handles {
+        all.extend(h.await.unwrap());
+    }
+    assert_eq!(all.len(), 200);
+    for (which, pool) in pools.iter().enumerate() {
+        let oldest = format!("{pool}000");
+        let (_, at, _) = all.iter().find(|(_, _, id)| *id == oldest).unwrap();
+        eprintln!("ALT-POOL {pool} oldest_at={at}");
+        assert!(*at < 32, "{pool}: oldest task claimed only at claim {at}");
+        assert_eq!(all.iter().filter(|(w, _, _)| *w == which).count(), 100);
+    }
+}
+
+/// Deterministic form: one worker strictly alternating two pools. With a
+/// process-wide head counter every head claim lands on one pool, and the
+/// other pool's oldest task waits until the queue drains to it.
+#[tokio::test]
+async fn one_worker_alternating_two_pools_reaches_both_heads() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "alt1").await;
+    let now = Utc::now();
+    let pools = ["alt1_a", "alt1_b"];
+    let ids: Vec<(String, &str, i64)> = pools
+        .iter()
+        .flat_map(|p| (0..64).map(move |i| (format!("{p}{i:03}"), *p, i)))
+        .collect();
+    let tasks: Vec<NewTask> = ids
+        .iter()
+        .rev()
+        .map(|(id, p, i)| task(id, "alt1", p, 0, now - Duration::seconds(1000 - i)))
+        .collect();
+    jobs::create_job(&db, &job("alt1", None, now), &tasks)
+        .await
+        .unwrap();
+    let mut first_at = [None, None];
+    for n in 0..64usize {
+        for (which, pool) in pools.iter().enumerate() {
+            let key = format!("claim:w:{which}:{n}");
+            let t = jobs::claim_next(&db, pool, "w", LEASE, now, &key)
+                .await
+                .unwrap()
+                .value
+                .expect("claimed");
+            if t.id == format!("{pool}000") {
+                first_at[which] = Some(n);
+            }
+        }
+    }
+    eprintln!("ALT1 oldest_at={first_at:?}");
+    for (which, pool) in pools.iter().enumerate() {
+        let at = first_at[which].expect("oldest claimed");
+        assert!(at < HEAD_BOUND, "{pool}: oldest claimed only at claim {at}");
+    }
 }

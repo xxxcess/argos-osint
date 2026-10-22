@@ -1155,3 +1155,66 @@ async fn one_worker_alternating_two_pools_reaches_both_heads() {
         assert!(at < HEAD_BOUND, "{pool}: oldest claimed only at claim {at}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Counters
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn counter_allocations_are_unique_gapless_and_replayable() {
+    use argos_osint_core::storage::counters;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "counters").await;
+    counters::apply_schema(&db).await.unwrap();
+    assert_eq!(counters::current(&db, "c").await.unwrap(), 0);
+    let first = counters::allocate(&db, "c", "alloc:k1")
+        .await
+        .unwrap()
+        .value;
+    // Replay of the same key (an unknown commit result) returns the same value.
+    assert_eq!(
+        counters::allocate(&db, "c", "alloc:k1")
+            .await
+            .unwrap()
+            .value,
+        first
+    );
+    assert_eq!(first, 1);
+    // A rolled-back allocation gives its value back.
+    let aborted = run_tx(&db, RetryPolicy::default(), |tx| async move {
+        counters::next_in(&tx, "c").await?;
+        Err::<(), _>(TxError::Abort("rollback".into()))
+    })
+    .await;
+    assert!(matches!(aborted, Err(TxError::Abort(_))));
+    assert_eq!(counters::current(&db, "c").await.unwrap(), 1);
+
+    let mut handles = Vec::new();
+    for w in 0..8 {
+        let client = server.root("argos", "counters").await;
+        handles.push(tokio::spawn(async move {
+            let mut got = Vec::new();
+            for i in 0..10 {
+                let r = counters::allocate(&client, "c", &format!("alloc:{w}:{i}"))
+                    .await
+                    .unwrap_or_else(|e| panic!("allocate: {e}"));
+                got.push((r.value, r.retries));
+            }
+            got
+        }));
+    }
+    let mut all = vec![first];
+    let mut max_retries = 0;
+    for h in handles {
+        for (v, retries) in h.await.unwrap() {
+            all.push(v);
+            max_retries = max_retries.max(retries);
+        }
+    }
+    eprintln!("COUNTER-RACE max_retries={max_retries}");
+    all.sort();
+    assert_eq!(all, (1..=81).collect::<Vec<i64>>(), "unique and gapless");
+    assert_eq!(counters::current(&db, "c").await.unwrap(), 81);
+}

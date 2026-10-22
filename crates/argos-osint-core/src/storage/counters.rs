@@ -65,6 +65,12 @@ pub async fn current(db: &Surreal<Any>, name: &str) -> Result<i64, TxError> {
     Ok(v.unwrap_or(0))
 }
 
+/// Receipt id for one allocation. Namespaced by counter so one caller
+/// op_key used on two counters (or by another receipt kind) never collides.
+fn receipt_key(name: &str, op_key: &str) -> String {
+    format!("counter:{name}:{op_key}")
+}
+
 #[derive(Debug, SurrealValue)]
 struct CounterReceipt {
     n: i64,
@@ -82,7 +88,7 @@ pub async fn allocate(
         let mut res = run(
             &tx,
             tx.query("SELECT n FROM ONLY $r WHERE kind = 'counter' AND name = $name")
-                .bind(("r", rid("tx_receipt", op_key)))
+                .bind(("r", rid("tx_receipt", &receipt_key(name, op_key))))
                 .bind(("name", name.to_string())),
         )
         .await?;
@@ -96,7 +102,7 @@ pub async fn allocate(
                 "CREATE $r SET kind = 'counter', name = $name, n = $value, \
                  at = <datetime>$now RETURN NONE",
             )
-            .bind(("r", rid("tx_receipt", op_key)))
+            .bind(("r", rid("tx_receipt", &receipt_key(name, op_key))))
             .bind(("name", name.to_string()))
             .bind(("value", value))
             .bind(("now", ts(chrono::Utc::now()))),

@@ -1228,6 +1228,18 @@ async fn counter_allocations_are_unique_gapless_and_replayable() {
     all.sort();
     assert_eq!(all, (1..=81).collect::<Vec<i64>>(), "unique and gapless");
     assert_eq!(counters::current(&db, "c").await.unwrap(), 81);
+    // Receipts are per counter: the same op_key on another counter
+    // allocates there (and replays there) instead of colliding.
+    for _ in 0..2 {
+        assert_eq!(
+            counters::allocate(&db, "d", "alloc:k1")
+                .await
+                .unwrap()
+                .value,
+            1
+        );
+    }
+    assert_eq!(counters::current(&db, "c").await.unwrap(), 81);
 }
 
 // ---------------------------------------------------------------------------

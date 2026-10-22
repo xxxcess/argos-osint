@@ -166,7 +166,13 @@ All tests run against a real RocksDB-backed server (`scripts/test_surreal.py`, u
 `CREATE memory_embeddings` failed in the server leg with "Transaction conflict:
 Resource busy" (3/25 loop runs). DISKANN writes on RocksDB conflict with
 background index compaction; this is retryable and the server does not retry
-it (SurrealDB 3.2 notes). This is inherent, not a bug in our query. All embedding
+it. Source: SurrealDB 3.2 upgrade notes, "DiskANN writes can return a
+retryable conflict on RocksDB ... the server does not retry user
+transactions" (https://surrealdb.com/releases/3.2). Confirmed locally: the
+retries counted by `run_tx` (0-9 per run) are exactly these conflicts. This is
+inherent, not a bug in our query. Related: embedded `tx.commit()` flattens
+commit-time conflicts to an internal error
+(https://github.com/surrealdb/surrealdb/issues/7472). All embedding
 writes now go through `storage::embeddings::put` (idempotent UPSERT on
 `run_tx`). Test: `concurrent_diskann_inserts_with_filtered_search` (4 writers x
 40 inserts alongside filtered KNN). After the fix: 0 conflict failures, 0-5 retries/run.
@@ -183,13 +189,32 @@ on a fresh port (up to 5 times).
 - `outbox`: `index_change:[op_key]`, seq from the `index_change` counter, written
   in the same transaction as the change; replay returns the existing seq; `ack`
   is fenced by revision/generation.
-- `processes`: heartbeat registry; `recover_orphans` requeues running tasks of
-  owners stale > 30 s via the reaper's shared `requeue_running_in` (epoch-fenced),
-  and skips when this process's own beat is stale (outage, not dead owners).
+  Equivalent work coalesces as the old partial unique index did: while a
+  row is pending, running or blocked, `index_work:[work_key]` (kind, id,
+  revision, normalized operation) names it, and other callers' enqueues
+  return that row. A terminal ack releases the lock. A replayed op_key
+  naming different work aborts.
+  **Watch in P2:** every publication's enqueue increments the one
+  `counter:index_change` record, so publications serialize on it
+  (hot-record policy, 16 attempts; 8 concurrent enqueuers stay within it).
+  If publication throughput matters, allocate seq in blocks or order by a
+  commit timestamp.
+- `processes`: heartbeat registry keyed by `scheduler::process_owner()`. A
+  claim stamps `task.process_owner` with that id; `lease_owner` stays per
+  worker (w0..w7). `recover_orphans` requeues running tasks whose
+  `process_owner` is not a fresh (< 30 s) process, via the reaper's shared
+  `requeue_running_in` (epoch-fenced), and skips when this process's own beat
+  is stale (outage, not dead owners). Rows with an empty `process_owner`
+  (pre-field) are left to lease expiry.
+  Cost: the task side uses the `task_claim_order` index on its `state`
+  prefix, so it reads running tasks only. `NOT IN $fresh` cannot seek
+  an index, so it filters them. The `process` side is a full scan of the
+  process table, one row per live or recent process.
 
 ### P2: stop-batch `$j IN ancestors` does not use `job_ancestors`
-EXPLAIN FULL on 3.3.4 (300 jobs, `DEFINE INDEX job_ancestors ON job FIELDS
-ancestors`): `$j IN ancestors`, `ancestors CONTAINS $j`, `CONTAINSANY [$j]`,
+`job_ancestors` ships in the P1 schema (`schema/jobs.surql`:
+`DEFINE INDEX job_ancestors ON job FIELDS ancestors`) but this query never
+uses it. EXPLAIN FULL on 3.3.4 (300 jobs): `$j IN ancestors`, `ancestors CONTAINS $j`, `CONTAINSANY [$j]`,
 `?= $j` and `= $j` all plan as **TableScan** with the predicate as a filter.
 Stop-job cost is O(all jobs) per batch. P2: replace with a `job_ancestor`
 (job, ancestor) link table indexed on `ancestor` and queried by scalar
@@ -201,3 +226,7 @@ Embedded run 15 at caa733b: `pool guard too hot: p99=4 exhausted=0`
 failure. Cause: the oldest-task and alternating-pool tests ran in parallel, so
 24 clients were on the box against a bound defined for 8. The many-client tests
 now share a mutex (8aefa09); the bound is unchanged.
+The mutex covers only the five many-client tests (the race, oldest-task,
+alternating-pool, counter-race and outbox-race tests). Every other test still
+runs in parallel with them, so their bounds hold under ordinary test-binary
+load, not on an idle box. After the change: 40/40 embedded runs passed.

@@ -6,7 +6,8 @@ DEFINE FIELD IF NOT EXISTS kind ON job TYPE string DEFAULT 'task';
 DEFINE FIELD IF NOT EXISTS operation ON job TYPE string;
 DEFINE FIELD IF NOT EXISTS parent ON job TYPE option<record<job>>;
 DEFINE FIELD IF NOT EXISTS ancestors ON job TYPE array<record<job>> DEFAULT [];
-DEFINE INDEX IF NOT EXISTS job_ancestors ON job FIELDS ancestors;
+-- Descendant lookup (stop-batch) goes through job_ancestor below: on 3.3.4
+-- no form of "$j IN ancestors" uses an index on this array.
 -- Top ancestor (itself for a root): one guard and one cancel flag per tree.
 DEFINE FIELD IF NOT EXISTS root ON job TYPE record<job>;
 DEFINE FIELD IF NOT EXISTS state ON job TYPE string;
@@ -19,6 +20,15 @@ DEFINE FIELD IF NOT EXISTS finished_at ON job TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS job_root ON job FIELDS root, stopped;
 DEFINE INDEX IF NOT EXISTS job_parent ON job FIELDS parent;
 DEFINE INDEX IF NOT EXISTS job_state_created ON job FIELDS state, created_at;
+
+-- One row per (ancestor, descendant), written with the job. The array
+-- id keeps it unique; the ancestor index serves stop-batch by equality.
+DEFINE TABLE IF NOT EXISTS job_ancestor SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS ancestor ON job_ancestor TYPE record<job>;
+DEFINE FIELD IF NOT EXISTS job ON job_ancestor TYPE record<job>;
+DEFINE FIELD IF NOT EXISTS root ON job_ancestor TYPE record<job>;
+DEFINE INDEX IF NOT EXISTS job_ancestor_ancestor ON job_ancestor FIELDS ancestor;
+DEFINE INDEX IF NOT EXISTS job_ancestor_root ON job_ancestor FIELDS root;
 
 DEFINE TABLE IF NOT EXISTS task SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS job ON task TYPE record<job>;

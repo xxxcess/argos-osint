@@ -212,7 +212,11 @@ async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxError> {
         tx.query(
             "CREATE $id SET kind = $kind, operation = $op, parent = $parent, root = $root, \
              ancestors = $ancestors, state = 'running', created_at = <datetime>$at, \
-             updated_at = <datetime>$at RETURN NONE",
+             updated_at = <datetime>$at RETURN NONE;
+             FOR $a IN $ancestors {
+                 CREATE type::record('job_ancestor', [record::id($a), record::id($id)])
+                     SET ancestor = $a, job = $id, root = $root RETURN NONE;
+             };",
         )
         .bind(("id", rid("job", job.id)))
         .bind(("kind", job.kind.to_string()))
@@ -1210,6 +1214,11 @@ pub struct StopProgress {
     pub done: bool,
 }
 
+/// Unstopped descendants of `$j`, at most `$n`. Reads `job_ancestor` by its
+/// `ancestor` index, so a batch costs the job's descendants, not all jobs.
+pub const STOP_DESCENDANTS_SURQL: &str = "SELECT VALUE record::id(job) FROM job_ancestor \
+     WHERE ancestor = $j AND job.stopped = false AND job.kind != 'service' LIMIT $n";
+
 /// Stop a job and its descendants. First sets `cancel_requested` on the job
 /// (claims and fences stop immediately), then cancels descendants in batches
 /// of `batch` jobs per transaction, then the job itself. Resumable and
@@ -1261,12 +1270,9 @@ pub async fn stop_job(
                 bump(&tx, "job_guard", &root_id).await?;
                 let mut res = run(
                     &tx,
-                    tx.query(
-                        "SELECT VALUE record::id(id) FROM job WHERE $j IN ancestors \
-                         AND stopped = false AND kind != 'service' LIMIT $n",
-                    )
-                    .bind(("j", rid("job", job_id)))
-                    .bind(("n", batch as i64)),
+                    tx.query(STOP_DESCENDANTS_SURQL)
+                        .bind(("j", rid("job", job_id)))
+                        .bind(("n", batch as i64)),
                 )
                 .await?;
                 let mut ids: Vec<String> = take(&mut res, 0)?;
@@ -1358,6 +1364,7 @@ async fn purge_tree_in(tx: &Tx, root: &str, reason: &str, now: &str) -> Result<(
              DELETE task WHERE root = $r;
              DELETE brief_run WHERE job.root = $r;
              DELETE job WHERE root = $r;
+             DELETE job_ancestor WHERE root = $r;
              UPSERT $m SET retired_at = <datetime>$now, reason = $reason RETURN NONE;",
         )
         .bind(("r", rid("job", root)))

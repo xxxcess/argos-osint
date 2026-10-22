@@ -84,6 +84,64 @@ async fn claim(
 // --- index check (replaces EXPLAIN QUERY PLAN in tasks.rs) -----------------
 
 #[tokio::test]
+async fn stop_batch_reads_descendants_through_the_ancestor_index() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "stop_index").await;
+    let now = Utc::now();
+    // Two trees: root a with a chain a > a1 > a2, root b with 20 children.
+    jobs::create_job(&db, &job("a", None, now), &[])
+        .await
+        .unwrap();
+    jobs::create_job(&db, &job("a1", Some("a"), now), &[])
+        .await
+        .unwrap();
+    jobs::create_job(&db, &job("a2", Some("a1"), now), &[])
+        .await
+        .unwrap();
+    jobs::create_job(&db, &job("b", None, now), &[])
+        .await
+        .unwrap();
+    for i in 0..20 {
+        jobs::create_job(&db, &job(&format!("b{i}"), Some("b"), now), &[])
+            .await
+            .unwrap();
+    }
+    let ids = |j: &'static str| {
+        let db = db.clone();
+        async move {
+            let mut r = db
+                .query(jobs::STOP_DESCENDANTS_SURQL)
+                .bind(("j", surrealdb::types::RecordId::new("job", j)))
+                .bind(("n", 100i64))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+            let mut v: Vec<String> = r.take(0).unwrap();
+            v.sort();
+            v
+        }
+    };
+    assert_eq!(ids("a").await, vec!["a1", "a2"]);
+    assert_eq!(ids("a1").await, vec!["a2"]);
+    assert_eq!(ids("b").await.len(), 20);
+    let mut r = db
+        .query(format!("{} EXPLAIN FULL", jobs::STOP_DESCENDANTS_SURQL))
+        .bind(("j", surrealdb::types::RecordId::new("job", "a")))
+        .bind(("n", 100i64))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let plan: surrealdb::types::Value = r.take(0).unwrap();
+    let plan = format!("{plan:?}");
+    assert!(plan.contains("job_ancestor_ancestor"), "{plan}");
+    assert!(!plan.contains("TableScan"), "{plan}");
+}
+
+#[tokio::test]
 async fn claim_scan_uses_task_claim_order_index() {
     let Some(server) = Server::start() else {
         return;

@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const config = JSON.parse(readFileSync(join(root, "opencode.json"), "utf8"));
-const skills = ["graphify", "argos-plan", "argos-implement", "ecc-plan", "ecc-review", "ecc-verify", "ecc-checkpoint", "ecc-learn", "argos-tui-verify", "argos-commit"];
 
 function rules(agent) {
   return config.agents[agent].permissions;
@@ -18,27 +17,30 @@ function effect(agent, action, resource) {
   return matched[matched.length - 1].effect;
 }
 
-test("primary agents keep a short skill list and split edit subagents", () => {
-  assert.equal(config.default_agent, "plan");
-  for (const agent of ["build", "plan"]) {
-    assert.equal(effect(agent, "execute", "*"), "deny");
-    assert.equal(effect(agent, "browser", "*"), "deny");
-    assert.equal(effect(agent, "subagent", "*"), "deny");
-    assert.equal(effect(agent, "skill", "*"), "deny");
-    for (const id of skills) assert.equal(effect(agent, "skill", id), "allow", id);
-    for (const id of skills) assert.ok(readFileSync(join(root, "skills", id, "SKILL.md"), "utf8"));
-    const skillRules = rules(agent).filter((rule) => rule.action === "skill");
-    assert.equal(skillRules[0].resource, "*");
-    assert.deepEqual(skillRules.slice(1).map((rule) => rule.resource), skills);
+test("replacement roles permit nested handoffs and restrict source edits", () => {
+  assert.equal(config.default_agent, "architect");
+  assert.equal(config.experimental.subagent_depth, 3);
+  assert.equal(config.subagent_depth, undefined);
+  for (const id of ["build", "plan", "general", "explore"]) assert.equal(config.agents[id].disabled, true);
+  for (const id of ["architect", "coder", "tester"]) {
+    assert.equal(config.agents[id].mode, "all");
+    assert.equal(effect(id, "execute", "*"), "deny");
+    assert.equal(effect(id, "browser", "*"), "deny");
+    assert.equal(effect(id, "shell", "*"), "allow");
+    assert.equal(effect(id, "subagent", "*"), "deny");
+    assert.equal(effect(id, "skill", "*"), "allow");
   }
-  for (const id of ["explore", "ecc-planner", "ecc-reviewer"]) {
-    assert.equal(effect("build", "subagent", id), "allow");
-    assert.equal(effect("plan", "subagent", id), "allow");
+  for (const parent of ["architect", "coder"]) {
+    for (const child of ["architect", "coder", "tester"]) assert.equal(effect(parent, "subagent", child), "allow");
+    const worker = JSON.parse(readFileSync(join(root, `${parent}-worker.json`), "utf8"));
+    assert.match(worker.model, /^[^/]+\/[^/]+$/);
   }
-  assert.equal(effect("build", "subagent", "ecc-edit"), "allow");
-  assert.equal(rules("plan").some((rule) => rule.action === "subagent" && rule.resource === "ecc-edit"), false);
-  assert.equal(effect("plan", "subagent", "*"), "deny");
-  assert.equal(effect("plan", "edit", "*"), "deny");
+  assert.equal(effect("tester", "subagent", "architect"), "allow");
+  assert.equal(effect("coder", "edit", "*"), "allow");
+  for (const id of ["architect", "tester"]) {
+    assert.equal(effect(id, "edit", "*"), "deny");
+    assert.equal(effect(id, "edit", "**/.planning/**"), "allow");
+  }
 });
 
 test("TUI command loads the registered screenshot skill and verify keeps offline flags", () => {
@@ -49,21 +51,13 @@ test("TUI command loads the registered screenshot skill and verify keeps offline
   assert.match(verify, /ARGOS_EMBED.*unset/);
 });
 
-test("build subagents allow shell commands without approval", () => {
-  for (const id of ["ecc-edit", "ecc-planner", "ecc-reviewer"]) {
-    const text = readFileSync(join(root, "agents", `${id}.md`), "utf8");
-    const frontmatter = text.split("---")[1];
-    assert.match(frontmatter, /action: shell\s+resource: "\*"\s+effect: allow/, id);
-    assert.doesNotMatch(frontmatter, /action: shell\s+resource: [^\n]+\s+effect: (deny|ask)/, id);
+test("worker prompts retain leaf roles and caller-owned continuation", () => {
+  const architect = readFileSync(join(root, "agents/architect.md"), "utf8");
+  const coder = readFileSync(join(root, "agents/coder.md"), "utf8");
+  assert.match(architect, /AUDIT_UNIT and CONSULT are leaf modes/);
+  assert.match(coder, /EDIT_UNIT/);
+  assert.match(coder, /Do not delegate, build or test/);
+  for (const id of ["architect", "coder", "tester"]) {
+    assert.match(readFileSync(join(root, "agents", `${id}.md`), "utf8"), /Resume only your own child sessionID/);
   }
-});
-
-test("ecc-edit leaves builds and tests to the parent", () => {
-  const text = readFileSync(join(root, "agents/ecc-edit.md"), "utf8");
-  assert.match(text, /mode: subagent/);
-  assert.match(text, /cargo fmt -- <paths>/);
-  assert.match(text, /Do not run `cargo test`, `cargo clippy`, or `cargo fmt --all`/);
-  const skill = readFileSync(join(root, "skills/argos-implement/SKILL.md"), "utf8");
-  assert.match(skill, /"agent": "ecc-edit"/);
-  assert.match(skill, /agent_cargo\.py test --workspace/);
 });

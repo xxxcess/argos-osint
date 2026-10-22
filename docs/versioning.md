@@ -98,9 +98,9 @@ It does not decide whether a change really breaks compatibility or replace the
 Rust fmt → Clippy → test gate, scoped TUI review or other relevant checks. Agents
 record actual validation in the commit body and report the SHA. Existing task
 authorization governs commits, pushes, merges and releases. The read-only
-OpenCode `plan` agent prepares messages/impact only; it does not stage or commit.
+OpenCode `architect` agent prepares messages/impact only; it does not stage or commit.
 
-OpenCode `build` and `plan` can load `argos-commit`; `/ecc-commit` routes to it.
+OpenCode `coder` and `architect` can load `argos-commit`; `/ecc-commit` routes to it.
 `argos-plan`, `argos-implement`, editors and reviewers carry the same policy.
 Never manually edit release versions/changelog for an ordinary feature/fix.
 Release Please owns their synchronized update. Explicit release/baseline repair

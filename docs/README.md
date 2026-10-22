@@ -50,6 +50,7 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 | Durable jobs | State machine | [diagrams/jobs-lifecycle.html](diagrams/jobs-lifecycle.html) |
 | Investigation harness | Process | [diagrams/investigation-harness.html](diagrams/investigation-harness.html) |
 | Agent exploration | Process | [diagrams/agent-graphify.html](diagrams/agent-graphify.html) |
+| Agent handoffs | Process | [diagrams/agent-team.html](diagrams/agent-team.html) |
 
 ## Agent and workflow
 

@@ -10,6 +10,9 @@
 use surrealdb::types::QueryError;
 use surrealdb::Error;
 
+// The embedded conflict match is on message text, not a typed variant. It is
+// tied to the `=3.3.4` surrealdb pin; the storage contract test asserts the raw
+// embedded error and fails if a future version changes the wording.
 /// Message prefix the 3.3.4 engines use for a retryable write conflict.
 const CONFLICT_MARKER: &str = "Transaction conflict";
 const RETRY_MARKER: &str = "can be retried";

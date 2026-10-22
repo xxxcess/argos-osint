@@ -74,7 +74,8 @@ Goal: replace SQLite + LanceDB with one local, disk-backed SurrealDB 3.3.4
    the server returns `Query` / `QueryError::TransactionConflict`. `storage::error::normalize`
    maps it to the structured form (message match on "Transaction conflict"
    and "can be retried"); the contract test asserts the raw embedded kind and
-   the normalized result in both modes.
+   the normalized result in both modes. The match is on message text and is
+   tied to the `=3.3.4` pin; the contract test catches any change in wording.
 7b. **Embedded reopen lag.** Dropping the last embedded client releases the
    RocksDB `LOCK` asynchronously; an immediate reopen in the same process
    can fail with "lock hold by current process". The test harness retries

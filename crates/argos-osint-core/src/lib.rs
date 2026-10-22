@@ -83,3 +83,5 @@ pub mod subscription;
 pub mod summarization;
 pub mod tasks;
 pub mod telemetry;
+#[cfg(test)]
+pub(crate) mod test_diag;

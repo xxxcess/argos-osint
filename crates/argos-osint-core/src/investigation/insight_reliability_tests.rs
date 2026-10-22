@@ -189,10 +189,16 @@ async fn finish(
 ) -> PipelineOutput {
     let cancel = Arc::new(AtomicBool::new(false));
     for _ in 0..64 {
-        if let Some(output) = insight_persist::run_refresh_slice(path, id, auth, settings, &cancel)
-            .await
-            .unwrap()
-        {
+        let slice = insight_persist::run_refresh_slice(path, id, auth, settings, &cancel).await;
+        // Flaky on loaded hosts ("article refresh lease lost before dispatch"):
+        // show the lease state that caused it.
+        let slice = slice.unwrap_or_else(|e| {
+            panic!(
+                "refresh slice for {id} failed: {e:#}{}",
+                crate::test_diag::dump_task_state(path)
+            )
+        });
+        if let Some(output) = slice {
             return output;
         }
     }

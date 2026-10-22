@@ -205,6 +205,9 @@ struct Run {
     by_route: std::collections::BTreeMap<String, usize>,
     stage_state: String,
     stage_error: String,
+    /// `run_claimed` result for the Inferences stage plus a table dump, for
+    /// failure messages.
+    diagnostics: String,
 }
 
 async fn run_inferences(weather: Weather) -> Run {
@@ -255,7 +258,10 @@ async fn run_inferences(weather: Weather) -> Run {
         settings,
         user_agent: None,
     };
-    let _ = run_claimed(&path, claimed, &mut backend, &cancel, &cfg()).await;
+    // Keep the outcome: when the stage doesn't complete, this error is the
+    // first thing to look at.
+    let outcome = run_claimed(&path, claimed, &mut backend, &cancel, &cfg()).await;
+    let outcome = format!("{outcome:?}");
     let mut by_operation = std::collections::BTreeMap::new();
     let mut by_route = std::collections::BTreeMap::new();
     let mut stmt = store
@@ -311,6 +317,14 @@ async fn run_inferences(weather: Weather) -> Run {
         by_route,
         stage_state: view.state.clone(),
         stage_error: view.row.clone(),
+        diagnostics: if view.state == "completed" {
+            format!("run_claimed: {outcome}")
+        } else {
+            format!(
+                "run_claimed: {outcome}{}",
+                crate::test_diag::dump_task_state(&path)
+            )
+        },
     }
 }
 
@@ -319,10 +333,18 @@ async fn run_inferences(weather: Weather) -> Run {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dead_first_routes_do_not_multiply_across_operations() {
     let healthy = run_inferences(Weather::Healthy).await;
-    assert_eq!(healthy.stage_state, "completed");
+    assert_eq!(
+        healthy.stage_state, "completed",
+        "{}\n{}",
+        healthy.stage_error, healthy.diagnostics
+    );
     assert!(healthy.requests <= 20, "{:?}", healthy.by_operation);
     let down = run_inferences(Weather::FirstRoutesDown).await;
-    assert_eq!(down.stage_state, "completed", "{}", down.stage_error);
+    assert_eq!(
+        down.stage_state, "completed",
+        "{}\n{}",
+        down.stage_error, down.diagnostics
+    );
     assert!(
         down.requests <= 36,
         "{} requests: {:?} {:?}",

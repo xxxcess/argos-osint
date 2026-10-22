@@ -12,4 +12,5 @@ pub mod codec;
 pub mod counters;
 pub mod embeddings;
 pub mod jobs;
+pub mod outbox;
 pub mod tx;

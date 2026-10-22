@@ -20,7 +20,7 @@ ARGOS_EMBED=1 cargo test -p argos-osint-core -- --ignored minilm
 
 Check order is fmt → clippy → test. MiniLM tests download a ~23 MB model. Rust 1.95.0 is pinned (minimum 1.95, required by the SurrealDB 3.3.4 SDK); `.cargo/config.toml` uses the vendored `tools/protoc` shim. First default build is slow and needs a C toolchain; local default builds include LanceDB.
 
-SurrealDB migration (in progress, `.planning/2026-10-22-surrealdb/` design.md + acceptance.md): the remote-only SDK is behind the non-default `surreal` feature. `python3 scripts/test_surreal.py` downloads the pinned, SHA-256-checked SurrealDB 3.3.4 server and runs `crates/argos-osint-core/tests/storage_contracts.rs` against real RocksDB disk servers it starts and stops in temp dirs. Without `ARGOS_SURREAL_BIN` the suite skips; `ARGOS_SURREAL_REQUIRED=1` (set by the script and CI) makes a missing server fail. It never touches an Argos home, `argos.db` or `memory_lancedb/`.
+SurrealDB migration (in progress, `.planning/2026-10-22-surrealdb/` design.md + acceptance.md): the remote-only SDK is behind the non-default `surreal` feature. `python3 scripts/test_surreal.py` downloads the pinned, SHA-256-checked SurrealDB 3.3.4 server and runs `crates/argos-osint-core/tests/storage_contracts.rs` against real RocksDB disk servers it starts and stops in temp dirs. Without `ARGOS_SURREAL_BIN` the suite skips; `ARGOS_SURREAL_REQUIRED=1` (set by the script; CI will set it once the pending `ci.yml` change is pushed) makes a missing server fail. It never touches an Argos home, `argos.db` or `memory_lancedb/`.
 
 ## OpenCode and Cargo
 

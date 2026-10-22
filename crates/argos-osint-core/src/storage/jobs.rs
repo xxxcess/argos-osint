@@ -36,13 +36,13 @@ pub const POOL_INTEL_BRIEF: &str = "intel_brief";
 pub const MAX_WORKER_RECOVERIES: i64 = 3;
 /// Execution age limit for claims and retention (72 hours).
 pub const EXECUTION_WINDOW_HOURS: i64 = 72;
-/// Candidates read per claim page, and the page cap.
 /// Candidates read per page. Each worker starts at its shard's offset in the
 /// page (see [`claim_shard`]), so concurrent workers rarely pick the same task
 /// row: with 8-row pages the embedded race still hit p99 4 and one exhaustion.
 /// The cost is that a claim may take any of the first 32 queued tasks in
 /// claim order rather than strictly the first.
 pub const CLAIM_PAGE: i64 = 32;
+/// Pages read per claim before it gives up (ineligible rows are skipped).
 pub const CLAIM_MAX_PAGES: i64 = 2;
 /// Claim guard shards per pool. One guard per pool exhausted 23 of 200 claims
 /// in the 8-client race (p99 5 retries), over the review threshold (p99 > 3 or

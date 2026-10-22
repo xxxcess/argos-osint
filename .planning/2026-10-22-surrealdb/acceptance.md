@@ -17,7 +17,7 @@ verified.
 - [x] `tests/storage_contracts.rs`: auth, rollback, structured retryable conflict, DISKANN F32/384/cosine filtered search, restart persistence, structured errors
 - [x] Suite skips cleanly without a server; fails with `ARGOS_SURREAL_REQUIRED=1`
 - [x] Contract suite passes locally, server mode (real 3.3.4 disk server) and embedded mode, Linux x86_64
-- [x] Embedded mode: auth not applicable; conflict is kind Internal (pinned as a known gap)
+- [x] Embedded mode: auth not applicable; raw conflict is kind Internal, normalized to the structured conflict
 - [ ] Local matrix on final head (see PR body for results)
 - [ ] CI: toolchain 1.95 action, dependency check, `surreal` and `embedded` clippy, contract suite in server and embedded mode on all four jobs. **Blocked:** the box's GitHub token lacks the `workflow` scope, so `.github/workflows/ci.yml` cannot be pushed from here. Patch prepared.
 - [ ] CI green on all four jobs with the contract suite (depends on the item above)
@@ -29,7 +29,7 @@ verified.
 
 - [x] Mode decided: `Surreal<Any>`, server default, embedded optional (user + Code Architect, 2026-10-22)
 - [ ] Embedded single-owner lock `storage/embedded.lock` with the "Argos home in use by PID N" error
-- [ ] Retry helper classifies embedded conflicts (kind Internal) by message
+- [x] `storage::error::normalize` maps the embedded conflict (kind Internal) to `QueryError::TransactionConflict`; contract test asserts the structured form in both modes
 - [ ] Fresh versioned schema files, checksummed ledger, database identity, reset epoch
 - [ ] Typed key codec with round-trip/collision tests
 - [ ] Async repository boundary; no raw connections

@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use std::sync::Mutex;
 
+use argos_osint_core::storage;
 use surrealdb::engine::any::{connect, Any};
 use surrealdb::opt::auth::Root;
 use surrealdb::types::{QueryError, SurrealValue};
@@ -68,7 +69,7 @@ impl Server {
         match std::env::var("ARGOS_SURREAL_MODE").as_deref() {
             Ok("embedded") => {
                 assert!(
-                    cfg!(feature = "embedded"),
+                    embedded_compiled(),
                     "ARGOS_SURREAL_MODE=embedded needs `--features embedded`"
                 );
                 return Some(Server {
@@ -197,7 +198,8 @@ impl Server {
 
     async fn root(&self, ns: &str, db: &str) -> Surreal<Any> {
         if self.embedded {
-            if let Some(client) = self.client.lock().expect("client lock").clone() {
+            let cached = self.client.lock().expect("client lock").clone();
+            if let Some(client) = cached {
                 client.use_ns(ns).use_db(db).await.expect("use ns/db");
                 return client;
             }
@@ -252,6 +254,10 @@ fn terminate(child: &Child) {
 
 #[cfg(not(unix))]
 fn terminate(_child: &Child) {}
+
+fn embedded_compiled() -> bool {
+    cfg!(feature = "embedded")
+}
 
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -467,34 +473,32 @@ async fn concurrent_writes_surface_a_retryable_conflict() {
         conflict.kind_str(),
         conflict.message()
     );
+    // Raw form differs per engine (server: Query/TransactionConflict;
+    // embedded 3.3.4: Internal with only a "can be retried" message).
+    // storage::error::normalize gives both the one structured form.
     if server.embedded {
-        // Known gap, SurrealDB 3.3.4 embedded engine: the same conflict comes back
-        // as kind `Internal` with no details; only the message says it can be
-        // retried. Repositories must classify it themselves in embedded mode.
-        // Pinned so a fix in a later SDK is noticed.
         assert!(
             conflict.is_internal(),
-            "embedded conflict kind: {}",
+            "raw embedded kind: {}",
             conflict.kind_str()
-        );
-        assert!(
-            conflict.message().contains("Transaction conflict")
-                && conflict.message().contains("can be retried"),
-            "{}",
-            conflict.message()
-        );
-    } else {
-        assert!(
-            conflict.is_query(),
-            "conflict kind: {}",
-            conflict.kind_str()
-        );
-        assert_eq!(
-            conflict.query_details(),
-            Some(&QueryError::TransactionConflict),
-            "a write conflict must be the structured, retryable TransactionConflict"
         );
     }
+    assert!(
+        storage::error::is_conflict(&conflict),
+        "{}",
+        conflict.message()
+    );
+    let conflict = storage::error::normalize(conflict);
+    assert!(
+        conflict.is_query(),
+        "conflict kind: {}",
+        conflict.kind_str()
+    );
+    assert_eq!(
+        conflict.query_details(),
+        Some(&QueryError::TransactionConflict),
+        "a write conflict must be the structured, retryable TransactionConflict"
+    );
 
     let mut response = first
         .query("SELECT VALUE owner FROM ONLY lease:scheduler; SELECT VALUE epoch FROM ONLY lease:scheduler")

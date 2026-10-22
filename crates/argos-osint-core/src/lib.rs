@@ -78,6 +78,8 @@ pub mod reliability_faults;
 pub mod request_policy;
 pub mod scheduler;
 pub mod secrets;
+#[cfg(feature = "surreal")]
+pub mod storage;
 pub mod store;
 pub mod subscription;
 pub mod summarization;

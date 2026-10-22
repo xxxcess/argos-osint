@@ -107,9 +107,12 @@ fn claim_order(candidates: Vec<Candidate>, slot: Option<u64>) -> Vec<Candidate> 
         return eligible;
     };
     let bucket = eligible.iter().take_while(|c| c.priority == top).count();
-    let turn = slot.map_or(0, |s| {
-        ((s as usize + 1) * bucket / (POOL_GUARD_SHARDS as usize + 1)) % bucket
-    });
+    // Worker slots map into 1..bucket, never 0 (the oldest), for any bucket
+    // size above 1. Only head claims (`None`) start at the oldest.
+    let turn = match slot {
+        Some(s) if bucket > 1 => 1 + (s as usize * (bucket - 1)) / POOL_GUARD_SHARDS as usize,
+        _ => 0,
+    };
     eligible[..bucket].rotate_left(turn);
     eligible
 }

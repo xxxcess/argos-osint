@@ -18,7 +18,7 @@ cargo test --workspace                 # offline; ARGOS_EMBED unset
 ARGOS_EMBED=1 cargo test -p argos-osint-core -- --ignored minilm
 ```
 
-Check order is fmt → clippy → test. MiniLM tests download a ~23 MB model. Rust 1.94.0 is pinned (minimum 1.91); `.cargo/config.toml` uses the vendored `tools/protoc` shim. First default build is slow and needs a C toolchain; local default builds include LanceDB.
+Check order is fmt → clippy → test. MiniLM tests download a ~23 MB model. Rust 1.95.0 is pinned (minimum 1.95, required by the SurrealDB 3.3.4 SDK); `.cargo/config.toml` uses the vendored `tools/protoc` shim. First default build is slow and needs a C toolchain; local default builds include LanceDB.
 
 ## OpenCode and Cargo
 

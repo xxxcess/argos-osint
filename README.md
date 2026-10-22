@@ -25,7 +25,7 @@ Only Recon has a chat. Everything else is fields, lists, and buttons. Observatio
 
 ## Quick start
 
-Rust **1.91+** (this repo pins **1.94**). First build needs a C toolchain (`xcode-select --install` on macOS). Protoc is vendored.
+Rust **1.95+** (this repo pins **1.95**). First build needs a C toolchain (`xcode-select --install` on macOS). Protoc is vendored.
 
 ```sh
 cargo run -p argos-osint-bin

@@ -36,7 +36,7 @@ def main():
     embedded = tree("--features", "embedded")
     if not any("rocksdb" in c for c in embedded):
         failures.append("--features embedded does not link RocksDB")
-    print(f"default: {len(default)} crates, surrealdb crates 0, embedded engines {engines(default)}")
+    print(f"default: {len(default)} crates, surrealdb crates {sum(1 for c in default if c.startswith('surrealdb'))}, embedded engines {engines(default)}")
     print(f"surreal: surrealdb crates {sorted(c for c in remote if c.startswith('surrealdb'))}, embedded engines {engines(remote)}")
     print(f"embedded: engines {engines(embedded)}")
     if failures:

@@ -3,28 +3,33 @@
 See [plan.md](design.md). Status is honest: unchecked means not done or not
 verified.
 
-## P0 — foundation (spec step 1, this PR)
+## P0 — foundation (spec step 1)
 
 - [x] Branch from current `origin/main` (`71797ee`); diff since spec baseline `7569da1` is `AGENTS.md` only
 - [x] Rust 1.95.0 pinned; workspace `rust-version = "1.95"`; AGENTS.md/README toolchain lines
 - [x] 1.95 lints fixed (clippy 1.95 adds collapsible_match, unnecessary_sort_by, explicit_counter_loop)
 - [x] `surrealdb = "=3.3.4"`, default features off, `protocol-ws` only, behind non-default `surreal` feature
+- [x] Non-default `embedded` feature = `surreal` + `surrealdb/kv-rocksdb`
+- [x] `scripts/check_storage_deps.py`: default build links no SurrealDB; `surreal` links no embedded engine
 - [x] `cargo tree -p argos-osint-bin --features surreal`: no rocksdb, surrealkv, tikv, mem/indxdb, surrealdb-kvs, engine-local or surrealdb-core
 - [x] Default build tree has no surrealdb crate
 - [x] `scripts/test_surreal.py`: pinned download + SHA-256, loopback RocksDB temp dir, sync every, versioning off, appendix env profile, teardown
 - [x] `tests/storage_contracts.rs`: auth, rollback, structured retryable conflict, DISKANN F32/384/cosine filtered search, restart persistence, structured errors
 - [x] Suite skips cleanly without a server; fails with `ARGOS_SURREAL_REQUIRED=1`
-- [x] Contract suite passes locally against the real 3.3.4 disk server (Linux x86_64)
+- [x] Contract suite passes locally, server mode (real 3.3.4 disk server) and embedded mode, Linux x86_64
+- [x] Embedded mode: auth not applicable; conflict is kind Internal (pinned as a known gap)
 - [ ] Local matrix on final head (see PR body for results)
-- [ ] CI: toolchain 1.95 action + `surreal` clippy/test + contract suite on all four jobs. **Blocked:** the box's GitHub token lacks the `workflow` scope, so `.github/workflows/ci.yml` cannot be pushed from here. Patch prepared.
+- [ ] CI: toolchain 1.95 action, dependency check, `surreal` and `embedded` clippy, contract suite in server and embedded mode on all four jobs. **Blocked:** the box's GitHub token lacks the `workflow` scope, so `.github/workflows/ci.yml` cannot be pushed from here. Patch prepared.
 - [ ] CI green on all four jobs with the contract suite (depends on the item above)
 - [x] Server lifecycle design written (design.md); not implemented
 - [x] Existing `argos.db`, sidecars and `memory_lancedb/` untouched
-- [ ] Release binary size and clean build time, before vs after (see PR body)
+- [ ] Release binary size and clean build time, before vs after, default and storage builds, per OS (see PR body; macOS/aarch64 need CI)
 
 ## P1 — storage traits + job system (spec steps 2–4)
 
-- [x] Server vs embedded decided: shared loopback server (user, 2026-10-22)
+- [x] Mode decided: `Surreal<Any>`, server default, embedded optional (user + Code Architect, 2026-10-22)
+- [ ] Embedded single-owner lock `storage/embedded.lock` with the "Argos home in use by PID N" error
+- [ ] Retry helper classifies embedded conflicts (kind Internal) by message
 - [ ] Fresh versioned schema files, checksummed ledger, database identity, reset epoch
 - [ ] Typed key codec with round-trip/collision tests
 - [ ] Async repository boundary; no raw connections
@@ -49,7 +54,8 @@ verified.
 ## P4 — TUI/CLI + storage commands (spec steps 7–9)
 
 - [x] Wipe vs import decided: wipe, no import (user, 2026-10-22)
-- [ ] Server lifecycle per design.md: `argos storage install|start|stop|status|init|reset --yes`
+- [ ] Server lifecycle per design.md: `argos storage install|start|stop|status`
+- [ ] `argos storage init --mode server|embedded`; `status` shows mode; `reset --yes` in both modes
 - [ ] CLI/TUI workers, Profile (20 views), Jobs, telemetry, summaries, NLP artifacts
 - [ ] `argos storage status`, `init`, `reset --yes` with resumable phases
 - [ ] Fresh population checks; two-session operation; restart reads
@@ -63,6 +69,6 @@ verified.
 ## Gates (every phase)
 
 - [ ] `cargo fmt --all --check`
-- [ ] clippy `-D warnings` + tests via `scripts/agent_cargo.py`: default; `--locked --no-default-features`; `--no-default-features --features nlp`; `--no-default-features --features surreal`
-- [ ] `python3 scripts/test_surreal.py` against the real server
+- [ ] clippy `-D warnings` + tests via `scripts/agent_cargo.py`: default; `--locked --no-default-features`; `--no-default-features --features nlp`; `--no-default-features --features surreal`; `--no-default-features --features embedded`
+- [ ] `python3 scripts/test_surreal.py` (server + embedded)
 - [ ] `graphify update .` as the last commit

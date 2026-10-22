@@ -16,8 +16,23 @@ Goal: replace SQLite + LanceDB with one local, disk-backed SurrealDB 3.3.4
   Argos. Nothing in P0 deletes or opens any existing `argos.db`, its sidecars
   or `memory_lancedb/`; the wipe happens only through the explicit P4 reset,
   after the user confirms it.
-- **Shared per-home loopback server**, not an embedded engine. The Argos
-  binary links only the remote client (no kv engine); `cargo tree` proves it.
+- **Two modes through one `Surreal<Any>` client; server is the default.** The
+  configured address picks the mode: `ws://127.0.0.1:<port>` for the shared
+  per-home loopback server, `rocksdb://<home>/storage/surreal` for the
+  embedded engine. The remote client is behind the non-default `surreal`
+  feature; the RocksDB engine is behind the non-default `embedded` feature
+  (`surreal` + `surrealdb/kv-rocksdb`). `scripts/check_storage_deps.py`
+  asserts that the default build links no SurrealDB crate and `surreal`
+  links no embedded engine.
+- **Embedded is single-owner.** Only one process may open a home's
+  datastore. The owner holds `storage/embedded.lock` (advisory lock + pid);
+  any other process fails fast with: "Argos home in use by PID N; use server
+  mode for concurrent CLI and TUI". No retry loop and no silent fallback.
+- **Storage commands (P4):** `argos storage init --mode server|embedded`
+  records the mode; `status` shows mode, address, schema and readiness;
+  `reset --yes` works in both modes (database-scoped in server mode,
+  datastore directory in embedded mode, only while it holds exclusive
+  ownership).
 - **One draft PR** for the whole migration, built phase by phase with
   Conventional Commits. Each phase must pass CI on its own. The `feat!`
   commit with `BREAKING CHANGE` lands with P5.
@@ -26,7 +41,7 @@ Goal: replace SQLite + LanceDB with one local, disk-backed SurrealDB 3.3.4
 
 | PR phase | Spec steps | Scope |
 |---|---|---|
-| **P0 foundation (this PR)** | 1 | Rust 1.95, remote-only SDK behind `surreal`, pinned server lifecycle script, disk contract suite, `cargo tree` proof. No Store or caller conversion. |
+| **P0 foundation** | 1 | Rust 1.95, `Surreal<Any>` SDK behind `surreal` (remote) and `embedded` (RocksDB), pinned server test script, disk contract suite in both modes, dependency check. No Store or caller conversion. |
 | P1 storage traits + job system | 2, 3, 4 | Fresh versioned SurrealQL schema + ledger, async repository boundary, transactions/retry helpers, guard records; scheduler election, claims, leases, cancellation, fences, heartbeats. |
 | P2 memories / graph / vectors | 5 (memory part), 6 | Memory publication, native graph projection, embedding outbox, DISKANN recall with lexical fallback and stale-hit rejection. |
 | P3 Recon / Intel / Atlas + savepoints | 5 (rest) | Recon, OSINT, Intel, Atlas, investigation persistence; the four savepoint replacements; credit accounting. |
@@ -53,6 +68,18 @@ Goal: replace SQLite + LanceDB with one local, disk-backed SurrealDB 3.3.4
 6. The spec's illustrative DISKANN definition is accepted as written; the
    server fills in `DEGREE 64 L_BUILD 100 ALPHA 1.2`. A `WHERE` filter is pushed
    into the `KnnScan` predicate and still returns k hits.
+7a. **Embedded conflicts are not structured.** The embedded 3.3.4 engine
+   returns a write conflict as kind `Internal` with no details (message
+   "Transaction conflict: Resource busy. This transaction can be retried");
+   the server returns `Query` / `QueryError::TransactionConflict`. P1's retry
+   helper must classify embedded conflicts by message until the SDK fixes it;
+   the contract test pins both behaviours.
+7b. **Embedded reopen lag.** Dropping the last embedded client releases the
+   RocksDB `LOCK` asynchronously; an immediate reopen in the same process
+   can fail with "lock hold by current process". The test harness retries
+   for up to 20 s; P4 shutdown must await datastore close explicitly.
+7c. Building `embedded` compiles librocksdb-sys, which needs clang/libclang
+   on the build host (and adds a long C++ build).
 7. No TLS feature is needed for a 127.0.0.1 server, so none is enabled; the
    spec's "transport/TLS features" wording should be read as transport only
    unless a non-loopback endpoint is ever allowed.

@@ -20,6 +20,12 @@ const LEASE: i64 = 30;
 /// Per pool, one claim in eight (jobs::HEAD_EVERY) starts at the head.
 const HEAD_BOUND: usize = 8;
 
+/// Held by every test that runs many concurrent clients. Their bounds
+/// (retry p99, the oldest-task claim position) are defined for one test's
+/// 8 clients; run in parallel, three such tests put 24 clients on the box,
+/// stretch every transaction and push embedded p99 past its bound.
+static CONCURRENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn fresh(server: &Server, name: &str) -> Surreal<Any> {
     let db = server.root("argos", name).await;
     jobs::apply_schema(&db).await.expect("schema");
@@ -232,6 +238,7 @@ fn pct(sorted: &[u32], p: f64) -> u32 {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn eight_clients_never_double_claim_and_report_retry_stats() {
+    let _serial = CONCURRENT.lock().await;
     let Some(server) = Server::start() else {
         return;
     };
@@ -953,6 +960,7 @@ async fn claim_window_never_crosses_a_priority_level() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn oldest_queued_task_is_claimed_within_the_window() {
+    let _serial = CONCURRENT.lock().await;
     let Some(server) = Server::start() else {
         return;
     };
@@ -1044,6 +1052,7 @@ async fn same_owner_reclaim_under_a_new_key_adds_no_attempt() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn alternating_two_pools_keeps_each_pools_starvation_bound() {
+    let _serial = CONCURRENT.lock().await;
     let Some(server) = Server::start() else {
         return;
     };
@@ -1163,6 +1172,7 @@ async fn one_worker_alternating_two_pools_reaches_both_heads() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn counter_allocations_are_unique_gapless_and_replayable() {
+    let _serial = CONCURRENT.lock().await;
     use argos_osint_core::storage::counters;
     let Some(server) = Server::start() else {
         return;
@@ -1318,6 +1328,7 @@ async fn outbox_rows_commit_with_their_change_and_replay_by_op_key() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_outbox_enqueues_get_distinct_ordered_seqs() {
+    let _serial = CONCURRENT.lock().await;
     let Some(server) = Server::start() else {
         return;
     };

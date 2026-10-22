@@ -38,6 +38,8 @@ nlp = ["dep:rquickjs"]
 lancedb = ["dep:lancedb"]
 # Remote-only SurrealDB client for the storage migration. Not in default builds.
 surreal = ["dep:surrealdb"]
+# Embedded RocksDB engine in-process (single owner per Argos home). Not in default builds.
+embedded = ["surreal", "surrealdb/kv-rocksdb"]
 # Test/screenshot fixtures used by the binary's tests. Never enabled in release builds.
 fixtures = []
 # Paused-time Tokio tests (`tokio::time::pause`).

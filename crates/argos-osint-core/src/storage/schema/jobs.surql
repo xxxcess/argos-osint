@@ -50,7 +50,6 @@ DEFINE FIELD IF NOT EXISTS updated_at ON task TYPE datetime;
 -- Replaces the SQLite partial index argos_tasks_queued_order.
 DEFINE INDEX IF NOT EXISTS task_claim_order ON task FIELDS state, pool, priority, created_at;
 DEFINE INDEX IF NOT EXISTS task_lease ON task FIELDS state, lease_until;
-DEFINE INDEX IF NOT EXISTS task_process ON task FIELDS state, process_owner;
 DEFINE INDEX IF NOT EXISTS task_job ON task FIELDS job, state;
 DEFINE INDEX IF NOT EXISTS task_root ON task FIELDS root, state;
 

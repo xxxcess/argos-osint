@@ -1241,6 +1241,9 @@ fn change<'a>(id: &'a str, rev: &'a str, generation: &'a str) -> outbox::NewChan
         revision: rev,
         operation: "index_upsert",
         generation,
+        content_hash: "",
+        task_id: "",
+        job_id: "",
     }
 }
 
@@ -1272,17 +1275,20 @@ async fn outbox_rows_commit_with_their_change_and_replay_by_op_key() {
     let a = outbox::enqueue(&db, &change("m1", "r1", "g1"), "ix:m1:r1", now)
         .await
         .unwrap()
-        .value;
+        .value
+        .seq;
     let b = outbox::enqueue(&db, &change("m2", "r1", "g1"), "ix:m2:r1", now)
         .await
         .unwrap()
-        .value;
+        .value
+        .seq;
     assert_eq!((a, b), (1, 2), "the rolled-back change left no seq gap");
     // Replay after an unknown commit result: same row, same seq, no new row.
     let replay = outbox::enqueue(&db, &change("m1", "r1", "g1"), "ix:m1:r1", now)
         .await
         .unwrap()
-        .value;
+        .value
+        .seq;
     assert_eq!(replay, a);
     assert_eq!(count(&db, "index_change").await, 2);
 
@@ -1357,6 +1363,77 @@ async fn concurrent_outbox_enqueues_get_distinct_ordered_seqs() {
         .map(|c| c.seq)
         .collect();
     assert_eq!(seqs, (1..=80).collect::<Vec<i64>>());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn equivalent_index_work_from_different_callers_coalesces_into_one_row() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "outbox_coalesce").await;
+    outbox::apply_schema(&db).await.unwrap();
+    let now = Utc::now();
+    // Two callers with their own op_keys queue the same work at once;
+    // "upsert" and "index_upsert" normalize to one operation.
+    let mut handles = Vec::new();
+    for (caller, op) in [("a", "upsert"), ("b", "index_upsert")] {
+        let client = server.root("argos", "outbox_coalesce").await;
+        handles.push(tokio::spawn(async move {
+            let c = outbox::NewChange {
+                operation: op,
+                ..change("m1", "r1", "g1")
+            };
+            outbox::enqueue(&client, &c, &format!("ix:{caller}"), now)
+                .await
+                .unwrap()
+                .value
+        }));
+    }
+    let mut got = Vec::new();
+    for h in handles {
+        got.push(h.await.unwrap());
+    }
+    assert_eq!(count(&db, "index_change").await, 1, "one row: {got:?}");
+    assert_eq!(got[0].key, got[1].key);
+    assert_eq!(got.iter().filter(|e| e.created).count(), 1);
+    let key = got[0].key.clone();
+
+    // Still coalesces while running or blocked.
+    for state in ["running", "blocked"] {
+        assert!(
+            outbox::set_active_state(&db, &key, state, now)
+                .await
+                .unwrap()
+                .value
+        );
+        let again = outbox::enqueue(&db, &change("m1", "r1", "g1"), &format!("ix:{state}"), now)
+            .await
+            .unwrap()
+            .value;
+        assert_eq!((again.key.as_str(), again.created), (key.as_str(), false));
+    }
+    // Another revision is different work.
+    let other = outbox::enqueue(&db, &change("m1", "r2", "g1"), "ix:r2", now)
+        .await
+        .unwrap()
+        .value;
+    assert!(other.created);
+
+    // Once terminal, the same work queues a new row.
+    assert_eq!(
+        outbox::ack(&db, &key, "r1", "g1", "completed", "", now)
+            .await
+            .unwrap()
+            .value,
+        outbox::Ack::Done
+    );
+    let fresh_row = outbox::enqueue(&db, &change("m1", "r1", "g1"), "ix:later", now)
+        .await
+        .unwrap()
+        .value;
+    assert!(fresh_row.created);
+    assert_eq!(fresh_row.key, "ix:later");
+    assert_eq!(count(&db, "index_change").await, 3);
 }
 
 // ---------------------------------------------------------------------------

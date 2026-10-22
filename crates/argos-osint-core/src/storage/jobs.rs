@@ -582,13 +582,16 @@ async fn claim_in(
                     continue;
                 }
             }
-            run(
+            // Confirm on the rows this UPDATE changed, not on a reread: a task
+            // already running under the same owner (a reclaim under a new
+            // op_key) changes no row and must not get a second attempt.
+            let mut res = run(
                 tx,
                 tx.query(
                     "UPDATE $t SET state = 'running', lease_owner = $owner, \
                      lease_until = <datetime>$until, lease_epoch += 1, attempts += 1, \
                      heartbeat_at = <datetime>$now, started_at = started_at ?? <datetime>$now, \
-                     updated_at = <datetime>$now WHERE state = 'queued' RETURN NONE",
+                     updated_at = <datetime>$now WHERE state = 'queued' RETURN AFTER",
                 )
                 .bind(("t", rid("task", &c.id)))
                 .bind(("owner", owner.to_string()))
@@ -596,12 +599,13 @@ async fn claim_in(
                 .bind(("now", now_s.clone())),
             )
             .await?;
+            let changed: Vec<surrealdb::types::Value> = take(&mut res, 0)?;
+            if changed.len() != 1 {
+                continue;
+            }
             let Some(task) = load_task(tx, &c.id).await? else {
                 continue;
             };
-            if task.state != "running" || task.lease_owner != owner {
-                continue;
-            }
             run(
                 tx,
                 tx.query(

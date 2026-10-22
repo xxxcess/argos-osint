@@ -1003,6 +1003,44 @@ async fn oldest_queued_task_is_claimed_within_the_window() {
     assert!(*at < 32, "oldest task claimed only at claim {at}");
 }
 
+#[tokio::test]
+async fn same_owner_reclaim_under_a_new_key_adds_no_attempt() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "reclaim").await;
+    let now = Utc::now();
+    jobs::create_job(&db, &job("j", None, now), &[task("t", "j", "p", 0, now)])
+        .await
+        .unwrap();
+    let first = jobs::claim_next(&db, "p", "w", LEASE, now, "k1")
+        .await
+        .unwrap()
+        .value
+        .expect("claimed");
+    let again = jobs::claim_task(&db, "p", "t", "w", LEASE, now, "k2")
+        .await
+        .unwrap()
+        .value;
+    assert!(again.is_none(), "a running task is not claimed again");
+    assert!(jobs::claim_next(&db, "p", "w", LEASE, now, "k3")
+        .await
+        .unwrap()
+        .value
+        .is_none());
+    assert_eq!(count(&db, "attempt").await, 1, "no duplicate attempt");
+    let replay = jobs::claim_next(&db, "p", "w", LEASE, now, "k1")
+        .await
+        .unwrap()
+        .value
+        .expect("receipt replay");
+    assert_eq!(
+        (replay.id, replay.lease_epoch),
+        (first.id, first.lease_epoch)
+    );
+    assert_eq!(count(&db, "attempt").await, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn alternating_two_pools_keeps_each_pools_starvation_bound() {
     let Some(server) = Server::start() else {

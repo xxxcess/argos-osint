@@ -79,6 +79,23 @@ pub const CLAIM_CANDIDATES_SURQL: &str = "SELECT record::id(id) AS id, priority,
      FROM task WHERE state = 'queued' AND pool = $pool AND next_eligible_at <= <datetime>$now \
      ORDER BY priority, created_at LIMIT $k START $start";
 
+/// Order in which one worker tries a page of candidates: eligible rows only,
+/// approximately FIFO. Only the leading run of eligible rows that share the
+/// best priority is rotated by the worker's shard offset, so the window never
+/// crosses a priority level: a lower-priority task is tried only after every
+/// eligible higher-priority row in the page. Rows blocked on dependencies are
+/// not eligible, so they cannot hold back the work they wait on.
+fn claim_order(candidates: Vec<Candidate>, shard: u64) -> Vec<Candidate> {
+    let mut eligible: Vec<Candidate> = candidates.into_iter().filter(|c| c.eligible()).collect();
+    let Some(top) = eligible.first().map(|c| c.priority) else {
+        return eligible;
+    };
+    let bucket = eligible.iter().take_while(|c| c.priority == top).count();
+    let turn = (shard as usize * bucket / POOL_GUARD_SHARDS as usize) % bucket;
+    eligible[..bucket].rotate_left(turn);
+    eligible
+}
+
 fn ts(t: DateTime<Utc>) -> String {
     t.to_rfc3339()
 }
@@ -323,6 +340,7 @@ pub struct ClaimedTask {
 
 #[derive(Debug, SurrealValue)]
 struct Candidate {
+    priority: i64,
     id: String,
     job_id: String,
     pool: String,
@@ -510,14 +528,7 @@ async fn claim_in(
         if candidates.is_empty() {
             break;
         }
-        let mut candidates = candidates;
-        let turn =
-            (shard as usize * candidates.len() / POOL_GUARD_SHARDS as usize) % candidates.len();
-        candidates.rotate_left(turn);
-        for c in &candidates {
-            if !c.eligible() {
-                continue;
-            }
+        for c in &claim_order(candidates, shard) {
             if c.pool == POOL_INTEL_BRIEF {
                 // A dependent stage runs alone in its job; independent roots
                 // run together (CLAIM_ELIGIBLE parity).

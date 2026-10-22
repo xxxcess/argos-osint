@@ -130,6 +130,15 @@ All tests run against a real RocksDB-backed server (`scripts/test_surreal.py`, u
 4. **Receipts** go on claims and stage commits only. Every other job write is idempotent, and each site's interleaving test replays the operation and proves the replay is harmless.
 5. **Large-tree stop.** First set `cancel_requested` on the root (one tx), then cancel descendants in bounded batches of about 100 per tx, resumable and idempotent. Workers check the flag before each stage. A crash-mid-stop-then-resume test is required.
 
+## Build findings
+- **Guard split (decision 2 triggered).** With one `pool_guard` per pool and a `job_guard:[root]` bump on every claim, the 8-client race over 200 tasks in one job gave p50 1, p99 5, max 5, and 23 exhausted claims (server mode). The hot key was the job guard, since every claim in one tree wrote it. Changes:
+  - Claims bump `job_guard:[root]` only in the `intel_brief` pool, where exclusivity needs it. Other claims race stop, cleanup and the reaper on the task row, which all of them write. A claim that slips past the stop flag is cancelled by the next stop batch and fenced by the stage-boundary flag check.
+  - `pool_guard:[pool, shard]` with 8 shards, where the shard is an FNV-1a hash of the worker owner.
+  - Candidate pages are 32 rows (2 pages). Each worker starts at its shard's offset, so concurrent workers rarely pick the same task row. In embedded mode, 8-row pages still gave p99 4 and one exhaustion. The cost is that a claim takes any of the first 32 queued tasks in claim order, not strictly the first.
+  - Result: server p50 0, p99 0, max 0; embedded p50 0, p99 1, max 1; 0 exhausted in both modes.
+- **3.3.4 UPDATE…WHERE in a transaction.** Inside an interactive transaction, `UPDATE attempt … WHERE task … AND finished_at = NONE` matched no rows that the same `SELECT` found. Attempts are now closed with `LET $open = SELECT VALUE id …; UPDATE $open …`.
+- **Cleanup busy test.** Jobs are created with `state = 'running'`, so the busy check counts only running tasks and service jobs, not the job state.
+
 ## Resolved questions (kept for history)
 1. **Which 7 sites?** The audit names no count, and production code has 24 BEGIN IMMEDIATE / `TransactionBehavior::Immediate` sites, plus 4 in tests. I took the 7 job-system ones (table above) and deferred 17 to phase 2. Should `brain_neighborhood_brief_exec.rs:660` count as the 7th instead of one of the cleanup sites?
 2. **Guard granularity:** a single `pool_guard` per pool serializes all claims in that pool. That is fine at one worker per pool today, but should it be sharded (`pool_guard:[pool, n]`) now or later?

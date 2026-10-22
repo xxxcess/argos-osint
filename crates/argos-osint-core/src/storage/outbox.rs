@@ -136,7 +136,7 @@ const CHANGE_FIELDS: &str = "record::id(id) AS key, seq, record_kind, record_id,
      operation, generation, state, outcome, work_key, content_hash, task_id, job_id";
 
 /// Enqueue `change` inside the caller's transaction. Replaying the same
-/// `op_key` returns that row; equivalent active work returns the active row.
+/// `op_key` returns that row (and is an error if it names other work); equivalent active work returns the active row.
 pub async fn enqueue_in(
     tx: &Tx,
     change: &NewChange<'_>,
@@ -145,13 +145,36 @@ pub async fn enqueue_in(
 ) -> Result<Enqueued, TxError> {
     let mut res = run(
         tx,
-        tx.query("SELECT VALUE seq FROM ONLY $r")
+        tx.query("SELECT seq, record_kind, record_id, revision, operation FROM ONLY $r")
             .bind(("r", rid("index_change", op_key))),
     )
     .await?;
-    if let Some(seq) = take::<Option<i64>>(&mut res, 0)? {
+    #[derive(SurrealValue)]
+    struct Existing {
+        seq: i64,
+        record_kind: String,
+        record_id: String,
+        revision: String,
+        operation: String,
+    }
+    if let Some(e) = take::<Option<Existing>>(&mut res, 0)? {
+        // A replay must name the same work; reusing an op_key for other
+        // work would silently drop it.
+        let op = normalized_operation(change.operation);
+        if (
+            e.record_kind.as_str(),
+            e.record_id.as_str(),
+            e.revision.as_str(),
+            e.operation.as_str(),
+        ) != (change.record_kind, change.record_id, change.revision, op)
+        {
+            return Err(TxError::Abort(format!(
+                "op_key {op_key} already names {}/{}@{} {}",
+                e.record_kind, e.record_id, e.revision, e.operation
+            )));
+        }
         return Ok(Enqueued {
-            seq,
+            seq: e.seq,
             key: op_key.to_string(),
             created: false,
         });

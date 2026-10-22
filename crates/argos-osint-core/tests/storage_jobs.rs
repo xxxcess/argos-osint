@@ -1291,6 +1291,12 @@ async fn outbox_rows_commit_with_their_change_and_replay_by_op_key() {
         .seq;
     assert_eq!(replay, a);
     assert_eq!(count(&db, "index_change").await, 2);
+    // Reusing an op_key for other work is an error, not a silent no-op.
+    for other in [change("m9", "r1", "g1"), change("m1", "r2", "g1")] {
+        let err = outbox::enqueue(&db, &other, "ix:m1:r1", now).await;
+        assert!(matches!(err, Err(TxError::Abort(_))), "{err:?}");
+    }
+    assert_eq!(count(&db, "index_change").await, 2);
 
     let pending = outbox::pending(&db, 0, 10).await.unwrap();
     assert_eq!(

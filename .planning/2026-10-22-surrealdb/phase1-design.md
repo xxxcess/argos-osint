@@ -50,12 +50,12 @@ Guard tables (schemafull, one small record each):
 ### 2a. Claim (`tasks.rs::claim_with` :996, `claim_next_in` :960, `claim_task` :986)
 These use UPDATE...RETURNING, not BEGIN IMMEDIATE, but they are the core. One transaction:
 1. `UPDATE pool_guard:[pool] SET rev += 1` (first statement, so conflicts surface early).
-2. Indexed candidate scan: `SELECT id, ... FROM task WHERE state IN ['queued','retry_scheduled'] AND pool = $pool AND next_eligible_at <= $now ORDER BY priority, created_at, id LIMIT $k` (k = 8). This uses index `task_claim_order ON task FIELDS state, pool, priority, created_at, id`, which replaces the SQLite partial index.
+2. Indexed candidate scan: `SELECT id, ... FROM task WHERE state IN ['queued','retry_scheduled'] AND pool = $pool AND next_eligible_at <= $now ORDER BY priority, created_at, id LIMIT $k` (k = 8; **superseded**: the build uses k = 32, see Build findings). This uses index `task_claim_order ON task FIELDS state, pool, priority, created_at, id`, which replaces the SQLite partial index.
 3. For each candidate in order, evaluate `CLAIM_ELIGIBLE` in SurrealQL inside the tx. Check the job is under 3 days old and not cancel-requested, there is no retirement, all deps are completed, and the intel_brief exclusivity rule holds (input_hash non-empty). Take the first eligible candidate.
 4. `UPDATE $task SET state='running', lease_owner, lease_until, lease_epoch += 1, attempts += 1, ... WHERE state IN [...] RETURN AFTER`. Assert one row came back, else `THROW`.
 5. `UPDATE job_guard:[job] SET rev += 1`. This makes the claim conflict with stop/finalize on the same job.
 
-If none of the k candidates is eligible, widen the window by paging with a (priority, created_at, id) cursor. The cap is 4 pages. After that it returns `NoClaim` rather than spinning, which preserves the no-starvation property of the shared selector. `claim_task` skips steps 2 and 3 and checks the specific id.
+If none of the k candidates is eligible, widen the window by paging with a (priority, created_at, id) cursor. The cap is 4 pages (**superseded**: 2 pages of 32, see Build findings). After that it returns `NoClaim` rather than spinning, which preserves the no-starvation property of the shared selector. `claim_task` skips steps 2 and 3 and checks the specific id.
 
 ### 2b. Per-site guards for the 7 job-system BEGIN IMMEDIATE sites
 
@@ -77,7 +77,7 @@ The 17 non-job production BEGIN IMMEDIATE sites (`store.rs` ×8, `store/publicat
 
 `tasks.rs:2064 queued_claim_scan_uses_the_partial_index` becomes `claim_scan_uses_task_claim_order_index`:
 1. Assert that the index exists: `INFO FOR TABLE task` → `indexes.task_claim_order` with the expected field list. This also guards the schema file against drift.
-2. Assert the plan: run the **production** candidate query string (exported as `const CLAIM_CANDIDATES_SURQL`, not a copy) with `EXPLAIN FULL` appended. Assert that the plan contains an `Iterate Index` operation naming `task_claim_order`, and no `Iterate Table` over `task`. Seed 1k tasks first so the planner does not pick a table scan for an empty table.
+2. Assert the plan: run the **production** candidate query string (exported as `const CLAIM_CANDIDATES_SURQL`, not a copy) with `EXPLAIN FULL` appended. Assert that the plan contains an `IndexScan` operation naming `task_claim_order`, and no `TableScan` over `task` (the 3.3.4 `EXPLAIN FULL` operator names; this is what the built test asserts). Seed 1k tasks first so the planner does not pick a table scan for an empty table.
 3. Assert the ordering: whether the 3.3.4 planner satisfies ORDER BY from the index is checked in the spike. If not, the test asserts that the result order is correct over a fixture with ties, and the plan assertion is limited to index use plus `LIMIT` pushdown.
 
 The same pattern replaces `brief_canonical_tests.rs:1046` and `brain_topology_tests.rs:1034`. Shared helper: `storage::testkit::assert_uses_index(db, query, index)`.
@@ -99,7 +99,8 @@ return Err(StoreError::Contention{op, attempts})
 ```
 - `normalize` (61a4f9f) maps the embedded engine's conflict to `Query/TransactionConflict`, so retry logic never branches on mode. A contract test covers both modes.
 - Embedded mode is single-process, so conflicts come only from concurrent tasks within the process. The guard design is still needed (tokio workers race), and the same tests run against it.
-- Unknown commit (server mode only: socket drop after COMMIT is sent): every job write carries an `op_key` (e.g. `claim:{owner}:{nonce}`) written into a `tx_receipt` record in the same tx. Before retrying, read `tx_receipt:[op_key]`. If present, return the stored result. Receipts are pruned by cleanup after 72 h.
+- Unknown commit: every job write carries an `op_key` (e.g. `claim:{owner}:{nonce}`) written into a `tx_receipt` record in the same tx. Before retrying, read `tx_receipt:[op_key]`. If present, return the stored result. Receipts are pruned by cleanup after 72 h.
+- **Receipts in both modes (decided in review).** The receipt is kept in embedded mode too, rather than restricted to server mode. The root cause it addresses is a caller that cannot tell whether a write committed. A socket drop is the server-mode case, but it is not the only one: in embedded mode a caller can still see an error or a cancelled future (task abort, timeout) after the commit went through. The contract is on the op_key: replaying the same op_key returns the first result in either mode. One code path also means the embedded test leg exercises the same receipt logic as the server leg. The cost is one small record per claim or stage commit, pruned after 72 h.
 - Service unavailable is never treated as a dead owner. Leases are not reaped while the reaper cannot reach the database, and epochs fence recovered work.
 - No provider or model call happens inside `run_tx` closures. The retried closure is pure DB work (enforced by the closure type: no `async` external clients captured; reviewed).
 
@@ -138,15 +139,18 @@ All tests run against a real RocksDB-backed server (`scripts/test_surreal.py`, u
   - **Claim window.** The old scan limit of 8 rows (4 pages) is replaced by a 32-task window (2 pages) plus per-worker offsets. Each worker starts at its shard's offset inside the window, so concurrent workers rarely pick the same task row. In embedded mode, 8-row pages still gave p99 4 and one exhaustion. Ordering is approximately FIFO, with at most 32 tasks out of order. The offset applies only to the leading run of eligible candidates that share the best priority, so the window never crosses a priority level. Dependency-blocked rows are ineligible and skipped; holding them would deadlock a dependent task behind its own lower-priority dependency.
   - Tests: `claim_window_never_crosses_a_priority_level` (8 owners in turn, buckets above and below the window, claimed priorities never decrease) and `oldest_queued_task_is_claimed_within_the_window` (8 clients, 200 tasks, the oldest claimed within the first 32 claims).
   - **Oldest-task-first rule (fix `1543bb0`).** Each worker used to start at a fixed shard slot, and only shard 0's slot was the oldest task. Under the server harness, clients sign in one after another, so the shard-0 worker started late and the oldest task waited for it: claim 24 to 45 over 20 runs, against the bound of 32. A slow or dead shard-0 worker would starve it outright. Now:
-    - One claim in 8 per process (`HEAD_EVERY`) starts at the oldest task.
-    - No fixed worker slot maps to the oldest task. Slot offsets are `(shard + 1) * bucket / 9`.
+    - One claim in 8 per pool (`HEAD_EVERY`, counted per pool in the process) starts at the oldest task. A process-wide counter let one pool take every head turn when a worker alternated between two pools; `one_worker_alternating_two_pools_reaches_both_heads` fails on it (the other pool's oldest task waited 63 claims) and passes per pool.
+    - No fixed worker slot maps to the oldest task. Slot offsets are `1 + shard * (bucket - 1) / 8`, which is never 0 for a bucket above 1. The earlier `(shard + 1) * bucket / 9` gave the oldest task to low shards when the bucket had 8 or fewer tasks.
     - A claim that started at the oldest task and lost a conflict retries from its own slot, so retries never pile up on the oldest task.
     - Dependency-blocked (and otherwise ineligible) tasks are skipped before the priority-bucket check, so a high-priority task never waits forever behind its own lower-priority dependency.
     - Over 20 runs per mode, the oldest task was claimed by claim 23 at worst, with 0 exhausted claims. Server p99 was 1 to 2 and embedded p99 was 2 to 3.
-  - **Results with the priority-bucket window**, from the final runs: server p50 0, p99 1, max 1; embedded p50 0, p99 3, max 4; 0 exhausted in both modes.
+  - **Results with the priority-bucket window (superseded** by the oldest-task-first results above; kept for history), from the final runs: server p50 0, p99 1, max 1; embedded p50 0, p99 3, max 4; 0 exhausted in both modes.
   - **Why the split stays.** The follow-up review asked to note that the guard split was skipped. It was not: going back to one `pool_guard` per pool, with the window and the narrower job guard kept, failed every run. Server mode gave p99 5 with 23 to 29 exhausted claims, and embedded mode gave p99 5 with 127 to 131 exhausted, out of 200 claims in 3 runs each. The 8 per-pool guards stay, since a single guard gave p99 5 with 23 to 131 exhausted claims per run. If p99 goes above 3 under P2 load, increase `POOL_GUARD_SHARDS` or widen the window.
   - **Track in P2:** embedded-mode p99 retries are 2 to 3, at the split limit of 3. Watch the RETRY-STATS line in the race test and under P2 load.
 - **3.3.4 UPDATE…WHERE in a transaction.** Inside an interactive transaction, `UPDATE attempt … WHERE task … AND finished_at = NONE` matched no rows that the same `SELECT` found. Attempts are now closed with `LET $open = SELECT VALUE id …; UPDATE $open …`.
+- **Claim confirm.** The claim UPDATE uses `RETURN AFTER` and requires exactly one changed row. It used to reread the task and accept `running` with the same owner, so the same owner reclaiming under a new op_key could add a second attempt. Test: `same_owner_reclaim_under_a_new_key_adds_no_attempt`.
+- **Track in P2: stop-batch subtree query.** `SELECT ... FROM job WHERE $j IN ancestors` (jobs.rs, stop batch) has index `job_ancestors`, but whether 3.3.4 uses it for `IN` on an array field is unverified and it may be a full table scan. Add an `EXPLAIN` assertion or a per-root subtree record under P2 load.
+- **JobRepo scope status.** §1 lists the process registry, index outbox/change seq and counters under `JobRepo` in phase 1. They are not built yet: the code has no `JobRepo` trait and no process registry, outbox or general counter records. The only counter is the `brief_chain_guard` generation. They are still open P1 work unless the review moves them to P2.
 - **Cleanup busy test.** Jobs are created with `state = 'running'`, so the busy check counts only running tasks and service jobs, not the job state.
 
 ## Resolved questions (kept for history)

@@ -13,4 +13,5 @@ pub mod counters;
 pub mod embeddings;
 pub mod jobs;
 pub mod outbox;
+pub mod processes;
 pub mod tx;

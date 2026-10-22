@@ -712,30 +712,62 @@ pub async fn interrupt_expired_leases_in(tx: &Tx, now: DateTime<Utc>) -> Result<
     let expired: Vec<Expired> = take(&mut res, 0)?;
     let mut recovered = 0;
     for e in expired {
-        let failed = e.recoveries + 1 >= MAX_WORKER_RECOVERIES;
-        run(
+        requeue_running_in(
             tx,
-            tx.query(
-                "UPDATE $t SET state = $next, lease_epoch += 1, lease_owner = '', \
-                 lease_until = NONE, recoveries += 1, next_eligible_at = <datetime>$now, \
-                 finished_at = IF $failed THEN <datetime>$now ELSE NONE END, updated_at = <datetime>$now \
-                 WHERE state = 'running' AND lease_epoch = $e AND lease_until <= <datetime>$now \
-                 RETURN NONE;
-                 LET $open = SELECT VALUE id FROM attempt \
-                 WHERE task = $t AND epoch = $e AND finished_at = NONE;
-                 UPDATE $open SET finished_at = <datetime>$now, outcome = 'lease_expired' RETURN NONE;",
-            )
-            .bind(("t", rid("task", &e.id)))
-            .bind(("next", if failed { "failed" } else { "queued" }))
-            .bind(("failed", failed))
-            .bind(("now", now_s.clone()))
-            .bind(("e", e.lease_epoch)),
+            &e.id,
+            &e.root_id,
+            e.lease_epoch,
+            e.recoveries,
+            "lease_expired",
+            &now_s,
+            true,
         )
         .await?;
-        bump(tx, "job_guard", &e.root_id).await?;
         recovered += 1;
     }
     Ok(recovered)
+}
+
+/// Fence a running task held at `epoch`: advance the epoch (a late write
+/// from the old owner then fails its fence), close its open attempt with
+/// `outcome`, and requeue it, or fail it after [`MAX_WORKER_RECOVERIES`].
+/// Shared by the lease reaper (`only_expired`: the lease must also have run
+/// out by now) and the process registry. A no-op if the task moved past
+/// `epoch` or is no longer running.
+pub(crate) async fn requeue_running_in(
+    tx: &Tx,
+    id: &str,
+    root_id: &str,
+    epoch: i64,
+    recoveries: i64,
+    outcome: &str,
+    now_s: &str,
+    only_expired: bool,
+) -> Result<(), TxError> {
+    let failed = recoveries + 1 >= MAX_WORKER_RECOVERIES;
+    run(
+        tx,
+        tx.query(
+            "UPDATE $t SET state = $next, lease_epoch += 1, lease_owner = '', \
+             lease_until = NONE, recoveries += 1, next_eligible_at = <datetime>$now, \
+             finished_at = IF $failed THEN <datetime>$now ELSE NONE END, updated_at = <datetime>$now \
+             WHERE state = 'running' AND lease_epoch = $e \
+             AND (!$only_expired OR lease_until <= <datetime>$now) RETURN NONE;
+             LET $open = SELECT VALUE id FROM attempt \
+             WHERE task = $t AND epoch = $e AND finished_at = NONE;
+             UPDATE $open SET finished_at = <datetime>$now, outcome = $outcome RETURN NONE;",
+        )
+        .bind(("t", rid("task", id)))
+        .bind(("next", if failed { "failed" } else { "queued" }))
+        .bind(("failed", failed))
+        .bind(("now", now_s.to_string()))
+        .bind(("e", epoch))
+        .bind(("outcome", outcome.to_string()))
+        .bind(("only_expired", only_expired)),
+    )
+    .await?;
+    bump(tx, "job_guard", root_id).await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

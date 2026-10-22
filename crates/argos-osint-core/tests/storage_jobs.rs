@@ -8,8 +8,8 @@ mod support;
 use std::collections::HashSet;
 
 use argos_osint_core::storage::jobs::{self, ClaimedTask, NewJob, NewTask, Publish, StageSpec};
-use argos_osint_core::storage::outbox;
 use argos_osint_core::storage::tx::{run_tx, RetryPolicy, TxError};
+use argos_osint_core::storage::{outbox, processes};
 use chrono::{DateTime, Duration, Utc};
 use support::*;
 use surrealdb::engine::any::Any;
@@ -1346,4 +1346,105 @@ async fn concurrent_outbox_enqueues_get_distinct_ordered_seqs() {
         .map(|c| c.seq)
         .collect();
     assert_eq!(seqs, (1..=80).collect::<Vec<i64>>());
+}
+
+// ---------------------------------------------------------------------------
+// Process registry
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn gone_owners_tasks_are_recovered_once_and_fenced() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "processes").await;
+    processes::apply_schema(&db).await.unwrap();
+    let t0 = Utc::now();
+    jobs::create_job(
+        &db,
+        &job("pj", None, t0),
+        &[
+            task("pa", "pj", "p", 0, t0),
+            task("pb", "pj", "p", 0, t0 + Duration::seconds(1)),
+            task("pc", "pj", "p", 0, t0 + Duration::seconds(2)),
+        ],
+    )
+    .await
+    .unwrap();
+    for owner in ["me", "dead", "alive"] {
+        processes::beat(&db, owner, 1, t0).await.unwrap();
+    }
+    // Long leases, so only the registry (not lease expiry) can recover them.
+    let dead = jobs::claim_task(&db, "p", "pa", "dead", 3600, t0, "c:pa")
+        .await
+        .unwrap()
+        .value
+        .unwrap();
+    let alive = jobs::claim_task(&db, "p", "pb", "alive", 3600, t0, "c:pb")
+        .await
+        .unwrap()
+        .value
+        .unwrap();
+    // A task held by an owner that never registered is also orphaned.
+    let ghost = jobs::claim_task(&db, "p", "pc", "ghost", 3600, t0, "c:pc")
+        .await
+        .unwrap()
+        .value
+        .unwrap();
+
+    let t1 = t0 + Duration::seconds(processes::PROCESS_STALE_SECS + 5);
+    // My own beat is stale too: a database outage, not dead owners.
+    let r = processes::recover_orphans(&db, "me", t1)
+        .await
+        .unwrap()
+        .value;
+    assert!(r.skipped_self_stale);
+    assert_eq!(r.tasks, 0);
+
+    processes::beat(&db, "me", 1, t1).await.unwrap();
+    processes::beat(&db, "alive", 1, t1).await.unwrap();
+    // A replayed old beat never moves the heartbeat back.
+    processes::beat(&db, "alive", 1, t0).await.unwrap();
+    let r = processes::recover_orphans(&db, "me", t1)
+        .await
+        .unwrap()
+        .value;
+    assert_eq!((r.tasks, r.processes, r.skipped_self_stale), (2, 1, false));
+    // Replay: a second pass finds nothing more.
+    let r = processes::recover_orphans(&db, "me", t1)
+        .await
+        .unwrap()
+        .value;
+    assert_eq!((r.tasks, r.processes), (0, 0));
+
+    let state = |id: &'static str| {
+        let db = db.clone();
+        async move { scalar::<String>(&db, &format!("SELECT VALUE state FROM ONLY task:{id}")).await }
+    };
+    assert_eq!(state("pa").await, "queued");
+    assert_eq!(state("pc").await, "queued");
+    assert_eq!(state("pb").await, "running", "a live owner keeps its task");
+    let epoch: i64 = scalar(&db, "SELECT VALUE lease_epoch FROM ONLY task:pa").await;
+    assert_eq!(epoch, dead.lease_epoch + 1, "recovered exactly once");
+    // The old owners are fenced: their renewals fail.
+    assert!(!jobs::renew_lease(&db, &dead, 3600, t1).await.unwrap().value);
+    assert!(
+        !jobs::renew_lease(&db, &ghost, 3600, t1)
+            .await
+            .unwrap()
+            .value
+    );
+    assert!(
+        jobs::renew_lease(&db, &alive, 3600, t1)
+            .await
+            .unwrap()
+            .value
+    );
+    let open: i64 = scalar(
+        &db,
+        "RETURN count(SELECT * FROM attempt WHERE outcome = 'owner_gone')",
+    )
+    .await;
+    assert_eq!(open, 2);
+    assert_eq!(count(&db, "process").await, 2, "the dead row is removed");
 }

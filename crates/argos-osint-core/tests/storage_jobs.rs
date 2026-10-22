@@ -1440,66 +1440,78 @@ async fn equivalent_index_work_from_different_callers_coalesces_into_one_row() {
 // Process registry
 // ---------------------------------------------------------------------------
 
+/// Pretend `task` was claimed by a worker of process `proc` (one test binary
+/// is one process, so other processes are simulated by restamping).
+async fn stamp_process(db: &Surreal<Any>, task: &str, proc: &str) {
+    db.query("UPDATE type::record('task', $t) SET process_owner = $p")
+        .bind(("t", task.to_string()))
+        .bind(("p", proc.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+}
+
 #[tokio::test]
-async fn gone_owners_tasks_are_recovered_once_and_fenced() {
+async fn gone_processes_tasks_are_recovered_once_and_fenced() {
     let Some(server) = Server::start() else {
         return;
     };
     let db = fresh(&server, "processes").await;
     processes::apply_schema(&db).await.unwrap();
+    let me = argos_osint_core::scheduler::process_owner();
     let t0 = Utc::now();
-    jobs::create_job(
-        &db,
-        &job("pj", None, t0),
-        &[
-            task("pa", "pj", "p", 0, t0),
-            task("pb", "pj", "p", 0, t0 + Duration::seconds(1)),
-            task("pc", "pj", "p", 0, t0 + Duration::seconds(2)),
-        ],
-    )
-    .await
-    .unwrap();
-    for owner in ["me", "dead", "alive"] {
-        processes::beat(&db, owner, 1, t0).await.unwrap();
+    let ids = ["pa", "pb", "pc", "w0", "w1", "w2"];
+    let tasks: Vec<_> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| task(id, "pj", "p", 0, t0 + Duration::seconds(i as i64)))
+        .collect();
+    jobs::create_job(&db, &job("pj", None, t0), &tasks)
+        .await
+        .unwrap();
+    for p in [me.as_str(), "dead", "alive"] {
+        processes::beat(&db, p, 1, t0).await.unwrap();
     }
     // Long leases, so only the registry (not lease expiry) can recover them.
-    let dead = jobs::claim_task(&db, "p", "pa", "dead", 3600, t0, "c:pa")
-        .await
-        .unwrap()
-        .value
-        .unwrap();
-    let alive = jobs::claim_task(&db, "p", "pb", "alive", 3600, t0, "c:pb")
-        .await
-        .unwrap()
-        .value
-        .unwrap();
-    // A task held by an owner that never registered is also orphaned.
-    let ghost = jobs::claim_task(&db, "p", "pc", "ghost", 3600, t0, "c:pc")
-        .await
-        .unwrap()
-        .value
-        .unwrap();
+    // Leases are held by per-worker owners, never by process ids.
+    let mut claimed = std::collections::HashMap::new();
+    for (i, id) in ids.iter().enumerate() {
+        let worker = format!("w{i}");
+        let c = jobs::claim_task(&db, "p", id, &worker, 3600, t0, &format!("c:{id}"))
+            .await
+            .unwrap()
+            .value
+            .unwrap();
+        claimed.insert(*id, c);
+    }
+    let stamped: String = scalar(&db, "SELECT VALUE process_owner FROM ONLY task:w0").await;
+    assert_eq!(stamped, me, "a claim stamps this process");
+    stamp_process(&db, "pa", "dead").await;
+    stamp_process(&db, "pb", "alive").await;
+    // A process that never registered is gone too.
+    stamp_process(&db, "pc", "ghost").await;
 
     let t1 = t0 + Duration::seconds(processes::PROCESS_STALE_SECS + 5);
     // My own beat is stale too: a database outage, not dead owners.
-    let r = processes::recover_orphans(&db, "me", t1)
+    let r = processes::recover_orphans(&db, &me, t1)
         .await
         .unwrap()
         .value;
     assert!(r.skipped_self_stale);
     assert_eq!(r.tasks, 0);
 
-    processes::beat(&db, "me", 1, t1).await.unwrap();
+    processes::beat(&db, &me, 1, t1).await.unwrap();
     processes::beat(&db, "alive", 1, t1).await.unwrap();
     // A replayed old beat never moves the heartbeat back.
     processes::beat(&db, "alive", 1, t0).await.unwrap();
-    let r = processes::recover_orphans(&db, "me", t1)
+    let r = processes::recover_orphans(&db, &me, t1)
         .await
         .unwrap()
         .value;
     assert_eq!((r.tasks, r.processes, r.skipped_self_stale), (2, 1, false));
     // Replay: a second pass finds nothing more.
-    let r = processes::recover_orphans(&db, "me", t1)
+    let r = processes::recover_orphans(&db, &me, t1)
         .await
         .unwrap()
         .value;
@@ -1511,23 +1523,41 @@ async fn gone_owners_tasks_are_recovered_once_and_fenced() {
     };
     assert_eq!(state("pa").await, "queued");
     assert_eq!(state("pc").await, "queued");
-    assert_eq!(state("pb").await, "running", "a live owner keeps its task");
+    assert_eq!(
+        state("pb").await,
+        "running",
+        "a live process keeps its task"
+    );
     let epoch: i64 = scalar(&db, "SELECT VALUE lease_epoch FROM ONLY task:pa").await;
-    assert_eq!(epoch, dead.lease_epoch + 1, "recovered exactly once");
-    // The old owners are fenced: their renewals fail.
-    assert!(!jobs::renew_lease(&db, &dead, 3600, t1).await.unwrap().value);
-    assert!(
-        !jobs::renew_lease(&db, &ghost, 3600, t1)
-            .await
-            .unwrap()
-            .value
+    assert_eq!(
+        epoch,
+        claimed["pa"].lease_epoch + 1,
+        "recovered exactly once"
     );
-    assert!(
-        jobs::renew_lease(&db, &alive, 3600, t1)
-            .await
-            .unwrap()
-            .value
-    );
+    let cleared: String = scalar(&db, "SELECT VALUE process_owner FROM ONLY task:pa").await;
+    assert_eq!(cleared, "");
+    // The gone processes' workers are fenced; live leases still renew.
+    for (id, live) in [("pa", false), ("pc", false), ("pb", true)] {
+        assert_eq!(
+            jobs::renew_lease(&db, &claimed[id], 3600, t1)
+                .await
+                .unwrap()
+                .value,
+            live,
+            "{id}"
+        );
+    }
+    // My own per-worker leases (w0..w2, lease_owner != my process id)
+    // survive while I beat.
+    for id in ["w0", "w1", "w2"] {
+        assert_eq!(state(id).await, "running", "{id}");
+        assert!(
+            jobs::renew_lease(&db, &claimed[id], 3600, t1)
+                .await
+                .unwrap()
+                .value
+        );
+    }
     let open: i64 = scalar(
         &db,
         "RETURN count(SELECT * FROM attempt WHERE outcome = 'owner_gone')",

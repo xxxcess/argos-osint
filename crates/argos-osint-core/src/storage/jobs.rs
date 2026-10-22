@@ -591,13 +591,14 @@ async fn claim_in(
             let mut res = run(
                 tx,
                 tx.query(
-                    "UPDATE $t SET state = 'running', lease_owner = $owner, \
+                    "UPDATE $t SET state = 'running', lease_owner = $owner, process_owner = $proc, \
                      lease_until = <datetime>$until, lease_epoch += 1, attempts += 1, \
                      heartbeat_at = <datetime>$now, started_at = started_at ?? <datetime>$now, \
                      updated_at = <datetime>$now WHERE state = 'queued' RETURN AFTER",
                 )
                 .bind(("t", rid("task", &c.id)))
                 .bind(("owner", owner.to_string()))
+                .bind(("proc", crate::scheduler::process_owner()))
                 .bind(("until", ts(now + ChronoDuration::seconds(lease_secs))))
                 .bind(("now", now_s.clone())),
             )
@@ -748,7 +749,7 @@ pub(crate) async fn requeue_running_in(
     run(
         tx,
         tx.query(
-            "UPDATE $t SET state = $next, lease_epoch += 1, lease_owner = '', \
+            "UPDATE $t SET state = $next, lease_epoch += 1, lease_owner = '', process_owner = '', \
              lease_until = NONE, recoveries += 1, next_eligible_at = <datetime>$now, \
              finished_at = IF $failed THEN <datetime>$now ELSE NONE END, updated_at = <datetime>$now \
              WHERE state = 'running' AND lease_epoch = $e \
@@ -823,7 +824,7 @@ async fn complete_in(tx: &Tx, claimed: &ClaimedTask, hash: &str, now: &str) -> R
     run(
         tx,
         tx.query(
-            "UPDATE $t SET state = 'completed', output_hash = $hash, lease_owner = '', \
+            "UPDATE $t SET state = 'completed', output_hash = $hash, lease_owner = '', process_owner = '', \
              lease_until = NONE, finished_at = <datetime>$now, updated_at = <datetime>$now \
              RETURN NONE;
              LET $open = SELECT VALUE id FROM attempt \
@@ -1124,7 +1125,7 @@ pub async fn ensure_chain(
                             "UPDATE $j SET cancel_requested = true, state = 'superseded', \
                              finished_at = <datetime>$now, updated_at = <datetime>$now RETURN NONE;
                              UPDATE task SET state = 'cancelled', lease_epoch += 1, \
-                             lease_owner = '', lease_until = NONE, finished_at = <datetime>$now, \
+                             lease_owner = '', process_owner = '', lease_until = NONE, finished_at = <datetime>$now, \
                              updated_at = <datetime>$now WHERE job = $j \
                              AND state IN ['queued', 'running'] RETURN NONE;
                              UPDATE brief_run SET state = 'superseded', updated_at = <datetime>$now \
@@ -1300,7 +1301,7 @@ async fn cancel_one_in(tx: &Tx, job_id: &str, now: &str) -> Result<(), TxError> 
             "LET $tasks = SELECT VALUE id FROM task WHERE job = $j;
              LET $open = SELECT VALUE id FROM attempt WHERE task INSIDE $tasks AND finished_at = NONE;
              UPDATE $open SET finished_at = <datetime>$now, outcome = 'cancelled' RETURN NONE;
-             UPDATE task SET state = 'cancelled', lease_epoch += 1, lease_owner = '', \
+             UPDATE task SET state = 'cancelled', lease_epoch += 1, lease_owner = '', process_owner = '', \
              lease_until = NONE, finished_at = <datetime>$now, updated_at = <datetime>$now \
              WHERE job = $j AND state IN ['queued', 'running'] RETURN NONE;
              UPDATE $j SET state = 'cancelled', finished_at = <datetime>$now \

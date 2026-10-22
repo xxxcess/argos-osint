@@ -1,8 +1,11 @@
 //! Process registry (replaces `argos_processes`, job_registry.rs).
 //!
-//! Each process beats every [`BEAT_INTERVAL`] into `process:[owner]`. A
-//! process whose last beat is older than [`PROCESS_STALE_SECS`] is gone, and
-//! its running tasks are recovered with a new lease epoch, which fences any
+//! Each process beats every [`BEAT_INTERVAL`] into `process:[owner]`, where
+//! `owner` is `scheduler::process_owner()`. A claim stamps that same id into
+//! `task.process_owner`; `task.lease_owner` names the worker (w0..w7) and is
+//! never compared with process ids. A process whose last beat is older than
+//! [`PROCESS_STALE_SECS`] is gone, and the running tasks it stamped are
+//! recovered with a new lease epoch, which fences any
 //! late write from the old owner (storage-audit.md:174).
 //!
 //! Service unavailability is not a dead owner. A beat that cannot reach the
@@ -85,7 +88,7 @@ struct Orphan {
     root_id: String,
     lease_epoch: i64,
     recoveries: i64,
-    lease_owner: String,
+    process_owner: String,
 }
 
 /// Recover running tasks owned by gone processes (stale beat, or no row),
@@ -123,8 +126,9 @@ pub async fn recover_orphans(
                 &tx,
                 tx.query(
                     "SELECT record::id(id) AS id, record::id(root) AS root_id, lease_epoch, \
-                     recoveries, lease_owner FROM task \
-                     WHERE state = 'running' AND lease_owner NOT IN $fresh LIMIT $n",
+                     recoveries, process_owner FROM task \
+                     WHERE state = 'running' AND process_owner != '' \
+                     AND process_owner NOT IN $fresh LIMIT $n",
                 )
                 .bind(("fresh", fresh.clone()))
                 .bind(("n", RECOVER_BATCH)),
@@ -132,7 +136,7 @@ pub async fn recover_orphans(
             .await?;
             let orphans: Vec<Orphan> = take(&mut res, 0)?;
             for o in &orphans {
-                debug_assert!(o.lease_owner != me);
+                debug_assert!(o.process_owner != me);
                 jobs::requeue_running_in(
                     &tx,
                     &o.id,

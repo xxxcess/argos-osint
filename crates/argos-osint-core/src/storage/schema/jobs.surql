@@ -34,6 +34,9 @@ DEFINE FIELD IF NOT EXISTS deps ON task TYPE array<record<task>> DEFAULT [];
 DEFINE FIELD IF NOT EXISTS input_hash ON task TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS output_hash ON task TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS lease_owner ON task TYPE string DEFAULT '';
+-- The process whose worker holds the lease (scheduler::process_owner()).
+-- lease_owner names the worker (w0..w7); registry recovery matches on this.
+DEFINE FIELD IF NOT EXISTS process_owner ON task TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS lease_until ON task TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS lease_epoch ON task TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS attempts ON task TYPE int DEFAULT 0;
@@ -47,6 +50,7 @@ DEFINE FIELD IF NOT EXISTS updated_at ON task TYPE datetime;
 -- Replaces the SQLite partial index argos_tasks_queued_order.
 DEFINE INDEX IF NOT EXISTS task_claim_order ON task FIELDS state, pool, priority, created_at;
 DEFINE INDEX IF NOT EXISTS task_lease ON task FIELDS state, lease_until;
+DEFINE INDEX IF NOT EXISTS task_process ON task FIELDS state, process_owner;
 DEFINE INDEX IF NOT EXISTS task_job ON task FIELDS job, state;
 DEFINE INDEX IF NOT EXISTS task_root ON task FIELDS root, state;
 

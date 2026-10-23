@@ -93,8 +93,17 @@ fn mem(id: &str, kind: MemoryKind) -> EndpointRef {
     }
 }
 
-/// Edges a memory's payload produces. Pure, so it is unit-testable.
+/// Edges a memory's payload produces, one per edge key. Pure, so it is
+/// unit-testable. A payload may repeat an actor with the same role, or a
+/// premise claim; those map to one edge key and the first one wins.
 pub fn edges_for(memory_id: &str, payload: &MemoryPayload) -> Vec<Edge> {
+    let mut seen = std::collections::HashSet::new();
+    let mut edges = payload_edges(memory_id, payload);
+    edges.retain(|e| seen.insert(e.key.clone()));
+    edges
+}
+
+fn payload_edges(memory_id: &str, payload: &MemoryPayload) -> Vec<Edge> {
     let me = mem(memory_id, payload.kind());
     let concerns = |actors: &[crate::memory_metadata::ActorRef]| {
         actors
@@ -151,6 +160,10 @@ pub fn edges_for(memory_id: &str, payload: &MemoryPayload) -> Vec<Edge> {
     }
 }
 
+/// Drops the edges memory `$id` owns, through the `brain_graph_edge_owner`
+/// index (pinned by a plan test).
+pub const DELETE_OWNED_SURQL: &str = "DELETE brain_graph_edge WHERE owner = $id";
+
 /// Re-project `memory_id` inside the caller's transaction, in one query:
 /// upsert its node with `lifecycle`, drop the edges it owns, and (when
 /// active) relate the edges its payload produces.
@@ -167,8 +180,10 @@ pub async fn project_memory_in(
     };
     let mut sql = String::from(
         "UPSERT $me SET kind = 'memory', ref_id = $id, memory_kind = $mk, lifecycle = $lc \
-         RETURN NONE; DELETE brain_graph_edge WHERE owner = $id RETURN NONE;",
+         RETURN NONE;",
     );
+    sql.push_str(DELETE_OWNED_SURQL);
+    sql.push_str(" RETURN NONE;");
     for i in 0..edges.len() {
         for side in ["f", "t"] {
             sql.push_str(&format!(

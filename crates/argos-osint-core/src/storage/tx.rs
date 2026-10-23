@@ -55,9 +55,12 @@ pub enum TxError {
     Contention { attempts: u32 },
     /// The body chose to abort (validation failed); nothing was written.
     Abort(String),
-    /// The publisher was shut down or lost the write before replying; the
-    /// write may or may not have committed only in the `dropped` case.
-    PublisherUnavailable { reason: &'static str },
+    /// The publisher was shut down before accepting the write; it never
+    /// committed.
+    PublisherStopped,
+    /// The publisher accepted the write but ended before replying; the write
+    /// may have committed.
+    PublisherDropped,
 }
 
 impl std::fmt::Display for TxError {
@@ -71,14 +74,25 @@ impl std::fmt::Display for TxError {
                 )
             }
             TxError::Abort(why) => write!(f, "transaction aborted: {why}"),
-            TxError::PublisherUnavailable { reason } => {
-                write!(f, "memory publisher unavailable: {reason}")
+            TxError::PublisherStopped => {
+                write!(f, "memory publisher stopped; the write was not accepted")
             }
+            TxError::PublisherDropped => write!(
+                f,
+                "memory publisher ended before replying; the write may have committed"
+            ),
         }
     }
 }
 
-impl std::error::Error for TxError {}
+impl std::error::Error for TxError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TxError::Db(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<Error> for TxError {
     fn from(e: Error) -> Self {

@@ -24,7 +24,6 @@ strsim.workspace = true
 surrealdb = { workspace = true, optional = true }
 sysinfo.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 tempfile.workspace = true
 tokenizers.workspace = true
 toml.workspace = true

@@ -92,7 +92,7 @@ fn allowed_kinds(q: &RecallQuery) -> Vec<String> {
 }
 
 /// Recall memories for `q`. A vector-index failure falls back to lexical
-/// recall (logged); only lexical-path database errors are returned.
+/// recall (reported on stderr); only lexical-path database errors are returned.
 pub async fn recall(db: &Surreal<Any>, q: &RecallQuery) -> Result<Vec<RecallHit>, TxError> {
     if q.opt_out || q.text.trim().is_empty() {
         return Ok(Vec::new());
@@ -106,7 +106,7 @@ pub async fn recall(db: &Surreal<Any>, q: &RecallQuery) -> Result<Vec<RecallHit>
     if let Some(v) = &q.embedding {
         match vector_candidates(db, q, v, &kinds, k).await {
             Ok(hits) => ranked = hits,
-            Err(e) => tracing::warn!(error = %e, "vector recall failed; using lexical recall"),
+            Err(e) => eprintln!("vector recall failed; using lexical recall: {e}"),
         }
     }
     if ranked.is_empty() {

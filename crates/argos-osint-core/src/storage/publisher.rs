@@ -91,21 +91,19 @@ impl Publisher {
         self.queue
             .send((write, tx))
             .await
-            .map_err(|_| TxError::PublisherUnavailable { reason: "stopped" })?;
-        rx.await.map_err(|_| TxError::PublisherUnavailable {
-            reason: "dropped the write",
-        })?
+            .map_err(|_| TxError::PublisherStopped)?;
+        rx.await.map_err(|_| TxError::PublisherDropped)?
     }
 
     /// Stop accepting writes, publish everything already queued, and wait
     /// for the task to finish. Later `publish` calls fail with
-    /// [`TxError::PublisherUnavailable`]. Safe to call more than once.
+    /// [`TxError::PublisherStopped`]. Safe to call more than once.
     pub async fn shutdown(&self) {
         self.stop.notify_one();
         let task = self.task.lock().await.take();
         if let Some(task) = task {
             if let Err(e) = task.await {
-                tracing::warn!(error = %e, "memory publisher task ended abnormally");
+                eprintln!("memory publisher task ended abnormally: {e}");
             }
         }
     }
@@ -142,7 +140,10 @@ async fn run(db: Surreal<Any>, mut rx: mpsc::Receiver<(Write, Reply)>, stop: Arc
             Ok(results) => results,
             Err(panic) => {
                 let why = panic_message(&*panic);
-                tracing::warn!(batch_size = writes.len(), panic = %why, "memory publish batch panicked");
+                eprintln!(
+                    "memory publish batch panicked (batch_size={}): {why}",
+                    writes.len()
+                );
                 writes
                     .iter()
                     .map(|_| Err(TxError::Abort(format!("publish batch panicked: {why}"))))
@@ -170,21 +171,27 @@ pub async fn publish_batch(
     match commit(db, writes).await {
         Ok(done) => done.into_iter().map(Ok).collect(),
         Err(e) if writes.len() > 1 && splittable(&e) => {
-            tracing::warn!(batch_size = writes.len(), error = %e, "memory publish batch failed; splitting");
+            eprintln!(
+                "memory publish batch failed; splitting (batch_size={}): {e}",
+                writes.len()
+            );
             let mut out = Vec::with_capacity(writes.len());
             for w in writes {
                 let r = commit(db, std::slice::from_ref(w))
                     .await
                     .map(|mut v| v.remove(0));
                 if let Err(e) = &r {
-                    tracing::warn!(batch_size = 1, error = %e, "memory write failed");
+                    eprintln!("memory write failed (batch_size=1): {e}");
                 }
                 out.push(r);
             }
             out
         }
         Err(e) => {
-            tracing::warn!(batch_size = writes.len(), error = %e, "memory publish batch failed");
+            eprintln!(
+                "memory publish batch failed (batch_size={}): {e}",
+                writes.len()
+            );
             writes.iter().map(|_| Err(e.clone())).collect()
         }
     }
@@ -204,7 +211,7 @@ fn splittable(e: &TxError) -> bool {
                 // timeouts, cancellation and conflicts do.
                 || (e.is_query() && e.query_details().is_none())
         }
-        TxError::Contention { .. } | TxError::PublisherUnavailable { .. } => false,
+        TxError::Contention { .. } | TxError::PublisherStopped | TxError::PublisherDropped => false,
     }
 }
 

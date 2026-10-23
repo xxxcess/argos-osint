@@ -429,17 +429,14 @@ async fn shutdown_drains_queued_writes_then_refuses_new_ones() {
     for w in waiters {
         match w.await.unwrap() {
             Ok(_) => committed += 1,
-            Err(TxError::PublisherUnavailable { reason }) => assert_eq!(reason, "stopped"),
+            Err(TxError::PublisherStopped) => {}
             Err(e) => panic!("unexpected {e}"),
         }
     }
     let probes: i64 = scalar(&db, "RETURN count(SELECT * FROM memory_probe)").await;
     assert_eq!(probes, committed, "every accepted write was published");
     let late = publisher.publish(probe_write("late".into(), false)).await;
-    assert!(matches!(
-        late,
-        Err(TxError::PublisherUnavailable { reason: "stopped" })
-    ));
+    assert!(matches!(late, Err(TxError::PublisherStopped)));
     publisher.shutdown().await;
 }
 
@@ -814,5 +811,116 @@ mod recall {
         assert_eq!(&ids(&hits)[..2], &["zz1", "zz2"]);
         assert!(!ids(&hits).contains(&"zz3"));
         assert!(hits[2..].iter().all(|h| h.id.starts_with('m')));
+    }
+}
+
+mod graph_edge_keys {
+    use super::*;
+    use argos_osint_core::memory_metadata::{
+        ActorRef, ClaimPayload, IdentityState, InferencePayload, MemoryKind, MemoryPayload,
+    };
+    use argos_osint_core::storage::graph;
+    use argos_osint_core::storage::memory::TypedMemory;
+
+    fn actor(id: &str, role: &str) -> ActorRef {
+        ActorRef {
+            actor_id: id.into(),
+            role: role.into(),
+            binding_state: IdentityState::Resolved,
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_actors_and_premises_write_one_edge_each() {
+        let Some(server) = Server::start() else {
+            return;
+        };
+        let _serial = SERIAL.lock().await;
+        let (db, publisher) = fresh(&server, "graph_dupes").await;
+        let ms = vec![
+            TypedMemory {
+                id: "c".into(),
+                text: "claim".into(),
+                kind: MemoryKind::Claim,
+                payload: Some(MemoryPayload::Claim(ClaimPayload {
+                    actors: vec![
+                        actor("x", "subject"),
+                        actor("x", "subject"),
+                        actor("x", "object"),
+                    ],
+                    ..ClaimPayload::default()
+                })),
+                lifecycle: "active".into(),
+            },
+            TypedMemory {
+                id: "i".into(),
+                text: "inference".into(),
+                kind: MemoryKind::Inference,
+                payload: Some(MemoryPayload::Inference(InferencePayload {
+                    premise_claims: vec!["c".into(), "c".into()],
+                    actors: vec![actor("x", "relevant"), actor("x", "relevant")],
+                    ..InferencePayload::default()
+                })),
+                lifecycle: "active".into(),
+            },
+        ];
+        let write: MemoryWrite = Arc::new(move |tx| {
+            let ms = ms.clone();
+            Box::pin(async move {
+                for m in &ms {
+                    memory::put_typed_in(&tx, m).await?;
+                }
+                Ok(ms.iter().map(|m| m.id.clone()).collect())
+            })
+        });
+        memory::write_then_index(&publisher, write).await.unwrap();
+        let count = |meaning: &'static str| {
+            let db = db.clone();
+            async move {
+                let n: i64 = scalar(
+                    &db,
+                    &format!(
+                        "RETURN count(SELECT * FROM brain_graph_edge WHERE meaning = '{meaning}')"
+                    ),
+                )
+                .await;
+                n
+            }
+        };
+        assert_eq!(
+            count("concerns").await,
+            3,
+            "x/subject, x/object, x/relevant"
+        );
+        assert_eq!(count("premise").await, 1);
+    }
+
+    #[tokio::test]
+    async fn dropping_owned_edges_uses_the_owner_index() {
+        let Some(server) = Server::start() else {
+            return;
+        };
+        let _serial = SERIAL.lock().await;
+        let (db, _publisher) = fresh(&server, "graph_owner_plan").await;
+        let mut r = db
+            .query(format!("{} EXPLAIN FULL", graph::DELETE_OWNED_SURQL))
+            .bind(("id", "m1".to_string()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let plan: surrealdb::types::Value = r.take(0).unwrap();
+        let plan = format!("{plan:?}");
+        // DELETE plans in the 3.3.4 iterator format: an index iteration on
+        // brain_graph_edge_owner, never a table iteration.
+        assert!(
+            plan.contains(r#""operation": String("Iterate Index")"#),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(r#""index": String("brain_graph_edge_owner")"#),
+            "{plan}"
+        );
+        assert!(!plan.contains("Iterate Table"), "{plan}");
     }
 }

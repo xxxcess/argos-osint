@@ -223,7 +223,6 @@ dependencies = [
  "tokenizers",
  "tokio",
  "toml",
- "tracing",
  "tract-onnx",
  "url",
 ]

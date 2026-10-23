@@ -174,3 +174,62 @@ async fn open_home_needs_init_and_returns_a_bootstrapped_store() {
         );
     }
 }
+
+#[tokio::test]
+async fn reset_then_open_home_bootstraps_a_fresh_schema() {
+    let Some(mode) = mode() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let layout = Layout::new(dir.path());
+    commands::init(&layout, mode, None).await.unwrap();
+    seed(&layout, mode).await;
+    assert_eq!(count_seed(&layout, mode).await, 1);
+    commands::reset(&layout, true).await.unwrap();
+
+    let store = home::open_home(&layout).await.unwrap();
+    assert_eq!(store.opened.bootstrap.version, 1);
+    let mut r = store
+        .opened
+        .db
+        .query(
+            "SELECT VALUE version FROM storage_meta WHERE id = storage_meta:schema; \
+             RETURN array::len(SELECT VALUE id FROM storage_meta:seed); \
+             SELECT VALUE reset_epoch FROM storage_meta WHERE id = storage_meta:epoch",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(r.take::<Vec<i64>>(0usize).unwrap(), vec![1]);
+    assert_eq!(r.take::<Option<i64>>(1usize).unwrap(), Some(0));
+    assert_eq!(r.take::<Vec<String>>(2usize).unwrap().len(), 1);
+    // Every module table is back (fresh schema, not a leftover).
+    let mut info = store
+        .opened
+        .db
+        .query("INFO FOR DB")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let info = info
+        .take::<Option<surrealdb::types::Value>>(0usize)
+        .unwrap()
+        .map(|v| v.into_json_value())
+        .unwrap()
+        .to_string();
+    for t in [
+        "memory",
+        "job",
+        "atlas_article",
+        "insight_refresh_task",
+        "storage_meta",
+    ] {
+        assert!(info.contains(&format!("\"{t}\"")), "missing {t}");
+    }
+    drop(store);
+    if mode == Mode::Server {
+        assert!(server::stop(&layout, true).await.unwrap());
+    }
+}

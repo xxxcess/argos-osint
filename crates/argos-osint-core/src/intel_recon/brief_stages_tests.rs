@@ -1784,19 +1784,25 @@ async fn sqlite_contention_and_publication_delay_keep_leases_and_commit_once() {
         lease_secs: 6,
         heartbeat: Duration::from_millis(250),
     };
-    let out = drain(&db.path, "w1", &mut mock, &cancel, &config)
-        .await
-        .unwrap();
+    let out = drain(&db.path, "w1", &mut mock, &cancel, &config).await;
     stop.store(true, Ordering::Release);
-    assert!(writer.join().unwrap() >= 2, "contention actually happened");
-    assert_eq!(out.len(), 4, "{out:?}");
-    assert!(out
-        .iter()
-        .all(|o| matches!(o, StageOutcome::Committed { .. })));
+    let held = writer.join().unwrap();
+    // On failure, dump the job/task/lease tables so CI shows the race.
+    let diag = || crate::test_diag::dump_task_state(&db.path);
+    let out = out.unwrap_or_else(|e| panic!("drain failed: {e:#}{}", diag()));
+    assert!(held >= 2, "contention actually happened");
+    assert_eq!(out.len(), 4, "{out:?}{}", diag());
+    assert!(
+        out.iter()
+            .all(|o| matches!(o, StageOutcome::Committed { .. })),
+        "{out:?}{}",
+        diag()
+    );
     assert_eq!(
         mock.requests().len(),
         4,
-        "no repeated successful stage calls"
+        "no repeated successful stage calls{}",
+        diag()
     );
     let store = Store::open(&db.path).unwrap();
     let recoveries: i64 = store
@@ -1807,10 +1813,13 @@ async fn sqlite_contention_and_publication_delay_keep_leases_and_commit_once() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(recoveries, 0);
-    assert!(rows(&db.path, &job)
-        .iter()
-        .all(|r| r.starts_with("Completed")));
+    assert_eq!(recoveries, 0, "{}", diag());
+    let stage_rows = rows(&db.path, &job);
+    assert!(
+        stage_rows.iter().all(|r| r.starts_with("Completed")),
+        "{stage_rows:?}{}",
+        diag()
+    );
 }
 
 // §8.5: two real drainers race over one chain; each stage runs exactly once.

@@ -992,3 +992,121 @@ pub async fn publish_snapshot(
     .await?;
     Ok(committed.value)
 }
+
+// ---------------------------------------------------------------------------
+// delete_memory
+
+/// `tombstone_memory`: record a user-deletion tombstone for a memory and each
+/// claim fingerprint it backs, with the runs that claim came from.
+pub async fn tombstone_memory(tx: &Tx, memory_id: &str, reason: &str) -> Result<(), TxError> {
+    run(
+        tx,
+        tx.query(
+            "LET $fps = (SELECT VALUE record::id(id) FROM insight_claim WHERE memory_id = $mem);
+             IF $fps = [] {
+               UPSERT type::record('memory_tombstone', [$mem, '']) SET memory_id = $mem,
+                 fingerprint = '', reason = $reason, run_ids = [], created_at = $now RETURN NONE;
+             };
+             FOR $fp IN $fps {
+               UPSERT type::record('memory_tombstone', [$mem, $fp]) SET memory_id = $mem,
+                 fingerprint = $fp, reason = $reason, created_at = $now,
+                 run_ids = array::distinct((SELECT VALUE run_id FROM insight_source
+                   WHERE fingerprint = $fp AND run_id != NONE)) RETURN NONE;
+             };",
+        )
+        .bind(("mem", memory_id.to_string()))
+        .bind(("reason", reason.to_string()))
+        .bind(("now", chrono::Utc::now().to_rfc3339())),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Item ids (`item_json.id`) of the derivations backed by `memory_id`.
+async fn derivation_item_ids(tx: &Tx, memory_id: &str) -> Result<Vec<String>, TxError> {
+    let mut r = run(
+        tx,
+        tx.query("SELECT VALUE item_json FROM insight_derivation WHERE memory_id = $mem;")
+            .bind(("mem", memory_id.to_string())),
+    )
+    .await?;
+    let items: Vec<String> = take(&mut r, 0)?;
+    Ok(items
+        .iter()
+        .filter_map(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+        .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(str::to_string))
+        .collect())
+}
+
+async fn delete_memory_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
+    let mut r = run(
+        tx,
+        tx.query("RETURN record::exists(type::record('memory', $id));")
+            .bind(("id", id.to_string())),
+    )
+    .await?;
+    let exists = take::<Option<bool>>(&mut r, 0)? == Some(true);
+    if exists {
+        tombstone_memory(tx, id, "user_delete").await?;
+    }
+    let items = derivation_item_ids(tx, id).await?;
+    let mut r = run(
+        tx,
+        tx.query(
+            "LET $derived = (SELECT VALUE derivation_id FROM insight_derivation_evidence WHERE memory_id = $mem);
+             LET $snaps = (SELECT VALUE snapshot_id FROM insight_derivation
+               WHERE record::id(id) INSIDE $derived);
+             UPDATE insight_owner_state SET lifecycle = 'previous', last_error = 'memory premise deleted'
+               WHERE active_snapshot_id INSIDE $snaps RETURN NONE;
+             LET $premised = (SELECT VALUE derivation_id FROM insight_derivation_evidence
+               WHERE premise_id INSIDE $items);
+             UPDATE insight_derivation SET status = 'blocked_premise'
+               WHERE record::id(id) INSIDE $premised RETURN NONE;
+             LET $blocked = (SELECT VALUE snapshot_id FROM insight_derivation WHERE status = 'blocked_premise');
+             UPDATE insight_owner_state SET lifecycle = 'previous', last_error = 'claim premise deleted'
+               WHERE active_snapshot_id INSIDE $blocked RETURN NONE;
+             UPDATE insight_derivation_link SET status = 'deleted_endpoint'
+               WHERE left_id INSIDE $items OR right_id INSIDE $items RETURN NONE;
+             UPDATE insight_derivation SET memory_id = NONE, status = 'deleted'
+               WHERE memory_id = $mem RETURN NONE;
+             UPDATE insight_derivation_evidence SET memory_id = NONE WHERE memory_id = $mem RETURN NONE;
+             LET $fps = (SELECT VALUE record::id(id) FROM insight_claim WHERE memory_id = $mem);
+             -- One equality per fingerprint keeps each delete on its index.
+             FOR $fp IN $fps {
+               DELETE insight_source WHERE fingerprint = $fp RETURN NONE;
+               DELETE insight_relation WHERE left_fingerprint = $fp RETURN NONE;
+               DELETE insight_relation WHERE right_fingerprint = $fp RETURN NONE;
+             };
+             DELETE insight_claim WHERE memory_id = $mem RETURN NONE;
+             DELETE type::record('memory_graph_summary', $mem) RETURN NONE;
+             DELETE brain_graph_edge WHERE owner = $mem RETURN NONE;
+             RETURN (DELETE type::record('memory', $mem) RETURN BEFORE) != [];",
+        )
+        .bind(("mem", id.to_string()))
+        .bind(("items", items)),
+    )
+    .await?;
+    let last = r.num_statements() - 1;
+    Ok(take::<Option<bool>>(&mut r, last)? == Some(true))
+}
+
+/// `Store::delete_memory` on SurrealDB: tombstone, provenance downgrade,
+/// insight cleanup, the memory delete and its removal index work in one
+/// publisher transaction. The NLP cache (still SQLite) and the job
+/// retention sweep (`jobs::cleanup_batch`, its own idempotent transaction)
+/// stay with the caller.
+pub async fn delete_memory(publisher: &Publisher, id: &str) -> Result<bool, TxError> {
+    let deleted = Arc::new(Mutex::new(false));
+    let (id, slot) = (id.to_string(), deleted.clone());
+    let write: MemoryWrite = Arc::new(move |tx| {
+        let (id, slot) = (id.clone(), slot.clone());
+        Box::pin(async move {
+            let gone = delete_memory_in(&tx, &id).await?;
+            *slot.lock().expect("delete lock") = gone;
+            Ok(if gone { vec![id] } else { Vec::new() })
+        })
+    });
+    write_then_index(publisher, write).await?;
+    let gone = *deleted.lock().expect("delete lock");
+    Ok(gone)
+}

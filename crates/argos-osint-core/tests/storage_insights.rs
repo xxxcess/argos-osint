@@ -391,3 +391,102 @@ async fn source_and_relation_lookups_use_their_indexes() {
         assert!(!p.contains("Iterate Table"), "{sql}: {p}");
     }
 }
+
+#[tokio::test]
+async fn deleting_a_memory_tombstones_it_and_cleans_its_insights_in_one_commit() {
+    use argos_osint_core::storage::insight::{delete_memory, publish_atlas_insights};
+    use argos_osint_core::store::PublishOptions;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let (db, p) = fresh(&server, "insight_delete").await;
+    let r = publish_atlas_insights(
+        &p,
+        "run1",
+        vec![claim("Paris", "a1"), claim("Lyon", "a1")],
+        vec![],
+        "",
+        PublishOptions::default(),
+    )
+    .await
+    .unwrap();
+    let (fp, mem) = r.claim_memory_ids[0].clone();
+    db.query(
+        "UPSERT insight_owner_state:['recon', 'o'] SET owner_kind = 'recon', owner_id = 'o', active_snapshot_id = 's1', lifecycle = 'active', updated_at = '';
+         CREATE insight_derivation:d1 SET snapshot_id = 's1', memory_id = $mem, insight_kind = 'claim', fingerprint = 'x', item_json = '{\"id\":\"item1\"}', assessment_json = '{}', status = 'active', revision = '1';
+         CREATE insight_derivation:d2 SET snapshot_id = 's2', insight_kind = 'inference', fingerprint = 'y', item_json = '{\"id\":\"item2\"}', assessment_json = '{}', status = 'active', revision = '1';
+         CREATE insight_derivation_evidence SET derivation_id = 'd1', source_id = 'm', source_revision = '1', memory_id = $mem, evidence_json = '{}';
+         CREATE insight_derivation_evidence SET derivation_id = 'd2', source_id = 'c', source_revision = '1', premise_id = 'item1', evidence_json = '{}';
+         CREATE insight_derivation_link:l1 SET snapshot_id = 's2', left_kind = 'claim', left_id = 'item1', right_kind = 'inference', right_id = 'item2', relation = 'supports', rationale = '', assessment_json = '{}', evidence_json = '{}', status = 'active', revision = '1';
+         CREATE memory_graph_summary SET id = type::record('memory_graph_summary', $mem), summary = 's', created_at = '';",
+    )
+    .bind(("mem", mem.clone()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    assert!(delete_memory(&p, &mem).await.unwrap());
+    assert!(
+        !delete_memory(&p, &mem).await.unwrap(),
+        "a second delete is a no-op"
+    );
+    let q = |sql: &'static str| scalar::<String>(&db, sql);
+    assert_eq!(
+        q("SELECT VALUE lifecycle FROM ONLY insight_owner_state:['recon', 'o']").await,
+        "previous"
+    );
+    assert_eq!(
+        q("SELECT VALUE status FROM ONLY insight_derivation:d1").await,
+        "deleted"
+    );
+    assert_eq!(
+        q("SELECT VALUE status FROM ONLY insight_derivation:d2").await,
+        "blocked_premise"
+    );
+    assert_eq!(
+        q("SELECT VALUE status FROM ONLY insight_derivation_link:l1").await,
+        "deleted_endpoint"
+    );
+    let fp_left: i64 = scalar(&db, "RETURN count(SELECT id FROM insight_claim)").await;
+    assert_eq!(fp_left, 1, "only the other claim remains");
+    let tomb: Vec<String> = {
+        let mut r = db
+            .query("SELECT VALUE run_ids FROM memory_tombstone WHERE fingerprint = $fp")
+            .bind(("fp", fp.clone()))
+            .await
+            .unwrap();
+        r.take::<Vec<Vec<String>>>(0usize).unwrap().concat()
+    };
+    assert_eq!(tomb, vec!["run1".to_string()]);
+    assert_eq!(
+        scalar::<i64>(&db, "RETURN count(SELECT id FROM memory_graph_summary)").await,
+        0
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &db,
+            "RETURN count(SELECT id FROM insight_source WHERE fingerprint = $fp)"
+        )
+        .await,
+        0
+    );
+    let removal: i64 = scalar(
+        &db,
+        &format!("RETURN count(SELECT id FROM index_work WHERE record::id(id) CONTAINS '{mem}')"),
+    )
+    .await;
+    assert!(removal >= 1, "removal index work is queued");
+    // The tombstone stops republication of this run's claim.
+    let again = publish_atlas_insights(
+        &p,
+        "run1",
+        vec![claim("Paris", "a1")],
+        vec![],
+        "",
+        PublishOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(again.rejected.len(), 1);
+}

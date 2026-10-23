@@ -71,7 +71,7 @@ verified.
 - [ ] Server lifecycle per design.md: `argos storage install|start|stop|status`
 - [x] Pinned 3.3.4 SHA-256 per OS confirmed by two independent HTTPS fetches + GitHub asset digest (box)
 - [ ] Same hashes re-confirmed from a CI runner network
-- [ ] `server.lock` and `embedded.lock` as OS advisory locks (`flock`), pid informational only
+- [x] `server.lock` and `embedded.lock` as OS advisory locks (std `File::try_lock`, `flock` on Unix), pid informational only (`storage::home::try_lock`). `open_embedded` takes `embedded.lock` before opening and fails fast with the documented message. Config and credentials files are written atomically with mode 0600, and the root secret comes from `/dev/urandom`, which is Unix-only.
 - [ ] `clients/<pid>` leases written atomically (temp + fsync + rename)
 - [ ] Tests: stale `server.json` adopt; wrong-identity port refused; last client stops server; second embedded process fails
 - [ ] `argos storage init --mode server|embedded`; `status` shows mode; `reset --yes` in both modes

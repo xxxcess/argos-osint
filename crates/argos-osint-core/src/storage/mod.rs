@@ -21,6 +21,7 @@ pub mod codec;
 pub mod counters;
 pub mod embeddings;
 pub mod graph;
+pub mod home;
 pub mod insight;
 pub mod intel;
 pub mod jobs;

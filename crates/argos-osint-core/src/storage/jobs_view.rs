@@ -558,3 +558,21 @@ pub async fn cancel_job(db: &Surreal<Any>, id: &str) -> Result<crate::job_regist
     super::jobs::stop_job(db, id, Utc::now(), 50, None).await?;
     Ok(CancelRequest::Requested)
 }
+
+/// Retention sweep for the Jobs dashboard: run `jobs::cleanup_batch` until a
+/// batch deletes nothing or `max_batches` ran. Returns the trees deleted.
+pub async fn sweep_expired(
+    db: &Surreal<Any>,
+    now: DateTime<Utc>,
+    max_batches: usize,
+) -> Result<usize> {
+    let mut total = 0;
+    for _ in 0..max_batches.max(1) {
+        let n = super::jobs::cleanup_batch(db, now).await?.value.jobs;
+        total += n;
+        if n == 0 {
+            break;
+        }
+    }
+    Ok(total)
+}

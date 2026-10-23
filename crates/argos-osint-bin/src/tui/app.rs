@@ -10864,13 +10864,20 @@ pub async fn run(mut app: App) -> Result<()> {
     let _beat = argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok();
     // One-time retention cleanup is separate from the elected, resumable
     // backfill pool. Neither belongs to startup or the terminal event loop.
+    // Under a storage config, job retention runs on the repository only.
+    let surreal_jobs = surreal_brain::on();
+    if surreal_jobs {
+        surreal_brain::spawn_job_sweeper();
+    }
     let repair_tx = app.work_tx.clone();
     let repair_db = paths::db_path();
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
             let store = Store::open_light(&repair_db)?;
             store.prune_events(super::logs::RETENTION_HOURS)?;
-            store.clear_old_jobs()?;
+            if !surreal_jobs {
+                store.clear_old_jobs()?;
+            }
             Ok(())
         })()
         .map_err(|e| e.to_string());

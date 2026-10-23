@@ -335,3 +335,27 @@ async fn jobs_record_dashboard_metadata_on_create_and_finish() {
     );
     assert_eq!(w2.queue_ms, None, "no task started: Unavailable");
 }
+
+#[tokio::test]
+async fn retention_sweep_deletes_expired_trees_only() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = server.root("argos", "jobs_view_sweep").await;
+    for i in 0..3 {
+        let id = format!("old{i}");
+        jobs::create_job(&db, &job(&id, None, 100), &[])
+            .await
+            .unwrap();
+    }
+    jobs::create_job(&db, &job("oldkid", Some("old0"), 100), &[])
+        .await
+        .unwrap();
+    jobs::create_job(&db, &job("fresh", None, 1), &[])
+        .await
+        .unwrap();
+    assert_eq!(view::sweep_expired(&db, Utc::now(), 64).await.unwrap(), 3);
+    assert_eq!(view::sweep_expired(&db, Utc::now(), 64).await.unwrap(), 0);
+    assert_eq!(count(&db, "job").await, 1);
+    assert!(view::get_job(&db, "fresh").await.unwrap().is_some());
+}

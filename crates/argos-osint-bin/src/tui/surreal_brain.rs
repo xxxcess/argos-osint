@@ -190,3 +190,28 @@ pub(crate) fn load_jobs(jobs: &mut super::jobs::JobsView, pending: Option<&str>)
 pub(crate) fn load_jobs(_jobs: &mut super::jobs::JobsView, _pending: Option<&str>) {
     unreachable!("SurrealDB Jobs is off without the surreal feature")
 }
+
+/// Batches per job retention sweep (each is one bounded transaction).
+#[cfg(feature = "surreal")]
+const SWEEP_BATCHES: usize = 64;
+
+/// SurrealDB job retention: one sweep now, then hourly, on its own plain
+/// thread for the life of the TUI (the SQLite `clear_old_jobs` never runs
+/// under a storage config).
+#[cfg(feature = "surreal")]
+pub(crate) fn spawn_job_sweeper() {
+    use argos_osint_core::storage::{jobs_view, runtime};
+    std::thread::spawn(|| loop {
+        // A failed sweep retries next hour; the Jobs pane already hides
+        // expired jobs, so nothing is shown stale meanwhile.
+        let _ = runtime::blocking(|repo| async move {
+            jobs_view::sweep_expired(repo.db(), chrono::Utc::now(), SWEEP_BATCHES).await
+        });
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    });
+}
+
+#[cfg(not(feature = "surreal"))]
+pub(crate) fn spawn_job_sweeper() {
+    unreachable!("SurrealDB Jobs is off without the surreal feature")
+}

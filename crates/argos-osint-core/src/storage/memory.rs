@@ -31,6 +31,9 @@ DEFINE FIELD IF NOT EXISTS category ON memory TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS pinned ON memory TYPE bool DEFAULT false;
 DEFINE FIELD IF NOT EXISTS lifecycle ON memory TYPE string DEFAULT 'active';
 DEFINE FIELD IF NOT EXISTS source_json ON memory TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS memory_kind ON memory TYPE string DEFAULT 'claim';
+-- Discriminated `MemoryPayload` JSON; '' for untyped memories.
+DEFINE FIELD IF NOT EXISTS payload_json ON memory TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS created_at ON memory TYPE datetime DEFAULT time::now();
 DEFINE TABLE IF NOT EXISTS memory_index_state SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS revision ON memory_index_state TYPE string;
@@ -41,6 +44,7 @@ DEFINE FIELD IF NOT EXISTS indexed_at ON memory_index_state TYPE datetime;";
 /// Apply the memory schema (idempotent).
 pub async fn apply_schema(db: &Surreal<Any>) -> Result<(), TxError> {
     db.query(SCHEMA).await?.check()?;
+    db.query(super::graph::SCHEMA).await?.check()?;
     Ok(())
 }
 
@@ -217,4 +221,40 @@ pub async fn record_index_states(
         record_index_states_in(&tx, rows, fingerprint, generation).await
     })
     .await
+}
+
+/// A typed memory to write: canonical row plus its graph projection.
+#[derive(Debug, Clone)]
+pub struct TypedMemory {
+    pub id: String,
+    pub text: String,
+    pub kind: crate::memory_metadata::MemoryKind,
+    pub payload: Option<crate::memory_metadata::MemoryPayload>,
+    pub lifecycle: String,
+}
+
+/// Write `m` and re-project its graph edges inside the caller's
+/// transaction (graph projection stays synchronous with the canonical
+/// write). Use inside a [`MemoryWrite`] so index work joins the same
+/// publication.
+pub async fn put_typed_in(tx: &Tx, m: &TypedMemory) -> Result<(), TxError> {
+    let payload_json = match &m.payload {
+        Some(p) => serde_json::to_string(p)
+            .map_err(|e| TxError::Abort(format!("memory {} payload: {e}", m.id)))?,
+        None => String::new(),
+    };
+    run(
+        tx,
+        tx.query(
+            "UPSERT $m SET text = $text, memory_kind = $kind, payload_json = $payload, \
+             lifecycle = $lc RETURN NONE",
+        )
+        .bind(("m", rid("memory", &m.id)))
+        .bind(("text", m.text.clone()))
+        .bind(("kind", m.kind.as_str().to_string()))
+        .bind(("payload", payload_json))
+        .bind(("lc", m.lifecycle.clone())),
+    )
+    .await?;
+    super::graph::project_memory_in(tx, &m.id, m.kind, m.payload.as_ref(), &m.lifecycle).await
 }

@@ -442,3 +442,217 @@ async fn shutdown_drains_queued_writes_then_refuses_new_ones() {
     ));
     publisher.shutdown().await;
 }
+
+// --- graph projection ------------------------------------------------------
+
+mod graph_projection {
+    use super::*;
+    use argos_osint_core::memory_metadata::{
+        ActorPayload, ActorRef, ClaimPayload, EndpointRef, IdentityState, InferencePayload,
+        LinkPayload, MemoryKind, MemoryPayload, RelatedPayload,
+    };
+    use argos_osint_core::storage::graph;
+    use argos_osint_core::storage::memory::TypedMemory;
+
+    fn actor_ref(id: &str, role: &str) -> ActorRef {
+        ActorRef {
+            actor_id: id.into(),
+            role: role.into(),
+            binding_state: IdentityState::Resolved,
+        }
+    }
+
+    fn m(id: &str, kind: MemoryKind, payload: MemoryPayload) -> TypedMemory {
+        TypedMemory {
+            id: id.into(),
+            text: format!("text of {id}"),
+            kind,
+            payload: Some(payload),
+            lifecycle: "active".into(),
+        }
+    }
+
+    fn ep(id: &str, kind: MemoryKind) -> EndpointRef {
+        EndpointRef::Memory {
+            memory_id: id.into(),
+            kind,
+        }
+    }
+
+    fn link(id: &str, from: &str, to: &str, relation: &str) -> TypedMemory {
+        m(
+            id,
+            MemoryKind::Link,
+            MemoryPayload::Link(LinkPayload {
+                source: ep(from, MemoryKind::Actor),
+                target: ep(to, MemoryKind::Actor),
+                relation: relation.into(),
+                rationale: String::new(),
+                receipts: vec![],
+                promoted_from: None,
+            }),
+        )
+    }
+
+    fn write(ms: Vec<TypedMemory>) -> MemoryWrite {
+        Arc::new(move |tx| {
+            let ms = ms.clone();
+            Box::pin(async move {
+                for x in &ms {
+                    memory::put_typed_in(&tx, x).await?;
+                }
+                Ok(ms.iter().map(|x| x.id.clone()).collect())
+            })
+        })
+    }
+
+    async fn edges(db: &Surreal<Any>, meaning: &str) -> Vec<String> {
+        let mut r = db
+            .query(
+                "SELECT VALUE record::id(id) FROM brain_graph_edge WHERE meaning = $m ORDER BY id",
+            )
+            .bind(("m", meaning.to_string()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        r.take(0).unwrap()
+    }
+
+    fn node(id: &str) -> surrealdb::types::RecordId {
+        surrealdb::types::RecordId::new("brain_graph_node", graph::memory_node(id))
+    }
+
+    #[tokio::test]
+    async fn memory_payloads_project_typed_edges_with_their_write() {
+        let Some(server) = Server::start() else {
+            return;
+        };
+        let _serial = SERIAL.lock().await;
+        let (db, publisher) = fresh(&server, "graph_project").await;
+        let actor = |id: &str| {
+            m(
+                id,
+                MemoryKind::Actor,
+                MemoryPayload::Actor(ActorPayload {
+                    display_name: id.into(),
+                    ..ActorPayload::default()
+                }),
+            )
+        };
+        let claim = m(
+            "c",
+            MemoryKind::Claim,
+            MemoryPayload::Claim(ClaimPayload {
+                actors: vec![actor_ref("x", "subject"), actor_ref("y", "object")],
+                ..ClaimPayload::default()
+            }),
+        );
+        let inference = m(
+            "i",
+            MemoryKind::Inference,
+            MemoryPayload::Inference(InferencePayload {
+                premise_claims: vec!["c".into()],
+                actors: vec![actor_ref("x", "relevant")],
+                support_state: "supported".into(),
+                ..InferencePayload::default()
+            }),
+        );
+        let related = m(
+            "r",
+            MemoryKind::Related,
+            MemoryPayload::Related(RelatedPayload {
+                source: ep("x", MemoryKind::Actor),
+                target: EndpointRef::Article {
+                    run_id: "run1".into(),
+                    article_id: "a1".into(),
+                    revision: "v1".into(),
+                },
+                shared_actors: vec!["x".into()],
+                basis: String::new(),
+                interpretation: String::new(),
+                verification_gap: String::new(),
+                source_revisions: vec![],
+            }),
+        );
+        memory::write_then_index(
+            &publisher,
+            write(vec![
+                actor("x"),
+                actor("y"),
+                claim.clone(),
+                inference,
+                link("l1", "x", "y", "supports"),
+                link("l2", "x", "y", "contradicts"),
+                related,
+            ]),
+        )
+        .await
+        .unwrap();
+        // Parallel Link edges between the same endpoints keep the memory ids.
+        assert_eq!(edges(&db, "link").await, vec!["l1", "l2"]);
+        assert_eq!(edges(&db, "related").await, vec!["r"]);
+        assert_eq!(edges(&db, "concerns").await.len(), 3);
+        assert_eq!(edges(&db, "premise").await.len(), 1);
+        // Native traversal from the claim reaches both actors.
+        let mut r = db
+            .query(
+                "SELECT VALUE ->brain_graph_edge[WHERE meaning = 'concerns']->brain_graph_node.ref_id \
+                 FROM ONLY $c",
+            )
+            .bind(("c", node("c")))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let mut reached: Vec<String> = r.take(0).unwrap();
+        reached.sort();
+        assert_eq!(reached, vec!["x", "y"]);
+        // Article endpoint is an exact-revision node.
+        let mut r = db
+            .query("SELECT VALUE [kind, origin, ref_id, revision] FROM brain_graph_node WHERE kind = 'article'")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let art: Vec<Vec<String>> = r.take(0).unwrap();
+        assert_eq!(art, vec![vec!["article", "run1", "a1", "v1"]]);
+
+        // Retiring the claim drops the edges it owns, keeps the premise edge
+        // the inference owns toward it, and marks its node.
+        let mut retired = claim;
+        retired.lifecycle = "archived".into();
+        memory::write_then_index(&publisher, write(vec![retired]))
+            .await
+            .unwrap();
+        assert_eq!(
+            edges(&db, "concerns").await.len(),
+            1,
+            "inference's edge stays"
+        );
+        assert_eq!(edges(&db, "premise").await.len(), 1);
+        let lc: String = scalar(
+            &db,
+            &format!(
+                "SELECT VALUE lifecycle FROM ONLY brain_graph_node:⟨{}⟩",
+                graph::memory_node("c")
+            ),
+        )
+        .await;
+        assert_eq!(lc, "archived");
+
+        // Re-publishing a Link replaces its edge rather than adding one.
+        memory::write_then_index(&publisher, write(vec![link("l1", "y", "x", "supports")]))
+            .await
+            .unwrap();
+        assert_eq!(edges(&db, "link").await, vec!["l1", "l2"]);
+        let mut r = db
+            .query("SELECT VALUE record::id(out) FROM ONLY brain_graph_edge:l1")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let out: Option<String> = r.take(0).unwrap();
+        assert_eq!(out, Some(graph::memory_node("x")));
+    }
+}

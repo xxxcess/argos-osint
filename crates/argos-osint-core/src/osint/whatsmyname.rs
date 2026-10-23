@@ -1460,9 +1460,11 @@ mod tests {
         let bytes = dataset_json.to_string().into_bytes();
 
         // 1. Measure cold parse and index build
-        let t0 = std::time::Instant::now();
-        let snapshot = parse_dataset(&bytes).expect("parse 1000-site dataset");
-        let parse_elapsed = t0.elapsed();
+        // CPU time, not wall time: the budgets bound work, and wall time also
+        // counts every moment a loaded host keeps this thread off-CPU.
+        let (snapshot, parse_elapsed) = crate::test_clock::cpu_timed(|| {
+            parse_dataset(&bytes).expect("parse 1000-site dataset")
+        });
 
         assert_eq!(snapshot.sites.len(), 1000);
         assert_eq!(snapshot.id_to_index.len(), 1000);
@@ -1474,14 +1476,14 @@ mod tests {
         );
 
         // 2. Measure warm exact and category selection
-        let t1 = std::time::Instant::now();
-        for _ in 0..100 {
-            let tech_sites = snapshot.category_to_indexes.get("tech").unwrap();
-            assert_eq!(tech_sites.len(), 200);
-            let site = snapshot.id_to_index.get("site42").unwrap();
-            assert_eq!(*site, 42);
-        }
-        let select_elapsed = t1.elapsed();
+        let ((), select_elapsed) = crate::test_clock::cpu_timed(|| {
+            for _ in 0..100 {
+                let tech_sites = snapshot.category_to_indexes.get("tech").unwrap();
+                assert_eq!(tech_sites.len(), 200);
+                let site = snapshot.id_to_index.get("site42").unwrap();
+                assert_eq!(*site, 42);
+            }
+        });
         println!("100 category & exact lookups: {:?}", select_elapsed);
         assert!(
             select_elapsed < std::time::Duration::from_millis(50),

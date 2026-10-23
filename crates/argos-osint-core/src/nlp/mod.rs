@@ -207,12 +207,21 @@ impl Service {
         SERVICE.get_or_init(Self::start)
     }
     fn start() -> Self {
+        Self::start_with_clock(engine::wall_clock())
+    }
+    /// A private service whose engine budgets run on `clock` (tests only;
+    /// production uses [`Service::shared`] on wall time).
+    #[cfg(test)]
+    pub(crate) fn with_clock(clock: engine::Clock) -> Self {
+        Self::start_with_clock(clock)
+    }
+    fn start_with_clock(clock: engine::Clock) -> Self {
         let (sender, mut receiver) = mpsc::channel::<Work>(32);
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("argos-nlp".into())
             .spawn(move || {
-                let mut engine = engine::Engine::new();
+                let mut engine = engine::Engine::with_clock(clock.clone());
                 let _ = ready_tx.send(engine.as_ref().map(|_| ()).map_err(|e| e.clone()));
                 let mut memory = cache::MemoryCache::default();
                 while let Some(work) = receiver.blocking_recv() {
@@ -229,7 +238,7 @@ impl Service {
                                 continue;
                             }
                             if engine.is_err() {
-                                engine = engine::Engine::new();
+                                engine = engine::Engine::with_clock(clock.clone());
                             }
                             let cleaned =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -265,7 +274,7 @@ impl Service {
                         result = hit;
                     } else {
                         if engine.is_err() {
-                            engine = engine::Engine::new();
+                            engine = engine::Engine::with_clock(clock.clone());
                         }
                         match engine.as_mut() {
                             Ok(e) => {
@@ -302,7 +311,7 @@ impl Service {
                                     memory.put(result.clone());
                                 } else if matches!(result.status, Status::Failed | Status::Timeout)
                                 {
-                                    engine = engine::Engine::new();
+                                    engine = engine::Engine::with_clock(clock.clone());
                                 }
                             }
                             Err(e) => result.flags.push(e.clone()),
@@ -887,16 +896,16 @@ mod tests {
             reference_date: "2026-10-11".into(),
             ..Default::default()
         };
-        let a = Service::shared()
+        // A private service on a frozen clock: the parse budgets can't
+        // expire because the host is busy, and no other test shares it.
+        let frozen = std::time::Instant::now();
+        let service = Service::with_clock(Arc::new(move || frozen));
+        let a = service
             .annotate(s.clone(), ctx, Arc::new(AtomicBool::new(false)))
             .await;
         #[cfg(feature = "nlp")]
         {
-            assert!(
-                Service::shared().readiness.is_ok(),
-                "{:?}",
-                Service::shared().readiness
-            );
+            assert!(service.readiness.is_ok(), "{:?}", service.readiness);
             assert_eq!(a.status, Status::Complete, "{:?}", a.flags);
             assert!(a.validate(&s));
             assert_eq!(

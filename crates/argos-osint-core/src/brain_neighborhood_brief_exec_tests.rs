@@ -312,11 +312,7 @@ async fn worker_generates_publishes_and_completes_under_the_role_runtime() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delayed_reply_keeps_the_fallback_readable_until_the_watcher_sees_the_result() {
-    let server = mock::serve_delayed(
-        Duration::from_millis(900),
-        vec![mock::ok_json(&good(), "stop")],
-    )
-    .await;
+    let (server, gate) = mock::serve_gated(vec![mock::ok_json(&good(), "stop")]).await;
     let rt = runtime(&server.base_url, "fixture");
     let (_dir, path, store) = file_store();
     let req = prepared(&store, &rt);
@@ -340,9 +336,18 @@ async fn delayed_reply_keeps_the_fallback_readable_until_the_watcher_sees_the_re
             .unwrap()
         })
     };
-    // While the model is still thinking, readers get Pending (fallback stays).
-    tokio::time::sleep(Duration::from_millis(350)).await;
+    // Wait until the model request is in flight; the gate holds the reply,
+    // so readers must still get Pending (fallback stays).
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while server.requests.lock().unwrap().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the worker never sent the model request"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(poll(&store.conn, &req).unwrap(), Delivery::Pending);
+    gate.release();
     let started = Instant::now();
     let settled = tokio::task::spawn_blocking(move || watcher.join().unwrap())
         .await

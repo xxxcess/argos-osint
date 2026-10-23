@@ -163,7 +163,7 @@ def main():
         return
     for mode in modes:
         feature = "surreal" if mode == "server" else "embedded"
-        command = [*cargo, "test", "-p", "argos-osint-core", "--locked", "--no-default-features",
+        command = [*cargo, "test", "--workspace", "--locked", "--no-default-features",
                    "--features", feature, "--test", "storage_contracts", "--test", "storage_jobs", "--test", "storage_memory", "--test", "storage_insights", *extra, "--", "--nocapture"]
         env = {**os.environ, "ARGOS_SURREAL_MODE": mode, "ARGOS_SURREAL_REQUIRED": "1"}
         if binary:

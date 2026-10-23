@@ -51,3 +51,8 @@ scraper = "0.27"
 # The embedded JS engine must meet local interrupt deadlines in debug builds too.
 [profile.dev.package.rquickjs-sys]
 opt-level = 3
+
+# RocksDB's C++ (built by cc in librocksdb-sys' build script) is the single
+# biggest compile; skip -g for it in dev/test builds (local and CI).
+[profile.dev.package.surrealdb-librocksdb-sys]
+debug = false

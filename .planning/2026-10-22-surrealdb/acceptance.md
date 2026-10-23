@@ -67,6 +67,7 @@ verified.
 ## P4 — TUI/CLI + storage commands (spec steps 7–9)
 
 - [x] Wipe vs import decided: wipe, no import (user, 2026-10-22)
+- [x] `storage::open::open` is the only production path to a SurrealDB client: it connects (loopback server with root sign-in, or embedded RocksDB), selects ns/db and runs `ensure_schema` before returning. `Target`'s Debug redacts the password. Gap: `Store::open` and the CLI/TUI do not call it yet, and credentials/port still come from the caller (no `server.json`/`credentials.json` discovery).
 - [ ] Server lifecycle per design.md: `argos storage install|start|stop|status`
 - [x] Pinned 3.3.4 SHA-256 per OS confirmed by two independent HTTPS fetches + GitHub asset digest (box)
 - [ ] Same hashes re-confirmed from a CI runner network

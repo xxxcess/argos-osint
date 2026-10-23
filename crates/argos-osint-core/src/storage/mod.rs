@@ -26,6 +26,7 @@ pub mod intel;
 pub mod jobs;
 pub mod lifecycle;
 pub mod memory;
+pub mod open;
 pub mod outbox;
 pub mod processes;
 pub mod provenance;

@@ -2,7 +2,7 @@
 //! Actor-group seed of `Store::topology_snapshot`. Members resolve through
 //! redirects; the group's neighbours are its members' typed payload actors,
 //! actor refs, native mentions and active Links, all re-pointed at the group;
-//! the cycle scope, the depth gap and refused seeds. Both modes via
+//! the cycle scope, depth above 1 and the refused retained seeds. Both modes via
 //! `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
 
@@ -278,14 +278,17 @@ async fn actor_group_topology_scopes_depth_and_seeds() {
     want.sort();
     assert_eq!(ids(&snap.nodes, |n| n.id.clone()), want);
 
-    // Deeper walks are bounded with an explicit gap.
+    // Depth 2 walks past the group's neighbours: c2's recorded topic.
     let snap = topology::topology_snapshot(&repo, &group(), &options(2, CycleScope::AllRetained))
         .await
         .unwrap();
-    assert!(!snap.exploration_exhausted);
-    assert!(snap
-        .unresolved_endpoints
-        .contains(&topology::DEPTH_GAP.to_string()));
+    let topic = snap
+        .nodes
+        .iter()
+        .find(|n| n.kind == TopologyNodeKind::Topic)
+        .expect("topic two hops out");
+    assert_eq!((topic.label.as_str(), topic.min_hops), ("t", 2));
+    assert!(snap.unresolved_endpoints.is_empty());
 
     // A group with no live member has no root.
     let empty = TopologySeed::ActorGroup {
@@ -299,13 +302,16 @@ async fn actor_group_topology_scopes_depth_and_seeds() {
     assert!(snap.root_id.is_empty());
     assert!(snap.neighborhood_brief.is_some());
 
-    // Other seeds are refused, never answered from partial data.
-    let err = topology::topology_snapshot(
-        &repo,
-        &TopologySeed::Actor("act1".into()),
-        &options(1, CycleScope::AllRetained),
-    )
-    .await
-    .unwrap_err();
+    // Retained Intel display seeds are refused, never answered from partial data.
+    let retained = TopologySeed::RetainedActor {
+        run_id: "r1".into(),
+        article_id: "a1".into(),
+        revision: String::new(),
+        actor_ref: "x".into(),
+        name: "Acme".into(),
+    };
+    let err = topology::topology_snapshot(&repo, &retained, &options(1, CycleScope::AllRetained))
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("isn't available on SurrealDB yet"));
 }

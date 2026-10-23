@@ -174,7 +174,7 @@ fn meaningful_topic(label: &str) -> bool {
     )
 }
 
-fn topic_node(label: &str) -> Option<TopologyNode> {
+pub(crate) fn topic_node(label: &str) -> Option<TopologyNode> {
     if !meaningful_topic(label) {
         return None;
     }

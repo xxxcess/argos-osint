@@ -2,7 +2,9 @@
 //!
 //! `error` normalizes engine errors, `tx` runs bounded-retry transactions,
 //! `codec` encodes compound keys, `jobs` is the job-system repository, and
-//! `embeddings` writes DISKANN-indexed vectors through the retry runner.
+//! `embeddings` writes DISKANN-indexed vectors through the retry runner,
+//! `publisher` group-commits memory publications and `memory` holds the P2
+//! memory write sites on top of it.
 //! Existing `Store` callers are not converted yet; see
 //! `.planning/2026-10-22-surrealdb/phase1-design.md`.
 
@@ -12,6 +14,7 @@ pub mod codec;
 pub mod counters;
 pub mod embeddings;
 pub mod jobs;
+pub mod memory;
 pub mod outbox;
 pub mod processes;
 pub mod publisher;

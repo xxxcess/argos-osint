@@ -6,7 +6,9 @@
 mod support;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
+use argos_osint_core::storage::memory::{self, IndexedRow, MemoryWrite};
 use argos_osint_core::storage::publisher::{self, Publisher};
 use argos_osint_core::storage::tx::TxError;
 use argos_osint_core::storage::{counters, outbox};
@@ -33,8 +35,174 @@ async fn scalar<T: SurrealValue>(db: &Surreal<Any>, sql: &str) -> T {
 async fn fresh(server: &Server, name: &str) -> (Surreal<Any>, Publisher) {
     let db = server.root("argos", name).await;
     outbox::apply_schema(&db).await.unwrap();
+    memory::apply_schema(&db).await.unwrap();
     let publisher = Publisher::spawn(server.root("argos", name).await);
     (db, publisher)
+}
+
+/// Upsert `(id, text)` memories, or delete ids whose text is `None`.
+fn put(rows: Vec<(&'static str, Option<&'static str>)>) -> MemoryWrite {
+    Arc::new(move |tx| {
+        let rows = rows.clone();
+        Box::pin(async move {
+            let mut ids = Vec::new();
+            for (id, text) in rows {
+                let q = match text {
+                    Some(t) => tx
+                        .query("UPSERT type::record('memory', $id) SET text = $t RETURN NONE")
+                        .bind(("t", t.to_string())),
+                    None => tx.query("DELETE type::record('memory', $id) RETURN NONE"),
+                };
+                q.bind(("id", id.to_string())).await?.check()?;
+                ids.push(id.to_string());
+            }
+            Ok(ids)
+        })
+    })
+}
+
+async fn pending(db: &Surreal<Any>) -> Vec<(String, String, String)> {
+    outbox::pending(db, 0, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.record_id, c.revision, c.operation))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_write_and_its_index_work_commit_together() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let _serial = SERIAL.lock().await;
+    let (db, publisher) = fresh(&server, "mem_write").await;
+    let p = memory::write_then_index(
+        &publisher,
+        put(vec![
+            ("a", Some("alpha")),
+            ("b", Some("beta")),
+            ("a", Some("alpha")),
+        ]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(p.value.enqueued.len(), 2, "duplicate id queued once");
+    assert_eq!(p.value.changed_seq, 1);
+    let rev_a = memory::memory_revision("alpha");
+    assert_eq!(
+        pending(&db).await,
+        vec![
+            ("a".into(), rev_a.clone(), "index_upsert".into()),
+            (
+                "b".into(),
+                memory::memory_revision("beta"),
+                "index_upsert".into()
+            ),
+        ]
+    );
+    // A failing write leaves neither the memory nor its index work.
+    let failing: MemoryWrite = Arc::new(|tx| {
+        Box::pin(async move {
+            tx.query("UPSERT memory:c SET text = 'gamma' RETURN NONE")
+                .await?
+                .check()?;
+            Err(TxError::Abort("validation failed".into()))
+        })
+    });
+    assert!(memory::write_then_index(&publisher, failing).await.is_err());
+    let c: Option<i64> = {
+        let mut r = db
+            .query("RETURN count(SELECT * FROM memory:c)")
+            .await
+            .unwrap();
+        r.take(0).unwrap()
+    };
+    assert_eq!(c, Some(0));
+    assert_eq!(pending(&db).await.len(), 2);
+    assert_eq!(
+        counters::current(&db, memory_changed()).await.unwrap(),
+        1,
+        "failed write does not bump memories_changed"
+    );
+}
+
+fn memory_changed() -> &'static str {
+    argos_osint_core::storage::publisher::CHANGED_COUNTER
+}
+
+#[tokio::test]
+async fn indexed_revisions_are_skipped_and_deletes_queue_removal() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let _serial = SERIAL.lock().await;
+    let (db, publisher) = fresh(&server, "mem_states").await;
+    memory::write_then_index(
+        &publisher,
+        put(vec![("a", Some("alpha")), ("b", Some("beta"))]),
+    )
+    .await
+    .unwrap();
+    // Rebuild records both as indexed at their current text.
+    let rows = vec![
+        IndexedRow {
+            id: "a".into(),
+            text: "alpha".into(),
+        },
+        IndexedRow {
+            id: "b".into(),
+            text: "beta".into(),
+        },
+    ];
+    memory::record_index_states(&db, &rows, "fp1", "g1")
+        .await
+        .unwrap();
+    let states: Vec<(String, String, String)> = {
+        let mut r = db
+            .query("SELECT VALUE [record::id(id), fingerprint, generation] FROM memory_index_state ORDER BY id")
+            .await
+            .unwrap();
+        r.take::<Vec<Vec<String>>>(0)
+            .unwrap()
+            .into_iter()
+            .map(|v| (v[0].clone(), v[1].clone(), v[2].clone()))
+            .collect()
+    };
+    assert_eq!(
+        states,
+        vec![
+            ("a".into(), "fp1".into(), "g1".into()),
+            ("b".into(), "fp1".into(), "g1".into())
+        ]
+    );
+    // Same text again: already indexed, nothing queued, counter still bumps.
+    let same = memory::write_then_index(&publisher, put(vec![("a", Some("alpha"))]))
+        .await
+        .unwrap();
+    assert!(same.value.enqueued.is_empty());
+    assert_eq!(same.value.changed_seq, 2);
+    // Delete queues removal; an archived memory also queues removal.
+    let del = memory::write_then_index(&publisher, put(vec![("b", None)]))
+        .await
+        .unwrap();
+    assert_eq!(del.value.enqueued.len(), 1);
+    let archive: MemoryWrite = Arc::new(|tx| {
+        Box::pin(async move {
+            tx.query("UPDATE memory:a SET lifecycle = 'archived' RETURN NONE")
+                .await?
+                .check()?;
+            Ok(vec!["a".to_string()])
+        })
+    });
+    memory::write_then_index(&publisher, archive).await.unwrap();
+    let removals: Vec<_> = pending(&db)
+        .await
+        .into_iter()
+        .filter(|(_, rev, op)| rev == memory::DELETED_REVISION && op == "index_remove")
+        .map(|(id, _, _)| id)
+        .collect();
+    assert_eq!(removals, vec!["b".to_string(), "a".to_string()]);
 }
 
 fn probe_write(id: String, fail: bool) -> publisher::Write {

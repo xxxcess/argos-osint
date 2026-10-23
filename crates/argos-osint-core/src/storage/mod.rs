@@ -34,6 +34,7 @@ pub mod insight_views;
 pub mod install;
 pub mod intel;
 pub mod jobs;
+pub mod jobs_view;
 pub mod lifecycle;
 pub mod live_evidence;
 pub mod memories;

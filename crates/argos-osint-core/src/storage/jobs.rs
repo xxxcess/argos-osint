@@ -189,7 +189,7 @@ struct Lineage {
     ancestors: Vec<RecordId>,
 }
 
-async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxError> {
+pub(crate) async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxError> {
     let (root, ancestors) = match job.parent {
         None => (rid("job", job.id), Vec::new()),
         Some(parent) => {
@@ -230,7 +230,7 @@ async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxError> {
     Ok(())
 }
 
-async fn create_task_in(tx: &Tx, task: &NewTask<'_>) -> Result<(), TxError> {
+pub(crate) async fn create_task_in(tx: &Tx, task: &NewTask<'_>) -> Result<(), TxError> {
     run(
         tx,
         tx.query(

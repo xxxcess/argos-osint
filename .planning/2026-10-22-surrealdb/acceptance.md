@@ -52,6 +52,9 @@ verified.
 - [ ] `publish_snapshot`'s validate callback still reads live evidence from SQLite outside the Surreal transaction. Unavoidable until the source tables move; then validate inside the tx.
 - [ ] `storage::insight::delete_memory` has no callers yet. The caller wrapper must also clear the NLP cache (`nlp::cache::remove_owner`) and run the job sweep (`job_cleanup::cleanup_batch`), both still SQLite, and the NLP cache must treat a missing memory as a miss.
 
+- [x] `schedule_article_refresh` (`storage/refresh.rs`) with `enqueue_refresh_in`, `retire_replaced_in` and `supersession`. Intent, retirement check, prior-task comparison, generation advance, job/task creation, the owner's `refresh_job_id` and supersession all commit in one transaction. The refresh task's `input_ref`, `role_snapshot` and `source_revision`, plus the job's `owner_scope`, live in an `insight_refresh_task` sidecar, because `task` and `job` have no such fields.
+- [ ] `schedule_article_refresh` gaps: the caller still builds the `PipelineInput` from SQLite evidence (`article_input`), and does so before the intent check. The `insight.superseded` event is not recorded (`events` is still SQLite). The SQLite paused-task requeue (`blocked_reason='cancelled; evidence dirty'`) has no counterpart, because SurrealDB tasks have no `paused` state.
+
 - [ ] Recon/OSINT messages, tools, artifacts, ordered counters, credit hold/reconcile/release
 - [ ] Intel stage publication with failure fallback (no savepoints)
 - [ ] Atlas occurrences, metadata revisions, actor index receipts

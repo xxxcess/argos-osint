@@ -68,12 +68,13 @@ verified.
 
 - [x] Wipe vs import decided: wipe, no import (user, 2026-10-22)
 - [x] `storage::open::open` is the only production path to a SurrealDB client: it connects (loopback server with root sign-in, or embedded RocksDB), selects ns/db and runs `ensure_schema` before returning. `Target`'s Debug redacts the password. Gap: `Store::open` and the CLI/TUI do not call it yet, and credentials/port still come from the caller (no `server.json`/`credentials.json` discovery).
-- [ ] Server lifecycle per design.md: `argos storage install|start|stop|status`
+- [x] Server lifecycle library (`storage::server`): discovery under `server.lock` (pid, TCP, root sign-in, 3.3.4 version, `storage_meta:identity`), start on demand (free or configured port, bounded port retries, credentials via env, detached process group, 30 s readiness, schema bootstrap, identity kept across restarts), leases, and last-client stop.
+- [ ] Server lifecycle gaps: the `argos storage install|start|stop|status` CLI is not wired. `install` (download or `--from` with archive SHA-256 check, plus tgz unpacking) is not implemented, and the resolved binary is not hash-checked. Health is sign-in plus version, not the HTTP `/health` endpoint. Pid liveness uses `ps -p`, which is Unix-only.
 - [x] Pinned 3.3.4 SHA-256 per OS confirmed by two independent HTTPS fetches + GitHub asset digest (box)
 - [ ] Same hashes re-confirmed from a CI runner network
 - [x] `server.lock` and `embedded.lock` as OS advisory locks (std `File::try_lock`, `flock` on Unix), pid informational only (`storage::home::try_lock`). `open_embedded` takes `embedded.lock` before opening and fails fast with the documented message. Config and credentials files are written atomically with mode 0600, and the root secret comes from `/dev/urandom`, which is Unix-only.
-- [ ] `clients/<pid>` leases written atomically (temp + fsync + rename)
-- [ ] Tests: stale `server.json` adopt; wrong-identity port refused; last client stops server; second embedded process fails
+- [x] `clients/<pid>` leases written atomically (temp + fsync + rename)
+- [x] Tests: stale `server.json` dropped and restarted; live server adopted; wrong-identity port refused; another live lease keeps the server running; last client stops the server; a second embedded owner fails (same process, separate lock fd)
 - [ ] `argos storage init --mode server|embedded`; `status` shows mode; `reset --yes` in both modes
 - [ ] CLI/TUI workers, Profile (20 views), Jobs, telemetry, summaries, NLP artifacts
 - [ ] `argos storage status`, `init`, `reset --yes` with resumable phases

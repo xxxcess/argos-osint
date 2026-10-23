@@ -132,3 +132,11 @@ Under a storage config the TUI Brain list, preview and memory delete run only on
 ### P4 — scoped Actor-group views and graph
 
 `storage::browse_assoc` adds `actor_groups_scoped`, `actor_group_associations_scoped` and `actor_group_graph` (the graph reuses `Store::actor_group_graph_from`, so both stores build it identically). `actor_groups_scoped` reads the association inputs once for all groups instead of once per group. Covered in both modes by `tests/storage_browse_assoc.rs`. Gap: the TUI's Actor-group views still call the SQLite `Store`.
+
+### P4 — TUI refuses the Actor-group topology on SurrealDB
+
+Under a storage config `App::open_topology` refuses `TopologySeed::ActorGroup` with "Actor-group topology isn't available on SurrealDB yet." before anything is queried, so the TUI never reads SQLite for it (covered by `surreal_refuses_only_the_actor_group_topology`). Other topology seeds are unchanged.
+
+## Phase 5 — first item (blocks phase 5 sign-off)
+
+- [ ] Port the `brain_topology_query` actor-group seed to the repository (contract tests in both modes) and wire the TUI topology worker to it through `storage::runtime::blocking`, removing the SurrealDB refusal above.

@@ -6826,6 +6826,10 @@ impl App {
         seed: argos_osint_core::brain_topology::TopologySeed,
         depth: Option<usize>,
     ) {
+        if let Some(refusal) = surreal_topology_refusal(super::surreal_brain::on(), &seed) {
+            self.status = refusal.into();
+            return;
+        }
         let already_open =
             self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Topology;
         if already_open {
@@ -11177,6 +11181,21 @@ impl TopologySummaryJob {
             Some(exec::Delivery::Pending) | None => {}
         }
     }
+}
+
+/// Under a storage config the actor-group topology is refused: its query
+/// (`brain_topology_query`) still reads the SQLite store, and the TUI never
+/// mixes storage modes. Ported in phase 5.
+fn surreal_topology_refusal(
+    surreal: bool,
+    seed: &argos_osint_core::brain_topology::TopologySeed,
+) -> Option<&'static str> {
+    (surreal
+        && matches!(
+            seed,
+            argos_osint_core::brain_topology::TopologySeed::ActorGroup { .. }
+        ))
+    .then_some("Actor-group topology isn't available on SurrealDB yet.")
 }
 
 #[cfg(test)]
@@ -21374,6 +21393,24 @@ mod tests {
             })
         );
         assert_eq!(app.topology_state.depth, 1);
+    }
+
+    #[test]
+    fn surreal_refuses_only_the_actor_group_topology() {
+        use argos_osint_core::brain_topology::TopologySeed;
+        let group = TopologySeed::ActorGroup {
+            name_key: "ana ruiz".into(),
+            member_ids: vec!["a1".into()],
+        };
+        assert_eq!(
+            surreal_topology_refusal(true, &group),
+            Some("Actor-group topology isn't available on SurrealDB yet.")
+        );
+        assert_eq!(surreal_topology_refusal(false, &group), None);
+        assert_eq!(
+            surreal_topology_refusal(true, &TopologySeed::Actor("a1".into())),
+            None
+        );
     }
 
     #[test]

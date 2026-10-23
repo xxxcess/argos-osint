@@ -368,3 +368,77 @@ async fn an_invalid_write_is_split_out_of_its_batch() {
     let bad = publisher::publish_batch(&db, &[other]).await;
     assert!(matches!(&bad[0], Err(TxError::Abort(m)) if m.contains("already names")));
 }
+
+fn panicking_write() -> publisher::Write {
+    Arc::new(|_tx| Box::pin(async move { panic!("boom in write") }))
+}
+
+#[tokio::test]
+async fn a_panicking_write_fails_alone_and_the_publisher_keeps_running() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let _serial = SERIAL.lock().await;
+    let (db, publisher) = fresh(&server, "publish_panic").await;
+    counters::apply_schema(&db).await.unwrap();
+    // In a batch, the panic is split out and the good writes commit.
+    let results = publisher::publish_batch(
+        &db,
+        &[
+            probe_write("a".into(), false),
+            panicking_write(),
+            probe_write("c".into(), false),
+        ],
+    )
+    .await;
+    assert!(results[0].is_ok() && results[2].is_ok());
+    assert!(matches!(&results[1], Err(TxError::Abort(m)) if m.contains("boom in write")));
+    // Through the task: the waiter gets the error and the loop survives.
+    let err = publisher.publish(panicking_write()).await.unwrap_err();
+    assert!(
+        matches!(&err, TxError::Abort(m) if m.contains("panicked")),
+        "{err}"
+    );
+    let ok = publisher
+        .publish(probe_write("d".into(), false))
+        .await
+        .unwrap();
+    assert_eq!(ok.value.enqueued.len(), 1);
+    let probes: i64 = scalar(&db, "RETURN count(SELECT * FROM memory_probe)").await;
+    assert_eq!(probes, 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_drains_queued_writes_then_refuses_new_ones() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let _serial = SERIAL.lock().await;
+    let (db, publisher) = fresh(&server, "publish_shutdown").await;
+    counters::apply_schema(&db).await.unwrap();
+    let waiters: Vec<_> = (0..20)
+        .map(|i| {
+            let p = publisher.clone();
+            tokio::spawn(async move { p.publish(probe_write(format!("s{i}"), false)).await })
+        })
+        .collect();
+    // Let the writes reach the queue, then stop.
+    tokio::task::yield_now().await;
+    publisher.shutdown().await;
+    let mut committed = 0i64;
+    for w in waiters {
+        match w.await.unwrap() {
+            Ok(_) => committed += 1,
+            Err(TxError::PublisherUnavailable { reason }) => assert_eq!(reason, "stopped"),
+            Err(e) => panic!("unexpected {e}"),
+        }
+    }
+    let probes: i64 = scalar(&db, "RETURN count(SELECT * FROM memory_probe)").await;
+    assert_eq!(probes, committed, "every accepted write was published");
+    let late = publisher.publish(probe_write("late".into(), false)).await;
+    assert!(matches!(
+        late,
+        Err(TxError::PublisherUnavailable { reason: "stopped" })
+    ));
+    publisher.shutdown().await;
+}

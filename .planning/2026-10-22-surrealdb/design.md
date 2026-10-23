@@ -59,6 +59,10 @@ Goal: replace SQLite + LanceDB with one local, disk-backed SurrealDB 3.3.4
   The acceptance test asserts correctness only (no exhausted retries,
   gap-free seqs, every write once) and prints p50/p99, warning above
   200 ms: server p99 swung 67-140 ms between runs with zero retries.
+- **Batch `index_changes_in` per-id RETURN statements into one query.**
+  `memory::index_changes_in` reads each written id's current state with its
+  own `RETURN` statement; one query covering every id in the write would
+  remove that per-id round trip from the publication path.
 
 ## Spec notes found while doing P0 (inputs for P1+)
 

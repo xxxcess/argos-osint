@@ -235,3 +235,56 @@ pub async fn project_memory_in(
     run(tx, q).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory_metadata::{ActorRef, ClaimPayload, IdentityState, InferencePayload};
+
+    fn actor(id: &str, role: &str, state: IdentityState) -> ActorRef {
+        ActorRef {
+            actor_id: id.into(),
+            role: role.into(),
+            binding_state: state,
+        }
+    }
+
+    #[test]
+    fn edges_for_dedupes_repeated_actor_roles_and_premises() {
+        let claim = MemoryPayload::Claim(ClaimPayload {
+            actors: vec![
+                actor("x", "subject", IdentityState::Resolved),
+                actor("x", "subject", IdentityState::Provisional),
+                actor("x", "object", IdentityState::Resolved),
+                actor("y", "subject", IdentityState::Resolved),
+            ],
+            ..ClaimPayload::default()
+        });
+        let edges = edges_for("c", &claim);
+        let roles: Vec<(String, String)> = edges
+            .iter()
+            .map(|e| (e.role.clone(), e.binding_state.clone()))
+            .collect();
+        assert_eq!(edges.len(), 3, "x/subject once, x/object, y/subject");
+        // First occurrence wins.
+        assert_eq!(
+            roles[0],
+            ("subject".into(), IdentityState::Resolved.as_str().into())
+        );
+        let keys: std::collections::HashSet<&str> = edges.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys.len(), edges.len());
+
+        let inference = MemoryPayload::Inference(InferencePayload {
+            premise_claims: vec!["c1".into(), "c2".into(), "c1".into()],
+            actors: vec![
+                actor("x", "relevant", IdentityState::Resolved),
+                actor("x", "relevant", IdentityState::Resolved),
+            ],
+            ..InferencePayload::default()
+        });
+        let edges = edges_for("i", &inference);
+        let count = |m: &str| edges.iter().filter(|e| e.meaning == m).count();
+        assert_eq!(count("premise"), 2);
+        assert_eq!(count("concerns"), 1);
+    }
+}

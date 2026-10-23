@@ -3,10 +3,8 @@
 //! `brain_browse` (Claims plus Actor groups), with the same shapes as SQLite.
 //!
 //! Every SurrealDB memory has a `memory_kind` (default `claim`), so there is
-//! no legacy, untyped insight-backed claim fallback. `Store::brain_browse_memories`
-//! (Actor group thread/article counts) and `Store::answer_memories` read
-//! `recon_threads`, `recon_message_memories` and `brain_memory_endpoints`,
-//! which are not on SurrealDB yet, so they are not ported here.
+//! no legacy, untyped insight-backed claim fallback. Actor-group counts and
+//! associations (`brain_browse_memories`) are in `browse_assoc`.
 
 use std::collections::BTreeMap;
 
@@ -86,7 +84,7 @@ pub async fn delete_memory(repo: &Repository, id: &str) -> Result<bool> {
     Ok(deleted)
 }
 
-async fn claims(repo: &Repository) -> Result<Vec<Memory>> {
+pub(crate) async fn claims(repo: &Repository) -> Result<Vec<Memory>> {
     let mut r = repo
         .db()
         .query(format!(

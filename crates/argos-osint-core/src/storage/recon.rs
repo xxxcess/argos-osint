@@ -323,8 +323,16 @@ pub async fn put_actor_ref(
     Ok(())
 }
 
-/// Remove a thread: its messages and their memory links go by cascade, and
-/// its actor mentions in the same transaction. Returns false when unknown.
+/// `Store::delete_thread` (keeping insights), in one transaction: the
+/// thread's actor mentions go; its insight sources are detached and marked
+/// `deleted_origin`; in-flight calls are cancelled; its runs' extraction
+/// jobs and model operations, its strategies, messages (with their
+/// evidence and memory links), runs, entity links, message counter and
+/// the `last_thread` pointer are deleted; its calls are detached, and
+/// detached Recon calls no insight source or derivation cites are
+/// deleted. Manual calls and the tool cache (keyed by tool inputs, not
+/// thread) stay, as in SQLite. Returns false when unknown or already
+/// deleted.
 pub async fn delete_thread(repo: &Repository, id: &str) -> Result<bool> {
     let id = id.to_string();
     let done = run_tx(repo.db(), RetryPolicy::default(), |tx| {
@@ -333,12 +341,41 @@ pub async fn delete_thread(repo: &Repository, id: &str) -> Result<bool> {
             let mut r = run(
                 &tx,
                 tx.query(
-                    "LET $found = record::exists(type::record('recon_thread', $id));
-                     DELETE brain_actor_mention WHERE origin_kind = 'thread' AND origin_id = $id RETURN NONE;
-                     DELETE type::record('recon_thread', $id) RETURN NONE;
+                    "LET $th = type::record('recon_thread', $id);
+                     LET $found = record::exists($th) AND (SELECT VALUE deleted FROM ONLY $th) != true;
+                     IF $found {
+                       LET $runs = SELECT VALUE meta::id(id) FROM recon_run WHERE thread_id = $id;
+                       DELETE brain_actor_mention WHERE origin_kind = 'thread' AND origin_id = $id RETURN NONE;
+                       UPDATE insight_source SET deleted_origin = true, thread_id = NONE, run_id = NONE,
+                         answer_id = 'deleted-origin' WHERE thread_id = $id RETURN NONE;
+                       UPDATE osint_call SET status = 'cancelled'
+                         WHERE thread_id = $id AND status INSIDE ['queued', 'running'] RETURN NONE;
+                       DELETE extraction_job WHERE run_id INSIDE $runs RETURN NONE;
+                       DELETE recon_model_operation WHERE run_id INSIDE $runs RETURN NONE;
+                       DELETE investigation_strategy WHERE thread_id = $id RETURN NONE;
+                       DELETE recon_message WHERE thread_id = $id RETURN NONE;
+                       DELETE recon_run WHERE thread_id = $id RETURN NONE;
+                       UPDATE osint_call SET thread_id = NONE, turn_id = NONE, run_id = NONE
+                         WHERE thread_id = $id RETURN NONE;
+                       LET $cited = SELECT VALUE call_id FROM insight_source;
+                       LET $derived = SELECT VALUE source_id FROM insight_derivation_evidence
+                         WHERE string::starts_with(source_id, 'call:');
+                       FOR $c IN (SELECT VALUE meta::id(id) FROM osint_call
+                           WHERE origin = 'recon' AND thread_id = NONE AND run_id = NONE) {
+                         LET $key = 'call:' + $c;
+                         IF $c NOTINSIDE $cited AND array::len(array::filter($derived,
+                             |$s| $s == $key OR string::starts_with($s, $key + '#page'))) == 0 {
+                           DELETE type::record('osint_call', $c) RETURN NONE;
+                         };
+                       };
+                       DELETE $th RETURN NONE;
+                       DELETE type::record('counter', $counter) RETURN NONE;
+                       DELETE app_state:last_thread WHERE value = $id RETURN NONE;
+                     };
                      RETURN $found;",
                 )
-                .bind(("id", id)),
+                .bind(("id", id.clone()))
+                .bind(("counter", super::recon_threads::sequence_counter(&id))),
             )
             .await?;
             let last = r.num_statements() - 1;

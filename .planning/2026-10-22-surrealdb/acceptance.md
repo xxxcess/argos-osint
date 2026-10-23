@@ -167,3 +167,21 @@ Under a storage config `App::open_topology` refuses `TopologySeed::ActorGroup` w
   - Gaps: other seeds are refused with an error; depth > 1 does not expand past the group's own neighbours (reported as the bounded `DEPTH_GAP`); `ThisCycle` scope skips the current-metadata fence; memory nodes carry no revision (SurrealDB memories have none, so typed-payload receipts read `memory_metadata:<id>@`); reads are not one snapshot transaction.
   - [x] TUI wiring: under a storage config `request_topology` reads `TopologySeed::ActorGroup` only through `tui::surreal_brain::topology` (`storage::runtime::blocking` on a plain worker thread, also for in-memory fixtures); the refusal from 4caaf10 is removed (`surreal_reads_only_the_actor_group_topology_from_the_repository`).
   - Gaps: the generated neighbourhood summary is skipped for this seed on SurrealDB (its cache and tasks are SQLite-only; the deterministic brief shows); other topology seeds and the rest of the TUI still use the SQLite `Store`; no TUI test drives the SurrealDB worker (both-feature clippy only).
+
+### Phase 5 — remaining topology seeds and TUI wiring (a6ac67b, 08f4fca, 05880e0)
+
+- [x] `storage::topology::topology_snapshot` answers the Claim, Actor, Inference, Article, Topic, Source and Link/Related seeds as well as the Actor group, walking breadth-first to depth 1–3; admission still goes through the shared `brain_topology::query::admit`. Covered in both modes by `tests/storage_topology.rs` (every seed, premises both ways, stale revisions, cycle scope, depth 2 and 3), which supersedes the `DEPTH_GAP` above.
+- [x] TUI wiring (05880e0): under a storage config the topology worker reads every seed through `tui::surreal_brain::topology`, so topology never mixes stores.
+- Gaps: the retained Intel display seeds are refused with an error (Intel brief publications are still SQLite); the generated neighbourhood summary stays skipped on SurrealDB; no TUI test drives the SurrealDB worker (both-feature clippy only).
+
+### Phase 5 — Profile read model (542b7c0, 9490f2f)
+
+- [x] Profile reads its rows through a `ProfileSource`; `storage::profile_view` loads the source tables from SurrealDB into `ProfileTables` and builds the snapshot with the shared aggregation, adding the telemetry tables schema. SQLite parity covered in both modes by `tests/storage_profile_view.rs`.
+- Gaps: the TUI Profile pane is not wired to SurrealDB yet; nothing writes the telemetry tables on SurrealDB; recon run/coverage, intel report jobs and recon model ops feeding Profile stay empty on SurrealDB until their writers move.
+
+### Phase 5 — Recon runs, calls, evidence and cache (3fe8789)
+
+- [x] `storage::recon_runs` adds `recon_run`, `osint_call`, `recon_message_evidence` and `osint_cache`, mirroring the SQLite `Store` (run state machine, call queue/finish/attach, in-flight duplicate detection, cache freshness). Covered in both modes by `tests/storage_recon_runs.rs`.
+- Gaps: nothing calls `storage::recon_runs` yet; the executor writes, the full `delete_thread` cascade and the caller switch follow.
+
+Bootstrap registers 21 schemas after the topology, Profile and Recon tracks merge.

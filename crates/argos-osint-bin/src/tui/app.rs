@@ -11260,15 +11260,12 @@ impl TopologySummaryJob {
     }
 }
 
-/// Under a storage config the actor-group topology is read only from the
+/// Under a storage config every topology seed is read only from the
 /// repository (`storage::topology`), on a plain worker thread through
 /// `storage::runtime::blocking`; it never falls back to the SQLite store.
-fn surreal_topology(surreal: bool, seed: &argos_osint_core::brain_topology::TopologySeed) -> bool {
+/// The repository refuses the retained Intel display seeds with an error.
+fn surreal_topology(surreal: bool, _seed: &argos_osint_core::brain_topology::TopologySeed) -> bool {
     surreal
-        && matches!(
-            seed,
-            argos_osint_core::brain_topology::TopologySeed::ActorGroup { .. }
-        )
 }
 
 #[cfg(test)]
@@ -21469,7 +21466,7 @@ mod tests {
     }
 
     #[test]
-    fn surreal_reads_only_the_actor_group_topology_from_the_repository() {
+    fn surreal_reads_every_topology_seed_from_the_repository() {
         use argos_osint_core::brain_topology::TopologySeed;
         let group = TopologySeed::ActorGroup {
             name_key: "ana ruiz".into(),
@@ -21477,7 +21474,8 @@ mod tests {
         };
         assert!(surreal_topology(true, &group));
         assert!(!surreal_topology(false, &group));
-        assert!(!surreal_topology(true, &TopologySeed::Actor("a1".into())));
+        assert!(surreal_topology(true, &TopologySeed::Actor("a1".into())));
+        assert!(!surreal_topology(false, &TopologySeed::Actor("a1".into())));
     }
 
     #[test]

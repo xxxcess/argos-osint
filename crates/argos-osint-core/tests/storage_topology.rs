@@ -2,7 +2,7 @@
 //! Actor-group seed of `Store::topology_snapshot`. Members resolve through
 //! redirects; the group's neighbours are its members' typed payload actors,
 //! actor refs, native mentions and active Links, all re-pointed at the group;
-//! the cycle scope, the depth gap and refused seeds. Both modes via
+//! the cycle scope, depth above 1 and the refused retained seeds. Both modes via
 //! `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
 
@@ -10,10 +10,11 @@ mod support;
 
 use argos_osint_core::brain::MemorySource;
 use argos_osint_core::brain_topology::{
-    CycleScope, TopologyEdgeKind, TopologyNodeKind, TopologyOptions, TopologySeed,
+    CycleScope, TopologyEdgeKind, TopologyNodeKind, TopologyOptions, TopologySeed, TopologySnapshot,
 };
 use argos_osint_core::memory_metadata::{
-    ActorRef, ClaimPayload, EndpointRef, IdentityState, LinkPayload, MemoryKind, MemoryPayload,
+    ActorRef, ClaimPayload, EndpointRef, IdentityState, InferencePayload, LinkPayload, MemoryKind,
+    MemoryPayload,
 };
 use argos_osint_core::recon::Thread;
 use argos_osint_core::storage::recon::{self, Endpoint};
@@ -278,14 +279,17 @@ async fn actor_group_topology_scopes_depth_and_seeds() {
     want.sort();
     assert_eq!(ids(&snap.nodes, |n| n.id.clone()), want);
 
-    // Deeper walks are bounded with an explicit gap.
+    // Depth 2 walks past the group's neighbours: c2's recorded topic.
     let snap = topology::topology_snapshot(&repo, &group(), &options(2, CycleScope::AllRetained))
         .await
         .unwrap();
-    assert!(!snap.exploration_exhausted);
-    assert!(snap
-        .unresolved_endpoints
-        .contains(&topology::DEPTH_GAP.to_string()));
+    let topic = snap
+        .nodes
+        .iter()
+        .find(|n| n.kind == TopologyNodeKind::Topic)
+        .expect("topic two hops out");
+    assert_eq!((topic.label.as_str(), topic.min_hops), ("t", 2));
+    assert!(snap.unresolved_endpoints.is_empty());
 
     // A group with no live member has no root.
     let empty = TopologySeed::ActorGroup {
@@ -299,13 +303,182 @@ async fn actor_group_topology_scopes_depth_and_seeds() {
     assert!(snap.root_id.is_empty());
     assert!(snap.neighborhood_brief.is_some());
 
-    // Other seeds are refused, never answered from partial data.
-    let err = topology::topology_snapshot(
+    // Retained Intel display seeds are refused, never answered from partial data.
+    let retained = TopologySeed::RetainedActor {
+        run_id: "r1".into(),
+        article_id: "a1".into(),
+        revision: String::new(),
+        actor_ref: "x".into(),
+        name: "Acme".into(),
+    };
+    let err = topology::topology_snapshot(&repo, &retained, &options(1, CycleScope::AllRetained))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("isn't available on SurrealDB yet"));
+}
+
+/// Adds inference i1 with c1 as its payload premise.
+async fn seed_inference(repo: &Repository, c1: &str) -> String {
+    let payload = serde_json::to_string(&MemoryPayload::Inference(InferencePayload {
+        premise_claims: vec![c1.into()],
+        reasoning: "follows".into(),
+        ..Default::default()
+    }))
+    .unwrap();
+    repo.db()
+        .query(
+            "CREATE memory:i1 SET text = 'Acme expands', memory_kind = 'inference',
+               payload_json = $p",
+        )
+        .bind(("p", payload))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    "i1".into()
+}
+
+async fn snap(repo: &Repository, seed: TopologySeed, depth: usize) -> TopologySnapshot {
+    topology::topology_snapshot(repo, &seed, &options(depth, CycleScope::AllRetained))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn memory_seeds_walk_their_own_neighbours() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "topology_memory").await;
+    let (c1, c2) = seed(&repo).await;
+    let i1 = seed_inference(&repo, &c1).await;
+
+    // An actor root carries its redirected aliases and walks them.
+    let s = snap(&repo, TopologySeed::Actor("act1".into()), 1).await;
+    assert_eq!(s.root_kind, Some(TopologyNodeKind::Entity));
+    assert_eq!(s.nodes[0].member_ids, vec!["act1", "act3"]);
+    let mut want = vec![
+        "act1".to_string(),
+        c1.clone(),
+        "article:r2/a2".into(),
+        "source:thread:t1@".into(),
+    ];
+    want.sort();
+    assert_eq!(ids(&s.nodes, |n| n.id.clone()), want);
+
+    // A claim: its actor ref, historical article origin and topic.
+    let s = snap(&repo, TopologySeed::Claim(c2.clone()), 1).await;
+    assert_eq!(s.root_id, c2);
+    let mut want = vec![
+        c2.clone(),
+        "act2".to_string(),
+        "article:r1/a1".into(),
+        "topic:t".into(),
+    ];
+    want.sort();
+    let mut got = ids(&s.nodes, |n| n.id.clone());
+    got.iter_mut()
+        .filter(|id| id.starts_with("topic"))
+        .for_each(|id| *id = "topic:t".into());
+    assert_eq!(got, want);
+    let origin = s
+        .edges
+        .iter()
+        .find(|e| e.id == format!("article-evidence:article:r1/a1:{c2}"))
+        .unwrap();
+    assert_eq!(origin.label, "historical origin");
+
+    // Premises run both ways between an inference and its claim.
+    let s = snap(&repo, TopologySeed::Inference(i1.clone()), 1).await;
+    assert_eq!(s.root_kind, Some(TopologyNodeKind::Inference));
+    let premise = s.edges.iter().find(|e| e.kind == TopologyEdgeKind::Premise);
+    assert_eq!(
+        premise.map(|e| (e.from.as_str(), e.to.as_str())),
+        Some((c1.as_str(), i1.as_str()))
+    );
+    let s = snap(&repo, TopologySeed::Claim(c1.clone()), 1).await;
+    assert!(s.nodes.iter().any(|n| n.id == i1));
+    assert!(s.edges.iter().any(|e| e.id == format!("premise:{c1}:{i1}")));
+
+    // Depth 3 from the inference reaches the actor group's member act1
+    // through c1 (typed actor act3 resolves to act1) and then its thread.
+    let s = snap(&repo, TopologySeed::Inference(i1.clone()), 3).await;
+    let hops = |id: &str| s.nodes.iter().find(|n| n.id == id).map(|n| n.min_hops);
+    assert_eq!(hops(&c1), Some(1));
+    assert_eq!(hops("act1"), Some(2));
+    assert_eq!(hops("source:thread:t1@"), Some(3));
+    let s = snap(&repo, TopologySeed::Inference(i1), 2).await;
+    assert!(s.nodes.iter().all(|n| n.min_hops <= 2));
+    assert!(!s.nodes.iter().any(|n| n.id == "source:thread:t1@"));
+
+    // A missing or mismatched memory has no root.
+    let s = snap(&repo, TopologySeed::Claim("act1".into()), 1).await;
+    assert!(s.root_id.is_empty());
+}
+
+#[tokio::test]
+async fn article_topic_source_and_link_seeds() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "topology_other").await;
+    let (_, c2) = seed(&repo).await;
+
+    let article = |run: &str, id: &str| TopologySeed::Article {
+        run_id: run.into(),
+        article_id: id.into(),
+        revision: String::new(),
+        originating_memory: None,
+    };
+    // The article: act2's native mention and c2's historical source.
+    let s = snap(&repo, article("r1", "a1"), 1).await;
+    assert_eq!(s.root_id, "article:r1/a1");
+    let mut want = vec!["act2".to_string(), c2.clone(), "article:r1/a1".into()];
+    want.sort();
+    assert_eq!(ids(&s.nodes, |n| n.id.clone()), want);
+    // A revision that no longer matches is a gap, not a root.
+    let stale = TopologySeed::Article {
+        run_id: "r1".into(),
+        article_id: "a1".into(),
+        revision: "old".into(),
+        originating_memory: None,
+    };
+    let s = snap(&repo, stale, 1).await;
+    assert!(s.root_id.is_empty());
+    assert!(!s.unresolved_endpoints.is_empty());
+
+    // The topic collects the claims recorded under it.
+    let s = snap(&repo, TopologySeed::Topic("T".into()), 1).await;
+    assert_eq!(s.root_kind, Some(TopologyNodeKind::Topic));
+    assert!(s.nodes.iter().any(|n| n.id == c2));
+
+    // A thread source; its mention edge is an actor's, so it is found at
+    // depth 1 only through the actor walk, not from the source itself.
+    let s = snap(
         &repo,
-        &TopologySeed::Actor("act1".into()),
-        &options(1, CycleScope::AllRetained),
+        TopologySeed::Source {
+            origin: "thread".into(),
+            source_id: "t1".into(),
+            revision: String::new(),
+        },
+        1,
+    )
+    .await;
+    assert_eq!(s.root_kind, Some(TopologyNodeKind::Source));
+
+    // The Link seed roots both endpoints with the link between them.
+    let s = snap(&repo, TopologySeed::Link("l1".into()), 1).await;
+    assert!(s.nodes.iter().any(|n| n.id == "act1" && n.is_root));
+    assert!(s.nodes.iter().any(|n| n.id == "article:r2/a2" && n.is_root));
+    assert!(s.edges.iter().any(|e| e.id == "l1"));
+
+    // Under a cycle the article from another run is out of scope.
+    let s = topology::topology_snapshot(
+        &repo,
+        &article("r2", "a2"),
+        &options(1, CycleScope::ThisCycle("r1".into())),
     )
     .await
-    .unwrap_err();
-    assert!(err.to_string().contains("isn't available on SurrealDB yet"));
+    .unwrap();
+    assert!(s.nodes.iter().all(|n| n.is_root));
 }

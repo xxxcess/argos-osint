@@ -36,7 +36,7 @@ use std::{
     time::Duration,
 };
 static IDS: AtomicU64 = AtomicU64::new(0);
-pub(crate) fn id(prefix: &str) -> String {
+pub fn id(prefix: &str) -> String {
     format!(
         "{prefix}-{}-{}-{}",
         Utc::now().timestamp_micros(),

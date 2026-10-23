@@ -222,3 +222,154 @@ async fn thread_delete_cascades_and_leaves_no_orphans() {
         .unwrap()
         .is_empty());
 }
+
+#[tokio::test]
+async fn recon_threads_and_messages_match_the_sqlite_store() {
+    use argos_osint_core::storage::recon_threads as rt;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "recon_threads").await;
+    let blank = rt::new_thread(&repo, "  ").await.unwrap();
+    assert_eq!(blank.title, argos_osint_core::recon::PLACEHOLDER_TITLE);
+    let t = rt::new_thread(&repo, " example.org ").await.unwrap();
+    assert_eq!(t.title, "example.org");
+
+    // Messages from an import (explicit sequences) are never overtaken.
+    recon::put_message(&repo, &message("m-old", &t.id, 3))
+        .await
+        .unwrap();
+    let a = rt::add_message(&repo, &t.id, "user", "who?", None)
+        .await
+        .unwrap();
+    let b = rt::add_message(&repo, &t.id, "assistant", "them", Some("run-1"))
+        .await
+        .unwrap();
+    assert_eq!((a.sequence, b.sequence), (4, 5));
+    let other = rt::add_message(&repo, &blank.id, "user", "hi", None)
+        .await
+        .unwrap();
+    assert_eq!(other.sequence, 1, "sequences are per thread");
+    let listed = rt::list_messages(&repo, &t.id).await.unwrap();
+    assert_eq!(
+        listed.iter().map(|m| m.sequence).collect::<Vec<_>>(),
+        vec![3, 4, 5]
+    );
+    assert_eq!(listed[2].run_id.as_deref(), Some("run-1"));
+    assert!(rt::add_message(&repo, "thread-missing", "user", "x", None)
+        .await
+        .is_err());
+
+    // Rename, draft, recall toggle; title or entity search.
+    assert!(rt::rename_thread(&repo, &t.id, "Port scan").await.unwrap());
+    assert!(rt::rename_thread(&repo, &t.id, " ").await.is_err());
+    assert!(!rt::rename_thread(&repo, "nope", "x").await.unwrap());
+    rt::save_draft(&repo, &t.id, "draft", 7).await.unwrap();
+    assert!(rt::set_recall_insights(&repo, &t.id, true).await.unwrap());
+    let got = recon::get_thread(&repo, &t.id).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            got.title.as_str(),
+            got.draft.as_str(),
+            got.scroll,
+            got.recall_insights
+        ),
+        ("Port scan", "draft", 7, true)
+    );
+    rt::link_entity(&repo, &t.id, "domain", "Example.org", Some("call-1"))
+        .await
+        .unwrap();
+    rt::link_entity(&repo, &t.id, "domain", "Example.org", Some("call-1"))
+        .await
+        .unwrap();
+    rt::link_entity(&repo, &t.id, "email", "a@example.org", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        rt::thread_entities(&repo, &t.id).await.unwrap(),
+        vec![
+            ("domain".to_string(), "Example.org".to_string()),
+            ("email".to_string(), "a@example.org".to_string())
+        ]
+    );
+    let ids =
+        |v: Vec<argos_osint_core::recon::Thread>| v.into_iter().map(|t| t.id).collect::<Vec<_>>();
+    assert_eq!(
+        ids(rt::list_threads(&repo, "port").await.unwrap()),
+        vec![t.id.clone()]
+    );
+    assert_eq!(
+        ids(rt::list_threads(&repo, "example.ORG").await.unwrap()),
+        vec![t.id.clone()]
+    );
+    assert_eq!(
+        ids(rt::list_threads(&repo, "").await.unwrap()),
+        vec![t.id.clone(), blank.id.clone()],
+        "newest update first"
+    );
+
+    // Last thread follows selection and forgets deleted threads.
+    assert_eq!(rt::last_thread(&repo).await.unwrap(), None);
+    rt::select_thread(&repo, &t.id).await.unwrap();
+    assert_eq!(rt::last_thread(&repo).await.unwrap(), Some(t.id.clone()));
+    assert!(rt::select_thread(&repo, "nope").await.is_err());
+    assert!(recon::delete_thread(&repo, &t.id).await.unwrap());
+    assert_eq!(rt::last_thread(&repo).await.unwrap(), None);
+    assert_eq!(
+        count(&repo, "RETURN count(SELECT * FROM recon_thread_entity)").await,
+        0,
+        "entity links cascade"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_appends_get_distinct_sequences() {
+    use argos_osint_core::storage::recon_threads as rt;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "recon_seq").await;
+    let t = rt::new_thread(&repo, "busy").await.unwrap();
+    let mut tasks = Vec::new();
+    for i in 0..6 {
+        let (repo, id) = (repo.clone(), t.id.clone());
+        tasks.push(tokio::spawn(async move {
+            rt::add_message(&repo, &id, "user", &format!("q{i}"), None)
+                .await
+                .unwrap()
+                .sequence
+        }));
+    }
+    let mut seqs = Vec::new();
+    for t in tasks {
+        seqs.push(t.await.unwrap());
+    }
+    seqs.sort();
+    assert_eq!(seqs, (1..=6).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn tool_preferences_default_and_persist() {
+    use argos_osint_core::storage::recon_threads as rt;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "recon_tools").await;
+    assert!(rt::tool_enabled(&repo, "hunter_person_enrichment")
+        .await
+        .unwrap());
+    assert!(!rt::tool_enabled(&repo, "firecrawl_crawl").await.unwrap());
+    rt::set_tool_enabled(&repo, "hunter_person_enrichment", false)
+        .await
+        .unwrap();
+    rt::set_tool_enabled(&repo, "firecrawl_crawl", true)
+        .await
+        .unwrap();
+    assert!(!rt::tool_enabled(&repo, "hunter_person_enrichment")
+        .await
+        .unwrap());
+    assert!(rt::tool_enabled(&repo, "firecrawl_crawl").await.unwrap());
+    assert!(rt::set_tool_enabled(&repo, "no_such_tool", true)
+        .await
+        .is_err());
+}

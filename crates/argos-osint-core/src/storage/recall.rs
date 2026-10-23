@@ -117,6 +117,9 @@ pub async fn recall(db: &Surreal<Any>, q: &RecallQuery) -> Result<Vec<RecallHit>
             Err(e) => eprintln!("vector recall failed; using lexical recall: {e}"),
         }
     }
+    // The top-up counts hits before the token budget is applied, so
+    // `apply_caps` may still drop over-budget hits and return fewer than
+    // `max` even when more lexical matches exist past the `k` ranked here.
     if ranked.len() < max {
         let have: HashSet<String> = ranked.iter().map(|h| h.id.clone()).collect();
         let lexical = lexical_candidates(db, &q.text, &kinds, k).await?;
@@ -264,7 +267,14 @@ async fn lexical_candidates(
                 heap.push(make_hit(row, score, RecallSource::Lexical));
             }
         }
-        if n < LEXICAL_PAGE || read >= LEXICAL_SCAN_CAP {
+        if n < LEXICAL_PAGE {
+            break;
+        }
+        if read >= LEXICAL_SCAN_CAP {
+            eprintln!(
+                "lexical recall stopped at the {LEXICAL_SCAN_CAP}-row scan cap; \
+                 later active memories were not scored"
+            );
             break;
         }
     }

@@ -185,3 +185,8 @@ Under a storage config `App::open_topology` refuses `TopologySeed::ActorGroup` w
 - Gaps: nothing calls `storage::recon_runs` yet; the executor writes, the full `delete_thread` cascade and the caller switch follow.
 
 Bootstrap registers 21 schemas after the topology, Profile and Recon tracks merge.
+
+### Phase 5 — Recon executor writes
+
+- [x] `storage::recon_exec` adds `extraction_job`, `recon_model_operation` and `investigation_strategy` (bootstrap now 22 schemas) and ports `add_answer` (one transaction: active-run check, message, evidence, surviving memories in order, extraction job, synthesis operation finalized, run stage complete), `has_final_answer_for_run`, `recover_runs` (runs and calls interrupted, running extraction requeued, held credits released), the model operation upsert/draft/finish the executor streams into, and `record_strategy`/`latest_strategy_kind`. Covered in both modes by `tests/storage_recon_exec.rs`.
+- Gaps: nothing calls these yet; `recon_model_attempts`, `task_epoch` and the job executor refs are not ported; `recover_runs` releases credits after its updates, not in the same transaction (as SQLite).

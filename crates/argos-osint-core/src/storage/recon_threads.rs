@@ -49,7 +49,7 @@ fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
-fn sequence_counter(thread_id: &str) -> String {
+pub(crate) fn sequence_counter(thread_id: &str) -> String {
     format!("recon_message:{thread_id}")
 }
 

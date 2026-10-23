@@ -19,6 +19,7 @@ pub mod counters;
 pub mod embeddings;
 pub mod graph;
 pub mod insight;
+pub mod intel;
 pub mod jobs;
 pub mod memory;
 pub mod outbox;

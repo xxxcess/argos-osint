@@ -83,3 +83,6 @@ verified.
 - [ ] clippy `-D warnings` + tests via `scripts/agent_cargo.py`: default; `--locked --no-default-features`; `--no-default-features --features nlp`; `--no-default-features --features surreal`; `--no-default-features --features embedded`
 - [ ] `python3 scripts/test_surreal.py` (server + embedded)
 - [ ] `graphify update .` as the last commit
+- [ ] Atlas deletes (step 3) on Surreal leave to the caller: NLP cache/`nlp_source_refs`, `brain_backfill_receipts` cleanup, `jobs::cleanup_batch`, and `retire_deleted_article_leads` (reads `app_state`).
+- [ ] `atlas_save_metadata` on Surreal does not run `persist_article_rating` (confidence inputs still SQLite).
+- [ ] Step 4 remainder: `legacy_receipt`, `bind_claim_subject` (needs the `actors::bind` engine), `refresh_cached_publication`, and Source/MentionedIn/Contains topology edges.

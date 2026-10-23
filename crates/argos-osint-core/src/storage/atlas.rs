@@ -109,7 +109,7 @@ impl From<RunRow> for AtlasRunRow {
 }
 
 #[derive(SurrealValue)]
-struct ArticleRow {
+pub(crate) struct ArticleRow {
     run_id: String,
     article_id: String,
     title: String,
@@ -351,6 +351,21 @@ pub async fn article(
         .await?
         .check()?;
     Ok(r.take::<Option<ArticleRow>>(0)?.map(Into::into))
+}
+
+/// `atlas_article` inside the caller's transaction.
+pub(crate) async fn article_in(
+    tx: &super::tx::Tx,
+    run_id: &str,
+    article_id: &str,
+) -> Result<Option<AtlasArticleRow>, TxError> {
+    let mut r = run(
+        tx,
+        tx.query("SELECT * FROM ONLY type::record('atlas_article', $key)")
+            .bind(("key", encode(&[run_id, article_id]))),
+    )
+    .await?;
+    Ok(take::<Option<ArticleRow>>(&mut r, 0)?.map(Into::into))
 }
 
 /// `atlas_latest_article_by_id`.

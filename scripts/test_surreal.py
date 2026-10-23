@@ -4,7 +4,7 @@
 Downloads the pinned SurrealDB server for this host (verified by SHA-256),
 caches it, checks that it starts on loopback with RocksDB under a temporary
 directory (sync on every commit, versioning off, appendix tuning profile),
-stops it, then runs `tests/storage_contracts.rs`, `tests/storage_jobs.rs`, `tests/storage_memory.rs` `tests/storage_insights.rs` `tests/storage_atlas.rs` `tests/storage_intel.rs` `tests/storage_lifecycle.rs` and `tests/storage_atlas_delete.rs` with ARGOS_SURREAL_BIN set and
+stops it, then runs `tests/storage_contracts.rs`, `tests/storage_jobs.rs`, `tests/storage_memory.rs` `tests/storage_insights.rs` `tests/storage_atlas.rs` `tests/storage_intel.rs` `tests/storage_lifecycle.rs` `tests/storage_atlas_delete.rs` and `tests/storage_atlas_metadata.rs` with ARGOS_SURREAL_BIN set and
 ARGOS_SURREAL_REQUIRED=1, so a missing server is a failure rather than a skip.
 Each contract test starts and stops its own server in its own temp directory.
 
@@ -164,7 +164,7 @@ def main():
     for mode in modes:
         feature = "surreal" if mode == "server" else "embedded"
         command = [*cargo, "test", "--workspace", "--locked", "--no-default-features",
-                   "--features", feature, "--test", "storage_contracts", "--test", "storage_jobs", "--test", "storage_memory", "--test", "storage_insights", "--test", "storage_atlas", "--test", "storage_intel", "--test", "storage_lifecycle", "--test", "storage_atlas_delete", *extra, "--", "--nocapture"]
+                   "--features", feature, "--test", "storage_contracts", "--test", "storage_jobs", "--test", "storage_memory", "--test", "storage_insights", "--test", "storage_atlas", "--test", "storage_intel", "--test", "storage_lifecycle", "--test", "storage_atlas_delete", "--test", "storage_atlas_metadata", *extra, "--", "--nocapture"]
         env = {**os.environ, "ARGOS_SURREAL_MODE": mode, "ARGOS_SURREAL_REQUIRED": "1"}
         if binary:
             env["ARGOS_SURREAL_BIN"] = str(binary)

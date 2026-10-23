@@ -161,7 +161,7 @@ impl Server {
                 self.port = free_port();
                 return self.launch();
             }
-            if self.log().contains(&ready) && TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
+            if self.log().contains(&ready) && health_ok(self.port) {
                 break;
             }
             if Instant::now() >= deadline {
@@ -232,7 +232,11 @@ impl Server {
             )
             .await
         };
-        repo.expect("open repository")
+        match repo {
+            Ok(repo) => repo,
+            // Show the server's side (its log never holds the password).
+            Err(e) => panic!("open repository: {e}\nserver log:\n{}", self.log()),
+        }
     }
 
     /// A bare client without the schema bootstrap (bootstrap tests only).
@@ -272,7 +276,7 @@ impl Server {
                 password: self.password.clone(),
             })
             .await
-            .expect("root signin");
+            .unwrap_or_else(|e| panic!("root signin: {e}\nserver log:\n{}", self.log()));
         client.use_ns(ns).use_db(db).await.expect("use ns/db");
         client
     }
@@ -294,6 +298,24 @@ pub fn terminate(child: &Child) {
 
 #[cfg(not(unix))]
 pub fn terminate(_child: &Child) {}
+
+/// Readiness: our server answers `GET /health` with 200, which SurrealDB
+/// only does once the datastore (and with it the root user created from
+/// SURREAL_USER/SURREAL_PASS) is ready. A bare TCP accept is not enough.
+fn health_ok(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) else {
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+    if s.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut buf = [0u8; 16];
+    matches!(s.read(&mut buf), Ok(n) if n >= 12 && &buf[9..12] == b"200")
+}
 
 pub fn embedded_compiled() -> bool {
     cfg!(feature = "embedded")

@@ -34,6 +34,10 @@ pub struct Embedding<'a> {
     pub key: &'a str,
     pub kind: &'a str,
     pub generation: i64,
+    /// `memory::memory_revision` of the text the vector was computed from.
+    pub revision: &'a str,
+    /// Embedding model fingerprint.
+    pub model: &'a str,
     pub embedding: &'a [f32],
 }
 
@@ -55,12 +59,14 @@ pub async fn put(db: &Surreal<Any>, row: &Embedding<'_>) -> Result<Committed<()>
                 &tx,
                 tx.query(
                     "UPSERT $r CONTENT { key: $key, kind: $kind, generation: $generation, \
-                     embedding: $embedding } RETURN NONE",
+                     revision: $revision, model: $model, embedding: $embedding } RETURN NONE",
                 )
                 .bind(("r", rid("memory_embeddings", row.key)))
                 .bind(("key", row.key.to_string()))
                 .bind(("kind", row.kind.to_string()))
                 .bind(("generation", row.generation))
+                .bind(("revision", row.revision.to_string()))
+                .bind(("model", row.model.to_string()))
                 .bind(("embedding", vector)),
             )
             .await?;

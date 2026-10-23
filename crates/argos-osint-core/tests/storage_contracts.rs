@@ -289,6 +289,8 @@ fn row<'a>(
         key,
         kind,
         generation,
+        revision: "",
+        model: "",
         embedding: v,
     }
 }

@@ -30,6 +30,20 @@ impl MemoryKind {
         MemoryKind::Related,
     ];
 
+    /// Every kind, canonical and legacy-derived.
+    pub const ALL: [MemoryKind; 10] = [
+        MemoryKind::Actor,
+        MemoryKind::Claim,
+        MemoryKind::Inference,
+        MemoryKind::Link,
+        MemoryKind::Related,
+        MemoryKind::CycleBrief,
+        MemoryKind::InvestigationDigest,
+        MemoryKind::SourceSummary,
+        MemoryKind::ManualNote,
+        MemoryKind::UserProfile,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             MemoryKind::Actor => "actor",

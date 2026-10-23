@@ -656,3 +656,163 @@ mod graph_projection {
         assert_eq!(out, Some(graph::memory_node("x")));
     }
 }
+
+// --- recall ----------------------------------------------------------------
+
+mod recall {
+    use super::*;
+    use argos_osint_core::memory_metadata::MemoryKind;
+    use argos_osint_core::storage::embeddings::{self, Embedding};
+    use argos_osint_core::storage::recall::{self, RecallQuery, RecallSource};
+
+    fn near(i: usize, tilt: f32) -> Vec<f32> {
+        let mut v = vec![0.0f32; embeddings::DIMENSION];
+        v[0] = 1.0;
+        v[i] = tilt;
+        v
+    }
+
+    async fn mem(db: &Surreal<Any>, id: &str, text: &str, kind: &str, lc: &str) {
+        db.query("UPSERT type::record('memory', $id) SET text = $t, memory_kind = $k, lifecycle = $lc RETURN NONE")
+            .bind(("id", id.to_string()))
+            .bind(("t", text.to_string()))
+            .bind(("k", kind.to_string()))
+            .bind(("lc", lc.to_string()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    async fn emb(
+        db: &Surreal<Any>,
+        id: &str,
+        of_text: &str,
+        model: &str,
+        generation: i64,
+        tilt: usize,
+    ) {
+        let rev = memory::memory_revision(of_text);
+        let v = near(tilt, 0.05);
+        embeddings::put(
+            db,
+            &Embedding {
+                key: id,
+                kind: "claim",
+                generation,
+                revision: &rev,
+                model,
+                embedding: &v,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    fn ids(hits: &[recall::RecallHit]) -> Vec<&str> {
+        hits.iter().map(|h| h.id.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn vector_hits_are_fenced_and_lexical_fills_in() {
+        let Some(server) = Server::start() else {
+            return;
+        };
+        let _serial = SERIAL.lock().await;
+        let (db, _publisher) = fresh(&server, "recall_fence").await;
+        embeddings::apply_schema(&db).await.unwrap();
+        let rows = [
+            ("fresh", "alpha signal one", "claim", "active"),
+            ("edited", "alpha signal two", "claim", "active"),
+            ("othermodel", "alpha signal three", "claim", "active"),
+            ("oldgen", "alpha signal four", "claim", "active"),
+            ("archived", "alpha signal five", "claim", "archived"),
+            ("actor", "alpha signal six", "actor", "active"),
+        ];
+        for (i, (id, text, kind, lc)) in rows.iter().enumerate() {
+            mem(&db, id, text, kind, lc).await;
+            let of_text = if *id == "edited" { "older text" } else { text };
+            let model = if *id == "othermodel" { "mB" } else { "mA" };
+            let generation = if *id == "oldgen" { 1 } else { 2 };
+            emb(&db, id, of_text, model, generation, i + 1).await;
+        }
+        let q = RecallQuery {
+            text: "alpha signal".into(),
+            embedding: Some(near(1, 0.05)),
+            model: "mA".into(),
+            generation: 2,
+            ..Default::default()
+        };
+        let hits = recall::recall(&db, &q).await.unwrap();
+        assert_eq!(ids(&hits), vec!["fresh"], "stale hits never surface");
+        assert_eq!(hits[0].source, RecallSource::Vector);
+        assert!(hits[0].score > 0.9);
+
+        // No hit survives fencing: lexical fallback over active, allowed kinds.
+        let stale = RecallQuery {
+            generation: 3,
+            ..q.clone()
+        };
+        let hits = recall::recall(&db, &stale).await.unwrap();
+        assert!(hits.iter().all(|h| h.source == RecallSource::Lexical));
+        // Equal overlap ties order by id.
+        assert_eq!(ids(&hits), vec!["edited", "fresh", "oldgen", "othermodel"]);
+
+        // Explicit kinds override the default exclusions.
+        let actors = RecallQuery {
+            embedding: None,
+            allowed_kinds: vec![MemoryKind::Actor],
+            ..q.clone()
+        };
+        assert_eq!(
+            ids(&recall::recall(&db, &actors).await.unwrap()),
+            vec!["actor"]
+        );
+
+        let opted_out = RecallQuery {
+            opt_out: true,
+            ..q.clone()
+        };
+        assert!(recall::recall(&db, &opted_out).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn lexical_recall_pages_the_store_and_applies_caps() {
+        let Some(server) = Server::start() else {
+            return;
+        };
+        let _serial = SERIAL.lock().await;
+        let (db, _publisher) = fresh(&server, "recall_lexical").await;
+        // More than one page; the best matches sit on the last page.
+        let total = recall::LEXICAL_PAGE + 40;
+        let mut sql = String::from("BEGIN;");
+        for i in 0..total {
+            sql.push_str(&format!(
+                "UPSERT memory:⟨m{i:04}⟩ SET text = 'filler entry {i} beacon', memory_kind = 'claim';"
+            ));
+        }
+        sql.push_str("COMMIT;");
+        db.query(sql).await.unwrap().check().unwrap();
+        let long = "beacon harbor lantern ".repeat(400);
+        for (id, text) in [
+            ("zz1", "beacon harbor lantern"),
+            ("zz2", "beacon harbor"),
+            ("zz3", long.as_str()),
+        ] {
+            mem(&db, id, text, "claim", "active").await;
+        }
+        let q = RecallQuery {
+            text: "beacon harbor lantern".into(),
+            max_memories: 50,
+            token_budget: 10_000,
+            ..Default::default()
+        };
+        let hits = recall::recall(&db, &q).await.unwrap();
+        assert_eq!(hits.len(), recall::MAX_MEMORIES, "count capped at 5");
+        assert!(hits.iter().map(|h| h.tokens).sum::<usize>() <= recall::MAX_TOKENS);
+        // zz3 matches as well as zz1 but is over the token budget.
+        assert_eq!(&ids(&hits)[..2], &["zz1", "zz2"]);
+        assert!(!ids(&hits).contains(&"zz3"));
+        assert!(hits[2..].iter().all(|h| h.id.starts_with('m')));
+    }
+}

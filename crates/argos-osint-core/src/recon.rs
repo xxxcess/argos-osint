@@ -212,7 +212,7 @@ fn explicit_entities(text: &str) -> Vec<(String, String)> {
     }
     found.into_iter().collect()
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Thread {
     pub id: String,
     pub title: String,

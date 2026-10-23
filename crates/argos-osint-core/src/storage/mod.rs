@@ -38,6 +38,7 @@ pub mod processes;
 pub mod provenance;
 pub mod publisher;
 pub mod recall;
+pub mod recon;
 pub mod refresh;
 pub mod repo;
 pub mod runtime;

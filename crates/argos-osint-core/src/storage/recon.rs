@@ -1,0 +1,351 @@
+//! Recon threads and messages on SurrealDB (migration phase 4a): the
+//! `recon_thread`, `recon_message` and `recon_message_memory` tables, plus
+//! the Brain edge tables `brain_memory_endpoint` and `brain_memory_actor_ref`
+//! that Brain browse needs. These are the SurrealDB side of the SQLite
+//! tables with the same names (plural).
+//!
+//! SQLite's foreign keys become field assertions (a child row needs its
+//! parent) and its `ON DELETE CASCADE`s become DELETE events, as in
+//! `atlas_metadata`:
+//!
+//! - deleting a thread deletes its messages;
+//! - deleting a message deletes its memory links;
+//! - deleting a memory deletes its endpoints and actor refs.
+//!
+//! Record keys: `recon_thread` and `recon_message` by id,
+//! `recon_message_memory` by `[message, memory]`, `brain_memory_endpoint`
+//! by `[memory, side]`, and `brain_memory_actor_ref` by
+//! `[memory, actor, role]`.
+//!
+//! `recon_runs`, `osint_calls`, `recon_thread_entities` and the
+//! investigation tables are not ported yet. `delete_thread` here removes
+//! the thread, its messages and links, and its actor mentions; the full
+//! `Store::delete_thread` (insight cleanup, run and call cancellation)
+//! moves with the investigation write path.
+
+use std::collections::HashMap;
+
+use anyhow::{anyhow, Result};
+use surrealdb::types::SurrealValue;
+
+use super::jobs::{rid, run};
+use super::repo::Repository;
+use super::tx::{run_tx, RetryPolicy};
+use crate::brain::{Memory, MemorySource};
+use crate::recon::{Message, Thread};
+
+/// Recon schema (idempotent).
+pub const SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS recon_thread SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS title ON recon_thread TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON recon_thread TYPE string;
+DEFINE FIELD IF NOT EXISTS updated_at ON recon_thread TYPE string;
+DEFINE FIELD IF NOT EXISTS draft ON recon_thread TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS scroll ON recon_thread TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS deleted ON recon_thread TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS recall_insights ON recon_thread TYPE bool DEFAULT false;
+DEFINE INDEX IF NOT EXISTS recon_thread_updated ON recon_thread FIELDS updated_at;
+
+DEFINE TABLE IF NOT EXISTS recon_message SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS thread_id ON recon_message TYPE string
+  ASSERT record::exists(type::record('recon_thread', $value));
+DEFINE FIELD IF NOT EXISTS sequence ON recon_message TYPE int;
+DEFINE FIELD IF NOT EXISTS role ON recon_message TYPE string;
+DEFINE FIELD IF NOT EXISTS content ON recon_message TYPE string;
+DEFINE FIELD IF NOT EXISTS run_id ON recon_message TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON recon_message TYPE string;
+DEFINE INDEX IF NOT EXISTS recon_message_sequence ON recon_message FIELDS thread_id, sequence UNIQUE;
+
+DEFINE TABLE IF NOT EXISTS recon_message_memory SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS message_id ON recon_message_memory TYPE string
+  ASSERT record::exists(type::record('recon_message', $value));
+DEFINE FIELD IF NOT EXISTS memory_id ON recon_message_memory TYPE string;
+DEFINE FIELD IF NOT EXISTS ordinal ON recon_message_memory TYPE int;
+DEFINE INDEX IF NOT EXISTS recon_message_memory_message ON recon_message_memory FIELDS message_id;
+
+DEFINE TABLE IF NOT EXISTS brain_memory_endpoint SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS memory_id ON brain_memory_endpoint TYPE string
+  ASSERT record::exists(type::record('memory', $value));
+DEFINE FIELD IF NOT EXISTS side ON brain_memory_endpoint TYPE string
+  ASSERT $value INSIDE ['source', 'target'];
+DEFINE FIELD IF NOT EXISTS endpoint_kind ON brain_memory_endpoint TYPE string
+  ASSERT $value INSIDE ['memory', 'article', 'source'];
+DEFINE FIELD IF NOT EXISTS ref_id ON brain_memory_endpoint TYPE string;
+DEFINE FIELD IF NOT EXISTS origin ON brain_memory_endpoint TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS revision ON brain_memory_endpoint TYPE string DEFAULT '';
+DEFINE INDEX IF NOT EXISTS brain_memory_endpoint_ref ON brain_memory_endpoint FIELDS endpoint_kind, ref_id;
+DEFINE INDEX IF NOT EXISTS brain_memory_endpoint_memory ON brain_memory_endpoint FIELDS memory_id;
+
+DEFINE TABLE IF NOT EXISTS brain_memory_actor_ref SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS memory_id ON brain_memory_actor_ref TYPE string
+  ASSERT record::exists(type::record('memory', $value));
+DEFINE FIELD IF NOT EXISTS actor_id ON brain_memory_actor_ref TYPE string;
+DEFINE FIELD IF NOT EXISTS role ON brain_memory_actor_ref TYPE string;
+DEFINE FIELD IF NOT EXISTS binding_state ON brain_memory_actor_ref TYPE string DEFAULT 'provisional';
+DEFINE FIELD IF NOT EXISTS provenance_json ON brain_memory_actor_ref TYPE string DEFAULT '{}';
+DEFINE INDEX IF NOT EXISTS brain_memory_actor_ref_actor ON brain_memory_actor_ref FIELDS actor_id;
+DEFINE INDEX IF NOT EXISTS brain_memory_actor_ref_memory ON brain_memory_actor_ref FIELDS memory_id;
+
+DEFINE EVENT IF NOT EXISTS recon_thread_cascade ON TABLE recon_thread
+  WHEN $event = 'DELETE' THEN {
+    DELETE recon_message WHERE thread_id = record::id($before.id) RETURN NONE;
+  };
+DEFINE EVENT IF NOT EXISTS recon_message_cascade ON TABLE recon_message
+  WHEN $event = 'DELETE' THEN {
+    DELETE recon_message_memory WHERE message_id = record::id($before.id) RETURN NONE;
+  };
+DEFINE EVENT IF NOT EXISTS memory_edge_cascade ON TABLE memory
+  WHEN $event = 'DELETE' THEN {
+    DELETE brain_memory_endpoint WHERE memory_id = record::id($before.id) RETURN NONE;
+    DELETE brain_memory_actor_ref WHERE memory_id = record::id($before.id) RETURN NONE;
+  };";
+
+#[derive(Debug, Clone, SurrealValue)]
+struct ThreadRow {
+    id: String,
+    title: String,
+    created_at: String,
+    updated_at: String,
+    draft: String,
+    scroll: i64,
+    recall_insights: bool,
+}
+
+/// Create or replace a thread.
+pub async fn put_thread(repo: &Repository, t: &Thread) -> Result<()> {
+    repo.db()
+        .query(
+            "UPSERT $t SET title = $title, created_at = $c, updated_at = $u, draft = $d, \
+             scroll = $s, recall_insights = $r, deleted = false RETURN NONE",
+        )
+        .bind(("t", rid("recon_thread", &t.id)))
+        .bind(("title", t.title.clone()))
+        .bind(("c", t.created_at.clone()))
+        .bind(("u", t.updated_at.clone()))
+        .bind(("d", t.draft.clone()))
+        .bind(("s", t.scroll))
+        .bind(("r", t.recall_insights))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+/// A live (not deleted) thread.
+pub async fn get_thread(repo: &Repository, id: &str) -> Result<Option<Thread>> {
+    let mut r = repo
+        .db()
+        .query(
+            "SELECT meta::id(id) AS id, title, created_at, updated_at, draft, scroll, \
+             recall_insights FROM ONLY $t WHERE deleted = false",
+        )
+        .bind(("t", rid("recon_thread", id)))
+        .await?
+        .check()?;
+    let row: Option<ThreadRow> = r.take(0usize)?;
+    Ok(row.map(|t| Thread {
+        id: t.id,
+        title: t.title,
+        created_at: t.created_at,
+        updated_at: t.updated_at,
+        draft: t.draft,
+        scroll: t.scroll,
+        recall_insights: t.recall_insights,
+    }))
+}
+
+/// Append a message (the thread must exist; sequences are unique per thread).
+pub async fn put_message(repo: &Repository, m: &Message) -> Result<()> {
+    repo.db()
+        .query(
+            "CREATE $m SET thread_id = $t, sequence = $s, role = $role, content = $c, \
+             run_id = $run, created_at = $at RETURN NONE",
+        )
+        .bind(("m", rid("recon_message", &m.id)))
+        .bind(("t", m.thread_id.clone()))
+        .bind(("s", m.sequence))
+        .bind(("role", m.role.clone()))
+        .bind(("c", m.content.clone()))
+        .bind(("run", m.run_id.clone()))
+        .bind(("at", m.created_at.clone()))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+/// Replace the memories an answer cited, in order.
+pub async fn link_message_memories(
+    repo: &Repository,
+    message_id: &str,
+    memory_ids: &[String],
+) -> Result<()> {
+    let (message, ids) = (message_id.to_string(), memory_ids.to_vec());
+    run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let (message, ids) = (message.clone(), ids.clone());
+        async move {
+            run(
+                &tx,
+                tx.query(
+                    "DELETE recon_message_memory WHERE message_id = $m RETURN NONE;
+                     FOR $i IN array::range(0, array::len($ids)) {
+                       CREATE type::record('recon_message_memory', [$m, $ids[$i]])
+                         SET message_id = $m, memory_id = $ids[$i], ordinal = $i RETURN NONE;
+                     };",
+                )
+                .bind(("m", message))
+                .bind(("ids", ids)),
+            )
+            .await?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| anyhow!("link message memories: {e}"))?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, SurrealValue)]
+struct LinkRow {
+    message_id: String,
+    memory_id: String,
+    text: Option<String>,
+    category: Option<String>,
+    pinned: Option<bool>,
+    created_at: Option<String>,
+    source_json: Option<String>,
+}
+
+/// Per message of the thread, the memories it cited in order. A memory
+/// that is gone reads as "no longer stored", as in SQLite.
+pub async fn answer_memories(
+    repo: &Repository,
+    thread_id: &str,
+) -> Result<HashMap<String, Vec<Memory>>> {
+    let mut r = repo
+        .db()
+        .query(
+            "LET $msgs = (SELECT VALUE meta::id(id) FROM recon_message WHERE thread_id = $t);
+             SELECT message_id, memory_id, ordinal,
+                    type::record('memory', memory_id).text AS text,
+                    type::record('memory', memory_id).category AS category,
+                    type::record('memory', memory_id).pinned AS pinned,
+                    (IF record::exists(type::record('memory', memory_id)) THEN time::format(type::record('memory', memory_id).created_at, '%+') END) AS created_at,
+                    type::record('memory', memory_id).source_json AS source_json
+               FROM recon_message_memory WHERE message_id INSIDE $msgs
+              ORDER BY ordinal;",
+        )
+        .bind(("t", thread_id.to_string()))
+        .await?
+        .check()?;
+    let rows: Vec<LinkRow> = r.take(1usize)?;
+    let mut out: HashMap<String, Vec<Memory>> = HashMap::new();
+    for row in rows {
+        let memory = match (
+            row.text,
+            row.category,
+            row.pinned,
+            row.created_at,
+            row.source_json,
+        ) {
+            (Some(text), Some(category), Some(pinned), Some(created_at), Some(source_json)) => {
+                Memory {
+                    source: serde_json::from_str(&source_json).unwrap_or(MemorySource {
+                        app: "argos".into(),
+                        conversation_id: String::new(),
+                        message_id: None,
+                        reference: None,
+                    }),
+                    id: row.memory_id,
+                    text,
+                    category,
+                    pinned,
+                    created_at,
+                }
+            }
+            _ => Memory {
+                id: row.memory_id,
+                text: "This memory is no longer stored.".into(),
+                category: "missing".into(),
+                pinned: false,
+                created_at: String::new(),
+                source: MemorySource {
+                    app: "argos".into(),
+                    conversation_id: String::new(),
+                    message_id: None,
+                    reference: None,
+                },
+            },
+        };
+        out.entry(row.message_id).or_default().push(memory);
+    }
+    Ok(out)
+}
+
+/// One typed endpoint of a Link/Related memory.
+#[derive(Debug, Clone)]
+pub struct Endpoint<'a> {
+    pub memory_id: &'a str,
+    pub side: &'a str,
+    pub endpoint_kind: &'a str,
+    pub ref_id: &'a str,
+    pub origin: &'a str,
+    pub revision: &'a str,
+}
+
+pub async fn put_endpoint(repo: &Repository, e: &Endpoint<'_>) -> Result<()> {
+    repo.db()
+        .query(
+            "UPSERT type::record('brain_memory_endpoint', [$m, $side]) SET memory_id = $m, side = $side, endpoint_kind = $kind, ref_id = $ref, \
+             origin = $origin, revision = $rev RETURN NONE",
+        )
+        .bind(("m", e.memory_id.to_string()))
+        .bind(("side", e.side.to_string()))
+        .bind(("kind", e.endpoint_kind.to_string()))
+        .bind(("ref", e.ref_id.to_string()))
+        .bind(("origin", e.origin.to_string()))
+        .bind(("rev", e.revision.to_string()))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+pub async fn put_actor_ref(
+    repo: &Repository,
+    memory_id: &str,
+    actor_id: &str,
+    role: &str,
+) -> Result<()> {
+    repo.db()
+        .query("UPSERT type::record('brain_memory_actor_ref', [$m, $a, $role]) SET memory_id = $m, actor_id = $a, role = $role RETURN NONE")
+        .bind(("m", memory_id.to_string()))
+        .bind(("a", actor_id.to_string()))
+        .bind(("role", role.to_string()))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+/// Remove a thread: its messages and their memory links go by cascade, and
+/// its actor mentions in the same transaction. Returns false when unknown.
+pub async fn delete_thread(repo: &Repository, id: &str) -> Result<bool> {
+    let id = id.to_string();
+    let done = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let id = id.clone();
+        async move {
+            let mut r = run(
+                &tx,
+                tx.query(
+                    "LET $found = record::exists(type::record('recon_thread', $id));
+                     DELETE brain_actor_mention WHERE origin_kind = 'thread' AND origin_id = $id RETURN NONE;
+                     DELETE type::record('recon_thread', $id) RETURN NONE;
+                     RETURN $found;",
+                )
+                .bind(("id", id)),
+            )
+            .await?;
+            let last = r.num_statements() - 1;
+            super::jobs::take::<Option<bool>>(&mut r, last)
+        }
+    })
+    .await
+    .map_err(|e| anyhow!("delete thread: {e}"))?;
+    Ok(done.value == Some(true))
+}

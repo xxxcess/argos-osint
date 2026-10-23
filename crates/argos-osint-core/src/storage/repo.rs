@@ -20,6 +20,7 @@ struct Inner {
     db: Surreal<Any>,
     bootstrap: Bootstrap,
     mode: Option<Mode>,
+    publisher: std::sync::OnceLock<super::publisher::Publisher>,
     _hold: Option<Hold>,
 }
 
@@ -80,6 +81,7 @@ impl Repository {
                 db,
                 bootstrap,
                 mode,
+                publisher: std::sync::OnceLock::new(),
                 _hold: hold,
             }),
         }
@@ -88,6 +90,14 @@ impl Repository {
     /// The client, for the `storage::*` repository functions.
     pub fn db(&self) -> &Surreal<Any> {
         &self.inner.db
+    }
+
+    /// The group-commit publisher for memory writes, started on first use
+    /// (must be called inside the runtime).
+    pub fn publisher(&self) -> &super::publisher::Publisher {
+        self.inner
+            .publisher
+            .get_or_init(|| super::publisher::Publisher::spawn(self.inner.db.clone()))
     }
 
     pub fn bootstrap(&self) -> Bootstrap {

@@ -210,6 +210,12 @@ impl Server {
     /// (`storage::repo::Repository`), so every contract test runs against
     /// the bootstrapped repository path in both modes.
     pub async fn root(&self, ns: &str, db: &str) -> Surreal<Any> {
+        self.repo(ns, db).await.db().clone()
+    }
+
+    /// The async repository on `ns`/`db` (bootstrapped).
+    #[allow(dead_code)]
+    pub async fn repo(&self, ns: &str, db: &str) -> argos_osint_core::storage::repo::Repository {
         use argos_osint_core::storage::open::Target;
         use argos_osint_core::storage::repo::Repository;
         let repo = if self.embedded {
@@ -226,7 +232,7 @@ impl Server {
             )
             .await
         };
-        repo.expect("open repository").db().clone()
+        repo.expect("open repository")
     }
 
     /// A bare client without the schema bootstrap (bootstrap tests only).

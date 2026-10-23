@@ -27,7 +27,7 @@ static IDS: AtomicU64 = AtomicU64::new(1);
 
 /// Memory id: time, a random per-process salt and a sequence, so two
 /// processes writing one database in the same millisecond cannot collide.
-pub(crate) fn new_id() -> String {
+pub fn new_id() -> String {
     static SALT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let salt = *SALT.get_or_init(|| {
         use std::hash::{BuildHasher, Hasher};

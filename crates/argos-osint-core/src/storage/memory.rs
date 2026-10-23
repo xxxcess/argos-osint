@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use surrealdb::engine::any::Any;
-use surrealdb::types::SurrealValue;
+use surrealdb::types::{RecordId, SurrealValue};
 use surrealdb::Surreal;
 
 use super::jobs::{rid, run, take};
@@ -262,4 +262,62 @@ pub async fn put_typed_in(tx: &Tx, m: &TypedMemory) -> Result<(), TxError> {
     )
     .await?;
     super::graph::project_memory_in(tx, &m.id, m.kind, m.payload.as_ref(), &m.lifecycle).await
+}
+
+#[derive(SurrealValue)]
+struct LifecycleRow {
+    id: String,
+    lifecycle: Option<String>,
+    memory_kind: Option<String>,
+    payload_json: Option<String>,
+}
+
+/// Set `lifecycle` on each existing memory in `ids` whose lifecycle differs,
+/// re-projecting its graph node and edges in the caller's transaction (a
+/// memory that stops being active loses the edges its payload produced).
+/// Returns the ids that changed. One read and one write round trip.
+pub async fn set_lifecycle_in(
+    tx: &Tx,
+    ids: &[String],
+    lifecycle: &str,
+) -> Result<Vec<String>, TxError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rids: Vec<RecordId> = ids.iter().map(|i| rid("memory", i)).collect();
+    let mut r = run(
+        tx,
+        tx.query(
+            "SELECT record::id(id) AS id, lifecycle, memory_kind, payload_json FROM $rids \
+             WHERE lifecycle != $lc",
+        )
+        .bind(("rids", rids))
+        .bind(("lc", lifecycle.to_string())),
+    )
+    .await?;
+    let rows: Vec<LifecycleRow> = take(&mut r, 0)?;
+    let mut changed = Vec::with_capacity(rows.len());
+    for row in rows {
+        let _ = row.lifecycle;
+        let kind = row
+            .memory_kind
+            .as_deref()
+            .and_then(crate::memory_metadata::MemoryKind::parse)
+            .unwrap_or(crate::memory_metadata::MemoryKind::Claim);
+        let payload = row
+            .payload_json
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .and_then(|p| serde_json::from_str::<crate::memory_metadata::MemoryPayload>(p).ok());
+        run(
+            tx,
+            tx.query("UPDATE $m SET lifecycle = $lc RETURN NONE")
+                .bind(("m", rid("memory", &row.id)))
+                .bind(("lc", lifecycle.to_string())),
+        )
+        .await?;
+        super::graph::project_memory_in(tx, &row.id, kind, payload.as_ref(), lifecycle).await?;
+        changed.push(row.id);
+    }
+    Ok(changed)
 }

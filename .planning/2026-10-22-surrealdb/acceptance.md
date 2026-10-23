@@ -46,7 +46,9 @@ verified.
 
 ## P3 — Recon, Intel, Atlas + savepoints (spec step 5 rest)
 - Insight publication (`storage/insight.rs`): `commit_article_insight_replacement` (bc3184e), `publish_atlas_insights` and `publish_snapshot` ported. Publishes bump `memories_changed` only when they changed something (SQLite's rule); `write_then_index` only when it touched memory ids.
-- [ ] `brain_backfill::bind_claim_subject` with the backfill receipts (`legacy_receipt`), step 4; the publishers return the created fingerprints for it.
+- [x] `legacy_receipt` (`storage/provenance.rs`): reads, index work and the `reconstructed` receipt row in one publisher transaction. Links are ordered by fingerprint (SurrealDB has no rowid order).
+- [ ] `brain_backfill::bind_claim_subject`: not ported. It needs the `brain_actors::bind` engine (1,092 lines), which reads and writes `brain_actor_aliases`, `brain_actor_external_refs`, `brain_actor_dedup_receipts`, `brain_memory_actor_refs`, `brain_memory_endpoints` and `memory_metadata`. None of those have a SurrealDB table yet. `claim_subject` also reads `recon_entities` (Recon, still SQLite) and writes `brain_backfill_receipts`. Port it together with the actor tables and the Recon tables. Until then, `ArticleReplacement::created` and the receipts' fingerprints are returned for the caller to bind on SQLite.
+- [ ] `refresh_cached_publication`: only its SurrealDB inputs are ported (`provenance::stage_outputs` through `stage_output_root`, and `republished_stages`). The captured metadata reads `argos_tasks.input_ref`, and SurrealDB brief-chain tasks have no `input_ref`. `prepare_for_stage` reads retained article evidence (`article_input`, SQLite), and `publish_completed_stage` writes `intel_brief_publications`, also SQLite. The function moves once those do.
 - [ ] `publish_snapshot`'s validate callback still reads live evidence from SQLite outside the Surreal transaction. Unavoidable until the source tables move; then validate inside the tx.
 - [ ] `storage::insight::delete_memory` has no callers yet. The caller wrapper must also clear the NLP cache (`nlp::cache::remove_owner`) and run the job sweep (`job_cleanup::cleanup_batch`), both still SQLite, and the NLP cache must treat a missing memory as a miss.
 
@@ -54,7 +56,7 @@ verified.
 - [ ] Intel stage publication with failure fallback (no savepoints)
 - [ ] Atlas occurrences, metadata revisions, actor index receipts
 - [ ] `brain_backfill`, `atlas_actor_index`, `job_cleanup`, `brief_canonical` savepoint replacements
-- [ ] Graph edges from atlas/insight records: Source, MentionedIn, Contains (moved from P2)
+- [x] Graph edges from atlas/insight records: Source, MentionedIn, Contains (moved from P2). `provenance::memory_record_edges` / `actor_mention_edges` read them at query time from canonical records, as `brain_topology_query` does, rather than storing `brain_graph_edge` rows. Gaps: the `current_metadata_sql` article-revision filter is not applied; thread sources carry no title and no `recon_threads.deleted` filter, because Recon threads are still SQLite.
 - [ ] The 14 write sites moved from P2 (`delete_memory`, atlas deletes/prune, insight publication, metadata, `ensure_schema`; see design.md)
 
 ## P4 — TUI/CLI + storage commands (spec steps 7–9)
@@ -85,4 +87,4 @@ verified.
 - [ ] `graphify update .` as the last commit
 - [ ] Atlas deletes (step 3) on Surreal leave to the caller: NLP cache/`nlp_source_refs`, `brain_backfill_receipts` cleanup, `jobs::cleanup_batch`, and `retire_deleted_article_leads` (reads `app_state`).
 - [ ] `atlas_save_metadata` on Surreal does not run `persist_article_rating` (confidence inputs still SQLite).
-- [ ] Step 4 remainder: `legacy_receipt`, `bind_claim_subject` (needs the `actors::bind` engine), `refresh_cached_publication`, and Source/MentionedIn/Contains topology edges.
+- [ ] Step 4 remainder: `legacy_receipt` and the Source/MentionedIn/Contains edges are done. Still open: `bind_claim_subject` and `refresh_cached_publication`; see P3 above for exactly what each still reads from SQLite.

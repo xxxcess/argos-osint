@@ -27,6 +27,7 @@ pub mod lifecycle;
 pub mod memory;
 pub mod outbox;
 pub mod processes;
+pub mod provenance;
 pub mod publisher;
 pub mod recall;
 pub mod tx;

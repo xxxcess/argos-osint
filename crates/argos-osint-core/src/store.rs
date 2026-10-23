@@ -20,9 +20,11 @@ pub use publication::{
     RejectedClaim, DELETED_REVISION, MEMORY_RECORD,
 };
 
+pub(crate) use publication::reject_reason;
+
 static IDS: AtomicU64 = AtomicU64::new(1);
 
-fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     let n = IDS.fetch_add(1, Ordering::Relaxed);
     format!("mem-{}-{n}", chrono::Utc::now().timestamp_millis())
 }

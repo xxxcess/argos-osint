@@ -377,7 +377,7 @@ pub fn payload_revision(claims: &[AtlasInsightClaim], brief: &str) -> String {
     crate::evidence::content_hash(&parts.join("\n"))[..24].to_string()
 }
 
-fn reject_reason(claim: &AtlasInsightClaim) -> Option<String> {
+pub(crate) fn reject_reason(claim: &AtlasInsightClaim) -> Option<String> {
     let missing: Vec<&str> = [
         ("entity", claim.entity.trim().is_empty()),
         ("namespace", claim.namespace.trim().is_empty()),

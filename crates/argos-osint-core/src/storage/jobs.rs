@@ -791,17 +791,21 @@ pub enum Publish {
 }
 
 #[derive(Debug, SurrealValue)]
-struct FenceRow {
+pub(crate) struct FenceRow {
     root_id: String,
     state: String,
     lease_owner: String,
     lease_epoch: i64,
     output_hash: String,
     live: bool,
-    cancelled: bool,
+    pub(crate) cancelled: bool,
 }
 
-async fn fence(tx: &Tx, claimed: &ClaimedTask, now: &str) -> Result<Option<FenceRow>, TxError> {
+pub(crate) async fn fence(
+    tx: &Tx,
+    claimed: &ClaimedTask,
+    now: &str,
+) -> Result<Option<FenceRow>, TxError> {
     let mut res = run(
         tx,
         tx.query(
@@ -817,14 +821,19 @@ async fn fence(tx: &Tx, claimed: &ClaimedTask, now: &str) -> Result<Option<Fence
     take(&mut res, 0)
 }
 
-fn holds(f: &FenceRow, claimed: &ClaimedTask) -> bool {
+pub(crate) fn holds(f: &FenceRow, claimed: &ClaimedTask) -> bool {
     f.state == "running"
         && f.lease_owner == claimed.lease_owner
         && f.lease_epoch == claimed.lease_epoch
         && f.live
 }
 
-async fn complete_in(tx: &Tx, claimed: &ClaimedTask, hash: &str, now: &str) -> Result<(), TxError> {
+pub(crate) async fn complete_in(
+    tx: &Tx,
+    claimed: &ClaimedTask,
+    hash: &str,
+    now: &str,
+) -> Result<(), TxError> {
     run(
         tx,
         tx.query(

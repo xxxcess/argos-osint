@@ -45,6 +45,7 @@ verified.
 - [x] Recall caps (5 memories, 1,500 tokens), opt-out, default kind exclusions (actor, link, related unless asked for)
 
 ## P3 — Recon, Intel, Atlas + savepoints (spec step 5 rest)
+- Insight publication (`storage/insight.rs`): `commit_article_insight_replacement` (bc3184e), `publish_atlas_insights` and `publish_snapshot` ported. `brain_backfill::bind_claim_subject` is deferred to step 4 with the backfill receipts (`legacy_receipt`); the publishers return the created fingerprints for it.
 
 - [ ] Recon/OSINT messages, tools, artifacts, ordered counters, credit hold/reconcile/release
 - [ ] Intel stage publication with failure fallback (no savepoints)

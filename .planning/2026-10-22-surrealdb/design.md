@@ -48,6 +48,16 @@ Goal: replace SQLite + LanceDB with one local, disk-backed SurrealDB 3.3.4
 | P4 TUI / CLI + storage commands | 7, 8, 9 | Consumers and fixtures, `argos storage status|init|reset --yes`, repopulation checks, memory measurements. |
 | P5 `feat!` removal | 10 | Delete rusqlite, LanceDB, SQL schemas/migrations, protoc tooling; docs, diagrams, packaging. |
 
+### P5 perf list (measured, not scheduled earlier)
+
+- **Single-query publication batch (writes return statements).** The P2
+  group-commit publisher still runs each write's own query, then one query
+  for all outbox entries plus the `memories_changed` bump, then the commit,
+  in sequence. At 8 writers x 40, retries are 0 but embedded p99 was 65-84 ms
+  over three runs (server 67 ms in the gate run), all from per-query round-trip cost. Having
+  writes return their statements so a batch is one query would cut that.
+  Acceptance budget is 100 ms in both modes until then.
+
 ## Spec notes found while doing P0 (inputs for P1+)
 
 1. The SDK crates (surrealdb 3.3.4 and its workspace crates) declare **no

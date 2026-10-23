@@ -14,4 +14,5 @@ pub mod embeddings;
 pub mod jobs;
 pub mod outbox;
 pub mod processes;
+pub mod publisher;
 pub mod tx;

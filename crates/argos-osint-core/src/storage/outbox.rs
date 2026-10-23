@@ -240,6 +240,114 @@ pub async fn enqueue_in(
     })
 }
 
+/// One change's enqueue as a single SurrealQL block, same rules as
+/// [`enqueue_in`]: op_key replay, active work-key coalescing, then a fresh
+/// seq. `{i}` suffixes the bindings.
+const ENQUEUE_BLOCK: &str = "{
+    LET $e = (SELECT seq, record_kind, record_id, revision, operation FROM ONLY $r{i});
+    IF $e != NONE {
+        IF $e.record_kind != $kind{i} OR $e.record_id != $id{i} OR $e.revision != $rev{i}
+            OR $e.operation != $op{i} {
+            RETURN { conflict: 'op_key ' + $key{i} + ' already names ' + $e.record_kind + '/'
+                + $e.record_id + '@' + $e.revision + ' ' + $e.operation };
+        };
+        RETURN { seq: $e.seq, key: $key{i}, created: false };
+    };
+    LET $k = (SELECT VALUE change FROM ONLY $w{i});
+    IF $k != NONE {
+        LET $a = (SELECT record::id(id) AS key, seq FROM ONLY type::record('index_change', $k)
+            WHERE state IN $active);
+        IF $a != NONE { RETURN { seq: $a.seq, key: $a.key, created: false }; };
+    };
+    LET $seq = (UPSERT $seq_counter SET n = (n ?? 0) + 1 RETURN VALUE n)[0];
+    CREATE $r{i} SET seq = $seq, record_kind = $kind{i}, record_id = $id{i}, revision = $rev{i},
+        operation = $op{i}, generation = $gen{i}, state = 'pending', work_key = $wk{i},
+        content_hash = $hash{i}, task_id = $task{i}, job_id = $job{i},
+        created_at = <datetime>$now, updated_at = <datetime>$now RETURN NONE;
+    UPSERT $w{i} SET change = $key{i} RETURN NONE;
+    RETURN { seq: $seq, key: $key{i}, created: true };
+};
+";
+
+/// Enqueue many changes inside the caller's transaction in one round trip,
+/// in order, then (if `bump` names a counter) allocate one value from it.
+/// Equivalent to calling [`enqueue_in`] per change.
+pub async fn enqueue_many_in(
+    tx: &Tx,
+    changes: &[(NewChange<'_>, &str)],
+    bump: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<(Vec<Enqueued>, Option<i64>), TxError> {
+    if changes.is_empty() && bump.is_none() {
+        return Ok((Vec::new(), None));
+    }
+    let mut sql = String::new();
+    for i in 0..changes.len() {
+        sql.push_str(&ENQUEUE_BLOCK.replace("{i}", &i.to_string()));
+    }
+    if bump.is_some() {
+        sql.push_str("UPSERT $bump SET n = (n ?? 0) + 1 RETURN VALUE n;");
+    }
+    let mut q = tx
+        .query(sql)
+        .bind(("seq_counter", rid("counter", SEQ_COUNTER)))
+        .bind(("active", ACTIVE_STATES.to_vec()))
+        .bind(("now", ts(now)));
+    if let Some(name) = bump {
+        q = q.bind(("bump", rid("counter", name)));
+    }
+    for (i, (c, op_key)) in changes.iter().enumerate() {
+        let op = normalized_operation(c.operation);
+        q = q
+            .bind((format!("r{i}"), rid("index_change", op_key)))
+            .bind((format!("w{i}"), work_rid(c)))
+            .bind((format!("key{i}"), op_key.to_string()))
+            .bind((format!("kind{i}"), c.record_kind.to_string()))
+            .bind((format!("id{i}"), c.record_id.to_string()))
+            .bind((format!("rev{i}"), c.revision.to_string()))
+            .bind((format!("op{i}"), op.to_string()))
+            .bind((format!("gen{i}"), c.generation.to_string()))
+            .bind((
+                format!("wk{i}"),
+                work_key(c.record_kind, c.record_id, c.revision, op),
+            ))
+            .bind((format!("hash{i}"), c.content_hash.to_string()))
+            .bind((format!("task{i}"), c.task_id.to_string()))
+            .bind((format!("job{i}"), c.job_id.to_string()));
+    }
+    let mut res = run(tx, q).await?;
+    #[derive(SurrealValue)]
+    struct Row {
+        seq: Option<i64>,
+        key: Option<String>,
+        created: Option<bool>,
+        conflict: Option<String>,
+    }
+    let mut out = Vec::with_capacity(changes.len());
+    for i in 0..changes.len() {
+        let row: Option<Row> = take(&mut res, i)?;
+        let row = row.ok_or_else(|| TxError::Abort(format!("enqueue {i} returned nothing")))?;
+        if let Some(why) = row.conflict {
+            return Err(TxError::Abort(why));
+        }
+        match (row.seq, row.key, row.created) {
+            (Some(seq), Some(key), Some(created)) => out.push(Enqueued { seq, key, created }),
+            _ => {
+                return Err(TxError::Abort(format!(
+                    "enqueue {i} returned a partial row"
+                )))
+            }
+        }
+    }
+    let bumped = if bump.is_some() {
+        let v: Vec<i64> = take(&mut res, changes.len())?;
+        v.first().copied()
+    } else {
+        None
+    };
+    Ok((out, bumped))
+}
+
 /// Enqueue `change` in a transaction of its own. Every enqueue allocates
 /// from one counter, so it uses the counter's hot-record policy.
 pub async fn enqueue(

@@ -43,6 +43,7 @@ pub mod open;
 pub mod outbox;
 pub mod pipeline_inputs;
 pub mod processes;
+pub mod profile_view;
 pub mod provenance;
 pub mod publisher;
 pub mod recall;

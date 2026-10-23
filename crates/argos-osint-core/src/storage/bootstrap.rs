@@ -22,7 +22,7 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// before lifecycle (which indexes `brain_graph_node`); Atlas before its
 /// metadata (whose event is on `atlas_article`); jobs, insight and intel
 /// before refresh.
-pub fn schemas() -> [(&'static str, &'static str); 18] {
+pub fn schemas() -> [(&'static str, &'static str); 19] {
     [
         ("counters", super::counters::SCHEMA),
         ("outbox", super::outbox::SCHEMA),
@@ -41,6 +41,7 @@ pub fn schemas() -> [(&'static str, &'static str); 18] {
         ("entities", super::entities::SCHEMA),
         ("credits", super::credits::SCHEMA),
         ("pipeline_inputs", super::pipeline_inputs::SCHEMA),
+        ("profile_view", super::profile_view::SCHEMA),
         ("meta", META_SCHEMA),
     ]
 }

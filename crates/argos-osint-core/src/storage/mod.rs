@@ -36,5 +36,7 @@ pub mod provenance;
 pub mod publisher;
 pub mod recall;
 pub mod refresh;
+pub mod repo;
+pub mod runtime;
 pub mod server;
 pub mod tx;

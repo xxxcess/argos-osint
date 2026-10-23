@@ -206,7 +206,31 @@ impl Server {
         self.launch();
     }
 
+    /// A client on `ns`/`db` obtained through the async repository
+    /// (`storage::repo::Repository`), so every contract test runs against
+    /// the bootstrapped repository path in both modes.
     pub async fn root(&self, ns: &str, db: &str) -> Surreal<Any> {
+        use argos_osint_core::storage::open::Target;
+        use argos_osint_core::storage::repo::Repository;
+        let repo = if self.embedded {
+            Repository::attach(self.raw_root(ns, db).await, ns, db).await
+        } else {
+            Repository::connect(
+                &Target::Server {
+                    port: self.port,
+                    username: "root".into(),
+                    password: self.password.clone(),
+                },
+                ns,
+                db,
+            )
+            .await
+        };
+        repo.expect("open repository").db().clone()
+    }
+
+    /// A bare client without the schema bootstrap (bootstrap tests only).
+    pub async fn raw_root(&self, ns: &str, db: &str) -> Surreal<Any> {
         if self.embedded {
             let cached = self.client.lock().expect("client lock").clone();
             if let Some(client) = cached {

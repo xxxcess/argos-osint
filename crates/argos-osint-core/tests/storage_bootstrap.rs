@@ -14,7 +14,7 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
     let Some(server) = Server::start() else {
         return;
     };
-    let db = server.root("argos", "bootstrap").await;
+    let db = server.raw_root("argos", "bootstrap").await;
     let first = ensure_schema(&db).await.unwrap();
     assert_eq!((first.previous, first.version), (0, SCHEMA_VERSION));
     let mut r = db.query("INFO FOR DB").await.unwrap().check().unwrap();

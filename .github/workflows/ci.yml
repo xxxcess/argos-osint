@@ -24,9 +24,11 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
+      # Matches rust-toolchain.toml (1.95.0 + clippy + rustfmt); 1.95 is the
+      # SurrealDB 3.3.4 SDK minimum.
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       # No protoc install step on purpose: .cargo/config.toml points PROTOC at
       # tools/protoc, which uses the protoc-bin-vendored binary for this host.
@@ -49,3 +51,39 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked --no-default-features --features nlp -- -D warnings
       - name: Test (NLP enabled; offline; no embeddings)
         run: cargo test --workspace --locked --no-default-features --features nlp
+
+      # SurrealDB migration (PR #53, acceptance.md P0). Default builds must link
+      # no SurrealDB crate; `surreal` (remote client) and `embedded` (RocksDB)
+      # are non-default features checked here.
+      - name: Storage dependency check (default links no SurrealDB)
+        run: python3 scripts/check_storage_deps.py
+      - name: Install libclang (RocksDB bindgen)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - name: Clippy (SurrealDB remote client)
+        run: cargo clippy --workspace --all-targets --locked --no-default-features --features surreal -- -D warnings
+      - name: Clippy (SurrealDB embedded RocksDB)
+        run: cargo clippy --workspace --all-targets --locked --no-default-features --features embedded -- -D warnings
+      - name: Pinned SurrealDB hashes match design.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          hashes=$(grep -oE '"[0-9a-f]{64}"' scripts/test_surreal.py | tr -d '"' | sort -u)
+          test "$(echo "$hashes" | wc -l)" -eq 4
+          for h in $hashes; do
+            grep -q "$h" .planning/2026-10-22-surrealdb/design.md || { echo "hash $h not in design.md"; exit 1; }
+          done
+      - name: Cache SurrealDB 3.3.4 server binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/argos-surreal
+          key: surreal-3.3.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test_surreal.py') }}
+      # Downloads the per-OS release asset over HTTPS and verifies its SHA-256
+      # (pinned in scripts/test_surreal.py) on a cache miss.
+      - name: Install SurrealDB 3.3.4 server (SHA-256 verified)
+        run: python3 scripts/test_surreal.py --mode server --fetch-only
+      # Sets ARGOS_SURREAL_REQUIRED=1, so a missing server fails instead of skipping.
+      - name: Storage contracts (server mode, real 3.3.4 disk server)
+        run: python3 scripts/test_surreal.py --mode server --cargo cargo
+      - name: Storage contracts (embedded RocksDB mode)
+        run: python3 scripts/test_surreal.py --mode embedded --cargo cargo

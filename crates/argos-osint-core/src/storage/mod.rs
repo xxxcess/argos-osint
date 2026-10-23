@@ -47,6 +47,7 @@ pub mod provenance;
 pub mod publisher;
 pub mod recall;
 pub mod recon;
+pub mod recon_runs;
 pub mod recon_threads;
 pub mod refresh;
 pub mod refresh_exec;

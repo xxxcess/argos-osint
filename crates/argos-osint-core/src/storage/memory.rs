@@ -16,7 +16,7 @@ use surrealdb::types::SurrealValue;
 use surrealdb::Surreal;
 
 use super::jobs::{rid, run, take};
-use super::publisher::{Change, Published, Publisher, Write};
+use super::publisher::{Change, Published, Publisher, Write, Wrote};
 use super::tx::{run_tx, Committed, RetryPolicy, Tx, TxError};
 
 /// Record kind for memory rows in the outbox (`store::publication`).
@@ -161,7 +161,10 @@ pub async fn write_then_index(
         let nonce = nonce.clone();
         Box::pin(async move {
             let ids = write(tx.clone()).await?;
-            index_changes_in(&tx, &ids, &nonce).await
+            // As in SQLite: no touched memory, no `memories_changed` bump.
+            let changed = !ids.is_empty();
+            let changes = index_changes_in(&tx, &ids, &nonce).await?;
+            Ok(Wrote { changes, changed })
         })
     });
     publisher.publish(w).await

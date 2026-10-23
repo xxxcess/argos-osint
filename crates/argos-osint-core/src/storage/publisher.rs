@@ -25,7 +25,7 @@ use super::counters;
 use super::outbox::{self, Enqueued, NewChange};
 use super::tx::{run_tx, Committed, Tx, TxError};
 
-/// Counter bumped once per committed batch.
+/// Counter bumped once per committed batch that changed memories.
 pub const CHANGED_COUNTER: &str = "memories_changed";
 /// Most writes per transaction.
 pub const BATCH_CAP: usize = 32;
@@ -44,18 +44,37 @@ pub struct Change {
     pub op_key: String,
 }
 
+/// What one write did: the outbox changes to enqueue, and whether it changed
+/// memories (bumps `memories_changed`, matching SQLite's conditional bump).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wrote {
+    pub changes: Vec<Change>,
+    pub changed: bool,
+}
+
+impl From<Vec<Change>> for Wrote {
+    /// A plain change list counts as a memory change.
+    fn from(changes: Vec<Change>) -> Self {
+        Wrote {
+            changes,
+            changed: true,
+        }
+    }
+}
+
 /// One memory write: database statements run inside the batch transaction,
-/// returning the outbox changes to enqueue. It may run more than once
-/// (retries, a split), so it must be pure database work.
-pub type Write = Arc<dyn Fn(Tx) -> BoxFuture<'static, Result<Vec<Change>, TxError>> + Send + Sync>;
+/// returning what it did. It may run more than once (retries, a split), so
+/// it must be pure database work.
+pub type Write = Arc<dyn Fn(Tx) -> BoxFuture<'static, Result<Wrote, TxError>> + Send + Sync>;
 
 /// What a committed write got.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Published {
     /// Outbox rows for this write's changes, in order.
     pub enqueued: Vec<Enqueued>,
-    /// `memories_changed` after the batch that carried it.
-    pub changed_seq: i64,
+    /// `memories_changed` after the batch that carried it; `None` when no
+    /// write in the batch changed memories (the counter was not bumped).
+    pub changed_seq: Option<i64>,
     /// Writes in that batch (1 after a split).
     pub batch_size: usize,
 }
@@ -230,6 +249,7 @@ async fn commit(db: &Surreal<Any>, writes: &[Write]) -> Result<Vec<Committed<Pub
             let now = Utc::now();
             let mut all = Vec::new();
             let mut counts = Vec::with_capacity(writes.len());
+            let mut changed = false;
             for w in &writes {
                 let changes = match std::panic::catch_unwind(AssertUnwindSafe(|| w(tx.clone()))) {
                     Ok(fut) => AssertUnwindSafe(fut).catch_unwind().await,
@@ -238,8 +258,9 @@ async fn commit(db: &Surreal<Any>, writes: &[Write]) -> Result<Vec<Committed<Pub
                 .map_err(|panic| {
                     TxError::Abort(format!("write panicked: {}", panic_message(&*panic)))
                 })??;
-                counts.push(changes.len());
-                all.extend(changes);
+                changed |= changes.changed;
+                counts.push(changes.changes.len());
+                all.extend(changes.changes);
             }
             // All outbox entries and the one counter bump in one round trip.
             let new: Vec<(NewChange<'_>, &str)> = all
@@ -260,10 +281,12 @@ async fn commit(db: &Surreal<Any>, writes: &[Write]) -> Result<Vec<Committed<Pub
                     )
                 })
                 .collect();
-            let (enqueued, bumped) =
-                outbox::enqueue_many_in(&tx, &new, Some(CHANGED_COUNTER), now).await?;
-            let changed_seq = bumped
-                .ok_or_else(|| TxError::Abort("memories_changed returned no value".into()))?;
+            let counter = changed.then_some(CHANGED_COUNTER);
+            let (enqueued, bumped) = outbox::enqueue_many_in(&tx, &new, counter, now).await?;
+            if changed && bumped.is_none() {
+                return Err(TxError::Abort("memories_changed returned no value".into()));
+            }
+            let changed_seq = bumped;
             let mut rest = enqueued.into_iter();
             let per_write: Vec<Vec<Enqueued>> = counts
                 .iter()

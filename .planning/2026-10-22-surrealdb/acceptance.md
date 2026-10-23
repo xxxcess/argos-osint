@@ -45,7 +45,10 @@ verified.
 - [x] Recall caps (5 memories, 1,500 tokens), opt-out, default kind exclusions (actor, link, related unless asked for)
 
 ## P3 — Recon, Intel, Atlas + savepoints (spec step 5 rest)
-- Insight publication (`storage/insight.rs`): `commit_article_insight_replacement` (bc3184e), `publish_atlas_insights` and `publish_snapshot` ported. `brain_backfill::bind_claim_subject` is deferred to step 4 with the backfill receipts (`legacy_receipt`); the publishers return the created fingerprints for it.
+- Insight publication (`storage/insight.rs`): `commit_article_insight_replacement` (bc3184e), `publish_atlas_insights` and `publish_snapshot` ported. Publishes bump `memories_changed` only when they changed something (SQLite's rule); `write_then_index` only when it touched memory ids.
+- [ ] `brain_backfill::bind_claim_subject` with the backfill receipts (`legacy_receipt`), step 4; the publishers return the created fingerprints for it.
+- [ ] `publish_snapshot`'s validate callback still reads live evidence from SQLite outside the Surreal transaction. Unavoidable until the source tables move; then validate inside the tx.
+- [ ] `storage::insight::delete_memory` has no callers yet. The caller wrapper must also clear the NLP cache (`nlp::cache::remove_owner`) and run the job sweep (`job_cleanup::cleanup_batch`), both still SQLite, and the NLP cache must treat a missing memory as a miss.
 
 - [ ] Recon/OSINT messages, tools, artifacts, ordered counters, credit hold/reconcile/release
 - [ ] Intel stage publication with failure fallback (no savepoints)

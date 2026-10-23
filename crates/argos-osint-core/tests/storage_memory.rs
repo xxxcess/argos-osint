@@ -88,7 +88,7 @@ async fn a_write_and_its_index_work_commit_together() {
     .await
     .unwrap();
     assert_eq!(p.value.enqueued.len(), 2, "duplicate id queued once");
-    assert_eq!(p.value.changed_seq, 1);
+    assert_eq!(p.value.changed_seq, Some(1));
     let rev_a = memory::memory_revision("alpha");
     assert_eq!(
         pending(&db).await,
@@ -181,7 +181,7 @@ async fn indexed_revisions_are_skipped_and_deletes_queue_removal() {
         .await
         .unwrap();
     assert!(same.value.enqueued.is_empty());
-    assert_eq!(same.value.changed_seq, 2);
+    assert_eq!(same.value.changed_seq, Some(2));
     // Delete queues removal; an archived memory also queues removal.
     let del = memory::write_then_index(&publisher, put(vec![("b", None)]))
         .await
@@ -224,7 +224,8 @@ fn probe_write(id: String, fail: bool) -> publisher::Write {
                 generation: String::new(),
                 content_hash: "h".into(),
                 op_key: format!("pub:{id}"),
-            }])
+            }]
+            .into())
         })
     })
 }
@@ -289,7 +290,10 @@ async fn eight_publishers_group_commit_every_write_once() {
         probes as usize, total,
         "every write's statements landed once"
     );
-    let batches: HashSet<i64> = ok.iter().map(|(c, _)| c.value.changed_seq).collect();
+    let batches: HashSet<i64> = ok
+        .iter()
+        .map(|(c, _)| c.value.changed_seq.unwrap())
+        .collect();
     let changed: i64 = counters::current(&db, publisher::CHANGED_COUNTER)
         .await
         .unwrap();
@@ -360,7 +364,7 @@ async fn an_invalid_write_is_split_out_of_its_batch() {
             let inner = inner.clone();
             Box::pin(async move {
                 let mut v = inner(tx).await?;
-                v[0].op_key = "pub:a".into();
+                v.changes[0].op_key = "pub:a".into();
                 Ok(v)
             })
         })

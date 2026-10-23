@@ -207,6 +207,24 @@ async fn publication_dedups_reuses_tombstones_and_records_its_receipt() {
         3
     );
 
+    // memories_changed bumps only when a publish changed something.
+    let seq = || scalar::<i64>(&db, "RETURN counter:memories_changed.n ?? 0");
+    let bumped = seq().await;
+    assert!(bumped > 0, "a publish that created claims bumps");
+    let noop = publish_atlas_insights(
+        &p,
+        "run9",
+        vec![claim("Paris", "a1"), claim("Lyon", "a2")],
+        vec![],
+        "",
+        PublishOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!((noop.created, noop.reused), (0, 2));
+    assert!(noop.brief_memory_id.is_none() && noop.updated_memory_ids.is_empty());
+    assert_eq!(seq().await, bumped, "all-reused publish leaves the counter");
+
     // A tombstoned fingerprint from this run is not recreated.
     let fp = r.claim_memory_ids[0].0.clone();
     db.query("DELETE insight_claim WHERE record::id(id) = $fp; CREATE memory_tombstone SET memory_id = 'x', fingerprint = $fp, run_ids = ['run9'], created_at = '';")
@@ -362,6 +380,7 @@ async fn plan(db: &Surreal<Any>, sql: &str) -> String {
         .bind(("answer", "atlas-r".to_string()))
         .bind(("call", "a".to_string()))
         .bind(("fp", "f".to_string()))
+        .bind(("item", "i".to_string()))
         .await
         .unwrap()
         .check()
@@ -385,11 +404,37 @@ async fn source_and_relation_lookups_use_their_indexes() {
         (SOURCES_BY_CALL_SURQL, "insight_source_call"),
         (DELETE_RELATIONS_LEFT_SURQL, "insight_relation_left"),
         (DELETE_RELATIONS_RIGHT_SURQL, "insight_relation_right"),
+        // delete_memory_in's per-item and sweep statements.
+        (
+            "SELECT VALUE derivation_id FROM insight_derivation_evidence WHERE premise_id = $item",
+            "insight_evidence_premise",
+        ),
+        (
+            "UPDATE insight_derivation_link SET status = 'deleted_endpoint' WHERE left_id = $item RETURN NONE",
+            "insight_links_left_id",
+        ),
+        (
+            "UPDATE insight_derivation_link SET status = 'deleted_endpoint' WHERE right_id = $item RETURN NONE",
+            "insight_links_right_id",
+        ),
+        (
+            "SELECT VALUE snapshot_id FROM insight_derivation WHERE status = 'blocked_premise'",
+            "insight_derivation_status",
+        ),
     ] {
         let p = plan(&db, sql).await;
         assert!(p.contains(index), "{sql}: {p}");
         assert!(!p.contains("Iterate Table"), "{sql}: {p}");
     }
+    // Derived snapshots are read by record id: no table iteration.
+    let mut r = db
+        .query("SELECT VALUE snapshot_id FROM [insight_derivation:d1, insight_derivation:d2] EXPLAIN FULL")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let p = format!("{:?}", r.take::<surrealdb::types::Value>(0).unwrap());
+    assert!(!p.contains("Iterate Table"), "{p}");
 }
 
 #[tokio::test]

@@ -120,6 +120,7 @@ DEFINE FIELD IF NOT EXISTS status ON insight_derivation TYPE string;
 DEFINE FIELD IF NOT EXISTS revision ON insight_derivation TYPE string;
 DEFINE INDEX IF NOT EXISTS insight_derivation_memory ON insight_derivation FIELDS memory_id;
 DEFINE INDEX IF NOT EXISTS insight_derivation_snapshot ON insight_derivation FIELDS snapshot_id;
+DEFINE INDEX IF NOT EXISTS insight_derivation_status ON insight_derivation FIELDS status;
 DEFINE TABLE IF NOT EXISTS insight_derivation_evidence SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS derivation_id ON insight_derivation_evidence TYPE string;
 DEFINE FIELD IF NOT EXISTS source_id ON insight_derivation_evidence TYPE string;
@@ -130,6 +131,7 @@ DEFINE FIELD IF NOT EXISTS evidence_json ON insight_derivation_evidence TYPE str
 DEFINE INDEX IF NOT EXISTS insight_evidence_derivation ON insight_derivation_evidence FIELDS derivation_id;
 DEFINE INDEX IF NOT EXISTS insight_evidence_source ON insight_derivation_evidence FIELDS source_id, source_revision;
 DEFINE INDEX IF NOT EXISTS insight_evidence_memory ON insight_derivation_evidence FIELDS memory_id;
+DEFINE INDEX IF NOT EXISTS insight_evidence_premise ON insight_derivation_evidence FIELDS premise_id;
 DEFINE TABLE IF NOT EXISTS insight_derivation_link SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS snapshot_id ON insight_derivation_link TYPE string;
 DEFINE FIELD IF NOT EXISTS left_kind ON insight_derivation_link TYPE string;
@@ -144,7 +146,9 @@ DEFINE FIELD IF NOT EXISTS status ON insight_derivation_link TYPE string;
 DEFINE FIELD IF NOT EXISTS revision ON insight_derivation_link TYPE string;
 DEFINE INDEX IF NOT EXISTS insight_links_snapshot ON insight_derivation_link FIELDS snapshot_id;
 DEFINE INDEX IF NOT EXISTS insight_links_left ON insight_derivation_link FIELDS left_kind, left_id;
-DEFINE INDEX IF NOT EXISTS insight_links_right ON insight_derivation_link FIELDS right_kind, right_id;";
+DEFINE INDEX IF NOT EXISTS insight_links_right ON insight_derivation_link FIELDS right_kind, right_id;
+DEFINE INDEX IF NOT EXISTS insight_links_left_id ON insight_derivation_link FIELDS left_id;
+DEFINE INDEX IF NOT EXISTS insight_links_right_id ON insight_derivation_link FIELDS right_id;";
 
 /// An article's source rows, through the `insight_source_call` index.
 pub const SOURCES_BY_CALL_SURQL: &str = "SELECT VALUE fingerprint FROM insight_source
@@ -489,8 +493,9 @@ async fn publish_in(
     brief: &str,
     options: &PublishOptions,
     revision: &str,
-) -> Result<PublicationReceipt, TxError> {
+) -> Result<(PublicationReceipt, usize), TxError> {
     let answer_id = atlas_answer_id(run_id);
+    let mut retagged = 0usize;
     let now = chrono::Utc::now().to_rfc3339();
     let mut receipt = PublicationReceipt {
         run_id: run_id.into(),
@@ -571,6 +576,7 @@ async fn publish_in(
                             let tagged = serde_json::to_string(&retag_source(parsed, app, run_id))
                                 .map_err(json_err)?;
                             if tagged != head.source_json {
+                                retagged += 1;
                                 run(
                                     tx,
                                     tx.query("UPDATE type::record('memory', $id) SET source_json = $s RETURN NONE;")
@@ -706,7 +712,7 @@ async fn publish_in(
         }
     }
     receipt.affected_memory_ids = affected;
-    Ok(receipt)
+    Ok((receipt, retagged))
 }
 
 async fn upsert_relations(tx: &Tx, relations: &[(String, String, String)]) -> Result<(), TxError> {
@@ -763,7 +769,7 @@ pub async fn publish_atlas_insights(
         let (args, out, nonce) = (args.clone(), out.clone(), nonce.clone());
         Box::pin(async move {
             let (run_id, claims, relations, brief, options, revision) = &*args;
-            let mut receipt =
+            let (mut receipt, retagged) =
                 publish_in(&tx, run_id, claims, relations, brief, options, revision).await?;
             let changes =
                 super::memory::index_changes_in(&tx, &receipt.affected_memory_ids, &nonce).await?;
@@ -787,8 +793,14 @@ pub async fn publish_atlas_insights(
                 )
                 .await?;
             }
+            // SQLite bumps only for a retag, a created or repaired claim, an
+            // updated brief, or a brief at all.
+            let changed = retagged > 0
+                || receipt.created + receipt.repaired > 0
+                || !receipt.updated_memory_ids.is_empty()
+                || receipt.brief_memory_id.is_some();
             *out.lock().expect("receipt lock") = receipt;
-            Ok(changes)
+            Ok(super::publisher::Wrote { changes, changed })
         })
     });
     publisher.publish(w).await?;
@@ -1054,19 +1066,26 @@ async fn delete_memory_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
         tx,
         tx.query(
             "LET $derived = (SELECT VALUE derivation_id FROM insight_derivation_evidence WHERE memory_id = $mem);
-             LET $snaps = (SELECT VALUE snapshot_id FROM insight_derivation
-               WHERE record::id(id) INSIDE $derived);
-             UPDATE insight_owner_state SET lifecycle = 'previous', last_error = 'memory premise deleted'
-               WHERE active_snapshot_id INSIDE $snaps RETURN NONE;
-             LET $premised = (SELECT VALUE derivation_id FROM insight_derivation_evidence
-               WHERE premise_id INSIDE $items);
-             UPDATE insight_derivation SET status = 'blocked_premise'
-               WHERE record::id(id) INSIDE $premised RETURN NONE;
+             -- Record ids, so these are direct fetches rather than a scan.
+             LET $drids = array::map($derived, |$d| type::record('insight_derivation', $d));
+             LET $snaps = (SELECT VALUE snapshot_id FROM $drids);
+             FOR $s IN $snaps {
+               UPDATE insight_owner_state SET lifecycle = 'previous', last_error = 'memory premise deleted'
+                 WHERE active_snapshot_id = $s RETURN NONE;
+             };
+             -- One equality per item keeps each statement on its index.
+             FOR $item IN $items {
+               LET $premised = (SELECT VALUE derivation_id FROM insight_derivation_evidence WHERE premise_id = $item);
+               UPDATE array::map($premised, |$d| type::record('insight_derivation', $d))
+                 SET status = 'blocked_premise' RETURN NONE;
+               UPDATE insight_derivation_link SET status = 'deleted_endpoint' WHERE left_id = $item RETURN NONE;
+               UPDATE insight_derivation_link SET status = 'deleted_endpoint' WHERE right_id = $item RETURN NONE;
+             };
              LET $blocked = (SELECT VALUE snapshot_id FROM insight_derivation WHERE status = 'blocked_premise');
-             UPDATE insight_owner_state SET lifecycle = 'previous', last_error = 'claim premise deleted'
-               WHERE active_snapshot_id INSIDE $blocked RETURN NONE;
-             UPDATE insight_derivation_link SET status = 'deleted_endpoint'
-               WHERE left_id INSIDE $items OR right_id INSIDE $items RETURN NONE;
+             FOR $s IN $blocked {
+               UPDATE insight_owner_state SET lifecycle = 'previous', last_error = 'claim premise deleted'
+                 WHERE active_snapshot_id = $s RETURN NONE;
+             };
              UPDATE insight_derivation SET memory_id = NONE, status = 'deleted'
                WHERE memory_id = $mem RETURN NONE;
              UPDATE insight_derivation_evidence SET memory_id = NONE WHERE memory_id = $mem RETURN NONE;

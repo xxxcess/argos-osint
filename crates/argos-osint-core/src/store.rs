@@ -24,9 +24,23 @@ pub(crate) use publication::reject_reason;
 
 static IDS: AtomicU64 = AtomicU64::new(1);
 
+/// Memory id: time, a random per-process salt and a sequence, so two
+/// processes writing one database in the same millisecond cannot collide.
 pub(crate) fn new_id() -> String {
+    static SALT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let salt = *SALT.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        // RandomState is seeded from the OS RNG; no extra dependency.
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u32(std::process::id());
+        h.finish()
+    });
     let n = IDS.fetch_add(1, Ordering::Relaxed);
-    format!("mem-{}-{n}", chrono::Utc::now().timestamp_millis())
+    format!(
+        "mem-{}-{:012x}-{n}",
+        chrono::Utc::now().timestamp_millis(),
+        salt & 0xffff_ffff_ffff
+    )
 }
 
 /// A saved explanation of one memory, keyed by the directive it was written from.

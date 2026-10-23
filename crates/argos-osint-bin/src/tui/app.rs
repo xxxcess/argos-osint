@@ -6826,10 +6826,6 @@ impl App {
         seed: argos_osint_core::brain_topology::TopologySeed,
         depth: Option<usize>,
     ) {
-        if let Some(refusal) = surreal_topology_refusal(super::surreal_brain::on(), &seed) {
-            self.status = refusal.into();
-            return;
-        }
         let already_open =
             self.module == Some(ModuleId::Brain) && self.brain_list_mode == BrainListMode::Topology;
         if already_open {
@@ -6910,7 +6906,20 @@ impl App {
                 max_edges: 200,
                 continuation_token: None,
             };
-            if let Some(db) = self.background_db.clone() {
+            if surreal_topology(super::surreal_brain::on(), &seed) {
+                self.topology_reading = true;
+                let tx = self.work_tx.clone();
+                std::thread::spawn(move || {
+                    let outcome = super::surreal_brain::topology(&seed, &options)
+                        .map(Box::new)
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(WorkEvent::TopologyLoaded {
+                        generation,
+                        seed,
+                        outcome,
+                    });
+                });
+            } else if let Some(db) = self.background_db.clone() {
                 self.topology_reading = true;
                 let tx = self.work_tx.clone();
                 std::thread::spawn(move || {
@@ -6948,6 +6957,13 @@ impl App {
         let Some(seed) = self.topology_state.seed.clone() else {
             return;
         };
+        if surreal_topology(super::surreal_brain::on(), &seed) {
+            // The generated summary's cache and tasks are still SQLite-only;
+            // the deterministic brief in the snapshot stays visible.
+            self.topology_state.summary.detach();
+            self.topology_state.summary.gen = SummaryGen::Idle;
+            return;
+        }
         let options = argos_osint_core::brain_topology::TopologyOptions {
             depth: self.topology_state.depth,
             cycle_scope: self.topology_state.cycle_scope.clone(),
@@ -11183,19 +11199,15 @@ impl TopologySummaryJob {
     }
 }
 
-/// Under a storage config the actor-group topology is refused: its query
-/// (`brain_topology_query`) still reads the SQLite store, and the TUI never
-/// mixes storage modes. Ported in phase 5.
-fn surreal_topology_refusal(
-    surreal: bool,
-    seed: &argos_osint_core::brain_topology::TopologySeed,
-) -> Option<&'static str> {
-    (surreal
+/// Under a storage config the actor-group topology is read only from the
+/// repository (`storage::topology`), on a plain worker thread through
+/// `storage::runtime::blocking`; it never falls back to the SQLite store.
+fn surreal_topology(surreal: bool, seed: &argos_osint_core::brain_topology::TopologySeed) -> bool {
+    surreal
         && matches!(
             seed,
             argos_osint_core::brain_topology::TopologySeed::ActorGroup { .. }
-        ))
-    .then_some("Actor-group topology isn't available on SurrealDB yet.")
+        )
 }
 
 #[cfg(test)]
@@ -21396,21 +21408,15 @@ mod tests {
     }
 
     #[test]
-    fn surreal_refuses_only_the_actor_group_topology() {
+    fn surreal_reads_only_the_actor_group_topology_from_the_repository() {
         use argos_osint_core::brain_topology::TopologySeed;
         let group = TopologySeed::ActorGroup {
             name_key: "ana ruiz".into(),
             member_ids: vec!["a1".into()],
         };
-        assert_eq!(
-            surreal_topology_refusal(true, &group),
-            Some("Actor-group topology isn't available on SurrealDB yet.")
-        );
-        assert_eq!(surreal_topology_refusal(false, &group), None);
-        assert_eq!(
-            surreal_topology_refusal(true, &TopologySeed::Actor("a1".into())),
-            None
-        );
+        assert!(surreal_topology(true, &group));
+        assert!(!surreal_topology(false, &group));
+        assert!(!surreal_topology(true, &TopologySeed::Actor("a1".into())));
     }
 
     #[test]

@@ -139,6 +139,8 @@ Under a storage config `App::open_topology` refuses `TopologySeed::ActorGroup` w
 
 ## Phase 5 — first item (blocks phase 5 sign-off)
 
-- [ ] Port the `brain_topology_query` actor-group seed to the repository (contract tests in both modes) and wire the TUI topology worker to it through `storage::runtime::blocking`, removing the SurrealDB refusal above.
+- [x] Port the `brain_topology_query` actor-group seed to the repository (contract tests in both modes) and wire the TUI topology worker to it through `storage::runtime::blocking`, removing the SurrealDB refusal above.
   - [x] Repository port: `storage::topology::topology_snapshot` for `TopologySeed::ActorGroup` (member resolution through redirects; the members' typed Links/Related, actor refs, typed payload actors and native mentions, re-pointed at the group; SQLite admission, findings and deterministic brief shared through `brain_topology::query::admit`). Covered in both modes by `tests/storage_topology.rs`.
   - Gaps: other seeds are refused with an error; depth > 1 does not expand past the group's own neighbours (reported as the bounded `DEPTH_GAP`); `ThisCycle` scope skips the current-metadata fence; memory nodes carry no revision (SurrealDB memories have none, so typed-payload receipts read `memory_metadata:<id>@`); reads are not one snapshot transaction.
+  - [x] TUI wiring: under a storage config `request_topology` reads `TopologySeed::ActorGroup` only through `tui::surreal_brain::topology` (`storage::runtime::blocking` on a plain worker thread, also for in-memory fixtures); the refusal from 4caaf10 is removed (`surreal_reads_only_the_actor_group_topology_from_the_repository`).
+  - Gaps: the generated neighbourhood summary is skipped for this seed on SurrealDB (its cache and tasks are SQLite-only; the deterministic brief shows); other topology seeds and the rest of the TUI still use the SQLite `Store`; no TUI test drives the SurrealDB worker (both-feature clippy only).

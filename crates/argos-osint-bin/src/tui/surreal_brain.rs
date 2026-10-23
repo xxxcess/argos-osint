@@ -1,6 +1,6 @@
 //! The TUI Brain on SurrealDB. Under a storage config the Brain list,
-//! preview and delete run only on the repository (never mixed with the
-//! SQLite store), through `storage::runtime::blocking`. Callers are the
+//! preview, delete and the Actor-group topology run only on the repository
+//! (never mixed with the SQLite store), through `storage::runtime::blocking`. Callers are the
 //! Brain's plain worker threads, never async code or the draw loop.
 
 use anyhow::Result;
@@ -43,6 +43,23 @@ pub(crate) fn preview(id: &str) -> Result<Option<InsightView>> {
 pub(crate) fn delete(id: &str) -> Result<bool> {
     use argos_osint_core::storage::{browse, runtime};
     runtime::blocking(|repo| async move { browse::delete_memory(&repo, id).await })
+}
+
+#[cfg(feature = "surreal")]
+pub(crate) fn topology(
+    seed: &argos_osint_core::brain_topology::TopologySeed,
+    options: &argos_osint_core::brain_topology::TopologyOptions,
+) -> Result<argos_osint_core::brain_topology::TopologySnapshot> {
+    use argos_osint_core::storage::{runtime, topology};
+    runtime::blocking(|repo| async move { topology::topology_snapshot(&repo, seed, options).await })
+}
+
+#[cfg(not(feature = "surreal"))]
+pub(crate) fn topology(
+    _seed: &argos_osint_core::brain_topology::TopologySeed,
+    _options: &argos_osint_core::brain_topology::TopologyOptions,
+) -> Result<argos_osint_core::brain_topology::TopologySnapshot> {
+    unreachable!("SurrealDB Brain is off without the surreal feature")
 }
 
 #[cfg(not(feature = "surreal"))]

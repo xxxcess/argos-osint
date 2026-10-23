@@ -83,6 +83,41 @@ enum Command {
         #[command(subcommand)]
         command: AtlasCommand,
     },
+    /// SurrealDB storage: status, init, start, stop, reset.
+    #[cfg(feature = "surreal")]
+    Storage {
+        #[command(subcommand)]
+        command: StorageCommand,
+    },
+}
+
+#[cfg(feature = "surreal")]
+#[derive(Subcommand)]
+enum StorageCommand {
+    /// Show mode, address, schema and readiness as JSON (never starts a server).
+    Status,
+    /// Record the storage mode and bootstrap the schema.
+    Init {
+        #[arg(long)]
+        mode: argos_osint_core::storage::home::Mode,
+        /// Fixed loopback port for server mode (default: pick a free one).
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Start (or adopt) this home's server.
+    Start,
+    /// Stop this home's server if no other Argos session uses it.
+    Stop {
+        /// Stop even while other sessions hold leases.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Delete all Argos application data and bootstrap a fresh store.
+    /// Keeps config, provider credentials, quotas, models and datasets.
+    Reset {
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -349,6 +384,26 @@ pub async fn dispatch() -> Result<()> {
         Some(Command::Osint { command }) => osint_command(command).await,
         Some(Command::Defaults { command }) => defaults_command(command),
         Some(Command::Atlas { command }) => atlas_command(command).await,
+        #[cfg(feature = "surreal")]
+        Some(Command::Storage { command }) => storage_command(command).await,
+    }
+}
+
+#[cfg(feature = "surreal")]
+async fn storage_command(command: StorageCommand) -> Result<()> {
+    use argos_osint_core::storage::{commands, home::Layout, server};
+    let layout = Layout::new(paths::ensure_home()?);
+    match command {
+        StorageCommand::Status => print_json(&commands::status(&layout).await?),
+        StorageCommand::Init { mode, port } => {
+            print_json(&commands::init(&layout, mode, port).await?)
+        }
+        StorageCommand::Start => print_json(&server::ensure_started(&layout).await?),
+        StorageCommand::Stop { force } => {
+            let stopped = server::stop(&layout, force).await?;
+            print_json(&serde_json::json!({ "stopped": stopped }))
+        }
+        StorageCommand::Reset { yes } => print_json(&commands::reset(&layout, yes).await?),
     }
 }
 

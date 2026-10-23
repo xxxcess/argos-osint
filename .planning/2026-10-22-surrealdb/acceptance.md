@@ -75,9 +75,10 @@ verified.
 - [x] `server.lock` and `embedded.lock` as OS advisory locks (std `File::try_lock`, `flock` on Unix), pid informational only (`storage::home::try_lock`). `open_embedded` takes `embedded.lock` before opening and fails fast with the documented message. Config and credentials files are written atomically with mode 0600, and the root secret comes from `/dev/urandom`, which is Unix-only.
 - [x] `clients/<pid>` leases written atomically (temp + fsync + rename)
 - [x] Tests: stale `server.json` dropped and restarted; live server adopted; wrong-identity port refused; another live lease keeps the server running; last client stops the server; a second embedded owner fails (same process, separate lock fd)
-- [ ] `argos storage init --mode server|embedded`; `status` shows mode; `reset --yes` in both modes
+- [x] `argos storage init --mode server|embedded`, `status` (mode, address, server, schema, epoch, readiness, pending reset), `start`, `stop [--force]` and `reset --yes` in both modes (`storage::commands`, CLI behind the `surreal` feature). Reset requires exclusive ownership and keeps config, credentials, settings, models and datasets. It wipes `argos.db` and its sidecars plus `memory_lancedb/`, then removes the `argos` database (database-scoped in embedded mode too, because the SDK cannot close a datastore; design.md 7b), bootstraps and publishes a new `storage_meta:epoch`. Embedded opens wait out the SDK's asynchronous RocksDB LOCK release (20 s bound, this process's own handle only).
+- [ ] Storage command gaps: reset does not stop running workers itself; it refuses while other leases are live. `init` refuses a mode switch until reset, but reset does not migrate between modes, and the old mode's data directory is left in place. `status` in embedded mode opens the store, which applies the idempotent schema.
 - [ ] CLI/TUI workers, Profile (20 views), Jobs, telemetry, summaries, NLP artifacts
-- [ ] `argos storage status`, `init`, `reset --yes` with resumable phases
+- [x] `argos storage status`, `init`, `reset --yes` with resumable phases (`storage/reset.json`: wipe_legacy, wipe_store, bootstrap; tested by resuming from bootstrap)
 - [ ] Fresh population checks; two-session operation; restart reads
 - [ ] RSS/swap/disk/p95 measurements on the target machine
 

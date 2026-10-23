@@ -74,11 +74,26 @@ pub async fn open(target: &Target, ns: &str, database: &str) -> Result<Opened, T
         Target::Embedded { path } => {
             let path = std::path::absolute(path)
                 .map_err(|e| TxError::Abort(format!("embedded store path: {e}")))?;
-            connect(format!(
-                "rocksdb://{}?versioned=false&sync=every",
-                path.display()
-            ))
-            .await?
+            let url = format!("rocksdb://{}?versioned=false&sync=every", path.display());
+            // The SDK has no explicit close: dropping the last client of a
+            // datastore releases RocksDB's LOCK asynchronously, so a reopen
+            // in the same process (reset, status after init) can briefly
+            // see our own old handle (design.md 7b). Only that error is
+            // waited out, bounded; another process is kept out earlier by
+            // `embedded.lock`.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                match connect(url.as_str()).await {
+                    Ok(db) => break db,
+                    Err(e)
+                        if e.to_string().contains("lock hold by current process")
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
         }
     };
     db.use_ns(ns).use_db(database).await?;

@@ -18,6 +18,7 @@ pub mod atlas_delete;
 pub mod atlas_metadata;
 pub mod bootstrap;
 pub mod codec;
+pub mod commands;
 pub mod counters;
 pub mod embeddings;
 pub mod graph;

@@ -13,6 +13,7 @@
 
 pub mod error;
 
+pub mod atlas;
 pub mod codec;
 pub mod counters;
 pub mod embeddings;

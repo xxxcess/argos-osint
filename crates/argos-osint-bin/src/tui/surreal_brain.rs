@@ -1,5 +1,5 @@
 //! The TUI Brain on SurrealDB. Under a storage config the Brain list,
-//! preview, delete and the Actor-group topology run only on the repository
+//! preview, delete and the Brain topology run only on the repository
 //! (never mixed with the SQLite store), through `storage::runtime::blocking`. Callers are the
 //! Brain's plain worker threads, never async code or the draw loop.
 

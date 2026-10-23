@@ -159,6 +159,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures-util",
  "lancedb",
+ "libc",
  "protoc-bin-vendored",
  "regex",
  "reqwest",

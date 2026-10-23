@@ -1249,6 +1249,32 @@ pub mod mock {
     /// Like [`serve`], but every reply is held back for `delay` after the
     /// request has been read (a slow provider).
     pub async fn serve_delayed(delay: std::time::Duration, script: Vec<Reply>) -> Server {
+        serve_inner(delay, None, script).await
+    }
+
+    /// Holds every reply until [`Gate::release`] is called, so a test can
+    /// observe the "request in flight" state without guessing at timings.
+    pub struct Gate(Arc<tokio::sync::Semaphore>);
+
+    impl Gate {
+        /// Lets every held (and future) reply through.
+        pub fn release(&self) {
+            self.0.add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
+        }
+    }
+
+    /// Like [`serve`], but replies wait for the returned [`Gate`].
+    pub async fn serve_gated(script: Vec<Reply>) -> (Server, Gate) {
+        let sem = Arc::new(tokio::sync::Semaphore::new(0));
+        let server = serve_inner(std::time::Duration::ZERO, Some(sem.clone()), script).await;
+        (server, Gate(sem))
+    }
+
+    async fn serve_inner(
+        delay: std::time::Duration,
+        gate: Option<Arc<tokio::sync::Semaphore>>,
+        script: Vec<Reply>,
+    ) -> Server {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let hits = Arc::new(AtomicUsize::new(0));
@@ -1261,11 +1287,14 @@ pub mod mock {
                 };
                 let n = h.fetch_add(1, Ordering::SeqCst);
                 let reply = script.get(n).or(script.last()).cloned();
-                let r = r.clone();
+                let (r, gate) = (r.clone(), gate.clone());
                 tokio::spawn(async move {
                     let request = read_request(&mut socket).await;
                     r.lock().unwrap().push(request);
                     let Some(reply) = reply else { return };
+                    if let Some(gate) = gate {
+                        let _ = gate.acquire().await;
+                    }
                     let bytes = match reply {
                         Reply::Json(status, body) => format!(
                             "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",

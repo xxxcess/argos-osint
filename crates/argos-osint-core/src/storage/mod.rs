@@ -25,6 +25,7 @@ pub mod commands;
 pub mod counters;
 pub mod derivations;
 pub mod embeddings;
+pub mod entities;
 pub mod graph;
 pub mod home;
 pub mod insight;

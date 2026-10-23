@@ -1050,6 +1050,36 @@ async fn derivation_item_ids(tx: &Tx, memory_id: &str) -> Result<Vec<String>, Tx
         .collect())
 }
 
+/// `nlp::cache::remove_owner` on SurrealDB: drop the owner's source refs,
+/// then collect only the artifacts those refs named that nothing else still
+/// references (another ref, retained derivation evidence or a snapshot's
+/// inputs). Artifacts outside that set are left alone.
+pub async fn remove_nlp_owner_in(tx: &Tx, kind: &str, owner: &str) -> Result<(), TxError> {
+    run(
+        tx,
+        tx.query(
+            "LET $refs = (SELECT prose_hash, raw_hash FROM nlp_source_ref
+                WHERE owner_kind = $kind AND owner_id = $owner);
+             LET $hashes = array::distinct(array::filter(array::concat(
+                $refs.prose_hash, $refs.raw_hash), |$h| $h != NONE));
+             DELETE nlp_source_ref WHERE owner_kind = $kind AND owner_id = $owner RETURN NONE;
+             FOR $h IN $hashes {
+               IF (SELECT VALUE id FROM nlp_source_ref WHERE prose_hash = $h OR raw_hash = $h LIMIT 1) == []
+                 AND (SELECT VALUE id FROM insight_derivation_evidence
+                      WHERE string::contains(evidence_json, $h) LIMIT 1) == []
+                 AND (SELECT VALUE id FROM insight_snapshot
+                      WHERE string::contains(inputs_json, $h) LIMIT 1) == [] {
+                 DELETE type::record('nlp_artifact', $h) RETURN NONE;
+               };
+             };",
+        )
+        .bind(("kind", kind.to_string()))
+        .bind(("owner", owner.to_string())),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn delete_memory_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
     let mut r = run(
         tx,
@@ -1060,6 +1090,7 @@ async fn delete_memory_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
     let exists = take::<Option<bool>>(&mut r, 0)? == Some(true);
     if exists {
         tombstone_memory(tx, id, "user_delete").await?;
+        remove_nlp_owner_in(tx, "memory", id).await?;
     }
     let items = derivation_item_ids(tx, id).await?;
     let mut r = run(
@@ -1111,9 +1142,10 @@ async fn delete_memory_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
 
 /// `Store::delete_memory` on SurrealDB: tombstone, provenance downgrade,
 /// insight cleanup, the memory delete and its removal index work in one
-/// publisher transaction. The NLP cache (still SQLite) and the job
+/// publisher transaction, together with the memory's NLP source refs and
+/// the artifacts only they referenced (`remove_nlp_owner_in`). The job
 /// retention sweep (`jobs::cleanup_batch`, its own idempotent transaction)
-/// stay with the caller.
+/// stays with the caller (`browse::delete_memory`).
 pub async fn delete_memory(publisher: &Publisher, id: &str) -> Result<bool, TxError> {
     let deleted = Arc::new(Mutex::new(false));
     let (id, slot) = (id.to_string(), deleted.clone());

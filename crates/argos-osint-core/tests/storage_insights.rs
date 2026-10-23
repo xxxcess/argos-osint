@@ -535,3 +535,81 @@ async fn deleting_a_memory_tombstones_it_and_cleans_its_insights_in_one_commit()
     .unwrap();
     assert_eq!(again.rejected.len(), 1);
 }
+
+#[tokio::test]
+async fn deleting_a_memory_drops_its_nlp_refs_and_only_unshared_artifacts() {
+    use argos_osint_core::storage::insight::{delete_memory, publish_atlas_insights};
+    use argos_osint_core::store::PublishOptions;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let (db, p) = fresh(&server, "insight_delete_nlp").await;
+    let r = publish_atlas_insights(
+        &p,
+        "run1",
+        vec![claim("Paris", "a1")],
+        vec![],
+        "",
+        PublishOptions::default(),
+    )
+    .await
+    .unwrap();
+    let mem = r.claim_memory_ids[0].1.clone();
+    let reference =
+        "SET owner_kind = $k, owner_id = $o, source_id = 's', revision = '1', attempt_id = 'a',
+           raw_hash = $raw, prose_hash = $prose, metadata_json = '{}', transform_version = 't'";
+    for h in ["only", "shared", "raw", "evidence"] {
+        db.query(
+            "CREATE type::record('nlp_artifact', $h) SET text = $h, byte_len = 1, created_at = ''",
+        )
+        .bind(("h", h))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    }
+    for (k, o, raw, prose) in [
+        ("memory", mem.as_str(), Some("raw"), "only"),
+        ("memory", mem.as_str(), None, "shared"),
+        ("memory", mem.as_str(), None, "evidence"),
+        ("article", "a9", None, "shared"),
+    ] {
+        db.query(format!("CREATE nlp_source_ref {reference}"))
+            .bind(("k", k))
+            .bind(("o", o.to_string()))
+            .bind(("raw", raw))
+            .bind(("prose", prose))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    db.query(
+        "CREATE insight_derivation_evidence SET derivation_id = 'dx', source_id = 'm', source_revision = '1',
+           evidence_json = '{\"artifact_hash\":\"evidence\"}'",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    assert!(delete_memory(&p, &mem).await.unwrap());
+    let left = |sql: &'static str| {
+        let db = db.clone();
+        async move {
+            let mut r = db.query(sql).await.unwrap().check().unwrap();
+            let mut v: Vec<String> = r.take(0usize).unwrap();
+            v.sort();
+            v
+        }
+    };
+    assert_eq!(
+        left("SELECT VALUE record::id(id) FROM nlp_artifact").await,
+        vec!["evidence", "shared"],
+        "unshared artifacts collected; shared and evidence-retained kept"
+    );
+    assert_eq!(
+        left("SELECT VALUE owner_kind FROM nlp_source_ref").await,
+        vec!["article"]
+    );
+}

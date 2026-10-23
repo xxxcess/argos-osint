@@ -22,6 +22,7 @@ pub mod browse_assoc;
 pub mod codec;
 pub mod commands;
 pub mod counters;
+pub mod derivations;
 pub mod embeddings;
 pub mod graph;
 pub mod home;

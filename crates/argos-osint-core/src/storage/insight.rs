@@ -457,7 +457,7 @@ async fn create_memory(
 
 /// `atlas_brief_id`: the run's brief memory (an Atlas memory of the run that
 /// backs no claim).
-async fn atlas_brief_id(tx: &Tx, run_id: &str) -> Result<Option<String>, TxError> {
+pub(crate) async fn atlas_brief_id(tx: &Tx, run_id: &str) -> Result<Option<String>, TxError> {
     #[derive(Debug, Clone, SurrealValue)]
     struct Row {
         id: String,

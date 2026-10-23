@@ -113,7 +113,9 @@ async fn extraction_writes_claims_sources_relations_and_index_work_in_one_transa
         .await
         .unwrap();
     assert_eq!((p.written.len(), p.touched.len()), (2, 2));
-    assert_eq!(p.queued, 2, "index work for each new memory");
+    assert_eq!(p.actors.len(), 1, "Alice's subject actor is bound once");
+    assert!(!p.touched.contains(&p.actors[0]));
+    assert_eq!(p.queued, 3, "index work for each new memory and the actor");
     assert_eq!(count(repo.db(), "insight_claim").await, 2);
     assert_eq!(
         count(repo.db(), "insight_source").await,
@@ -145,7 +147,7 @@ async fn extraction_writes_claims_sources_relations_and_index_work_in_one_transa
         rx::extraction_state(&repo, &a.id).await.unwrap(),
         Some("completed".into())
     );
-    assert_eq!(count(repo.db(), "index_change").await, 2);
+    assert_eq!(count(repo.db(), "index_change").await, 3);
     assert_eq!(
         counters::current(repo.db(), "memories_changed")
             .await

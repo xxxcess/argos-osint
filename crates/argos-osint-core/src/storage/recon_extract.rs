@@ -61,7 +61,10 @@ pub struct Persisted {
     /// Every memory the claims resolve to (new and reused); each got index
     /// work queued unless its current revision is already indexed.
     pub touched: Vec<String>,
-    /// Outbox rows queued.
+    /// Subject actor memories the claims created or changed (index work is
+    /// queued for them too; SQLite indexes them outside `touched`).
+    pub actors: Vec<String>,
+    /// Outbox rows queued (claim memories plus changed actors).
     pub queued: usize,
 }
 
@@ -160,7 +163,9 @@ pub async fn persist_claims(
             let p = write_claims(&tx, &answer, &parsed).await?;
             let changed = !p.written.is_empty();
             let nonce = format!("extract:{}:{}", answer.id, crate::recon::id("n"));
-            let changes = index_changes_in(&tx, &p.touched, &nonce).await?;
+            let mut index = p.touched.clone();
+            index.extend(p.actors.iter().filter(|a| !p.touched.contains(a)).cloned());
+            let changes = index_changes_in(&tx, &index, &nonce).await?;
             *out.lock().unwrap() = Persisted {
                 queued: changes.len(),
                 ..p
@@ -280,8 +285,8 @@ async fn write_claim(
             p.touched.push(memory_id);
             for id in super::actor_bind::bind_claim_subject_in(tx, &c.fingerprint, None, at).await?
             {
-                if !p.touched.contains(&id) {
-                    p.touched.push(id);
+                if !p.actors.contains(&id) {
+                    p.actors.push(id);
                 }
             }
             let mut r = run(
@@ -352,13 +357,38 @@ struct Row {
     score: f64,
 }
 
-/// Full-text candidates for `question`: active memories of the default
-/// recall kinds, BM25 best first, ties by memory id. Public for the plan
-/// test.
+/// Full-text candidates for one query term: active memories of the default
+/// recall kinds, BM25 best first. [`recall_for_turn`] runs it once per
+/// distinct term, so a memory matching any term is a candidate (OR
+/// semantics). Ranking is by terms matched, then summed BM25 score: BM25
+/// idf goes negative for a term in more than half the memories, so the raw
+/// score is not a usable relevance cut on its own.
+/// Public for the plan test.
 pub const RECALL_SURQL: &str = "SELECT record::id(id) AS id, text, memory_kind,
     search::score(1) AS score FROM memory
-    WHERE text @1,OR@ $q AND lifecycle = 'active' AND memory_kind NOT IN $excluded
+    WHERE text @1@ $q AND lifecycle = 'active' AND memory_kind NOT IN $excluded
     ORDER BY score DESC LIMIT $n";
+
+/// Most distinct query terms searched per turn.
+const MAX_TERMS: usize = 16;
+
+/// Distinct lowercased alphanumeric terms of `question`, in order.
+fn terms(question: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in question
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_lowercase)
+    {
+        if !out.contains(&t) {
+            out.push(t);
+        }
+        if out.len() == MAX_TERMS {
+            break;
+        }
+    }
+    out
+}
 
 /// STOPGAP for `orchestrate::recall_for_turn`: nothing when the thread
 /// opted out of insights; otherwise up to [`RECALL_LIMIT`] memories within
@@ -369,7 +399,8 @@ pub async fn recall_for_turn(
     thread_id: &str,
     question: &str,
 ) -> Result<Vec<RecallHit>> {
-    if question.trim().is_empty() {
+    let terms = terms(question);
+    if terms.is_empty() {
         return Ok(Vec::new());
     }
     let mut r = repo
@@ -385,20 +416,35 @@ pub async fn recall_for_turn(
         .iter()
         .map(|k| k.as_str().to_string())
         .collect();
-    let mut r = repo
-        .db()
-        .query(RECALL_SURQL)
-        .bind(("q", question.to_string()))
-        .bind(("excluded", excluded))
-        .bind(("n", CANDIDATES as i64))
-        .await?
-        .check()?;
-    let mut rows: Vec<Row> = r.take(0usize)?;
-    rows.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
+    let mut rows: Vec<(usize, Row)> = Vec::new();
+    for term in terms {
+        let mut r = repo
+            .db()
+            .query(RECALL_SURQL)
+            .bind(("q", term))
+            .bind(("excluded", excluded.clone()))
+            .bind(("n", CANDIDATES as i64))
+            .await?
+            .check()?;
+        let hits: Vec<Row> = r.take(0usize)?;
+        for hit in hits {
+            match rows.iter_mut().find(|(_, row)| row.id == hit.id) {
+                Some((matched, row)) => {
+                    *matched += 1;
+                    row.score += hit.score;
+                }
+                None => rows.push((1, hit)),
+            }
+        }
+    }
+    rows.sort_by(|(ma, a), (mb, b)| {
+        mb.cmp(ma)
+            .then_with(|| b.score.total_cmp(&a.score))
+            .then_with(|| a.id.cmp(&b.id))
+    });
     let ranked = rows
         .into_iter()
-        .filter(|row| row.score > 0.0)
-        .map(|row| RecallHit {
+        .map(|(_, row)| RecallHit {
             tokens: estimate_tokens(&row.text),
             id: row.id,
             text: row.text,

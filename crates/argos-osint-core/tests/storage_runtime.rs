@@ -102,7 +102,12 @@ async fn open_home_runs_ensure_schema() {
         let defined: Vec<&str> = defined
             .filter_map(|d| d.split_whitespace().next())
             .collect();
-        assert!(!defined.is_empty(), "{module}: no tables parsed");
+        // Index-only modules (e.g. `recon_extract`'s full-text index on
+        // `memory`) define no table of their own.
+        assert!(
+            !defined.is_empty() || schema.contains("DEFINE INDEX IF NOT EXISTS "),
+            "{module}: no tables parsed"
+        );
         for table in defined {
             assert!(tables.contains_key(table), "{module}: {table} not defined");
         }

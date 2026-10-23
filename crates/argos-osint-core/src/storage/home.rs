@@ -275,3 +275,53 @@ pub async fn open_embedded(
     .map_err(|e| anyhow::anyhow!("open embedded store: {e}"))?;
     Ok((opened, guard))
 }
+
+/// What keeps a home's store open: a server lease or the embedded lock.
+#[derive(Debug)]
+pub enum Hold {
+    Server(super::server::Lease),
+    Embedded(LockGuard),
+}
+
+/// An open store for one Argos home. Drop it to release the hold.
+pub struct HomeStore {
+    pub opened: super::open::Opened,
+    pub mode: Mode,
+    pub hold: Hold,
+}
+
+/// The entry point for consumers: open this home's store in its configured
+/// mode (starting or adopting the server, or taking the embedded lock),
+/// always through the schema-bootstrapping [`super::open::open`]. An
+/// uninitialized home is an error; it never falls back to SQLite.
+pub async fn open_home(layout: &Layout) -> anyhow::Result<HomeStore> {
+    let config = load_config(layout)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "storage is not initialized; run `argos storage init --mode server|embedded`"
+        )
+    })?;
+    match config.mode {
+        Mode::Server => {
+            let (opened, lease, _) = super::server::connect_server(layout).await?;
+            Ok(HomeStore {
+                opened,
+                mode: Mode::Server,
+                hold: Hold::Server(lease),
+            })
+        }
+        Mode::Embedded => {
+            #[cfg(feature = "embedded")]
+            {
+                let (opened, guard) =
+                    open_embedded(layout, super::server::NS, super::server::DB).await?;
+                Ok(HomeStore {
+                    opened,
+                    mode: Mode::Embedded,
+                    hold: Hold::Embedded(guard),
+                })
+            }
+            #[cfg(not(feature = "embedded"))]
+            anyhow::bail!("this build has no embedded engine (`embedded` feature)")
+        }
+    }
+}

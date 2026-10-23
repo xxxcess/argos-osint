@@ -147,3 +147,30 @@ async fn init_status_and_resumable_reset() {
         assert!(server::stop(&layout, true).await.unwrap());
     }
 }
+
+#[tokio::test]
+async fn open_home_needs_init_and_returns_a_bootstrapped_store() {
+    let Some(mode) = mode() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let layout = Layout::new(dir.path());
+    let err = home::open_home(&layout)
+        .await
+        .err()
+        .expect("uninitialized")
+        .to_string();
+    assert!(err.contains("argos storage init"), "{err}");
+    assert!(!layout.home.join("argos.db").exists(), "no SQLite fallback");
+    home::save_config(&layout, &home::StorageConfig { mode, port: None }).unwrap();
+    let store = home::open_home(&layout).await.unwrap();
+    assert_eq!(store.mode, mode);
+    assert_eq!(store.opened.bootstrap.version, 1);
+    drop(store);
+    if mode == Mode::Server {
+        assert!(
+            server::stop(&layout, false).await.unwrap(),
+            "last client stops it"
+        );
+    }
+}

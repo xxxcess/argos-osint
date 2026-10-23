@@ -140,3 +140,5 @@ Under a storage config `App::open_topology` refuses `TopologySeed::ActorGroup` w
 ## Phase 5 — first item (blocks phase 5 sign-off)
 
 - [ ] Port the `brain_topology_query` actor-group seed to the repository (contract tests in both modes) and wire the TUI topology worker to it through `storage::runtime::blocking`, removing the SurrealDB refusal above.
+  - [x] Repository port: `storage::topology::topology_snapshot` for `TopologySeed::ActorGroup` (member resolution through redirects; the members' typed Links/Related, actor refs, typed payload actors and native mentions, re-pointed at the group; SQLite admission, findings and deterministic brief shared through `brain_topology::query::admit`). Covered in both modes by `tests/storage_topology.rs`.
+  - Gaps: other seeds are refused with an error; depth > 1 does not expand past the group's own neighbours (reported as the bounded `DEPTH_GAP`); `ThisCycle` scope skips the current-metadata fence; memory nodes carry no revision (SurrealDB memories have none, so typed-payload receipts read `memory_metadata:<id>@`); reads are not one snapshot transaction.

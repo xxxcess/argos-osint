@@ -45,6 +45,10 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
         "recon_message_memory",
         "brain_memory_endpoint",
         "brain_memory_actor_ref",
+        "article_body",
+        "nlp_artifact",
+        "nlp_source_ref",
+        "app_state",
         "storage_meta",
     ] {
         assert!(info.contains(&format!("\"{table}\"")), "missing {table}");
@@ -52,7 +56,7 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
     // Idempotent re-run.
     let again = ensure_schema(&db).await.unwrap();
     assert_eq!(again.previous, SCHEMA_VERSION);
-    assert_eq!(bootstrap::schemas().len(), 15);
+    assert_eq!(bootstrap::schemas().len(), 16);
 
     // A newer database is refused and left untouched.
     db.query("UPDATE storage_meta:schema SET version = 99")

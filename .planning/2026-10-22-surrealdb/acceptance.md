@@ -112,3 +112,9 @@ verified.
 - [ ] Atlas deletes (step 3) on Surreal leave to the caller: NLP cache/`nlp_source_refs`, `brain_backfill_receipts` cleanup, `jobs::cleanup_batch`, and `retire_deleted_article_leads` (reads `app_state`).
 - [ ] `atlas_save_metadata` on Surreal does not run `persist_article_rating` (confidence inputs still SQLite).
 - [ ] Step 4 remainder: `legacy_receipt` and the Source/MentionedIn/Contains edges are done. Still open: `bind_claim_subject` and `refresh_cached_publication`; see P3 above for exactly what each still reads from SQLite.
+
+### Phase 4c — pipeline inputs behind the repository
+
+`storage::pipeline_inputs` adds `article_body`, `nlp_artifact`, `nlp_source_ref` and `app_state` (bootstrap now 16 schemas) and ports `article_input` (retained clean/baseline body, acquisition coverage, metadata passage and atlas metadata actors) and the Recon input (thread `recall_insights` gates both saving and recall; generation advanced from 0). Covered in both modes by `tests/storage_pipeline_inputs.rs`.
+
+Gaps: no tool evidence on article inputs (`osint_calls`/`intel_evidence` not on SurrealDB yet); Recon evidence is built by the caller (`evidence_from_tools` still reads the SQLite NLP cache) and only its texts are retained here; source-ref recency uses `registered_at` instead of SQLite rowid; nothing writes these tables from the pipeline yet (acquisition writers move with phase 5).

@@ -37,6 +37,7 @@ pub mod memories;
 pub mod memory;
 pub mod open;
 pub mod outbox;
+pub mod pipeline_inputs;
 pub mod processes;
 pub mod provenance;
 pub mod publisher;

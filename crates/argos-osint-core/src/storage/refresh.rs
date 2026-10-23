@@ -36,6 +36,8 @@ DEFINE FIELD IF NOT EXISTS role_snapshot ON insight_refresh_task TYPE string;
 DEFINE FIELD IF NOT EXISTS input_hash ON insight_refresh_task TYPE string;
 DEFINE FIELD IF NOT EXISTS source_revision ON insight_refresh_task TYPE string;
 DEFINE FIELD IF NOT EXISTS created_at ON insight_refresh_task TYPE datetime;
+DEFINE FIELD IF NOT EXISTS message ON insight_refresh_task TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS blocked_reason ON insight_refresh_task TYPE string DEFAULT '';
 DEFINE INDEX IF NOT EXISTS insight_refresh_task_owner ON insight_refresh_task FIELDS owner_scope, created_at;
 DEFINE TABLE IF NOT EXISTS insight_supersession SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS job_id ON insight_supersession TYPE string;

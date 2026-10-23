@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 tokio::task_local! { static SLICE_REMAINING: std::cell::Cell<usize>; }
 
 #[derive(Debug)]
-pub(super) struct SliceYield;
+pub(crate) struct SliceYield;
 impl std::fmt::Display for SliceYield {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("insight slice complete; queued continuation")
@@ -387,7 +387,7 @@ pub fn owner_progress(conn: &Connection, kind: &str, owner: &str) -> Result<Opti
         .map(Option::flatten)
 }
 
-pub(super) async fn slice<T>(future: impl std::future::Future<Output = T>) -> T {
+pub(crate) async fn slice<T>(future: impl std::future::Future<Output = T>) -> T {
     SLICE_REMAINING.scope(std::cell::Cell::new(2), future).await
 }
 

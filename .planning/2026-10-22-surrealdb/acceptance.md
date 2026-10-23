@@ -118,3 +118,9 @@ verified.
 `storage::pipeline_inputs` adds `article_body`, `nlp_artifact`, `nlp_source_ref` and `app_state` (bootstrap now 16 schemas) and ports `article_input` (retained clean/baseline body, acquisition coverage, metadata passage and atlas metadata actors) and the Recon input (thread `recall_insights` gates both saving and recall; generation advanced from 0). Covered in both modes by `tests/storage_pipeline_inputs.rs`.
 
 Gaps: no tool evidence on article inputs (`osint_calls`/`intel_evidence` not on SurrealDB yet); Recon evidence is built by the caller (`evidence_from_tools` still reads the SQLite NLP cache) and only its texts are retained here; source-ref recency uses `registered_at` instead of SQLite rowid; nothing writes these tables from the pipeline yet (acquisition writers move with phase 5).
+
+### Phase 4d — refresh slice and recovery
+
+`storage::refresh_exec` ports `run_refresh_slice` (exact-task claim, admission, 30 s heartbeat with supersession drop, slice continuation, supersession, cancel-to-paused, failure, fenced publication with derivations) and the admission half of `recover_refreshes` (article intents rescheduled from `pipeline_inputs::article_input`, expired leases reaped, queued ids returned with captured settings). Task messages and `blocked_reason` live on the `insight_refresh_task` sidecar. Covered in both modes by `tests/storage_refresh_exec.rs`.
+
+Gaps: the pipeline run, live-evidence validation and the derivation context (live Recon opt-in) are caller-supplied; `insight.recovery_error` events are returned, not recorded; `retire_atlas_insight_work` is not ported; no error category or `max_attempts` on Surreal tasks (failures are terminal); the slice-yield path is not covered by a contract test (`SliceYield` is crate-private); nothing in the CLI calls these yet.

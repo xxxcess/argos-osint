@@ -4,7 +4,9 @@
 
 use argos_osint_core::storage::commands::{self, ResetPhase};
 use argos_osint_core::storage::home::{self, Layout, Mode};
-use argos_osint_core::storage::server::{self, DB, NS};
+use argos_osint_core::storage::server;
+#[cfg(feature = "embedded")]
+use argos_osint_core::storage::server::{DB, NS};
 
 fn mode() -> Option<Mode> {
     let embedded = std::env::var("ARGOS_SURREAL_MODE").as_deref() == Ok("embedded");

@@ -165,7 +165,11 @@ async fn derivations_write_memories_evidence_and_retire_on_refresh() {
         mid
     );
     assert_eq!(
-        scalar::<i64>(&db, "RETURN count(SELECT id FROM memory)").await,
+        scalar::<i64>(
+            &db,
+            "RETURN count(SELECT id FROM memory WHERE memory_kind != 'actor')"
+        )
+        .await,
         2
     );
     assert_eq!(
@@ -207,7 +211,7 @@ async fn derivations_write_memories_evidence_and_retire_on_refresh() {
     // Index work and the change counter joined the publication.
     assert_eq!(
         scalar::<i64>(&db, "RETURN count(SELECT id FROM index_change)").await,
-        2
+        3 // claim, inference and the claim subject actor
     );
     assert_eq!(
         scalar::<i64>(
@@ -231,7 +235,11 @@ async fn derivations_write_memories_evidence_and_retire_on_refresh() {
     )
     .await;
     assert_eq!(
-        scalar::<i64>(&db, "RETURN count(SELECT id FROM memory)").await,
+        scalar::<i64>(
+            &db,
+            "RETURN count(SELECT id FROM memory WHERE memory_kind != 'actor')"
+        )
+        .await,
         1
     );
     assert_eq!(
@@ -255,7 +263,11 @@ async fn derivations_write_memories_evidence_and_retire_on_refresh() {
     // An empty refresh deletes the article-owned claim memory too.
     publish(&db, "a1", PipelineOutput::default(), saving()).await;
     assert_eq!(
-        scalar::<i64>(&db, "RETURN count(SELECT id FROM memory)").await,
+        scalar::<i64>(
+            &db,
+            "RETURN count(SELECT id FROM memory WHERE memory_kind != 'actor')"
+        )
+        .await,
         0
     );
     assert_eq!(
@@ -307,7 +319,11 @@ async fn tombstones_and_disabled_saving_write_derivations_only() {
     )
     .await;
     assert_eq!(
-        scalar::<i64>(&db, "RETURN count(SELECT id FROM memory)").await,
+        scalar::<i64>(
+            &db,
+            "RETURN count(SELECT id FROM memory WHERE memory_kind != 'actor')"
+        )
+        .await,
         0
     );
     assert_eq!(
@@ -318,5 +334,180 @@ async fn tombstones_and_disabled_saving_write_derivations_only() {
     assert_eq!(
         scalar::<i64>(&db, "RETURN count(SELECT id FROM index_change)").await,
         0
+    );
+}
+
+fn read<T: serde::de::DeserializeOwned>(raw: String) -> T {
+    serde_json::from_str(&raw).unwrap()
+}
+
+#[tokio::test]
+async fn claims_bind_actors_and_kind_refresh_carries_the_other_kind() {
+    use argos_osint_core::memory_metadata::MemoryPayload;
+    use argos_osint_core::nlp::{EntityCandidate, Span};
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "derivations_actors").await;
+    let db = repo.db().clone();
+    let mut kept = claim("c1", "office", true);
+    kept.evidence_refs[0].location = EvidenceLocation::Range(Span {
+        start_byte: 0,
+        end_byte: 40,
+    });
+    let fp = claim_fingerprint(&kept);
+    let mid = format!("mem:{fp}");
+    let entities = vec![
+        EntityCandidate {
+            id: "e:acme".into(),
+            type_hint: "org".into(),
+            comparison_key: "acme".into(),
+            original_forms: vec!["Acme".into()],
+            mention_refs: vec![],
+        },
+        // Mentioned inside the cited range of its own source.
+        EntityCandidate {
+            id: "body:a1:entity:bob".into(),
+            type_hint: "person".into(),
+            comparison_key: "bob".into(),
+            original_forms: vec!["Bob".into()],
+            mention_refs: vec![Span {
+                start_byte: 5,
+                end_byte: 8,
+            }],
+        },
+    ];
+    let inference = Inference {
+        id: "i1".into(),
+        text: "Acme is expanding.".into(),
+        entity_refs: vec!["e:acme".into()],
+        premise_claim_ids: vec!["c1".into()],
+        evidence_refs: vec![reference("body:a1")],
+        rationale: "office".into(),
+        limitations: vec!["one source".into()],
+        assessment: Assessment {
+            fidelity: "faithful".into(),
+            threshold_passed: true,
+            ..Default::default()
+        },
+        snapshot_key: String::new(),
+    };
+    let full = PipelineOutput {
+        entities: entities.clone(),
+        claims: vec![kept.clone()],
+        inferences: vec![inference],
+        ..Default::default()
+    };
+    publish(&db, "a1", full, saving()).await;
+
+    // The claim payload names its subject and the mentioned person.
+    let payload: MemoryPayload = read(
+        scalar::<String>(
+            &db,
+            &format!("SELECT VALUE payload_json FROM ONLY type::record('memory', '{mid}')"),
+        )
+        .await,
+    );
+    let MemoryPayload::Claim(claim_payload) = payload else {
+        panic!("claim payload");
+    };
+    assert_eq!(claim_payload.predicate, "opened");
+    assert_eq!(claim_payload.passages, vec!["body:a1".to_string()]);
+    let mut roles: Vec<&str> = claim_payload
+        .actors
+        .iter()
+        .map(|a| a.role.as_str())
+        .collect();
+    roles.sort();
+    roles.dedup();
+    assert_eq!(roles, vec!["mentioned", "subject"]);
+    assert_eq!(
+        scalar::<i64>(
+            &db,
+            "RETURN count(SELECT id FROM brain_actor WHERE display_name = 'Bob')"
+        )
+        .await,
+        1
+    );
+    assert!(
+        scalar::<bool>(&db, "RETURN record::exists(type::record('brain_actor_external_ref', ['recon_entities', 'e:acme']))").await
+    );
+    // The inference records its premise and inherits the premise actors.
+    let raw = scalar::<String>(
+        &db,
+        "RETURN (SELECT VALUE payload_json FROM memory WHERE memory_kind = 'inference')[0]",
+    )
+    .await;
+    let MemoryPayload::Inference(inf) = read(raw) else {
+        panic!("inference payload");
+    };
+    assert_eq!(inf.premise_claims, vec![mid.clone()]);
+    assert_eq!(inf.limitations, "one source");
+    assert!(!inf.actors.is_empty() && inf.actors.iter().all(|a| a.role == "premise"));
+
+    // Re-binding the same extraction reuses every actor.
+    let actors = scalar::<i64>(&db, "RETURN count(SELECT id FROM brain_actor)").await;
+
+    // A claim-only refresh carries the inference derivation forward.
+    let generation = run_tx(&db, RetryPolicy::default(), |tx| async move {
+        advance_generation(&tx, "article", "a1", "now").await
+    })
+    .await
+    .unwrap()
+    .value;
+    let input = Arc::new(input("a1", generation as u32, true));
+    let output = Arc::new(PipelineOutput {
+        entities,
+        claims: vec![kept],
+        ..Default::default()
+    });
+    let step = derivation_step(input.clone(), output, Some("claim"), saving());
+    let ok: SnapshotStep = Arc::new(|_, _| Box::pin(async { Ok(()) }));
+    let snapshot = run_tx(&db, RetryPolicy::default(), |tx| {
+        let (input, step, ok) = (input.clone(), step.clone(), ok.clone());
+        async move {
+            publish_snapshot_on(
+                &tx,
+                &input.snapshot,
+                &input.snapshot.key,
+                "active",
+                "2026-10-23T00:00:01Z",
+                &ok,
+                &step,
+            )
+            .await
+        }
+    })
+    .await
+    .unwrap()
+    .value
+    .expect("published");
+    let q = format!(
+        "RETURN count(SELECT id FROM insight_derivation WHERE snapshot_id = '{snapshot}' AND insight_kind = 'inference' AND status = 'assessed')"
+    );
+    assert_eq!(scalar::<i64>(&db, &q).await, 1);
+    let q = format!(
+        "RETURN count(SELECT id FROM insight_derivation_evidence WHERE string::starts_with(derivation_id, '{snapshot}:i1'))"
+    );
+    assert!(scalar::<i64>(&db, &q).await >= 1);
+    let readiness: serde_json::Value = read(
+        scalar::<String>(
+            &db,
+            &format!("SELECT VALUE readiness_json FROM ONLY type::record('insight_snapshot', '{snapshot}')"),
+        )
+        .await,
+    );
+    assert_eq!(readiness["carried_kinds"][0]["kind"], "inference");
+    assert_eq!(
+        scalar::<i64>(
+            &db,
+            "RETURN count(SELECT id FROM memory WHERE memory_kind = 'inference')"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        scalar::<i64>(&db, "RETURN count(SELECT id FROM brain_actor)").await,
+        actors
     );
 }

@@ -12,7 +12,9 @@
 //! `memories_changed` bump, both only when something changed).
 //!
 //! Record keys: `brain_actor` by actor (memory) id, `brain_actor_mention` by
-//! mention id, `brain_actor_redirect` by `from_actor`.
+//! mention id, `brain_actor_redirect` by `from_actor`, `brain_actor_alias`
+//! by `[actor, normalized, alias_type]` and `brain_actor_external_ref` by
+//! `[scope, legacy_id]`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -51,7 +53,17 @@ DEFINE FIELD IF NOT EXISTS to_actor ON brain_actor_redirect TYPE string;
 DEFINE FIELD IF NOT EXISTS receipt_json ON brain_actor_redirect TYPE string DEFAULT '{}';
 DEFINE FIELD IF NOT EXISTS created_at ON brain_actor_redirect TYPE string;
 DEFINE INDEX IF NOT EXISTS brain_actor_redirect_to ON brain_actor_redirect FIELDS to_actor;
-DEFINE INDEX IF NOT EXISTS brain_graph_node_origin ON brain_graph_node FIELDS kind, origin;";
+DEFINE INDEX IF NOT EXISTS brain_graph_node_origin ON brain_graph_node FIELDS kind, origin;
+DEFINE TABLE IF NOT EXISTS brain_actor_alias SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS actor_id ON brain_actor_alias TYPE string;
+DEFINE FIELD IF NOT EXISTS alias ON brain_actor_alias TYPE string;
+DEFINE FIELD IF NOT EXISTS normalized ON brain_actor_alias TYPE string;
+DEFINE FIELD IF NOT EXISTS alias_type ON brain_actor_alias TYPE string;
+DEFINE FIELD IF NOT EXISTS provenance_json ON brain_actor_alias TYPE string DEFAULT '{}';
+DEFINE INDEX IF NOT EXISTS brain_actor_alias_normalized ON brain_actor_alias FIELDS normalized, alias_type;
+DEFINE TABLE IF NOT EXISTS brain_actor_external_ref SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS actor_id ON brain_actor_external_ref TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON brain_actor_external_ref TYPE string;";
 
 /// Mentions of one origin; pinned to `brain_actor_mention_origin`.
 pub const ORIGIN_MENTIONS_SURQL: &str = "SELECT VALUE actor_id FROM brain_actor_mention \

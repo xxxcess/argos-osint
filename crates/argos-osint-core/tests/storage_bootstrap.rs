@@ -37,6 +37,8 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
         "atlas_article_metadata",
         "intel_investigation",
         "brain_actor",
+        "brain_actor_alias",
+        "brain_actor_external_ref",
         "insight_refresh_task",
         "recon_thread",
         "recon_message",

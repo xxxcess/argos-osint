@@ -268,3 +268,70 @@ async fn jobs_pane_stop_and_clear_history_on_the_repository() {
     assert!(view::get_job(&db, "done").await.unwrap().is_none());
     assert!(view::get_job(&db, "idle").await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn jobs_record_dashboard_metadata_on_create_and_finish() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = server.root("argos", "jobs_view_write").await;
+    let now = Utc::now();
+    let at = |secs: i64| now + Duration::seconds(secs);
+    let mut new = job("w1", None, 0);
+    new.operation = "atlas_enrich";
+    new.created_at = now;
+    let mut t = task("wt", "w1", "op");
+    t.pool = "p";
+    t.created_at = now;
+    jobs::create_job(&db, &new, &[t]).await.unwrap();
+    let row = view::get_job(&db, "w1").await.unwrap().unwrap();
+    assert_eq!(
+        (row.app.as_str(), row.title.as_str()),
+        ("atlas", "Atlas enrich")
+    );
+    assert!(row.cancellable);
+    assert_eq!(
+        (row.active_ms, row.queue_ms, row.attempts_used),
+        (None, None, 0)
+    );
+
+    let claimed = jobs::claim_next(&db, "p", "w0", 30, at(2), "claim:wt")
+        .await
+        .unwrap()
+        .value
+        .expect("claimed");
+    jobs::commit_stage(&db, &claimed, "{}", "h", at(5), "stage:wt")
+        .await
+        .unwrap();
+    jobs::finalize_job(&db, "w1", None, "completed", at(6))
+        .await
+        .unwrap();
+    let detail = view::job_detail(&db, "w1", 10).await.unwrap().unwrap();
+    assert_eq!(detail.attempts[0].duration_ms, Some(3000));
+    assert_eq!(detail.tasks[0].active_ms, 3000);
+    let w1 = detail.job;
+    assert_eq!((w1.attempts_used, w1.attempt_cap), (1, 3));
+    assert_eq!((w1.active_ms, w1.queue_ms), (Some(3000), Some(2000)));
+    assert!(w1.error_summary.is_empty());
+
+    // A stopped job with a failed task records the failure summary.
+    jobs::create_job(&db, &job("w2", None, 0), &[task("ft", "w2", "op")])
+        .await
+        .unwrap();
+    db.query("UPDATE task:ft SET state = 'failed', error_category = 'timeout'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        view::cancel_job(&db, "w2").await.unwrap(),
+        argos_osint_core::job_registry::CancelRequest::Requested
+    );
+    let w2 = view::get_job(&db, "w2").await.unwrap().unwrap();
+    assert_eq!(w2.state, "cancelled");
+    assert_eq!(
+        (w2.error_summary.as_str(), w2.error_category.as_str()),
+        ("1 task(s) failed", "timeout")
+    );
+    assert_eq!(w2.queue_ms, None, "no task started: Unavailable");
+}

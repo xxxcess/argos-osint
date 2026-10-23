@@ -189,6 +189,59 @@ struct Lineage {
     ancestors: Vec<RecordId>,
 }
 
+/// Dashboard app of a job, from its operation (`argos_jobs.app` parity).
+pub fn job_app(operation: &str) -> &'static str {
+    match operation {
+        op if op.starts_with("intel_brief") || op.starts_with("insight") => "intel",
+        op if op.starts_with("atlas") => "atlas",
+        op if op.starts_with("recon") => "recon",
+        op if op.starts_with("brain") || op.starts_with("memory") || op.starts_with("index") => {
+            "brain"
+        }
+        "summaries" | "summary" => "intel",
+        _ => "jobs",
+    }
+}
+
+/// Dashboard title of a job: the operation in words.
+pub fn job_title(operation: &str) -> String {
+    let words = operation.replace('_', " ");
+    let mut chars = words.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// Durable rollup written when a job reaches a terminal state: attempts
+/// used and cap, active time (sum of closed attempt durations), queue time
+/// (creation to the first task start; NONE when no task started) and the
+/// failure summary from failed tasks.
+pub(crate) async fn rollup_in(tx: &Tx, job_id: &str) -> Result<(), TxError> {
+    run(
+        tx,
+        tx.query(
+            "LET $tasks = SELECT VALUE id FROM task WHERE job = $j;
+             LET $att = SELECT VALUE duration_ms FROM attempt WHERE task INSIDE $tasks;
+             LET $first = (SELECT VALUE started_at FROM task WHERE job = $j AND started_at != NONE \
+               ORDER BY started_at LIMIT 1)[0];
+             LET $failed = SELECT VALUE error_category FROM task WHERE job = $j AND state = 'failed';
+             UPDATE $j SET attempts_used = count($att),
+               attempt_cap = math::sum((SELECT VALUE max_attempts FROM task WHERE job = $j)),
+               active_ms = IF count($att) > 0 { math::sum($att.map(|$d| $d ?? 0)) } ELSE { active_ms },
+               queue_ms = IF $first != NONE { duration::millis($first - created_at) } ELSE { queue_ms },
+               error_summary = IF count($failed) > 0 { <string>count($failed) + ' task(s) failed' }
+                 ELSE { error_summary },
+               error_category = IF count($failed) > 0 { $failed.find(|$c| $c != '') ?? 'task_failed' }
+                 ELSE { error_category }
+             RETURN NONE;",
+        )
+        .bind(("j", rid("job", job_id))),
+    )
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxError> {
     let (root, ancestors) = match job.parent {
         None => (rid("job", job.id), Vec::new()),
@@ -211,7 +264,8 @@ pub(crate) async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxErr
         tx,
         tx.query(
             "CREATE $id SET kind = $kind, operation = $op, parent = $parent, root = $root, \
-             ancestors = $ancestors, state = 'running', created_at = <datetime>$at, \
+             ancestors = $ancestors, state = 'running', app = $app, title = $title, \
+             created_at = <datetime>$at, \
              updated_at = <datetime>$at RETURN NONE;
              FOR $a IN $ancestors {
                  CREATE type::record('job_ancestor', [record::id($a), record::id($id)])
@@ -221,6 +275,8 @@ pub(crate) async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxErr
         .bind(("id", rid("job", job.id)))
         .bind(("kind", job.kind.to_string()))
         .bind(("op", job.operation.to_string()))
+        .bind(("app", job_app(job.operation).to_string()))
+        .bind(("title", job_title(job.operation)))
         .bind(("parent", job.parent.map(|p| rid("job", p))))
         .bind(("root", root))
         .bind(("ancestors", ancestors))
@@ -760,7 +816,7 @@ pub(crate) async fn requeue_running_in(
              AND (!$only_expired OR lease_until <= <datetime>$now) RETURN NONE;
              LET $open = SELECT VALUE id FROM attempt \
              WHERE task = $t AND epoch = $e AND finished_at = NONE;
-             UPDATE $open SET finished_at = <datetime>$now, outcome = $outcome RETURN NONE;",
+             UPDATE $open SET finished_at = <datetime>$now, duration_ms = duration::millis(<datetime>$now - started_at), outcome = $outcome RETURN NONE;",
         )
         .bind(("t", rid("task", id)))
         .bind(("next", if failed { "failed" } else { "queued" }))
@@ -842,7 +898,8 @@ pub(crate) async fn complete_in(
              RETURN NONE;
              LET $open = SELECT VALUE id FROM attempt \
              WHERE task = $t AND epoch = $e AND finished_at = NONE;
-             UPDATE $open SET finished_at = <datetime>$now, outcome = 'completed' RETURN NONE;",
+             UPDATE $open SET finished_at = <datetime>$now, duration_ms = duration::millis(<datetime>$now - started_at), outcome = 'completed' RETURN NONE;
+             UPDATE $t SET active_ms = math::sum((SELECT VALUE duration_ms ?? 0 FROM attempt WHERE task = $t)) RETURN NONE;",
         )
         .bind(("t", rid("task", &claimed.id)))
         .bind(("hash", hash.to_string()))
@@ -1060,6 +1117,7 @@ pub async fn finalize_job(
                 )),
             )
             .await?;
+            rollup_in(&tx, job_id).await?;
             Ok(Finalize::Finalized)
         }
     })
@@ -1315,7 +1373,7 @@ async fn cancel_one_in(tx: &Tx, job_id: &str, now: &str) -> Result<(), TxError> 
         tx.query(
             "LET $tasks = SELECT VALUE id FROM task WHERE job = $j;
              LET $open = SELECT VALUE id FROM attempt WHERE task INSIDE $tasks AND finished_at = NONE;
-             UPDATE $open SET finished_at = <datetime>$now, outcome = 'cancelled' RETURN NONE;
+             UPDATE $open SET finished_at = <datetime>$now, duration_ms = duration::millis(<datetime>$now - started_at), outcome = 'cancelled' RETURN NONE;
              UPDATE task SET state = 'cancelled', lease_epoch += 1, lease_owner = '', process_owner = '', \
              lease_until = NONE, finished_at = <datetime>$now, updated_at = <datetime>$now \
              WHERE job = $j AND state IN ['queued', 'running'] RETURN NONE;
@@ -1334,6 +1392,7 @@ async fn cancel_one_in(tx: &Tx, job_id: &str, now: &str) -> Result<(), TxError> 
         )),
     )
     .await?;
+    rollup_in(tx, job_id).await?;
     Ok(())
 }
 

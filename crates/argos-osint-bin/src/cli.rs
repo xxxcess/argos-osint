@@ -314,7 +314,13 @@ enum AtlasCommand {
 }
 
 pub async fn dispatch() -> Result<()> {
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+    #[cfg(feature = "surreal")]
+    let command = match surreal_brain(command).await? {
+        Some(command) => command,
+        None => return Ok(()),
+    };
+    match command {
         None => tui::run(App::boot()?).await,
         Some(Command::Remember {
             app,
@@ -416,6 +422,75 @@ async fn storage_command(command: StorageCommand) -> Result<()> {
         }
         StorageCommand::Reset { yes } => print_json(&commands::reset(&layout, yes).await?),
     }
+}
+
+/// Under a configured storage mode, the Brain commands run on the SurrealDB
+/// repository only, never mixed with SQLite. Returns the command back
+/// when it is not a Brain command or no storage mode is configured, and
+/// None when it ran here.
+#[cfg(feature = "surreal")]
+async fn surreal_brain(command: Option<Command>) -> Result<Option<Option<Command>>> {
+    use argos_osint_core::storage::{home, insight_views, memories, runtime, vectors};
+    let brain = matches!(
+        command,
+        Some(
+            Command::Remember { .. }
+                | Command::Recall { .. }
+                | Command::Memories { .. }
+                | Command::Insights { .. }
+        )
+    );
+    if !brain || home::load_config(&home::Layout::new(paths::ensure_home()?))?.is_none() {
+        return Ok(Some(command));
+    }
+    let repo = runtime::repository().await?;
+    let embedder = vectors::Embedder::local();
+    match command {
+        Some(Command::Remember {
+            app,
+            conversation,
+            message,
+            reference,
+            category,
+            text,
+        }) => {
+            let source = MemorySource {
+                app,
+                conversation_id: conversation,
+                message_id: message,
+                reference,
+            };
+            let memory =
+                memories::add_memory(&repo, &text, &category, false, source, embedder.as_ref())
+                    .await?;
+            print_json(&memory)?;
+        }
+        Some(Command::Recall { query, limit }) => {
+            let hits = memories::recall(&repo, &query, limit, embedder.as_ref()).await?;
+            let mut out = Vec::with_capacity(hits.len());
+            for hit in hits {
+                let metadata = insight_views::insight_metadata(&repo, &hit.memory.id).await?;
+                out.push(serde_json::json!({"score":hit.score,"memory":hit.memory,"insight_metadata":metadata}));
+            }
+            print_json(&out)?;
+        }
+        Some(Command::Memories {
+            command: Some(MemoriesCommand::Reindex),
+        }) => {
+            let embedder = embedder.ok_or_else(|| {
+                anyhow!("Brain vectors are off (ARGOS_EMBED=0); nothing to reindex")
+            })?;
+            print_json(&vectors::reindex(&repo, &embedder).await?)?;
+        }
+        Some(Command::Memories { command: None }) => {
+            print_json(&memories::list_memories(&repo).await?)?;
+        }
+        Some(Command::Insights { entity, topic }) => {
+            print_json(&insight_views::search_insights(&repo, &entity, &topic).await?)?;
+        }
+        _ => unreachable!("checked above"),
+    }
+    Ok(None)
 }
 
 fn open_store() -> Result<Store> {

@@ -3,6 +3,20 @@ mod tui;
 
 #[tokio::main]
 async fn main() {
+    // The one storage entry point: the CLI and TUI reach the SurrealDB
+    // repository through this runtime's handle.
+    #[cfg(feature = "surreal")]
+    if let Err(err) = argos_osint_core::paths::ensure_home()
+        .map_err(anyhow::Error::from)
+        .and_then(|home| {
+            argos_osint_core::storage::runtime::init(argos_osint_core::storage::home::Layout::new(
+                home,
+            ))
+        })
+    {
+        eprintln!("argos: {err:#}");
+        std::process::exit(1);
+    }
     if let Err(err) = cli::dispatch().await {
         eprintln!("argos: {err:#}");
         std::process::exit(1);

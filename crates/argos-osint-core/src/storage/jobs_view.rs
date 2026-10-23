@@ -1,9 +1,9 @@
 //! Jobs dashboard read model and Retry on SurrealDB (`crate::jobs_view`
 //! parity). Returns the same `JobRow` / `JobDetail` types as SQLite.
 //!
-//! The SurrealDB `job` / `task` / `attempt` records carry less than
-//! `argos_jobs`: fields with no source (app, title, provider, model, tool,
-//! run/resource/result refs, error text, durable timing) are `""` / `None`
+//! Dashboard metadata (app, title, provider, model, tool, refs, error text,
+//! durable timing, attempt caps) lives on `job` / `task` / `attempt` and is
+//! written with [`set_job_meta`]; unknown timing stays `None`
 //! ("Unavailable"), never zero-filled. Visibility follows
 //! `job_cleanup::eligible`: created inside the 72-hour execution window and
 //! not retired.
@@ -24,7 +24,14 @@ const ELIGIBLE: &str = "created_at >= <datetime>$cutoff \
 
 const ROW: &str = "SELECT record::id(id) AS key,
     IF parent != NONE { record::id(parent) } ELSE { '' } AS parent_id,
-    kind, operation, state, phase, cancel_requested,
+    kind, operation, state, phase, cancel_requested, cancellable AS cancellable_flag,
+    app, title, provider, model, tool, run_ref, resource_ref, result_ref, error_category,
+    error_summary, correlation_id, stage_coverage_json, active_ms, queue_ms, retry_wait_ms,
+    attempts_used, attempt_cap, worker_owner, progress_done, progress_total,
+    IF heartbeat_at != NONE { <string>heartbeat_at } ELSE { '' } AS heartbeat_at,
+    IF active_since != NONE { <string>active_since } ELSE { '' } AS active_since,
+    count((SELECT VALUE id FROM job_event WHERE job_id = record::id($parent.id)
+      OR job_id IN (SELECT VALUE record::id(id) FROM job WHERE parent = $parent.id))) AS events,
     <string>created_at AS created_at,
     IF finished_at != NONE { <string>finished_at } ELSE { '' } AS finished_at,
     updated_at,
@@ -50,6 +57,30 @@ struct Raw {
     state: String,
     phase: String,
     cancel_requested: bool,
+    cancellable_flag: bool,
+    app: String,
+    title: String,
+    provider: String,
+    model: String,
+    tool: String,
+    run_ref: String,
+    resource_ref: String,
+    result_ref: String,
+    error_category: String,
+    error_summary: String,
+    correlation_id: String,
+    stage_coverage_json: String,
+    active_ms: Option<i64>,
+    queue_ms: Option<i64>,
+    retry_wait_ms: Option<i64>,
+    attempts_used: i64,
+    attempt_cap: i64,
+    worker_owner: String,
+    progress_done: Option<i64>,
+    progress_total: Option<i64>,
+    heartbeat_at: String,
+    active_since: String,
+    events: i64,
     created_at: String,
     finished_at: String,
     children: i64,
@@ -61,7 +92,30 @@ struct Raw {
 
 fn row(r: Raw) -> JobRow {
     JobRow {
-        cancellable: r.kind != "service" && r.tasks > 0,
+        cancellable: r.kind != "service" && (r.cancellable_flag || r.tasks > 0),
+        app: r.app,
+        title: r.title,
+        provider: r.provider,
+        model: r.model,
+        tool: r.tool,
+        run_ref: r.run_ref,
+        resource_ref: r.resource_ref,
+        result_ref: r.result_ref,
+        error_category: r.error_category,
+        error_summary: r.error_summary,
+        correlation_id: r.correlation_id,
+        stage_coverage_json: r.stage_coverage_json,
+        active_ms: r.active_ms,
+        queue_ms: r.queue_ms,
+        retry_wait_ms: r.retry_wait_ms,
+        attempts_used: r.attempts_used,
+        attempt_cap: r.attempt_cap,
+        worker_owner: r.worker_owner,
+        progress_done: r.progress_done,
+        progress_total: r.progress_total,
+        heartbeat_at: r.heartbeat_at,
+        active_since: r.active_since,
+        events: r.events,
         id: r.key,
         parent_id: r.parent_id,
         kind: r.kind,
@@ -76,7 +130,6 @@ fn row(r: Raw) -> JobRow {
         attempt_rows: r.attempt_rows,
         open_attempt_started: r.open_attempt_started,
         cancel_requested: r.cancel_requested,
-        ..JobRow::default()
     }
 }
 
@@ -93,12 +146,8 @@ fn retryable_ops() -> Vec<String> {
 }
 
 /// `list_jobs`: top-level visible jobs, active first, then most recently
-/// updated, services last. Bounded by `limit`. `app` filters match nothing
-/// but `""` (SurrealDB jobs carry no app yet).
+/// updated, services last. Bounded by `limit`.
 pub async fn list_jobs(db: &Surreal<Any>, filter: &JobFilter, limit: usize) -> Result<Vec<JobRow>> {
-    if !filter.app.is_empty() {
-        return Ok(Vec::new());
-    }
     let mut sql = format!("{ROW} WHERE parent = NONE AND {ELIGIBLE}");
     let states: Vec<String> = filter
         .status
@@ -109,6 +158,9 @@ pub async fn list_jobs(db: &Surreal<Any>, filter: &JobFilter, limit: usize) -> R
     if !states.is_empty() {
         sql.push_str(" AND state IN $states");
     }
+    if !filter.app.is_empty() {
+        sql.push_str(" AND app = $app");
+    }
     if !filter.operation.is_empty() {
         sql.push_str(" AND operation = $op");
     }
@@ -116,6 +168,8 @@ pub async fn list_jobs(db: &Surreal<Any>, filter: &JobFilter, limit: usize) -> R
     if !text.is_empty() {
         sql.push_str(
             " AND (string::contains(string::lowercase(operation), $text) \
+             OR string::contains(string::lowercase(title), $text) \
+             OR string::contains(string::lowercase(error_summary), $text) \
              OR string::contains(string::lowercase(<string>record::id(id)), $text))",
         );
     }
@@ -127,6 +181,7 @@ pub async fn list_jobs(db: &Surreal<Any>, filter: &JobFilter, limit: usize) -> R
         .query(sql)
         .bind(("cutoff", cutoff(Utc::now())))
         .bind(("states", states))
+        .bind(("app", filter.app.clone()))
         .bind(("op", filter.operation.clone()))
         .bind(("text", text))
         .bind(("since", filter.since.clone()))
@@ -182,9 +237,86 @@ pub async fn job_counts(db: &Surreal<Any>) -> Result<JobCounts> {
     Ok(c)
 }
 
-/// `job_apps`: SurrealDB jobs carry no app yet, so the filter list is empty.
-pub async fn job_apps(_db: &Surreal<Any>) -> Result<Vec<String>> {
-    Ok(Vec::new())
+/// `job_apps`: distinct apps of visible top-level jobs, at most 32.
+pub async fn job_apps(db: &Surreal<Any>) -> Result<Vec<String>> {
+    let apps: Vec<String> = db
+        .query(format!(
+            "SELECT VALUE app FROM job WHERE parent = NONE AND app != '' AND {ELIGIBLE}"
+        ))
+        .bind(("cutoff", cutoff(Utc::now())))
+        .await?
+        .check()?
+        .take(0)?;
+    let mut apps: Vec<String> = apps
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    apps.truncate(32);
+    Ok(apps)
+}
+
+/// Dashboard metadata for a job (`argos_jobs` columns with no executor
+/// role). `None` leaves a field unchanged.
+#[derive(Clone, Debug, Default)]
+pub struct JobMeta {
+    pub app: Option<String>,
+    pub title: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub tool: Option<String>,
+    pub run_ref: Option<String>,
+    pub resource_ref: Option<String>,
+    pub result_ref: Option<String>,
+    pub error_category: Option<String>,
+    pub error_summary: Option<String>,
+    pub correlation_id: Option<String>,
+    pub worker_owner: Option<String>,
+    pub progress_done: Option<i64>,
+    pub progress_total: Option<i64>,
+    pub active_ms: Option<i64>,
+    pub queue_ms: Option<i64>,
+    pub retry_wait_ms: Option<i64>,
+    pub attempts_used: Option<i64>,
+    pub attempt_cap: Option<i64>,
+    pub cancellable: Option<bool>,
+}
+
+/// Write [`JobMeta`] onto `job:id` (merge; absent fields untouched).
+pub async fn set_job_meta(db: &Surreal<Any>, id: &str, meta: &JobMeta) -> Result<()> {
+    let mut patch = serde_json::Map::new();
+    macro_rules! put {
+        ($($f:ident),*) => {$(
+            if let Some(v) = &meta.$f {
+                patch.insert(stringify!($f).into(), serde_json::json!(v));
+            }
+        )*};
+    }
+    put!(
+        app,
+        title,
+        provider,
+        model,
+        tool,
+        run_ref,
+        resource_ref,
+        result_ref,
+        error_category,
+        error_summary,
+        correlation_id,
+        active_ms,
+        queue_ms,
+        retry_wait_ms,
+        attempts_used,
+        attempt_cap,
+        cancellable
+    );
+    db.query("UPDATE $j MERGE $patch RETURN NONE")
+        .bind(("j", rid("job", id)))
+        .bind(("patch", serde_json::Value::Object(patch)))
+        .await?
+        .check()?;
+    Ok(())
 }
 
 #[derive(SurrealValue)]
@@ -200,6 +332,13 @@ struct RawTask {
     pool: String,
     state: String,
     attempts: i64,
+    max_attempts: i64,
+    active_ms: i64,
+    queue_ms: Option<i64>,
+    retry_wait_ms: i64,
+    error_category: String,
+    error_message: String,
+    result_ref: String,
     next_eligible_at: String,
     updated_at: String,
 }
@@ -213,6 +352,9 @@ struct RawAttempt {
     started_at: String,
     finished_at: String,
     outcome: String,
+    duration_ms: Option<i64>,
+    error_category: String,
+    error_message: String,
     operation: String,
 }
 
@@ -237,7 +379,8 @@ pub async fn job_detail(
     let mut r = db
         .query(format!(
             "{ROW} WHERE parent = $j ORDER BY created_at, id LIMIT 50;
-             SELECT record::id(id) AS id, operation, pool, state, attempts,
+             SELECT record::id(id) AS id, operation, pool, state, attempts, max_attempts, active_ms,
+               queue_ms, retry_wait_ms, error_category, error_message, result_ref,
                <string>next_eligible_at AS next_eligible_at, <string>updated_at AS updated_at,
                IF state IN ['running', 'queued', 'retry_scheduled', 'failed'] {{ 0 }} ELSE {{ 1 }} AS rank,
                updated_at AS u
@@ -246,7 +389,8 @@ pub async fn job_detail(
              SELECT record::id(id) AS id, record::id(task) AS task_id, number, owner,
                <string>started_at AS started_at,
                IF finished_at != NONE {{ <string>finished_at }} ELSE {{ '' }} AS finished_at,
-               outcome, task.operation AS operation, started_at AS s
+               outcome, duration_ms, error_category, error_message,
+               task.operation AS operation, started_at AS s
              FROM attempt WHERE task.job = $j ORDER BY s DESC, id LIMIT 20;
              RETURN count((SELECT VALUE id FROM task WHERE job = $j AND state = 'failed'
                AND operation IN $ops));"
@@ -272,16 +416,27 @@ pub async fn job_detail(
                 pool: t.pool,
                 state: t.state,
                 attempts: t.attempts,
+                max_attempts: t.max_attempts,
+                active_ms: t.active_ms,
+                queue_ms: t.queue_ms,
+                retry_wait_ms: t.retry_wait_ms,
+                error_category: t.error_category,
+                error_message: t.error_message,
+                result_ref: t.result_ref,
                 next_eligible_at: t.next_eligible_at,
                 updated_at: t.updated_at,
-                ..TaskRow::default()
+                stage_label: String::new(),
             })
             .collect(),
         task_total: task_total.unwrap_or(0),
         attempts: attempts
             .into_iter()
             .map(|a| AttemptRow {
-                duration_ms: ms_between(&a.started_at, &a.finished_at),
+                duration_ms: a
+                    .duration_ms
+                    .or_else(|| ms_between(&a.started_at, &a.finished_at)),
+                error_category: a.error_category,
+                error_message: a.error_message,
                 task_label: task_label(&a.operation),
                 id: a.id,
                 task_id: a.task_id,
@@ -290,7 +445,6 @@ pub async fn job_detail(
                 started_at: a.started_at,
                 finished_at: a.finished_at,
                 outcome: a.outcome,
-                ..AttemptRow::default()
             })
             .collect(),
         retryable: retryable.unwrap_or(0),
@@ -300,7 +454,9 @@ pub async fn job_detail(
 
 /// `retry_failed_tasks`: requeue a job's failed tasks that a durable pool
 /// owns (index and summary work), under the tree's `job_guard`, and reopen a
-/// failed/partial job. Completed tasks are untouched. A job with a cancel
+/// failed/partial job, resets the requeued tasks' failed index changes and
+/// records a `job.retry` event in the same transaction. Brief-chain and
+/// insight-extraction retries wait for those pipelines. Completed tasks are untouched. A job with a cancel
 /// request, a retired or missing job retries nothing.
 pub async fn retry_failed_tasks(db: &Surreal<Any>, id: &str) -> Result<usize> {
     if get_job(db, id).await?.is_none() {
@@ -330,23 +486,35 @@ pub async fn retry_failed_tasks(db: &Surreal<Any>, id: &str) -> Result<usize> {
                 tx.query(
                     "UPDATE task SET state = 'queued', attempts = 0, next_eligible_at = <datetime>$now,
                        lease_owner = '', process_owner = '', lease_until = NONE, finished_at = NONE,
+                       error_category = '', error_message = '',
                        updated_at = <datetime>$now
-                     WHERE job = $j AND state = 'failed' AND operation IN $ops RETURN VALUE id;",
+                     WHERE job = $j AND state = 'failed' AND operation IN $ops RETURN VALUE record::id(id);",
                 )
                 .bind(("j", rid("job", &id)))
                 .bind(("ops", retryable_ops()))
                 .bind(("now", now.clone())),
             )
             .await?;
-            let ids: Vec<surrealdb::types::RecordId> = take(&mut r, 0)?;
+            let ids: Vec<String> = take(&mut r, 0)?;
             if !ids.is_empty() {
                 run(
                     &tx,
                     tx.query(
                         "UPDATE $j SET state = 'running', finished_at = NONE, updated_at = <datetime>$now
-                         WHERE state IN ['failed', 'partial'] RETURN NONE",
+                         WHERE state IN ['failed', 'partial'] RETURN NONE;
+                         UPDATE index_change SET state = 'pending', error_category = '',
+                           error_message = '', updated_at = <datetime>$now
+                         WHERE state = 'failed' AND task_id IN $tasks RETURN NONE;
+                         CREATE job_event SET job_id = $key, app = 'jobs', event_type = 'job.retry',
+                           severity = 'info', message = $msg, ts = <datetime>$now RETURN NONE;",
                     )
                     .bind(("j", rid("job", &id)))
+                    .bind(("key", id.clone()))
+                    .bind(("tasks", ids.clone()))
+                    .bind((
+                        "msg",
+                        format!("Retry requested for {} failed task(s)", ids.len()),
+                    ))
                     .bind(("now", now)),
                 )
                 .await?;

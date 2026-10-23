@@ -72,6 +72,62 @@ async fn jobs_view_lists_details_and_retries_like_sqlite() {
     .unwrap()
     .check()
     .unwrap();
+    db.query(
+        "UPDATE task:t1 SET error_category = 'timeout', error_message = 'slow', max_attempts = 5;
+         CREATE index_change:c1 SET seq = 1, record_kind = 'memory', record_id = 'm1',
+           operation = 'index_upsert', state = 'failed', task_id = 't1', error_message = 'x',
+           created_at = time::now(), updated_at = time::now();
+         CREATE index_change:c2 SET seq = 2, record_kind = 'memory', record_id = 'm2',
+           operation = 'index_upsert', state = 'failed', task_id = 't3',
+           created_at = time::now(), updated_at = time::now();",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let meta = view::JobMeta {
+        app: Some("atlas".into()),
+        title: Some("Summaries for Rotterdam".into()),
+        provider: Some("openai".into()),
+        error_summary: Some("1 task failed".into()),
+        active_ms: Some(1500),
+        attempt_cap: Some(3),
+        ..view::JobMeta::default()
+    };
+    view::set_job_meta(&db, "j1", &meta).await.unwrap();
+    view::set_job_meta(
+        &db,
+        "j2",
+        &view::JobMeta {
+            app: Some("recon".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(view::job_apps(&db).await.unwrap(), vec!["atlas", "recon"]);
+    let atlas = JobFilter {
+        app: "atlas".into(),
+        ..JobFilter::default()
+    };
+    let rows = view::list_jobs(&db, &atlas, 50).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].title.as_str(), rows[0].provider.as_str()),
+        ("Summaries for Rotterdam", "openai")
+    );
+    assert_eq!(
+        (rows[0].active_ms, rows[0].queue_ms, rows[0].attempt_cap),
+        (Some(1500), None, 3)
+    );
+    let rotterdam = JobFilter {
+        text: "rotterdam".into(),
+        ..JobFilter::default()
+    };
+    assert_eq!(
+        view::list_jobs(&db, &rotterdam, 50).await.unwrap()[0].id,
+        "j1"
+    );
 
     let all = view::list_jobs(&db, &JobFilter::default(), 50)
         .await
@@ -109,6 +165,12 @@ async fn jobs_view_lists_details_and_retries_like_sqlite() {
     assert_eq!(detail.children[0].id, "c1");
     assert_eq!((detail.task_total, detail.retryable), (3, 1));
     assert_eq!(detail.tasks[0].state, "failed", "failed tasks sort first");
+    let t1 = detail.tasks.iter().find(|t| t.id == "t1").unwrap();
+    assert_eq!(
+        (t1.error_category.as_str(), t1.max_attempts),
+        ("timeout", 5)
+    );
+    assert_eq!(detail.job.events, 0);
     assert_eq!(detail.attempts[0].task_id, "t1");
     assert!(detail.attempts[0].duration_ms.is_some_and(|ms| ms >= 1000));
 
@@ -116,6 +178,21 @@ async fn jobs_view_lists_details_and_retries_like_sqlite() {
     assert_eq!(view::retry_failed_tasks(&db, "j1").await.unwrap(), 0);
     let detail = view::job_detail(&db, "j1", 40).await.unwrap().unwrap();
     assert_eq!(detail.job.state, "running");
+    assert_eq!(detail.job.events, 1, "job.retry recorded");
+    let t1 = detail.tasks.iter().find(|t| t.id == "t1").unwrap();
+    assert!(t1.error_message.is_empty());
+    let mut r = db
+        .query("SELECT VALUE state FROM index_change ORDER BY seq; SELECT VALUE event_type FROM job_event")
+        .await
+        .unwrap();
+    let states: Vec<String> = r.take(0).unwrap();
+    let events: Vec<String> = r.take(1).unwrap();
+    assert_eq!(
+        states,
+        vec!["pending", "failed"],
+        "only the requeued task's change resets"
+    );
+    assert_eq!(events, vec!["job.retry"]);
     let state = |id: &str| {
         detail
             .tasks

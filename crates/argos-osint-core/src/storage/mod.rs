@@ -34,6 +34,7 @@ pub mod install;
 pub mod intel;
 pub mod jobs;
 pub mod lifecycle;
+pub mod live_evidence;
 pub mod memories;
 pub mod memory;
 pub mod open;

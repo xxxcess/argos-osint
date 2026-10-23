@@ -11,6 +11,7 @@ use super::jobs::{rid, run};
 use super::memory::{self, MemoryWrite};
 use super::recall::{self, RecallQuery};
 use super::repo::Repository;
+use super::vectors::Embedder;
 use crate::brain::{normalize_category, Memory, MemorySource};
 
 #[derive(Debug, Clone, SurrealValue)]
@@ -47,6 +48,7 @@ pub async fn add_memory(
     category: &str,
     pinned: bool,
     source: MemorySource,
+    vectors: Option<&Embedder>,
 ) -> Result<Memory> {
     source.validate()?;
     let text = text.trim();
@@ -86,6 +88,14 @@ pub async fn add_memory(
     memory::write_then_index(repo.publisher(), write)
         .await
         .map_err(|e| anyhow!("save memory: {e}"))?;
+    // Vector writes happen after commit. A failure leaves the memory saved
+    // and lexically recallable; `argos memories reindex` repairs it.
+    if let Some(e) = vectors {
+        if let Err(err) = super::vectors::index_new(repo, e, std::slice::from_ref(&memory.id)).await
+        {
+            eprintln!("memory {} saved without a vector: {err:#}", memory.id);
+        }
+    }
     Ok(memory)
 }
 
@@ -111,22 +121,38 @@ pub struct ScoredMemory {
     pub memory: Memory,
 }
 
-/// Fenced recall (caps: five memories, token budget) without a query
-/// vector, so the lexical path ranks.
-pub async fn recall(repo: &Repository, query: &str, limit: usize) -> Result<Vec<ScoredMemory>> {
+/// Fenced recall (caps: five memories, token budget). With an embedder
+/// whose model serves the current generation, the query is embedded and
+/// vector hits rank first; lexical hits top up. Without one, or when the
+/// query cannot be embedded (reported on stderr), the lexical path ranks.
+pub async fn recall(
+    repo: &Repository,
+    query: &str,
+    limit: usize,
+    vectors: Option<&Embedder>,
+) -> Result<Vec<ScoredMemory>> {
     if query.trim().is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
-    let hits = recall::recall(
-        repo.db(),
-        &RecallQuery {
-            text: query.into(),
-            max_memories: limit,
-            ..RecallQuery::default()
-        },
-    )
-    .await
-    .map_err(|e| anyhow!("recall: {e}"))?;
+    let mut q = RecallQuery {
+        text: query.into(),
+        max_memories: limit,
+        ..RecallQuery::default()
+    };
+    if let Some(e) = vectors {
+        match super::vectors::query_vector(repo, e, query).await {
+            Ok(Some((state, v))) => {
+                q.embedding = Some(v);
+                q.model = state.model;
+                q.generation = state.generation;
+            }
+            Ok(None) => {}
+            Err(err) => eprintln!("query embedding failed; using lexical recall: {err:#}"),
+        }
+    }
+    let hits = recall::recall(repo.db(), &q)
+        .await
+        .map_err(|e| anyhow!("recall: {e}"))?;
     let ids: Vec<_> = hits.iter().map(|h| rid("memory", &h.id)).collect();
     let mut r = repo
         .db()

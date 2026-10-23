@@ -23,15 +23,29 @@ async fn remember_list_and_recall_through_the_repository() {
         return;
     };
     let repo = server.repo("argos", "memories").await;
-    let err = memories::add_memory(&repo, "  ", "fact", false, source()).await;
+    let err = memories::add_memory(&repo, "  ", "fact", false, source(), None).await;
     assert!(err.is_err());
-    let a = memories::add_memory(&repo, " The ship sails at dawn ", "fact", false, source())
-        .await
-        .unwrap();
+    let a = memories::add_memory(
+        &repo,
+        " The ship sails at dawn ",
+        "fact",
+        false,
+        source(),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(a.text, "The ship sails at dawn");
-    let b = memories::add_memory(&repo, "Harbor closes at noon", "nonsense", true, source())
-        .await
-        .unwrap();
+    let b = memories::add_memory(
+        &repo,
+        "Harbor closes at noon",
+        "nonsense",
+        true,
+        source(),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         b.category,
         argos_osint_core::brain::normalize_category("nonsense")
@@ -49,7 +63,7 @@ async fn remember_list_and_recall_through_the_repository() {
     let pending = outbox::pending(repo.db(), 0, 10).await.unwrap();
     assert_eq!(pending.len(), 2);
 
-    let hits = memories::recall(&repo, "when does the ship sail", 8)
+    let hits = memories::recall(&repo, "when does the ship sail", 8, None)
         .await
         .unwrap();
     assert_eq!(
@@ -57,5 +71,8 @@ async fn remember_list_and_recall_through_the_repository() {
         Some(a.id.clone())
     );
     assert!(hits.len() <= 5, "recall cap");
-    assert!(memories::recall(&repo, " ", 8).await.unwrap().is_empty());
+    assert!(memories::recall(&repo, " ", 8, None)
+        .await
+        .unwrap()
+        .is_empty());
 }

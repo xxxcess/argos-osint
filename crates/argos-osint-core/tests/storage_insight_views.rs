@@ -26,10 +26,17 @@ async fn insights_search_view_and_metadata_through_the_repository() {
         return;
     };
     let repo = server.repo("argos", "insight_views").await;
-    let a = memories::add_memory(&repo, "Acme ships via Rotterdam", "fact", false, source())
-        .await
-        .unwrap();
-    let b = memories::add_memory(&repo, "Globex hires pilots", "fact", false, source())
+    let a = memories::add_memory(
+        &repo,
+        "Acme ships via Rotterdam",
+        "fact",
+        false,
+        source(),
+        None,
+    )
+    .await
+    .unwrap();
+    let b = memories::add_memory(&repo, "Globex hires pilots", "fact", false, source(), None)
         .await
         .unwrap();
     let rev = memory_revision(&a.text);

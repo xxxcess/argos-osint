@@ -43,13 +43,16 @@ pub fn schemas() -> [(&'static str, &'static str); 14] {
 
 /// The version record (`storage_meta:schema`) and the database identity
 /// (`storage_meta:identity`, see `storage::server`), and the reset epoch
-/// (`storage_meta:epoch`, see `storage::commands`).
+/// (`storage_meta:epoch`, see `storage::commands`), and the serving
+/// embedding generation (`storage_meta:vectors`, see `storage::vectors`).
 pub const META_SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS storage_meta SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS version ON storage_meta TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS applied_at ON storage_meta TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS instance_id ON storage_meta TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS reset_epoch ON storage_meta TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS reset_at ON storage_meta TYPE option<string>;";
+DEFINE FIELD IF NOT EXISTS reset_at ON storage_meta TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS embedding_generation ON storage_meta TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS embedding_model ON storage_meta TYPE option<string>;";
 
 /// What [`ensure_schema`] found and did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

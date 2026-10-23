@@ -42,3 +42,4 @@ pub mod repo;
 pub mod runtime;
 pub mod server;
 pub mod tx;
+pub mod vectors;

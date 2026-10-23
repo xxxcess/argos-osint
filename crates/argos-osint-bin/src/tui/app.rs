@@ -1,5 +1,6 @@
 //! App state and keyboard routing for the Argos terminal shell.
 
+use super::surreal_brain;
 use super::tracked;
 use super::ui::nudge;
 use anyhow::Result;
@@ -3458,9 +3459,12 @@ impl App {
         let generation = self.brain_generation;
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_profile_reader(&db)
-                .and_then(|store| store.insight_for_memory(&id))
-                .map_err(|e| e.to_string());
+            let outcome = if surreal_brain::on() {
+                surreal_brain::preview(&id)
+            } else {
+                Store::open_profile_reader(&db).and_then(|store| store.insight_for_memory(&id))
+            }
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::BrainPreviewLoaded {
                 generation,
                 memory_id: id,
@@ -6665,14 +6669,17 @@ impl App {
         self.brain_reading = Some(generation);
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_profile_reader(&db)
-                .and_then(|store| {
+            let outcome = if surreal_brain::on() {
+                surreal_brain::list()
+            } else {
+                Store::open_profile_reader(&db).and_then(|store| {
                     // One consistent read transaction; concurrent ingest cannot
                     // produce mixed revisions in the display projection.
                     store.connection().execute_batch("BEGIN")?;
                     store.brain_browse_memories(None, "")
                 })
-                .map_err(|e| e.to_string());
+            }
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::BrainLoaded {
                 generation,
                 outcome,
@@ -9495,9 +9502,12 @@ impl App {
         let db = self.background_db.clone().expect("production database");
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_light(&db)
-                .and_then(|store| store.delete_memory(&id))
-                .map_err(|e| e.to_string());
+            let outcome = if surreal_brain::on() {
+                surreal_brain::delete(&id)
+            } else {
+                Store::open_light(&db).and_then(|store| store.delete_memory(&id))
+            }
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::MemoryDeleted {
                 memory_id: id,
                 outcome,

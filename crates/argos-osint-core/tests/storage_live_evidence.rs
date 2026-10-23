@@ -142,3 +142,62 @@ async fn live_evidence_is_checked_in_the_transaction() {
         .unwrap_err()
         .contains("isn't available on SurrealDB yet"));
 }
+
+#[tokio::test]
+async fn report_evidence_needs_the_latest_unretired_result() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = server.root("argos", "live_evidence_report").await;
+    let artifact = "Report text";
+    db.query(
+        "CREATE type::record('nlp_artifact', $h) SET text = $t, byte_len = 1, created_at = ''",
+    )
+    .bind(("h", hash(artifact)))
+    .bind(("t", artifact))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    sql(
+        &db,
+        "CREATE atlas_article SET run_id = 'r1', article_id = 'a1', title = '', description = '',
+           url = '', country = '', source_name = '', source_domain = '', published_at = '',
+           provider = '', temperature = 0.0, seen_at = '';
+         CREATE intel_report_result SET job_id = 'j1', generation = 1, article_id = 'a1',
+           completion_sequence = 1, source_hash = 'h1', details_json = '{}', completed_at = '';",
+    )
+    .await;
+    let snapshot = EvidenceSnapshot {
+        owner_kind: "article".into(),
+        owner_id: "a1".into(),
+        generation: 1,
+        source_refs: vec![reference("report:j1", "1:h1", artifact)],
+        entities: vec![],
+        tool_refs: vec![],
+        coverage_by_stage: vec![],
+        assessed_claim_refs: vec![],
+        identity_bindings: vec![],
+        memory_refs: vec![],
+        memory_claims: vec![],
+        key: "k".into(),
+    };
+    validate(&db, &snapshot).await.unwrap();
+    // A newer result from another job takes the authority.
+    sql(
+        &db,
+        "CREATE intel_report_result SET job_id = 'j2', generation = 2, article_id = 'a1',
+           completion_sequence = 2, source_hash = 'h2', details_json = '{}', completed_at = ''",
+    )
+    .await;
+    let err = validate(&db, &snapshot).await.unwrap_err();
+    assert!(err.contains("report authority changed"), "{err}");
+    // A retired report job is refused first.
+    sql(
+        &db,
+        "CREATE job_retirement:j1 SET retired_at = time::now(), reason = 'expired'",
+    )
+    .await;
+    let err = validate(&db, &snapshot).await.unwrap_err();
+    assert!(err.contains("retired before publication"), "{err}");
+}

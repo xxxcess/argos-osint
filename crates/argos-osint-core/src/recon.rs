@@ -47,7 +47,7 @@ pub(crate) fn id(prefix: &str) -> String {
 fn now() -> String {
     Utc::now().to_rfc3339()
 }
-fn same_budget_month(stored: &str) -> bool {
+pub(crate) fn same_budget_month(stored: &str) -> bool {
     let now = Utc::now().format("%Y-%m").to_string();
     stored.starts_with(&now)
 }

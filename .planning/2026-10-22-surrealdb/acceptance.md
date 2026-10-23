@@ -66,6 +66,8 @@ verified.
 - [ ] `ensure_schema` gaps: SQLite `Store::open` is unaffected (SQLite mode never opens SurrealDB). There is no migration ladder between Surreal schema versions (the store starts fresh, P4). The embeddings DISKANN dimension is fixed at 384 in `embeddings.surql` rather than taken from the configured model.
 
 - [ ] Recon/OSINT messages, tools, artifacts, ordered counters, credit hold/reconcile/release
+  - [x] Credit hold/reconcile/release (`storage::credits`, `tests/storage_credits.rs`, both modes): trial first, monthly reset, Whoxy prepaid pool, concurrent holds never overdraw, `release_held_credits` recovery. Gap: Recon callers still use the SQLite `Store`; messages, tools, artifacts and ordered counters are unported.
+  - [x] Live-evidence `report:` branch contract test (latest result authority, retirement) in both modes.
 - [ ] Intel stage publication with failure fallback (no savepoints)
 - [ ] Atlas occurrences, metadata revisions, actor index receipts
 - [ ] `brain_backfill`, `atlas_actor_index`, `job_cleanup`, `brief_canonical` savepoint replacements
@@ -102,6 +104,7 @@ verified.
 - [x] CLI (surreal builds): `main` calls `storage::runtime::init` once inside the Tokio runtime. When `storage/config.json` exists, `remember`, `recall` (with `insight_metadata`), `memories`, `memories reindex` and `insights` run only on `runtime::repository()`, and no `argos.db` is opened or created. Without a config they stay on SQLite. Smoke-tested in embedded mode. Gap: no bin-level automated test yet; the core contract tests cover the operations.
 - [ ] CLI and TUI call sites still use the SQLite `Store`; they move area by area onto `storage::runtime` (CLI, then TUI). The SQLite path stays compiling and green under default clippy until phase 5.
 - [ ] CLI/TUI workers, Profile (20 views), Jobs, telemetry, summaries, NLP artifacts
+  - Includes deferred P3 item 3: `refresh_cached_publication` moves with the summaries / Intel brief pipeline move (dependency list in the P3 entry above).
 - [x] `argos storage status`, `init`, `reset --yes` with resumable phases (`storage/reset.json`: wipe_legacy, wipe_store, bootstrap; tested by resuming from bootstrap)
 - [ ] Fresh population checks; two-session operation; restart reads
 - [ ] RSS/swap/disk/p95 measurements on the target machine

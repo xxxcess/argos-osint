@@ -83,7 +83,7 @@ enum Command {
         #[command(subcommand)]
         command: AtlasCommand,
     },
-    /// SurrealDB storage: status, init, start, stop, reset.
+    /// SurrealDB storage: status, init, install, start, stop, reset.
     #[cfg(feature = "surreal")]
     Storage {
         #[command(subcommand)]
@@ -103,6 +103,12 @@ enum StorageCommand {
         /// Fixed loopback port for server mode (default: pick a free one).
         #[arg(long)]
         port: Option<u16>,
+    },
+    /// Install the pinned SurrealDB 3.3.4 server into bin/ (download, or
+    /// a local archive with --from), checking its SHA-256.
+    Install {
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
     },
     /// Start (or adopt) this home's server.
     Start,
@@ -397,6 +403,11 @@ async fn storage_command(command: StorageCommand) -> Result<()> {
         StorageCommand::Status => print_json(&commands::status(&layout).await?),
         StorageCommand::Init { mode, port } => {
             print_json(&commands::init(&layout, mode, port).await?)
+        }
+        StorageCommand::Install { from } => {
+            let path =
+                argos_osint_core::storage::install::install(&layout, from.as_deref()).await?;
+            print_json(&serde_json::json!({ "installed": path }))
         }
         StorageCommand::Start => print_json(&server::ensure_started(&layout).await?),
         StorageCommand::Stop { force } => {

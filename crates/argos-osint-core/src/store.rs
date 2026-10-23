@@ -20,6 +20,7 @@ pub use publication::{
     RejectedClaim, DELETED_REVISION, MEMORY_RECORD,
 };
 
+#[cfg(feature = "surreal")]
 pub(crate) use publication::reject_reason;
 
 static IDS: AtomicU64 = AtomicU64::new(1);

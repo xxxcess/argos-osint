@@ -25,6 +25,16 @@ use surrealdb::Surreal;
 use super::jobs::{self, rid, run, take, ts};
 use super::tx::{run_tx, Committed, RetryPolicy, TxError};
 
+/// Running tasks whose owner process is not fresh. Reads the task table
+/// through the `state` prefix of `task_claim_order` (the plan 3.3.4 picks;
+/// the test pins an IndexScan), so it costs the running set
+/// (bounded by workers x processes), not all tasks. The `process` scan above
+/// it is a full read of a table with one row per live process.
+pub const ORPHANS_SURQL: &str = "SELECT record::id(id) AS id, record::id(root) AS root_id, \
+     lease_epoch, recoveries, process_owner FROM task \
+     WHERE state = 'running' AND process_owner != '' \
+     AND process_owner NOT IN $fresh LIMIT $n";
+
 /// Seconds after the last beat at which a process counts as gone.
 pub const PROCESS_STALE_SECS: i64 = 30;
 /// Heartbeat interval.
@@ -124,14 +134,9 @@ pub async fn recover_orphans(
             jobs::bump(&tx, "lease_sweep_guard", "singleton").await?;
             let mut res = run(
                 &tx,
-                tx.query(
-                    "SELECT record::id(id) AS id, record::id(root) AS root_id, lease_epoch, \
-                     recoveries, process_owner FROM task \
-                     WHERE state = 'running' AND process_owner != '' \
-                     AND process_owner NOT IN $fresh LIMIT $n",
-                )
-                .bind(("fresh", fresh.clone()))
-                .bind(("n", RECOVER_BATCH)),
+                tx.query(ORPHANS_SURQL)
+                    .bind(("fresh", fresh.clone()))
+                    .bind(("n", RECOVER_BATCH)),
             )
             .await?;
             let orphans: Vec<Orphan> = take(&mut res, 0)?;

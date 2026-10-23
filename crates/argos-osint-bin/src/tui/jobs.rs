@@ -15,6 +15,35 @@ use super::logs::local_time;
 use super::theme;
 use super::ui::{contains, draw_button_state, draw_field, fit, inset, pane, ACTION_H, FIELD_H};
 
+/// Where the Jobs pane reads: the SQLite store, or the SurrealDB repository
+/// under a storage config (see `surreal_brain::SurrealJobs`). One pane never
+/// mixes the two.
+pub trait JobsSource {
+    fn list(&self, filter: &JobFilter, limit: usize) -> anyhow::Result<Vec<JobRow>>;
+    fn counts(&self) -> anyhow::Result<JobCounts>;
+    fn apps(&self) -> anyhow::Result<Vec<String>>;
+    fn detail(&self, id: &str, tasks: usize) -> anyhow::Result<Option<JobDetail>>;
+    fn job(&self, id: &str) -> anyhow::Result<Option<JobRow>>;
+}
+
+impl JobsSource for Store {
+    fn list(&self, filter: &JobFilter, limit: usize) -> anyhow::Result<Vec<JobRow>> {
+        self.list_jobs(filter, limit)
+    }
+    fn counts(&self) -> anyhow::Result<JobCounts> {
+        self.job_counts()
+    }
+    fn apps(&self) -> anyhow::Result<Vec<String>> {
+        self.job_apps()
+    }
+    fn detail(&self, id: &str, tasks: usize) -> anyhow::Result<Option<JobDetail>> {
+        self.job_detail(id, tasks)
+    }
+    fn job(&self, id: &str) -> anyhow::Result<Option<JobRow>> {
+        self.get_job(id)
+    }
+}
+
 pub const PAGE: usize = 200;
 /// Below this body width the table and detail share one panel.
 pub const WIDE: u16 = 100;
@@ -50,8 +79,8 @@ impl JobsView {
     }
 
     /// Reload rows and the selected job's detail, keeping the selection by id.
-    pub fn reload(&mut self, store: &Store) {
-        match store.list_jobs(&self.filter(), PAGE) {
+    pub fn reload(&mut self, store: &impl JobsSource) {
+        match store.list(&self.filter(), PAGE) {
             Ok(rows) => {
                 self.rows = rows;
                 self.error = None;
@@ -69,21 +98,21 @@ impl JobsView {
             }
             Err(err) => self.error = Some(format!("Could not read jobs: {err:#}")),
         }
-        if let Ok(counts) = store.job_counts() {
+        if let Ok(counts) = store.counts() {
             self.counts = counts;
         }
-        if let Ok(apps) = store.job_apps() {
+        if let Ok(apps) = store.apps() {
             self.apps = apps;
         }
         self.load_detail(store);
     }
 
-    pub fn load_detail(&mut self, store: &Store) {
+    pub fn load_detail(&mut self, store: &impl JobsSource) {
         let Some(id) = self.selected().map(|row| row.id.clone()) else {
             self.detail = None;
             return;
         };
-        match store.job_detail(&id, 40) {
+        match store.detail(&id, 40) {
             Ok(detail) => self.detail = detail,
             Err(err) => self.error = Some(format!("Could not read job {id}: {err:#}")),
         }
@@ -93,7 +122,7 @@ impl JobsView {
         self.rows.get(self.sel)
     }
 
-    pub fn select(&mut self, index: usize, store: &Store) {
+    pub fn select(&mut self, index: usize, store: &impl JobsSource) {
         self.select_cached(index);
         self.load_detail(store);
     }
@@ -129,7 +158,7 @@ impl JobsView {
         self.detail = snapshot.detail;
     }
 
-    pub fn move_by(&mut self, delta: i32, store: &Store) {
+    pub fn move_by(&mut self, delta: i32, store: &impl JobsSource) {
         if self.rows.is_empty() {
             return;
         }
@@ -139,10 +168,10 @@ impl JobsView {
 
     /// Log → job navigation: select the job's top-level ancestor, clearing
     /// filters only when they hide it. Returns false when it no longer exists.
-    pub fn focus_job(&mut self, store: &Store, id: &str) -> bool {
+    pub fn focus_job(&mut self, store: &impl JobsSource, id: &str) -> bool {
         let mut target = id.to_string();
         for _ in 0..8 {
-            match store.get_job(&target) {
+            match store.job(&target) {
                 Ok(Some(job)) if !job.parent_id.is_empty() => target = job.parent_id,
                 Ok(Some(_)) => break,
                 _ => return false,

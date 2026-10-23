@@ -1908,8 +1908,14 @@ impl App {
         }
     }
 
+    /// Jobs reads run off the UI thread: on a background SQLite reader, or
+    /// on the SurrealDB repository under a storage config (never both).
+    fn jobs_async(&self) -> bool {
+        self.background_db.is_some() || surreal_brain::on()
+    }
+
     pub(crate) fn reload_jobs(&mut self) {
-        if self.background_db.is_some() {
+        if self.jobs_async() {
             self.request_dashboard_snapshot();
             return;
         }
@@ -1933,6 +1939,24 @@ impl App {
 
     fn request_dashboard_snapshot(&mut self) {
         if self.dashboard_reading {
+            return;
+        }
+        if surreal_brain::on() && self.module == Some(ModuleId::Jobs) {
+            self.dashboard_reading = true;
+            let module = self.module;
+            let key = self.dashboard_read_key();
+            let mut jobs = self.jobs.clone();
+            let pending_job = self.pending_job.clone();
+            let tx = self.work_tx.clone();
+            std::thread::spawn(move || {
+                surreal_brain::load_jobs(&mut jobs, pending_job.as_deref());
+                let outcome = Ok(Box::new(DashboardSnapshot::Jobs(Box::new(jobs))));
+                let _ = tx.send(WorkEvent::DashboardLoaded {
+                    module,
+                    key,
+                    outcome,
+                });
+            });
             return;
         }
         let Some(db) = self.background_db.clone() else {
@@ -1992,7 +2016,7 @@ impl App {
 
     /// Logs → Jobs for a job id (selected event's job, or the return path).
     fn open_job(&mut self, id: &str) -> Result<String> {
-        if self.background_db.is_some() {
+        if self.jobs_async() {
             self.pending_job = Some(id.into());
             self.select(ModuleId::Jobs.index());
             return Ok(format!("Loading job {}…", super::logs::short_id(id)));
@@ -5167,7 +5191,7 @@ impl App {
                 self.jobs.scroll = 0;
                 self.jobs.detail_scroll = 0;
                 self.status =
-                    outcome.unwrap_or_else(|error| format!("Could not clear jobs: {error}"));
+                    outcome.unwrap_or_else(|error| format!("Jobs action failed: {error}"));
                 self.reload_jobs();
                 self.refresh_intel_briefing();
                 true
@@ -8280,6 +8304,10 @@ impl App {
                 let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
                     return;
                 };
+                if surreal_brain::on() {
+                    self.spawn_job_action(surreal_brain::JobAction::Retry(id));
+                    return;
+                }
                 let retried = self.store.retry_failed_tasks(&id);
                 self.reload_jobs();
                 retried.map(|n| {
@@ -8294,6 +8322,10 @@ impl App {
                 let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
                     return;
                 };
+                if surreal_brain::on() {
+                    self.spawn_job_action(surreal_brain::JobAction::Cancel(id));
+                    return;
+                }
                 let requested = self.store.request_job_cancel(&id);
                 self.reload_jobs();
                 requested.map(|outcome| match outcome {
@@ -8315,6 +8347,17 @@ impl App {
                     ButtonId::JobsClearStopped => JobStatusFilter::Stopped,
                     _ => JobStatusFilter::Failed,
                 };
+                if surreal_brain::on() {
+                    if self.jobs_clearing {
+                        self.status = "Jobs cleanup is already in progress".into();
+                        return;
+                    }
+                    self.jobs_clearing = true;
+                    self.spawn_job_action(surreal_brain::JobAction::Clear(status));
+                    self.status =
+                        format!("Clearing {} job history…", status.label().to_lowercase());
+                    return;
+                }
                 if let Some(db) = self.background_db.clone() {
                     if self.jobs_clearing {
                         self.status = "Jobs cleanup is already in progress".into();
@@ -9193,7 +9236,7 @@ impl App {
                 self.toggle_log();
             }
             Target::JobRow(index) => {
-                if self.background_db.is_some() {
+                if self.jobs_async() {
                     self.pending_job = None;
                     self.jobs.select_cached(index);
                     self.reload_jobs();
@@ -10397,11 +10440,22 @@ impl App {
         self.set_focus(Target::LogLine(self.logs.sel));
     }
 
+    /// Run a Jobs action on the repository off the UI thread; the outcome
+    /// lands as `JobsCleared` (status line, then a Jobs reload).
+    fn spawn_job_action(&mut self, action: surreal_brain::JobAction) {
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = surreal_brain::job_action(action).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::JobsCleared { outcome });
+        });
+        self.status = "Working…".into();
+    }
+
     fn move_job(&mut self, delta: i32) {
         if self.jobs.rows.is_empty() {
             return;
         }
-        if self.background_db.is_some() {
+        if self.jobs_async() {
             self.pending_job = None;
             let index =
                 (self.jobs.sel as i32 + delta).clamp(0, self.jobs.rows.len() as i32 - 1) as usize;

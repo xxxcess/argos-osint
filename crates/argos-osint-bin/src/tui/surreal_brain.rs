@@ -76,3 +76,117 @@ pub(crate) fn preview(_id: &str) -> Result<Option<InsightView>> {
 pub(crate) fn delete(_id: &str) -> Result<bool> {
     unreachable!("SurrealDB Brain is off without the surreal feature")
 }
+
+/// The Jobs pane on the repository. Plain worker threads only.
+#[cfg(feature = "surreal")]
+pub(crate) struct SurrealJobs;
+
+#[cfg(feature = "surreal")]
+impl super::jobs::JobsSource for SurrealJobs {
+    fn list(
+        &self,
+        filter: &argos_osint_core::jobs_view::JobFilter,
+        limit: usize,
+    ) -> Result<Vec<argos_osint_core::jobs_view::JobRow>> {
+        use argos_osint_core::storage::{jobs_view, runtime};
+        runtime::blocking(
+            |repo| async move { jobs_view::list_jobs(repo.db(), filter, limit).await },
+        )
+    }
+    fn counts(&self) -> Result<argos_osint_core::jobs_view::JobCounts> {
+        use argos_osint_core::storage::{jobs_view, runtime};
+        runtime::blocking(|repo| async move { jobs_view::job_counts(repo.db()).await })
+    }
+    fn apps(&self) -> Result<Vec<String>> {
+        use argos_osint_core::storage::{jobs_view, runtime};
+        runtime::blocking(|repo| async move { jobs_view::job_apps(repo.db()).await })
+    }
+    fn detail(
+        &self,
+        id: &str,
+        tasks: usize,
+    ) -> Result<Option<argos_osint_core::jobs_view::JobDetail>> {
+        use argos_osint_core::storage::{jobs_view, runtime};
+        runtime::blocking(|repo| async move { jobs_view::job_detail(repo.db(), id, tasks).await })
+    }
+    fn job(&self, id: &str) -> Result<Option<argos_osint_core::jobs_view::JobRow>> {
+        use argos_osint_core::storage::{jobs_view, runtime};
+        runtime::blocking(|repo| async move { jobs_view::get_job(repo.db(), id).await })
+    }
+}
+
+/// Jobs pane actions on the repository (Retry, Stop, Clear history), as the
+/// status line text. Plain worker threads only.
+#[cfg(feature = "surreal")]
+pub(crate) fn job_action(action: JobAction) -> Result<String> {
+    use argos_osint_core::job_registry::CancelRequest;
+    use argos_osint_core::storage::{jobs_view, runtime};
+    match action {
+        JobAction::Retry(id) => {
+            let n = runtime::blocking(|repo| async move {
+                jobs_view::retry_failed_tasks(repo.db(), &id).await
+            })?;
+            Ok(if n == 0 {
+                "Nothing to retry".into()
+            } else {
+                format!("Retrying {n} failed task(s)")
+            })
+        }
+        JobAction::Cancel(id) => {
+            let outcome =
+                runtime::blocking(
+                    |repo| async move { jobs_view::cancel_job(repo.db(), &id).await },
+                )?;
+            Ok(match outcome {
+                CancelRequest::Requested => {
+                    "Stop requested · the job stops at its next safe point".into()
+                }
+                CancelRequest::NotCancellable => "This job cannot be cancelled safely".into(),
+                CancelRequest::NotRunning => "This job is not running".into(),
+                CancelRequest::Missing => "Job history expired".into(),
+            })
+        }
+        JobAction::Clear(status) => {
+            let n =
+                runtime::blocking(
+                    |repo| async move { jobs_view::clear_jobs(repo.db(), status).await },
+                )?;
+            Ok(format!("Cleared {n} jobs"))
+        }
+    }
+}
+
+#[cfg(not(feature = "surreal"))]
+pub(crate) fn job_action(action: JobAction) -> Result<String> {
+    let target = match action {
+        JobAction::Retry(id) | JobAction::Cancel(id) => id,
+        JobAction::Clear(status) => status.label().to_string(),
+    };
+    unreachable!("SurrealDB Jobs is off without the surreal feature ({target})")
+}
+
+/// A Jobs pane action for [`job_action`].
+pub(crate) enum JobAction {
+    Retry(String),
+    Cancel(String),
+    Clear(argos_osint_core::jobs_view::JobStatusFilter),
+}
+
+/// Load a Jobs snapshot from the repository (focus `pending` when set).
+/// Plain worker threads only.
+#[cfg(feature = "surreal")]
+pub(crate) fn load_jobs(jobs: &mut super::jobs::JobsView, pending: Option<&str>) {
+    match pending {
+        Some(id) => {
+            if !jobs.focus_job(&SurrealJobs, id) {
+                jobs.error = Some("Job history expired".into());
+            }
+        }
+        None => jobs.reload(&SurrealJobs),
+    }
+}
+
+#[cfg(not(feature = "surreal"))]
+pub(crate) fn load_jobs(_jobs: &mut super::jobs::JobsView, _pending: Option<&str>) {
+    unreachable!("SurrealDB Jobs is off without the surreal feature")
+}

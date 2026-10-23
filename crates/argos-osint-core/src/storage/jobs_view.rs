@@ -526,3 +526,35 @@ pub async fn retry_failed_tasks(db: &Surreal<Any>, id: &str) -> Result<usize> {
     .value;
     Ok(n)
 }
+
+/// `clear_jobs_by_status`: delete terminal visible root trees in the
+/// Completed / Stopped / Failed history (running work and services stay).
+/// Returns the number of jobs cleared.
+pub async fn clear_jobs(
+    db: &Surreal<Any>,
+    status: crate::jobs_view::JobStatusFilter,
+) -> Result<usize> {
+    use crate::jobs_view::JobStatusFilter as S;
+    if !matches!(status, S::Completed | S::Stopped | S::Failed) {
+        anyhow::bail!("{} is not a history filter", status.label());
+    }
+    let counts = super::jobs::clear_jobs_by_status(db, status.states(), Utc::now()).await?;
+    Ok(counts.jobs)
+}
+
+/// `request_job_cancel`: stop a running, cancellable job and its
+/// descendants through `jobs::stop_job` (resumable; a second call finishes).
+pub async fn cancel_job(db: &Surreal<Any>, id: &str) -> Result<crate::job_registry::CancelRequest> {
+    use crate::job_registry::CancelRequest;
+    let Some(job) = get_job(db, id).await? else {
+        return Ok(CancelRequest::Missing);
+    };
+    if !job.cancellable {
+        return Ok(CancelRequest::NotCancellable);
+    }
+    if !job.is_active() {
+        return Ok(CancelRequest::NotRunning);
+    }
+    super::jobs::stop_job(db, id, Utc::now(), 50, None).await?;
+    Ok(CancelRequest::Requested)
+}

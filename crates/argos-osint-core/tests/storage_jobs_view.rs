@@ -216,3 +216,55 @@ async fn jobs_view_lists_details_and_retries_like_sqlite() {
     assert_eq!(view::retry_failed_tasks(&db, "j1").await.unwrap(), 0);
     assert_eq!(view::retry_failed_tasks(&db, "missing").await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn jobs_pane_stop_and_clear_history_on_the_repository() {
+    use argos_osint_core::job_registry::CancelRequest;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = server.root("argos", "jobs_view_actions").await;
+    jobs::create_job(&db, &job("run", None, 1), &[task("rt", "run", "op")])
+        .await
+        .unwrap();
+    jobs::create_job(&db, &job("idle", None, 1), &[])
+        .await
+        .unwrap();
+    jobs::create_job(&db, &job("done", None, 1), &[])
+        .await
+        .unwrap();
+    db.query("UPDATE job:done SET state = 'completed', finished_at = time::now()")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        view::cancel_job(&db, "missing").await.unwrap(),
+        CancelRequest::Missing
+    );
+    assert_eq!(
+        view::cancel_job(&db, "idle").await.unwrap(),
+        CancelRequest::NotCancellable
+    );
+    assert_eq!(
+        view::cancel_job(&db, "run").await.unwrap(),
+        CancelRequest::Requested
+    );
+    assert!(
+        view::get_job(&db, "run")
+            .await
+            .unwrap()
+            .unwrap()
+            .cancel_requested
+    );
+
+    assert!(view::clear_jobs(&db, JobStatusFilter::All).await.is_err());
+    assert_eq!(
+        view::clear_jobs(&db, JobStatusFilter::Completed)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(view::get_job(&db, "done").await.unwrap().is_none());
+    assert!(view::get_job(&db, "idle").await.unwrap().is_some());
+}

@@ -43,10 +43,29 @@ Goal: replace SQLite + LanceDB with one local, disk-backed SurrealDB 3.3.4
 |---|---|---|
 | **P0 foundation** | 1 | Rust 1.95, `Surreal<Any>` SDK behind `surreal` (remote) and `embedded` (RocksDB), pinned server test script, disk contract suite in both modes, dependency check. No Store or caller conversion. |
 | P1 storage traits + job system | 2, 3, 4 | Fresh versioned SurrealQL schema + ledger, async repository boundary, transactions/retry helpers, guard records; scheduler election, claims, leases, cancellation, fences, heartbeats. |
-| P2 memories / graph / vectors | 5 (memory part), 6 | Memory publication (`write_then_index`, `record_index_states` on the group-commit publisher), native graph projection, embedding outbox, DISKANN recall with lexical fallback and stale-hit rejection. Plus the P1 tracking items (job_ancestor, orphan scan, publication counter, embedded retries). |
+| P2 memories / graph / vectors | 5 (memory part), 6 | **Done (storage layer).** Memory publication (`write_then_index`, `record_index_states` on the hardened group-commit publisher), native graph projection of Link/Related/Concerns/Premise, embedding outbox, DISKANN recall with stale-hit rejection and lexical top-up. Plus the P1 tracking items (job_ancestor, orphan scan, publication counter, embedded retries). Source/MentionedIn/Contains edges move to P3 with the atlas/insight tables. |
 | P3 Recon / Intel / Atlas + savepoints | 5 (rest) | Recon, OSINT, Intel, Atlas, investigation persistence; the four savepoint replacements; credit accounting. Also the 14 SQLite write sites moved from P2 (Code Architect, 2026-10-22), each landing with its tables in one transaction: `delete_memory` (memory side plus insight cascade); atlas deletes and prune (`atlas_delete_run`, `delete_article_insights`, `atlas_delete_article`, `atlas_prune_expired`); insight publication (`commit_article_insight_replacement`, `publish_atlas_insights`, `schedule_article_refresh`, `publish_snapshot`); `atlas_save_metadata`, `atlas_set_classification`, `legacy_receipt`, `refresh_cached_publication`; and the `ensure_schema` bootstrap last. |
 | P4 TUI / CLI + storage commands | 7, 8, 9 | Consumers and fixtures, `argos storage status|init|reset --yes`, repopulation checks, memory measurements. |
 | P5 `feat!` removal | 10 | Delete rusqlite, LanceDB, SQL schemas/migrations, protoc tooling; docs, diagrams, packaging. |
+
+### P2 recall behaviour (storage::recall)
+
+- Vector path: DISKANN `<|k,100|>` with k = 4 x the memory cap, filtered by
+  generation and model *inside* the KNN search (the 3.3.4 plan pushes the
+  predicate into the DISKANN node; pinned by a plan test and by a test where
+  25 nearer neighbours from another generation/model do not hide a fresh
+  row). Revision (`memory_revision` of the current text), lifecycle and kind
+  are checked on the returned rows; a failing row is a stale hit and is
+  dropped.
+- Top-up: when fewer than the cap of vector hits survive (including no
+  query vector or a failed search), lexical Jaccard hits fill the rest,
+  ranked after vector hits. Lexical paging reads active rows through the
+  `memory_lifecycle_kind` index (lifecycle prefix; kind is a residual
+  filter), 256 per page, at most 4,096 rows per pass, bounded top-k heap,
+  ties by id.
+- Caps: 5 memories, 1,500 estimated tokens (chars / 4); a hit over the
+  remaining budget is skipped. Actor/Link/Related are excluded unless
+  asked for; opt-out queries nothing.
 
 ### P5 perf list (measured, not scheduled earlier)
 

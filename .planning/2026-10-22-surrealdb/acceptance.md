@@ -39,10 +39,10 @@ verified.
 
 ## P2 — memories, graph, vectors (spec steps 5 memory part, 6)
 
-- [ ] Memory publication with graph projection, tombstones, change sequence, embedding outbox in one transaction
-- [ ] Seven edge meanings, parallel Link/Related IDs, retirement behaviour
-- [ ] DISKANN recall with revision/generation fencing and lexical fallback; bounded top-k heap
-- [ ] Recall caps (5 memories, 1,500 tokens), opt-out, default kind exclusions
+- [x] Memory publication with graph projection, tombstones, change sequence, embedding outbox in one transaction (group-commit publisher; `memory::put_typed_in` projects the graph in the same transaction)
+- [x] Seven edge meanings, parallel Link/Related IDs, retirement behaviour: Link, Related, Concerns, Premise projected from memories (edge keys deduped; owner-index delete pinned by a plan test). Source, MentionedIn, Contains come from atlas/insight records and land in P3 (see below)
+- [x] DISKANN recall with revision/generation fencing and lexical fallback; bounded top-k heap. Generation and model filter inside the KNN search (plan-pinned; 25 stale near neighbours do not hide a fresh one); revision, lifecycle and kind are checked on returned rows. Fewer than 5 surviving vector hits are topped up with lexical hits, paged via the `memory_lifecycle_kind` index, at most 4,096 rows per pass
+- [x] Recall caps (5 memories, 1,500 tokens), opt-out, default kind exclusions (actor, link, related unless asked for)
 
 ## P3 — Recon, Intel, Atlas + savepoints (spec step 5 rest)
 
@@ -50,6 +50,8 @@ verified.
 - [ ] Intel stage publication with failure fallback (no savepoints)
 - [ ] Atlas occurrences, metadata revisions, actor index receipts
 - [ ] `brain_backfill`, `atlas_actor_index`, `job_cleanup`, `brief_canonical` savepoint replacements
+- [ ] Graph edges from atlas/insight records: Source, MentionedIn, Contains (moved from P2)
+- [ ] The 14 write sites moved from P2 (`delete_memory`, atlas deletes/prune, insight publication, metadata, `ensure_schema`; see design.md)
 
 ## P4 — TUI/CLI + storage commands (spec steps 7–9)
 

@@ -34,6 +34,8 @@ DEFINE FIELD IF NOT EXISTS source_json ON memory TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS memory_kind ON memory TYPE string DEFAULT 'claim';
 -- Discriminated `MemoryPayload` JSON; '' for untyped memories.
 DEFINE FIELD IF NOT EXISTS payload_json ON memory TYPE string DEFAULT '';
+-- Lexical recall pages active memories of the allowed kinds.
+DEFINE INDEX IF NOT EXISTS memory_lifecycle_kind ON memory FIELDS lifecycle, memory_kind;
 DEFINE FIELD IF NOT EXISTS created_at ON memory TYPE datetime DEFAULT time::now();
 DEFINE TABLE IF NOT EXISTS memory_index_state SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS revision ON memory_index_state TYPE string;

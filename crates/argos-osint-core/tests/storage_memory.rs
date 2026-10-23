@@ -741,9 +741,14 @@ mod recall {
             ..Default::default()
         };
         let hits = recall::recall(&db, &q).await.unwrap();
-        assert_eq!(ids(&hits), vec!["fresh"], "stale hits never surface");
+        // The one fresh vector hit ranks first; fewer than 5 survived
+        // fencing, so lexical hits top up (stale vectors never surface as
+        // vector hits; archived and actor memories not at all).
+        assert_eq!(hits[0].id, "fresh");
         assert_eq!(hits[0].source, RecallSource::Vector);
         assert!(hits[0].score > 0.9);
+        assert_eq!(ids(&hits), vec!["fresh", "edited", "oldgen", "othermodel"]);
+        assert!(hits[1..].iter().all(|h| h.source == RecallSource::Lexical));
 
         // No hit survives fencing: lexical fallback over active, allowed kinds.
         let stale = RecallQuery {
@@ -785,7 +790,7 @@ mod recall {
         let mut sql = String::from("BEGIN;");
         for i in 0..total {
             sql.push_str(&format!(
-                "UPSERT memory:⟨m{i:04}⟩ SET text = 'filler entry {i} beacon', memory_kind = 'claim';"
+                "UPSERT memory:⟨m{i:04}⟩ SET text = 'filler entry {i} beacon', memory_kind = 'claim', lifecycle = 'active';"
             ));
         }
         sql.push_str("COMMIT;");
@@ -922,5 +927,144 @@ mod graph_edge_keys {
             "{plan}"
         );
         assert!(!plan.contains("Iterate Table"), "{plan}");
+    }
+}
+
+mod recall_plans {
+    use super::*;
+    use argos_osint_core::storage::embeddings::{self, Embedding};
+    use argos_osint_core::storage::recall::{self, RecallQuery, RecallSource};
+
+    fn unit_mix(main: f32, i: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; embeddings::DIMENSION];
+        v[0] = main;
+        v[i] = (1.0 - main * main).sqrt();
+        v
+    }
+
+    async fn plan(
+        db: &Surreal<Any>,
+        sql: &str,
+        bind: impl FnOnce(surrealdb::method::Query<'_, Any>) -> surrealdb::method::Query<'_, Any>,
+    ) -> String {
+        let q = bind(db.query(format!("{sql} EXPLAIN FULL")));
+        let mut r = q.await.unwrap().check().unwrap();
+        let plan: surrealdb::types::Value = r.take(0).unwrap();
+        format!("{plan:?}")
+    }
+
+    /// 25 nearer neighbours from another generation or model, then one
+    /// fresh row farther away: generation/model filter inside the KNN
+    /// search, so the fresh row is still found with k = 20.
+    #[tokio::test]
+    async fn generation_and_model_filter_before_the_knn_cut() {
+        let Some(server) = Server::start() else {
+            return;
+        };
+        let _serial = SERIAL.lock().await;
+        let (db, _publisher) = fresh(&server, "recall_prefilter").await;
+        embeddings::apply_schema(&db).await.unwrap();
+        let put = |id: String, text: String, model: &'static str, generation: i64, v: Vec<f32>| {
+            let db = db.clone();
+            async move {
+                db.query("UPSERT type::record('memory', $id) SET text = $t, memory_kind = 'claim', lifecycle = 'active' RETURN NONE")
+                    .bind(("id", id.clone()))
+                    .bind(("t", text.clone()))
+                    .await
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                let rev = memory::memory_revision(&text);
+                embeddings::put(
+                    &db,
+                    &Embedding {
+                        key: &id,
+                        kind: "claim",
+                        generation,
+                        revision: &rev,
+                        model,
+                        embedding: &v,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        };
+        for i in 0..25 {
+            let (model, generation) = if i % 2 == 0 { ("mA", 1) } else { ("mB", 2) };
+            put(
+                format!("near{i:02}"),
+                format!("unrelated words {i}"),
+                model,
+                generation,
+                unit_mix(0.999, i + 1),
+            )
+            .await;
+        }
+        put(
+            "far".into(),
+            "the fresh one".into(),
+            "mA",
+            2,
+            unit_mix(0.80, 100),
+        )
+        .await;
+        let q = RecallQuery {
+            text: "nothing lexical matches".into(),
+            embedding: Some(unit_mix(1.0, 1)),
+            model: "mA".into(),
+            generation: 2,
+            ..Default::default()
+        };
+        let hits = recall::recall(&db, &q).await.unwrap();
+        eprintln!(
+            "RECALL-PREFILTER hits={:?}",
+            hits.iter().map(|h| (&h.id, h.source)).collect::<Vec<_>>()
+        );
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].id, "far");
+        assert_eq!(hits[0].source, RecallSource::Vector);
+    }
+
+    #[tokio::test]
+    async fn recall_queries_use_their_indexes() {
+        let Some(server) = Server::start() else {
+            return;
+        };
+        let _serial = SERIAL.lock().await;
+        let (db, _publisher) = fresh(&server, "recall_plans").await;
+        embeddings::apply_schema(&db).await.unwrap();
+        let v = unit_mix(1.0, 1);
+        let vector = plan(&db, &recall::vector_sql(20), |q| {
+            q.bind(("g", 2i64))
+                .bind(("model", "mA".to_string()))
+                .bind(("v", v))
+        })
+        .await;
+        eprintln!("RECALL-PLAN vector: {vector}");
+        assert!(vector.contains("memory_embedding_diskann"), "{vector}");
+        assert!(
+            !vector.contains("TableScan") && !vector.contains("Iterate Table"),
+            "{vector}"
+        );
+        let kinds = vec!["claim".to_string(), "inference".to_string()];
+        for after in [false, true] {
+            let k = kinds.clone();
+            let page = plan(&db, &recall::lexical_page_sql(after), move |q| {
+                let q = q.bind(("kinds", k));
+                if after {
+                    q.bind(("after", surrealdb::types::RecordId::new("memory", "m0100")))
+                } else {
+                    q
+                }
+            })
+            .await;
+            eprintln!("RECALL-PLAN lexical after={after}: {page}");
+            assert!(page.contains("memory_lifecycle_kind"), "{page}");
+            assert!(
+                !page.contains("TableScan") && !page.contains("Iterate Table"),
+                "{page}"
+            );
+        }
     }
 }

@@ -5,11 +5,16 @@
 //! memory's *current* text (`revision` = [`memory_revision`] of the stored
 //! text), with the query's embedding model and the current generation, and
 //! the memory is still active and of an allowed kind. Anything else is a
-//! stale hit and is dropped, never shown. When there is no query vector, the
-//! vector search fails, or no hit survives fencing, recall falls back to
-//! token-overlap (Jaccard) scoring, paged through the active memories with
-//! a bounded top-k heap so memory use does not grow with the store.
-//! Ties order by memory id, so results are deterministic.
+//! stale hit and is dropped, never shown. Generation and model are filters
+//! inside the DISKANN search, so neighbours from another generation or model
+//! never crowd fresh ones out of the k nearest; revision, lifecycle and kind
+//! are checked on the returned rows. When fewer than the requested number of
+//! vector hits survive (none, a failed search or no query vector included),
+//! recall tops up with token-overlap (Jaccard) hits, paged through the
+//! active memories of the allowed kinds via the `memory_lifecycle_kind`
+//! index with a bounded top-k heap and at most [`LEXICAL_SCAN_CAP`] rows read.
+//! Vector hits rank ahead of lexical ones; ties order by memory id, so
+//! results are deterministic.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashSet};
@@ -28,6 +33,9 @@ pub const MAX_MEMORIES: usize = 5;
 pub const MAX_TOKENS: usize = 1_500;
 /// Rows read per lexical page.
 pub const LEXICAL_PAGE: usize = 256;
+/// Most rows one lexical pass reads (16 pages), so fallback cost stays
+/// bounded however large the store grows.
+pub const LEXICAL_SCAN_CAP: usize = LEXICAL_PAGE * 16;
 /// Kinds left out of default recall: actors serve identity lookup and
 /// Link/Related records serve exploration, not independent evidence.
 pub const DEFAULT_EXCLUDED: [MemoryKind; 3] =
@@ -109,8 +117,10 @@ pub async fn recall(db: &Surreal<Any>, q: &RecallQuery) -> Result<Vec<RecallHit>
             Err(e) => eprintln!("vector recall failed; using lexical recall: {e}"),
         }
     }
-    if ranked.is_empty() {
-        ranked = lexical_candidates(db, &q.text, &kinds, k).await?;
+    if ranked.len() < max {
+        let have: HashSet<String> = ranked.iter().map(|h| h.id.clone()).collect();
+        let lexical = lexical_candidates(db, &q.text, &kinds, k).await?;
+        ranked.extend(lexical.into_iter().filter(|h| !have.contains(&h.id)));
     }
     Ok(apply_caps(ranked, max, budget))
 }
@@ -155,6 +165,26 @@ struct MemoryRow {
     lifecycle: String,
 }
 
+/// The DISKANN query for `k` neighbours; `k` is a literal in the KNN
+/// operator (a bounded usize). Public for the plan test.
+pub fn vector_sql(k: usize) -> String {
+    format!(
+        "SELECT key, revision, vector::distance::knn() AS d FROM memory_embeddings \
+         WHERE generation = $g AND model = $model AND embedding <|{k},{KNN_EF}|> $v ORDER BY d"
+    )
+}
+
+/// One lexical page; `after` adds the `id > $after` cursor. Public for the
+/// plan test.
+pub fn lexical_page_sql(after: bool) -> String {
+    let cursor = if after { " AND id > $after" } else { "" };
+    format!(
+        "SELECT record::id(id) AS id, text, memory_kind, lifecycle FROM memory \
+         WHERE lifecycle = 'active' AND memory_kind IN $kinds{cursor} \
+         ORDER BY id LIMIT {LEXICAL_PAGE}"
+    )
+}
+
 async fn vector_candidates(
     db: &Surreal<Any>,
     q: &RecallQuery,
@@ -162,13 +192,8 @@ async fn vector_candidates(
     kinds: &[String],
     k: usize,
 ) -> Result<Vec<RecallHit>, TxError> {
-    // `k` is a literal in the KNN operator; it is a bounded usize.
-    let sql = format!(
-        "SELECT key, revision, vector::distance::knn() AS d FROM memory_embeddings \
-         WHERE generation = $g AND model = $model AND embedding <|{k},{KNN_EF}|> $v ORDER BY d"
-    );
     let mut res = db
-        .query(sql)
+        .query(vector_sql(k))
         .bind(("g", q.generation))
         .bind(("model", q.model.clone()))
         .bind(("v", v.to_vec()))
@@ -219,24 +244,17 @@ async fn lexical_candidates(
     }
     let mut heap = TopK::new(k);
     let mut after: Option<RecordId> = None;
+    let mut read = 0;
     loop {
-        let filter = "lifecycle = 'active' AND memory_kind IN $kinds";
-        let sql = match after {
-            Some(_) => format!(
-                "SELECT record::id(id) AS id, text, memory_kind, lifecycle FROM memory \
-                 WHERE {filter} AND id > $after ORDER BY id LIMIT {LEXICAL_PAGE}"
-            ),
-            None => format!(
-                "SELECT record::id(id) AS id, text, memory_kind, lifecycle FROM memory \
-                 WHERE {filter} ORDER BY id LIMIT {LEXICAL_PAGE}"
-            ),
-        };
-        let mut req = db.query(sql).bind(("kinds", kinds.to_vec()));
+        let mut req = db
+            .query(lexical_page_sql(after.is_some()))
+            .bind(("kinds", kinds.to_vec()));
         if let Some(a) = &after {
             req = req.bind(("after", a.clone()));
         }
         let rows: Vec<MemoryRow> = req.await?.check()?.take(0)?;
         let n = rows.len();
+        read += n;
         if let Some(last) = rows.last() {
             after = Some(RecordId::new("memory", last.id.as_str()));
         }
@@ -246,7 +264,7 @@ async fn lexical_candidates(
                 heap.push(make_hit(row, score, RecallSource::Lexical));
             }
         }
-        if n < LEXICAL_PAGE {
+        if n < LEXICAL_PAGE || read >= LEXICAL_SCAN_CAP {
             break;
         }
     }
@@ -375,6 +393,33 @@ mod tests {
             .map(|h| h.id)
             .collect();
         assert_eq!(kept, vec!["a", "c", "d", "e", "f"]);
+    }
+
+    #[test]
+    fn all_lists_every_memory_kind_once() {
+        // Exhaustive match: a new MemoryKind variant fails to compile here
+        // until it is added to ALL.
+        fn listed(k: MemoryKind) -> bool {
+            match k {
+                MemoryKind::Actor
+                | MemoryKind::Claim
+                | MemoryKind::Inference
+                | MemoryKind::Link
+                | MemoryKind::Related
+                | MemoryKind::CycleBrief
+                | MemoryKind::InvestigationDigest
+                | MemoryKind::SourceSummary
+                | MemoryKind::ManualNote
+                | MemoryKind::UserProfile => MemoryKind::ALL.contains(&k),
+            }
+        }
+        assert!(MemoryKind::ALL.iter().all(|&k| listed(k)));
+        let names: HashSet<&str> = MemoryKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(names.len(), MemoryKind::ALL.len(), "no duplicates");
+        // Every listed kind round-trips through parse.
+        for k in MemoryKind::ALL {
+            assert_eq!(MemoryKind::parse(k.as_str()), Some(k));
+        }
     }
 
     #[test]

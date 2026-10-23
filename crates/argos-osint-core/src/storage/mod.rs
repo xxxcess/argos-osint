@@ -16,6 +16,7 @@ pub mod error;
 pub mod atlas;
 pub mod atlas_delete;
 pub mod atlas_metadata;
+pub mod bootstrap;
 pub mod codec;
 pub mod counters;
 pub mod embeddings;

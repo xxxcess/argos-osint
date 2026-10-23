@@ -54,6 +54,8 @@ verified.
 
 - [x] `schedule_article_refresh` (`storage/refresh.rs`) with `enqueue_refresh_in`, `retire_replaced_in` and `supersession`. Intent, retirement check, prior-task comparison, generation advance, job/task creation, the owner's `refresh_job_id` and supersession all commit in one transaction. The refresh task's `input_ref`, `role_snapshot` and `source_revision`, plus the job's `owner_scope`, live in an `insight_refresh_task` sidecar, because `task` and `job` have no such fields.
 - [ ] `schedule_article_refresh` gaps: the caller still builds the `PipelineInput` from SQLite evidence (`article_input`), and does so before the intent check. The `insight.superseded` event is not recorded (`events` is still SQLite). The SQLite paused-task requeue (`blocked_reason='cancelled; evidence dirty'`) has no counterpart, because SurrealDB tasks have no `paused` state.
+- [x] Step 5: `storage::bootstrap::ensure_schema` applies all 13 module schemas plus `storage_meta` in dependency order, in one transaction, and records `storage_meta:schema.version` (`SCHEMA_VERSION = 1`). It is idempotent, and it refuses (and rolls back) a database whose version is newer, like the SQLite `user_version` check.
+- [ ] `ensure_schema` gaps: it has no caller yet, because `Store::open` is still SQLite. There is no migration ladder between Surreal schema versions (the store starts fresh, P4). The embeddings DISKANN dimension is fixed at 384 in `embeddings.surql` rather than taken from the configured model.
 
 - [ ] Recon/OSINT messages, tools, artifacts, ordered counters, credit hold/reconcile/release
 - [ ] Intel stage publication with failure fallback (no savepoints)

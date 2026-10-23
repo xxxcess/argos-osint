@@ -432,6 +432,31 @@ async fn claims_bind_actors_and_kind_refresh_carries_the_other_kind() {
     assert!(
         scalar::<bool>(&db, "RETURN record::exists(type::record('brain_actor_external_ref', ['recon_entities', 'e:acme']))").await
     );
+    // The subject entity is stored (insert-or-ignore) and labels the
+    // subject actor; the claim is receipted for the backfill.
+    assert_eq!(
+        scalar::<String>(&db, "RETURN type::record('recon_entity', 'e:acme').label").await,
+        "Acme"
+    );
+    assert_eq!(
+        scalar::<String>(
+            &db,
+            &format!(
+                "RETURN (SELECT VALUE coverage FROM brain_backfill_receipt WHERE source = 'insight_claims' AND unit_id = '{fp}')[0]"
+            )
+        )
+        .await,
+        "subject bound"
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &db,
+            "RETURN count(SELECT id FROM brain_actor WHERE display_name = 'e:acme')"
+        )
+        .await,
+        0,
+        "the subject actor carries the stored label, not the entity id"
+    );
     // The inference records its premise and inherits the premise actors.
     let raw = scalar::<String>(
         &db,

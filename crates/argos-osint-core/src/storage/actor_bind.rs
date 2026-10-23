@@ -6,7 +6,7 @@
 //! `bind_in` follows the SQLite order: scoped external reference, then the
 //! sole source-scoped alias match, then the deterministic provisional actor.
 //! Trusted identifiers are refused (publication never passes any); the
-//! backfill receipt (`brain_backfill_receipts`) is not on SurrealDB.
+//! backfill receipt is `storage::entities::put_backfill_receipt_in`.
 
 use std::collections::BTreeSet;
 
@@ -418,14 +418,42 @@ struct Retained {
 }
 
 /// Bind a new insight claim's subject (and the actors its retained
-/// extractions reference) in the publishing transaction. `label` is the
-/// subject entity's display label (SQLite reads it from `recon_entities`).
+/// extractions reference) in the publishing transaction, and receipt it for
+/// the backfill (`brain_backfill_receipt`, source `insight_claims`), as
+/// `brain_backfill::bind_claim_subject`. `label` overrides the subject's
+/// display label; `None` reads it from `recon_entity` (label, then
+/// canonical), falling back to the entity id.
 pub async fn bind_claim_subject_in(
     tx: &Tx,
     fingerprint: &str,
     label: Option<&str>,
     now: &str,
 ) -> Result<Vec<String>, TxError> {
+    let Some((head, coverage, changed)) = claim_subject_in(tx, fingerprint, label, now).await?
+    else {
+        return Ok(Vec::new());
+    };
+    let revision = crate::brain_backfill::h(&json!([head.memory_id, head.entity_id]));
+    super::entities::put_backfill_receipt_in(
+        tx,
+        "insight_claims",
+        fingerprint,
+        &revision,
+        coverage,
+        now,
+    )
+    .await?;
+    Ok(changed)
+}
+
+/// `brain_backfill::claim_subject`: `None` when there is no claim or no
+/// subject (no receipt), otherwise the coverage label and changed actors.
+async fn claim_subject_in(
+    tx: &Tx,
+    fingerprint: &str,
+    label: Option<&str>,
+    now: &str,
+) -> Result<Option<(ClaimHead, &'static str, Vec<String>)>, TxError> {
     let mut r = run(
         tx,
         tx.query(
@@ -437,15 +465,23 @@ pub async fn bind_claim_subject_in(
     )
     .await?;
     let Some(claim) = take::<Option<ClaimHead>>(&mut r, 0)? else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
-    if claim.entity_id.is_empty() || claim.classification.to_lowercase() == "inference" {
-        return Ok(Vec::new());
+    if claim.entity_id.is_empty() {
+        return Ok(None);
     }
-    let Some(source) = claim.source_json else {
-        return Ok(Vec::new());
+    if claim.classification.to_lowercase() == "inference" {
+        return Ok(Some((claim, "inference retained internally", Vec::new())));
+    }
+    let Some(source) = claim.source_json.clone() else {
+        return Ok(Some((claim, "no memory", Vec::new())));
+    };
+    let stored = match label {
+        Some(_) => None,
+        None => super::entities::entity_label_in(tx, &claim.entity_id).await?,
     };
     let entity = label
+        .or(stored.as_deref())
         .filter(|l| !l.trim().is_empty())
         .unwrap_or(&claim.entity_id)
         .to_string();
@@ -593,7 +629,7 @@ pub async fn bind_claim_subject_in(
             .await?;
         }
     }
-    Ok(changed)
+    Ok(Some((claim, "subject bound", changed)))
 }
 
 /// Whether a claim references `entity`: its explicit subject, or a mention

@@ -739,18 +739,22 @@ async fn bind_item_in(
     let scope = format!("{owner_kind}:{}", input.snapshot.owner_id);
     let mut touched = Vec::new();
     if item.kind == "claim" {
-        let label = output
-            .entities
-            .iter()
-            .find(|e| e.id == item.subject)
-            .map(|e| {
-                e.original_forms
-                    .first()
-                    .filter(|f| !f.trim().is_empty())
-                    .unwrap_or(&e.comparison_key)
-                    .clone()
-            });
-        touched.extend(bind_claim_subject_in(tx, &item.fingerprint, label.as_deref(), now).await?);
+        // `INSERT OR IGNORE INTO recon_entities`, so the subject's label
+        // comes from the stored entity, as on SQLite.
+        if let Some(e) = output.entities.iter().find(|e| e.id == item.subject) {
+            super::entities::ensure_recon_entity_in(
+                tx,
+                &super::entities::ReconEntity {
+                    id: e.id.clone(),
+                    kind: e.type_hint.clone(),
+                    namespace: e.id.clone(),
+                    canonical: e.comparison_key.clone(),
+                    label: e.original_forms.first().cloned().unwrap_or_default(),
+                },
+            )
+            .await?;
+        }
+        touched.extend(bind_claim_subject_in(tx, &item.fingerprint, None, now).await?);
         let provenance = serde_json::json!({"snapshot": snapshot_id, "claim": item.id});
         for entity in &output.entities {
             let article_entity = |id: &str| {

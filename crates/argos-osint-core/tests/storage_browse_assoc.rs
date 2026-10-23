@@ -248,4 +248,49 @@ async fn actor_groups_count_claims_threads_and_articles() {
         .await
         .unwrap();
     assert_eq!(only_claims, vec![c2]);
+
+    // Scoped views and the graph (phase 4).
+    let scoped = browse_assoc::actor_groups_scoped(&repo, Some("r1"))
+        .await
+        .unwrap();
+    assert_eq!(scoped.len(), 1);
+    assert!(browse_assoc::actor_groups_scoped(&repo, Some("r9"))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        browse_assoc::actor_groups_scoped(&repo, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let r1 = browse_assoc::actor_group_associations_scoped(&repo, &group, Some("r1"))
+        .await
+        .unwrap();
+    assert_eq!(r1.articles.len(), 1);
+    assert!(r1.articles[0]
+        .occurrences
+        .iter()
+        .all(|(run, _, _)| run == "r1"));
+    assert_eq!(r1.articles[0].article.run_id, "r1");
+    let r9 = browse_assoc::actor_group_associations_scoped(&repo, &group, Some("r9"))
+        .await
+        .unwrap();
+    assert!(r9.articles.is_empty());
+    assert_eq!(r9.claims.len(), 2, "scoping filters articles only");
+    let graph = browse_assoc::actor_group_graph(&repo, &group)
+        .await
+        .unwrap();
+    assert_eq!(
+        graph.nodes.len(),
+        6,
+        "group, 2 claims, 2 threads, 1 article"
+    );
+    assert_eq!(graph.edges.len(), 5);
+    assert_eq!(graph.nodes[0].id, group.key());
+    assert!(graph
+        .nodes
+        .iter()
+        .any(|n| n.id == "article:r1/a1" && n.article_id == "a1"));
 }

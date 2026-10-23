@@ -435,6 +435,69 @@ pub async fn actor_group_associations(
     Ok(group_associations(group, &inputs, &context))
 }
 
+/// `Store::actor_groups_scoped`: every Actor group, or with `cycle` only
+/// those with an article occurrence in that run.
+pub async fn actor_groups_scoped(
+    repo: &Repository,
+    cycle: Option<&str>,
+) -> Result<Vec<ActorGroup>> {
+    let all = super::browse::actor_groups(repo).await?;
+    let Some(cycle) = cycle else {
+        return Ok(all);
+    };
+    // One read of the inputs for every group (SQLite rereads per group).
+    let inputs = inputs(repo).await?;
+    let context = context(repo, &inputs).await?;
+    Ok(all
+        .into_iter()
+        .filter(|g| {
+            group_associations(g, &inputs, &context)
+                .articles
+                .iter()
+                .any(|a| a.occurrences.iter().any(|(run, _, _)| run == cycle))
+        })
+        .collect())
+}
+
+/// `Store::actor_group_associations_scoped`: with `cycle`, only that run's
+/// article occurrences, each article shown as that run's row.
+pub async fn actor_group_associations_scoped(
+    repo: &Repository,
+    group: &ActorGroup,
+    cycle: Option<&str>,
+) -> Result<Associations> {
+    let mut assoc = actor_group_associations(repo, group).await?;
+    let Some(cycle) = cycle else {
+        return Ok(assoc);
+    };
+    assoc
+        .articles
+        .retain(|a| a.occurrences.iter().any(|(run, _, _)| run == cycle));
+    for association in &mut assoc.articles {
+        association.occurrences.retain(|(run, _, _)| run == cycle);
+        if let Some((run, id, _)) = association.occurrences.first() {
+            if let Some(article) = super::atlas::article(repo.db(), run, id)
+                .await
+                .map_err(|e| anyhow!("atlas article {run}/{id}: {e}"))?
+            {
+                association.article = article;
+            }
+        }
+    }
+    Ok(assoc)
+}
+
+/// `Store::actor_group_graph`: the group's graph from the same associations.
+pub async fn actor_group_graph(
+    repo: &Repository,
+    group: &ActorGroup,
+) -> Result<crate::recon::MemoryGraph> {
+    Ok(crate::store::Store::actor_group_graph_from(
+        group,
+        actor_group_associations(repo, group).await?,
+    ))
+}
+
 /// The TUI list: claims as stored, Actor groups as stable group keys with
 /// claim, thread and article counts. Mutations must reject group keys.
 pub async fn brain_browse_memories(

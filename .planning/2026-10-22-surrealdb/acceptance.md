@@ -128,3 +128,7 @@ Gaps: the pipeline run, live-evidence validation and the derivation context (liv
 ### P4 — TUI Brain on the repository
 
 Under a storage config the TUI Brain list, preview and memory delete run only on SurrealDB (`tui::surreal_brain`), through `storage::runtime::blocking` from the Brain's existing plain worker threads (never async code or the draw loop). An unreadable config counts as configured, so it errors on the SurrealDB path instead of silently falling back. Gaps: pin/edit, Find (`brain_browse_memories` with a query), the synchronous non-background path and the rest of the TUI still use the SQLite `Store`; no TUI test drives the SurrealDB branch (verified by both-feature clippy only).
+
+### P4 — scoped Actor-group views and graph
+
+`storage::browse_assoc` adds `actor_groups_scoped`, `actor_group_associations_scoped` and `actor_group_graph` (the graph reuses `Store::actor_group_graph_from`, so both stores build it identically). `actor_groups_scoped` reads the association inputs once for all groups instead of once per group. Covered in both modes by `tests/storage_browse_assoc.rs`. Gap: the TUI's Actor-group views still call the SQLite `Store`.

@@ -6,7 +6,7 @@ Rust OSINT workbench (CLI + TUI) with Recon, Intel, Atlas and Brain pipelines, s
 
 - `crates/argos-osint-core/` — OSINT, Recon, Brain, persistence. Storage: `src/storage/`. Storage contract tests: `tests/storage_*.rs` (shared harness `tests/support/`). Tool bindings: `src/recon/investigation/tool_io.rs`; provider adapters: `src/osint/providers.rs`.
 - `crates/argos-osint-bin/` — CLI/TUI (`src/tui/`).
-- `scripts/` — `agent_cargo.py` (isolated agent builds), `local_matrix.sh`, `test_surreal.py`, `release_check.mjs`, `tui_review.py`, `check_storage_deps.py`.
+- `scripts/` — `agent_cargo.py` (isolated agent builds), `local_matrix.sh`, `test_surreal.py`, `release_check.mjs`, `tui_review.py`.
 - `.github/workflows/` — CI, commit policy, Release Please. Owned by Code Architect. See [docs/ci.md](docs/ci.md).
 
 ## Where to look first
@@ -31,7 +31,7 @@ That is the only leg agents run locally; the `server` leg runs in CI only ([docs
 
 - Default features `embedded,nlp`: embedded SurrealDB (RocksDB, in-process) under `<ARGOS_HOME>/storage/surreal`; `ARGOS_HOME` defaults to `~/.argos`.
 - Server mode is opt-in: `--no-default-features --features server,nlp`, selected by `argos storage init --mode server` or `ARGOS_STORAGE_MODE=server|embedded` (env → `storage/config.json` → embedded).
-- Storage is SurrealDB only; don't add another storage engine. `scripts/check_storage_deps.py` will guard this.
+- Storage is SurrealDB only. CI fails if `rusqlite` or `lancedb` appears in `cargo tree`.
 - Storage tests pick their mode from `ARGOS_SURREAL_MODE` and skip without it (and without `ARGOS_SURREAL_BIN`); run them via `test_surreal.py`.
 
 ## Workflow rules

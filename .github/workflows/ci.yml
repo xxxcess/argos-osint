@@ -50,6 +50,15 @@ jobs:
           # local_matrix.sh builds through scripts/agent_cargo.py into target/agents.
           workspaces: . -> target/agents
           cache-on-failure: true
+      - name: No SQLite or LanceDB in the dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          for c in rusqlite lancedb; do
+            if cargo tree --workspace --all-features -e normal,build -i "$c" --locked >/dev/null 2>&1; then
+              echo "::error::$c is still in the dependency graph"; exit 1
+            fi
+          done
       - name: Show which protoc the build will use
         run: |
           uname -sm

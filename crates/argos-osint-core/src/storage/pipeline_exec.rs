@@ -314,10 +314,10 @@ pub async fn validate_dispatch(repo: &Repository, input: &PipelineInput) -> Resu
         .query(
             "LET $state = SELECT desired_generation, refresh_job_id
                FROM ONLY type::record('insight_owner_state', ['article', $o]);
+             LET $job = IF $state.refresh_job_id THEN type::record('job', $state.refresh_job_id) ELSE NONE END;
              RETURN {
                generation: $state.desired_generation ?? -1,
-               leased: array::len(SELECT id FROM task WHERE $state.refresh_job_id != ''
-                 AND job = type::record('job', $state.refresh_job_id)
+               leased: array::len(SELECT id FROM task WHERE $job != NONE AND job = $job
                  AND operation = 'insight_refresh' AND state = 'running'
                  AND lease_until != NONE AND lease_until > time::now()) > 0
              };",
@@ -443,6 +443,9 @@ pub async fn task_event_scope(
     repo: &Repository,
     task_id: &str,
 ) -> Result<Option<(String, String)>> {
+    if task_id.is_empty() {
+        return Ok(None);
+    }
     let mut r = repo
         .db()
         .query(

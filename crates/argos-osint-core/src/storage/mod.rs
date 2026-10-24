@@ -16,6 +16,7 @@ pub mod error;
 pub mod actor_bind;
 pub mod atlas;
 pub mod atlas_delete;
+pub mod atlas_memory;
 pub mod atlas_metadata;
 pub mod atlas_work;
 pub mod bootstrap;

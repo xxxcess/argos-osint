@@ -496,6 +496,26 @@ impl WorkerPool {
     pub fn spawn_index_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
+        // Under SurrealDB the index pool is the repository's; only the Atlas
+        // memory-phase refresh runs here, never reopening SQLite.
+        if crate::recon::backend::sqlite_path(&db_path).is_none() {
+            #[cfg(feature = "surreal")]
+            crate::storage::runtime::spawn(async move {
+                while !flag.load(Ordering::Relaxed) {
+                    if let Ok(store) = crate::atlas_store::AtlasStore::open(&db_path).await {
+                        let _ = crate::atlas_memory::refresh_incomplete_runs_store(&store, 8).await;
+                    }
+                    for _ in 0..60 {
+                        if flag.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            });
+            let _ = owner;
+            return Self { stop };
+        }
         std::thread::Builder::new()
             .name("argos-index-pool".into())
             .spawn(move || {

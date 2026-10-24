@@ -23,7 +23,7 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// metadata (whose event is on `atlas_article`); jobs, insight and intel
 /// before refresh. The event logs (`argos_event`, `investigation_event`)
 /// stand alone; telemetry writes use `profile_view`'s tables.
-pub fn schemas() -> [(&'static str, &'static str); 27] {
+pub fn schemas() -> [(&'static str, &'static str); 29] {
     [
         ("counters", super::counters::SCHEMA),
         ("outbox", super::outbox::SCHEMA),
@@ -51,6 +51,8 @@ pub fn schemas() -> [(&'static str, &'static str); 27] {
         ("pipeline_exec", super::pipeline_exec::SCHEMA),
         ("profile_view", super::profile_view::SCHEMA),
         ("event_log", super::event_log::SCHEMA),
+        ("investigation", super::investigation::SCHEMA),
+        ("atlas_work", super::atlas_work::SCHEMA),
         ("meta", META_SCHEMA),
     ]
 }

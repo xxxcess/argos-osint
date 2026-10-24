@@ -812,6 +812,69 @@ pub fn refresh_incomplete_runs(store: &Store, limit: usize) -> Result<usize> {
     Ok(changed)
 }
 
+/// [`refresh_run_indexing`] on the selected store (SurrealDB included).
+pub async fn refresh_run_indexing_store(
+    store: &crate::atlas_store::AtlasStore,
+    run: &crate::store::AtlasRunRow,
+) -> Result<Option<MemoryPhase>> {
+    let raw: serde_json::Value = serde_json::from_str(&run.stats_json).unwrap_or_default();
+    if raw
+        .get("contract_version")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(crate::atlas_work::is_collection_contract)
+        || matches!(run.state.as_str(), "running" | "paused")
+    {
+        return Ok(None);
+    }
+    let mut stats: crate::atlas::RunStats =
+        serde_json::from_str(&run.stats_json).unwrap_or_default();
+    if !stats.memories.started() || stats.memories.publication == StepState::Failed {
+        return Ok(None);
+    }
+    let Some(receipt) = store.publication_receipt(&run.id).await? else {
+        return Ok(None);
+    };
+    let verification = store.verify_publication(&receipt).await?;
+    stats.memories.apply_verification(&verification);
+    store
+        .save(&run.id, &run.cursor_json, &serde_json::to_string(&stats)?)
+        .await?;
+    let outcome = stats.memories.outcome();
+    if outcome.as_state() != run.state {
+        store
+            .set_state(&run.id, outcome.as_state(), &stats.memories.note(), false)
+            .await?;
+    }
+    Ok(Some(stats.memories))
+}
+
+/// [`refresh_incomplete_runs`] on the selected store. Returns the number
+/// of runs whose state changed.
+pub async fn refresh_incomplete_runs_store(
+    store: &crate::atlas_store::AtlasStore,
+    limit: usize,
+) -> Result<usize> {
+    let mut runs: Vec<crate::store::AtlasRunRow> = store
+        .list_runs()
+        .await?
+        .into_iter()
+        .filter(|run| {
+            matches!(run.state.as_str(), "partial" | "blocked" | "waiting") && run.phase == 5
+        })
+        .collect();
+    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    runs.truncate(limit);
+    let mut changed = 0usize;
+    for run in runs {
+        if let Some(phase) = refresh_run_indexing_store(store, &run).await? {
+            if phase.outcome().as_state() != run.state {
+                changed += 1;
+            }
+        }
+    }
+    Ok(changed)
+}
+
 /// Per-run repair classification (stored separately from the run's own state).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

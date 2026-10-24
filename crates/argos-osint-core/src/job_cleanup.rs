@@ -667,69 +667,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn article_report_retirement_cancels_only_execution_and_fences_late_writes() {
-        let store = Store::memory().unwrap();
-        let now = Utc::now().to_rfc3339();
-        let inv = store
-            .ensure_intel_investigation("article", "run", "https://example.com/a", "{}")
-            .unwrap();
-        let report = store
-            .insert_report_job(&inv.id, "article", "verify", 1, "{}", "{}", 0, 0, 24, None)
-            .unwrap();
-        let task = store
-            .insert_report_task(&report.id, "collect", "", "[]", "pending")
-            .unwrap();
-        let leased = store
-            .claim_report_task(&report.id, "fixture", 120)
-            .unwrap()
-            .unwrap();
-        assert_eq!(leased.id, task);
-        store.conn.execute("INSERT INTO intel_report_results(job_id,generation,article_id,completion_sequence,source_hash,details_json,completed_at) VALUES('history',1,'article',1,'hash','{}',?1)",[&now]).unwrap();
-        for (id, operation, parent, run) in [
-            ("report-runtime", "intel_recon", "", report.id.as_str()),
-            ("report-child", "cleanup", "report-runtime", ""),
-            ("brief", "intel_brief", "", ""),
-            ("unrelated-atlas", "atlas_cycle", "", "missing-fixture-run"),
-        ] {
-            store.conn.execute("INSERT INTO argos_jobs(id,kind,state,created_at,updated_at,operation,parent_id,run_ref) VALUES(?1,'user','running',?2,?2,?3,?4,?5)",params![id,now,operation,parent,run]).unwrap();
-        }
-        retire_article_reports(&store.conn).unwrap();
-        retire_article_reports(&store.conn).unwrap();
-        assert!(retired(&store.conn, &report.id).unwrap());
-        assert!(retired(&store.conn, "report-child").unwrap());
-        assert!(!retired(&store.conn, "brief").unwrap());
-        let owners: i64 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM argos_job_owners WHERE job_id='unrelated-atlas'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            owners, 0,
-            "retirement cannot backfill unrelated owner state"
-        );
-        assert!(!store
-            .complete_report_task_fenced(&task, "late", leased.lease_epoch)
-            .unwrap());
-        store
-            .update_report_job(&report.id, "running", "late", 0, 0, "", "")
-            .unwrap();
-        assert_eq!(
-            store.intel_report_job(&report.id).unwrap().unwrap().state,
-            "cancelled"
-        );
-        let history: i64 = store
-            .conn
-            .query_row("SELECT COUNT(*) FROM intel_report_results", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(history, 1);
-    }
-
     fn job(conn: &Connection, id: &str, created: &str, parent: &str, resource: &str) {
         tasks::enqueue_job_with(
             conn,

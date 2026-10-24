@@ -15,8 +15,9 @@ use chrono::Utc;
 use super::runtime;
 use super::tx::TxError;
 use crate::atlas_metadata::ArticleMetadata;
-use crate::events::{EventCounts, EventFilter, EventRow, NewEvent};
+use crate::events::{EventFilter, EventRow, NewEvent};
 use crate::job_registry::CancelRequest;
+use crate::jobs_view::EventCounts;
 use crate::jobs_view::{JobCounts, JobDetail, JobFilter, JobRow};
 
 fn tx_err(e: TxError) -> anyhow::Error {

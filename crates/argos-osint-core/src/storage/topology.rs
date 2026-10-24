@@ -36,6 +36,22 @@ use crate::memory_metadata::{EndpointRef, MemoryKind, MemoryPayload};
 
 type Adjacency = (TopologyNode, TopologyEdge);
 
+/// A live derivation's kind and snapshot owner, inputs and readiness, for
+/// the article-revision fence.
+#[derive(SurrealValue)]
+struct Cited {
+    kind: String,
+    owner_id: Option<String>,
+    inputs_json: Option<String>,
+    readiness_json: Option<String>,
+}
+
+/// The [`Cited`] projection of an `insight_derivation` row.
+const CITED: &str = "insight_kind AS kind,
+    type::record('insight_snapshot', snapshot_id).owner_id AS owner_id,
+    type::record('insight_snapshot', snapshot_id).inputs_json AS inputs_json,
+    type::record('insight_snapshot', snapshot_id).readiness_json AS readiness_json";
+
 /// Derivation statuses that no longer support a node or its scope.
 const DEAD: [&str; 3] = ["deleted", "retired", "rejected"];
 
@@ -490,61 +506,27 @@ impl Query<'_> {
         let mut r = self
             .repo
             .db()
-            .query(
-                "LET $owners = (SELECT VALUE type::record('insight_snapshot', snapshot_id).owner_id
-                   FROM insight_derivation WHERE memory_id = $m AND status NOTINSIDE $dead);
-                 SELECT VALUE count() FROM atlas_article
-                   WHERE run_id = $c AND article_id INSIDE $owners GROUP ALL;
+            .query(format!(
+                "SELECT {CITED} FROM insight_derivation WHERE memory_id = $m AND status NOTINSIDE $dead;
                  LET $fps = (SELECT VALUE record::id(id) FROM insight_claim WHERE memory_id = $m);
                  SELECT VALUE count() FROM insight_source
                    WHERE fingerprint INSIDE $fps AND run_id = $c AND deleted_origin = false
-                   GROUP ALL;",
-            )
+                   GROUP ALL;"
+            ))
             .bind(("m", memory.to_string()))
             .bind(("c", cycle.to_string()))
             .bind(("dead", dead()))
             .await?
             .check()?;
-        let derived: Option<i64> = r.take(1)?;
-        let sourced: Option<i64> = r.take(3)?;
-        Ok(derived.unwrap_or(0) > 0 || sourced.unwrap_or(0) > 0)
+        let cited: Vec<Cited> = r.take(0)?;
+        let sourced: Option<i64> = r.take(2)?;
+        Ok(sourced.unwrap_or(0) > 0 || self.current_in_cycle(cited, cycle).await?)
     }
 
-    /// `ScopedRows::Evidence`: a live derivation cites this source revision,
-    /// its snapshot owner is an article retained in `cycle`, and that
-    /// derivation's retained refs (the sibling kind's carried refs for a
-    /// scoped publication) still match the article's current metadata.
-    async fn evidence_in_cycle(
-        &mut self,
-        source: &str,
-        revision: &str,
-        cycle: &str,
-    ) -> Result<bool> {
-        #[derive(SurrealValue)]
-        struct Cited {
-            kind: String,
-            owner_id: Option<String>,
-            inputs_json: Option<String>,
-            readiness_json: Option<String>,
-        }
+    /// Whether one of `cited` is owned by an article retained in `cycle`
+    /// whose metadata its retained refs still match (`current_metadata_sql`).
+    async fn current_in_cycle(&self, cited: Vec<Cited>, cycle: &str) -> Result<bool> {
         let db = self.repo.db();
-        let mut r = db
-            .query(
-                "LET $ds = (SELECT VALUE derivation_id FROM insight_derivation_evidence
-                   WHERE source_id = $s AND source_revision = $rev);
-                 SELECT insight_kind AS kind,
-                     type::record('insight_snapshot', snapshot_id).owner_id AS owner_id,
-                     type::record('insight_snapshot', snapshot_id).inputs_json AS inputs_json,
-                     type::record('insight_snapshot', snapshot_id).readiness_json AS readiness_json
-                   FROM insight_derivation
-                   WHERE record::id(id) INSIDE $ds AND status NOTINSIDE $dead;",
-            )
-            .bind(("s", source.to_string()))
-            .bind(("rev", revision.to_string()))
-            .bind(("dead", dead()))
-            .await?
-            .check()?;
-        let cited: Vec<Cited> = r.take(1)?;
         for c in cited {
             let Some(owner) = c.owner_id else { continue };
             let refs = super::provenance::retained_refs(
@@ -559,6 +541,34 @@ impl Query<'_> {
             }
         }
         Ok(false)
+    }
+
+    /// `ScopedRows::Evidence`: a live derivation cites this source revision,
+    /// its snapshot owner is an article retained in `cycle`, and that
+    /// derivation's retained refs (the sibling kind's carried refs for a
+    /// scoped publication) still match the article's current metadata.
+    async fn evidence_in_cycle(
+        &mut self,
+        source: &str,
+        revision: &str,
+        cycle: &str,
+    ) -> Result<bool> {
+        let mut r = self
+            .repo
+            .db()
+            .query(format!(
+                "LET $ds = (SELECT VALUE derivation_id FROM insight_derivation_evidence
+                   WHERE source_id = $s AND source_revision = $rev);
+                 SELECT {CITED} FROM insight_derivation
+                   WHERE record::id(id) INSIDE $ds AND status NOTINSIDE $dead;"
+            ))
+            .bind(("s", source.to_string()))
+            .bind(("rev", revision.to_string()))
+            .bind(("dead", dead()))
+            .await?
+            .check()?;
+        let cited: Vec<Cited> = r.take(1)?;
+        self.current_in_cycle(cited, cycle).await
     }
 
     async fn in_scope(&mut self, n: &TopologyNode) -> Result<bool> {

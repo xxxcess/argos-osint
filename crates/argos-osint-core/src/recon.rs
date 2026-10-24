@@ -1,4 +1,5 @@
 //! Persistent investigations and evidence-grounded model orchestration.
+pub mod backend;
 mod brain_resources;
 pub(crate) mod budget;
 pub mod clocks;

@@ -8164,7 +8164,9 @@ impl App {
     }
 
     fn more_related_articles(&mut self) -> Result<String> {
-        if self.background_db.is_some() {
+        // Under SurrealDB the worker snapshot reads the repository; never
+        // page from the in-memory SQLite store.
+        if self.background_db.is_some() || surreal_brain::on() {
             self.intel_related_limit = self
                 .intel_related
                 .page

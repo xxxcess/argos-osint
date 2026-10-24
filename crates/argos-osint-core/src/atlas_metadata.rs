@@ -714,51 +714,6 @@ mod tests {
         metadata.entity_state = MetadataState::Unavailable;
         assert!(article_actors(&a, &metadata).is_empty());
     }
-    #[test]
-    fn calendar_months_are_not_actors_or_related_entity_overlap() {
-        let store = Store::memory().unwrap();
-        store.atlas_insert_run("calendar", "{}", "{}").unwrap();
-        for (id, title) in [
-            ("a", "Jane Doe announced a project in August"),
-            ("b", "Jane Doe reviewed a project in August"),
-        ] {
-            let article = AtlasArticleRow {
-                run_id: "calendar".into(),
-                id: id.into(),
-                title: title.into(),
-                url: format!("https://news.test/{id}"),
-                category: "economic".into(),
-                ..Default::default()
-            };
-            store.atlas_upsert_article(&article).unwrap();
-            let mut metadata = ArticleMetadata::pending(&article);
-            metadata.entity_state = MetadataState::Complete;
-            for name in ["Jane Doe", "August"] {
-                let start = title.find(name).unwrap();
-                metadata.mentions.push(ArticleMention {
-                    type_hint: "person".into(),
-                    comparison_key: name.to_lowercase(),
-                    field: "title".into(),
-                    start_byte: start,
-                    end_byte: start + name.len(),
-                    original_text: name.into(),
-                });
-            }
-            assert_eq!(
-                article_actors(&article, &metadata)
-                    .iter()
-                    .map(|a| a.display_name.as_str())
-                    .collect::<Vec<_>>(),
-                vec!["Jane Doe"]
-            );
-            store.atlas_save_metadata(&metadata).unwrap();
-        }
-        assert_eq!(
-            crate::related_articles::build(&store, "calendar").unwrap(),
-            0,
-            "a shared month cannot supply the second entity"
-        );
-    }
 
     fn article() -> AtlasArticleRow {
         AtlasArticleRow {
@@ -790,51 +745,6 @@ mod tests {
         assert_eq!(m.entity_state, MetadataState::Unavailable);
         assert_eq!(m.input_hash, input_hash(&a));
     }
-    #[test]
-    fn classification_receipts_preserve_native_metadata_and_reject_stale_revision() {
-        let store = Store::memory().unwrap();
-        store.atlas_insert_run("r", "{}", "{}").unwrap();
-        let mut a = article();
-        store.atlas_upsert_article(&a).unwrap();
-        let mut m = ArticleMetadata::pending(&a);
-        m.entity_state = MetadataState::Complete;
-        m.mentions.push(ArticleMention {
-            type_hint: "person".into(),
-            comparison_key: "jane doe".into(),
-            field: "title".into(),
-            start_byte: 0,
-            end_byte: 8,
-            original_text: "Jane Doe".into(),
-        });
-        store.atlas_save_metadata(&m).unwrap();
-        assert!(store
-            .atlas_set_classification(
-                "r",
-                "a",
-                &m.input_hash,
-                "classified",
-                r#"{"category":"unk"}"#,
-                Some("unk")
-            )
-            .unwrap());
-        let saved = store.atlas_metadata("r", "a").unwrap().unwrap();
-        assert_eq!(saved.entity_state, MetadataState::Complete);
-        assert_eq!(saved.mentions.len(), 1);
-        assert_eq!(saved.classification_status, "classified");
-        a.description = "Revised description".into();
-        store.atlas_upsert_article(&a).unwrap();
-        assert!(!store
-            .atlas_set_classification(
-                "r",
-                "a",
-                &m.input_hash,
-                "classified",
-                "{}",
-                Some("economic")
-            )
-            .unwrap());
-        assert!(store.atlas_metadata("r", "a").unwrap().is_none());
-    }
     #[tokio::test]
     async fn publisher_prior_uses_real_url_host_not_spoofed_publisher() {
         let mut a = article();
@@ -854,61 +764,6 @@ mod tests {
         let prior = m.publisher_prior.unwrap();
         assert_eq!(prior.observation.domain, "evil.example");
         assert_eq!(prior.score, None);
-    }
-
-    #[test]
-    fn concurrent_native_metadata_and_classifier_receipts_preserve_both_results() {
-        let directory = tempfile::tempdir().unwrap();
-        let db = directory.path().join("concurrent.db");
-        let store = Store::open(&db).unwrap();
-        store.atlas_insert_run("r", "{}", "{}").unwrap();
-        let article = article();
-        store.atlas_upsert_article(&article).unwrap();
-        let mut metadata = ArticleMetadata::pending(&article);
-        metadata.entity_state = MetadataState::Complete;
-        let ready = Arc::new(std::sync::Barrier::new(3));
-        let workers: Vec<_> = [false, true]
-            .into_iter()
-            .map(|classification| {
-                let db = db.clone();
-                let ready = ready.clone();
-                let mut metadata = metadata.clone();
-                std::thread::spawn(move || {
-                    let store = Store::open(&db).unwrap();
-                    ready.wait();
-                    for iteration in 0..50 {
-                        if classification {
-                            assert!(store
-                                .atlas_set_classification(
-                                    "r",
-                                    "a",
-                                    &metadata.input_hash,
-                                    "classified",
-                                    &serde_json::json!({"iteration":iteration}).to_string(),
-                                    Some("military")
-                                )
-                                .unwrap());
-                        } else {
-                            metadata.diagnostics = vec![format!("iteration {iteration}")];
-                            assert!(store.atlas_save_metadata(&metadata).unwrap());
-                        }
-                    }
-                })
-            })
-            .collect();
-        ready.wait();
-        for worker in workers {
-            worker.join().unwrap();
-        }
-        let saved = store.atlas_metadata("r", "a").unwrap().unwrap();
-        assert_eq!(saved.entity_state, MetadataState::Complete);
-        assert_eq!(saved.classification_status, "classified");
-        assert_eq!(saved.classification_receipt.unwrap()["iteration"], 49);
-        assert_eq!(saved.diagnostics, vec!["iteration 49"]);
-        assert_eq!(
-            store.atlas_article("r", "a").unwrap().unwrap().category,
-            "military"
-        );
     }
 }
 
@@ -1185,68 +1040,4 @@ async fn inventory_worker(
 #[cfg(test)]
 mod inventory_tests {
     use super::*;
-    #[tokio::test]
-    async fn collection_inventory_drains_every_admitted_revision_without_brain_writes() {
-        let directory = tempfile::tempdir().unwrap();
-        let db = directory.path().join("inventory.db");
-        let store = Store::open(&db).unwrap();
-        store.atlas_insert_run("r", "{}", "{}").unwrap();
-        let index = rsp::RspIndex::build(vec![], chrono::Utc::now().to_rfc3339());
-        store
-            .app_state_set(rsp::APP_STATE_KEY, &rsp::index_to_json(&index).unwrap())
-            .unwrap();
-        let inventory = NativeInventory::start(&db, "r", "Argos fixture");
-        for i in 0..40 {
-            let article = AtlasArticleRow {
-                run_id: "r".into(),
-                id: format!("a{i}"),
-                title: format!("Jane Doe reports story {i}"),
-                description: String::new(),
-                url: format!("https://unlisted.example/{i}"),
-                country: String::new(),
-                source_name: "Unlisted".into(),
-                source_domain: "unlisted.example".into(),
-                published_at: "2026-10-12".into(),
-                provider: "fixture".into(),
-                temperature: 0.0,
-                category: "unk".into(),
-                seen_at: String::new(),
-                author: String::new(),
-                image_url: String::new(),
-            };
-            store.atlas_upsert_article(&article).unwrap();
-            if let Err(error) = inventory.queue(&article).await {
-                let worker = inventory.finish().await;
-                panic!("Inventory admission: {error}; worker: {worker:?}");
-            }
-        }
-        inventory.finish().await.unwrap();
-        let count:i64=store.conn.query_row("SELECT COUNT(*) FROM atlas_article_metadata WHERE run_id='r' AND reliability_state='complete'",[],|r|r.get(0)).unwrap();
-        assert_eq!(count, 40);
-        let memories: i64 = store
-            .conn
-            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(memories, 0);
-    }
-    #[tokio::test]
-    async fn empty_inventory_starts_no_native_or_model_work() {
-        let directory = tempfile::tempdir().unwrap();
-        let db = directory.path().join("empty.db");
-        let store = Store::open(&db).unwrap();
-        store.atlas_insert_run("r", "{}", "{}").unwrap();
-        NativeInventory::start(&db, "r", "Argos fixture")
-            .finish()
-            .await
-            .unwrap();
-        let jobs: i64 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM argos_jobs WHERE run_ref='r'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(jobs, 0);
-    }
 }

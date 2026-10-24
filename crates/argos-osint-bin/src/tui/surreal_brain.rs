@@ -178,10 +178,14 @@ pub(crate) fn job_action(action: JobAction) -> Result<String> {
             })
         }
         JobAction::Cancel(id) => {
+            let job_id = id.clone();
             let outcome =
                 runtime::blocking(
                     |repo| async move { jobs_view::cancel_job(repo.db(), &id).await },
                 )?;
+            if outcome == CancelRequest::Requested {
+                argos_osint_core::job_registry::raise_local_cancel(&job_id);
+            }
             Ok(match outcome {
                 CancelRequest::Requested => {
                     "Stop requested · the job stops at its next safe point".into()

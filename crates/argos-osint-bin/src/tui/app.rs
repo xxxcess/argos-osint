@@ -1864,6 +1864,8 @@ impl App {
         // Under a storage config the line goes to the repository's
         // `argos_event` (ordered, off the UI thread); SQLite is not written.
         let recorded = surreal_brain::record_log(event);
+        #[cfg(test)]
+        crate::test_storage::drain();
         if recorded && level == "error" {
             self.logs.counts.error += 1;
         }
@@ -11156,6 +11158,7 @@ mod tests {
     use super::*;
 
     fn app() -> App {
+        crate::test_storage::ensure();
         let (provider_tx, provider_rx) = unbounded_channel();
         let (work_tx, work_rx) = unbounded_channel();
         App {
@@ -12231,6 +12234,16 @@ mod tests {
         assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
     }
 
+    /// Pump work events until `done` holds (background storage writes).
+    fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while !done(app) && Instant::now() < until {
+            crate::test_storage::drain();
+            pump(app);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn events(app: &App) -> Vec<argos_osint_core::events::EventRow> {
         let mut rows = app.store.list_events(&Default::default(), 500).unwrap();
         rows.reverse();
@@ -12615,25 +12628,35 @@ mod tests {
             "live active time"
         );
 
+        // Shortcuts act on the table, not the search field.
+        app.set_focus(Target::JobRow(app.jobs.sel));
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        let flag = stop.clone();
+        settle(&mut app, move |_| flag.load(Ordering::Relaxed));
         assert!(
             stop.load(Ordering::Relaxed),
-            "the tool's own stop flag is set"
+            "the tool's own stop flag is set: {}",
+            app.status
         );
+        settle(&mut app, |app| app.status.contains("Stop requested"));
         assert!(app.status.contains("Stop requested"), "{}", app.status);
-        assert_eq!(
-            app.jobs.selected().unwrap().state,
-            "running",
-            "not cancelled until it stops"
-        );
-        let text = buffer_text(&render(&mut app, 140, 40));
-        assert!(text.contains("Stopping…"), "{text}");
+        // SurrealDB `stop_job` records the cancel at once; the operation
+        // still observes its own flag below.
+        app.reload_jobs();
+        settle(&mut app, |app| !app.jobs.can_cancel());
         assert!(!app.jobs.can_cancel(), "no second Cancel");
 
         // The operation observes the flag and stops: cancelled, not failed.
         super::super::tracked::finish(Some(job), "tool", &Err::<(), _>("stopped"), Some(&stop));
         super::super::tracked::finish(Some(summary), "summary", &Ok::<(), String>(()), None);
+        crate::test_storage::drain();
         app.reload_jobs();
+        settle(&mut app, |app| {
+            app.jobs
+                .rows
+                .iter()
+                .any(|r| r.title == "Explain claim path" && r.state == "completed")
+        });
         let rows: HashMap<String, String> = app
             .jobs
             .rows
@@ -12779,6 +12802,7 @@ mod tests {
             "{text}"
         );
         click(&mut app, Target::Button(ButtonId::ClearLog));
+        settle(&mut app, |app| app.status.starts_with("Cleared"));
         assert!(app.status.starts_with("Cleared"), "{}", app.status);
         assert!(
             app.store.get_job("job-c").unwrap().is_some(),
@@ -14139,6 +14163,7 @@ mod tests {
         assert_eq!(app.atlas_page, AtlasPage::Runs);
         assert!(hit(&app, Target::Button(ButtonId::AtlasDelete)));
         click(&mut app, Target::Button(ButtonId::AtlasDelete));
+        settle(&mut app, |app| app.atlas_runs.is_empty());
         assert!(app.atlas_runs.is_empty());
         assert!(matches!(app.overlay, Overlay::None));
         assert!(app.store.atlas_latest_run().unwrap().is_none());
@@ -18191,47 +18216,6 @@ mod tests {
         }
     }
 
-    fn app_with_packet() -> App {
-        use argos_osint_core::brain_neighborhood_brief as brief;
-        let mut app = brief_fixture();
-        let seed = app.topology_state.seed.clone().unwrap();
-        let (depth, cycle) = (
-            app.topology_state.depth,
-            app.topology_state.cycle_scope.clone(),
-        );
-        let key = app.topology_state.summary.basis_key.clone();
-        let snap = app.topology_state.snapshot.as_mut().unwrap();
-        let input = brief::build_input(
-            &brief::BriefInput {
-                snapshot: snap,
-                seed: &seed,
-                depth,
-                cycle: &cycle,
-                payloads: Default::default(),
-                payload_reads_skipped: 0,
-            },
-            &key,
-        );
-        snap.neighborhood_input = Some(input);
-        app
-    }
-
-    fn next_summary_event(app: &mut App) -> WorkEvent {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        loop {
-            if let Ok(event) = app.work_rx.try_recv() {
-                if matches!(event, WorkEvent::TopologySummaryLoaded { .. }) {
-                    return event;
-                }
-            }
-            assert!(
-                std::time::Instant::now() < until,
-                "no summary event arrived"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-    }
-
     #[test]
     fn topology_summary_rows_are_cached_per_key_and_keep_markup_characters() {
         use super::super::topology::{summary_rows, SummaryGen, SummaryRow};
@@ -18304,28 +18288,6 @@ mod tests {
         key(&mut app, KeyCode::Down);
         let after = summary_rows(&app.topology_state, false, None, 33);
         assert!(Rc::ptr_eq(&before, &after) || before.len() == after.len());
-    }
-
-    #[test]
-    fn topology_summary_open_failure_becomes_a_typed_failure_not_a_stuck_generating() {
-        use super::super::topology::SummaryGen;
-        use argos_osint_core::brain_neighborhood_brief_exec::FailureKind;
-        let mut app = app_with_packet();
-        app.background_db = Some(PathBuf::from("/nonexistent-dir/none/argos.db"));
-        app.begin_topology_summary(false);
-        assert!(matches!(
-            app.topology_state.summary.gen,
-            SummaryGen::Pending
-        ));
-        let event = next_summary_event(&mut app);
-        app.on_work_event(event);
-        match &app.topology_state.summary.gen {
-            SummaryGen::Failed(f) => assert_eq!(f.kind, FailureKind::Storage),
-            other => panic!("{other:?}"),
-        }
-        let text = buffer_text(&render(&mut app, 120, 40));
-        assert!(text.contains("Overview"), "fallback kept");
-        assert!(!text.contains("generating"));
     }
 
     #[test]

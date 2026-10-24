@@ -1,4 +1,6 @@
 mod cli;
+#[cfg(test)]
+mod test_storage;
 mod tui;
 
 #[tokio::main]

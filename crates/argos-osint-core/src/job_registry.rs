@@ -168,6 +168,19 @@ fn live() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
     LIVE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Raise the stop flag of a live job in this process (a Jobs → Cancel
+/// issued here reaches the operation without waiting for the next beat).
+pub fn raise_local_cancel(id: &str) -> bool {
+    let live = live().lock().unwrap_or_else(|e| e.into_inner());
+    match live.get(id) {
+        Some(flag) => {
+            flag.store(true, Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
+}
+
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }

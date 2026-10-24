@@ -1245,6 +1245,7 @@ mod tests {
 
     #[test]
     fn atlas_memory_maintenance_accepts_historical_and_rejects_collection_contracts() {
+        crate::test_storage::ensure();
         let store = Store::memory().unwrap();
         store.atlas_insert_run("historical", "{}", "{}").unwrap();
         store

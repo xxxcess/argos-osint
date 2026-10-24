@@ -36,6 +36,7 @@ pub mod insight_owner;
 pub mod insight_views;
 pub mod install;
 pub mod intel;
+pub mod investigation;
 pub mod jobs;
 pub mod jobs_view;
 pub mod lifecycle;

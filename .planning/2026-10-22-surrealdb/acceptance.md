@@ -3,26 +3,37 @@
 See [plan.md](design.md). Status is honest: unchecked means not done or not
 verified.
 
-## Still needs SQLite (2026-10-24, after 3dae43c)
+## Still needs SQLite (2026-10-24, combined tree at 4760a9e)
 
 Authoritative list; older "Gaps" bullets below are historical where they
 conflict. Revision fence for cycle evidence and derivation membership
-(67ee9ee, 2049aa7) is closed.
+(67ee9ee, 2049aa7) is closed. Model attempts/drafts, `task_epoch`, the Recon
+job registry, stage/activity events, `insight.superseded` and recall
+telemetry are wired (see "Combined tree" at the end).
 
 - [ ] Brief chain engine: `brief_stages::drain_parallel` / `claim_next` /
   `run_claimed`, `brief_pipeline::publish` and `brief_canonical::publish_stage_on`
-  still read and write SQLite. `storage::brief` now has every table they need
-  (publications, runs, leads, index state, stage receipts), but no production
-  caller writes them, so `storage::brief::record_run` and `replace_leads`
-  have no callers yet. `spawn_intel_brief_drainer` is not gated on
-  `surreal_selected()`.
-- [ ] Events and telemetry writers (`argos_events` stage/activity events,
-  `insight.superseded`, recall telemetry): owned by the combined tree; the
-  `telemetry_event` table exists via `profile_view` but nothing writes it on
-  SurrealDB. Skipped (no-op) on SurrealDB runs, never dual-written.
-- [ ] Report surface of `run_pipeline` bails on SurrealDB.
+  still read and write SQLite. `storage::brief` is registered and has every
+  table they need, but no production caller writes them, so
+  `storage::brief::record_run` and `replace_leads` have no callers yet.
+  `spawn_intel_brief_drainer` is not gated on `surreal_selected()`.
+- [ ] Logs pane, its severity counts, the TUI session log and Jobs → Logs
+  counts read SQLite `argos_events`; `argos_event` has no prune or clear.
+  `telemetry_meta`, backfill and the telemetry prune are not on SurrealDB.
+- [ ] Report surface of `run_pipeline` bails on SurrealDB (the Intel report
+  worker is retired: `report_execution_enabled()` is false).
+- [ ] Article refresh input: `insight_persist::article_input` reads SQLite
+  evidence tables.
 - [ ] `pipeline_exec::load_memory_evidence` has no legacy (pre-derivation)
-  fallback; its recall has no recall cache or kind filter.
+  fallback; its recall has no recall cache or kind filter. Turn recall is the
+  BM25 stopgap until vector recall lands.
+- [ ] `enqueue_refresh` does not requeue paused tasks; `validate_retry` and
+  `retire_atlas_insight_work` stay SQLite.
+- [ ] Topology: retained Intel seeds are refused, the neighbourhood summary
+  is skipped, snapshot reads are not one transaction, no TUI test drives the
+  SurrealDB workers.
+- [ ] Atlas, Atlas insight/memory writers and the investigation harness
+  (`investigation::engine`) stay SQLite.
 
 ## P0 — foundation (spec step 1)
 
@@ -271,3 +282,25 @@ Bootstrap registers 21 schemas after the topology, Profile and Recon tracks merg
 - [x] `storage::recon_jobs` ports the remaining Recon/Intel job writers as repository methods with their own schema (`recon_jobs::SCHEMA`: `task_epoch` on `recon_model_operation`, `recon_model_attempt` keyed by `(operation_id, generation, route_index, attempt)` and removed with its operation, `recon_coverage`, `intel_report_job` and `intel_report_task` removed with their job): model operation `task_epoch` (kept when a later ensure omits it) and attempt start/finish/list (a replayed start resets the same row); coverage record save/load by scope and generation; Intel report job insert/get/list/revision/update (retired jobs untouched) and task insert/list/claim (dependencies complete, lease guarded so one claim wins)/complete/fail/expired-lease interrupt; Recon job registry rows (begin or resume with attempts + 1, phase returning the cancel flag, finish, `job_for_run`). Covered in both modes by `tests/storage_recon_jobs.rs`, which applies the full bootstrap plus `recon_jobs::SCHEMA` in setup.
 - [x] Profile on SurrealDB now loads recon run states, report jobs/tasks, coverage and model operations/attempts from these tables. If the schema is not registered, they show as unavailable.
 - Gaps: `recon_jobs::SCHEMA` is not in `storage::bootstrap` yet. Register `("recon_jobs", super::recon_jobs::SCHEMA)` after `recon_exec` at merge, which adds one to the bootstrap count. No production caller is switched yet. On SurrealDB, the executor's attempt ledger, task epochs and the Recon job registry row are still skipped, as before. The Intel report worker and `brain_neighborhood_brief_exec` (the only `task_epoch` writer) remain SQLite subsystems. Coverage has no production caller on either store. There is no capability-cache table to port.
+
+## Combined tree (telemetry + job writers + remaining gaps)
+
+- [x] Merged telemetry (304aec4), job writers (7b58568) and the remaining
+  gaps branch (233b224). Bootstrap registers 27 schemas (`recon_jobs` after
+  `recon_exec`, `brief` after `intel`, `pipeline_exec`), asserted by
+  `tests/storage_bootstrap.rs`; per-test `apply_schema` calls dropped.
+- [x] Model ledger on the repository (e835e5b): `ensure_operation` with
+  `task_epoch`, drafts, status, attempt start/finish, in order through
+  `storage::runtime::spawn_ordered` (drained on exit).
+- [x] Recon job registry on the repository (4ec0549): begin/resume, phase with
+  cancel, finish.
+- [x] Events on SurrealDB (c4a5def): `ExecStore` stage and activity events
+  write `argos_event`, turn recall records recall telemetry, and article
+  refresh admission logs `insight.superseded` per retired task after commit.
+- [x] `run_pipeline` reaches storage only through `ExecStore`; on SurrealDB it
+  opens no SQLite file (telemetry path `None`). `ExecStore` keeps SQLite behind
+  a mutex so spawned pipelines stay `Send` (0bd6912).
+- [x] Server fixes: no `math::max`/`math::min` (floats on a server), no empty
+  record ids in pipeline lookups.
+- Gate at 4760a9e: fmt, clippy (core, workspace, bin), bin tests and
+  `test_surreal.py` in server and embedded modes, all green.

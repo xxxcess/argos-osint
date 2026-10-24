@@ -122,7 +122,7 @@ impl Publisher {
         let task = self.task.lock().await.take();
         if let Some(task) = task {
             if let Err(e) = task.await {
-                eprintln!("memory publisher task ended abnormally: {e}");
+                tracing::warn!("memory publisher task ended abnormally: {e}");
             }
         }
     }
@@ -159,7 +159,7 @@ async fn run(db: Surreal<Any>, mut rx: mpsc::Receiver<(Write, Reply)>, stop: Arc
             Ok(results) => results,
             Err(panic) => {
                 let why = panic_message(&*panic);
-                eprintln!(
+                tracing::warn!(
                     "memory publish batch panicked (batch_size={}): {why}",
                     writes.len()
                 );
@@ -190,7 +190,7 @@ pub async fn publish_batch(
     match commit(db, writes).await {
         Ok(done) => done.into_iter().map(Ok).collect(),
         Err(e) if writes.len() > 1 && splittable(&e) => {
-            eprintln!(
+            tracing::warn!(
                 "memory publish batch failed; splitting (batch_size={}): {e}",
                 writes.len()
             );
@@ -200,14 +200,14 @@ pub async fn publish_batch(
                     .await
                     .map(|mut v| v.remove(0));
                 if let Err(e) = &r {
-                    eprintln!("memory write failed (batch_size=1): {e}");
+                    tracing::warn!("memory write failed (batch_size=1): {e}");
                 }
                 out.push(r);
             }
             out
         }
         Err(e) => {
-            eprintln!(
+            tracing::warn!(
                 "memory publish batch failed (batch_size={}): {e}",
                 writes.len()
             );

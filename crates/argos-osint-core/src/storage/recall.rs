@@ -114,7 +114,7 @@ pub async fn recall(db: &Surreal<Any>, q: &RecallQuery) -> Result<Vec<RecallHit>
     if let Some(v) = &q.embedding {
         match vector_candidates(db, q, v, &kinds, k).await {
             Ok(hits) => ranked = hits,
-            Err(e) => eprintln!("vector recall failed; using lexical recall: {e}"),
+            Err(e) => tracing::warn!("vector recall failed; using lexical recall: {e}"),
         }
     }
     // The top-up counts hits before the token budget is applied, so
@@ -271,7 +271,7 @@ async fn lexical_candidates(
             break;
         }
         if read >= LEXICAL_SCAN_CAP {
-            eprintln!(
+            tracing::warn!(
                 "lexical recall stopped at the {LEXICAL_SCAN_CAP}-row scan cap; \
                  later active memories were not scored"
             );

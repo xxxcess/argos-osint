@@ -443,7 +443,7 @@ pub async fn recall_candidates_for_turn(
         Ok(Some(found)) => found,
         Ok(None) => return lexical_for_turn(repo, thread_id, question, limit, tokens).await,
         Err(err) => {
-            eprintln!("query embedding failed; using lexical recall: {err:#}");
+            tracing::warn!("query embedding failed; using lexical recall: {err:#}");
             return lexical_for_turn(repo, thread_id, question, limit, tokens).await;
         }
     };

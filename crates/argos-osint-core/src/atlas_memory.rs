@@ -1335,7 +1335,7 @@ pub fn spawn_repair(db_path: std::path::PathBuf, restart: bool) -> bool {
         let spawned = crate::storage::runtime::spawn(async move {
             if let Ok(store) = AtlasStore::open(&db_path).await {
                 if let Err(e) = run_repair_job_store(&store, 16, restart).await {
-                    eprintln!("atlas repair failed: {e:#}");
+                    tracing::warn!("atlas repair failed: {e:#}");
                 }
             }
             REPAIR_RUNNING.store(false, Ordering::SeqCst);

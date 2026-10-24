@@ -93,7 +93,7 @@ pub async fn add_memory(
     if let Some(e) = vectors {
         if let Err(err) = super::vectors::index_new(repo, e, std::slice::from_ref(&memory.id)).await
         {
-            eprintln!("memory {} saved without a vector: {err:#}", memory.id);
+            tracing::warn!("memory {} saved without a vector: {err:#}", memory.id);
         }
     }
     Ok(memory)
@@ -147,7 +147,7 @@ pub async fn recall(
                 q.generation = state.generation;
             }
             Ok(None) => {}
-            Err(err) => eprintln!("query embedding failed; using lexical recall: {err:#}"),
+            Err(err) => tracing::warn!("query embedding failed; using lexical recall: {err:#}"),
         }
     }
     let hits = recall::recall(repo.db(), &q)

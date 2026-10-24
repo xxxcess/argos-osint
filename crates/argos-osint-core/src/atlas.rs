@@ -1791,7 +1791,7 @@ impl SurrealCycleJob {
                 parent: None,
             };
             if let Err(e) = crate::storage::recon_jobs::begin_app_job(&repo, &spec).await {
-                eprintln!("atlas job start not recorded: {e:#} (job {job})");
+                tracing::warn!("atlas job start not recorded: {e:#} (job {job})");
             }
         });
         Self {
@@ -1815,7 +1815,7 @@ impl SurrealCycleJob {
                     .await
                 {
                     Ok(flag) => stop |= flag,
-                    Err(e) => eprintln!("atlas job progress not recorded: {e:#} (job {job})"),
+                    Err(e) => tracing::warn!("atlas job progress not recorded: {e:#} (job {job})"),
                 }
             }
             if stop {
@@ -1847,7 +1847,7 @@ impl SurrealCycleJob {
                 parent: Some(&parent),
             };
             if let Err(e) = crate::storage::recon_jobs::begin_app_job(&repo, &spec).await {
-                eprintln!("atlas phase job not recorded: {e:#} (job {job})");
+                tracing::warn!("atlas phase job not recorded: {e:#} (job {job})");
             }
         });
         self.progress(child.clone(), phase_title(phase), None, None);
@@ -1877,7 +1877,7 @@ impl SurrealCycleJob {
             )
             .await
             {
-                eprintln!("atlas job finish not recorded: {e:#} (job {id})");
+                tracing::warn!("atlas job finish not recorded: {e:#} (job {id})");
             }
         });
     }

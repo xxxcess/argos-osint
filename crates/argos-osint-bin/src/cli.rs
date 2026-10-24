@@ -1063,12 +1063,34 @@ fn reject_collection_maintenance(
     Ok(run.id.clone())
 }
 
+/// [`reject_collection_maintenance`] on the selected store (SQLite or
+/// SurrealDB), so `atlas repair` never opens SQLite under SurrealDB.
+async fn reject_collection_maintenance_store(
+    store: &argos_osint_core::atlas_store::AtlasStore,
+    run_id: &str,
+) -> Result<String> {
+    let runs = store.list_runs().await?;
+    let run = if run_id.is_empty() {
+        runs.first()
+    } else {
+        runs.iter().find(|run| run.id == run_id)
+    }
+    .ok_or_else(|| anyhow!("Atlas run {run_id} not found"))?;
+    argos_osint_core::atlas_memory::ensure_historical_contract_store(store, &run.id)
+        .await
+        .map_err(|_| anyhow!("Repair/Verify are historical memory maintenance only; atlas-collection cycles do not publish memories"))?;
+    Ok(run.id.clone())
+}
+
 async fn atlas_command(command: AtlasCommand) -> Result<()> {
     match command {
         AtlasCommand::Repair { run_id, page } => {
-            let store = open_store()?;
-            let run_id = reject_collection_maintenance(&store, &run_id)?;
-            let repair = argos_osint_core::atlas_memory::repair_run(&store, &run_id, None)?;
+            paths::ensure_home()?;
+            let _ = argos_osint_core::config_commit::recover_at_startup();
+            let store = argos_osint_core::atlas_store::AtlasStore::open(&paths::db_path()).await?;
+            let run_id = reject_collection_maintenance_store(&store, &run_id).await?;
+            let repair =
+                argos_osint_core::atlas_memory::repair_run_store(&store, &run_id, None).await?;
             print_json(&serde_json::json!({
                 "run_id": run_id,
                 "page": page,

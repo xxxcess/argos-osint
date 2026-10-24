@@ -452,14 +452,8 @@ pub struct CheckpointInput<'a> {
     pub initial_confidences: std::collections::BTreeMap<String, f64>,
 }
 
-/// Persist the validated extraction before publication. Idempotent per
-/// payload revision.
-pub fn save_checkpoint(
-    store: &Store,
-    run_id: &str,
-    input: CheckpointInput<'_>,
-) -> Result<Checkpoint> {
-    let checkpoint = Checkpoint {
+fn checkpoint_of(run_id: &str, input: CheckpointInput<'_>) -> Checkpoint {
+    Checkpoint {
         run_id: run_id.into(),
         revision: payload_revision(input.claims, input.brief),
         claims: input.claims.to_vec(),
@@ -470,7 +464,17 @@ pub fn save_checkpoint(
         partial: input.partial,
         notes: input.notes,
         initial_confidences: input.initial_confidences.clone(),
-    };
+    }
+}
+
+/// Persist the validated extraction before publication. Idempotent per
+/// payload revision.
+pub fn save_checkpoint(
+    store: &Store,
+    run_id: &str,
+    input: CheckpointInput<'_>,
+) -> Result<Checkpoint> {
+    let checkpoint = checkpoint_of(run_id, input);
     store.conn.execute(
         "INSERT INTO argos_atlas_checkpoints(run_id,revision,payload_json,accepted,rejected,created_at)
          VALUES (?1,?2,?3,?4,0,?5)
@@ -812,6 +816,69 @@ pub fn refresh_incomplete_runs(store: &Store, limit: usize) -> Result<usize> {
     Ok(changed)
 }
 
+/// [`refresh_run_indexing`] on the selected store (SurrealDB included).
+pub async fn refresh_run_indexing_store(
+    store: &crate::atlas_store::AtlasStore,
+    run: &crate::store::AtlasRunRow,
+) -> Result<Option<MemoryPhase>> {
+    let raw: serde_json::Value = serde_json::from_str(&run.stats_json).unwrap_or_default();
+    if raw
+        .get("contract_version")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(crate::atlas_work::is_collection_contract)
+        || matches!(run.state.as_str(), "running" | "paused")
+    {
+        return Ok(None);
+    }
+    let mut stats: crate::atlas::RunStats =
+        serde_json::from_str(&run.stats_json).unwrap_or_default();
+    if !stats.memories.started() || stats.memories.publication == StepState::Failed {
+        return Ok(None);
+    }
+    let Some(receipt) = store.publication_receipt(&run.id).await? else {
+        return Ok(None);
+    };
+    let verification = store.verify_publication(&receipt).await?;
+    stats.memories.apply_verification(&verification);
+    store
+        .save(&run.id, &run.cursor_json, &serde_json::to_string(&stats)?)
+        .await?;
+    let outcome = stats.memories.outcome();
+    if outcome.as_state() != run.state {
+        store
+            .set_state(&run.id, outcome.as_state(), &stats.memories.note(), false)
+            .await?;
+    }
+    Ok(Some(stats.memories))
+}
+
+/// [`refresh_incomplete_runs`] on the selected store. Returns the number
+/// of runs whose state changed.
+pub async fn refresh_incomplete_runs_store(
+    store: &crate::atlas_store::AtlasStore,
+    limit: usize,
+) -> Result<usize> {
+    let mut runs: Vec<crate::store::AtlasRunRow> = store
+        .list_runs()
+        .await?
+        .into_iter()
+        .filter(|run| {
+            matches!(run.state.as_str(), "partial" | "blocked" | "waiting") && run.phase == 5
+        })
+        .collect();
+    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    runs.truncate(limit);
+    let mut changed = 0usize;
+    for run in runs {
+        if let Some(phase) = refresh_run_indexing_store(store, &run).await? {
+            if phase.outcome().as_state() != run.state {
+                changed += 1;
+            }
+        }
+    }
+    Ok(changed)
+}
+
 /// Per-run repair classification (stored separately from the run's own state).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -963,38 +1030,47 @@ fn record_repair(store: &Store, repair: &RunRepair, job_id: Option<&str>) -> Res
             now
         ],
     )?;
-    if repair.status != RepairStatus::Verified && repair.status != RepairStatus::NoInsights {
-        let severity = match repair.status {
-            RepairStatus::Partial | RepairStatus::MissingPayload => Severity::Warn,
-            _ => Severity::Info,
-        };
-        let _ = events::record_event(
-            &store.conn,
-            &NewEvent {
-                severity: Some(severity),
-                app: "atlas".into(),
-                event_type: "atlas.memory_repair".into(),
-                message: format!(
-                    "Repair Atlas memories: {} — {}",
-                    status,
-                    if repair.detail.is_empty() {
-                        format!(
-                            "{} restored, {} index changes queued",
-                            repair.restored_memory_ids.len(),
-                            repair.requeued
-                        )
-                    } else {
-                        repair.detail.clone()
-                    }
-                ),
-                details: serde_json::to_string(repair)?,
-                job_id: job_id.unwrap_or_default().into(),
-                run_id: repair.run_id.clone(),
-                ..Default::default()
-            },
-        );
+    if let Some(event) = repair_event(repair, &status, job_id)? {
+        let _ = events::record_event(&store.conn, &event);
     }
     Ok(())
+}
+
+/// The `atlas.memory_repair` event of a non-trivial repair.
+fn repair_event(
+    repair: &RunRepair,
+    status: &str,
+    job_id: Option<&str>,
+) -> Result<Option<NewEvent>> {
+    if repair.status == RepairStatus::Verified || repair.status == RepairStatus::NoInsights {
+        return Ok(None);
+    }
+    let severity = match repair.status {
+        RepairStatus::Partial | RepairStatus::MissingPayload => Severity::Warn,
+        _ => Severity::Info,
+    };
+    Ok(Some(NewEvent {
+        severity: Some(severity),
+        app: "atlas".into(),
+        event_type: "atlas.memory_repair".into(),
+        message: format!(
+            "Repair Atlas memories: {} — {}",
+            status,
+            if repair.detail.is_empty() {
+                format!(
+                    "{} restored, {} index changes queued",
+                    repair.restored_memory_ids.len(),
+                    repair.requeued
+                )
+            } else {
+                repair.detail.clone()
+            }
+        ),
+        details: serde_json::to_string(repair)?,
+        job_id: job_id.unwrap_or_default().into(),
+        run_id: repair.run_id.clone(),
+        ..Default::default()
+    }))
 }
 
 /// Stored repair status for a run.
@@ -1254,6 +1330,21 @@ pub fn spawn_repair(db_path: std::path::PathBuf, restart: bool) -> bool {
     if REPAIR_RUNNING.swap(true, Ordering::SeqCst) {
         return false;
     }
+    // Under SurrealDB the repair runs on the process runtime, never SQLite.
+    if crate::recon::backend::sqlite_path(&db_path).is_none() {
+        let spawned = crate::storage::runtime::spawn(async move {
+            if let Ok(store) = AtlasStore::open(&db_path).await {
+                if let Err(e) = run_repair_job_store(&store, 16, restart).await {
+                    tracing::warn!("atlas repair failed: {e:#}");
+                }
+            }
+            REPAIR_RUNNING.store(false, Ordering::SeqCst);
+        });
+        if !spawned {
+            REPAIR_RUNNING.store(false, Ordering::SeqCst);
+        }
+        return spawned;
+    }
     let spawned = std::thread::Builder::new()
         .name("argos-atlas-repair".into())
         .spawn(move || {
@@ -1276,6 +1367,10 @@ pub fn spawn_repair(db_path: std::path::PathBuf, restart: bool) -> bool {
 
 /// Compatibility entry point: retire obsolete work without startup publication.
 pub fn spawn_startup_reconciliation(db_path: std::path::PathBuf) -> bool {
+    // The retired Atlas insight work lives in SQLite's task tables only.
+    if crate::recon::backend::sqlite_path(&db_path).is_none() {
+        return false;
+    }
     if let Ok(store) = Store::open(&db_path) {
         let _ = tasks::retire_atlas_insight_work(&store.conn, &chrono::Utc::now().to_rfc3339());
     }
@@ -1311,6 +1406,485 @@ pub fn prepare_reextraction(store: &Store, run_id: &str) -> Result<bool> {
         &serde_json::to_string(&stats)?,
     )?;
     store.atlas_set_state(run_id, "paused", "Re-extraction requested", false)?;
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Selected-store entry points. SQLite delegates to the functions above;
+// SurrealDB runs the same steps against the repository (publication through
+// `storage::insight::publish_atlas_insights`, reconstruction through
+// `storage::provenance::legacy_receipt`).
+
+use crate::atlas_store::AtlasStore;
+
+/// [`save_checkpoint`] on the selected store.
+pub async fn save_checkpoint_store(
+    store: &AtlasStore,
+    run_id: &str,
+    input: CheckpointInput<'_>,
+) -> Result<Checkpoint> {
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        let checkpoint = checkpoint_of(run_id, input);
+        crate::storage::atlas_memory::put_checkpoint(
+            repo.db(),
+            run_id,
+            &checkpoint.revision,
+            &serde_json::to_string(&checkpoint)?,
+            checkpoint.claims.len() as i64,
+        )
+        .await?;
+        return Ok(checkpoint);
+    }
+    store.sqlite("atlas save checkpoint", |s| {
+        save_checkpoint(s, run_id, input)
+    })
+}
+
+/// [`load_checkpoint`] on the selected store.
+pub async fn load_checkpoint_store(store: &AtlasStore, run_id: &str) -> Result<Option<Checkpoint>> {
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        return Ok(
+            match crate::storage::atlas_memory::latest_checkpoint(repo.db(), run_id).await? {
+                Some(json) => Some(serde_json::from_str(&json)?),
+                None => None,
+            },
+        );
+    }
+    store.sqlite("atlas load checkpoint", |s| load_checkpoint(s, run_id))
+}
+
+/// [`publish_checkpoint`] on the selected store. Under SurrealDB the brief
+/// summary flush (SQLite summarization queue) is not enqueued.
+pub async fn publish_checkpoint_store(
+    store: &AtlasStore,
+    checkpoint: &Checkpoint,
+    parent_job: Option<&str>,
+    repair: bool,
+    brief_override: Option<&str>,
+) -> Result<PublicationReceipt> {
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        let brief = brief_override.unwrap_or(&checkpoint.brief);
+        return crate::storage::insight::publish_atlas_insights(
+            repo.publisher(),
+            &checkpoint.run_id,
+            checkpoint.claims.clone(),
+            checkpoint.relations.clone(),
+            brief,
+            PublishOptions {
+                revision: Some(checkpoint.revision.clone()),
+                parent_job: parent_job.map(str::to_string),
+                repair,
+                index_now: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("atlas publish checkpoint: {e}"));
+    }
+    store.sqlite("atlas publish checkpoint", |s| {
+        publish_checkpoint(s, checkpoint, parent_job, repair, brief_override)
+    })
+}
+
+/// [`legacy_receipt`] on the selected store.
+pub async fn legacy_receipt_store(
+    store: &AtlasStore,
+    run_id: &str,
+    parent_job: Option<&str>,
+) -> Result<PublicationReceipt> {
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        return crate::storage::provenance::legacy_receipt(repo.publisher(), run_id, parent_job)
+            .await
+            .map_err(|e| anyhow::anyhow!("atlas legacy receipt: {e}"));
+    }
+    store.sqlite("atlas legacy receipt", |s| {
+        legacy_receipt(s, run_id, parent_job)
+    })
+}
+
+async fn requeue_uncovered_store(
+    store: &AtlasStore,
+    coverage: &crate::store::CoverageReport,
+    job_id: Option<&str>,
+) -> Result<usize> {
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        let _ = job_id;
+        return crate::storage::atlas_memory::requeue_uncovered(repo.publisher(), coverage).await;
+    }
+    store.sqlite("atlas requeue", |s| {
+        Ok(s.requeue_uncovered(coverage, job_id)?.len())
+    })
+}
+
+async fn run_row_store(
+    store: &AtlasStore,
+    run_id: &str,
+) -> Result<Option<crate::store::AtlasRunRow>> {
+    Ok(store
+        .list_runs()
+        .await?
+        .into_iter()
+        .find(|run| run.id == run_id))
+}
+
+fn historical(run: &crate::store::AtlasRunRow) -> Result<()> {
+    let stats: serde_json::Value = serde_json::from_str(&run.stats_json).unwrap_or_default();
+    anyhow::ensure!(
+        !stats
+            .get("contract_version")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(crate::atlas_work::is_collection_contract),
+        "Repair/Verify are restricted to historical Atlas contracts"
+    );
+    Ok(())
+}
+
+/// [`ensure_historical_contract`] on the selected store.
+pub async fn ensure_historical_contract_store(store: &AtlasStore, run_id: &str) -> Result<()> {
+    let Some(run) = run_row_store(store, run_id).await? else {
+        anyhow::bail!("Atlas run {run_id} not found");
+    };
+    historical(&run)
+}
+
+/// [`index_and_verify`] on the selected store. Under SurrealDB the index
+/// pool owns the work: round 0 re-queues uncovered memories, later rounds
+/// only wait for it (there is no inline `index_now`).
+pub async fn index_and_verify_store(
+    store: &AtlasStore,
+    receipt: &PublicationReceipt,
+    pause: Option<&AtomicBool>,
+    barrier: Barrier,
+    mut progress: impl FnMut(u32, u32),
+) -> Result<Phase5Report> {
+    if !store.is_surreal() {
+        return store.sqlite("atlas index and verify", |s| {
+            index_and_verify(s, receipt, pause, barrier, progress)
+        });
+    }
+    ensure_historical_contract_store(store, &receipt.run_id).await?;
+    let mut round = 0u32;
+    loop {
+        let verification = store.verify_publication(receipt).await?;
+        let coverage = &verification.coverage;
+        progress(coverage.indexed.len() as u32, coverage.required as u32);
+        if coverage.disabled || coverage.complete() || round >= barrier.rounds {
+            return Ok(Phase5Report {
+                verification,
+                paused: false,
+            });
+        }
+        if pause.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Ok(Phase5Report {
+                verification,
+                paused: true,
+            });
+        }
+        if round == 0 {
+            requeue_uncovered_store(store, coverage, None).await?;
+        }
+        round += 1;
+        if round < barrier.rounds {
+            tokio::time::sleep(barrier.wait).await;
+        }
+    }
+}
+
+async fn record_repair_store(
+    store: &AtlasStore,
+    repair: &RunRepair,
+    job_id: Option<&str>,
+) -> Result<()> {
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        let status = serde_json::to_value(repair.status)?
+            .as_str()
+            .unwrap_or("verified")
+            .to_string();
+        crate::storage::atlas::set_repair(
+            repo.db(),
+            &repair.run_id,
+            &status,
+            &serde_json::to_string(repair)?,
+            job_id.unwrap_or_default(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("atlas repair status: {e}"))?;
+        if let Some(event) = repair_event(repair, &status, job_id)? {
+            let _ = crate::storage::event_log::record_event(repo.db(), &event).await;
+        }
+        return Ok(());
+    }
+    store.sqlite("atlas record repair", |s| record_repair(s, repair, job_id))
+}
+
+/// [`repair_status`] on the selected store.
+pub async fn repair_status_store(store: &AtlasStore, run_id: &str) -> Result<Option<RunRepair>> {
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        let json = crate::storage::atlas_memory::repair_detail(repo.db(), run_id).await?;
+        return Ok(json.and_then(|json| serde_json::from_str(&json).ok()));
+    }
+    store.sqlite("atlas repair status", |s| repair_status(s, run_id))
+}
+
+/// [`repair_run`] on the selected store: the CLI and the repair job use
+/// this, so SurrealDB never reopens SQLite.
+pub async fn repair_run_store(
+    store: &AtlasStore,
+    run_id: &str,
+    job_id: Option<&str>,
+) -> Result<RunRepair> {
+    if !store.is_surreal() {
+        return store.sqlite("atlas repair run", |s| repair_run(s, run_id, job_id));
+    }
+    #[cfg(feature = "surreal")]
+    {
+        let repo = store
+            .repository()
+            .ok_or_else(|| anyhow::anyhow!("atlas repair: no repository"))?;
+        let db = repo.db();
+        let Some(run) = run_row_store(store, run_id).await? else {
+            anyhow::bail!("Atlas run {run_id} not found");
+        };
+        historical(&run)?;
+        let mut out = RunRepair {
+            run_id: run_id.into(),
+            status: RepairStatus::Verified,
+            restored_memory_ids: Vec::new(),
+            requeued: 0,
+            required: 0,
+            indexed: 0,
+            unrecoverable: Vec::new(),
+            reextract_available: false,
+            detail: String::new(),
+        };
+        if matches!(run.state.as_str(), "running" | "paused") {
+            out.status = RepairStatus::Active;
+            out.detail = "run is still active".into();
+            return Ok(out);
+        }
+        let stats: crate::atlas::RunStats =
+            serde_json::from_str(&run.stats_json).unwrap_or_default();
+        let prior = store.publication_receipt(run_id).await?;
+        let has_links = crate::storage::atlas_memory::has_insights(db, run_id).await?;
+        let receipt = if let Some(checkpoint) = load_checkpoint_store(store, run_id).await? {
+            let brief_deleted = match prior.as_ref().and_then(|r| r.brief_memory_id.clone()) {
+                Some(id) => crate::storage::atlas_memory::is_tombstoned(db, &id).await?,
+                None => false,
+            };
+            let receipt = publish_checkpoint_store(
+                store,
+                &checkpoint,
+                job_id,
+                true,
+                brief_deleted.then_some(""),
+            )
+            .await?;
+            out.restored_memory_ids
+                .extend(receipt.created_memory_ids.iter().cloned());
+            out.restored_memory_ids
+                .extend(receipt.repaired_memory_ids.iter().cloned());
+            receipt
+        } else if has_links || prior.is_some() {
+            legacy_receipt_store(store, run_id, job_id).await?
+        } else {
+            out.reextract_available = !store.list_articles(run_id).await?.is_empty();
+            let produced = stats.insights.claims > 0
+                || !stats.insights.rows.is_empty()
+                || stats.memories.extracted > 0;
+            out.status = if produced {
+                out.detail = MISSING_PAYLOAD_LINE.into();
+                RepairStatus::MissingPayload
+            } else {
+                RepairStatus::NoInsights
+            };
+            record_repair_store(store, &out, job_id).await?;
+            return Ok(out);
+        };
+        for rejected in &receipt.rejected {
+            if !rejected.reason.contains("deleted by user") {
+                out.unrecoverable
+                    .push((rejected.article_id.clone(), rejected.reason.clone()));
+            }
+        }
+        let verification = store.verify_publication(&receipt).await?;
+        let requeued = requeue_uncovered_store(store, &verification.coverage, job_id).await?;
+        out.requeued = requeued + receipt.queued_index_changes.len();
+        out.required = verification.coverage.required;
+        out.indexed = verification.coverage.indexed.len();
+        out.status = if !out.unrecoverable.is_empty() {
+            out.reextract_available = !store.list_articles(run_id).await?.is_empty();
+            out.detail = format!(
+                "{} claims unrecoverable; {MISSING_PAYLOAD_LINE}",
+                out.unrecoverable.len()
+            );
+            RepairStatus::Partial
+        } else if !out.restored_memory_ids.is_empty() {
+            RepairStatus::Repaired
+        } else if verification.coverage.disabled {
+            out.detail = INDEXING_DISABLED_LINE.into();
+            RepairStatus::IndexingDisabled
+        } else if out.requeued > 0 || !verification.coverage.complete() {
+            RepairStatus::IndexQueued
+        } else {
+            RepairStatus::Verified
+        };
+        if let Some(run) = run_row_store(store, run_id).await? {
+            let _ = refresh_run_indexing_store(store, &run).await;
+        }
+        record_repair_store(store, &out, job_id).await?;
+        Ok(out)
+    }
+    #[cfg(not(feature = "surreal"))]
+    unreachable!("SurrealDB store without the surreal feature")
+}
+
+async fn load_progress_store(store: &AtlasStore) -> Result<RepairProgress> {
+    Ok(store
+        .app_state_get(REPAIR_PROGRESS_KEY)
+        .await?
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default())
+}
+
+async fn save_progress_store(store: &AtlasStore, progress: &RepairProgress) -> Result<()> {
+    store
+        .app_state_set(REPAIR_PROGRESS_KEY, &serde_json::to_string(progress)?)
+        .await
+}
+
+/// [`repair_page`] on the selected store. Under SurrealDB the keyset page
+/// is taken from `list_runs` (historical contracts, `(started_at, id)`
+/// ascending); SQLite's `retire_atlas_insight_work` and job registration
+/// have no SurrealDB counterpart here.
+pub async fn repair_page_store(
+    store: &AtlasStore,
+    progress: &mut RepairProgress,
+    page: usize,
+) -> Result<Vec<RunRepair>> {
+    if !store.is_surreal() {
+        return store.sqlite("atlas repair page", |s| repair_page(s, progress, page));
+    }
+    let mut runs: Vec<(String, String)> = store
+        .list_runs()
+        .await?
+        .into_iter()
+        .filter(|run| historical(run).is_ok())
+        .map(|run| (run.started_at, run.id))
+        .filter(|(started, id)| {
+            (started.as_str(), id.as_str())
+                > (
+                    progress.after_started_at.as_str(),
+                    progress.after_id.as_str(),
+                )
+        })
+        .collect();
+    runs.sort();
+    runs.truncate(page.max(1));
+    let mut results = Vec::new();
+    if runs.is_empty() {
+        progress.done = true;
+        save_progress_store(store, progress).await?;
+        return Ok(results);
+    }
+    for (started_at, id) in runs {
+        let job = Some(progress.job_id.clone()).filter(|j| !j.is_empty());
+        let repair = repair_run_store(store, &id, job.as_deref()).await?;
+        progress.runs_checked += 1;
+        if !matches!(
+            repair.status,
+            RepairStatus::Verified | RepairStatus::NoInsights | RepairStatus::Active
+        ) {
+            progress.runs_repaired += 1;
+        }
+        progress.memories_restored += repair.restored_memory_ids.len() as u32;
+        progress.index_queued += repair.requeued as u32;
+        progress.unrecoverable += repair.unrecoverable.len() as u32;
+        if (repair.status == RepairStatus::MissingPayload || repair.status == RepairStatus::Partial)
+            && !progress.missing_payload.contains(&id)
+        {
+            progress.missing_payload.push(id.clone());
+        }
+        progress.after_started_at = started_at;
+        progress.after_id = id;
+        results.push(repair);
+    }
+    save_progress_store(store, progress).await?;
+    Ok(results)
+}
+
+/// [`run_repair_job`] on the selected store. Under SurrealDB progress is
+/// kept in `app_state` only; the job is not mirrored into the registry.
+pub async fn run_repair_job_store(
+    store: &AtlasStore,
+    page: usize,
+    restart: bool,
+) -> Result<RepairProgress> {
+    if !store.is_surreal() {
+        return store.sqlite("atlas repair job", |s| run_repair_job(s, page, restart));
+    }
+    let mut progress = load_progress_store(store).await?;
+    if restart || progress.done || progress.job_id.is_empty() {
+        progress = RepairProgress {
+            job_id: format!("atlas-repair-{}", chrono::Utc::now().timestamp_millis()),
+            ..Default::default()
+        };
+    }
+    save_progress_store(store, &progress).await?;
+    while !repair_page_store(store, &mut progress, page.max(1))
+        .await?
+        .is_empty()
+    {}
+    #[cfg(feature = "surreal")]
+    if progress.memories_restored > 0 {
+        if let Some(repo) = store.repository() {
+            let _ = crate::storage::atlas_memory::bump_memories_changed(repo.publisher()).await;
+        }
+    }
+    Ok(progress)
+}
+
+/// [`prepare_reextraction`] on the selected store.
+pub async fn prepare_reextraction_store(store: &AtlasStore, run_id: &str) -> Result<bool> {
+    if !store.is_surreal() {
+        return store.sqlite("atlas prepare reextraction", |s| {
+            prepare_reextraction(s, run_id)
+        });
+    }
+    let Some(run) = run_row_store(store, run_id).await? else {
+        anyhow::bail!("Atlas run {run_id} not found");
+    };
+    historical(&run)?;
+    if run.state == "running" || store.list_articles(run_id).await?.is_empty() {
+        return Ok(false);
+    }
+    let mut cursor: crate::atlas::Cursor =
+        serde_json::from_str(&run.cursor_json).unwrap_or_default();
+    cursor.phase = 4;
+    cursor.leg = "insights".into();
+    let mut stats: crate::atlas::RunStats =
+        serde_json::from_str(&run.stats_json).unwrap_or_default();
+    stats.memories = MemoryPhase::default();
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        crate::storage::atlas_memory::delete_checkpoints(repo.db(), run_id).await?;
+    }
+    store
+        .save(
+            run_id,
+            &serde_json::to_string(&cursor)?,
+            &serde_json::to_string(&stats)?,
+        )
+        .await?;
+    store
+        .set_state(run_id, "paused", "Re-extraction requested", false)
+        .await?;
     Ok(true)
 }
 

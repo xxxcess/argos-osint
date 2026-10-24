@@ -603,7 +603,7 @@ pub async fn extract(
     )
     .await;
     if let Ok(extraction) = &outcome {
-        record_article_telemetry(db_path, run_id, articles, origins, &extraction.settled);
+        record_article_telemetry(db_path, run_id, articles, origins, &extraction.settled).await;
     }
     outcome
 }
@@ -641,8 +641,10 @@ async fn extract_inner(
     let mut extract_error = None;
     let warnings = Vec::new();
     let mut diagnostics = Vec::new();
-    let existing = Store::open(db_path)?
-        .atlas_get_unit_manifests(run_id, crate::atlas_work::STAGE_EXTRACT)
+    let existing = crate::atlas_store::AtlasStore::open(db_path)
+        .await?
+        .unit_manifests(run_id, crate::atlas_work::STAGE_EXTRACT)
+        .await
         .unwrap_or_default();
 
     for packet in significant.chunks(PACKET_LIMIT) {
@@ -680,7 +682,8 @@ async fn extract_inner(
                     disposition,
                     None,
                     asked.history,
-                )?;
+                )
+                .await?;
                 diagnostics.push(packet_diag(
                     "lead",
                     packet,
@@ -707,7 +710,8 @@ async fn extract_inner(
                     crate::atlas_work::DISPOSITION_FAILED,
                     Some(&message),
                     Vec::new(),
-                )?;
+                )
+                .await?;
                 diagnostics.push(packet_diag(
                     "lead",
                     packet,
@@ -790,7 +794,7 @@ pub fn brief_rating_mean(confidences: &[f64]) -> Option<f64> {
 /// invents a new first sighting) and one Brief rating row per significant
 /// article. Best-effort by construction: every failure is ignored here so a
 /// telemetry problem can never fail the memory phase.
-fn record_article_telemetry(
+async fn record_article_telemetry(
     db_path: &Path,
     run_id: &str,
     articles: &[AtlasArticleRow],
@@ -817,7 +821,7 @@ fn record_article_telemetry(
                 .push(raw);
         }
     }
-    let known = seen_article_ids(db_path);
+    let known = seen_article_ids(db_path).await;
     let stamp = chrono::Utc::now().to_rfc3339();
     for article in select_significant(articles, origins) {
         let claim_count = current.get(article.id.as_str()).map(Vec::len).unwrap_or(0);
@@ -892,7 +896,19 @@ fn record_article_telemetry(
 /// raw events for 90 days, so an id missing here is genuinely unseen inside the
 /// observable window. Best-effort: an unreadable database reports nothing known
 /// and the caller records first sightings again (they replace, never add).
-fn seen_article_ids(db_path: &Path) -> std::collections::HashSet<String> {
+async fn seen_article_ids(db_path: &Path) -> std::collections::HashSet<String> {
+    #[cfg(feature = "surreal")]
+    if crate::recon::backend::sqlite_path(db_path).is_none() {
+        return match crate::storage::runtime::repository().await {
+            Ok(repo) => crate::storage::atlas_memory::seen_article_ids(repo.db())
+                .await
+                .unwrap_or_default(),
+            Err(_) => Default::default(),
+        };
+    }
+    let Some(db_path) = crate::recon::backend::sqlite_path(db_path) else {
+        return Default::default();
+    };
     rusqlite::Connection::open(db_path)
         .ok()
         .and_then(|conn| {
@@ -920,7 +936,6 @@ pub async fn extract_for_article_body(
 ) -> Result<Settled> {
     use crate::investigation::insights;
     let db_path = crate::paths::db_path();
-    let store = Store::open(&db_path)?;
     let mut settings = crate::provider::SettingsFile::load().unwrap_or_default();
     let mut auth = crate::secrets::AuthFile::load().unwrap_or_default();
     auth.set_account(synthesis.clone());
@@ -928,7 +943,7 @@ pub async fn extract_for_article_body(
         settings.defaults.synthesis.provider = synthesis.kind.clone();
         settings.defaults.synthesis.model = synthesis.model.clone();
     }
-    let hash = crate::nlp::cache::artifact(&store.conn, body_markdown)?;
+    let hash = retain_artifact(&db_path, body_markdown).await?;
     let evidence = insights::RetainedEvidence {
         reference: insights::EvidenceRef {
             source_id: format!("body-api:{}", article.id),
@@ -963,7 +978,6 @@ pub async fn extract_for_article_body(
         recall_enabled: false,
     };
     input.snapshot.key = insights::input_key(&input, &settings);
-    drop(store);
     let output = insights::run_pipeline(
         &mut input,
         &auth,
@@ -1714,7 +1728,10 @@ fn packet_json(articles: &[AtlasArticleRow]) -> Result<String> {
                     &article.description,
                     DESCRIPTION_CHARS,
                 );
-                if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
+                let db = crate::paths::db_path();
+                if let Some(store) = crate::recon::backend::sqlite_path(&db)
+                    .and_then(|path| crate::store::Store::open(&path).ok())
+                {
                     let req = crate::summarization::flush_request(
                         crate::summarization::SummarizationMode::ArticleDescription,
                         &article.id,
@@ -1830,7 +1847,7 @@ fn recover_legacy_packet(
     }
 }
 
-fn persist_packet(
+async fn persist_packet(
     db_path: &Path,
     run_id: &str,
     unit_id: &str,
@@ -1849,7 +1866,7 @@ fn persist_packet(
     if attempt_history.is_empty() {
         attempt_history.push(chrono::Utc::now().to_rfc3339());
     }
-    let store = Store::open(db_path)?;
+    let store = crate::atlas_store::AtlasStore::open(db_path).await?;
     let manifest = crate::atlas_work::UnitManifest {
         run_id: run_id.to_string(),
         unit_id: unit_id.to_string(),
@@ -1868,7 +1885,7 @@ fn persist_packet(
         disposition: disposition.into(),
         receipt_json: serde_json::json!({ "dropped": dropped }).to_string(),
     };
-    store.atlas_save_unit_manifest(&manifest)?;
+    store.save_unit_manifest(&manifest).await?;
     // One work-unit transition, one telemetry row, keyed by the unit id.
     crate::atlas_work::record_unit_stage_telemetry(db_path, &manifest);
     Ok(())
@@ -1912,6 +1929,69 @@ pub fn required_extraction_incomplete(store: &Store, run_id: &str) -> bool {
         .any(|u| u.is_required && u.unit_id.starts_with("lead-") && !u.reusable_success())
 }
 
+/// `nlp::cache::artifact` on the selected store; returns the text hash.
+async fn retain_artifact(db_path: &Path, text: &str) -> Result<String> {
+    #[cfg(feature = "surreal")]
+    if crate::recon::backend::sqlite_path(db_path).is_none() {
+        let repo = crate::storage::runtime::repository().await?;
+        let text = text.to_string();
+        let hash = crate::storage::tx::run_tx(
+            repo.db(),
+            crate::storage::tx::RetryPolicy::default(),
+            |tx| {
+                let text = text.clone();
+                async move { crate::storage::pipeline_inputs::artifact_in(&tx, &text).await }
+            },
+        )
+        .await
+        .map_err(|e| anyhow!("atlas artifact: {e}"))?;
+        return Ok(hash.value);
+    }
+    let store = Store::open(db_path)?;
+    crate::nlp::cache::artifact(&store.conn, text)
+}
+
+/// The owner's desired insight generation, started (advanced to 1) when it
+/// has none, on the selected store.
+async fn owner_generation(db_path: &Path, kind: &str, owner: &str) -> Result<i64> {
+    #[cfg(feature = "surreal")]
+    if crate::recon::backend::sqlite_path(db_path).is_none() {
+        let repo = crate::storage::runtime::repository().await?;
+        let (kind, owner) = (kind.to_string(), owner.to_string());
+        let generation = crate::storage::tx::run_tx(
+            repo.db(),
+            crate::storage::tx::RetryPolicy::default(),
+            |tx| {
+                let (kind, owner) = (kind.clone(), owner.clone());
+                async move {
+                    let current =
+                        crate::storage::insight::desired_generation(&tx, &kind, &owner).await?;
+                    if current != 0 {
+                        return Ok(current);
+                    }
+                    let now = chrono::Utc::now().to_rfc3339();
+                    crate::storage::insight::advance_generation(&tx, &kind, &owner, &now).await
+                }
+            },
+        )
+        .await
+        .map_err(|e| anyhow!("atlas generation: {e}"))?;
+        return Ok(generation.value);
+    }
+    let store = Store::open(db_path)?;
+    let generation =
+        crate::investigation::insight_persist::desired_generation(&store.conn, kind, owner)?;
+    if generation != 0 {
+        return Ok(generation);
+    }
+    crate::investigation::insight_persist::advance_generation(
+        &store.conn,
+        kind,
+        owner,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+}
+
 async fn ask_shared_source_claims(
     db_path: &Path,
     _run_id: &str,
@@ -1945,11 +2025,10 @@ async fn ask_shared_source_claims(
     let mut raw = Vec::new();
     for article in articles {
         let mut input = {
-            let store = Store::open(db_path)?;
             // Ingestion deliberately uses title + description even when an older
             // full article acquisition exists. No context/reasoning/link stage.
             let text = format!("{}\n{}", article.title, article.description);
-            let artifact = crate::nlp::cache::artifact(&store.conn, &text)?;
+            let artifact = retain_artifact(db_path, &text).await?;
             let evidence = insights::RetainedEvidence {
                 reference: insights::EvidenceRef {
                     source_id: format!("article:{}", article.id),
@@ -1972,21 +2051,7 @@ async fn ask_shared_source_claims(
                 complete_story: false,
                 known_truncation: false,
             };
-            let generation = crate::investigation::insight_persist::desired_generation(
-                &store.conn,
-                "atlas",
-                &article.id,
-            )?;
-            let generation = if generation == 0 {
-                crate::investigation::insight_persist::advance_generation(
-                    &store.conn,
-                    "atlas",
-                    &article.id,
-                    &chrono::Utc::now().to_rfc3339(),
-                )?
-            } else {
-                generation
-            };
+            let generation = owner_generation(db_path, "atlas", &article.id).await?;
             let mut input = insights::PipelineInput {
                 snapshot: insights::snapshot(
                     "atlas",
@@ -2004,6 +2069,11 @@ async fn ask_shared_source_claims(
             input.snapshot.key = insights::input_key(&input, &settings);
             input
         };
+        // Both stores refuse Atlas-surface refreshes; under SurrealDB fail the
+        // same way without reopening SQLite.
+        if crate::recon::backend::sqlite_path(db_path).is_none() {
+            anyhow::bail!("Atlas cycles cannot enqueue insight refreshes");
+        }
         let task = {
             let store = Store::open(db_path)?;
             crate::investigation::insight_persist::enqueue_refresh(

@@ -102,6 +102,34 @@ impl AtlasStore {
 
     // ---- runs -------------------------------------------------------------
 
+    /// Latest publication receipt of a run (memory phase).
+    pub async fn publication_receipt(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<crate::store::PublicationReceipt>> {
+        match self {
+            Self::Sqlite(m) => lock(m).atlas_publication_receipt(run_id),
+            #[cfg(feature = "surreal")]
+            Self::Surreal(r) => {
+                crate::storage::atlas_memory::publication_receipt(r.db(), run_id).await
+            }
+        }
+    }
+
+    /// Phase-completion check of one publication receipt.
+    pub async fn verify_publication(
+        &self,
+        receipt: &crate::store::PublicationReceipt,
+    ) -> Result<crate::store::PublicationVerification> {
+        match self {
+            Self::Sqlite(m) => lock(m).verify_atlas_publication(receipt),
+            #[cfg(feature = "surreal")]
+            Self::Surreal(r) => {
+                crate::storage::atlas_memory::verify_publication(r.db(), receipt).await
+            }
+        }
+    }
+
     pub async fn list_runs(&self) -> Result<Vec<AtlasRunRow>> {
         dispatch!(self, s => s.atlas_list_runs(),
             r => crate::storage::atlas::list_runs(r.db()).await.map_err(tx("atlas runs")))

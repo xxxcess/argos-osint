@@ -331,6 +331,26 @@ pub fn cache_get(conn: &Connection, req: &SummaryRequest) -> anyhow::Result<Opti
     Ok(cache_get_exact(conn, &local)?.filter(|r| r.fallback))
 }
 
+/// [`cache_get`] for async callers on the selected store: the repository
+/// (`storage::summary_flush::cache_get`) under SurrealDB, otherwise `conn`
+/// opened by `open` (SQLite is never opened under SurrealDB).
+pub async fn cache_get_selected(
+    req: &SummaryRequest,
+    open: impl FnOnce() -> anyhow::Result<crate::store::Store>,
+) -> anyhow::Result<Option<SummaryResult>> {
+    if crate::recon::backend::surreal_selected() {
+        #[cfg(feature = "surreal")]
+        {
+            let repo = crate::storage::runtime::repository().await?;
+            return crate::storage::summary_flush::cache_get(&repo, req).await;
+        }
+        #[cfg(not(feature = "surreal"))]
+        return Ok(None);
+    }
+    let store = open()?;
+    cache_get(&store.conn, req)
+}
+
 pub fn resolved_summary_route() -> (String, String) {
     let auth = crate::secrets::AuthFile::load().unwrap_or_default();
     let settings = crate::provider::SettingsFile::load().unwrap_or_default();

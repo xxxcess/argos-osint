@@ -5,13 +5,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::brain::{normalize_category, recall, Memory, MemorySource, ScoredMemory};
+use crate::brain::{Memory, MemorySource, ScoredMemory};
 use crate::profile_stats;
 
 mod publication;
-pub(crate) use publication::{bump_memories_changed, enqueue_memory_index_on, tombstone_runs};
+
 pub use publication::{
     memory_revision, payload_revision, retag_source, CoverageReport, MemoriesChanged,
     MemoryChangeWatcher, PublicationReceipt, PublicationVerification, PublishOptions,
@@ -68,9 +67,11 @@ pub const AUTO_REBUILD_HINT: usize = 64;
 /// by the in-memory stores used in tests.
 pub const SCHEMA_TELEMETRY_SQL: &str = include_str!("schema_telemetry.sql");
 
-pub struct Store {
-    pub(crate) conn: Connection,
-}
+/// Handle onto the process SurrealDB store (`storage::runtime`). Carries no
+/// connection of its own; every method goes through `storage::{brain_store,
+/// store_bridge}`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Store {}
 
 /// Result of [`Store::commit_article_insight_replacement`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -161,876 +162,54 @@ fn boost_with_passage_hybrid(
 }
 
 impl Store {
-    /// TUI control connection. Index work stays in the durable worker outbox;
-    /// this connection never opens LanceDB or performs inline embeddings.
-    /// Small interactive writes fail promptly on contention and can be retried.
+    /// TUI control handle. Every method dispatches to the process SurrealDB
+    /// runtime, so this only makes sure the state folder exists.
     pub fn open_ui(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let store = Self::open_light(path)?;
-        store.ensure_schema()?;
-        crate::job_cleanup::retire_article_reports(&store.conn)?;
-        store
-            .conn
-            .busy_timeout(std::time::Duration::from_millis(25))?;
-        Ok(store)
+        Self::open(path)
     }
 
-    #[cfg(test)]
-    fn ui_store_contract_test(path: &Path) {
-        let store = Self::open_ui(path).unwrap();
-        assert!(
-            !store.vectors_enabled(),
-            "UI never attaches the vector index"
-        );
-        let memory = store
-            .add_user_claim(
-                "Ada announced a new project",
-                "fact",
-                crate::brain::MemorySource {
-                    app: "user".into(),
-                    conversation_id: "ui-test".into(),
-                    message_id: None,
-                    reference: None,
-                },
-            )
-            .unwrap();
-        let queued: i64 = store.conn.query_row("SELECT COUNT(*) FROM argos_index_changes WHERE record_id=?1 AND state<>'completed'",[&memory.id],|r| r.get(0)).unwrap();
-        assert!(queued > 0, "UI writes must retain durable indexing work");
-        let before: i64 = store
-            .conn
-            .query_row("PRAGMA schema_version", [], |r| r.get(0))
-            .unwrap();
-        drop(Self::open_profile_reader(path).unwrap());
-        drop(Self::open_light(path).unwrap());
-        let after: i64 = store
-            .conn
-            .query_row("PRAGMA schema_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(
-            before, after,
-            "reader/control connections perform no migrations"
-        );
-        let lock = Connection::open(path).unwrap();
-        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let started = std::time::Instant::now();
-        assert!(store.app_state_set("ui-test", "busy").is_err());
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "a contended interactive write must fail promptly"
-        );
-        lock.execute_batch("ROLLBACK").unwrap();
-        assert!(store.get_memory(&memory.id).unwrap().is_some());
-    }
     /// Typed Brain insight kind (`claim` = source claim, `inference`) from the
     /// canonical derivation row, newest first; `None` for untyped memories.
     pub fn memory_insight_kind(&self, memory_id: &str) -> Option<String> {
         crate::storage::store_bridge::memory_insight_kind(memory_id)
     }
 
-    /// Analytics worker connection: no migrations, vector index, or writes.
+    /// Analytics reader handle (SurrealDB-backed; see [`Store::open`]).
     pub fn open_profile_reader(path: &Path) -> Result<Self> {
-        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .with_context(|| format!("open profile reader {}", path.display()))?;
-        conn.busy_timeout(std::time::Duration::from_millis(250))?;
-        Ok(Self { conn })
+        let _ = path;
+        Ok(Self {})
     }
 
-    /// Lightweight connection for lease heartbeats: no migration or vector
-    /// initialization, bounded busy wait.
+    /// Lightweight handle for lease heartbeats (SurrealDB-backed).
     pub fn open_light(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
-        conn.busy_timeout(std::time::Duration::from_secs(2))?;
-        Ok(Self { conn })
+        let _ = path;
+        Ok(Self {})
     }
 
-    /// Worker/cache connection with lazy first-use schema initialization.
-    /// An already-current database performs only the version read, not DDL.
+    /// Worker/cache handle (SurrealDB-backed; see [`Store::open`]).
     pub fn open_initialized_light(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let store = Self::open_light(path)?;
-        let version: i64 = store
-            .conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version != SCHEMA_VERSION {
-            store.ensure_schema()?;
-        }
-        Ok(store)
+        Self::open(path)
     }
 
+    /// A handle onto the process SurrealDB store. `path` is the legacy
+    /// `argos.db` location; only its folder is created, no file is opened.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
         }
-        let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
-        let store = Self { conn };
-        store.ensure_schema()?;
-        crate::job_cleanup::retire_article_reports(&store.conn)?;
-        Ok(store)
+        Ok(Self {})
     }
 
-    /// Index-pool connection after the state root has been initialized. Polls
-    /// attach the shared index without re-running schema/data migrations.
+    /// Index-pool handle; vectors live in SurrealDB and the worker drains
+    /// them through `storage::store_bridge`.
     pub fn open_index_worker(path: &Path) -> Result<Self> {
-        // Vectors live in SurrealDB; the worker drains them through
-        // `storage::store_bridge`.
-        Self::open_initialized_light(path)
+        Self::open(path)
     }
 
-    #[cfg(test)]
-    pub(crate) fn conn_for_tests(&self) -> &Connection {
-        &self.conn
-    }
-
+    /// A handle with no state folder, for tests and tools.
     pub fn memory() -> Result<Self> {
-        let store = Self {
-            conn: Connection::open_in_memory()?,
-        };
-        // Under a SurrealDB storage config every frozen `Store` method
-        // dispatches to `storage::{brain_store, store_bridge}`, so the SQLite
-        // handle is an unused, schema-less placeholder: no argos.db, no
-        // migrations, no vector index. The field itself goes away with the
-        // `feat!` removal commit.
-        Ok(store)
-    }
-
-    fn ensure_schema(&self) -> Result<()> {
-        self.conn
-            .execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE")?;
-        let result = (|| -> Result<()> {
-            let version: i64 = self
-                .conn
-                .pragma_query_value(None, "user_version", |row| row.get(0))?;
-            anyhow::ensure!(
-                version <= SCHEMA_VERSION,
-                "database schema version {version} is newer than this Argos build"
-            );
-            let tables: Vec<String> = {
-                let mut stmt = self.conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?;
-                let rows = stmt
-                    .query_map([], |row| row.get(0))?
-                    .collect::<rusqlite::Result<_>>()?;
-                rows
-            };
-            let old_memories = tables.iter().any(|name| name == "memories");
-            let cols: Vec<String> = if old_memories {
-                let mut stmt = self.conn.prepare("PRAGMA table_info(memories)")?;
-                let rows = stmt
-                    .query_map([], |row| row.get(1))?
-                    .collect::<rusqlite::Result<_>>()?;
-                rows
-            } else {
-                Vec::new()
-            };
-            if !old_memories {
-                self.conn.execute_batch("CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT NOT NULL, category TEXT NOT NULL, pinned INTEGER NOT NULL, created_at TEXT NOT NULL, source_json TEXT NOT NULL)")?;
-            } else if !cols.iter().any(|v| v == "source_json") {
-                self.conn.execute_batch("CREATE TABLE memories_new (id TEXT PRIMARY KEY, text TEXT NOT NULL, category TEXT NOT NULL, pinned INTEGER NOT NULL, created_at TEXT NOT NULL, source_json TEXT NOT NULL)")?;
-                let category = if cols.iter().any(|v| v == "category") {
-                    "category"
-                } else {
-                    "'fact'"
-                };
-                let pinned = if cols.iter().any(|v| v == "pinned") {
-                    "pinned"
-                } else {
-                    "0"
-                };
-                let source = if cols.iter().any(|v| v == "source_json") {
-                    "source_json"
-                } else {
-                    "'{\"app\":\"argos-legacy\",\"conversation_id\":\"unknown\",\"message_id\":null,\"reference\":null}'"
-                };
-                let filter = if cols.iter().any(|v| v == "report_id") {
-                    "WHERE report_id IS NULL"
-                } else {
-                    ""
-                };
-                self.conn.execute_batch(&format!("INSERT INTO memories_new SELECT id,text,{category},{pinned},created_at,{source} FROM memories {filter}"))?;
-                self.conn.execute_batch(
-                    "DROP TABLE memories; ALTER TABLE memories_new RENAME TO memories",
-                )?;
-            }
-            self.conn.execute_batch(
-                "CREATE INDEX IF NOT EXISTS memories_created ON memories(created_at DESC)",
-            )?;
-            if version < 4 {
-                self.conn.execute_batch(include_str!("schema_recon.sql"))?;
-                self.conn.pragma_update(None, "user_version", 4)?;
-            }
-            if version < 5 {
-                let recon_schema_present: bool = self.conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='recon_runs')",
-                    [],
-                    |row| row.get(0),
-                )?;
-                if !recon_schema_present {
-                    self.conn.execute_batch(include_str!("schema_recon.sql"))?;
-                }
-                let run_columns: Vec<String> = {
-                    let mut stmt = self.conn.prepare("PRAGMA table_info(recon_runs)")?;
-                    let columns = stmt
-                        .query_map([], |row| row.get(1))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    columns
-                };
-                if !run_columns.iter().any(|name| name == "max_rounds") {
-                    self.conn.execute_batch(
-                        "ALTER TABLE recon_runs ADD COLUMN max_rounds INTEGER NOT NULL DEFAULT 6;
-                         ALTER TABLE recon_runs ADD COLUMN max_calls INTEGER NOT NULL DEFAULT 12;
-                         ALTER TABLE recon_runs ADD COLUMN turn_seconds INTEGER NOT NULL DEFAULT 300;",
-                    )?;
-                }
-                self.conn.pragma_update(None, "user_version", 5)?;
-            }
-            if version < 6 {
-                self.conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS recon_message_memories (
-                       message_id TEXT NOT NULL REFERENCES recon_messages(id) ON DELETE CASCADE,
-                       memory_id TEXT NOT NULL,
-                       ordinal INTEGER NOT NULL,
-                       PRIMARY KEY(message_id, memory_id)
-                     );",
-                )?;
-                self.conn.pragma_update(None, "user_version", 6)?;
-            }
-            if version < 7 {
-                self.conn
-                    .execute_batch(include_str!("schema_investigation.sql"))?;
-                self.conn.pragma_update(None, "user_version", 7)?;
-            }
-            if version < 8 {
-                let run_columns: Vec<String> = {
-                    let mut stmt = self.conn.prepare("PRAGMA table_info(recon_runs)")?;
-                    let columns = stmt
-                        .query_map([], |row| row.get(1))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    columns
-                };
-                if !run_columns.iter().any(|name| name == "tool_picker_model") {
-                    self.conn.execute_batch(
-                        "ALTER TABLE recon_runs ADD COLUMN tool_picker_model TEXT NOT NULL DEFAULT ''",
-                    )?;
-                }
-                self.conn.pragma_update(None, "user_version", 8)?;
-            }
-            if version < 9 {
-                self.conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS memory_graph_summaries (
-                       memory_id TEXT PRIMARY KEY,
-                       summary TEXT NOT NULL,
-                       created_at TEXT NOT NULL
-                     );",
-                )?;
-                self.conn.pragma_update(None, "user_version", 9)?;
-            }
-            if version < 10 {
-                let summary_columns: Vec<String> = {
-                    let mut stmt = self
-                        .conn
-                        .prepare("PRAGMA table_info(memory_graph_summaries)")?;
-                    let columns = stmt
-                        .query_map([], |row| row.get(1))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    columns
-                };
-                if !summary_columns.iter().any(|name| name == "focus") {
-                    self.conn.execute_batch(
-                        "ALTER TABLE memory_graph_summaries ADD COLUMN focus TEXT NOT NULL DEFAULT ''",
-                    )?;
-                }
-                self.conn.pragma_update(None, "user_version", 10)?;
-            }
-            if version < 11 {
-                self.conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS atlas_runs (
-                       id TEXT PRIMARY KEY,
-                       state TEXT NOT NULL,
-                       phase INTEGER NOT NULL DEFAULT 1,
-                       cursor_json TEXT NOT NULL DEFAULT '',
-                       stats_json TEXT NOT NULL DEFAULT '',
-                       note TEXT NOT NULL DEFAULT '',
-                       started_at TEXT NOT NULL,
-                       finished_at TEXT NOT NULL DEFAULT ''
-                     );
-                     CREATE TABLE IF NOT EXISTS atlas_quota (
-                       provider TEXT NOT NULL,
-                       day TEXT NOT NULL,
-                       used INTEGER NOT NULL,
-                       PRIMARY KEY (provider, day)
-                     );",
-                )?;
-                self.conn.pragma_update(None, "user_version", 11)?;
-            }
-            if version < 12 {
-                self.conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS atlas_articles (
-                       run_id TEXT NOT NULL,
-                       article_id TEXT NOT NULL,
-                       title TEXT NOT NULL,
-                       description TEXT NOT NULL,
-                       url TEXT NOT NULL,
-                       country TEXT NOT NULL,
-                       source_name TEXT NOT NULL,
-                       source_domain TEXT NOT NULL,
-                       published_at TEXT NOT NULL,
-                       provider TEXT NOT NULL,
-                       temperature REAL NOT NULL,
-                       category TEXT NOT NULL DEFAULT 'unk',
-                       seen_at TEXT NOT NULL,
-                       PRIMARY KEY (run_id, article_id)
-                     );",
-                )?;
-                self.conn.pragma_update(None, "user_version", 12)?;
-            }
-            if version < 13 {
-                let columns: Vec<String> = {
-                    let mut stmt = self.conn.prepare("PRAGMA table_info(atlas_articles)")?;
-                    let columns = stmt
-                        .query_map([], |row| row.get(1))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    columns
-                };
-                if !columns.iter().any(|name| name == "author") {
-                    self.conn.execute_batch(
-                        "ALTER TABLE atlas_articles ADD COLUMN author TEXT NOT NULL DEFAULT ''",
-                    )?;
-                }
-                if !columns.iter().any(|name| name == "image_url") {
-                    self.conn.execute_batch(
-                        "ALTER TABLE atlas_articles ADD COLUMN image_url TEXT NOT NULL DEFAULT ''",
-                    )?;
-                }
-                self.conn.pragma_update(None, "user_version", 13)?;
-            }
-            if version < 14 {
-                let thread_columns: Vec<String> = {
-                    let mut stmt = self.conn.prepare("PRAGMA table_info(recon_threads)")?;
-                    let columns = stmt
-                        .query_map([], |row| row.get(1))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    columns
-                };
-                if !thread_columns.iter().any(|name| name == "recall_insights") {
-                    self.conn.execute_batch(
-                        "ALTER TABLE recon_threads ADD COLUMN recall_insights INTEGER NOT NULL DEFAULT 0",
-                    )?;
-                }
-                let source_columns: Vec<String> = {
-                    let mut stmt = self.conn.prepare("PRAGMA table_info(insight_sources)")?;
-                    let columns = stmt
-                        .query_map([], |row| row.get(1))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    columns
-                };
-                if !source_columns.iter().any(|name| name == "published_at") {
-                    self.conn.execute_batch(
-                        "ALTER TABLE insight_sources ADD COLUMN published_at TEXT NOT NULL DEFAULT ''",
-                    )?;
-                }
-                self.conn.pragma_update(None, "user_version", 14)?;
-            }
-            if version < 15 {
-                let claim_columns: Vec<String> = {
-                    let mut stmt = self.conn.prepare("PRAGMA table_info(insight_claims)")?;
-                    let columns = stmt
-                        .query_map([], |row| row.get(1))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    columns
-                };
-                if !claim_columns
-                    .iter()
-                    .any(|name| name == "source_reliability")
-                {
-                    self.conn.execute_batch(
-                        "ALTER TABLE insight_claims ADD COLUMN source_reliability TEXT NOT NULL DEFAULT '';
-                         ALTER TABLE insight_claims ADD COLUMN info_credibility INTEGER NOT NULL DEFAULT 0;
-                         ALTER TABLE insight_claims ADD COLUMN admiralty TEXT NOT NULL DEFAULT '';
-                         ALTER TABLE insight_claims ADD COLUMN rsp_status TEXT NOT NULL DEFAULT '';",
-                    )?;
-                }
-                self.conn.pragma_update(None, "user_version", 15)?;
-            }
-            if version < 16 {
-                self.conn
-                    .execute_batch(include_str!("schema_intel_recon.sql"))?;
-                self.conn.pragma_update(None, "user_version", 16)?;
-            }
-            // v17: Brain vectors moved to LanceDB. Runs on every open as well, because
-            // unreleased local builds already used user_version 17 for sqlite-vec.
-            repair_embed_tables(&self.conn)?;
-            if version < 17 {
-                self.conn.pragma_update(None, "user_version", 17)?;
-            }
-            // v18: durable jobs/tasks/attempts, index change queue, derived summaries.
-            if version < 18 {
-                crate::tasks::migrate_tables(&self.conn)?;
-                crate::scheduler::migrate_scheduler(&self.conn)?;
-                self.conn.pragma_update(None, "user_version", 18)?;
-            } else {
-                // Idempotent ensure for databases already at 18+.
-                crate::tasks::migrate_tables(&self.conn)?;
-                crate::scheduler::migrate_scheduler(&self.conn)?;
-            }
-            // v19: additive job timing, pool routing, leased index outbox, events,
-            // Atlas checkpoints/receipts, tombstones. `migrate_tables` above already
-            // applied the idempotent additive step; this only records the version.
-            if version < 19 {
-                crate::tasks::migrate_additive(&self.conn)?;
-                self.conn.pragma_update(None, "user_version", 19)?;
-            }
-            // v20: unified investigation harness tasks, dependencies, passages, assessments, events, stream parts.
-            if version < 20 {
-                self.conn
-                    .execute_batch(include_str!("schema_investigation_harness.sql"))?;
-                self.conn.pragma_update(None, "user_version", 20)?;
-            }
-            if version < 21 {
-                self.conn
-                    .execute_batch(include_str!("schema_atlas_recall.sql"))?;
-                self.conn.pragma_update(None, "user_version", 21)?;
-            }
-            if version < 22 {
-                self.conn.execute_batch(
-                    "UPDATE intel_report_jobs
-                     SET tool_calls_done = -1
-                     WHERE state IN ('completed', 'failed', 'partial', 'cancelled')
-                       AND tool_calls_done = 0;",
-                )?;
-                self.conn.pragma_update(None, "user_version", 22)?;
-            }
-            // intel_report_attempts was added to schema_intel_recon.sql after v16
-            // shipped. Create it before any backfill that reads the table.
-            // Idempotent for databases already at v23/v24 that never got the table.
-            self.conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS intel_report_attempts (
-                   id TEXT PRIMARY KEY,
-                   job_id TEXT NOT NULL REFERENCES intel_report_jobs(id) ON DELETE CASCADE,
-                   generation INTEGER NOT NULL,
-                   task_id TEXT NOT NULL REFERENCES intel_report_tasks(id) ON DELETE CASCADE,
-                   tool_id TEXT NOT NULL,
-                   state TEXT NOT NULL,
-                   started_at TEXT NOT NULL,
-                   finished_at TEXT NOT NULL DEFAULT ''
-                 );
-                 CREATE INDEX IF NOT EXISTS intel_report_attempts_job
-                   ON intel_report_attempts(job_id, generation);",
-            )?;
-            // Only attributable dispatch records can recover historical usage.
-            if version < 23 {
-                self.conn.execute_batch(
-                    "UPDATE intel_report_jobs
-                     SET tool_calls_done = (
-                         SELECT COUNT(*) FROM intel_report_attempts a
-                         WHERE a.job_id = intel_report_jobs.id
-                           AND a.generation = intel_report_jobs.generation
-                     )
-                     WHERE tool_calls_done < 0
-                       AND EXISTS (
-                           SELECT 1 FROM intel_report_attempts a
-                           WHERE a.job_id = intel_report_jobs.id
-                             AND a.generation = intel_report_jobs.generation
-                       );",
-                )?;
-                self.conn.pragma_update(None, "user_version", 23)?;
-            }
-            if version < 24 {
-                self.conn.pragma_update(None, "user_version", 24)?;
-            }
-            // v25: durable Atlas packet outputs, dispositions, receipts.
-            {
-                let work_cols: Vec<String> = {
-                    let mut stmt = self.conn.prepare("PRAGMA table_info(atlas_work_units)")?;
-                    let cols = stmt
-                        .query_map([], |row| row.get(1))?
-                        .collect::<rusqlite::Result<_>>()
-                        .unwrap_or_default();
-                    cols
-                };
-                if !work_cols.is_empty() {
-                    for (name, decl) in [
-                        ("output_json", "TEXT NOT NULL DEFAULT ''"),
-                        ("disposition", "TEXT NOT NULL DEFAULT ''"),
-                        ("receipt_json", "TEXT NOT NULL DEFAULT ''"),
-                    ] {
-                        if !work_cols.iter().any(|c| c == name) {
-                            self.conn.execute_batch(&format!(
-                                "ALTER TABLE atlas_work_units ADD COLUMN {name} {decl}"
-                            ))?;
-                        }
-                    }
-                }
-            }
-            if version < 25 {
-                self.conn.pragma_update(None, "user_version", 25)?;
-            }
-            // Additive, idempotent: revision-aware graph summary cache and
-            // the latest explanation diagnostic.
-
-            // Additive, idempotent: persist view-only intel link explanations.
-            self.conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS intel_link_explanations (
-                   article_id TEXT NOT NULL,
-                   left_id TEXT NOT NULL,
-                   right_id TEXT NOT NULL,
-                   explanation TEXT NOT NULL,
-                   updated_at TEXT NOT NULL,
-                   PRIMARY KEY (article_id, left_id, right_id)
-                 );
-                 CREATE INDEX IF NOT EXISTS intel_link_explanations_article
-                   ON intel_link_explanations(article_id);",
-            )?;
-
-            if version < 26 {
-                self.conn.pragma_update(None, "user_version", 26)?;
-            }
-            // Schema 26: model operations, attempts, coverage ledger, lease epoch
-            self.conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS recon_model_operations (
-                   id TEXT PRIMARY KEY,
-                   run_id TEXT NOT NULL DEFAULT '',
-                   task_id TEXT NOT NULL DEFAULT '',
-                   role TEXT NOT NULL,
-                   generation INTEGER NOT NULL DEFAULT 1,
-                   status TEXT NOT NULL,
-                   draft TEXT NOT NULL DEFAULT '',
-                   final_message_id TEXT,
-                   created_at TEXT NOT NULL,
-                   updated_at TEXT NOT NULL
-                 );
-                 CREATE UNIQUE INDEX IF NOT EXISTS recon_operations_final_msg
-                   ON recon_model_operations(run_id, final_message_id)
-                   WHERE final_message_id IS NOT NULL AND run_id != '';
-                 CREATE INDEX IF NOT EXISTS recon_operations_run ON recon_model_operations(run_id);
-                 CREATE INDEX IF NOT EXISTS recon_operations_task ON recon_model_operations(task_id);
-
-                 CREATE TABLE IF NOT EXISTS recon_model_attempts (
-                   id TEXT PRIMARY KEY,
-                   operation_id TEXT NOT NULL REFERENCES recon_model_operations(id) ON DELETE CASCADE,
-                   generation INTEGER NOT NULL DEFAULT 1,
-                   route_index INTEGER NOT NULL,
-                   attempt INTEGER NOT NULL,
-                   provider TEXT NOT NULL,
-                   account TEXT NOT NULL,
-                   model TEXT NOT NULL,
-                   transport TEXT NOT NULL,
-                   dispatched INTEGER NOT NULL,
-                   outcome TEXT NOT NULL,
-                   failure_category TEXT NOT NULL DEFAULT '',
-                   http_status INTEGER,
-                   request_id TEXT NOT NULL DEFAULT '',
-                   finish_reason TEXT NOT NULL DEFAULT '',
-                   char_count INTEGER NOT NULL DEFAULT 0,
-                   wait_ms INTEGER NOT NULL DEFAULT 0,
-                   error_message TEXT NOT NULL DEFAULT '',
-                   started_at TEXT NOT NULL,
-                   finished_at TEXT NOT NULL DEFAULT '',
-                   UNIQUE(operation_id, generation, route_index, attempt)
-                 );
-                 CREATE INDEX IF NOT EXISTS recon_attempts_op ON recon_model_attempts(operation_id, generation);
-
-                 CREATE TABLE IF NOT EXISTS recon_coverage (
-                   id TEXT PRIMARY KEY,
-                   scope TEXT NOT NULL,
-                   generation INTEGER NOT NULL DEFAULT 1,
-                   directive_index INTEGER NOT NULL DEFAULT 0,
-                   category TEXT NOT NULL,
-                   payload_json TEXT NOT NULL DEFAULT '{}',
-                   updated_at TEXT NOT NULL,
-                   UNIQUE(scope, generation, directive_index, category)
-                 );
-                 CREATE INDEX IF NOT EXISTS recon_coverage_scope ON recon_coverage(scope, generation);",
-            )?;
-
-            // Add lease_epoch column to intel_report_tasks if missing
-            let has_lease_epoch: bool = {
-                let mut stmt = self.conn.prepare("PRAGMA table_info(intel_report_tasks)")?;
-                let mut rows = stmt.query([])?;
-                let mut found = false;
-                while let Some(row) = rows.next()? {
-                    let col_name: String = row.get(1)?;
-                    if col_name == "lease_epoch" {
-                        found = true;
-                        break;
-                    }
-                }
-                found
-            };
-            if !has_lease_epoch {
-                let _ = self.conn.execute(
-                    "ALTER TABLE intel_report_tasks ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0",
-                    [],
-                );
-            }
-
-            // Schema 27: telemetry, activity history, and additive timing columns.
-            // Everything below is idempotent so a database that already carries
-            // the tables (or a partial upgrade) reopens cleanly.
-            if version < 27 {
-                self.conn.execute_batch(SCHEMA_TELEMETRY_SQL)?;
-
-                let add_missing = |conn: &Connection, table: &str, column: &str, ddl: &str| {
-                    let mut stmt = match conn.prepare(&format!("PRAGMA table_info({table})")) {
-                        Ok(stmt) => stmt,
-                        Err(_) => return,
-                    };
-                    let rows = stmt.query([]);
-                    if let Ok(mut rows) = rows {
-                        while let Ok(Some(row)) = rows.next() {
-                            let name: String = row.get(1).unwrap_or_default();
-                            if name == column {
-                                return;
-                            }
-                        }
-                    }
-                    let _ = conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {ddl}"), []);
-                };
-
-                // Per-wire-attempt timing. `wait_ms` waits are retry waits and do
-                // not establish queue residence, so the measured columns are separate.
-                let attempt_columns = [
-                    ("queued_at", "queued_at TEXT NOT NULL DEFAULT ''"),
-                    ("admitted_at", "admitted_at TEXT NOT NULL DEFAULT ''"),
-                    ("sent_at", "sent_at TEXT NOT NULL DEFAULT ''"),
-                    (
-                        "first_response_at",
-                        "first_response_at TEXT NOT NULL DEFAULT ''",
-                    ),
-                    ("elapsed_ms", "elapsed_ms INTEGER NOT NULL DEFAULT 0"),
-                    ("queue_ms", "queue_ms INTEGER NOT NULL DEFAULT 0"),
-                    ("ttfb_ms", "ttfb_ms INTEGER NOT NULL DEFAULT 0"),
-                    ("prompt_tokens", "prompt_tokens INTEGER"),
-                    ("completion_tokens", "completion_tokens INTEGER"),
-                    (
-                        "stream_completed",
-                        "stream_completed INTEGER NOT NULL DEFAULT 0",
-                    ),
-                ];
-                for (column, ddl) in attempt_columns {
-                    add_missing(&self.conn, "recon_model_attempts", column, ddl);
-                }
-
-                // Tool-call attribution on the canonical call record.
-                let call_columns = [
-                    ("app", "app TEXT NOT NULL DEFAULT ''"),
-                    ("trigger", "trigger TEXT NOT NULL DEFAULT ''"),
-                    ("mode", "mode TEXT NOT NULL DEFAULT ''"),
-                    ("category", "category TEXT NOT NULL DEFAULT ''"),
-                    (
-                        "remote_requests",
-                        "remote_requests INTEGER NOT NULL DEFAULT 0",
-                    ),
-                    ("duration_ms", "duration_ms INTEGER NOT NULL DEFAULT 0"),
-                    ("outcome", "outcome TEXT NOT NULL DEFAULT ''"),
-                    ("reason", "reason TEXT NOT NULL DEFAULT ''"),
-                ];
-                for (column, ddl) in call_columns {
-                    add_missing(&self.conn, "osint_calls", column, ddl);
-                }
-
-                self.conn.pragma_update(None, "user_version", 27)?;
-            }
-            if version < 28 {
-                crate::nlp::cache::migrate(&self.conn)?;
-                self.conn.pragma_update(None, "user_version", 28)?;
-            }
-            if version < 29 {
-                crate::investigation::insight_persist::migrate(&self.conn)?;
-                self.conn.pragma_update(None, "user_version", 29)?;
-            }
-
-            if version < 30 {
-                self.conn
-                    .execute_batch(include_str!("schema_atlas_metadata.sql"))?;
-                self.conn.pragma_update(None, "user_version", 30)?;
-            }
-
-            if version < 31 {
-                self.conn
-                    .execute_batch(include_str!("schema_article_refresh.sql"))?;
-                self.conn.pragma_update(None, "user_version", 31)?;
-            }
-            if version < 32 {
-                self.conn
-                    .execute_batch(include_str!("schema_insight_execution.sql"))?;
-                self.conn.pragma_update(None, "user_version", 32)?;
-            }
-            if version < 33 {
-                // Additive, idempotent: live throttled insight activity label
-                // (counts/status only, never model text).
-                for column in ["activity", "activity_at"] {
-                    let exists: bool = self.conn.query_row(
-                        "SELECT COUNT(*) > 0 FROM pragma_table_info('insight_refresh_execution') WHERE name=?1",
-                        [column],
-                        |r| r.get(0),
-                    )?;
-                    if !exists {
-                        self.conn.execute_batch(&format!(
-                            "ALTER TABLE insight_refresh_execution ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
-                        ))?;
-                    }
-                }
-                self.conn.pragma_update(None, "user_version", 33)?;
-            }
-            if version < 34 {
-                // Additive: why an insight task was retired and what replaced it.
-                self.conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS insight_supersessions (
-                        task_id TEXT PRIMARY KEY,
-                        job_id TEXT NOT NULL,
-                        owner_kind TEXT NOT NULL,
-                        owner_id TEXT NOT NULL,
-                        generation INTEGER NOT NULL,
-                        replaced_by_job TEXT NOT NULL,
-                        replaced_by_task TEXT NOT NULL,
-                        replaced_by_generation INTEGER NOT NULL,
-                        reason TEXT NOT NULL,
-                        detail_json TEXT NOT NULL DEFAULT '{}',
-                        at TEXT NOT NULL
-                    );
-                    CREATE INDEX IF NOT EXISTS insight_supersession_owner
-                        ON insight_supersessions(owner_kind, owner_id);",
-                )?;
-                self.conn.pragma_update(None, "user_version", 34)?;
-            }
-            if version < 35 {
-                // Additive: Intel brief preparation manifest and stage outputs
-                // (task dependencies/recoveries live in tasks::migrate_additive).
-                self.conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS intel_brief_runs (
-                        job_id TEXT PRIMARY KEY,
-                        article_id TEXT NOT NULL,
-                        generation INTEGER NOT NULL,
-                        contract TEXT NOT NULL,
-                        input_revision TEXT NOT NULL,
-                        state TEXT NOT NULL DEFAULT 'active',
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    );
-                    CREATE UNIQUE INDEX IF NOT EXISTS intel_brief_one_active
-                        ON intel_brief_runs(article_id) WHERE state='active';
-                    CREATE TABLE IF NOT EXISTS intel_brief_stage_outputs (
-                        task_id TEXT PRIMARY KEY,
-                        job_id TEXT NOT NULL,
-                        stage TEXT NOT NULL,
-                        output_hash TEXT NOT NULL,
-                        output_json TEXT NOT NULL,
-                        item_count INTEGER NOT NULL DEFAULT 0,
-                        empty_reason TEXT NOT NULL DEFAULT '',
-                        committed_at TEXT NOT NULL
-                    );",
-                )?;
-                self.conn.pragma_update(None, "user_version", 35)?;
-            }
-            if version < 36 {
-                // Additive: published Intel brief snapshots and tentative
-                // article–inference leads (separate from assessed evidence edges).
-                self.conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS intel_brief_publications (
-                        article_id TEXT PRIMARY KEY,
-                        job_id TEXT NOT NULL,
-                        generation INTEGER NOT NULL,
-                        contract TEXT NOT NULL,
-                        body_hash TEXT NOT NULL,
-                        snapshot_hash TEXT NOT NULL,
-                        claims_json TEXT NOT NULL,
-                        inferences_json TEXT NOT NULL,
-                        leads_json TEXT NOT NULL,
-                        published_at TEXT NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS intel_inference_article_leads (
-                        id TEXT PRIMARY KEY,
-                        article_id TEXT NOT NULL,
-                        source_generation INTEGER NOT NULL,
-                        job_id TEXT NOT NULL,
-                        inference_id TEXT NOT NULL,
-                        inference_text TEXT NOT NULL,
-                        candidate_article_id TEXT NOT NULL,
-                        candidate_run_id TEXT NOT NULL,
-                        candidate_metadata_revision TEXT NOT NULL,
-                        interpretation TEXT NOT NULL,
-                        verification_needed TEXT NOT NULL DEFAULT '',
-                        citations_json TEXT NOT NULL,
-                        created_at TEXT NOT NULL
-                    );
-                    CREATE INDEX IF NOT EXISTS intel_leads_article
-                        ON intel_inference_article_leads(article_id, source_generation);",
-                )?;
-                self.conn.pragma_update(None, "user_version", 36)?;
-            }
-            if version < 37 {
-                // Additive: unified Brain typed kinds/actors/endpoints, the
-                // atomic_claim → claim/inference migration (IDs preserved) and
-                // per-stage Intel brief timing.
-                crate::brain_schema::migrate(&self.conn)?;
-                self.conn.pragma_update(None, "user_version", 37)?;
-            }
-            if version < 38 {
-                // Additive: dispatch declarations on attempt records and Brain
-                // actor backfill receipts (idempotent re-run of the Brain DDL).
-                crate::brain_schema::migrate(&self.conn)?;
-                self.conn.pragma_update(None, "user_version", 38)?;
-            }
-            if version < 39 {
-                // Additive: Atlas phase-6 atlas_article_index receipts.
-                crate::brain_schema::migrate(&self.conn)?;
-                self.conn.pragma_update(None, "user_version", 39)?;
-            }
-            if version < 40 {
-                // Additive: Brain lifecycle guard triggers (TTL/delete safety).
-                crate::brain_schema::migrate(&self.conn)?;
-                self.conn.pragma_update(None, "user_version", 40)?;
-            }
-            if version < 41 {
-                // Additive: per-attempt usage/timing counters, policy
-                // diagnostics and task epochs (provider execution, spec §9).
-                crate::provider_execution_schema::migrate(&self.conn)?;
-                self.conn.pragma_update(None, "user_version", 41)?;
-            }
-            if version < 42 {
-                crate::brain_schema::migrate(&self.conn)?;
-                self.conn.pragma_update(None, "user_version", 42)?;
-            }
-            if version < 43 {
-                self.conn
-                    .execute_batch("DROP TABLE IF EXISTS argos_graph_explanations")?;
-                self.conn.pragma_update(None, "user_version", 43)?;
-            }
-            // Idempotent and cheap: also clears the orphan from databases that
-            // reached user_version 43 through an earlier, reverted 43.
-            self.conn
-                .execute_batch("DROP TABLE IF EXISTS argos_graph_explanations")?;
-
-            // Conservative legacy migration: record existing completed non-cut-short assistant messages as final
-            if version < 26 {
-                let _ = self.conn.execute(
-                    "INSERT OR IGNORE INTO recon_model_operations (id, run_id, role, generation, status, draft, final_message_id, created_at, updated_at)
-                     SELECT 'legacy_op_' || r.id, r.id, 'synthesis', 1, 'final', '', m.id, r.created_at, r.updated_at
-                     FROM recon_runs r
-                     JOIN recon_messages m ON m.run_id = r.id AND m.role = 'assistant'
-                     WHERE r.state = 'completed'
-                       AND m.content NOT LIKE '%[Cut short%'
-                       AND m.content NOT LIKE '%cut_short%'
-                       AND NOT EXISTS (SELECT 1 FROM recon_model_operations op WHERE op.run_id = r.id)",
-                    [],
-                );
-            }
-
-            Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                self.conn.execute_batch("COMMIT; PRAGMA foreign_keys=ON")?;
-                Ok(())
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK; PRAGMA foreign_keys=ON");
-                Err(err)
-            }
-        }
+        Ok(Self {})
     }
 
     pub fn list_memories(&self) -> Result<Vec<Memory>> {
@@ -1052,46 +231,6 @@ impl Store {
         crate::storage::brain_store::add_memory(text, category, pinned, source)
     }
 
-    /// Run a memory write, its durable index-outbox rows and the
-    /// memories-changed bump in one transaction, then attempt the queued work
-    /// immediately through the same leased tasks. `write` returns its value and
-    /// the memory ids whose index state it may have changed. Index failure never
-    /// fails the write; the outbox keeps the work. Inside a caller's transaction
-    /// it only adds statements (the caller commits; the pool indexes).
-    pub(crate) fn write_then_index<T>(
-        &self,
-        write: impl FnOnce() -> Result<(T, Vec<String>)>,
-    ) -> Result<T> {
-        let own_tx = self.conn.is_autocommit();
-        if own_tx {
-            self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        }
-        let result = (|| -> Result<(T, Vec<crate::tasks::IndexEnqueue>)> {
-            let (value, ids) = write()?;
-            let queued = if ids.is_empty() {
-                Vec::new()
-            } else {
-                publication::bump_memories_changed(&self.conn)?;
-                self.enqueue_memory_index(&ids, None)?.0
-            };
-            Ok((value, queued))
-        })();
-        if !own_tx {
-            return result.map(|(value, _)| value);
-        }
-        match result {
-            Ok((value, queued)) => {
-                self.conn.execute_batch("COMMIT")?;
-                let _ = self.index_now(&queued);
-                Ok(value)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
-        }
-    }
-
     /// Recall: Jaccard on SQLite (SurrealDB serves vector recall),
     /// then passage-level [`crate::evidence::hybrid_passage_candidates`] for long
     /// memories so Brain/Recon share the same hybrid path (spec follow-up).
@@ -1099,17 +238,6 @@ impl Store {
     /// index problem never fails the caller.
     pub fn recall(&self, query: &str, top_k: usize) -> Result<Vec<ScoredMemory>> {
         crate::storage::brain_store::recall(query, top_k)
-    }
-
-    /// Actor/Link/Related memory IDs (excluded from default evidence recall).
-    pub fn structural_memory_ids(&self) -> Result<std::collections::HashSet<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT memory_id FROM memory_metadata WHERE memory_kind IN ('actor','link','related')",
-        )?;
-        let rows = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(rows)
     }
 
     /// True when recall will use the vector index (embedding on, file-backed store).
@@ -1122,28 +250,6 @@ impl Store {
     /// None when embedding is off or the index is unavailable.
     pub fn find_similar_memory(&self, text: &str, threshold: f32) -> Option<(String, f32)> {
         crate::storage::brain_store::find_similar_memory(text, threshold)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn memory_texts(&self, ids: Option<&[String]>) -> Result<Vec<(String, String)>> {
-        let mut out = Vec::new();
-        match ids {
-            None => {
-                let mut stmt = self.conn.prepare("SELECT id,text FROM memories m WHERE NOT EXISTS (SELECT 1 FROM memory_metadata mm WHERE mm.memory_id=m.id AND mm.lifecycle<>'active')")?;
-                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-                for row in rows {
-                    out.push(row?);
-                }
-            }
-            Some(ids) => {
-                for id in ids {
-                    if let Some(text) = publication::memory_text(&self.conn, id)? {
-                        out.push((id.clone(), text));
-                    }
-                }
-            }
-        }
-        Ok(out)
     }
 
     /// Brings the Lance index in line with SQLite. Small missing/mismatched indexes
@@ -1237,15 +343,6 @@ impl Store {
         crate::storage::brain_store::get_memory(id)
     }
 
-    /// Durable removal work for memories deleted inside the caller's transaction.
-    fn queue_index_for(&self, ids: &[String]) -> Result<Vec<crate::tasks::IndexEnqueue>> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        publication::bump_memories_changed(&self.conn)?;
-        Ok(self.enqueue_memory_index(ids, None)?.0)
-    }
-
     pub fn atlas_insert_run(&self, id: &str, cursor_json: &str, stats_json: &str) -> Result<()> {
         crate::storage::store_bridge::atlas_insert_run(id, cursor_json, stats_json)
     }
@@ -1259,34 +356,6 @@ impl Store {
         manifest: &crate::atlas_work::UnitManifest,
     ) -> Result<()> {
         crate::storage::store_bridge::atlas_save_unit_manifest(manifest)
-    }
-
-    fn atlas_unit_from_row(
-        run_id: &str,
-        row: &rusqlite::Row<'_>,
-    ) -> rusqlite::Result<crate::atlas_work::UnitManifest> {
-        let input_ids: String = row.get(2)?;
-        let dependency_ids: String = row.get(5)?;
-        let output_refs: String = row.get(7)?;
-        let attempt_history: String = row.get(9)?;
-        Ok(crate::atlas_work::UnitManifest {
-            run_id: run_id.to_string(),
-            unit_id: row.get(0)?,
-            stage: row.get(1)?,
-            input_ids: serde_json::from_str(&input_ids).unwrap_or_default(),
-            input_rev: row.get(3)?,
-            contract_version: row.get(4)?,
-            dependency_ids: serde_json::from_str(&dependency_ids).unwrap_or_default(),
-            is_required: row.get(6)?,
-            output_refs: serde_json::from_str(&output_refs).unwrap_or_default(),
-            effective_model: row.get(8)?,
-            attempt_history: serde_json::from_str(&attempt_history).unwrap_or_default(),
-            next_eligible_at: row.get(10)?,
-            terminal_reason: row.get(11)?,
-            output_json: row.get::<_, String>(12).unwrap_or_default(),
-            disposition: row.get::<_, String>(13).unwrap_or_default(),
-            receipt_json: row.get::<_, String>(14).unwrap_or_default(),
-        })
     }
 
     pub fn atlas_get_unit_manifests(
@@ -1313,12 +382,6 @@ impl Store {
 
     pub fn atlas_list_runs(&self) -> Result<Vec<AtlasRunRow>> {
         crate::storage::store_bridge::atlas_list_runs()
-    }
-
-    /// Read-only handle for dashboard and diagnostics reads. Never locks the
-    /// writer, so a render never blocks recording.
-    pub fn connection(&self) -> &rusqlite::Connection {
-        &self.conn
     }
 
     /// One dashboard snapshot over this store.
@@ -1527,13 +590,7 @@ impl Store {
             preprocessing: serde_json::Value::Null,
             fallback: true,
         };
-        if crate::summarization::publish_selected(&req, deterministic.clone()).is_none() {
-            let _ = crate::summarization::publish_deterministic_and_enqueue(
-                &self.conn,
-                &req,
-                deterministic,
-            );
-        }
+        let _ = crate::summarization::publish_selected(&req, deterministic);
     }
 
     /// Writes Atlas claims into the same Brain tables Recon reads, through the
@@ -1572,91 +629,8 @@ impl Store {
     }
 }
 
-/// Idempotent v17 step: creates `memory_embed_meta` (the Brain vector fingerprint)
-/// and removes the sqlite-vec `memory_vec` table plus its shadow tables. Safe on a
-/// database that unreleased local builds already moved to user_version 17 with
-/// their own `memory_embed_meta`/`memory_vec`: a meta table of another shape is
-/// recreated (it only caches a fingerprint, so the Lance index just rebuilds).
-fn repair_embed_tables(conn: &Connection) -> Result<()> {
-    let meta_cols: Vec<String> = {
-        let mut stmt = conn.prepare("PRAGMA table_info(memory_embed_meta)")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        rows.collect::<rusqlite::Result<_>>()?
-    };
-    let fits = ["key", "value", "updated_at"]
-        .iter()
-        .all(|col| meta_cols.iter().any(|have| have == col));
-    if !meta_cols.is_empty() && !fits {
-        conn.execute_batch("DROP TABLE memory_embed_meta")?;
-    }
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS memory_embed_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )",
-    )?;
-    let has_vec: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE name='memory_vec'",
-        [],
-        |row| row.get(0),
-    )?;
-    if has_vec > 0
-        && conn
-            .execute_batch("DROP TABLE IF EXISTS memory_vec")
-            .is_err()
-    {
-        // A vec0 virtual table cannot be dropped without the sqlite-vec module
-        // ("no such module: vec0"). Remove its schema row directly instead.
-        conn.execute_batch(
-            "PRAGMA writable_schema=ON;
-             DELETE FROM sqlite_master WHERE name='memory_vec';
-             PRAGMA writable_schema=OFF;
-             PRAGMA writable_schema=RESET;",
-        )?;
-    }
-    let shadows: Vec<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'memory\\_vec\\_%' ESCAPE '\\'",
-        )?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
-        rows.collect::<rusqlite::Result<_>>()?
-    };
-    for name in shadows {
-        conn.execute_batch(&format!(
-            "DROP TABLE IF EXISTS \"{}\"",
-            name.replace('"', "\"\"")
-        ))?;
-    }
-    Ok(())
-}
-
 pub(crate) fn atlas_answer_id(run_id: &str) -> String {
     format!("atlas-{run_id}")
-}
-
-fn like_needle(query: &str) -> String {
-    let escaped = query
-        .trim()
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("%{escaped}%")
-}
-
-pub(crate) fn memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::brain::Memory> {
-    let source: String = row.get(5)?;
-    let source = serde_json::from_str(&source).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(err))
-    })?;
-    Ok(crate::brain::Memory {
-        id: row.get(0)?,
-        text: row.get(1)?,
-        category: row.get(2)?,
-        pinned: row.get::<_, i64>(3)? != 0,
-        created_at: row.get(4)?,
-        source,
-    })
 }
 
 /// Fingerprint Recon uses: the JSON array of namespace, entity, predicate, and object.
@@ -1692,55 +666,6 @@ pub fn atlas_claim_identity(claim: &AtlasInsightClaim) -> String {
             claim.published_at
         ]))
     )
-}
-
-pub(crate) fn atlas_brief_id(conn: &Connection, run_id: &str) -> Result<Option<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT m.id, m.source_json FROM memories m
-         WHERE m.id NOT IN (SELECT memory_id FROM insight_claims)",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    for row in rows {
-        let (id, source_json) = row?;
-        let source: MemorySource = match serde_json::from_str(&source_json) {
-            Ok(source) => source,
-            Err(_) => continue,
-        };
-        if source.app == "atlas" && source.conversation_id == run_id {
-            return Ok(Some(id));
-        }
-    }
-    Ok(None)
-}
-
-fn atlas_article_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AtlasArticleRow> {
-    Ok(AtlasArticleRow {
-        run_id: row.get(0)?,
-        id: row.get(1)?,
-        title: row.get(2)?,
-        description: row.get(3)?,
-        url: row.get(4)?,
-        country: row.get(5)?,
-        source_name: row.get(6)?,
-        source_domain: row.get(7)?,
-        published_at: row.get(8)?,
-        provider: row.get(9)?,
-        temperature: row.get(10)?,
-        category: row.get(11)?,
-        seen_at: row.get(12)?,
-        author: row.get(13)?,
-        image_url: row.get(14)?,
-    })
-}
-
-/// Keep the first row for each `article_id` (caller orders newest first).
-fn dedupe_articles_by_id(rows: Vec<AtlasArticleRow>) -> Vec<AtlasArticleRow> {
-    let mut seen = std::collections::HashSet::new();
-    rows.into_iter()
-        .filter(|row| seen.insert(row.id.clone()))
-        .collect()
 }
 
 /// One Atlas pipeline run. Statistics live in `stats_json`.

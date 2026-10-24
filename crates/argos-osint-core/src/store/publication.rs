@@ -9,13 +9,10 @@
 //! acknowledges work. Deletions leave tombstones so retries and repair cannot
 //! resurrect intentionally removed memories.
 
-use std::collections::{BTreeSet, HashSet};
-
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use super::{atlas_answer_id, atlas_brief_id, new_id, AtlasInsightClaim, Store};
+use super::{AtlasInsightClaim, Store};
 use crate::brain::MemorySource;
 use crate::tasks::{self, IndexEnqueue, IndexOutcome};
 
@@ -217,122 +214,6 @@ impl PublicationVerification {
     }
 }
 
-/// Drop a run's checkpoints, publication receipts and repair status (run
-/// deletion and retention). Plain statements; joins the caller's transaction.
-pub(crate) fn delete_run_memory_state(conn: &Connection, run_id: &str) -> Result<()> {
-    for table in [
-        "argos_atlas_checkpoints",
-        "argos_atlas_publications",
-        "argos_atlas_repairs",
-    ] {
-        conn.execute(&format!("DELETE FROM {table} WHERE run_id=?1"), [run_id])?;
-    }
-    Ok(())
-}
-
-/// Current revision recorded as indexed for a memory.
-pub(crate) fn indexed_revision(conn: &Connection, memory_id: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT revision FROM argos_memory_index_state WHERE memory_id=?1",
-            [memory_id],
-            |r| r.get(0),
-        )
-        .optional()?)
-}
-
-pub(crate) fn record_index_state(
-    conn: &Connection,
-    memory_id: &str,
-    revision: &str,
-    fingerprint: &str,
-    generation: &str,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO argos_memory_index_state(memory_id,revision,fingerprint,generation,indexed_at)
-         VALUES (?1,?2,?3,?4,?5)
-         ON CONFLICT(memory_id) DO UPDATE SET revision=excluded.revision, fingerprint=excluded.fingerprint,
-            generation=excluded.generation, indexed_at=excluded.indexed_at",
-        params![memory_id, revision, fingerprint, generation, chrono::Utc::now().to_rfc3339()],
-    )?;
-    Ok(())
-}
-
-/// Record index state for many rows (rebuilds). Wraps its own transaction only
-/// when the connection is not already inside one.
-pub(crate) fn record_index_states(
-    conn: &Connection,
-    rows: &[(String, String)],
-    generation: &str,
-) -> Result<()> {
-    let own_tx = conn.is_autocommit();
-    if own_tx {
-        conn.execute_batch("BEGIN IMMEDIATE")?;
-    }
-    let result = (|| -> Result<()> {
-        // No Lance index: SQLite records carry no embedder fingerprint.
-        let fp = String::new();
-        for (id, text) in rows {
-            record_index_state(conn, id, &memory_revision(text), &fp, generation)?;
-        }
-        Ok(())
-    })();
-    if own_tx {
-        if result.is_ok() {
-            conn.execute_batch("COMMIT")?;
-        } else {
-            let _ = conn.execute_batch("ROLLBACK");
-        }
-    }
-    result
-}
-
-pub(crate) fn clear_index_state(conn: &Connection, memory_id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM argos_memory_index_state WHERE memory_id=?1",
-        [memory_id],
-    )?;
-    Ok(())
-}
-
-/// Bump the durable memories-changed counter (lets other processes/sessions
-/// detect externally committed memory changes cheaply).
-pub(crate) fn bump_memories_changed(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "INSERT INTO app_state(key,value) VALUES ('memories_changed_seq','1')
-         ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",
-        [],
-    )?;
-    Ok(())
-}
-
-pub(super) fn memory_text(conn: &Connection, id: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row("SELECT text FROM memories m WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM memory_metadata mm WHERE mm.memory_id=m.id AND mm.lifecycle<>'active')", [id], |r| r.get(0))
-        .optional()?)
-}
-
-/// Tombstoned fingerprint → run ids it was deleted from (`None` = any run).
-pub(crate) fn tombstone_runs(conn: &Connection, fingerprint: &str) -> Result<Option<Vec<String>>> {
-    let rows: Vec<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT run_ids FROM argos_memory_tombstones WHERE fingerprint=?1 AND fingerprint<>''",
-        )?;
-        let rows = stmt
-            .query_map([fingerprint], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-    if rows.is_empty() {
-        return Ok(None);
-    }
-    let mut runs = Vec::new();
-    for json in rows {
-        runs.extend(serde_json::from_str::<Vec<String>>(&json).unwrap_or_default());
-    }
-    Ok(Some(runs))
-}
-
 /// Default publication revision: hash of the validated payload.
 pub fn payload_revision(claims: &[AtlasInsightClaim], brief: &str) -> String {
     let mut parts: Vec<String> = claims
@@ -373,88 +254,7 @@ pub(crate) fn reject_reason(claim: &AtlasInsightClaim) -> Option<String> {
     }
 }
 
-/// Queue index work for every memory whose current revision is not recorded as
-/// indexed, and removal work for ids that no longer exist. Plain statements
-/// only, so it joins the caller's transaction (including a
-/// `rusqlite::Transaction`, which derefs to `Connection`).
-pub(crate) fn enqueue_memory_index_on(
-    conn: &Connection,
-    ids: &[String],
-    parent_job: Option<&str>,
-) -> Result<(Vec<IndexEnqueue>, usize)> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut queued = Vec::new();
-    let mut already = 0usize;
-    let mut seen = HashSet::new();
-    for id in ids {
-        if !seen.insert(id.as_str()) {
-            continue;
-        }
-        match memory_text(conn, id)? {
-            Some(text) => {
-                let rev = memory_revision(&text);
-                if indexed_revision(conn, id)?.as_deref() == Some(rev.as_str()) {
-                    already += 1;
-                    continue;
-                }
-                queued.push(tasks::enqueue_index_work(
-                    conn,
-                    MEMORY_RECORD,
-                    id,
-                    &rev,
-                    &rev,
-                    "index_upsert",
-                    parent_job,
-                    &now,
-                )?);
-            }
-            None => {
-                queued.push(tasks::enqueue_index_work(
-                    conn,
-                    MEMORY_RECORD,
-                    id,
-                    DELETED_REVISION,
-                    "",
-                    "index_remove",
-                    parent_job,
-                    &now,
-                )?);
-            }
-        }
-    }
-    Ok((queued, already))
-}
-
 impl Store {
-    /// Clear vector proofs after removal, then fence a concurrent reactivation
-    /// with fresh outbox work. No vector writes occur under this transaction.
-    pub(super) fn reconcile_removed_vectors(&self, ids: &[String]) -> Result<()> {
-        self.write_then_index(|| {
-            for id in ids {
-                clear_index_state(&self.conn, id)?;
-            }
-            let active = ids
-                .iter()
-                .filter_map(|id| match memory_text(&self.conn, id) {
-                    Ok(Some(_)) => Some(Ok(id.clone())),
-                    Ok(None) => None,
-                    Err(e) => Some(Err(e)),
-                })
-                .collect::<Result<Vec<_>>>()?;
-            enqueue_memory_index_on(&self.conn, &active, None)?;
-            Ok(((), Vec::new()))
-        })
-    }
-
-    /// Store-connection form of [`enqueue_memory_index_on`].
-    pub(crate) fn enqueue_memory_index(
-        &self,
-        ids: &[String],
-        parent_job: Option<&str>,
-    ) -> Result<(Vec<IndexEnqueue>, usize)> {
-        enqueue_memory_index_on(&self.conn, ids, parent_job)
-    }
-
     /// Durable memories-changed counter (committed changes only).
     pub fn memories_changed_seq(&self) -> Result<i64> {
         crate::storage::store_bridge::memories_changed_seq()
@@ -490,7 +290,7 @@ impl Store {
     /// changed during the write returns `Pending` so the task re-runs on the
     /// newest text instead of acknowledging stale content. `expected` may be
     /// older than the current revision: a newer indexed revision supersedes it.
-    pub fn try_index_memory(&self, memory_id: &str, expected: &str) -> IndexOutcome {
+    pub fn try_index_memory(&self, memory_id: &str, _expected: &str) -> IndexOutcome {
         crate::storage::store_bridge::try_index_upsert(&[memory_id.to_string()])
     }
 
@@ -506,7 +306,7 @@ impl Store {
     pub fn requeue_uncovered(
         &self,
         report: &CoverageReport,
-        parent_job: Option<&str>,
+        _parent_job: Option<&str>,
     ) -> Result<Vec<IndexEnqueue>> {
         crate::storage::store_bridge::requeue_uncovered(report)
     }
@@ -560,7 +360,6 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embed::testing;
 
     fn claim(entity: &str, object: &str, article: &str) -> AtlasInsightClaim {
         AtlasInsightClaim {

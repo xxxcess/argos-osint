@@ -411,3 +411,12 @@ pub(crate) fn related_global(
 ) -> Result<argos_osint_core::related_global::GlobalRelatedPage> {
     unreachable!("SurrealDB Related is off without the surreal feature")
 }
+
+/// The Intel brief's repository-backed parts for one article.
+#[cfg(feature = "surreal")]
+pub(crate) fn brief_parts(
+    article: &argos_osint_core::store::AtlasArticleRow,
+) -> Result<argos_osint_core::storage::intel_brief_view::BriefParts> {
+    use argos_osint_core::storage::{intel_brief_view, runtime};
+    runtime::blocking(|repo| async move { intel_brief_view::brief_parts(&repo, article).await })
+}

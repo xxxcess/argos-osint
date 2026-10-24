@@ -40,6 +40,7 @@ pub mod insight_retry;
 pub mod insight_views;
 pub mod install;
 pub mod intel;
+pub mod intel_brief_view;
 pub mod investigation;
 pub mod jobs;
 pub mod jobs_view;

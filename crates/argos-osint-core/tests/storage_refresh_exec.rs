@@ -338,3 +338,37 @@ async fn retry_extraction_requeues_a_failed_refresh_with_an_exhausted_stage() {
     // Queued now: a second retry is refused.
     assert!(!retry_extraction(&db, &t).await.unwrap());
 }
+
+#[tokio::test]
+async fn intel_brief_parts_read_the_published_owner() {
+    use argos_osint_core::storage::intel_brief_view::brief_parts;
+    use argos_osint_core::store::AtlasArticleRow;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "intel_brief_parts").await;
+    let db = repo.db().clone();
+    let s = SettingsFile::default();
+    let calm = Arc::new(AtomicBool::new(false));
+    let article = AtlasArticleRow {
+        run_id: "run".into(),
+        id: "b1".into(),
+        ..Default::default()
+    };
+    let none = brief_parts(&repo, &article).await.unwrap();
+    assert_eq!(none.lifecycle, "legacy/unassessed");
+    assert_eq!(none.status, "Waiting · complete article details required");
+    assert!(none.output.is_none() && none.claims.is_empty() && none.body.is_none());
+
+    let t = schedule(&db, "b1", &s).await;
+    let queued = brief_parts(&repo, &article).await.unwrap();
+    assert_eq!(queued.status, "Queued");
+    run_refresh_slice(&repo, &t, &s, &calm, ok_validate(), ctx(), eligible())
+        .await
+        .unwrap()
+        .expect("published");
+    let parts = brief_parts(&repo, &article).await.unwrap();
+    assert_eq!(parts.lifecycle, "active");
+    assert_eq!(parts.status, "Published");
+    assert!(parts.output.is_some());
+}

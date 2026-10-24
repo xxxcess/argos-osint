@@ -2822,8 +2822,7 @@ pub(crate) async fn recall_for_turn(
     // SurrealDB: vector recall (DISKANN, lexical top-up; the full-text
     // stopgap without a served embedding generation) over the same 20
     // candidates, admission policy, five-memory cap, thin-Brain test and
-    // resource summary as SQLite. The recall_query telemetry row waits for
-    // the combined tree's SurrealDB telemetry writer.
+    // resource summary as SQLite, and the same recall_query telemetry row.
     #[cfg(feature = "surreal")]
     if let Some(repo) = store.repository() {
         let embedder = crate::storage::vectors::Embedder::local();
@@ -2837,6 +2836,7 @@ pub(crate) async fn recall_for_turn(
         )
         .await?;
         let unfamiliar = super::scores_are_thin(hits.iter().map(|hit| hit.score));
+        let candidates = hits.len();
         let query = crate::brain_query::BrainQuery {
             current_question: question.to_string(),
             confirmed_subjects: store
@@ -2887,7 +2887,21 @@ pub(crate) async fn recall_for_turn(
         let resources = brain_resources::summarize_with(&recalled, question, |id| {
             Ok(found.remove(id).unwrap_or((None, None)))
         })?;
-        let _ = (mode, run_id);
+        let accepted = recalled.len();
+        let facts = brain_resources::RecallQueryFacts {
+            candidates,
+            accepted,
+            rejection_reason: brain_resources::recall_gate_rejection(
+                candidates,
+                accepted,
+                candidates.saturating_sub(accepted),
+            ),
+            mode: mode.to_string(),
+            run_id: run_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let event = brain_resources::recall_query_event(&facts);
+        let _ = crate::storage::telemetry::record(repo.db(), &event).await;
         return Ok((recalled, unfamiliar, resources));
     }
     store.sqlite("recall", |s| {

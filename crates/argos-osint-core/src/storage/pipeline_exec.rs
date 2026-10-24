@@ -429,3 +429,54 @@ pub async fn load_memory_evidence(
         evidence,
     }))
 }
+
+/// The job id and owner scope (`resource_ref`) of `task_id`, for its
+/// stage and activity events; `None` when the task is unknown.
+pub async fn task_event_scope(
+    repo: &Repository,
+    task_id: &str,
+) -> Result<Option<(String, String)>> {
+    let mut r = repo
+        .db()
+        .query(
+            "SELECT VALUE [record::id(job), job.resource_ref ?? '']
+             FROM type::record('task', $t)",
+        )
+        .bind(("t", task_id.to_string()))
+        .await?
+        .check()?;
+    let rows: Vec<Vec<String>> = r.take(0usize)?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .and_then(|row| Some((row.first()?.clone(), row.get(1)?.clone()))))
+}
+
+/// Record one stage or activity event of `task_id` in the event log
+/// (`argos_event`), filling its job (and, with `owner_scope`, the owner
+/// scope and app) from the task. A task-less event is not recorded.
+pub async fn record_task_event(
+    repo: &Repository,
+    task_id: &str,
+    owner_scope: bool,
+    mut event: crate::events::NewEvent,
+) -> Result<()> {
+    if task_id.is_empty() {
+        return Ok(());
+    }
+    let Some((job, owner)) = task_event_scope(repo, task_id).await? else {
+        return Ok(());
+    };
+    event.job_id = job;
+    if owner_scope {
+        event.app = if owner.starts_with("recon:") {
+            "recon"
+        } else {
+            "intel"
+        }
+        .into();
+        event.resource_ref = owner;
+    }
+    super::event_log::record_event(repo.db(), &event).await?;
+    Ok(())
+}

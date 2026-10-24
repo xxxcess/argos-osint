@@ -560,25 +560,33 @@ pub fn activity_event(conn: &Connection, task_id: &str, message: &str) -> Result
         [task_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    crate::events::record_event(conn, &activity_new_event(task_id, job, owner, message))?;
+    Ok(())
+}
+
+/// The `insight.activity` event of `task_id` (job and owner scope looked up
+/// by the store).
+pub(crate) fn activity_new_event(
+    task_id: &str,
+    job: String,
+    owner: String,
+    message: &str,
+) -> crate::events::NewEvent {
     let app = if owner.starts_with("recon:") {
         "recon"
     } else {
         "intel"
     };
-    crate::events::record_event(
-        conn,
-        &crate::events::NewEvent {
-            severity: Some(crate::events::Severity::Info),
-            app: app.into(),
-            event_type: "insight.activity".into(),
-            message: message.into(),
-            job_id: job,
-            task_id: task_id.into(),
-            resource_ref: owner,
-            ..Default::default()
-        },
-    )?;
-    Ok(())
+    crate::events::NewEvent {
+        severity: Some(crate::events::Severity::Info),
+        app: app.into(),
+        event_type: "insight.activity".into(),
+        message: message.into(),
+        job_id: job,
+        task_id: task_id.into(),
+        resource_ref: owner,
+        ..Default::default()
+    }
 }
 
 /// Durable, throttled activity write (one row update, never per token).
@@ -623,7 +631,23 @@ pub(super) fn stage_event(
     )?;
     crate::events::record_event(
         conn,
-        &crate::events::NewEvent {
+        &stage_new_event(input, task_id, job, stage, outcome, message, details),
+    )?;
+    Ok(())
+}
+
+/// The `insight.stage.{outcome}` event of one pipeline stage.
+pub(crate) fn stage_new_event(
+    input: &PipelineInput,
+    task_id: &str,
+    job: String,
+    stage: &str,
+    outcome: &str,
+    message: &str,
+    details: serde_json::Value,
+) -> crate::events::NewEvent {
+    {
+        crate::events::NewEvent {
             severity: Some(match outcome {
                 "failed" => crate::events::Severity::Error,
                 "withheld" => crate::events::Severity::Warn,
@@ -647,9 +671,8 @@ pub(super) fn stage_event(
             },
             resource_ref: input.snapshot.owner_id.clone(),
             ..Default::default()
-        },
-    )?;
-    Ok(())
+        }
+    }
 }
 
 /// Admits exactly one bounded epoch for failed/partially published recoverable work.

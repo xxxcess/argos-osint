@@ -501,7 +501,12 @@ pub fn recall_gate_rejection(
 /// Record one completed recall query at the relevance gate. Best effort: a
 /// telemetry failure never fails a recon turn.
 pub fn note_recall_query(store: &Store, facts: &RecallQueryFacts) {
-    let event = crate::telemetry::TelemetryEvent::new(crate::telemetry::EventKind::RecallQuery)
+    let _ = crate::telemetry::insert(&store.conn, &recall_query_event(facts));
+}
+
+/// The `recall_query` telemetry row of one completed recall query.
+pub fn recall_query_event(facts: &RecallQueryFacts) -> crate::telemetry::TelemetryEvent {
+    crate::telemetry::TelemetryEvent::new(crate::telemetry::EventKind::RecallQuery)
         .at(chrono::Utc::now().to_rfc3339())
         .app("recon")
         .trigger(crate::telemetry::Trigger::ReconPrompt)
@@ -515,8 +520,7 @@ pub fn note_recall_query(store: &Store, facts: &RecallQueryFacts) {
             "candidate_hits": facts.candidates,
             "accepted_hits": facts.accepted,
             "rejection_reason": facts.rejection_reason,
-        }));
-    let _ = crate::telemetry::insert(&store.conn, &event);
+        }))
 }
 
 #[cfg(test)]

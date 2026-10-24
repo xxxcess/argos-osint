@@ -12,9 +12,10 @@
 //! `refresh_job_id` and the supersession of older live tasks commit together.
 //!
 //! Still on the caller: the retained-evidence `PipelineInput`
-//! (`insight_persist::article_input` reads SQLite evidence tables) and the
-//! `insight.superseded` event (`events`, SQLite). The caller builds the
-//! input before admission, so it is built even when no intent exists.
+//! (`insight_persist::article_input` reads SQLite evidence tables). The
+//! caller builds the input before admission, so it is built even when no
+//! intent exists. Each retired task's `insight.superseded` event goes to
+//! the event log (`argos_event`) once the admission commits.
 
 use surrealdb::engine::any::Any;
 use surrealdb::types::SurrealValue;
@@ -208,6 +209,14 @@ pub async fn enqueue_refresh_in(
     Ok(task_id)
 }
 
+/// One refresh task retired by a newer admission.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Retired {
+    pub task_id: String,
+    pub job_id: String,
+    pub message: String,
+}
+
 /// `insight_persist::retire_replaced`: every other live refresh task of the
 /// owner gets a supersession record; queued ones are superseded now (and
 /// their job settles), running ones retire at their next fence.
@@ -221,7 +230,7 @@ pub async fn retire_replaced_in(
     reason: &str,
     detail: &serde_json::Value,
     now: &str,
-) -> Result<Vec<String>, TxError> {
+) -> Result<Vec<Retired>, TxError> {
     let next_job = owner_tasks(tx, &format!("{kind}:{owner}"))
         .await?
         .into_iter()
@@ -268,10 +277,14 @@ pub async fn retire_replaced_in(
             .bind(("detail", detail.to_string()))
             .bind(("now", now.to_string()))
             .bind(("queued", t.state == "queued"))
-            .bind(("msg", message)),
+            .bind(("msg", message.clone())),
         )
         .await?;
-        retired.push(t.id);
+        retired.push(Retired {
+            task_id: t.id,
+            job_id: t.job_id,
+            message,
+        });
     }
     Ok(retired)
 }
@@ -354,7 +367,7 @@ pub async fn schedule_article_refresh(
                     let compatible = input_key(&p, &captured) == prior.input_hash;
                     p.snapshot.generation = 0;
                     if compatible && input_key(&p, &captured) == identity {
-                        return Ok(Some(prior.id.clone()));
+                        return Ok(Some((prior.id.clone(), Vec::new(), serde_json::Value::Null)));
                     }
                     reason = if compatible {
                         supersession_reason(&p, &captured, &input, settings)
@@ -374,12 +387,30 @@ pub async fn schedule_article_refresh(
         input.snapshot.generation = u32::try_from(generation)
             .map_err(|_| TxError::Abort(format!("generation {generation} out of range")))?;
         let task = enqueue_refresh_in(&tx, &mut input, settings, now).await?;
-        retire_replaced_in(
+        let retired = retire_replaced_in(
             &tx, "article", article_id, &input, &task, &reason.0, &reason.1, &now_s,
         )
         .await?;
-        Ok(Some(task))
+        Ok(Some((task, retired, reason.1)))
     })
     .await?;
-    Ok(out.value)
+    let Some((task, retired, detail)) = out.value else {
+        return Ok(None);
+    };
+    // Best effort, like the SQLite event: a log failure never fails admission.
+    for r in retired {
+        let event = crate::events::NewEvent {
+            severity: Some(crate::events::Severity::Info),
+            app: "intel".into(),
+            event_type: "insight.superseded".into(),
+            message: r.message,
+            details: detail.to_string(),
+            job_id: r.job_id,
+            task_id: r.task_id,
+            resource_ref: article_id.into(),
+            ..Default::default()
+        };
+        let _ = super::event_log::record_event(db, &event).await;
+    }
+    Ok(Some(task))
 }

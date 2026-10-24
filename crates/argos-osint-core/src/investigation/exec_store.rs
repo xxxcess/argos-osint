@@ -5,8 +5,8 @@
 //! `storage::pipeline_exec` and the SQLite file is never opened; otherwise
 //! the SQLite tables. One store per run, never both.
 //!
-//! On SurrealDB, stage and activity events (`argos_events`) are not written:
-//! the event log belongs to the combined tree's telemetry writer.
+//! On SurrealDB, stage and activity events go to the repository's event log
+//! (`argos_event`, `storage::pipeline_exec::record_task_event`).
 
 use std::path::Path;
 
@@ -196,7 +196,7 @@ impl ExecStore {
         }
     }
 
-    /// `insight_execution::stage_event`; SurrealDB has no event log here.
+    /// `insight_execution::stage_event`; on SurrealDB queued to `argos_event`.
     pub(crate) fn stage_event(
         &self,
         input: &PipelineInput,
@@ -211,7 +211,27 @@ impl ExecStore {
                 &s.conn, input, task_id, stage, outcome, message, details,
             ),
             #[cfg(feature = "surreal")]
-            Self::Surreal(_) => Ok(()),
+            Self::Surreal(_) => {
+                let event = super::insight_execution::stage_new_event(
+                    input,
+                    task_id,
+                    String::new(),
+                    stage,
+                    outcome,
+                    message,
+                    details,
+                );
+                let task_id = task_id.to_string();
+                crate::storage::runtime::spawn_ordered(async move {
+                    if let Ok(repo) = crate::storage::runtime::repository().await {
+                        let _ = crate::storage::pipeline_exec::record_task_event(
+                            &repo, &task_id, false, event,
+                        )
+                        .await;
+                    }
+                });
+                Ok(())
+            }
         }
     }
 
@@ -281,14 +301,24 @@ pub(crate) fn record_activity(db_path: &Path, task_id: &str, label: &str, messag
     #[cfg(feature = "surreal")]
     if crate::recon::backend::surreal_selected() {
         let (task_id, label) = (task_id.to_string(), label.to_string());
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                if let Ok(repo) = crate::storage::runtime::repository().await {
-                    let _ = crate::storage::pipeline_exec::record_activity(&repo, &task_id, &label)
-                        .await;
+        crate::storage::runtime::spawn_ordered(async move {
+            if let Ok(repo) = crate::storage::runtime::repository().await {
+                let _ =
+                    crate::storage::pipeline_exec::record_activity(&repo, &task_id, &label).await;
+                if let Some(message) = message {
+                    let event = super::insight_execution::activity_new_event(
+                        &task_id,
+                        String::new(),
+                        String::new(),
+                        &message,
+                    );
+                    let _ = crate::storage::pipeline_exec::record_task_event(
+                        &repo, &task_id, true, event,
+                    )
+                    .await;
                 }
-            });
-        }
+            }
+        });
         return;
     }
     if let Ok(store) = crate::store::Store::open(db_path) {

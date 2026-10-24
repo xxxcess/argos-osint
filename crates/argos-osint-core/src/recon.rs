@@ -1980,7 +1980,12 @@ fn auxiliary(word: &str) -> bool {
 }
 
 fn brain_is_thin(hits: &[crate::brain::ScoredMemory]) -> bool {
-    hits.iter().filter(|hit| hit.score >= 0.3).count() < 2
+    scores_are_thin(hits.iter().map(|hit| hit.score))
+}
+
+/// [`brain_is_thin`] over bare scores: fewer than two hits at 0.3 or more.
+pub(crate) fn scores_are_thin(scores: impl IntoIterator<Item = f32>) -> bool {
+    scores.into_iter().filter(|score| *score >= 0.3).count() < 2
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -3003,6 +3008,31 @@ impl Service {
             contract == "legacy-v1" || contract == backend::SURREAL_MINED,
             "unknown extraction contract"
         );
+        #[cfg(feature = "surreal")]
+        if let Some(repo) = store.repository() {
+            // New-policy insights retry the run's durable shared refresh
+            // first; only a run without one mines the saved answer.
+            let cancel = Arc::new(AtomicBool::new(false));
+            let execute = crate::storage::refresh_driver::pipeline(
+                &self.auth,
+                &self.settings,
+                &cancel,
+                self.db_path.clone(),
+            );
+            let retried = crate::storage::refresh_driver::retry_owner(
+                repo,
+                "recon",
+                &run_id,
+                &self.settings,
+                &cancel,
+                None,
+                execute,
+            )
+            .await?;
+            if retried != crate::storage::refresh_driver::Retried::Nothing {
+                return Ok(());
+            }
+        }
         let run = store
             .get_run(&run_id)
             .await?

@@ -2794,16 +2794,41 @@ pub(crate) async fn recall_for_turn(
     mode: &str,
     run_id: &str,
 ) -> Result<(Vec<super::RecallInsight>, bool, BrainResourceSummary)> {
-    // SurrealDB: the full-text stopgap (no admission policy, resource
-    // summary or recall telemetry yet).
+    // SurrealDB: vector recall (DISKANN, lexical top-up; the full-text
+    // stopgap without a served embedding generation) under the same
+    // admission policy and thin-Brain test as SQLite. No resource summary or
+    // recall telemetry yet.
     #[cfg(feature = "surreal")]
     if let Some(repo) = store.repository() {
-        let hits =
-            crate::storage::recon_extract::recall_for_turn(repo, thread_id, question).await?;
-        let unfamiliar = hits.iter().filter(|hit| hit.score >= 0.3).count() < 2;
+        let embedder = crate::storage::vectors::Embedder::local();
+        let hits = crate::storage::recon_extract::recall_for_turn_with(
+            repo,
+            thread_id,
+            question,
+            embedder.as_ref(),
+        )
+        .await?;
+        let unfamiliar = super::scores_are_thin(hits.iter().map(|hit| hit.score));
+        let query = crate::brain_query::BrainQuery {
+            current_question: question.to_string(),
+            confirmed_subjects: store
+                .thread_entities(thread_id)
+                .await?
+                .into_iter()
+                .map(|e| e.1)
+                .collect(),
+            candidate_limit: 20,
+            token_budget: 1500,
+            ..Default::default()
+        };
+        let policy = crate::brain_query::AdmissionPolicy {
+            strict_mode: true,
+            allow_background: false,
+        };
         let subject = super::question_subject(question);
         let recalled = hits
             .into_iter()
+            .filter(|hit| crate::brain_query::admit_text(&query, &hit.text, &policy))
             .take(5)
             .map(|hit| super::RecallInsight {
                 memory_id: hit.id,

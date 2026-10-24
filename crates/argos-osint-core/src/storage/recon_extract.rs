@@ -390,6 +390,59 @@ fn terms(question: &str) -> Vec<String> {
     out
 }
 
+/// `orchestrate::recall_for_turn` on SurrealDB: with an embedder whose
+/// model serves the current generation, fenced vector recall (DISKANN,
+/// lexical top-up; `recall::recall`) within [`RECALL_LIMIT`] and
+/// [`RECALL_TOKENS`]; without one, or when the query cannot be embedded or
+/// no vector hit lands, [`recall_for_turn`]. Nothing when the thread opted
+/// out of insights.
+pub async fn recall_for_turn_with(
+    repo: &Repository,
+    thread_id: &str,
+    question: &str,
+    vectors: Option<&super::vectors::Embedder>,
+) -> Result<Vec<RecallHit>> {
+    let Some(e) = vectors else {
+        return recall_for_turn(repo, thread_id, question).await;
+    };
+    if question.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut r = repo
+        .db()
+        .query("SELECT VALUE recall_insights FROM ONLY type::record('recon_thread', $t)")
+        .bind(("t", thread_id.to_string()))
+        .await?
+        .check()?;
+    if r.take::<Option<bool>>(0usize)? == Some(false) {
+        return Ok(Vec::new());
+    }
+    let (state, embedding) = match super::vectors::query_vector(repo, e, question).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return recall_for_turn(repo, thread_id, question).await,
+        Err(err) => {
+            eprintln!("query embedding failed; using lexical recall: {err:#}");
+            return recall_for_turn(repo, thread_id, question).await;
+        }
+    };
+    let q = super::recall::RecallQuery {
+        text: question.to_string(),
+        embedding: Some(embedding),
+        model: state.model,
+        generation: state.generation,
+        max_memories: RECALL_LIMIT,
+        token_budget: RECALL_TOKENS,
+        ..Default::default()
+    };
+    let hits = super::recall::recall(repo.db(), &q)
+        .await
+        .map_err(|e| anyhow!("recall: {e}"))?;
+    if hits.iter().any(|hit| hit.source == RecallSource::Vector) {
+        return Ok(hits);
+    }
+    recall_for_turn(repo, thread_id, question).await
+}
+
 /// STOPGAP for `orchestrate::recall_for_turn`: nothing when the thread
 /// opted out of insights; otherwise up to [`RECALL_LIMIT`] memories within
 /// [`RECALL_TOKENS`], ranked by SurrealDB full-text search. Replace with

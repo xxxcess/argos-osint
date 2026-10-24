@@ -2560,7 +2560,12 @@ fn packet_observation(value: &Value) -> Value {
                     crate::summarization::publish_selected(&req, digest.clone())
                 {
                     digest = published;
-                } else if let Ok(store) = Store::open(&crate::paths::db_path()) {
+                } else if let Some(Ok(store)) =
+                    // SurrealDB: `publish_selected` already tried the
+                    // repository; keep the deterministic digest.
+                    (!surreal_selected())
+                        .then(|| Store::open(&crate::paths::db_path()))
+                {
                     if let Ok(published) = crate::summarization::publish_deterministic_and_enqueue(
                         &store.conn,
                         &req,
@@ -5104,6 +5109,9 @@ async fn prepare_page_result(
         .and_then(Value::as_array)
         .map_or(1, Vec::len)
         .max(1);
+    // The NLP source cache is SQLite-only (`nlp::cache`); under SurrealDB no
+    // SQLite file is opened and pages are prepared uncached.
+    let db_path = db_path.filter(|_| !surreal_selected());
     let owner = db_path
         .and_then(|p| Store::open(p).ok())
         .and_then(|s| {

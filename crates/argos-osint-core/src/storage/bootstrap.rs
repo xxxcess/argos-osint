@@ -21,8 +21,9 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// Module schemas in apply order: counters before the outbox; the graph
 /// before lifecycle (which indexes `brain_graph_node`); Atlas before its
 /// metadata (whose event is on `atlas_article`); jobs, insight and intel
-/// before refresh.
-pub fn schemas() -> [(&'static str, &'static str); 23] {
+/// before refresh. The event logs (`argos_event`, `investigation_event`)
+/// stand alone; telemetry writes use `profile_view`'s tables.
+pub fn schemas() -> [(&'static str, &'static str); 24] {
     [
         ("counters", super::counters::SCHEMA),
         ("outbox", super::outbox::SCHEMA),
@@ -46,6 +47,7 @@ pub fn schemas() -> [(&'static str, &'static str); 23] {
         ("credits", super::credits::SCHEMA),
         ("pipeline_inputs", super::pipeline_inputs::SCHEMA),
         ("profile_view", super::profile_view::SCHEMA),
+        ("event_log", super::event_log::SCHEMA),
         ("meta", META_SCHEMA),
     ]
 }

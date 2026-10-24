@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_RETENTION_HOURS: i64 = 24;
 /// Bound on persisted detail text.
 pub const MAX_DETAIL_CHARS: usize = 16_000;
-const MAX_MESSAGE_CHARS: usize = 1_000;
+pub(crate) const MAX_MESSAGE_CHARS: usize = 1_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,7 +85,7 @@ pub struct EventRow {
 
 static SEQ: AtomicU64 = AtomicU64::new(1);
 
-fn new_event_id(ts_ms: i64) -> String {
+pub(crate) fn new_event_id(ts_ms: i64) -> String {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     format!("evt-{ts_ms}-{}-{n}", std::process::id())
 }
@@ -135,7 +135,7 @@ pub fn redact(text: &str) -> String {
     out
 }
 
-fn bound(text: &str, max: usize) -> String {
+pub(crate) fn bound(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
@@ -192,7 +192,7 @@ fn severity_rank_sql() -> &'static str {
     "CASE severity WHEN 'debug' THEN 0 WHEN 'info' THEN 1 WHEN 'warn' THEN 2 WHEN 'error' THEN 3 ELSE 1 END"
 }
 
-fn severity_rank(sev: Severity) -> i64 {
+pub(crate) fn severity_rank(sev: Severity) -> i64 {
     match sev {
         Severity::Debug => 0,
         Severity::Info => 1,

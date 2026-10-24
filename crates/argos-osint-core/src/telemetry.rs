@@ -388,7 +388,7 @@ impl TelemetryEvent {
 
     /// The dimension subset used by the hourly/daily rollups. A single
     /// `dim_key` per (bucket, event_type) keeps counts mergeable.
-    fn rollup_key(&self) -> String {
+    pub(crate) fn rollup_key(&self) -> String {
         let fields = [
             self.app.as_str(),
             self.trigger.as_str(),
@@ -567,7 +567,7 @@ fn rollup(
     Ok(())
 }
 
-fn event_bins(metric_ms: u64) -> Vec<i64> {
+pub(crate) fn event_bins(metric_ms: u64) -> Vec<i64> {
     let mut bins = vec![0i64; DURATION_BINS_MS.len() + 1];
     if metric_ms == 0 {
         return bins;
@@ -578,7 +578,7 @@ fn event_bins(metric_ms: u64) -> Vec<i64> {
 
 static ID_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn next_id() -> String {
+pub(crate) fn next_id() -> String {
     let n = ID_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     format!(
         "tel-{}-{n}",

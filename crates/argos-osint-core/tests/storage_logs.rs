@@ -1,7 +1,7 @@
 //! The Logs pane and telemetry retention on SurrealDB
 //! (`storage::event_log`, `storage::telemetry`) and the Report surface's
-//! result lookup (`storage::intel::report_details_by_hash`): the same
-//! events give the same counts as SQLite, the job filter walks child jobs,
+//! result lookup (`storage::intel::report_details_by_hash`): the
+//! Logs pane counts and apps, the job filter walks child jobs,
 //! prune and clear touch only `argos_event`, and the telemetry prune is
 //! rate limited through `telemetry_meta`. Both modes via
 //! `python3 scripts/test_surreal.py --mode both`.
@@ -13,7 +13,6 @@ use argos_osint_core::events::{EventFilter, NewEvent, Severity};
 use argos_osint_core::storage::bootstrap::ensure_schema;
 use argos_osint_core::storage::intel::{self, Sequence};
 use argos_osint_core::storage::{event_log, telemetry as surreal};
-use argos_osint_core::store::Store;
 use argos_osint_core::telemetry::{EventKind, TelemetryEvent};
 use support::*;
 
@@ -39,7 +38,7 @@ fn sample() -> Vec<NewEvent> {
 }
 
 #[tokio::test]
-async fn logs_pane_counts_apps_and_job_tree_match_sqlite() {
+async fn logs_pane_counts_apps_and_walks_the_job_tree() {
     let Some(server) = Server::start() else {
         return;
     };
@@ -60,18 +59,11 @@ async fn logs_pane_counts_apps_and_job_tree_match_sqlite() {
     .check()
     .unwrap();
 
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("argos.db")).unwrap();
     let mut ids = Vec::new();
     for e in sample() {
         ids.push(event_log::record_event(db, &e).await.unwrap());
-        store.record_event(&e).unwrap();
     }
 
-    assert_eq!(
-        event_log::event_counts(db).await.unwrap(),
-        store.event_counts().unwrap()
-    );
     let counts = event_log::event_counts(db).await.unwrap();
     assert_eq!(
         (counts.error, counts.warn, counts.info, counts.debug),
@@ -81,10 +73,6 @@ async fn logs_pane_counts_apps_and_job_tree_match_sqlite() {
     assert_eq!(
         event_log::event_apps(db).await.unwrap(),
         vec!["atlas".to_string(), "intel".into(), "recon".into()]
-    );
-    assert_eq!(
-        event_log::event_apps(db).await.unwrap(),
-        store.event_apps().unwrap()
     );
 
     let tree = EventFilter {

@@ -112,7 +112,8 @@ async fn scenario(store: &ReconStore) -> Seen {
         .await
         .unwrap()
         .into_iter()
-        .map(|e| e.reference.source_id)
+        // Call ids are random per backend: compare the reference shape.
+        .map(|e| e.reference.source_id.replace(&done, "<done>"))
         .collect();
     let tool_on = store.tool_enabled(TOOL).await.unwrap();
     store.set_tool_enabled(TOOL, false).await.unwrap();
@@ -177,11 +178,7 @@ async fn sqlite_and_surreal_dispatch_agree() {
     assert_eq!(a, b);
     assert_eq!(a.roles, ["user", "assistant"]);
     assert_eq!(a.statuses, ["completed", "interrupted"]);
-    assert!(
-        a.evidence.iter().all(|s| s.starts_with("call:")),
-        "{:?}",
-        a.evidence
-    );
+    assert!(a.evidence == ["call:<done>"], "{:?}", a.evidence);
     assert!(sqlite.sqlite("probe", |_| Ok(())).is_ok());
     let err = surreal.sqlite("probe", |_| Ok(())).unwrap_err();
     assert_eq!(err.to_string(), "probe is not on SurrealDB yet");

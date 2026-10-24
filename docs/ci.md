@@ -6,14 +6,14 @@ Three workflows live in `.github/workflows/` (owned by Code Architect; code chan
 
 ## `ci.yml` — build and test matrix
 
-Runs on pushes to `main` and on every PR; a newer push to the same PR cancels the older run. `fail-fast: false`, 90-minute timeout, Rust 1.95.0, no debuginfo.
+Runs on pushes to `main` and when a PR is opened, reopened or marked ready for review (drafts skipped). PR pushes do not build. All 8 legs run every time. `fail-fast: false`, 90-minute timeout, Rust 1.95.0, no debuginfo.
 
 | Platform | Runner | Legs |
 |---|---|---|
 | Linux x86_64 | `ubuntu-24.04` | embedded, server |
 | Linux aarch64 | `ubuntu-24.04-arm` | embedded, server |
 | macOS arm64 | `macos-14` | embedded, server |
-| macOS Intel | `macos-15-intel` | server; embedded on pushes to `main` and when a PR is marked ready for review |
+| macOS Intel | `macos-15-intel` | embedded, server |
 
 Every leg calls the same entry point you run locally, `scripts/local_matrix.sh`:
 

@@ -22,7 +22,6 @@ use crate::provider_attempt::{self, Deadlines, Transport};
 use crate::provider_chain::{self, ChainReport, DispatchError, ExecuteOptions, Route};
 use crate::provider_diag::{Category, ProviderFailure, Stage};
 use crate::secrets::{AuthFile, ProviderSecret};
-use crate::store::Store;
 use crate::telemetry::{self, EventKind, TelemetryEvent, Trigger};
 
 /// App dimension on every telemetry row written from this module.
@@ -1151,7 +1150,7 @@ pub fn ensure_operation(
     scope: &OperationScope<'_>,
     draft: &str,
 ) -> Result<()> {
-    let Some(db_path) = db_path else {
+    let Some(_db_path) = db_path else {
         return Ok(());
     };
     let (id, run, task, role) = (
@@ -1176,7 +1175,7 @@ pub fn ensure_operation(
 
 /// Update durable draft for an operation.
 pub fn save_operation_draft(db_path: Option<&Path>, operation_id: &str, draft: &str) -> Result<()> {
-    let Some(db_path) = db_path else {
+    let Some(_db_path) = db_path else {
         return Ok(());
     };
     let (id, draft) = (operation_id.to_string(), draft.to_string());
@@ -1193,7 +1192,7 @@ pub fn update_operation_status(
     status: &str,
     final_message_id: Option<&str>,
 ) -> Result<()> {
-    let Some(db_path) = db_path else {
+    let Some(_db_path) = db_path else {
         return Ok(());
     };
     let (id, status) = (operation_id.to_string(), status.to_string());
@@ -1217,7 +1216,7 @@ fn record_attempt_start(
     declaration: &str,
 ) -> Result<String> {
     let attempt_id = canonical_attempt_id(operation_id, generation, route_index, attempt);
-    let Some(db_path) = db_path else {
+    let Some(_db_path) = db_path else {
         return Ok(attempt_id);
     };
     let owned = [
@@ -1257,7 +1256,7 @@ fn record_attempt_finish(
     outcome: &AttemptOutcome,
     timings: &AttemptTimings,
 ) -> Result<()> {
-    let Some(db_path) = db_path else {
+    let Some(_db_path) = db_path else {
         return Ok(());
     };
     let id = attempt_id.to_string();

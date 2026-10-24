@@ -14,7 +14,7 @@ use super::backend::{sqlite_path, ReconStore};
 use super::{
     brain_resources::{self, BrainResourceSummary},
     investigation, picker, AnswerContext, CreditHold, EntityView, HypothesisView, Plan, PlanCall,
-    Run, Store,
+    Run,
 };
 use crate::{
     intel_recon::{self, ReportMode},
@@ -131,23 +131,6 @@ pub(crate) fn advance_stage(
         drop(previous);
     }
     *slot = Some(StageClock::start(db_path, run_id, mode, stage));
-}
-
-/// How many `recon_stage` rows already exist for this run and stage, so the next
-/// one is a separate attempt rather than a rewritten fact.
-fn stage_attempt(db_path: &Path, run_id: &str, stage: &str) -> i64 {
-    let Ok(conn) = rusqlite::Connection::open(db_path) else {
-        return 1;
-    };
-    let prefix = format!("{run_id}:{stage}:");
-    conn.query_row(
-        "SELECT COUNT(DISTINCT id) FROM telemetry_events
-         WHERE event_type = 'recon_stage' AND id >= ?1 AND id < ?2",
-        rusqlite::params![prefix, format!("{prefix}\u{10ffff}")],
-        |row| row.get::<_, i64>(0),
-    )
-    .unwrap_or(0)
-        + 1
 }
 
 fn now_stamp() -> String {
@@ -2813,109 +2796,29 @@ pub(crate) async fn recall_for_turn(
     // stopgap without a served embedding generation) over the same 20
     // candidates, admission policy, five-memory cap, thin-Brain test and
     // resource summary as SQLite, and the same recall_query telemetry row.
-    #[cfg(feature = "surreal")]
-    if let Some(repo) = store.repository() {
-        let embedder = crate::storage::vectors::Embedder::local();
-        let hits = crate::storage::recon_extract::recall_candidates_for_turn(
-            repo,
-            thread_id,
-            question,
-            embedder.as_ref(),
-            20,
-            usize::MAX,
-        )
-        .await?;
-        let unfamiliar = super::scores_are_thin(hits.iter().map(|hit| hit.score));
-        let candidates = hits.len();
-        let query = crate::brain_query::BrainQuery {
-            current_question: question.to_string(),
-            confirmed_subjects: store
-                .thread_entities(thread_id)
-                .await?
-                .into_iter()
-                .map(|e| e.1)
-                .collect(),
-            candidate_limit: 20,
-            token_budget: 1500,
-            ..Default::default()
-        };
-        let policy = crate::brain_query::AdmissionPolicy {
-            strict_mode: true,
-            allow_background: false,
-        };
-        let subject = super::question_subject(question);
-        let mut recalled: Vec<super::RecallInsight> = Vec::new();
-        for hit in hits {
-            if recalled.len() >= 5 {
-                break;
-            }
-            if !crate::brain_query::admit_text(&query, &hit.text, &policy)
-                || recalled.iter().any(|item| item.memory_id == hit.id)
-            {
-                continue;
-            }
-            recalled.push(super::RecallInsight {
-                memory_id: hit.id,
-                text: hit.text,
-                entity: subject.clone(),
-                predicate: "memory".into(),
-                updated_at: String::new(),
-                evidence_count: 0,
-            });
-        }
-        let mut found = std::collections::HashMap::new();
-        for item in &recalled {
-            found.insert(
-                item.memory_id.clone(),
-                (
-                    crate::storage::insight_views::insight_for_memory(repo, &item.memory_id)
-                        .await?,
-                    crate::storage::browse::get_memory(repo, &item.memory_id).await?,
-                ),
-            );
-        }
-        let resources = brain_resources::summarize_with(&recalled, question, |id| {
-            Ok(found.remove(id).unwrap_or((None, None)))
-        })?;
-        let accepted = recalled.len();
-        let facts = brain_resources::RecallQueryFacts {
-            candidates,
-            accepted,
-            rejection_reason: brain_resources::recall_gate_rejection(
-                candidates,
-                accepted,
-                candidates.saturating_sub(accepted),
-            ),
-            mode: mode.to_string(),
-            run_id: run_id.to_string(),
-            thread_id: thread_id.to_string(),
-        };
-        let event = brain_resources::recall_query_event(&facts);
-        let _ = crate::storage::telemetry::record(repo.db(), &event).await;
-        return Ok((recalled, unfamiliar, resources));
-    }
-    store.sqlite("recall", |s| {
-        recall_sqlite(s, thread_id, question, mode, run_id)
-    })
-}
-
-fn recall_sqlite(
-    store: &Store,
-    thread_id: &str,
-    question: &str,
-    mode: &str,
-    run_id: &str,
-) -> Result<(Vec<super::RecallInsight>, bool, BrainResourceSummary)> {
-    if store
-        .get_thread(thread_id)?
-        .is_some_and(|t| !t.recall_insights)
-    {
-        return Ok((Vec::new(), true, BrainResourceSummary::default()));
-    }
-    let thread_entities = store.thread_entities(thread_id)?;
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    let embedder = crate::storage::vectors::Embedder::local();
+    let hits = crate::storage::recon_extract::recall_candidates_for_turn(
+        repo,
+        thread_id,
+        question,
+        embedder.as_ref(),
+        20,
+        usize::MAX,
+    )
+    .await?;
+    let unfamiliar = super::scores_are_thin(hits.iter().map(|hit| hit.score));
+    let candidates = hits.len();
     let query = crate::brain_query::BrainQuery {
         current_question: question.to_string(),
-        confirmed_subjects: thread_entities.iter().map(|e| e.1.clone()).collect(),
+        confirmed_subjects: store
+            .thread_entities(thread_id)
+            .await?
+            .into_iter()
+            .map(|e| e.1)
+            .collect(),
         candidate_limit: 20,
         token_budget: 1500,
         ..Default::default()
@@ -2924,58 +2827,54 @@ fn recall_sqlite(
         strict_mode: true,
         allow_background: false,
     };
-
-    let text_hits = crate::brain_query::recall_candidates_for(
-        store,
-        "recon",
-        run_id,
-        question,
-        query.candidate_limit,
-        &query.allowed_kinds,
-    )?;
-    let unfamiliar = super::brain_is_thin(&text_hits);
-    let mut recalled: Vec<super::RecallInsight> = Vec::new();
     let subject = super::question_subject(question);
-
-    let mut admitted_count = 0;
-    for hit in &text_hits {
+    let mut recalled: Vec<super::RecallInsight> = Vec::new();
+    for hit in hits {
         if recalled.len() >= 5 {
             break;
         }
-        if !crate::brain_query::admit_memory(&query, &hit.memory, &policy) {
-            continue;
-        }
-        if recalled.iter().any(|item| item.memory_id == hit.memory.id) {
+        if !crate::brain_query::admit_text(&query, &hit.text, &policy)
+            || recalled.iter().any(|item| item.memory_id == hit.id)
+        {
             continue;
         }
         recalled.push(super::RecallInsight {
-            memory_id: hit.memory.id.clone(),
-            text: hit.memory.text.clone(),
+            memory_id: hit.id,
+            text: hit.text,
             entity: subject.clone(),
             predicate: "memory".into(),
-            updated_at: hit.memory.created_at.clone(),
+            updated_at: String::new(),
             evidence_count: 0,
         });
-        admitted_count += 1;
     }
-    recalled.truncate(5);
-    let resources = brain_resources::summarize_for_recall(store, &recalled, question)?;
-    // The recall relevance gate: one row per completed recall query, with the
-    // candidate and accepted hit counts and a bounded rejection label.
-    let candidates = text_hits.len();
+    let mut found = std::collections::HashMap::new();
+    for item in &recalled {
+        found.insert(
+            item.memory_id.clone(),
+            (
+                crate::storage::insight_views::insight_for_memory(repo, &item.memory_id).await?,
+                crate::storage::browse::get_memory(repo, &item.memory_id).await?,
+            ),
+        );
+    }
+    let resources = brain_resources::summarize_with(&recalled, question, |id| {
+        Ok(found.remove(id).unwrap_or((None, None)))
+    })?;
+    let accepted = recalled.len();
     let facts = brain_resources::RecallQueryFacts {
         candidates,
-        accepted: admitted_count,
+        accepted,
         rejection_reason: brain_resources::recall_gate_rejection(
             candidates,
-            admitted_count,
-            candidates.saturating_sub(admitted_count),
+            accepted,
+            candidates.saturating_sub(accepted),
         ),
         mode: mode.to_string(),
         run_id: run_id.to_string(),
         thread_id: thread_id.to_string(),
     };
-    brain_resources::note_recall_query(store, &facts);
+    let event = brain_resources::recall_query_event(&facts);
+    let _ = crate::storage::telemetry::record(repo.db(), &event).await;
     Ok((recalled, unfamiliar, resources))
 }
 
@@ -3010,19 +2909,13 @@ pub(crate) async fn previous_synthesis(store: &ReconStore, thread_id: &str) -> R
             .prompt_version()
             .into(),
     };
-    if store.is_surreal() {
+    {
         // `storage::summary_flush::cache_get`; SQLite is never opened here.
         if let Ok(Some(hit)) = crate::summarization::cache_get_selected(&req, || {
             anyhow::bail!("SQLite is not opened under SurrealDB")
         })
         .await
         {
-            return Ok(hit.content);
-        }
-    } else {
-        if let Ok(Some(hit)) = store.sqlite("summary cache", |s| {
-            crate::summarization::cache_get(&s.conn, &req)
-        }) {
             return Ok(hit.content);
         }
     }
@@ -3032,13 +2925,10 @@ pub(crate) async fn previous_synthesis(store: &ReconStore, thread_id: &str) -> R
         compact_prior_synthesis(&latest.content)
     };
     let det = crate::summarization::deterministic_follow_up(&content, PRIOR_SYNTHESIS_CHARS);
-    if let Some(published) = crate::summarization::publish_selected(&req, det.clone()) {
-        return Ok(published.content);
-    }
-    let published = store.sqlite("summary cache", |s| {
-        crate::summarization::publish_deterministic_and_enqueue(&s.conn, &req, det)
-    })?;
-    Ok(published.content)
+    Ok(match crate::summarization::publish_selected(&req, det) {
+        Some(published) => published.content,
+        None => content,
+    })
 }
 
 /// Drops citations, the evidence trailer, and repeated article lines, then keeps the
@@ -4042,7 +3932,6 @@ async fn model_json(
 mod tests {
     use super::super::PickRecord;
     use super::*;
-    use std::time::Duration;
 
     fn action(tool_id: &str, arguments: Value) -> investigation::ProposedAction {
         investigation::ProposedAction {

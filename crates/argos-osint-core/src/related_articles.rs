@@ -4,7 +4,6 @@ use crate::{
     store::{AtlasArticleRow, Store},
 };
 use anyhow::Result;
-use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 pub const MATCH_VERSION: &str = "shared-headline-entities-v4-possessive";
@@ -334,11 +333,10 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
 /// [`build`] on the SurrealDB repository: same plan, same input marker
 /// (`app_state`), published by `storage::atlas_metadata::replace_related`.
 pub async fn build_on(store: &crate::atlas_store::AtlasStore, run_id: &str) -> Result<usize> {
-    #[cfg(feature = "surreal")]
-    if let Some(repo) = store.repository() {
-        return build_surreal(store, repo, run_id).await;
-    }
-    store.sqlite("related articles", |s| build(s, run_id))
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    build_surreal(store, repo, run_id).await
 }
 
 #[cfg(feature = "surreal")]
@@ -382,13 +380,10 @@ pub async fn related_articles_on(
     offset: usize,
     limit: usize,
 ) -> Result<RelatedArticlePage> {
-    #[cfg(feature = "surreal")]
-    if let Some(repo) = store.repository() {
-        return related_surreal(store, repo, run_id, article_id, offset, limit).await;
-    }
-    store.sqlite("related articles", |s| {
-        s.related_articles(run_id, article_id, offset, limit)
-    })
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    related_surreal(store, repo, run_id, article_id, offset, limit).await
 }
 
 #[cfg(feature = "surreal")]
@@ -484,30 +479,25 @@ pub async fn related_articles_for_memory_on(
     offset: usize,
     limit: usize,
 ) -> Result<RelatedArticlePage> {
-    #[cfg(feature = "surreal")]
-    if let Some(repo) = store.repository() {
-        let origins =
-            crate::storage::browse_assoc::article_origins_for_memory(repo, memory_id).await?;
-        let mut pages = Vec::new();
-        for origin in &origins {
-            let mut start = 0;
-            loop {
-                let page =
-                    related_articles_on(store, &origin.run_id, &origin.article_id, start, 100)
-                        .await?;
-                let more = page.has_more;
-                pages.push(page);
-                if !more {
-                    break;
-                }
-                start += 100;
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    let origins = crate::storage::browse_assoc::article_origins_for_memory(repo, memory_id).await?;
+    let mut pages = Vec::new();
+    for origin in &origins {
+        let mut start = 0;
+        loop {
+            let page =
+                related_articles_on(store, &origin.run_id, &origin.article_id, start, 100).await?;
+            let more = page.has_more;
+            pages.push(page);
+            if !more {
+                break;
             }
+            start += 100;
         }
-        return Ok(union_pages(&origins, pages, offset, limit));
     }
-    store.sqlite("related articles for memory", |s| {
-        s.related_articles_for_memory(memory_id, offset, limit)
-    })
+    Ok(union_pages(&origins, pages, offset, limit))
 }
 
 /// Merge the Related pages of a memory's origins (shared by both stores).
@@ -743,211 +733,6 @@ pub(crate) fn canonical_url(raw: &str) -> String {
             u.to_string()
         })
         .unwrap_or_else(|_| raw.into())
-}
-impl Store {
-    /// Whether an occurrence participates in a retained ingest association
-    /// containing this actor name and at least one other distinct entity.
-    /// This checks stored pairs, never creates suggestions while browsing.
-    pub fn has_ingest_actor_association(
-        &self,
-        article: &AtlasArticleRow,
-        name_key: &str,
-    ) -> Result<bool> {
-        let mut offset = 0;
-        loop {
-            let page = self.related_articles(&article.run_id, &article.id, offset, 100)?;
-            for row in &page.rows {
-                if shared_entity_mentions(self, article, &row.article)?
-                    .iter()
-                    .any(|name| crate::brain_actors::normalize_alias(name) == name_key)
-                {
-                    return Ok(true);
-                }
-            }
-            if !page.has_more {
-                break;
-            }
-            offset += 100;
-        }
-        let candidates = crate::storage::store_bridge::related_endpoint_candidates(
-            &article.run_id,
-            &article.id,
-            true,
-        )?;
-        self.ingest_candidates_match(article, name_key, candidates)
-    }
-
-    fn ingest_candidates_match(
-        &self,
-        article: &AtlasArticleRow,
-        name_key: &str,
-        candidates: Vec<(String, String, String)>,
-    ) -> Result<bool> {
-        for (run, id, memory) in candidates {
-            let Some(crate::memory_metadata::MemoryPayload::Related(payload)) =
-                self.memory_payload(&memory)?
-            else {
-                continue;
-            };
-            if !current_ingest_related(self, &payload)? {
-                continue;
-            }
-            let Some(candidate) = self.atlas_article(&run, &id)? else {
-                continue;
-            };
-            let shared = shared_entity_mentions(self, article, &candidate)?;
-            if shared.len() >= MIN_SHARED_ENTITIES
-                && shared
-                    .iter()
-                    .any(|name| crate::brain_actors::normalize_alias(name) == name_key)
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-    pub fn related_articles(
-        &self,
-        run_id: &str,
-        article_id: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<RelatedArticlePage> {
-        let limit = limit.clamp(1, 100);
-        let articles = self.atlas_list_articles(run_id)?;
-        let lookup: HashMap<_, _> = articles.iter().map(|a| (a.id.as_str(), a)).collect();
-        let surreal_records = {
-            let mut pairs: Vec<_> =
-                crate::storage::store_bridge::related_pairs(run_id, article_id)?
-                    .into_iter()
-                    .filter_map(|p| {
-                        let other = if p.left_id == article_id {
-                            &p.right_id
-                        } else {
-                            &p.left_id
-                        };
-                        lookup.get(other.as_str()).map(|a| ((*a).clone(), p))
-                    })
-                    .collect();
-            // Same order as the SQLite read: named first, shared count, rarity,
-            // newest, then article id.
-            pairs.sort_by(|(a, p), (b, q)| {
-                (p.named_count == 0)
-                    .cmp(&(q.named_count == 0))
-                    .then(q.shared_count.cmp(&p.shared_count))
-                    .then(
-                        q.rarity
-                            .partial_cmp(&p.rarity)
-                            .unwrap_or(std::cmp::Ordering::Equal),
-                    )
-                    .then(b.published_at.cmp(&a.published_at))
-                    .then(a.id.cmp(&b.id))
-            });
-            Some(
-                pairs
-                    .into_iter()
-                    .map(|(_, p)| {
-                        (
-                            p.left_id,
-                            p.right_id,
-                            p.left_revision,
-                            p.right_revision,
-                            p.shared_json,
-                            p.named_count,
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        };
-        #[cfg(not(feature = "surreal"))]
-        let surreal_records: Option<Vec<(String, String, String, String, String, i64)>> = None;
-        let records = match surreal_records {
-            Some(r) => r,
-            None => self.related_pair_records(run_id, article_id)?,
-        };
-        let mut rows = vec![];
-        for (left, right, lr, rr, json, named_count) in records {
-            let (Some(a), Some(b)) = (lookup.get(left.as_str()), lookup.get(right.as_str())) else {
-                continue;
-            };
-            if revision(a) != lr || revision(b) != rr {
-                continue;
-            }
-            let shared: Vec<SharedMention> = serde_json::from_str(&json)?;
-            if shared_entity_mentions(self, a, b)?.len() < MIN_SHARED_ENTITIES {
-                continue;
-            }
-            let target = if left == article_id { b } else { a };
-            rows.push(RelatedArticle {
-                article: (*target).clone(),
-                shared_mentions: shared.into_iter().map(|m| m.original_text).collect(),
-                originating_run_ids: vec![run_id.into()],
-                place_only: named_count == 0,
-                ..RelatedArticle::default()
-            });
-        }
-        let total = rows.len();
-        let rows = rows.into_iter().skip(offset).take(limit).collect();
-        let coverage = match self.atlas_metadata(run_id, article_id)? {
-            Some(m) if m.entity_state == MetadataState::Complete => "available",
-            Some(m) if m.entity_state == MetadataState::Pending => "loading",
-            _ => "unavailable",
-        }
-        .into();
-        Ok(RelatedArticlePage {
-            rows,
-            total,
-            offset,
-            has_more: offset.saturating_add(limit) < total,
-            coverage,
-        })
-    }
-    #[allow(clippy::type_complexity)]
-    fn related_pair_records(
-        &self,
-        run_id: &str,
-        article_id: &str,
-    ) -> Result<Vec<(String, String, String, String, String, i64)>> {
-        let mut stmt=self.conn.prepare("SELECT p.left_id,p.right_id,p.left_revision,p.right_revision,p.shared_json,p.named_count FROM atlas_related_articles p JOIN atlas_articles a ON a.run_id=p.run_id AND a.article_id=CASE WHEN p.left_id=?2 THEN p.right_id ELSE p.left_id END WHERE p.run_id=?1 AND (p.left_id=?2 OR p.right_id=?2) ORDER BY CASE WHEN p.named_count>0 THEN 0 ELSE 1 END,p.shared_count DESC,p.rarity DESC,a.published_at DESC,a.article_id")?;
-        let records = stmt
-            .query_map(params![run_id, article_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, i64>(5)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(records)
-    }
-    pub fn article_origins_for_memory(&self, memory_id: &str) -> Result<Vec<ArticleOrigin>> {
-        crate::storage::store_bridge::article_origins_for_memory(memory_id)
-    }
-    pub fn related_articles_for_memory(
-        &self,
-        memory_id: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<RelatedArticlePage> {
-        let origins = self.article_origins_for_memory(memory_id)?;
-        let mut pages = Vec::new();
-        for origin in origins.iter() {
-            let mut start = 0;
-            loop {
-                let page = self.related_articles(&origin.run_id, &origin.article_id, start, 100)?;
-                let more = page.has_more;
-                pages.push(page);
-                if !more {
-                    break;
-                }
-                start += 100;
-            }
-        }
-        Ok(union_pages(&origins, pages, offset, limit))
-    }
 }
 
 #[cfg(test)]

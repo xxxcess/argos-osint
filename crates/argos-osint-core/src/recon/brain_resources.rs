@@ -2,7 +2,7 @@
 
 use super::{
     investigation::{self, URL_KIND},
-    Binding, InsightSource, RecallInsight, Store,
+    Binding, InsightSource, RecallInsight,
 };
 use anyhow::Result;
 use std::collections::{BTreeMap, HashSet};
@@ -172,19 +172,6 @@ fn is_http_url(value: &str) -> bool {
         return false;
     };
     matches!(url.scheme(), "http" | "https")
-}
-
-/// Collect and classify resources linked to recalled memories. When `question` is
-/// non-empty, candidates are ordered by claim+URL token overlap with the prompt so the
-/// most likely useful assets appear first.
-pub fn summarize_for_recall(
-    store: &Store,
-    recalled: &[RecallInsight],
-    question: &str,
-) -> Result<BrainResourceSummary> {
-    summarize_with(recalled, question, |id| {
-        Ok((store.insight_for_memory(id)?, store.get_memory(id)?))
-    })
 }
 
 /// [`summarize_for_recall`] over any store: `lookup` returns a recalled
@@ -496,12 +483,6 @@ pub fn recall_gate_rejection(
         return "admission_policy".into();
     }
     String::new()
-}
-
-/// Record one completed recall query at the relevance gate. Best effort: a
-/// telemetry failure never fails a recon turn.
-pub fn note_recall_query(store: &Store, facts: &RecallQueryFacts) {
-    let _ = crate::telemetry::insert(&store.conn, &recall_query_event(facts));
 }
 
 /// The `recall_query` telemetry row of one completed recall query.

@@ -621,7 +621,20 @@ impl Measured {
 
 /// Deletes raw events past the raw retention boundary and rollups past the
 /// rollup boundary. Rate limited; records when it last ran.
+///
+/// Under a storage config the prune runs on the repository
+/// (`storage::telemetry::prune`, started without waiting) and SQLite is
+/// never opened.
 pub fn prune(db_path: &Path, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
+    #[cfg(feature = "surreal")]
+    if crate::storage::runtime::configured() {
+        crate::storage::runtime::spawn(async move {
+            if let Ok(repo) = crate::storage::runtime::repository().await {
+                let _ = crate::storage::telemetry::prune(repo.db(), now).await;
+            }
+        });
+        return Ok(());
+    }
     let conn = write_connection(db_path)?;
     if !should_prune(&conn, now)? {
         return Ok(());

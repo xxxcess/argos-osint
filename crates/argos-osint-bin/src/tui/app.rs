@@ -1853,7 +1853,14 @@ impl App {
         let text = text.into();
         let detail = detail.into();
         let event = super::logs::session_event(level, &text, &detail);
-        if self.store.record_event(&event).is_ok() && level == "error" {
+        // Under a storage config the line goes to the repository's
+        // `argos_event` (ordered, off the UI thread); SQLite is not written.
+        let recorded = if surreal_brain::on() {
+            surreal_brain::record_log(event)
+        } else {
+            self.store.record_event(&event).is_ok()
+        };
+        if recorded && level == "error" {
             self.logs.counts.error += 1;
         }
         if self.module == Some(ModuleId::Logs) {
@@ -1872,7 +1879,11 @@ impl App {
         }
         let first = self.dashboards_at.is_none() && !self.logs.loaded;
         self.dashboards_at = Some(Instant::now());
-        if first && self.background_db.is_none() {
+        if first && surreal_brain::on() {
+            std::thread::spawn(|| {
+                let _ = surreal_brain::prune_logs(super::logs::RETENTION_HOURS);
+            });
+        } else if first && self.background_db.is_none() {
             let _ = self.store.prune_events(super::logs::RETENTION_HOURS);
         }
         if self.module == Some(ModuleId::Intel) && self.intel_page == IntelPage::Briefing {
@@ -1883,7 +1894,7 @@ impl App {
             Some(ModuleId::Jobs) => self.reload_jobs(),
             Some(ModuleId::System) => self.reload_profile(),
             _ => {
-                if self.background_db.is_some() {
+                if self.background_db.is_some() || surreal_brain::on() {
                     self.request_dashboard_snapshot();
                 } else {
                     self.logs.refresh_counts(&self.store);
@@ -1975,7 +1986,7 @@ impl App {
     }
 
     pub(crate) fn reload_logs(&mut self) {
-        if self.background_db.is_some() {
+        if self.background_db.is_some() || surreal_brain::on() {
             self.request_dashboard_snapshot();
             return;
         }
@@ -2025,16 +2036,29 @@ impl App {
         if self.dashboard_reading {
             return;
         }
-        if surreal_brain::on() && self.module == Some(ModuleId::Jobs) {
+        if surreal_brain::on() {
+            // Jobs, Logs and the header counts read only the repository.
             self.dashboard_reading = true;
             let module = self.module;
             let key = self.dashboard_read_key();
             let mut jobs = self.jobs.clone();
+            let mut logs = self.logs.clone();
             let pending_job = self.pending_job.clone();
             let tx = self.work_tx.clone();
             std::thread::spawn(move || {
-                surreal_brain::load_jobs(&mut jobs, pending_job.as_deref());
-                let outcome = Ok(Box::new(DashboardSnapshot::Jobs(Box::new(jobs))));
+                let outcome = match module {
+                    Some(ModuleId::Jobs) => {
+                        surreal_brain::load_jobs(&mut jobs, pending_job.as_deref());
+                        Ok(Box::new(DashboardSnapshot::Jobs(Box::new(jobs))))
+                    }
+                    Some(ModuleId::Logs) => {
+                        surreal_brain::load_logs(&mut logs);
+                        Ok(Box::new(DashboardSnapshot::Logs(Box::new(logs))))
+                    }
+                    _ => surreal_brain::log_counts()
+                        .map(|counts| Box::new(DashboardSnapshot::Counts(counts)))
+                        .map_err(|e| e.to_string()),
+                };
                 let _ = tx.send(WorkEvent::DashboardLoaded {
                     module,
                     key,
@@ -8607,6 +8631,21 @@ impl App {
             ButtonId::AtlasResume => self.resume_atlas_run(),
             ButtonId::ClearLog => {
                 // Scope: durable events only. Jobs, task results and memories stay.
+                if surreal_brain::on() {
+                    if self.logs_clearing {
+                        self.status = "Events cleanup is already in progress".into();
+                        return;
+                    }
+                    self.logs_clearing = true;
+                    let tx = self.work_tx.clone();
+                    std::thread::spawn(move || {
+                        let outcome =
+                            surreal_brain::clear_logs().map_err(|error| error.to_string());
+                        let _ = tx.send(WorkEvent::LogsCleared { outcome });
+                    });
+                    self.status = "Clearing events…".into();
+                    return;
+                }
                 if let Some(db) = self.background_db.clone() {
                     if self.logs_clearing {
                         self.status = "Events cleanup is already in progress".into();
@@ -11257,11 +11296,15 @@ pub async fn run(mut app: App) -> Result<()> {
     let repair_db = paths::db_path();
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
+            // Under a storage config events (and telemetry) are pruned on
+            // the repository and SQLite is not opened here.
+            if surreal_jobs {
+                surreal_brain::prune_logs(super::logs::RETENTION_HOURS)?;
+                return Ok(());
+            }
             let store = Store::open_light(&repair_db)?;
             store.prune_events(super::logs::RETENTION_HOURS)?;
-            if !surreal_jobs {
-                store.clear_old_jobs()?;
-            }
+            store.clear_old_jobs()?;
             Ok(())
         })()
         .map_err(|e| e.to_string());

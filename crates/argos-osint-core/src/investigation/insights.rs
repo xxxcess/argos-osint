@@ -695,16 +695,9 @@ pub async fn run_pipeline(
             .expect("claim assessment");
         if claim.assessment.faithful() && surface == Surface::Report {
             let store = super::exec_store::ExecStore::open(db_path).await?;
-            let Some(details) = store.with_sqlite(|store| {
-                store.conn.query_row(
-                    "SELECT details_json FROM intel_report_results WHERE source_hash=?1",
-                    [&claim.evidence_refs[0].acquisition_id],
-                    |r| r.get::<_, String>(0),
-                )
-            }) else {
-                anyhow::bail!("the Report surface is retired on SurrealDB");
-            };
-            let details = details?;
+            let details = store
+                .report_details(&claim.evidence_refs[0].acquisition_id)
+                .await?;
             drop(store);
             let bundle: Value = serde_json::from_str(&details)?;
             if let Some(entries) = bundle["support_receipts"].as_array() {

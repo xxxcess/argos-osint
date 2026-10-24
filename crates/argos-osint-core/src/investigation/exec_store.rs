@@ -63,6 +63,28 @@ impl ExecStore {
         }
     }
 
+    /// The Report surface's `intel_report_results.details_json` for a
+    /// source hash: SQLite, or `intel_report_result` on SurrealDB. A missing
+    /// row is an error on both stores.
+    pub(crate) async fn report_details(&self, source_hash: &str) -> Result<String> {
+        if let Some(found) = self.with_sqlite(|store| {
+            store.conn.query_row(
+                "SELECT details_json FROM intel_report_results WHERE source_hash=?1",
+                [source_hash],
+                |r| r.get::<_, String>(0),
+            )
+        }) {
+            return Ok(found?);
+        }
+        #[cfg(feature = "surreal")]
+        if let Self::Surreal(r) = self {
+            return crate::storage::intel::report_details_by_hash(r.db(), source_hash)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no Intel report result for {source_hash}"));
+        }
+        anyhow::bail!("no store for the Report surface")
+    }
+
     pub(crate) async fn validate_dispatch(&self, input: &PipelineInput) -> Result<()> {
         match self {
             Self::Sqlite(s) => super::insight_persist::validate_dispatch(&lock(s).conn, input),

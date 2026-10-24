@@ -18,8 +18,17 @@ telemetry are wired (see "Combined tree" at the end).
   now starts only the insight refresh drainer, so the Intel brief (and the
   index, summary, backfill, actor-dedup and brain-scope) pools no longer open
   SQLite; Intel briefs are not produced on SurrealDB until the engine moves.
-- [ ] Logs pane / Jobs → Logs / telemetry meta and prune (wip/surreal-logs).
-- [ ] Report surface of `run_pipeline` (wip/surreal-logs).
+- [x] Logs pane, its severity counts, the TUI session log and Jobs → Logs
+  counts read and write `argos_event` under a storage config
+  (`tui::surreal_brain::SurrealLogs`, worker threads); `argos_event` has prune
+  and clear; `telemetry_meta`, the telemetry prune and coverage are on
+  SurrealDB (`storage::telemetry::SCHEMA`, not yet in bootstrap). There is no
+  telemetry backfill to port (clean reset). `tests/storage_logs.rs`.
+- [x] Report surface of `run_pipeline` reads its result bundle from
+  `intel_report_result` by source hash on SurrealDB
+  (`ExecStore::report_details`, `storage::intel::report_details_by_hash`).
+  The Intel report worker stays retired (`report_execution_enabled()` is
+  false), so no production run reaches it yet.
 - [ ] Atlas, Atlas insight/memory writers and the investigation harness
   (wip/surreal-atlas).
 - [x] Article refresh input: `refresh_exec` builds it with
@@ -271,8 +280,8 @@ Bootstrap registers 21 schemas after the topology, Profile and Recon tracks merg
 - [x] `ReconStore` gained `list_investigation_events`, `insert_investigation_event`, `next_event_sequence`, `record_event` and `list_events`. Under a storage config the TUI Recon snapshot (`tui::surreal_recon::snapshot`, worker thread) reads the thread's investigation trace and records finished tool results not yet logged as `argos_event` rows, like the SQLite reader worker.
 - [x] Contract tests (both modes, `tests/storage_telemetry.rs`): `telemetry_events_and_rollups_match_sqlite` (events, hourly/daily rollups, replay, stage attempts), `investigation_events_match_sqlite`, `event_log_records_redacted_ordered_events`.
 - Gaps:
-  - The Logs pane, its severity counts, the TUI session log (`push_log`) and the Jobs → Logs event counts still read/write SQLite `argos_events`; call logs written to `argos_event` are not shown until Logs moves. `list_events` matches `job_id` exactly (no child-job expansion); no retention prune or clear for `argos_event` yet.
-  - Telemetry writes are fire-and-forget; a TUI killed mid-write can lose the last events. `telemetry_meta` (observed-since, prune markers), `telemetry_backfill` and the 90/365-day prune (`telemetry::prune`) are not on SurrealDB.
+  - ~~The Logs pane, its severity counts, the TUI session log and the Jobs → Logs event counts still read/write SQLite `argos_events`~~ Done (logs track): under a storage config Logs reads `argos_event` on worker threads, `push_log` records there (ordered, `runtime::spawn_ordered`), startup and first-tick prune and Clear log run on the repository, `list_events` walks child jobs (`event_log::job_tree`), and `JobRow.events` counts `argos_event` plus `job_event` rows (job and direct children). `job.retry` is still written only to `job_event`, so it is counted but not listed in Logs.
+  - Telemetry writes are fire-and-forget; a TUI killed mid-write can lose the last events. ~~`telemetry_meta`, `telemetry_backfill` and the 90/365-day prune are not on SurrealDB~~ Done (logs track): `storage::telemetry::{get_meta, set_meta, ensure_observed_since, coverage, prune}`; `telemetry::prune` routes there under a config and the TUI startup prune runs it. Register `("telemetry", super::telemetry::SCHEMA)` after `profile_view` at merge (+1 bootstrap count).
   - Writers that are still SQLite-only paths keep writing SQLite only when no config is set: Atlas, Atlas insights/memory, model attempts (`model_exec`, jobs track) and recall telemetry (`admit_memory` not ported).
   - The investigation harness (`investigation::engine`) has no production caller and still writes through the SQLite `Store`.
   - No end-to-end TUI test of the Recon pane trace or Profile event views on SurrealDB.

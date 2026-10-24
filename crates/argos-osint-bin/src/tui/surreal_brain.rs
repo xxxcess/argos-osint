@@ -286,3 +286,101 @@ pub(crate) fn retry_article_extraction(
     _settings: argos_osint_core::provider::SettingsFile,
 ) {
 }
+
+/// The Logs pane on the repository's `argos_event`. Plain worker threads
+/// only.
+#[cfg(feature = "surreal")]
+pub(crate) struct SurrealLogs;
+
+#[cfg(feature = "surreal")]
+impl super::logs::LogsSource for SurrealLogs {
+    fn list(
+        &self,
+        filter: &argos_osint_core::events::EventFilter,
+        limit: usize,
+    ) -> Result<Vec<argos_osint_core::events::EventRow>> {
+        use argos_osint_core::storage::{event_log, runtime};
+        runtime::blocking(
+            |repo| async move { event_log::list_events(repo.db(), filter, limit).await },
+        )
+    }
+    fn counts(&self) -> Result<argos_osint_core::jobs_view::EventCounts> {
+        use argos_osint_core::storage::{event_log, runtime};
+        runtime::blocking(|repo| async move { event_log::event_counts(repo.db()).await })
+    }
+    fn apps(&self) -> Result<Vec<String>> {
+        use argos_osint_core::storage::{event_log, runtime};
+        runtime::blocking(|repo| async move { event_log::event_apps(repo.db()).await })
+    }
+}
+
+/// Reload a Logs snapshot from the repository. Plain worker threads only.
+#[cfg(feature = "surreal")]
+pub(crate) fn load_logs(logs: &mut super::logs::LogsView) {
+    logs.reload(&SurrealLogs);
+}
+
+#[cfg(not(feature = "surreal"))]
+pub(crate) fn load_logs(_logs: &mut super::logs::LogsView) {
+    unreachable!("SurrealDB Logs is off without the surreal feature")
+}
+
+/// The Logs header counts from the repository. Plain worker threads only.
+#[cfg(feature = "surreal")]
+pub(crate) fn log_counts() -> Result<argos_osint_core::jobs_view::EventCounts> {
+    use super::logs::LogsSource;
+    SurrealLogs.counts()
+}
+
+#[cfg(not(feature = "surreal"))]
+pub(crate) fn log_counts() -> Result<argos_osint_core::jobs_view::EventCounts> {
+    unreachable!("SurrealDB Logs is off without the surreal feature")
+}
+
+/// Record one session log line in `argos_event` without blocking the UI
+/// thread (ordered, so lines keep their order; drained before exit).
+/// False when the write could not be started.
+#[cfg(feature = "surreal")]
+pub(crate) fn record_log(event: argos_osint_core::events::NewEvent) -> bool {
+    use argos_osint_core::storage::{event_log, runtime};
+    runtime::spawn_ordered(async move {
+        if let Ok(repo) = runtime::repository().await {
+            let _ = event_log::record_event(repo.db(), &event).await;
+        }
+    })
+}
+
+#[cfg(not(feature = "surreal"))]
+pub(crate) fn record_log(_event: argos_osint_core::events::NewEvent) -> bool {
+    unreachable!("SurrealDB Logs is off without the surreal feature")
+}
+
+/// Logs retention on the repository: `argos_event` past `hours` and the
+/// rate-limited telemetry prune. Plain worker threads only.
+#[cfg(feature = "surreal")]
+pub(crate) fn prune_logs(hours: i64) -> Result<usize> {
+    use argos_osint_core::storage::{event_log, runtime, telemetry};
+    runtime::blocking(|repo| async move {
+        let pruned = event_log::prune_events(repo.db(), hours).await?;
+        telemetry::prune(repo.db(), chrono::Utc::now()).await?;
+        Ok(pruned)
+    })
+}
+
+#[cfg(not(feature = "surreal"))]
+pub(crate) fn prune_logs(_hours: i64) -> Result<usize> {
+    unreachable!("SurrealDB Logs is off without the surreal feature")
+}
+
+/// Logs "Clear log" on the repository (`argos_event` only). Plain worker
+/// threads only.
+#[cfg(feature = "surreal")]
+pub(crate) fn clear_logs() -> Result<usize> {
+    use argos_osint_core::storage::{event_log, runtime};
+    runtime::blocking(|repo| async move { event_log::clear_events(repo.db()).await })
+}
+
+#[cfg(not(feature = "surreal"))]
+pub(crate) fn clear_logs() -> Result<usize> {
+    unreachable!("SurrealDB Logs is off without the surreal feature")
+}

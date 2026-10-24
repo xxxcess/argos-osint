@@ -2972,48 +2972,27 @@ impl ReconJob {
         resume_run: Option<&str>,
         cancel: Arc<AtomicBool>,
     ) -> Option<Self> {
-        #[cfg(feature = "surreal")]
-        if surreal_selected() {
-            use crate::storage::recon_jobs as rj;
-            let repo = crate::storage::runtime::repository().await.ok()?;
-            let existing = match resume_run {
-                Some(run) => rj::job_for_run(&repo, rj::RECON_OPERATION, run)
-                    .await
-                    .ok()
-                    .flatten(),
-                None => None,
-            };
-            let spec = rj::ReconJob {
-                id: existing.as_deref(),
-                title: &title,
-                run_ref: resume_run.unwrap_or(""),
-                resource_ref: &resource,
-            };
-            let id = rj::begin_recon_job(&repo, &spec).await.ok()?;
-            return Some(Self::Surreal {
-                id,
-                span: std::time::Instant::now(),
-                cancel,
-            });
-        }
-        let db = sqlite_path(db_path)?;
-        let existing = resume_run.and_then(|run| {
-            rusqlite::Connection::open(db).ok().and_then(|conn| {
-                crate::job_registry::job_for_run(&conn, "recon_investigation", run)
-                    .ok()
-                    .flatten()
-            })
-        });
-        let mut spec = crate::job_registry::JobSpec::new("recon", "recon_investigation", title)
-            .resource(resource)
-            .cancellable();
-        if let Some(run) = resume_run {
-            spec = spec.run(run);
-        }
-        if let Some(id) = existing {
-            spec = spec.with_id(id);
-        }
-        crate::job_registry::begin_optional_with(db, spec, cancel).map(Self::Sqlite)
+        use crate::storage::recon_jobs as rj;
+        let repo = crate::storage::runtime::repository().await.ok()?;
+        let existing = match resume_run {
+            Some(run) => rj::job_for_run(&repo, rj::RECON_OPERATION, run)
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        let spec = rj::ReconJob {
+            id: existing.as_deref(),
+            title: &title,
+            run_ref: resume_run.unwrap_or(""),
+            resource_ref: &resource,
+        };
+        let id = rj::begin_recon_job(&repo, &spec).await.ok()?;
+        Some(Self::Surreal {
+            id,
+            span: std::time::Instant::now(),
+            cancel,
+        })
     }
 
     /// Phase heartbeat. On SurrealDB, Jobs → Cancel raises the cancel flag.

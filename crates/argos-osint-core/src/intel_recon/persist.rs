@@ -206,40 +206,15 @@ pub struct IntelAssessmentRow {
 
 impl Store {
     pub fn article_body_for_article(&self, article_id: &str) -> Result<Option<ArticleBodyRow>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            let a = article_id.to_string();
-            return crate::storage::runtime::blocking(|repo| async move {
-                crate::storage::pipeline_inputs::article_body_for_article(&repo, &a).await
-            });
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT id, article_id, run_id, original_url, resolved_url, source_domain, source_name,
-                    body_markdown, content_hash, quality, quality_rationale, body_version,
-                    fetch_tool, fetched_at, retry_after, state, created_at, updated_at
-             FROM article_bodies WHERE article_id=?1
-             ORDER BY body_version DESC, updated_at DESC LIMIT 1",
-        )?;
-        Ok(stmt
-            .query_row([article_id], article_body_from_row)
-            .optional()?)
+        let a = article_id.to_string();
+        crate::storage::runtime::blocking(|repo| async move {
+            crate::storage::pipeline_inputs::article_body_for_article(&repo, &a).await
+        })
     }
 
     pub fn article_body_by_id(&self, id: &str) -> Result<Option<ArticleBodyRow>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            let id = id.to_string();
-            return crate::storage::runtime::blocking(
-                |repo| async move { sb::by_id(&repo, &id).await },
-            );
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT id, article_id, run_id, original_url, resolved_url, source_domain, source_name,
-                    body_markdown, content_hash, quality, quality_rationale, body_version,
-                    fetch_tool, fetched_at, retry_after, state, created_at, updated_at
-             FROM article_bodies WHERE id=?1",
-        )?;
-        Ok(stmt.query_row([id], article_body_from_row).optional()?)
+        let id = id.to_string();
+        crate::storage::runtime::blocking(|repo| async move { sb::by_id(&repo, &id).await })
     }
 
     pub fn ensure_article_body(
@@ -250,68 +225,30 @@ impl Store {
         source_domain: &str,
         source_name: &str,
     ) -> Result<ArticleBodyRow> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            let (a, r, u, d, n) = (
-                article_id.to_string(),
-                run_id.to_string(),
-                url.to_string(),
-                source_domain.to_string(),
-                source_name.to_string(),
-            );
-            return crate::storage::runtime::blocking(|repo| async move {
-                sb::ensure(&repo, &a, &r, &u, &d, &n).await
-            });
-        }
-        if let Some(existing) = self.article_body_for_article(article_id)? {
-            return Ok(existing);
-        }
-        let ts = now();
-        let id = new_row_id("abody");
-        self.conn.execute(
-            "INSERT INTO article_bodies(
-                id, article_id, run_id, original_url, resolved_url, source_domain, source_name,
-                body_markdown, content_hash, quality, quality_rationale, body_version,
-                fetch_tool, fetched_at, retry_after, state, created_at, updated_at
-             ) VALUES (?1,?2,?3,?4,'',?5,?6,'','','unavailable','',1,'','','','idle',?7,?7)",
-            params![id, article_id, run_id, url, source_domain, source_name, ts],
-        )?;
-        Ok(self.article_body_by_id(&id)?.expect("just inserted"))
+        let (a, r, u, d, n) = (
+            article_id.to_string(),
+            run_id.to_string(),
+            url.to_string(),
+            source_domain.to_string(),
+            source_name.to_string(),
+        );
+        crate::storage::runtime::blocking(|repo| async move {
+            sb::ensure(&repo, &a, &r, &u, &d, &n).await
+        })
     }
 
     pub fn update_article_body_state(&self, id: &str, state: &str) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            let (id, st) = (id.to_string(), state.to_string());
-            return crate::storage::runtime::blocking(|repo| async move {
-                sb::set_state(&repo, &id, &st).await
-            });
-        }
-        self.conn.execute(
-            "UPDATE article_bodies SET state=?2, updated_at=?3 WHERE id=?1",
-            params![id, state, now()],
-        )?;
-        Ok(())
+        let (id, st) = (id.to_string(), state.to_string());
+        crate::storage::runtime::blocking(
+            |repo| async move { sb::set_state(&repo, &id, &st).await },
+        )
     }
 
     /// Clear stored article prose before a Reload / forced re-fetch so the UI does not
     /// keep showing the previous body while retrieval and synthesis run.
     pub fn clear_article_body_content(&self, id: &str) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            let id = id.to_string();
-            return crate::storage::runtime::blocking(|repo| async move {
-                sb::clear_content(&repo, &id).await
-            });
-        }
-        self.conn.execute(
-            "UPDATE article_bodies SET
-                body_markdown='', content_hash='', quality='unavailable',
-                quality_rationale='', state='running', retry_after='', updated_at=?2
-             WHERE id=?1",
-            params![id, now()],
-        )?;
-        Ok(())
+        let id = id.to_string();
+        crate::storage::runtime::blocking(|repo| async move { sb::clear_content(&repo, &id).await })
     }
 
     pub fn commit_article_body(
@@ -325,71 +262,18 @@ impl Store {
         fetch_tool: &str,
         bump_version: bool,
     ) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            let (id, md, h, q, ra, u, t) = (
-                id.to_string(),
-                markdown.to_string(),
-                content_hash.to_string(),
-                quality.to_string(),
-                rationale.to_string(),
-                resolved_url.to_string(),
-                fetch_tool.to_string(),
-            );
-            return crate::storage::runtime::blocking(|repo| async move {
-                sb::commit(&repo, &id, &md, &h, &q, &ra, &u, &t, bump_version).await
-            });
-        }
-        let ts = now();
-        if bump_version {
-            self.conn.execute(
-                "UPDATE article_bodies SET
-                    body_markdown=?2, content_hash=?3, quality=?4, quality_rationale=?5,
-                    resolved_url=?6, fetch_tool=?7, fetched_at=?8, retry_after='',
-                    state='ready', body_version=body_version+1, updated_at=?8
-                 WHERE id=?1",
-                params![
-                    id,
-                    markdown,
-                    content_hash,
-                    quality,
-                    rationale,
-                    resolved_url,
-                    fetch_tool,
-                    ts
-                ],
-            )?;
-        } else {
-            self.conn.execute(
-                "UPDATE article_bodies SET
-                    body_markdown=?2, content_hash=?3, quality=?4, quality_rationale=?5,
-                    resolved_url=?6, fetch_tool=?7, fetched_at=?8, retry_after='',
-                    state='ready', updated_at=?8
-                 WHERE id=?1",
-                params![
-                    id,
-                    markdown,
-                    content_hash,
-                    quality,
-                    rationale,
-                    resolved_url,
-                    fetch_tool,
-                    ts
-                ],
-            )?;
-        }
-        if let Some(body) = self.article_body_by_id(id)? {
-            let source = crate::nlp::Source::derived(id, &body.body_version.to_string(), markdown);
-            crate::nlp::cache::register(
-                &self.conn,
-                "article",
-                &body.article_id,
-                &source,
-                None,
-                "historical-body-v1",
-            )?;
-        }
-        Ok(())
+        let (id, md, h, q, ra, u, t) = (
+            id.to_string(),
+            markdown.to_string(),
+            content_hash.to_string(),
+            quality.to_string(),
+            rationale.to_string(),
+            resolved_url.to_string(),
+            fetch_tool.to_string(),
+        );
+        crate::storage::runtime::blocking(|repo| async move {
+            sb::commit(&repo, &id, &md, &h, &q, &ra, &u, &t, bump_version).await
+        })
     }
 
     pub fn mark_article_body_failed(
@@ -400,29 +284,16 @@ impl Store {
         partial_markdown: &str,
         quality: &str,
     ) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            let (id, ra, ry, md, q) = (
-                id.to_string(),
-                rationale.to_string(),
-                retry_after.to_string(),
-                partial_markdown.to_string(),
-                quality.to_string(),
-            );
-            return crate::storage::runtime::blocking(|repo| async move {
-                sb::mark_failed(&repo, &id, &ra, &ry, &md, &q).await
-            });
-        }
-        let ts = now();
-        self.conn.execute(
-            "UPDATE article_bodies SET
-                quality=?2, quality_rationale=?3, retry_after=?4,
-                body_markdown=CASE WHEN length(?5)>0 THEN ?5 ELSE body_markdown END,
-                state='failed', updated_at=?6
-             WHERE id=?1",
-            params![id, quality, rationale, retry_after, partial_markdown, ts],
-        )?;
-        Ok(())
+        let (id, ra, ry, md, q) = (
+            id.to_string(),
+            rationale.to_string(),
+            retry_after.to_string(),
+            partial_markdown.to_string(),
+            quality.to_string(),
+        );
+        crate::storage::runtime::blocking(|repo| async move {
+            sb::mark_failed(&repo, &id, &ra, &ry, &md, &q).await
+        })
     }
 
     pub fn insert_retrieval_attempt(
@@ -435,46 +306,17 @@ impl Store {
         remote_job_id: &str,
         body_version: i64,
     ) -> Result<String> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            let _ = remote_job_id;
-            let (b, t, i, st, r) = (
-                body_id.to_string(),
-                tool_id.to_string(),
-                input_identity.to_string(),
-                state.to_string(),
-                reason.to_string(),
-            );
-            return crate::storage::runtime::blocking(|repo| async move {
-                sb::insert_attempt(&repo, &b, &t, &i, &st, &r, body_version).await
-            });
-        }
-        let id = new_row_id("attempt");
-        let ts = now();
-        let finished = if state == "running" {
-            String::new()
-        } else {
-            ts.clone()
-        };
-        self.conn.execute(
-            "INSERT INTO article_retrieval_attempts(
-                id, body_id, tool_id, input_identity, state, started_at, finished_at,
-                reason, remote_job_id, body_version
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![
-                id,
-                body_id,
-                tool_id,
-                input_identity,
-                state,
-                ts,
-                finished,
-                reason,
-                remote_job_id,
-                body_version
-            ],
-        )?;
-        Ok(id)
+        let _ = remote_job_id;
+        let (b, t, i, st, r) = (
+            body_id.to_string(),
+            tool_id.to_string(),
+            input_identity.to_string(),
+            state.to_string(),
+            reason.to_string(),
+        );
+        crate::storage::runtime::blocking(|repo| async move {
+            sb::insert_attempt(&repo, &b, &t, &i, &st, &r, body_version).await
+        })
     }
 
     pub fn finish_retrieval_attempt(
@@ -484,39 +326,18 @@ impl Store {
         reason: &str,
         remote_job_id: &str,
     ) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            let _ = remote_job_id;
-            let (id, st, r) = (id.to_string(), state.to_string(), reason.to_string());
-            return crate::storage::runtime::blocking(|repo| async move {
-                sb::finish_attempt(&repo, &id, &st, &r).await
-            });
-        }
-        self.conn.execute(
-            "UPDATE article_retrieval_attempts SET state=?2, finished_at=?3, reason=?4, remote_job_id=?5
-             WHERE id=?1",
-            params![id, state, now(), reason, remote_job_id],
-        )?;
-        Ok(())
+        let _ = remote_job_id;
+        let (id, st, r) = (id.to_string(), state.to_string(), reason.to_string());
+        crate::storage::runtime::blocking(|repo| async move {
+            sb::finish_attempt(&repo, &id, &st, &r).await
+        })
     }
 
     pub fn intel_report_job(&self, id: &str) -> Result<Option<IntelReportJobRow>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            let id = id.to_string();
-            return crate::storage::runtime::blocking(|repo| async move {
-                crate::storage::recon_jobs::report_job(&repo, &id).await
-            });
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT id, investigation_id, article_id, mode, revision, state, stage,
-                    settings_json, budget_json, parent_job_id,
-                    sections_done, sections_total, elements_done, elements_total,
-                    tool_calls_done, tool_calls_allowance, current_tool, warning, error,
-                    generation, started_at, updated_at, finished_at
-             FROM intel_report_jobs WHERE id=?1",
-        )?;
-        Ok(stmt.query_row([id], job_from_row).optional()?)
+        let id = id.to_string();
+        crate::storage::runtime::blocking(|repo| async move {
+            crate::storage::recon_jobs::report_job(&repo, &id).await
+        })
     }
 }
 

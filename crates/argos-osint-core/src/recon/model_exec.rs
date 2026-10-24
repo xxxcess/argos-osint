@@ -1154,49 +1154,23 @@ pub fn ensure_operation(
     let Some(db_path) = db_path else {
         return Ok(());
     };
-    #[cfg(feature = "surreal")]
-    if crate::storage::runtime::configured() {
-        let (id, run, task, role) = (
-            scope.operation_id.to_string(),
-            scope.run_id.unwrap_or("").to_string(),
-            scope.task_id.unwrap_or("").to_string(),
-            scope.role.to_string(),
-        );
-        let (generation, draft, epoch) = (
-            i64::from(scope.generation),
-            draft.to_string(),
-            scope.task_epoch,
-        );
-        on_repository(move |repo| async move {
-            crate::storage::recon_jobs::ensure_operation(
-                &repo, &id, &run, &task, &role, generation, &draft, epoch,
-            )
-            .await
-        });
-        return Ok(());
-    }
-    let store = Store::open(db_path)?;
-    let now = now_rfc3339();
-    store.conn.execute(
-        "INSERT INTO recon_model_operations (id, run_id, task_id, role, generation, status, draft, created_at, updated_at, task_epoch)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?7, ?8)
-         ON CONFLICT(id) DO UPDATE SET
-           generation = excluded.generation,
-           task_epoch = COALESCE(excluded.task_epoch, recon_model_operations.task_epoch),
-           status = 'running',
-           draft = CASE WHEN excluded.draft != '' THEN excluded.draft ELSE recon_model_operations.draft END,
-           updated_at = excluded.updated_at",
-        rusqlite::params![
-            scope.operation_id,
-            scope.run_id.unwrap_or(""),
-            scope.task_id.unwrap_or(""),
-            scope.role,
-            scope.generation,
-            draft,
-            now,
-            scope.task_epoch,
-        ],
-    )?;
+    let (id, run, task, role) = (
+        scope.operation_id.to_string(),
+        scope.run_id.unwrap_or("").to_string(),
+        scope.task_id.unwrap_or("").to_string(),
+        scope.role.to_string(),
+    );
+    let (generation, draft, epoch) = (
+        i64::from(scope.generation),
+        draft.to_string(),
+        scope.task_epoch,
+    );
+    on_repository(move |repo| async move {
+        crate::storage::recon_jobs::ensure_operation(
+            &repo, &id, &run, &task, &role, generation, &draft, epoch,
+        )
+        .await
+    });
     Ok(())
 }
 
@@ -1205,19 +1179,10 @@ pub fn save_operation_draft(db_path: Option<&Path>, operation_id: &str, draft: &
     let Some(db_path) = db_path else {
         return Ok(());
     };
-    #[cfg(feature = "surreal")]
-    if crate::storage::runtime::configured() {
-        let (id, draft) = (operation_id.to_string(), draft.to_string());
-        on_repository(move |repo| async move {
-            crate::storage::recon_exec::set_operation_draft(&repo, &id, &draft).await
-        });
-        return Ok(());
-    }
-    let store = Store::open(db_path)?;
-    store.conn.execute(
-        "UPDATE recon_model_operations SET draft = ?1, updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![draft, now_rfc3339(), operation_id],
-    )?;
+    let (id, draft) = (operation_id.to_string(), draft.to_string());
+    on_repository(move |repo| async move {
+        crate::storage::recon_exec::set_operation_draft(&repo, &id, &draft).await
+    });
     Ok(())
 }
 
@@ -1231,21 +1196,11 @@ pub fn update_operation_status(
     let Some(db_path) = db_path else {
         return Ok(());
     };
-    #[cfg(feature = "surreal")]
-    if crate::storage::runtime::configured() {
-        let (id, status) = (operation_id.to_string(), status.to_string());
-        let final_id = final_message_id.map(str::to_string);
-        on_repository(move |repo| async move {
-            crate::storage::recon_exec::finish_operation(&repo, &id, &status, final_id.as_deref())
-                .await
-        });
-        return Ok(());
-    }
-    let store = Store::open(db_path)?;
-    store.conn.execute(
-        "UPDATE recon_model_operations SET status = ?1, final_message_id = COALESCE(?2, final_message_id), updated_at = ?3 WHERE id = ?4",
-        rusqlite::params![status, final_message_id, now_rfc3339(), operation_id],
-    )?;
+    let (id, status) = (operation_id.to_string(), status.to_string());
+    let final_id = final_message_id.map(str::to_string);
+    on_repository(move |repo| async move {
+        crate::storage::recon_exec::finish_operation(&repo, &id, &status, final_id.as_deref()).await
+    });
     Ok(())
 }
 
@@ -1265,64 +1220,33 @@ fn record_attempt_start(
     let Some(db_path) = db_path else {
         return Ok(attempt_id);
     };
-    #[cfg(feature = "surreal")]
-    if crate::storage::runtime::configured() {
-        let owned = [
-            attempt_id.clone(),
-            operation_id.to_string(),
-            route.provider.to_string(),
-            route.account.to_string(),
-            route.model.to_string(),
-            transport.to_string(),
-            queued_at.to_string(),
-            declaration.to_string(),
-        ];
-        on_repository(move |repo| async move {
-            let [id, op, provider, account, model, transport, queued, decl] = &owned;
-            let start = crate::storage::recon_jobs::AttemptStart {
-                id,
-                operation_id: op,
-                generation,
-                route_index,
-                attempt,
-                provider,
-                account,
-                model,
-                transport,
-                queued_at: queued,
-                declaration_json: decl,
-            };
-            crate::storage::recon_jobs::record_attempt_start(&repo, &start).await
-        });
-        return Ok(attempt_id);
-    }
-    let store = Store::open(db_path)?;
-    let now = now_rfc3339();
-    store.conn.execute(
-        "INSERT INTO recon_model_attempts (
-           id, operation_id, generation, route_index, attempt,
-           provider, account, model, transport, dispatched,
-           outcome, queued_at, admitted_at, started_at, finished_at, declaration_json
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 'running', ?10, ?11, ?11, '', ?12)
-         ON CONFLICT(operation_id, generation, route_index, attempt) DO UPDATE SET
-           outcome = 'running', queued_at = excluded.queued_at, admitted_at = excluded.admitted_at,
-            started_at = excluded.started_at, finished_at = '',
-            declaration_json = excluded.declaration_json",
-        rusqlite::params![
-            attempt_id,
-            operation_id,
+    let owned = [
+        attempt_id.clone(),
+        operation_id.to_string(),
+        route.provider.to_string(),
+        route.account.to_string(),
+        route.model.to_string(),
+        transport.to_string(),
+        queued_at.to_string(),
+        declaration.to_string(),
+    ];
+    on_repository(move |repo| async move {
+        let [id, op, provider, account, model, transport, queued, decl] = &owned;
+        let start = crate::storage::recon_jobs::AttemptStart {
+            id,
+            operation_id: op,
             generation,
             route_index,
             attempt,
-            route.provider,
-            route.account,
-            route.model,
+            provider,
+            account,
+            model,
             transport,
-            queued_at,
-            now,
-            declaration,
-        ],
-    )?;
+            queued_at: queued,
+            declaration_json: decl,
+        };
+        crate::storage::recon_jobs::record_attempt_start(&repo, &start).await
+    });
     Ok(attempt_id)
 }
 
@@ -1336,78 +1260,11 @@ fn record_attempt_finish(
     let Some(db_path) = db_path else {
         return Ok(());
     };
-    #[cfg(feature = "surreal")]
-    if crate::storage::runtime::configured() {
-        let id = attempt_id.to_string();
-        let finish = attempt_finish(outcome, timings);
-        on_repository(move |repo| async move {
-            crate::storage::recon_jobs::record_attempt_finish(&repo, &id, &finish).await
-        });
-        return Ok(());
-    }
-    let store = Store::open(db_path)?;
-    let now = now_rfc3339();
-    store.conn.execute(
-        "UPDATE recon_model_attempts SET
-           outcome = ?1,
-           failure_category = ?2,
-           http_status = ?3,
-           request_id = ?4,
-           finish_reason = ?5,
-           char_count = ?6,
-           wait_ms = ?7,
-           error_message = ?8,
-           finished_at = ?9,
-           queued_at = ?10,
-           admitted_at = ?11,
-           sent_at = ?12,
-           first_response_at = ?13,
-           elapsed_ms = ?14,
-           queue_ms = ?15,
-           ttfb_ms = ?16,
-           prompt_tokens = ?17,
-           completion_tokens = ?18,
-           stream_completed = ?19,
-           reasoning_tokens = ?21,
-           visible_tokens = ?22,
-           reported_cost_usd = ?23,
-           response_headers_ms = ?24,
-           first_reasoning_ms = ?25,
-           first_output_ms = ?26,
-           stream_completion_ms = ?27,
-           policy_diagnostics_json = ?28
-         WHERE id = ?20",
-        rusqlite::params![
-            outcome.outcome,
-            outcome.category.as_deref().unwrap_or(""),
-            outcome.http_status,
-            outcome.request_id.as_deref().unwrap_or(""),
-            outcome.finish_reason.as_deref().unwrap_or(""),
-            outcome.char_count,
-            outcome.wait_ms,
-            outcome.error_message.as_deref().unwrap_or(""),
-            now,
-            timings.queued_at,
-            timings.admitted_at,
-            timings.sent_at,
-            timings.first_response_at,
-            timings.elapsed_ms,
-            timings.queue_ms,
-            timings.ttfb_ms,
-            timings.prompt_tokens,
-            timings.completion_tokens,
-            timings.stream_completed,
-            attempt_id,
-            timings.reasoning_tokens,
-            timings.visible_tokens,
-            timings.reported_cost_usd,
-            timings.response_headers_ms,
-            timings.first_reasoning_ms,
-            timings.first_output_ms,
-            timings.stream_completion_ms,
-            serde_json::to_string(&timings.policy_diagnostics).unwrap_or_else(|_| "[]".into()),
-        ],
-    )?;
+    let id = attempt_id.to_string();
+    let finish = attempt_finish(outcome, timings);
+    on_repository(move |repo| async move {
+        crate::storage::recon_jobs::record_attempt_finish(&repo, &id, &finish).await
+    });
     Ok(())
 }
 

@@ -68,29 +68,19 @@ impl StageClock {
         }
         self.recorded = true;
         let elapsed = self.started.elapsed_ms();
-        #[cfg(feature = "surreal")]
-        if super::backend::surreal_selected() {
-            // The attempt ordinal is read from the repository, so the whole
-            // write runs there; SQLite is never opened.
-            let (run_id, mode, stage) =
-                (self.run_id.clone(), self.mode.clone(), self.stage.clone());
-            crate::storage::runtime::spawn(async move {
-                let Ok(repo) = crate::storage::runtime::repository().await else {
-                    return;
-                };
-                let attempt = crate::storage::telemetry::stage_attempt(repo.db(), &run_id, &stage)
-                    .await
-                    .unwrap_or(1);
-                let event = stage_event(&run_id, &mode, &stage, attempt, elapsed);
-                let _ = crate::storage::telemetry::record(repo.db(), &event).await;
-            });
-            return;
-        }
-        // A resumed or replayed stage is a new attempt, so the ordinal is
-        // derived from the rows already written for this run and stage.
-        let attempt = stage_attempt(&self.db_path, &self.run_id, &self.stage);
-        let event = stage_event(&self.run_id, &self.mode, &self.stage, attempt, elapsed);
-        let _ = telemetry::record(&self.db_path, &event);
+        // The attempt ordinal is read from the repository, so the whole
+        // write runs there; SQLite is never opened.
+        let (run_id, mode, stage) = (self.run_id.clone(), self.mode.clone(), self.stage.clone());
+        crate::storage::runtime::spawn(async move {
+            let Ok(repo) = crate::storage::runtime::repository().await else {
+                return;
+            };
+            let attempt = crate::storage::telemetry::stage_attempt(repo.db(), &run_id, &stage)
+                .await
+                .unwrap_or(1);
+            let event = stage_event(&run_id, &mode, &stage, attempt, elapsed);
+            let _ = crate::storage::telemetry::record(repo.db(), &event).await;
+        });
     }
 }
 

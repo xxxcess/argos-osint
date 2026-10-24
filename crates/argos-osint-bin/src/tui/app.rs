@@ -3871,25 +3871,10 @@ impl App {
     }
 
     pub(crate) fn open_profile_intel_job(&mut self, id: &str) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if surreal_brain::on() {
-            let (job, run_id) = surreal_brain::report_job_with_run(id)?
-                .ok_or_else(|| anyhow::anyhow!("Report job no longer retained"))?;
-            let run_id = run_id
-                .ok_or_else(|| anyhow::anyhow!("The report's article is no longer retained"))?;
-            self.open_claim_article(&run_id, &job.article_id)?;
-            self.status = format!("Report {} · {} · {}", job.id, job.state, job.stage);
-            return Ok(());
-        }
-        let job = self
-            .store
-            .intel_report_job(id)?
+        let (job, run_id) = surreal_brain::report_job_with_run(id)?
             .ok_or_else(|| anyhow::anyhow!("Report job no longer retained"))?;
-        let run_id: String = self.store.connection().query_row(
-            "SELECT run_id FROM atlas_articles WHERE id=?1 ORDER BY seen_at DESC LIMIT 1",
-            [&job.article_id],
-            |row| row.get(0),
-        )?;
+        let run_id =
+            run_id.ok_or_else(|| anyhow::anyhow!("The report's article is no longer retained"))?;
         self.open_claim_article(&run_id, &job.article_id)?;
         self.status = format!("Report {} · {} · {}", job.id, job.state, job.stage);
         Ok(())

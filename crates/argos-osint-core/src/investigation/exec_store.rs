@@ -35,13 +35,7 @@ pub(crate) type Saved = (String, String, String);
 impl ExecStore {
     /// SurrealDB when selected, else the SQLite file at `db_path`.
     pub(crate) async fn open(db_path: &Path) -> Result<Self> {
-        #[cfg(feature = "surreal")]
-        if crate::recon::backend::surreal_selected() {
-            return Ok(Self::Surreal(crate::storage::runtime::repository().await?));
-        }
-        Ok(Self::Sqlite(std::sync::Mutex::new(
-            crate::store::Store::open(db_path)?,
-        )))
+        Ok(Self::Surreal(crate::storage::runtime::repository().await?))
     }
 
     /// The SQLite path model execution and decisions write telemetry to;
@@ -356,33 +350,21 @@ impl ExecStore {
 /// Record a model-execution activity label (and its log message on
 /// SQLite) for `task_id`, best effort; never blocks the caller.
 pub(crate) fn record_activity(db_path: &Path, task_id: &str, label: &str, message: Option<String>) {
-    #[cfg(feature = "surreal")]
-    if crate::recon::backend::surreal_selected() {
-        let (task_id, label) = (task_id.to_string(), label.to_string());
-        crate::storage::runtime::spawn_ordered(async move {
-            if let Ok(repo) = crate::storage::runtime::repository().await {
+    let (task_id, label) = (task_id.to_string(), label.to_string());
+    crate::storage::runtime::spawn_ordered(async move {
+        if let Ok(repo) = crate::storage::runtime::repository().await {
+            let _ = crate::storage::pipeline_exec::record_activity(&repo, &task_id, &label).await;
+            if let Some(message) = message {
+                let event = super::insight_execution::activity_new_event(
+                    &task_id,
+                    String::new(),
+                    String::new(),
+                    &message,
+                );
                 let _ =
-                    crate::storage::pipeline_exec::record_activity(&repo, &task_id, &label).await;
-                if let Some(message) = message {
-                    let event = super::insight_execution::activity_new_event(
-                        &task_id,
-                        String::new(),
-                        String::new(),
-                        &message,
-                    );
-                    let _ = crate::storage::pipeline_exec::record_task_event(
-                        &repo, &task_id, true, event,
-                    )
-                    .await;
-                }
+                    crate::storage::pipeline_exec::record_task_event(&repo, &task_id, true, event)
+                        .await;
             }
-        });
-        return;
-    }
-    if let Ok(store) = crate::store::Store::open(db_path) {
-        let _ = super::insight_execution::record_activity(&store.conn, task_id, label);
-        if let Some(message) = message {
-            let _ = super::insight_execution::activity_event(&store.conn, task_id, &message);
         }
-    }
+    });
 }

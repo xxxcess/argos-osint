@@ -104,19 +104,11 @@ fn report_drainer<T>(db_path: &std::path::Path, name: &str, result: Result<T>) {
         message: format!("{name} worker error: {message}"),
         ..Default::default()
     };
-    #[cfg(feature = "surreal")]
-    if crate::recon::backend::surreal_selected() {
-        crate::storage::runtime::spawn_ordered(async move {
-            if let Ok(repo) = crate::storage::runtime::repository().await {
-                let _ = crate::storage::event_log::record_event(repo.db(), &event).await;
-            }
-        });
-        return;
-    }
-    if let Ok(conn) = Connection::open(db_path) {
-        let _ = conn.busy_timeout(Duration::from_secs(2));
-        let _ = crate::events::record_event(&conn, &event);
-    }
+    crate::storage::runtime::spawn_ordered(async move {
+        if let Ok(repo) = crate::storage::runtime::repository().await {
+            let _ = crate::storage::event_log::record_event(repo.db(), &event).await;
+        }
+    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -587,8 +579,7 @@ impl WorkerPool {
                 let mut loops = 0u32;
                 let mut schema_ready = false;
                 while !flag.load(Ordering::Relaxed) {
-                    #[cfg(feature = "surreal")]
-                    if crate::recon::backend::surreal_selected() {
+                    {
                         let owner = owner.clone();
                         let drained = crate::storage::runtime::blocking(move |repo| async move {
                             if !surreal_elected(&repo, &owner).await? {
@@ -750,8 +741,7 @@ impl WorkerPool {
                     return;
                 };
                 while !flag.load(Ordering::Acquire) {
-                    #[cfg(feature = "surreal")]
-                    if crate::recon::backend::surreal_selected() {
+                    {
                         let (owner, stop) = (owner.clone(), flag.clone());
                         report_drainer(
                             &db_path,
@@ -809,8 +799,7 @@ impl WorkerPool {
             .name("argos-brain-backfill".into())
             .spawn(move || {
                 while !flag.load(Ordering::Acquire) {
-                    #[cfg(feature = "surreal")]
-                    if crate::recon::backend::surreal_selected() {
+                    {
                         let owner = owner.clone();
                         let ran = crate::storage::runtime::blocking(move |repo| async move {
                             if !surreal_elected(&repo, &owner).await? {
@@ -900,8 +889,7 @@ impl WorkerPool {
                 while !flag.load(Ordering::Acquire) {
                     // SurrealDB: elect on the repository's scheduler lease and
                     // drain the repository's brief chains; never the SQLite file.
-                    #[cfg(feature = "surreal")]
-                    if crate::recon::backend::surreal_selected() {
+                                        {
                         let (owner, flag, config) = (owner.clone(), flag.clone(), config.clone());
                         report_drainer(
                             &db_path,
@@ -982,8 +970,7 @@ impl WorkerPool {
                     // SurrealDB: elect on the repository's scheduler lease and
                     // drive the shared refresh tasks there (startup recovery
                     // included); never the SQLite file.
-                    #[cfg(feature = "surreal")]
-                    if crate::recon::backend::surreal_selected() {
+                    {
                         let (owner, flag) = (owner.clone(), flag.clone());
                         report_drainer(
                             &db_path,
@@ -1073,8 +1060,7 @@ impl WorkerPool {
                     return;
                 };
                 while !flag.load(Ordering::Acquire) {
-                    #[cfg(feature = "surreal")]
-                    if crate::recon::backend::surreal_selected() {
+                    {
                         let (owner, stop) = (owner.clone(), flag.clone());
                         report_drainer(
                             &db_path,

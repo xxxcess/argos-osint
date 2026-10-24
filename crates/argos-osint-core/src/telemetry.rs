@@ -469,18 +469,13 @@ fn rusqlite_result<T>(value: Result<T, rusqlite::Error>) -> anyhow::Result<T> {
 /// runtime without waiting) and SQLite is never opened: the two stores are
 /// never both written.
 pub fn record(db_path: &Path, event: &TelemetryEvent) -> anyhow::Result<()> {
-    #[cfg(feature = "surreal")]
-    if crate::storage::runtime::configured() {
-        let event = event.clone();
-        crate::storage::runtime::spawn(async move {
-            if let Ok(repo) = crate::storage::runtime::repository().await {
-                let _ = crate::storage::telemetry::record(repo.db(), &event).await;
-            }
-        });
-        return Ok(());
-    }
-    let conn = write_connection(db_path)?;
-    insert(&conn, event)
+    let event = event.clone();
+    crate::storage::runtime::spawn(async move {
+        if let Ok(repo) = crate::storage::runtime::repository().await {
+            let _ = crate::storage::telemetry::record(repo.db(), &event).await;
+        }
+    });
+    Ok(())
 }
 
 /// Writes an event on an existing connection.
@@ -489,68 +484,7 @@ pub fn record(db_path: &Path, event: &TelemetryEvent) -> anyhow::Result<()> {
 /// the repository exactly like [`record`]: callers still holding a legacy
 /// `Store` connection never write SQLite telemetry.
 pub fn insert(conn: &rusqlite::Connection, event: &TelemetryEvent) -> anyhow::Result<()> {
-    #[cfg(feature = "surreal")]
-    if crate::storage::runtime::configured() {
-        return record(Path::new(""), event);
-    }
-    let id = if event.id.is_empty() {
-        next_id()
-    } else {
-        event.id.clone()
-    };
-    let occurred = &event.occurred_at;
-    let day = occurred.chars().take(10).collect::<String>();
-    let hour = occurred.chars().take(13).collect::<String>();
-    let already = conn
-        .query_row(
-            "SELECT 1 FROM telemetry_events WHERE id = ?1",
-            [&id],
-            |_| Ok(true),
-        )
-        .optional()
-        .map_err(|err| anyhow::anyhow!(err.to_string()))?
-        .unwrap_or(false);
-    rusqlite_result(conn.execute(
-        "INSERT OR REPLACE INTO telemetry_events
-         (id, event_type, occurred_at, day, hour, app, trigger, tool_id, category, provider, role,
-          model, mode, engine, outcome, reason, job_id, run_id, thread_id, turn_id, article_id,
-          origin, call_id, canonical_ref, metric_ms, count, payload_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                 ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
-        rusqlite::params![
-            id,
-            event.event_type,
-            occurred,
-            day,
-            hour,
-            event.app,
-            event.trigger,
-            event.tool_id,
-            event.category,
-            event.provider,
-            event.role,
-            event.model,
-            event.mode,
-            event.engine,
-            event.outcome,
-            event.reason,
-            event.job_id,
-            event.run_id,
-            event.thread_id,
-            event.turn_id,
-            event.article_id,
-            event.origin,
-            event.call_id,
-            event.canonical_ref,
-            event.metric_ms,
-            event.count,
-            event.payload_json,
-        ],
-    ))?;
-    if already {
-        return Ok(());
-    }
-    rollup(conn, event, &hour, &day)
+    record(Path::new(""), event)
 }
 
 /// Folds an event into the hourly and daily rollups. Duration histograms are
@@ -634,35 +568,11 @@ impl Measured {
 /// (`storage::telemetry::prune`, started without waiting) and SQLite is
 /// never opened.
 pub fn prune(db_path: &Path, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
-    #[cfg(feature = "surreal")]
-    if crate::storage::runtime::configured() {
-        crate::storage::runtime::spawn(async move {
-            if let Ok(repo) = crate::storage::runtime::repository().await {
-                let _ = crate::storage::telemetry::prune(repo.db(), now).await;
-            }
-        });
-        return Ok(());
-    }
-    let conn = write_connection(db_path)?;
-    if !should_prune(&conn, now)? {
-        return Ok(());
-    }
-    let raw_cutoff = (now - chrono::Duration::days(RAW_RETENTION_DAYS)).to_rfc3339();
-    let rollup_cutoff = now - chrono::Duration::days(ROLLUP_RETENTION_DAYS);
-    let _ = rusqlite_result(conn.execute(
-        "DELETE FROM telemetry_events WHERE occurred_at < ?1",
-        rusqlite::params![raw_cutoff],
-    ))?;
-    let hourly_cutoff = raw_cutoff.chars().take(13).collect::<String>();
-    let _ = rusqlite_result(conn.execute(
-        "DELETE FROM telemetry_hourly WHERE bucket < ?1",
-        rusqlite::params![hourly_cutoff],
-    ))?;
-    let _ = rusqlite_result(conn.execute(
-        "DELETE FROM telemetry_daily WHERE bucket < ?1",
-        rusqlite::params![rollup_cutoff.format("%Y-%m-%d").to_string()],
-    ))?;
-    set_meta(&conn, "raw_pruned_at", &now.to_rfc3339())?;
+    crate::storage::runtime::spawn(async move {
+        if let Ok(repo) = crate::storage::runtime::repository().await {
+            let _ = crate::storage::telemetry::prune(repo.db(), now).await;
+        }
+    });
     Ok(())
 }
 

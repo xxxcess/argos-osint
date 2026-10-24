@@ -11,13 +11,21 @@ conflict. Revision fence for cycle evidence and derivation membership
 job registry, stage/activity events, `insight.superseded` and recall
 telemetry are wired (see "Combined tree" at the end).
 
-- [ ] Brief chain engine: `brief_stages::drain_parallel` / `claim_next` /
-  `run_claimed`, `brief_pipeline::publish` and `brief_canonical::publish_stage_on`
-  still read and write SQLite; `storage::brief` has every table they need but
-  no production caller. Under a storage config `WorkerPool::spawn_default`
-  now starts only the insight refresh drainer, so the Intel brief (and the
-  index, summary, backfill, actor-dedup and brain-scope) pools no longer open
-  SQLite; Intel briefs are not produced on SurrealDB until the engine moves.
+- [x] Brief chain engine on SurrealDB (`storage::brief_stages`): chains are
+  ensured with their inputs, stages are claimed under leases with heartbeat
+  renewal, executed through the shared `execute` over a `StageStore`, and
+  committed once (`jobs::commit_stage`); committed claims, inferences and links
+  publish through `storage::brief`. Under a storage config `spawn_default`
+  starts the Intel brief drainer on the repository (`drain_parallel`,
+  `SurrealRuntimeBackend`). Contention plus a delayed publication commits each
+  stage once (`surreal_contention_and_publication_delay_keep_leases_and_commit_once`).
+  Gaps: article body acquisition is not ported (a body stage reuses a clean
+  artifact stored in the repository and otherwise fails visibly, so
+  body-dependent stages wait); Related candidates are the run's stored Related
+  pairs, not the global all-cycles scope; the canonical Brain publication is
+  not ported (stage index state is `not_indexed`); publication runs after the
+  commit transaction, not inside it; the SurrealDB backend writes no provider
+  telemetry rows.
 - [x] Logs pane, its severity counts, the TUI session log and Jobs → Logs
   counts read and write `argos_event` under a storage config
   (`tui::surreal_brain::SurrealLogs`, worker threads); `argos_event` has prune

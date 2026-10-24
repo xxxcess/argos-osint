@@ -661,8 +661,7 @@ impl WorkerPool {
     pub fn spawn_default(db_path: std::path::PathBuf) -> Vec<WorkerPool> {
         let owner = process_owner();
         // Under a storage config nothing may open SQLite: each pool below
-        // has a repository drainer. The Intel brief pool is a SQLite
-        // subsystem and stays off until it is ported.
+        // has a repository drainer.
         if crate::recon::backend::surreal_selected() {
             #[cfg(feature = "surreal")]
             return vec![
@@ -671,6 +670,7 @@ impl WorkerPool {
                 Self::spawn_insight_refresh_drainer(db_path.clone(), owner.clone()),
                 Self::spawn_brain_backfill_drainer(db_path.clone(), owner.clone()),
                 Self::spawn_actor_dedup_drainer(db_path.clone(), owner.clone()),
+                Self::spawn_intel_brief_drainer(db_path.clone(), owner.clone()),
                 Self::spawn_brain_scope_drainer(db_path, owner),
             ];
             #[cfg(not(feature = "surreal"))]
@@ -898,6 +898,53 @@ impl WorkerPool {
                 };
                 let config = crate::intel_recon::brief_stages::ExecConfig::default();
                 while !flag.load(Ordering::Acquire) {
+                    // SurrealDB: elect on the repository's scheduler lease and
+                    // drain the repository's brief chains; never the SQLite file.
+                    #[cfg(feature = "surreal")]
+                    if crate::recon::backend::surreal_selected() {
+                        let (owner, flag, config) = (owner.clone(), flag.clone(), config.clone());
+                        report_drainer(
+                            &db_path,
+                            "intel-brief",
+                            crate::storage::runtime::blocking(move |repo| async move {
+                                let elected = crate::storage::jobs::try_elect(
+                                    repo.db(),
+                                    &owner,
+                                    DEFAULT_LEASE_SECS,
+                                    chrono::Utc::now(),
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("elect: {e}"))?
+                                .value
+                                .elected;
+                                if !elected {
+                                    return Ok(0);
+                                }
+                                let r = repo.clone();
+                                crate::storage::brief_stages::drain_parallel(
+                                    &repo,
+                                    &format!("{owner}:intel-brief"),
+                                    move || {
+                                        Box::new(
+                                            crate::storage::brief_stages::SurrealRuntimeBackend::load(
+                                                r.clone(),
+                                            ),
+                                        )
+                                            as Box<
+                                                dyn crate::intel_recon::brief_stages::StageBackend
+                                                    + Send,
+                                            >
+                                    },
+                                    &flag,
+                                    &config,
+                                    crate::intel_recon::brief_stages::STAGE_SLOTS,
+                                )
+                                .await
+                            }),
+                        );
+                        std::thread::sleep(Duration::from_millis(750));
+                        continue;
+                    }
                     // Two stage slots: the independent v2 roots really run
                     // together, each with its own backend and connections.
                     let factory = make_backend.clone();

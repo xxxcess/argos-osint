@@ -2444,6 +2444,24 @@ pub struct RuntimeBackend {
 }
 
 impl RuntimeBackend {
+    /// SQLite telemetry file, or `None` for a backend built without one
+    /// (the SurrealDB drainer), so nothing opens SQLite there.
+    fn telemetry(&self) -> Option<&Path> {
+        Some(self.db_path.as_path()).filter(|p| !p.as_os_str().is_empty())
+    }
+
+    /// Model-activity sink writing to the SQLite activity table, or `None`
+    /// without a telemetry file.
+    fn sink(
+        &self,
+        task_id: &str,
+        substep: &str,
+        role: &str,
+    ) -> Option<Arc<dyn Fn(crate::recon::model_exec::ModelExecEvent) + Send + Sync>> {
+        self.telemetry()
+            .map(|db| super::brief_timing::activity_sink(db, task_id, substep, role))
+    }
+
     fn job_runtime(
         &self,
         ctx: &StageContext,
@@ -2586,13 +2604,8 @@ impl StageBackend for RuntimeBackend {
                 &scope,
                 &adapter,
                 cancel,
-                Some(super::brief_timing::activity_sink(
-                    &self.db_path,
-                    task_id,
-                    "checking fidelity",
-                    scope.role,
-                )),
-                Some(self.db_path.as_path()),
+                self.sink(task_id, "checking fidelity", scope.role),
+                self.telemetry(),
             )
             .await?;
             Ok(labels)
@@ -2609,7 +2622,9 @@ impl StageBackend for RuntimeBackend {
         batch: super::brief_context::ContextBatch,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<HashMap<String, String>>> {
-        let (auth, db_path) = (self.auth.clone(), self.db_path.clone());
+        let auth = self.auth.clone();
+        let sink = self.sink(&ctx.task_id, "selecting claim context", "classifier");
+        let db_path = self.telemetry().map(Path::to_path_buf);
         let settings = ctx.routed(&self.settings);
         Box::pin(async move {
             let operation_id = ctx.operation_id("claim-context", &batch.user());
@@ -2628,13 +2643,8 @@ impl StageBackend for RuntimeBackend {
                 &scope,
                 &adapter,
                 cancel,
-                Some(super::brief_timing::activity_sink(
-                    &db_path,
-                    &ctx.task_id,
-                    "selecting claim context",
-                    "classifier",
-                )),
-                Some(db_path.as_path()),
+                sink,
+                db_path.as_deref(),
             )
             .await?;
             Ok(labels)
@@ -2705,14 +2715,9 @@ impl StageBackend for RuntimeBackend {
                 &messages,
                 move |raw| validator(raw),
                 cancel,
-                Some(super::brief_timing::activity_sink(
-                    &backend.db_path,
-                    &request.task_id,
-                    &request.stage,
-                    request.role,
-                )),
+                backend.sink(&request.task_id, &request.stage, request.role),
                 None,
-                Some(backend.db_path.as_path()),
+                backend.telemetry(),
                 true,
             )
             .await?;

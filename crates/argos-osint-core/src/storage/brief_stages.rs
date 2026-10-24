@@ -785,3 +785,189 @@ pub async fn stage_meta(repo: &Repository, task: &str) -> Result<Option<(i64, St
     let meta: Option<Meta> = r.take(0)?;
     Ok(meta.map(|m| (m.item_count, m.empty_reason)))
 }
+
+/// Production stage backend for the SurrealDB drainer: the configured
+/// provider routes of [`RuntimeBackend`](crate::intel_recon::brief_stages::RuntimeBackend)
+/// without its SQLite file (no telemetry rows), with the body and related
+/// reads served by the repository.
+///
+/// Gap: article body acquisition (retrieval routes, cleanup and the
+/// retrieval-attempt ledger) is not ported. A body stage reuses a clean
+/// artifact already stored in the repository and otherwise fails visibly.
+pub struct SurrealRuntimeBackend {
+    inner: crate::intel_recon::brief_stages::RuntimeBackend,
+    repo: Repository,
+    handle: tokio::runtime::Handle,
+}
+
+impl SurrealRuntimeBackend {
+    /// Configured settings and keys; must be built inside the runtime that
+    /// drives `repo`.
+    pub fn load(repo: Repository) -> Self {
+        Self {
+            inner: crate::intel_recon::brief_stages::RuntimeBackend::load(std::path::Path::new("")),
+            repo,
+            handle: tokio::runtime::Handle::current(),
+        }
+    }
+}
+
+/// Clean artifact stored for an article's newest body version.
+pub async fn clean_artifact(
+    repo: &Repository,
+    article_id: &str,
+) -> Result<Option<crate::intel_recon::clean_body::CleanArtifact>> {
+    let Some(body) = super::pipeline_inputs::article_body_for_article(repo, article_id).await?
+    else {
+        return Ok(None);
+    };
+    let key = format!("intel-clean-body:{article_id}:{}", body.body_version);
+    Ok(super::pipeline_inputs::app_state_get(repo, &key)
+        .await?
+        .and_then(|json| serde_json::from_str(&json).ok()))
+}
+
+/// Up to 50 articles of the same run paired with `article` by Related,
+/// strongest first.
+pub async fn related(repo: &Repository, article: &AtlasArticleRow) -> Result<Vec<AtlasArticleRow>> {
+    #[derive(SurrealValue)]
+    struct Pair {
+        left_id: String,
+        right_id: String,
+    }
+    let mut r = repo
+        .db()
+        .query(
+            "SELECT left_id, right_id, rarity, shared_count FROM atlas_related_article
+               WHERE run_id = $run AND (left_id = $a OR right_id = $a)
+               ORDER BY rarity DESC, shared_count DESC LIMIT 50",
+        )
+        .bind(("run", article.run_id.clone()))
+        .bind(("a", article.id.clone()))
+        .await?
+        .check()?;
+    let pairs: Vec<Pair> = r.take(0)?;
+    let mut out = Vec::new();
+    for p in pairs {
+        let other = if p.left_id == article.id {
+            p.right_id
+        } else {
+            p.left_id
+        };
+        if let Some(row) = super::atlas::article(repo.db(), &article.run_id, &other)
+            .await
+            .map_err(|e| anyhow!("related article: {e}"))?
+        {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
+impl StageBackend for SurrealRuntimeBackend {
+    fn prepare_body<'a>(
+        &'a mut self,
+        _ctx: &'a StageContext,
+        article: &'a AtlasArticleRow,
+        _force: bool,
+        _cancel: &'a Arc<AtomicBool>,
+    ) -> BoxFut<'a, Result<crate::intel_recon::clean_body::CleanArtifact>> {
+        Box::pin(async move {
+            clean_artifact(&self.repo, &article.id)
+                .await?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "story missing: article body acquisition is not available on SurrealDB yet"
+                    )
+                })
+        })
+    }
+
+    fn assess<'a>(
+        &'a mut self,
+        ctx: &'a StageContext,
+        items: Vec<crate::intel_recon::brief_fidelity::FidelityItem>,
+        cancel: &'a Arc<AtomicBool>,
+    ) -> BoxFut<'a, Result<std::collections::HashMap<String, String>>> {
+        self.inner.assess(ctx, items, cancel)
+    }
+
+    fn classify_context<'a>(
+        &mut self,
+        ctx: &'a StageContext,
+        batch: crate::intel_recon::brief_context::ContextBatch,
+        cancel: &'a Arc<AtomicBool>,
+    ) -> BoxFut<'a, Result<std::collections::HashMap<String, String>>> {
+        self.inner.classify_context(ctx, batch, cancel)
+    }
+
+    fn related(&mut self, article: &AtlasArticleRow) -> Result<Vec<AtlasArticleRow>> {
+        // Sync boundary inside an async stage: run the read on a scoped
+        // thread driven by the repository's runtime.
+        let (repo, handle) = (self.repo.clone(), self.handle.clone());
+        std::thread::scope(|s| {
+            s.spawn(|| handle.block_on(related(&repo, article)))
+                .join()
+                .map_err(|_| anyhow!("related read panicked"))?
+        })
+    }
+
+    fn focused_oversized(&self) -> bool {
+        self.inner.focused_oversized()
+    }
+
+    fn generate<'a>(
+        &mut self,
+        request: crate::intel_recon::brief_stages::StageRequest,
+        cancel: &'a Arc<AtomicBool>,
+    ) -> BoxFut<'a, Result<String>> {
+        self.inner.generate(request, cancel)
+    }
+}
+
+/// Up to `slots` stages at once, each with its own backend, until no
+/// stage is ready or `cancel` is set.
+pub async fn drain_parallel(
+    repo: &Repository,
+    owner: &str,
+    make_backend: impl Fn() -> Box<dyn StageBackend + Send>,
+    cancel: &Arc<AtomicBool>,
+    config: &ExecConfig,
+    slots: usize,
+) -> Result<usize> {
+    let mut ran = 0;
+    loop {
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..slots.max(1) {
+            if cancel.load(Ordering::Acquire) {
+                break;
+            }
+            let Some((leased, claimed)) = claim(repo, owner, config).await? else {
+                break;
+            };
+            let (repo, cancel, config) = (repo.clone(), cancel.clone(), config.clone());
+            let mut backend = make_backend();
+            set.spawn(async move {
+                run_claimed(&repo, leased, claimed, backend.as_mut(), &cancel, &config).await
+            });
+        }
+        if set.is_empty() {
+            return Ok(ran);
+        }
+        let mut first_err = None;
+        while let Some(joined) = set.join_next().await {
+            match joined
+                .map_err(|e| anyhow!("brief stage task: {e}"))
+                .and_then(|r| r)
+            {
+                Ok(_) => ran += 1,
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+    }
+}

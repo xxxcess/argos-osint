@@ -13,7 +13,6 @@ anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
-lancedb = { workspace = true, optional = true }
 regex.workspace = true
 rquickjs = { workspace = true, optional = true }
 reqwest.workspace = true
@@ -36,8 +35,6 @@ scraper.workspace = true
 # A local build runs Argos on embedded SurrealDB (RocksDB on disk, no network).
 default = ["embedded", "nlp"]
 nlp = ["dep:rquickjs"]
-# Local LanceDB vector index. CI builds with `--no-default-features` and skips this.
-lancedb = ["dep:lancedb"]
 # SurrealDB storage API without an engine; pick `embedded` and/or `server`.
 surreal = ["dep:surrealdb"]
 # Embedded RocksDB engine in-process (single owner per Argos home). Default.
@@ -49,10 +46,6 @@ server = ["surreal", "surrealdb/protocol-ws"]
 fixtures = []
 # Paused-time Tokio tests (`tokio::time::pause`).
 test-util = ["tokio/test-util"]
-
-[build-dependencies]
-# Prebuilt protoc for every host; see tools/protoc and .cargo/config.toml.
-protoc-bin-vendored.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -19,11 +19,6 @@ clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 dirs = "5"
 futures-util = "0.3"
-# `remote` only works around a lancedb 0.39.0 bug: job.rs uses Error::Http, which
-# exists only with that feature, so the default (empty) feature set fails to compile.
-# Argos opens a local directory and never connects to LanceDB Cloud.
-lancedb = { version = "0.39", features = ["remote"] }
-protoc-bin-vendored = "3.3"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_28", "all-widgets", "layout-cache", "macros", "underline-color"] }
 ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }

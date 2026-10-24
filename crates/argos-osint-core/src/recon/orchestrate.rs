@@ -3020,8 +3020,7 @@ pub(crate) async fn previous_synthesis(store: &ReconStore, thread_id: &str) -> R
             .prompt_version()
             .into(),
     };
-    // The summarization cache is SQLite-only: SurrealDB uses the
-    // deterministic follow-up directly.
+    // SurrealDB reads its cache through `publish_selected` below.
     if !store.is_surreal() {
         if let Ok(Some(hit)) = store.sqlite("summary cache", |s| {
             crate::summarization::cache_get(&s.conn, &req)
@@ -3035,8 +3034,8 @@ pub(crate) async fn previous_synthesis(store: &ReconStore, thread_id: &str) -> R
         compact_prior_synthesis(&latest.content)
     };
     let det = crate::summarization::deterministic_follow_up(&content, PRIOR_SYNTHESIS_CHARS);
-    if store.is_surreal() {
-        return Ok(det.content);
+    if let Some(published) = crate::summarization::publish_selected(&req, det.clone()) {
+        return Ok(published.content);
     }
     let published = store.sqlite("summary cache", |s| {
         crate::summarization::publish_deterministic_and_enqueue(&s.conn, &req, det)

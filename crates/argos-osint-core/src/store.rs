@@ -2834,11 +2834,13 @@ impl Store {
             preprocessing: serde_json::Value::Null,
             fallback: true,
         };
-        let _ = crate::summarization::publish_deterministic_and_enqueue(
-            &self.conn,
-            &req,
-            deterministic,
-        );
+        if crate::summarization::publish_selected(&req, deterministic.clone()).is_none() {
+            let _ = crate::summarization::publish_deterministic_and_enqueue(
+                &self.conn,
+                &req,
+                deterministic,
+            );
+        }
     }
 
     /// Writes Atlas claims into the same Brain tables Recon reads, through the

@@ -1729,17 +1729,19 @@ fn packet_json(articles: &[AtlasArticleRow]) -> Result<String> {
                     DESCRIPTION_CHARS,
                 );
                 let db = crate::paths::db_path();
-                if let Some(store) = crate::recon::backend::sqlite_path(&db)
+                let req = crate::summarization::flush_request(
+                    crate::summarization::SummarizationMode::ArticleDescription,
+                    &article.id,
+                    &article.published_at,
+                    &format!("{}. {}", article.title, article.description),
+                    "atlas",
+                    DESCRIPTION_CHARS,
+                );
+                if let Some(published) = crate::summarization::publish_selected(&req, det.clone()) {
+                    det = published;
+                } else if let Some(store) = crate::recon::backend::sqlite_path(&db)
                     .and_then(|path| crate::store::Store::open(path).ok())
                 {
-                    let req = crate::summarization::flush_request(
-                        crate::summarization::SummarizationMode::ArticleDescription,
-                        &article.id,
-                        &article.published_at,
-                        &format!("{}. {}", article.title, article.description),
-                        "atlas",
-                        DESCRIPTION_CHARS,
-                    );
                     if let Ok(published) = crate::summarization::publish_deterministic_and_enqueue(
                         &store.conn,
                         &req,

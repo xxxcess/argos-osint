@@ -2546,16 +2546,21 @@ fn packet_observation(value: &Value) -> Value {
                 let mut digest = crate::summarization::deterministic_tool_observation(
                     tool_id, call_id, status, value, 4000,
                 );
-                // Best-effort flush enqueue when the process DB is reachable.
-                if let Ok(store) = Store::open(&crate::paths::db_path()) {
-                    let req = crate::summarization::flush_request(
-                        crate::summarization::SummarizationMode::ToolObservation,
-                        call_id,
-                        call_id,
-                        &value.to_string(),
-                        tool_id,
-                        4000,
-                    );
+                // Best-effort flush enqueue: the SurrealDB queue under a
+                // storage config, else the process DB when reachable.
+                let req = crate::summarization::flush_request(
+                    crate::summarization::SummarizationMode::ToolObservation,
+                    call_id,
+                    call_id,
+                    &value.to_string(),
+                    tool_id,
+                    4000,
+                );
+                if let Some(published) =
+                    crate::summarization::publish_selected(&req, digest.clone())
+                {
+                    digest = published;
+                } else if let Ok(store) = Store::open(&crate::paths::db_path()) {
                     if let Ok(published) = crate::summarization::publish_deterministic_and_enqueue(
                         &store.conn,
                         &req,

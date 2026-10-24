@@ -18,14 +18,13 @@ mod confidence;
 pub(crate) mod modes;
 pub mod passage_packets;
 mod persist;
-mod replace_insights;
 pub mod sentence_index;
 mod validate;
 mod worker;
 
 pub use actor_review::{
-    apply_reviewed_actors, is_meaningful_actor, resolve_actor_reviewer_secret,
-    review_article_actors, ActorReviewItem, ActorReviewResult,
+    is_meaningful_actor, resolve_actor_reviewer_secret, review_article_actors, ActorReviewItem,
+    ActorReviewResult,
 };
 pub use body::{
     body_fetch_routes, enqueue_article_body, fetch_article_body, BodyFetchEvent, EnqueueOutcome,
@@ -44,10 +43,9 @@ pub use classify_mode::{
     classify_recon_mode_for_role, default_recon_mode, heuristic_prompt_mode, parse_mode_choice,
     parse_mode_from_chat, ModeClassifyInput, PromptModeClassifyInput,
 };
-pub(crate) use confidence::persist_article_rating;
 #[cfg(feature = "surreal")]
 pub(crate) use confidence::persist_article_rating_surreal;
-pub use confidence::{article_confidence, initial_rating, EvidenceConfidence};
+pub use confidence::{initial_rating, EvidenceConfidence};
 pub use modes::{
     chat_response_spec, investigation_mode_spec, section_guideline, section_plan, ReportMode,
     SectionPlan,
@@ -56,6 +54,5 @@ pub use persist::{
     ArticleBodyRow, IntelAssessmentRow, IntelElementRow, IntelEvidenceRow, IntelInvestigationRow,
     IntelReportJobRow, IntelReportSectionRow, IntelReportTaskRow, RetrievalAttemptRow,
 };
-pub use replace_insights::{replace_article_insights_from_body, ReplaceOutcome};
 pub use validate::{validate_article_body, BodyQuality, BodyValidation};
 pub use worker::JobRuntime;

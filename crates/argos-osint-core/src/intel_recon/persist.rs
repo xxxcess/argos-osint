@@ -7,7 +7,6 @@
 //! (`report_execution_enabled()` was hard-coded false) are gone.
 
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
 
 #[cfg(feature = "surreal")]
 use crate::storage::article_body as sb;
@@ -339,55 +338,4 @@ impl Store {
             crate::storage::recon_jobs::report_job(&repo, &id).await
         })
     }
-}
-
-fn article_body_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleBodyRow> {
-    Ok(ArticleBodyRow {
-        id: row.get(0)?,
-        article_id: row.get(1)?,
-        run_id: row.get(2)?,
-        original_url: row.get(3)?,
-        resolved_url: row.get(4)?,
-        source_domain: row.get(5)?,
-        source_name: row.get(6)?,
-        body_markdown: row.get(7)?,
-        content_hash: row.get(8)?,
-        quality: row.get(9)?,
-        quality_rationale: row.get(10)?,
-        body_version: row.get(11)?,
-        fetch_tool: row.get(12)?,
-        fetched_at: row.get(13)?,
-        retry_after: row.get(14)?,
-        state: row.get(15)?,
-        created_at: row.get(16)?,
-        updated_at: row.get(17)?,
-    })
-}
-
-fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IntelReportJobRow> {
-    Ok(IntelReportJobRow {
-        id: row.get(0)?,
-        investigation_id: row.get(1)?,
-        article_id: row.get(2)?,
-        mode: row.get(3)?,
-        revision: row.get(4)?,
-        state: row.get(5)?,
-        stage: row.get(6)?,
-        settings_json: row.get(7)?,
-        budget_json: row.get(8)?,
-        parent_job_id: row.get(9)?,
-        sections_done: row.get(10)?,
-        sections_total: row.get(11)?,
-        elements_done: row.get(12)?,
-        elements_total: row.get(13)?,
-        tool_calls_done: row.get(14)?,
-        tool_calls_allowance: row.get(15)?,
-        current_tool: row.get(16)?,
-        warning: row.get(17)?,
-        error: row.get(18)?,
-        generation: row.get(19)?,
-        started_at: row.get(20)?,
-        updated_at: row.get(21)?,
-        finished_at: row.get(22)?,
-    })
 }

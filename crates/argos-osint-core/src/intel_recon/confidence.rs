@@ -2,7 +2,6 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension};
 
 use crate::investigation::insights::{claim_fingerprint, EvidenceRef, PipelineOutput};
 
@@ -232,54 +231,6 @@ impl EvidenceConfidence {
         result.provisional |= result.information_grade == 6;
         result
     }
-}
-
-/// Loaded with the briefing snapshot, never from drawing. Pending owners keep
-/// their previous score; additional evidence affects it only after assessment.
-pub fn article_confidence(
-    conn: &Connection,
-    article_id: &str,
-) -> Result<Option<EvidenceConfidence>> {
-    let head: Option<(String,String,String)> = conn.query_row(
-        "SELECT h.owner_kind,s.readiness_json,h.owner_id FROM insight_owner_state h JOIN insight_snapshots s ON s.id=h.active_snapshot_id WHERE h.owner_id=?1 AND h.owner_kind IN ('article','atlas') ORDER BY CASE h.owner_kind WHEN 'article' THEN 0 ELSE 1 END LIMIT 1",
-        [article_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-    let Some((kind, readiness, owner)) = head else {
-        return Ok(None);
-    };
-    let Some(mut output) =
-        crate::investigation::insight_persist::active_output(conn, &kind, &owner)?
-    else {
-        return Ok(None);
-    };
-    for claim in &mut output.claims {
-        let text: Option<String> = conn.query_row("SELECT m.text FROM memories m JOIN insight_claims c ON c.memory_id=m.id WHERE c.fingerprint=?1", [claim_fingerprint(claim)], |r| r.get(0)).optional()?;
-        if text.as_ref().is_some_and(|text| text != &claim.text) {
-            claim.assessment.fidelity = "user_edited".into();
-            claim.assessment.threshold_passed = false;
-        }
-    }
-    let stored: serde_json::Value = serde_json::from_str(&readiness)?;
-    let complete = stored
-        .pointer("/readiness/input_eligible")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let publisher = conn.query_row("SELECT metadata_json FROM atlas_article_metadata WHERE article_id=?1 ORDER BY rowid DESC LIMIT 1", [article_id], |r| r.get::<_,String>(0)).optional()?
-        .and_then(|s| serde_json::from_str::<crate::atlas_metadata::ArticleMetadata>(&s).ok()).and_then(|m| m.publisher_prior)
-        .and_then(|p| crate::osint::source_eval::SourceReliability::parse(&p.observation.reliability)).unwrap_or(crate::osint::source_eval::SourceReliability::F);
-    let report: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM insight_owner_state h JOIN insight_snapshots s ON s.id=h.active_snapshot_id WHERE h.owner_id=?1 AND s.inputs_json LIKE '%report:%')",[article_id],|r|r.get(0))?;
-    Ok(Some(EvidenceConfidence::estimate_for_source(
-        &output, complete, publisher, report,
-    )))
-}
-
-/// Publisher metadata commits update the persisted current rating without
-/// launching models or touching pending replacement generations.
-pub(crate) fn persist_article_rating(conn: &Connection, article_id: &str) -> Result<()> {
-    let Some(rating) = article_confidence(conn, article_id)? else {
-        return Ok(());
-    };
-    conn.execute("UPDATE insight_snapshots SET readiness_json=json_set(readiness_json,'$.rating.estimate',json(?2),'$.rating.policy','brief-rating-v2') WHERE id IN (SELECT active_snapshot_id FROM insight_owner_state WHERE owner_kind='article' AND owner_id=?1) AND contract_version=?3",rusqlite::params![article_id,serde_json::to_string(&rating)?,crate::investigation::insights::CONTRACT])?;
-    Ok(())
 }
 
 /// [`article_confidence`] on the repository: the same inputs (active

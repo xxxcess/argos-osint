@@ -7,7 +7,6 @@ use std::sync::{
 };
 
 use anyhow::{ensure, Result};
-use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 use super::decisions::{
@@ -223,11 +222,6 @@ pub(super) fn operation_scope<'a>(
     scope
 }
 
-pub(super) fn task_id(conn: &rusqlite::Connection, input: &PipelineInput) -> Result<String> {
-    Ok(conn.query_row("SELECT t.id FROM argos_tasks t JOIN argos_jobs j ON j.id=t.job_id WHERE j.owner_scope=?1 AND t.operation='insight_refresh' AND t.source_revision=?2 AND t.state='running' ORDER BY t.created_at DESC LIMIT 1",
-        params![format!("{}:{}",input.snapshot.owner_kind,input.snapshot.owner_id), input.snapshot.generation.to_string()], |r|r.get(0)).optional()?.unwrap_or_default())
-}
-
 /// Serial bounded batches share provider admission; optional model unavailability settles
 /// items as withheld, while local/stale/persistence/cancellation errors remain terminal.
 pub(super) async fn assess(
@@ -329,7 +323,7 @@ pub(super) async fn assess(
         store
             .begin(&key, input, "assessment", &window_id, true)
             .await?;
-        let telemetry = store.telemetry_path(db_path);
+        let telemetry = None::<&std::path::Path>;
         drop(store);
         let mut scope = operation_scope(&execution_id, role, input, &task_id);
         if input.snapshot.owner_kind == "recon" {

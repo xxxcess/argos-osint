@@ -417,6 +417,50 @@ impl ReconStore {
         dispatch!(self, s => s.calls_for_thread(tid),
             r => crate::storage::recon_runs::calls(r, crate::storage::recon_runs::CallFilter::ThreadCompleted(tid)).await)
     }
+    /// Every call on the thread, any status (`Store::all_calls_for_thread`).
+    pub async fn all_calls_for_thread(&self, tid: &str) -> Result<Vec<Call>> {
+        dispatch!(self, s => s.all_calls_for_thread(tid),
+            r => crate::storage::recon_runs::calls(r, crate::storage::recon_runs::CallFilter::Thread(tid)).await)
+    }
+    /// Manual (Tools pane) calls (`Store::manual_calls`).
+    pub async fn manual_calls(&self) -> Result<Vec<Call>> {
+        dispatch!(self, s => s.manual_calls(),
+            r => crate::storage::recon_runs::calls(r, crate::storage::recon_runs::CallFilter::Manual).await)
+    }
+    /// The state of the thread's newest run (`Store::latest_run_state`).
+    pub async fn latest_run_state(&self, tid: &str) -> Result<Option<String>> {
+        dispatch!(self, s => s.latest_run_state(tid),
+            r => crate::storage::recon_runs::latest_run_state(r, tid).await)
+    }
+    /// Store the thread's composer draft and chat scroll.
+    pub async fn save_draft(&self, tid: &str, draft: &str, scroll: i64) -> Result<()> {
+        dispatch!(self, s => s.save_draft(tid, draft, scroll),
+            r => crate::storage::recon_threads::save_draft(r, tid, draft, scroll).await)
+    }
+    /// Remember the thread as the last one opened.
+    pub async fn select_thread(&self, tid: &str) -> Result<()> {
+        dispatch!(self, s => s.select_thread(tid),
+            r => crate::storage::recon_threads::select_thread(r, tid).await)
+    }
+    /// The last selected thread, while it is live.
+    pub async fn last_thread(&self) -> Result<Option<String>> {
+        dispatch!(self, s => s.last_thread(),
+            r => crate::storage::recon_threads::last_thread(r).await)
+    }
+    /// Delete the thread. `with_insights` (also deleting the insights it
+    /// sourced) is SQLite-only: on SurrealDB the insights are kept.
+    pub async fn delete_thread(&self, tid: &str, with_insights: bool) -> Result<bool> {
+        match self {
+            Self::Sqlite(m) => lock(m).delete_thread(tid, with_insights),
+            #[cfg(feature = "surreal")]
+            Self::Surreal(r) => {
+                if with_insights {
+                    return Err(not_ported("deleting a thread with its insights"));
+                }
+                crate::storage::recon::delete_thread(r, tid).await
+            }
+        }
+    }
     /// Start (or restart at `generation`) the run's synthesis operation
     /// `{run}-synthesis`; an existing draft is kept.
     pub async fn begin_synthesis(&self, run_id: &str, generation: i64, draft: &str) -> Result<()> {

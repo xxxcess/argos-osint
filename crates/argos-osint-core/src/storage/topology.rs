@@ -5,12 +5,9 @@
 //! findings and the deterministic neighbourhood brief reuse the SQLite code
 //! (`brain_topology::admit`, `brain_neighborhood_brief::build`).
 //!
-//! The retained Intel display seeds read the repository's brief
-//! publications (`storage::brief`); a matching item is shown as a retained
-//! source node (its canonical binding needs the brief stage receipts, not
-//! ported), and `RetainedActor` is always provisional.
-//!
-//! Gaps (see acceptance.md): the `current_metadata_sql`
+//! Gaps (see acceptance.md): the retained Intel display seeds
+//! (`RetainedClaim`, `RetainedInference`, `RetainedActor`) are refused, since
+//! the Intel brief publications are still SQLite; the `current_metadata_sql`
 //! article-revision fence is not applied to derivation provenance or cycle
 //! scope; memory nodes carry no revision (SurrealDB memories have none);
 //! reads are not one snapshot transaction.
@@ -2014,7 +2011,6 @@ pub async fn topology_snapshot(
     let mut roots = Vec::new();
     let mut initial_edges = Vec::new();
     let mut group_members = BTreeSet::new();
-    let mut retained_article: Option<TopologyNode> = None;
     let kind_root = |want: TopologyNodeKind| move |n: &TopologyNode| n.kind == want;
     match seed {
         TopologySeed::Claim(id) => roots.extend(
@@ -2057,90 +2053,10 @@ pub async fn topology_snapshot(
                 initial_edges.push(e);
             }
         }
-        TopologySeed::RetainedClaim {
-            run_id,
-            article_id,
-            revision,
-            local_id,
-            text,
-            job_id,
-        }
-        | TopologySeed::RetainedInference {
-            run_id,
-            article_id,
-            revision,
-            local_id,
-            text,
-            job_id,
-        } => {
-            if let Some(article) = q.article_node(run_id, article_id, revision).await? {
-                let inference = matches!(seed, TopologySeed::RetainedInference { .. });
-                let (kind, retained, node_kind) = if inference {
-                    (
-                        "inference",
-                        super::brief::RetainedKind::Inference,
-                        TopologyNodeKind::Inference,
-                    )
-                } else {
-                    (
-                        "claim",
-                        super::brief::RetainedKind::Claim,
-                        TopologyNodeKind::Claim,
-                    )
-                };
-                // Fence the exact current job, generation and item identity;
-                // the canonical binding (brief stage receipts) is not on
-                // SurrealDB yet, so a match is shown as a retained source.
-                let matches = super::brief::retained_item(
-                    repo, article_id, job_id, retained, local_id, text,
-                )
-                .await?;
-                let mut n = node(seed.key(), node_kind, text.clone());
-                n.status = if matches {
-                    "retained source · not indexed".into()
-                } else {
-                    q.gaps.insert(format!(
-                        "{job_id}:{local_id}: the retained Intel publication changed or is unavailable"
-                    ));
-                    "retained source · canonical revision unavailable".into()
-                };
-                n.subtype = format!("retained_{kind}");
-                n.article_id = article_id.clone();
-                n.run_id = run_id.clone();
-                n.cycle = Some(run_id.clone());
-                n.revision = revision.clone();
-                n.topology_seed = Some(seed.clone());
-                n.passages.push(format!(
-                    "Intel {job_id}:{local_id} · {run_id}/{article_id}@{revision}"
-                ));
-                retained_article = Some(article);
-                roots.push(n);
-            }
-        }
-        TopologySeed::RetainedActor {
-            run_id,
-            article_id,
-            revision,
-            actor_ref,
-            name,
-        } => {
-            // Provisional only: the native-mention and canonical actor
-            // resolution of the SQLite seed are not ported.
-            if let Some(article) = q.article_node(run_id, article_id, revision).await? {
-                let mut n = node(seed.key(), TopologyNodeKind::Entity, name.clone());
-                n.status = "retained source · provisional".into();
-                n.subtype = "retained_actor".into();
-                n.article_id = article_id.clone();
-                n.run_id = run_id.clone();
-                n.cycle = Some(run_id.clone());
-                n.revision = revision.clone();
-                n.topology_seed = Some(seed.clone());
-                n.passages.push(format!(
-                    "Metadata actor {actor_ref} · {run_id}/{article_id}@{revision}"
-                ));
-                retained_article = Some(article);
-                roots.push(n);
-            }
+        TopologySeed::RetainedClaim { .. }
+        | TopologySeed::RetainedInference { .. }
+        | TopologySeed::RetainedActor { .. } => {
+            bail!("{} topology isn't available on SurrealDB yet", seed.key())
         }
     }
     let Some(root) = roots.first() else {
@@ -2168,29 +2084,6 @@ pub async fn topology_snapshot(
     }
     for e in initial_edges {
         edges.insert(e.id.clone(), e);
-    }
-    let retained_article = match retained_article {
-        Some(article) if q.in_scope(&article).await? => Some(article),
-        _ => None,
-    };
-    if let Some(mut article) = retained_article {
-        article.min_hops = 1;
-        article.predecessor = Some(root_id.clone());
-        let mut e = edge(
-            format!("retained-evidence:{root_id}"),
-            &article.id,
-            &root_id,
-            TopologyEdgeKind::Source,
-            format!("{}@{}", article.id, article.revision),
-        );
-        if matches!(seed, TopologySeed::RetainedActor { .. }) {
-            e.label = "retained source context".into();
-            e.status = "unresolved actor binding".into();
-            e.rationale = "The retained display actor is scoped to this source; no current native mention or canonical identity is asserted.".into();
-        }
-        edges.insert(e.id.clone(), e);
-        queue.push_back(article.id.clone());
-        nodes.insert(article.id.clone(), article);
     }
     let candidate_limit = options.max_nodes.saturating_mul(8).clamp(256, 4096);
     let edge_limit = options.max_edges.saturating_mul(8).clamp(512, 8192);

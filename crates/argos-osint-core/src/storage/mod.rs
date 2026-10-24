@@ -18,7 +18,6 @@ pub mod atlas;
 pub mod atlas_delete;
 pub mod atlas_metadata;
 pub mod bootstrap;
-pub mod brief;
 pub mod browse;
 pub mod browse_assoc;
 pub mod codec;

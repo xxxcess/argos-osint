@@ -2,7 +2,7 @@
 //! Actor-group seed of `Store::topology_snapshot`. Members resolve through
 //! redirects; the group's neighbours are its members' typed payload actors,
 //! actor refs, native mentions and active Links, all re-pointed at the group;
-//! the cycle scope, depth above 1 and a retained seed on a missing article. Both modes via
+//! the cycle scope, depth above 1 and the refused retained seeds. Both modes via
 //! `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
 
@@ -303,19 +303,18 @@ async fn actor_group_topology_scopes_depth_and_seeds() {
     assert!(snap.root_id.is_empty());
     assert!(snap.neighborhood_brief.is_some());
 
-    // A retained Intel display seed on a missing article has no root (the
-    // retained seeds themselves are covered by `tests/storage_brief.rs`).
+    // Retained Intel display seeds are refused, never answered from partial data.
     let retained = TopologySeed::RetainedActor {
-        run_id: "no-run".into(),
-        article_id: "no-article".into(),
+        run_id: "r1".into(),
+        article_id: "a1".into(),
         revision: String::new(),
         actor_ref: "x".into(),
         name: "Acme".into(),
     };
-    let snap = topology::topology_snapshot(&repo, &retained, &options(1, CycleScope::AllRetained))
+    let err = topology::topology_snapshot(&repo, &retained, &options(1, CycleScope::AllRetained))
         .await
-        .unwrap();
-    assert!(snap.root_id.is_empty());
+        .unwrap_err();
+    assert!(err.to_string().contains("isn't available on SurrealDB yet"));
 }
 
 /// Adds inference i1 with c1 as its payload premise.

@@ -3138,6 +3138,32 @@ impl Service {
         if contract == crate::investigation::insights::CONTRACT {
             // New-policy insights were staged from originals before the answer.
             // Retry the durable refresh, never mine the saved answer.
+            #[cfg(feature = "surreal")]
+            if let Some(repo) = store.repository() {
+                let cancel = Arc::new(AtomicBool::new(false));
+                let (_, errors) = crate::storage::refresh_driver::recover_and_run(
+                    repo,
+                    &self.settings,
+                    &cancel,
+                    || {
+                        crate::storage::refresh_driver::pipeline(
+                            &self.auth,
+                            &self.settings,
+                            &cancel,
+                            self.db_path.clone(),
+                        )
+                    },
+                )
+                .await?;
+                if let Some(e) = errors.first() {
+                    return Err(anyhow!(
+                        "insight refresh recovery: {}: {}",
+                        e.resource,
+                        e.message
+                    ));
+                }
+                return Ok(());
+            }
             drop(store);
             crate::investigation::insight_persist::recover_refreshes(
                 &self.db_path,

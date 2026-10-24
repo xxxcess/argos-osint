@@ -107,7 +107,7 @@ impl IntelBriefSnapshot {
     ) -> Result<Self> {
         #[cfg(feature = "surreal")]
         if super::surreal_brain::on() {
-            return Self::read_repository(store, article, scope, job, related_limit);
+            return Self::read_repository(article, scope, job, related_limit);
         }
         let conn = store.connection();
         let metadata = store.atlas_metadata(&article.run_id, &article.id)?;
@@ -253,8 +253,7 @@ impl IntelBriefSnapshot {
     /// The brief snapshot under a storage config: every part read from the
     /// repository. Brief-chain stages, outputs and the publication footer
     /// wait for the SurrealDB brief chain, so a job shows as unavailable.
-    fn read_repository(
-        store: &Store,
+    pub(crate) fn read_repository(
         article: &AtlasArticleRow,
         scope: RelatedScope,
         job: Option<&str>,
@@ -285,9 +284,9 @@ impl IntelBriefSnapshot {
         };
         let mut offset = 0;
         loop {
-            let page = related_page(
-                store,
-                article,
+            let page = super::surreal_brain::related_global(
+                &article.run_id,
+                &article.id,
                 scope,
                 (offset > 0).then(|| offset.to_string()).as_deref(),
                 (related_limit.max(20) - offset).clamp(1, 100),

@@ -3758,20 +3758,25 @@ impl App {
         if self.brain_preview_reading {
             return;
         }
-        let (Some(db), Some(id)) = (
-            self.background_db.clone(),
-            self.brain_preview_target.clone(),
-        ) else {
+        let Some(id) = self.brain_preview_target.clone() else {
             return;
         };
+        // Under a storage config the preview reads the repository; there is
+        // no SQLite path to open.
+        let db = self.background_db.clone();
+        if db.is_none() && !surreal_brain::on() {
+            return;
+        }
         self.brain_preview_reading = true;
         let generation = self.brain_generation;
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
             let outcome = if surreal_brain::on() {
                 surreal_brain::preview(&id)
+            } else if let Some(db) = &db {
+                Store::open_profile_reader(db).and_then(|store| store.insight_for_memory(&id))
             } else {
-                Store::open_profile_reader(&db).and_then(|store| store.insight_for_memory(&id))
+                Ok(None)
             }
             .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::BrainPreviewLoaded {
@@ -4583,13 +4588,25 @@ impl App {
             );
             let tx = self.work_tx.clone();
             std::thread::spawn(move || {
-                // Under a storage config the snapshot reads the repository;
-                // the empty in-memory store stands in for the SQLite reader.
-                let opened = match &db {
-                    Some(db) => Store::open_profile_reader(db),
-                    None => Store::memory(),
+                // Under a storage config the snapshot reads only the
+                // repository; no SQLite store (file or in-memory) is opened.
+                let Some(db) = db else {
+                    #[cfg(feature = "surreal")]
+                    let outcome = super::db_reads::IntelBriefSnapshot::read_repository(
+                        &article,
+                        scope,
+                        job.as_deref(),
+                        limit,
+                    )
+                    .map(Box::new)
+                    .map_err(|e| e.to_string());
+                    #[cfg(not(feature = "surreal"))]
+                    let outcome =
+                        Err("SurrealDB Intel is off without the surreal feature".to_string());
+                    let _ = tx.send(WorkEvent::IntelBriefLoaded { key, outcome });
+                    return;
                 };
-                let outcome = opened
+                let outcome = Store::open_profile_reader(&db)
                     .and_then(|store| {
                         store.connection().execute_batch("BEGIN")?;
                         super::db_reads::IntelBriefSnapshot::read(
@@ -5017,6 +5034,11 @@ impl App {
                 return Some(run.started_at[..10].to_string());
             }
         }
+        if surreal_brain::on() {
+            // The run cache above is the repository's run list; never ask
+            // the SQLite store.
+            return None;
+        }
         self.store
             .connection()
             .query_row(
@@ -5046,6 +5068,23 @@ impl App {
                 let outcome = Store::open_light(&db)
                     .and_then(|store| store.atlas_delete_run(&run.id))
                     .map_err(|e| e.to_string());
+                let _ = tx.send(WorkEvent::AtlasDeleted {
+                    run_id: run.id,
+                    outcome,
+                });
+            });
+            return Ok("Deleting cycle…".into());
+        }
+        if surreal_brain::on() {
+            anyhow::ensure!(
+                self.atlas_deleting.is_none(),
+                "A cycle deletion is already in progress"
+            );
+            self.atlas_deleting = Some(run.id.clone());
+            let tx = self.work_tx.clone();
+            std::thread::spawn(move || {
+                let outcome =
+                    super::surreal_intel::atlas_delete_run(&run.id).map_err(|e| e.to_string());
                 let _ = tx.send(WorkEvent::AtlasDeleted {
                     run_id: run.id,
                     outcome,
@@ -7100,22 +7139,25 @@ impl App {
         {
             return;
         }
-        let Some(db) = self.background_db.clone() else {
+        let db = self.background_db.clone();
+        if db.is_none() && !surreal_brain::on() {
             return;
-        };
+        }
         let generation = self.brain_generation;
         self.brain_reading = Some(generation);
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
             let outcome = if surreal_brain::on() {
                 surreal_brain::list()
-            } else {
-                Store::open_profile_reader(&db).and_then(|store| {
+            } else if let Some(db) = &db {
+                Store::open_profile_reader(db).and_then(|store| {
                     // One consistent read transaction; concurrent ingest cannot
                     // produce mixed revisions in the display projection.
                     store.connection().execute_batch("BEGIN")?;
                     store.brain_browse_memories(None, "")
                 })
+            } else {
+                Ok(Vec::new())
             }
             .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::BrainLoaded {

@@ -92,6 +92,17 @@ mod imp {
     pub(crate) fn atlas_articles(run_id: &str) -> Result<Vec<AtlasArticleRow>> {
         runtime::blocking(|repo| async move { Ok(atlas::list_articles(repo.db(), run_id).await?) })
     }
+
+    /// `Store::atlas_delete_run` on the repository: the run's memories,
+    /// articles and run row in one transaction. True when the run existed.
+    pub(crate) fn atlas_delete_run(run_id: &str) -> Result<bool> {
+        use argos_osint_core::storage::atlas_delete;
+        runtime::blocking(|repo| async move {
+            atlas_delete::delete_run(repo.publisher(), run_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("delete atlas run: {e}"))
+        })
+    }
 }
 
 #[cfg(not(feature = "surreal"))]
@@ -116,6 +127,10 @@ mod imp {
     }
     pub(crate) fn atlas_articles(_: &str) -> Result<Vec<AtlasArticleRow>> {
         off()
+    }
+
+    pub(crate) fn atlas_delete_run(_: &str) -> Result<bool> {
+        unreachable!("SurrealDB Atlas is off without the surreal feature")
     }
 }
 

@@ -77,19 +77,59 @@ pub fn evidence_from_tools(
     conn: &rusqlite::Connection,
     results: &[(String, crate::osint::ToolResult)],
 ) -> Result<Vec<RetainedEvidence>> {
-    use rusqlite::OptionalExtension;
+    evidence_with(&mut SqliteEvidence(conn), results)
+}
+
+/// Where [`evidence_with`] reads a call's persisted result and a stored
+/// artifact text, and records a retained artifact (returning its hash).
+pub trait EvidenceLookup {
+    fn persisted_result(&mut self, call_id: &str) -> Result<Option<String>>;
+    fn artifact_text(&mut self, hash: &str) -> Option<String>;
+    fn retain_artifact(&mut self, text: &str) -> Result<String>;
+}
+
+struct SqliteEvidence<'a>(&'a rusqlite::Connection);
+
+impl EvidenceLookup for SqliteEvidence<'_> {
+    fn persisted_result(&mut self, call_id: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .0
+            .query_row(
+                "SELECT result_json FROM osint_calls WHERE id=?1",
+                [call_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+    fn artifact_text(&mut self, hash: &str) -> Option<String> {
+        use rusqlite::OptionalExtension;
+        self.0
+            .query_row(
+                "SELECT text FROM nlp_artifacts WHERE hash=?1",
+                [hash],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+    fn retain_artifact(&mut self, text: &str) -> Result<String> {
+        crate::nlp::cache::artifact(self.0, text)
+    }
+}
+
+/// [`evidence_from_tools`] over any [`EvidenceLookup`].
+pub fn evidence_with(
+    lookup: &mut dyn EvidenceLookup,
+    results: &[(String, crate::osint::ToolResult)],
+) -> Result<Vec<RetainedEvidence>> {
     let mut evidence = Vec::new();
     for (id, result) in results
         .iter()
         .filter(|(_, r)| r.status == "completed" && r.error.is_none())
     {
-        let persisted: Option<String> = conn
-            .query_row(
-                "SELECT result_json FROM osint_calls WHERE id=?1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let persisted = lookup.persisted_result(id)?;
         let revision = hash(&persisted.unwrap_or(serde_json::to_string(result)?));
         let raw = serde_json::from_str::<Value>(&result.raw).unwrap_or(Value::Null);
         let acquired = raw.get("data").unwrap_or(&raw);
@@ -108,7 +148,7 @@ pub fn evidence_from_tools(
                     .unwrap_or(&result.source_url)
                     .into();
                 let mut retained =
-                    evidence_from_tools(conn, &[(format!("{id}#page{index}"), page_result)])?;
+                    evidence_with(lookup, &[(format!("{id}#page{index}"), page_result)])?;
                 for source in &mut retained {
                     source.reference.revision = revision.clone();
                 }
@@ -120,16 +160,7 @@ pub fn evidence_from_tools(
             .observations
             .pointer("/nlp_source/artifact_hash")
             .and_then(Value::as_str)
-            .and_then(|hash| {
-                conn.query_row(
-                    "SELECT text FROM nlp_artifacts WHERE hash=?1",
-                    [hash],
-                    |r| r.get(0),
-                )
-                .optional()
-                .ok()
-                .flatten()
-            });
+            .and_then(|hash| lookup.artifact_text(hash));
         let raw_full = acquired
             .get("markdown")
             .or_else(|| acquired.get("content"))
@@ -183,7 +214,7 @@ pub fn evidence_from_tools(
                     EvidenceLocation::JsonPointer(String::new()),
                 )
             };
-        let artifact_hash = crate::nlp::cache::artifact(conn, &text)?;
+        let artifact_hash = lookup.retain_artifact(&text)?;
         // Explicit acquisition roots override URL copies. Exact copied artifacts
         // share one root; unknown independence cannot multiply root count.
         let origin_root = result

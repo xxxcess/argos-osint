@@ -338,3 +338,42 @@ pub async fn set_extraction_state(repo: &Repository, answer_id: &str, state: &st
         .check()?;
     Ok(())
 }
+
+/// Replace the draft of every `role` operation of a run (the cut-short
+/// answer `keep_partial` leaves behind).
+pub async fn set_run_drafts(
+    repo: &Repository,
+    run_id: &str,
+    role: &str,
+    draft: &str,
+) -> Result<()> {
+    repo.db()
+        .query(
+            "UPDATE recon_model_operation SET draft = $d, updated_at = $at
+              WHERE run_id = $rid AND role = $role RETURN NONE",
+        )
+        .bind(("d", draft.to_string()))
+        .bind(("at", now()))
+        .bind(("rid", run_id.to_string()))
+        .bind(("role", role.to_string()))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+/// Point the run's active Recon snapshot sources at the stored answer
+/// (`store_answer`'s `insight_sources` relink).
+pub async fn relink_sources(repo: &Repository, run_id: &str, answer_id: &str) -> Result<()> {
+    repo.db()
+        .query(
+            "LET $active = (SELECT VALUE active_snapshot_id FROM insight_owner_state
+                             WHERE owner_kind = 'recon' AND owner_id = $rid);
+             UPDATE insight_source SET answer_id = $a
+              WHERE run_id = $rid AND answer_id INSIDE $active RETURN NONE",
+        )
+        .bind(("a", answer_id.to_string()))
+        .bind(("rid", run_id.to_string()))
+        .await?
+        .check()?;
+    Ok(())
+}

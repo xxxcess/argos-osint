@@ -45,6 +45,19 @@ pub fn init(layout: Layout) -> Result<()> {
     Ok(())
 }
 
+/// Whether the process selected SurrealDB: [`init`] ran and the home has a
+/// storage config (an unreadable config counts as configured, so a broken
+/// file fails loudly instead of silently falling back to SQLite). Cached
+/// after the first call. Without [`init`] (core tests, embedders) this is
+/// `false` and callers stay on SQLite.
+pub fn configured() -> bool {
+    static CONFIGURED: OnceLock<bool> = OnceLock::new();
+    let Some(entry) = ENTRY.get() else {
+        return false;
+    };
+    *CONFIGURED.get_or_init(|| !matches!(super::home::load_config(&entry.layout), Ok(None)))
+}
+
 fn entry() -> Result<&'static Entry> {
     ENTRY
         .get()

@@ -56,16 +56,18 @@
 
 pub use anyhow;
 
+mod source;
+
+pub use source::*;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
-use rusqlite::types::Value;
-use rusqlite::{params_from_iter, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
-use crate::provider_metrics::{self, CapacityRow};
+use crate::provider_metrics::CapacityRow;
 use crate::telemetry::{self, EventKind, Trigger};
 
 /// Percentiles below this many observations are suppressed instead of shown as
@@ -409,18 +411,15 @@ pub struct GlobalStatus {
 
 // ---------- snapshot assembly ----------
 
-/// Assembles one dashboard snapshot over `conn`.
-///
-/// Read-only: the writer is never locked, so a dashboard refresh never blocks
-/// recording. A missing table or an empty window yields empty sections, never
-/// fabricated numbers — the dashboard renders those as unavailable/N/A.
-pub fn snapshot(
-    conn: &Connection,
+/// [`snapshot`] over any [`ProfileSource`]: the SQLite connection or the
+/// rows `storage::profile_view` loads from SurrealDB.
+pub fn snapshot_from(
+    src: &dyn ProfileSource,
     period: &Period,
     filters: &StatFilters,
     now: DateTime<chrono::Utc>,
 ) -> Result<ProfileSnapshot> {
-    let reader = Reader::new(conn, period, filters, now);
+    let reader = Reader::new(src, period, filters, now);
     let intel = reader.intel();
     let recon = reader.recon();
     let atlas = reader.atlas();
@@ -428,12 +427,12 @@ pub fn snapshot(
     let tools = reader.tools();
     let attention = reader.attention(&recon, &models);
     let carries_data = sections_carry_data(&intel, &recon, &atlas, &models, &tools);
-    let status = global_status(conn, period, now, carries_data);
+    let status = global_status(src, period, now, carries_data);
     Ok(ProfileSnapshot {
         captured_at: now.to_rfc3339(),
         filters: filters.clone(),
-        observed_since: observed_since(conn),
-        retention: retention(conn, now),
+        observed_since: observed_since(src),
+        retention: retention(src, now),
         status,
         intel,
         recon,
@@ -444,16 +443,17 @@ pub fn snapshot(
     })
 }
 
-/// Every enum-ish value the filter strip can offer, for the filter popups.
-///
-/// The first pair is always the period choice list; every other pair is the
-/// sorted distinct non-empty values that dimension actually carries in
-/// `telemetry_events`, so the strip never offers a value that selects nothing.
-pub fn filter_options(conn: &Connection) -> Vec<(String, Vec<String>)> {
+/// [`filter_options`] over any [`ProfileSource`].
+pub fn filter_options_from(src: &dyn ProfileSource) -> Vec<(String, Vec<String>)> {
     let periods: Vec<String> = Period::ALL.iter().map(|p| p.label().into()).collect();
     let mut options: Vec<(String, Vec<String>)> = vec![("period".to_string(), periods)];
     for dimension in ["app", "provider", "role", "mode", "tool", "category"] {
-        options.push((dimension.to_string(), distinct_values(conn, dimension)));
+        let column = if dimension == "tool" {
+            "tool_id"
+        } else {
+            dimension
+        };
+        options.push((dimension.to_string(), src.distinct_values(column)));
     }
     options
 }
@@ -1323,18 +1323,33 @@ fn dims_from_key(key: &str) -> Dims {
     }
 }
 
-fn has_table(conn: &Connection, name: &str) -> bool {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-        rusqlite::params![name],
-        |row| row.get::<_, bool>(0),
-    )
-    .unwrap_or(false)
-}
-
-fn count_rows(conn: &Connection, sql: &str) -> i64 {
-    conn.query_row(sql, [], |row| row.get::<_, i64>(0))
-        .unwrap_or_default()
+/// The aggregation's view of one stored telemetry row.
+fn event_row(row: TelemetryRow) -> EventRow {
+    EventRow {
+        at: parse_timestamp(&row.occurred_at),
+        dims: Dims {
+            app: row.app,
+            trigger: row.trigger,
+            tool: row.tool_id,
+            category: row.category,
+            provider: row.provider,
+            role: row.role,
+            model: row.model,
+            mode: row.mode,
+            engine: row.engine,
+            outcome: row.outcome,
+            reason: row.reason,
+        },
+        job_id: row.job_id,
+        run_id: row.run_id,
+        article_id: row.article_id,
+        origin: row.origin,
+        call_id: row.call_id,
+        canonical_ref: row.canonical_ref,
+        metric_ms: row.metric_ms,
+        count: row.count,
+        payload: serde_json::from_str(&row.payload_json).unwrap_or(Json::Null),
+    }
 }
 
 fn mean_f64(samples: &[f64]) -> Option<f64> {
@@ -1420,7 +1435,7 @@ fn top_three_concentration(ranked: &[(String, u64, bool, bool)], total: u64) -> 
 /// Window-scoped, filter-aware view over one connection. Every method is read
 /// only: the writer is never locked for a dashboard query.
 struct Reader<'a> {
-    conn: &'a Connection,
+    src: &'a dyn ProfileSource,
     win: Window,
     filters: StatFilters,
 }
@@ -1442,20 +1457,36 @@ impl<'a> Reader<'a> {
                 action: directive.next_action.clone(),
             });
         }
-        if has_table(self.conn, "intel_report_jobs") {
-            if let Ok(mut stmt)=self.conn.prepare("SELECT id,article_id,state,stage,updated_at FROM intel_report_jobs WHERE state IN ('blocked','waiting') ORDER BY updated_at,id LIMIT 32") {
-                if let Ok(jobs)=stmt.query_map([],|row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?))) {
-                    for job in jobs.flatten() {
-                        rows.push(AttentionRow {app:"Intel".into(),owner_kind:"intel_job".into(),owner_id:job.0,item_id:job.1,reason:bounded_label(&format!("{} {}",job.2,job.3)),age_ms:age(&job.4),action:"Open report".into()});
-                    }
-                }
+        if let Some(jobs) = self.src.report_jobs_needing_attention() {
+            for job in jobs
+                .into_iter()
+                .map(|j| (j.id, j.article_id, j.state, j.stage, j.updated_at))
+            {
+                rows.push(AttentionRow {
+                    app: "Intel".into(),
+                    owner_kind: "intel_job".into(),
+                    owner_id: job.0,
+                    item_id: job.1,
+                    reason: bounded_label(&format!("{} {}", job.2, job.3)),
+                    age_ms: age(&job.4),
+                    action: "Open report".into(),
+                });
             }
         }
-        if has_table(self.conn, "intel_report_tasks") {
-            if let Ok(mut stmt)=self.conn.prepare("SELECT t.id,t.job_id,j.article_id,t.lease_until FROM intel_report_tasks t JOIN intel_report_jobs j ON j.id=t.job_id WHERE t.status='running' AND t.lease_until != '' AND t.lease_until < ?1 ORDER BY t.lease_until,t.id LIMIT 16") {
-                if let Ok(tasks)=stmt.query_map([self.win.now.to_rfc3339()],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?))) {
-                    for task in tasks.flatten() { rows.push(AttentionRow {app:"Intel".into(),owner_kind:"intel_job".into(),owner_id:task.1,item_id:task.2,reason:format!("expired task lease {}",bounded_label(&task.0)),age_ms:age(&task.3),action:"Open report".into()}); }
-                }
+        if let Some(tasks) = self.src.expired_report_tasks(&self.win.now.to_rfc3339()) {
+            for task in tasks
+                .into_iter()
+                .map(|t| (t.id, t.job_id, t.article_id, t.lease_until))
+            {
+                rows.push(AttentionRow {
+                    app: "Intel".into(),
+                    owner_kind: "intel_job".into(),
+                    owner_id: task.1,
+                    item_id: task.2,
+                    reason: format!("expired task lease {}", bounded_label(&task.0)),
+                    age_ms: age(&task.3),
+                    action: "Open report".into(),
+                });
             }
         }
         let stages = self.live_load(EventKind::AtlasStage);
@@ -1547,7 +1578,7 @@ impl<'a> Reader<'a> {
     /// Current states ignore the historical period and all historical filters.
     fn live_load(&self, kind: EventKind) -> Loaded {
         let mut reader = Self::new(
-            self.conn,
+            self.src,
             &Period::H24,
             &StatFilters::default(),
             self.win.now,
@@ -1557,7 +1588,7 @@ impl<'a> Reader<'a> {
         reader.load(kind).unwrap_or_default()
     }
     fn new(
-        conn: &'a Connection,
+        src: &'a dyn ProfileSource,
         period: &Period,
         filters: &StatFilters,
         now: DateTime<Utc>,
@@ -1570,7 +1601,7 @@ impl<'a> Reader<'a> {
             (end, start)
         };
         Self {
-            conn,
+            src,
             win: Window::new(now, start, end, period),
             filters: filters.clone(),
         }
@@ -1612,70 +1643,18 @@ impl<'a> Reader<'a> {
     /// overlap any retained raw row.
     fn load(&self, kind: EventKind) -> Result<Loaded> {
         let mut loaded = Loaded::default();
-        if !has_table(self.conn, "telemetry_events") {
+        let Some(rows) = self.src.telemetry_events(
+            kind.as_str(),
+            &self.win.start.to_rfc3339(),
+            &self.win.end.to_rfc3339(),
+        ) else {
             return Ok(loaded);
-        }
-        let mut sql = String::from(
-            "SELECT occurred_at, app, trigger, tool_id, category, provider, role, model, mode, engine, \
-             outcome, reason, job_id, run_id, article_id, origin, call_id, canonical_ref, metric_ms, \
-             count, payload_json FROM telemetry_events WHERE event_type = ?1",
-        );
-        let mut args: Vec<Value> = vec![kind.as_str().to_string().into()];
-        for (column, want) in [
-            ("app", self.filters.app.as_str()),
-            ("provider", self.filters.provider.as_str()),
-            ("role", self.filters.role.as_str()),
-            ("mode", self.filters.mode.as_str()),
-            ("tool_id", self.filters.tool.as_str()),
-            ("category", self.filters.category.as_str()),
-        ] {
-            let want = want.trim();
-            let dimension = if column == "tool_id" { "tool" } else { column };
-            if want.is_empty() || !applicable_filter_dimensions(kind).contains(&dimension) {
+        };
+        for row in rows {
+            let row = event_row(row);
+            if !self.matches_filters(kind, &row.dims) {
                 continue;
             }
-            let index = args.len() + 1;
-            sql.push_str(&format!(" AND {column} = ?{index}"));
-            args.push(want.to_string().into());
-        }
-        let start_index = args.len() + 1;
-        sql.push_str(&format!(" AND occurred_at >= ?{start_index}"));
-        args.push(self.win.start.to_rfc3339().into());
-        let end_index = args.len() + 1;
-        sql.push_str(&format!(" AND occurred_at <= ?{end_index}"));
-        args.push(self.win.end.to_rfc3339().into());
-        sql.push_str(" ORDER BY occurred_at, id");
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(args), |row| {
-            Ok(EventRow {
-                at: parse_timestamp(&row.get::<_, String>(0)?),
-                dims: Dims {
-                    app: row.get(1)?,
-                    trigger: row.get(2)?,
-                    tool: row.get(3)?,
-                    category: row.get(4)?,
-                    provider: row.get(5)?,
-                    role: row.get(6)?,
-                    model: row.get(7)?,
-                    mode: row.get(8)?,
-                    engine: row.get(9)?,
-                    outcome: row.get(10)?,
-                    reason: row.get(11)?,
-                },
-                job_id: row.get(12)?,
-                run_id: row.get(13)?,
-                article_id: row.get(14)?,
-                origin: row.get(15)?,
-                call_id: row.get(16)?,
-                canonical_ref: row.get(17)?,
-                metric_ms: row.get(18)?,
-                count: row.get(19)?,
-                payload: serde_json::from_str(&row.get::<_, String>(20)?).unwrap_or(Json::Null),
-            })
-        })?;
-        for row in rows {
-            let row = row?;
             let Some(at) = row.at else { continue };
             if !self.win.contains(at) {
                 continue;
@@ -1701,33 +1680,26 @@ impl<'a> Reader<'a> {
             ("telemetry_hourly", 3_600_i64),
             ("telemetry_daily", 86_400_i64),
         ] {
-            if !has_table(self.conn, table) {
+            let Some(stored) = self.src.telemetry_rollups(table, kind.as_str()) else {
                 continue;
-            }
+            };
             let cutoff = if granularity == 3_600 {
                 self.win.raw_cutoff
             } else {
                 bucket_floor(self.win.raw_cutoff, 3_600)
             };
-            let sql = format!(
-                "SELECT bucket, dim_key, events, total_ms, max_ms, bins_json FROM {table} \
-                 WHERE event_type = ?1"
-            );
             let mut merged: Vec<(String, Dims, Cell)> = Vec::new();
             {
-                let mut stmt = self.conn.prepare(&sql)?;
-                let rows = stmt.query_map(rusqlite::params![kind.as_str()], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, String>(5)?,
-                    ))
-                })?;
-                for row in rows {
-                    let (bucket, dim_key, events, total_ms, max_ms, bins_json) = row?;
+                for row in stored {
+                    let RollupRow {
+                        bucket,
+                        dim_key,
+                        events,
+                        total_ms,
+                        max_ms,
+                        bins_json,
+                        ..
+                    } = row;
                     let Some(start) = parse_bucket(&bucket) else {
                         continue;
                     };
@@ -1822,7 +1794,7 @@ impl Reader<'_> {
             }
         }
 
-        let identities_available = !observed_since(self.conn).is_empty()
+        let identities_available = !observed_since(self.src).is_empty()
             && articles
                 .cells
                 .values()
@@ -1831,7 +1803,7 @@ impl Reader<'_> {
         let distinct_new_articles = identities_available.then_some(seen.len() as u64);
         let body_eligible_articles = identities_available
             .then_some(seen.len() as u64)
-            .filter(|_| has_table(self.conn, "article_bodies"));
+            .filter(|_| self.src.has_article_bodies());
         let body_available_articles = body_eligible_articles.map(|_| {
             seen.iter()
                 .filter(|article| self.article_has_body(&article.domain, &article.id))
@@ -2064,23 +2036,11 @@ impl Reader<'_> {
     }
 
     fn article_has_body(&self, _domain: &str, article_id: &str) -> bool {
-        self.conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM article_bodies WHERE article_id = ?1 AND quality != 'unavailable' AND length(trim(body_markdown)) > 0)",
-                rusqlite::params![article_id],
-                |row| row.get::<_, bool>(0),
-            )
-            .unwrap_or(false)
+        self.src.article_has_body(article_id)
     }
 
     fn article_has_report(&self, article_id: &str) -> bool {
-        self.conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM intel_report_jobs WHERE article_id = ?1)",
-                rusqlite::params![article_id],
-                |row| row.get::<_, bool>(0),
-            )
-            .unwrap_or(false)
+        self.src.article_has_report(article_id)
     }
 }
 
@@ -2440,29 +2400,20 @@ impl Reader<'_> {
 
     /// Recon widget 5: eligible-tool attainment from `recon_coverage`.
     fn recon_diversity(&self) -> Vec<DiversityRow> {
-        if !has_table(self.conn, "recon_coverage") {
+        let Some(coverage) = self.src.recon_coverage() else {
             return Vec::new();
-        }
+        };
         let mut latest: HashMap<String, CoverageFact> = HashMap::new();
         {
-            let Ok(mut stmt) = self.conn.prepare(
-                "SELECT scope, generation, category, payload_json, updated_at \
-                 FROM recon_coverage",
-            ) else {
-                return Vec::new();
-            };
-            let Ok(rows) = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            }) else {
-                return Vec::new();
-            };
-            for row in rows.flatten() {
+            for row in coverage.into_iter().map(|c| {
+                (
+                    c.scope,
+                    c.generation,
+                    c.category,
+                    c.payload_json,
+                    c.updated_at,
+                )
+            }) {
                 let (scope, generation, category, payload, updated_at) = row;
                 let key = format!("{scope}\u{1f}{category}");
                 let stamp = parse_timestamp(&updated_at);
@@ -2853,7 +2804,7 @@ impl Reader<'_> {
         let mut rows: Vec<TemperatureChange> = per_origin
             .into_iter()
             .filter_map(|(origin, mut snaps)| {
-                snaps.sort_by(|a, b| a.at.cmp(&b.at));
+                snaps.sort_by_key(|a| a.at);
                 let latest = snaps.last()?;
                 let current = latest.payload.get("temperature").and_then(Json::as_f64);
                 let tier = latest
@@ -3071,38 +3022,88 @@ impl Reader<'_> {
         }
         // New-contract work comes from retained article metadata, not legacy
         // packet/memory events. Each stage counts its own article cohort.
-        if has_table(self.conn, "atlas_article_metadata") {
-            if let Ok(mut statement) = self.conn.prepare(
-                "SELECT r.state,r.stats_json,COALESCE(m.classification_status,'pending'),COALESCE(m.entity_state,'pending'),COALESCE(m.reliability_state,'pending') FROM atlas_articles a JOIN atlas_runs r ON r.id=a.run_id LEFT JOIN atlas_article_metadata m ON m.run_id=a.run_id AND m.article_id=a.article_id"
-            ) {
-                if let Ok(metadata) = statement.query_map([], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,String>(4)?))) {
-                    for (run_state, stats, classification, entities, publishers) in metadata.flatten() {
-                        let stats: serde_json::Value = serde_json::from_str(&stats).unwrap_or_default();
-                        if !stats.get("contract_version").and_then(serde_json::Value::as_str).is_some_and(crate::atlas_work::is_collection_contract) { continue; }
-                        for (stage,status) in [("classification",classification),("entities",entities),("publishers",publishers)] {
-                            let state = if status=="pending" { if run_state=="running" { "queued" } else { "waiting" } } else { &status };
-                            if !matches!(state,"queued"|"running"|"waiting"|"blocked") { continue; }
-                            let entry = rows.entry((stage.into(), "article".into())).or_insert_with(|| BacklogRow { stage:stage.into(),unit:"article".into(),..Default::default() });
-                            match state { "queued"=>entry.queued+=1,"running"=>entry.running+=1,"waiting"=>entry.waiting+=1,"blocked"=>entry.blocked+=1,_=>{} }
-                            // A metadata record has no authoritative queue timestamp.
-                            // Keep age unavailable instead of substituting ingestion time.
+        if let Some(metadata) = self.src.atlas_metadata() {
+            for (run_state, stats, classification, entities, publishers) in
+                metadata.into_iter().map(|m| {
+                    (
+                        m.run_state,
+                        m.stats_json,
+                        m.classification,
+                        m.entities,
+                        m.reliability,
+                    )
+                })
+            {
+                let stats: serde_json::Value = serde_json::from_str(&stats).unwrap_or_default();
+                if !stats
+                    .get("contract_version")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(crate::atlas_work::is_collection_contract)
+                {
+                    continue;
+                }
+                for (stage, status) in [
+                    ("classification", classification),
+                    ("entities", entities),
+                    ("publishers", publishers),
+                ] {
+                    let state = if status == "pending" {
+                        if run_state == "running" {
+                            "queued"
+                        } else {
+                            "waiting"
                         }
+                    } else {
+                        &status
+                    };
+                    if !matches!(state, "queued" | "running" | "waiting" | "blocked") {
+                        continue;
                     }
+                    let entry = rows
+                        .entry((stage.into(), "article".into()))
+                        .or_insert_with(|| BacklogRow {
+                            stage: stage.into(),
+                            unit: "article".into(),
+                            ..Default::default()
+                        });
+                    match state {
+                        "queued" => entry.queued += 1,
+                        "running" => entry.running += 1,
+                        "waiting" => entry.waiting += 1,
+                        "blocked" => entry.blocked += 1,
+                        _ => {}
+                    }
+                    // A metadata record has no authoritative queue timestamp.
+                    // Keep age unavailable instead of substituting ingestion time.
                 }
             }
         }
-        if has_table(self.conn, "argos_tasks") {
-            if let Ok(mut statement)=self.conn.prepare("SELECT state,created_at,error_category FROM argos_tasks WHERE operation='atlas_related' AND state IN ('queued','running','waiting','blocked')") {
-                if let Ok(tasks)=statement.query_map([],|row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))) {
-                    for (state,created,error) in tasks.flatten() {
-                        let entry=rows.entry(("related".into(),"cycle".into())).or_insert_with(|| BacklogRow{stage:"related".into(),unit:"cycle".into(),..Default::default()});
-                        match state.as_str(){"queued"=>entry.queued+=1,"running"=>entry.running+=1,"waiting"=>entry.waiting+=1,"blocked"=>entry.blocked+=1,_=>{}}
-                        if let Ok(created)=DateTime::parse_from_rfc3339(&created) {
-                            let age=now.signed_duration_since(created).num_milliseconds().max(0);
-                            entry.oldest_pending_ms=Some(entry.oldest_pending_ms.map_or(age,|old| old.max(age)));
-                        }
-                        if state=="blocked" { entry.latest_error_category=error; }
-                    }
+        if let Some(tasks) = self.src.atlas_related_tasks() {
+            for (state, created, error) in tasks
+                .into_iter()
+                .map(|t| (t.state, t.created_at, t.error_category))
+            {
+                let entry = rows
+                    .entry(("related".into(), "cycle".into()))
+                    .or_insert_with(|| BacklogRow {
+                        stage: "related".into(),
+                        unit: "cycle".into(),
+                        ..Default::default()
+                    });
+                match state.as_str() {
+                    "queued" => entry.queued += 1,
+                    "running" => entry.running += 1,
+                    "waiting" => entry.waiting += 1,
+                    "blocked" => entry.blocked += 1,
+                    _ => {}
+                }
+                if let Ok(created) = DateTime::parse_from_rfc3339(&created) {
+                    let age = now.signed_duration_since(created).num_milliseconds().max(0);
+                    entry.oldest_pending_ms =
+                        Some(entry.oldest_pending_ms.map_or(age, |old| old.max(age)));
+                }
+                if state == "blocked" {
+                    entry.latest_error_category = error;
                 }
             }
         }
@@ -3113,20 +3114,7 @@ impl Reader<'_> {
 
     /// Atlas widget 4 inputs: distinct articles per origin from durable rows.
     fn atlas_article_facts(&self) -> Vec<(String, u32)> {
-        if !has_table(self.conn, "atlas_articles") {
-            return Vec::new();
-        }
-        let Ok(mut stmt) = self.conn.prepare(
-            "SELECT country, COUNT(DISTINCT article_id) FROM atlas_articles GROUP BY country",
-        ) else {
-            return Vec::new();
-        };
-        let Ok(rows) = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
-        }) else {
-            return Vec::new();
-        };
-        rows.flatten().collect()
+        self.src.atlas_articles_by_country()
     }
 }
 
@@ -3931,7 +3919,7 @@ struct EvidenceAccumulator {
 
 impl Reader<'_> {
     fn models(&self) -> ModelStats {
-        let capacity = provider_metrics::capacity_snapshot(self.conn);
+        let capacity = self.src.capacity();
         let operations = self.load(EventKind::ModelOperation).unwrap_or_default();
         let attempts = self.load(EventKind::ModelAttempt).unwrap_or_default();
         let facts = model_facts(self, &operations, &attempts);
@@ -4241,7 +4229,8 @@ struct ModelFacts {
 /// Reads the durable schema-26 operation/attempt rows and merges the canonical
 /// telemetry events, keeping exactly one count per fact.
 fn model_facts(reader: &Reader<'_>, operations: &Loaded, attempts: &Loaded) -> ModelFacts {
-    let conn = reader.conn;
+    let src = reader.src;
+    let end = reader.win.end.to_rfc3339();
     let mut facts = ModelFacts::default();
     let mut known_operations: HashSet<String> = HashSet::new();
     let mut known_attempts: HashSet<String> = HashSet::new();
@@ -4253,150 +4242,99 @@ fn model_facts(reader: &Reader<'_>, operations: &Loaded, attempts: &Loaded) -> M
         .collect();
     let mut all_attempts = Vec::new();
 
-    if has_table(conn, "recon_model_operations") {
-        if let Ok(mut stmt) = conn
-            .prepare("SELECT id, role, status, created_at, updated_at FROM recon_model_operations WHERE created_at <= ?1")
+    if let Some(rows) = src.model_operations(&end) {
+        for row in rows
+            .into_iter()
+            .map(|r| (r.id, r.role, r.status, r.created_at, r.updated_at))
         {
-            if let Ok(rows) = stmt.query_map([reader.win.end.to_rfc3339()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            }) {
-                for row in rows.flatten() {
-                    known_operations.insert(row.0.clone());
-                    facts.operations.push(OperationFact {
-                        terminal_bucket: model_terminal(&row.2).then(|| parse_timestamp(&row.4)).flatten().filter(|at| reader.win.contains(*at)),
-                        role: row.1,
-                        primary_provider: String::new(),
-                        primary_model: String::new(),
-                        effective_provider: String::new(),
-                        effective_model: String::new(),
-                        sends: 0,
-                        failed: matches!(row.2.as_str(), "failed" | "error"),
-                        recovered: model_succeeded(&row.2),
-                        fallback_triggered: false,
-                        trigger_reason: String::new(),
-                        operation_id: row.0,
-                        created_at: parse_timestamp(&row.3),
-                    });
-                }
-            }
+            known_operations.insert(row.0.clone());
+            facts.operations.push(OperationFact {
+                terminal_bucket: model_terminal(&row.2)
+                    .then(|| parse_timestamp(&row.4))
+                    .flatten()
+                    .filter(|at| reader.win.contains(*at)),
+                role: row.1,
+                primary_provider: String::new(),
+                primary_model: String::new(),
+                effective_provider: String::new(),
+                effective_model: String::new(),
+                sends: 0,
+                failed: matches!(row.2.as_str(), "failed" | "error"),
+                recovered: model_succeeded(&row.2),
+                fallback_triggered: false,
+                trigger_reason: String::new(),
+                operation_id: row.0,
+                created_at: parse_timestamp(&row.3),
+            });
         }
     }
-    if has_table(conn, "recon_model_attempts") {
-        let columns: HashSet<String> = conn
-            .prepare("PRAGMA table_info(recon_model_attempts)")
-            .ok()
-            .and_then(|mut stmt| {
-                stmt.query_map([], |row| row.get::<_, String>(1))
-                    .ok()
-                    .map(|rows| rows.flatten().collect())
-            })
-            .unwrap_or_default();
-        let optional = |column: &str| {
-            if columns.contains(column) {
-                format!("a.{column}")
-            } else {
-                "NULL".into()
-            }
-        };
-        let sql = format!("SELECT a.id, a.operation_id, a.provider, a.model, a.route_index, a.dispatched, a.outcome, a.failure_category, a.http_status, {}, {}, {}, a.started_at, a.finished_at, {}, {}, {}, o.role, a.transport FROM recon_model_attempts a JOIN recon_model_operations o ON o.id = a.operation_id WHERE a.started_at <= ?1 ORDER BY a.started_at, a.id", optional("elapsed_ms"), optional("queue_ms"), optional("ttfb_ms"), optional("sent_at"), optional("queued_at"), optional("first_response_at"));
-        if let Ok(mut stmt) = conn.prepare(&sql) {
-            if let Ok(rows) = stmt.query_map([reader.win.end.to_rfc3339()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, u32>(4)?,
-                    row.get::<_, bool>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, Option<u32>>(8)?,
-                    row.get::<_, Option<i64>>(9)?,
-                    row.get::<_, Option<i64>>(10)?,
-                    row.get::<_, Option<i64>>(11)?,
-                    row.get::<_, String>(12)?,
-                    row.get::<_, String>(13)?,
-                    row.get::<_, Option<String>>(14)?.unwrap_or_default(),
-                    row.get::<_, Option<String>>(15)?.unwrap_or_default(),
-                    row.get::<_, Option<String>>(16)?.unwrap_or_default(),
-                    row.get::<_, String>(17)?,
-                    row.get::<_, String>(18)?,
-                ))
-            }) {
-                for row in rows.flatten() {
-                    known_attempts.insert(row.0.clone());
-                    let extra = supplemental.get(row.0.as_str()).copied();
-                    let finished = !row.13.is_empty() && model_finished(&row.6);
-                    let succeeded = finished && model_succeeded(&row.6);
-                    let mut dims = extra
-                        .map(|extra| extra.dims.clone())
-                        .unwrap_or_else(|| Dims {
-                            app: "recon".into(),
-                            provider: row.2.clone(),
-                            model: row.3.clone(),
-                            role: row.17.clone(),
-                            mode: row.18.clone(),
-                            outcome: row.6.clone(),
-                            reason: row.7.clone(),
-                            ..Dims::default()
-                        });
-                    dims.provider = row.2.clone();
-                    dims.model = row.3.clone();
-                    dims.role = row.17.clone();
-                    dims.outcome = row.6.clone();
-                    let at = parse_timestamp(if row.14.is_empty() { &row.12 } else { &row.14 });
-                    all_attempts.push(AttemptFact {
-                        id: row.0,
-                        at,
-                        dims,
-                        bucket: at.map(|at| reader.win.label_at(at)).unwrap_or_default(),
-                        provider: row.2,
-                        model: row.3,
-                        role: row.17,
-                        sent: row.5,
-                        finished,
-                        succeeded,
-                        failed: finished && !succeeded && !model_cancelled(&row.6),
-                        exec_ms: row
-                            .9
-                            .filter(|value| *value >= 0 && finished && !row.14.is_empty())
-                            .or_else(|| {
-                                extra
-                                    .and_then(|extra| extra.metric_ms)
-                                    .filter(|value| *value >= 0 && finished)
-                            }),
-                        queue_ms: row
-                            .10
-                            .filter(|value| *value >= 0 && !row.14.is_empty() && !row.15.is_empty())
-                            .or_else(|| {
-                                extra
-                                    .and_then(|extra| extra.int("queue_ms"))
-                                    .filter(|value| *value >= 0)
-                            }),
-                        first_header_ms: row
-                            .11
-                            .filter(|value| *value >= 0 && (!row.16.is_empty() || *value > 0))
-                            .or_else(|| {
-                                extra
-                                    .and_then(|extra| extra.int("ttfb_ms"))
-                                    .filter(|value| *value > 0)
-                            }),
-                        first_content_ms: extra
-                            .and_then(|extra| extra.int("first_content_ms"))
-                            .filter(|value| *value >= 0),
-                        http_status: row.8,
-                        failure_category: row.7,
-                        operation_id: row.1,
-                        route_index: row.4,
-                    });
-                }
-            }
+    if let Some(rows) = src.model_attempts(&end) {
+        for row in rows.into_iter().map(ModelAttemptRow::into_tuple) {
+            known_attempts.insert(row.0.clone());
+            let extra = supplemental.get(row.0.as_str()).copied();
+            let finished = !row.13.is_empty() && model_finished(&row.6);
+            let succeeded = finished && model_succeeded(&row.6);
+            let mut dims = extra
+                .map(|extra| extra.dims.clone())
+                .unwrap_or_else(|| Dims {
+                    app: "recon".into(),
+                    provider: row.2.clone(),
+                    model: row.3.clone(),
+                    role: row.17.clone(),
+                    mode: row.18.clone(),
+                    outcome: row.6.clone(),
+                    reason: row.7.clone(),
+                    ..Dims::default()
+                });
+            dims.provider = row.2.clone();
+            dims.model = row.3.clone();
+            dims.role = row.17.clone();
+            dims.outcome = row.6.clone();
+            let at = parse_timestamp(if row.14.is_empty() { &row.12 } else { &row.14 });
+            all_attempts.push(AttemptFact {
+                id: row.0,
+                at,
+                dims,
+                bucket: at.map(|at| reader.win.label_at(at)).unwrap_or_default(),
+                provider: row.2,
+                model: row.3,
+                role: row.17,
+                sent: row.5,
+                finished,
+                succeeded,
+                failed: finished && !succeeded && !model_cancelled(&row.6),
+                exec_ms: row
+                    .9
+                    .filter(|value| *value >= 0 && finished && !row.14.is_empty())
+                    .or_else(|| {
+                        extra
+                            .and_then(|extra| extra.metric_ms)
+                            .filter(|value| *value >= 0 && finished)
+                    }),
+                queue_ms: row
+                    .10
+                    .filter(|value| *value >= 0 && !row.14.is_empty() && !row.15.is_empty())
+                    .or_else(|| {
+                        extra
+                            .and_then(|extra| extra.int("queue_ms"))
+                            .filter(|value| *value >= 0)
+                    }),
+                first_header_ms: row
+                    .11
+                    .filter(|value| *value >= 0 && (!row.16.is_empty() || *value > 0))
+                    .or_else(|| {
+                        extra
+                            .and_then(|extra| extra.int("ttfb_ms"))
+                            .filter(|value| *value > 0)
+                    }),
+                first_content_ms: extra
+                    .and_then(|extra| extra.int("first_content_ms"))
+                    .filter(|value| *value >= 0),
+                http_status: row.8,
+                failure_category: row.7,
+                operation_id: row.1,
+                route_index: row.4,
+            });
         }
     }
     for (row, at) in attempts.timed() {
@@ -4825,12 +4763,12 @@ const TELEMETRY_STAMPS: [(&str, &str); 3] = [
 /// This is the dashboard's `observed_since` marker. Metrics before it are N/A,
 /// not zero, so a fresh installation must report an empty string rather than an
 /// invented epoch.
-fn observed_since(conn: &Connection) -> String {
+fn observed_since(conn: &dyn ProfileSource) -> String {
     let mut earliest = String::new();
     for value in [
-        oldest_stored(conn, "telemetry_events", "occurred_at", ""),
-        oldest_stored(conn, "telemetry_hourly", "bucket", ""),
-        oldest_stored(conn, "telemetry_daily", "bucket", ""),
+        conn.oldest_stored("telemetry_events", "occurred_at", ""),
+        conn.oldest_stored("telemetry_hourly", "bucket", ""),
+        conn.oldest_stored("telemetry_daily", "bucket", ""),
     ] {
         if !value.is_empty() && (earliest.is_empty() || value < earliest) {
             earliest = value;
@@ -4843,18 +4781,18 @@ fn observed_since(conn: &Connection) -> String {
 ///
 /// Only rows inside the published retention window count as retained, so a
 /// sweeper that has not caught up yet never widens the reported window.
-fn retention(conn: &Connection, now: DateTime<Utc>) -> RetentionInfo {
+fn retention(conn: &dyn ProfileSource, now: DateTime<Utc>) -> RetentionInfo {
     let raw_floor = retention_floor(now, telemetry::RAW_RETENTION_DAYS);
     let rollup_floor = retention_floor(now, telemetry::ROLLUP_RETENTION_DAYS);
-    let mut oldest_rollup = oldest_stored(conn, "telemetry_hourly", "bucket", &rollup_floor);
-    let oldest_daily = oldest_stored(conn, "telemetry_daily", "bucket", &rollup_floor);
+    let mut oldest_rollup = conn.oldest_stored("telemetry_hourly", "bucket", &rollup_floor);
+    let oldest_daily = conn.oldest_stored("telemetry_daily", "bucket", &rollup_floor);
     if !oldest_daily.is_empty() && (oldest_rollup.is_empty() || oldest_daily < oldest_rollup) {
         oldest_rollup = oldest_daily;
     }
     RetentionInfo {
         raw_days: telemetry::RAW_RETENTION_DAYS,
         rollup_days: telemetry::ROLLUP_RETENTION_DAYS,
-        oldest_raw: oldest_stored(conn, "telemetry_events", "occurred_at", &raw_floor),
+        oldest_raw: conn.oldest_stored("telemetry_events", "occurred_at", &raw_floor),
         oldest_rollup,
     }
 }
@@ -4869,13 +4807,13 @@ fn retention_floor(now: DateTime<Utc>, days: i64) -> String {
 /// retained: `unknown` when nothing is, `stale` when the newest raw event
 /// predates two period windows or nothing renders, `ok` otherwise.
 fn global_status(
-    conn: &Connection,
+    conn: &dyn ProfileSource,
     period: &Period,
     now: DateTime<Utc>,
     sections_carry_data: bool,
 ) -> GlobalStatus {
-    let live = provider_metrics::capacity_snapshot(conn);
-    let newest_raw = newest_stored(conn, &TELEMETRY_STAMPS);
+    let live = conn.capacity();
+    let newest_raw = newest_stored(conn);
     let span = period.end(now) - period.start(now);
     let window = ChronoDuration::seconds(span.num_seconds().saturating_mul(2));
     let fresh = match parse_timestamp(&newest_raw) {
@@ -4899,10 +4837,10 @@ fn global_status(
         }
     }
     GlobalStatus {
-        active_jobs: active_jobs(conn),
+        active_jobs: conn.active_jobs(),
         queued_requests,
         collection_health,
-        last_updated: newest_stored(conn, &TELEMETRY_STAMPS),
+        last_updated: newest_stored(conn),
         provider_capacity_available: live.available,
     }
 }
@@ -4910,29 +4848,6 @@ fn global_status(
 /// Live jobs across the durable job tables. A row is live while its status
 /// column is not one of the terminal states the crate already normalizes to:
 /// `normalize_run_outcome`, `is_terminal_report_state` and `cycle_outcome_label`.
-fn active_jobs(conn: &Connection) -> i64 {
-    const RECON_TERMINAL: &str = "('completed','completed_with_evidence',\
-                                  'completed_zero_evidence','partial','failed',\
-                                  'cancelled','canceled')";
-    const REPORT_TERMINAL: &str = "('completed','partial','failed','cancelled','canceled')";
-    // Atlas folds `paused` into a cancelled cycle, so it is terminal too.
-    const ATLAS_TERMINAL: &str = "('completed','partial','failed','cancelled','canceled','paused')";
-    let mut active = 0;
-    for (table, column, terminal) in [
-        ("recon_runs", "state", RECON_TERMINAL),
-        ("intel_report_jobs", "state", REPORT_TERMINAL),
-        ("atlas_runs", "state", ATLAS_TERMINAL),
-    ] {
-        if !has_table(conn, table) {
-            continue;
-        }
-        active += count_rows(
-            conn,
-            &format!("SELECT COUNT(*) FROM {table} WHERE {column} NOT IN {terminal}"),
-        );
-    }
-    active
-}
 
 /// True when at least one section carries a real observation. A zero-filled
 /// trend skeleton, the always-present named engines and a live `Other` row are
@@ -5032,30 +4947,13 @@ fn tools_carries_data(tools: &ToolStats) -> bool {
 /// Oldest value of one telemetry column: empty when the table is missing, the
 /// column holds nothing, or everything predates `floor`. An empty floor keeps
 /// every row, so it reads the whole retained window.
-fn oldest_stored(conn: &Connection, table: &str, column: &str, floor: &str) -> String {
-    if !has_table(conn, table) {
-        return String::new();
-    }
-    let sql = format!("SELECT MIN({column}) FROM {table} WHERE {column} >= ?1");
-    let oldest = conn.query_row(&sql, rusqlite::params![floor], |row| {
-        row.get::<_, Option<String>>(0)
-    });
-    match oldest {
-        Ok(Some(value)) if !value.is_empty() => value,
-        _ => String::new(),
-    }
-}
 
 /// Newest value across the given telemetry columns. A missing table is skipped,
 /// never an error, so a partially migrated store still reports what it holds.
-fn newest_stored(conn: &Connection, columns: &[(&str, &str)]) -> String {
+fn newest_stored(conn: &dyn ProfileSource) -> String {
     let mut newest = String::new();
-    for (table, column) in columns {
-        if !has_table(conn, table) {
-            continue;
-        }
-        let sql = format!("SELECT MAX({column}) FROM {table}");
-        if let Ok(Some(value)) = conn.query_row(&sql, [], |row| row.get::<_, Option<String>>(0)) {
+    for (table, column) in TELEMETRY_STAMPS {
+        if let Some(value) = conn.newest_stored(table, column) {
             if !value.is_empty() && value > newest {
                 newest = value;
             }
@@ -5066,31 +4964,10 @@ fn newest_stored(conn: &Connection, columns: &[(&str, &str)]) -> String {
 
 /// Sorted distinct non-empty values of one filter dimension. An empty vector
 /// means the dimension selects nothing, so the strip offers no choices.
-fn distinct_values(conn: &Connection, dimension: &str) -> Vec<String> {
-    if !has_table(conn, "telemetry_events") {
-        return Vec::new();
-    }
-    let column = match dimension {
-        "tool" => "tool_id",
-        other => other,
-    };
-    let sql = format!(
-        "SELECT DISTINCT {column} FROM telemetry_events WHERE {column} <> '' ORDER BY {column}"
-    );
-    let mut values = Vec::new();
-    if let Ok(mut stmt) = conn.prepare(&sql) {
-        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
-            values.extend(rows.flatten());
-        }
-    }
-    values
-}
 
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
-    use crate::store::Store;
-    use crate::telemetry::{EventKind, TelemetryEvent};
 
     #[test]
     fn retained_bucket_parser_defaults_hour_boundaries_to_zero_minutes() {
@@ -5121,80 +4998,6 @@ mod snapshot_tests {
             .with_ratio();
             assert_eq!(row.ratio, expected);
         }
-    }
-
-    #[test]
-    fn durable_model_rows_and_supplemental_telemetry_count_once() {
-        let store = store();
-        let now = Utc::now();
-        let started = (now - ChronoDuration::minutes(5)).to_rfc3339();
-        let finished = (now - ChronoDuration::minutes(1)).to_rfc3339();
-        store.connection().execute("INSERT INTO recon_model_operations (id,role,status,created_at,updated_at) VALUES ('op-main','recon','final',?1,?2)",rusqlite::params![started,finished]).unwrap();
-        for index in 0..24 {
-            let id = format!("attempt-{index}");
-            store.connection().execute("INSERT INTO recon_model_attempts (id,operation_id,route_index,attempt,provider,account,model,transport,dispatched,outcome,started_at,finished_at,sent_at,queued_at,first_response_at,elapsed_ms,queue_ms,ttfb_ms) VALUES (?1,'op-main',0,?2,'openrouter','','fixture','chat',1,'ok',?3,?4,?3,?3,?3,1000,200,100)",rusqlite::params![id,index,started,finished]).unwrap();
-            record(
-                &store,
-                TelemetryEvent::new(EventKind::ModelAttempt)
-                    .canonical(&id)
-                    .at(finished.clone())
-                    .app("recon")
-                    .provider("openrouter")
-                    .model("fixture")
-                    .role("recon")
-                    .mode("chat")
-                    .outcome("ok")
-                    .duration_ms(Some(1000))
-                    .payload(serde_json::json!({"operation_id":"op-main","queue_ms":200})),
-            );
-        }
-        record(
-            &store,
-            TelemetryEvent::new(EventKind::ModelOperation)
-                .canonical("op-main")
-                .at(finished)
-                .app("recon")
-                .role("recon")
-                .outcome("final"),
-        );
-        let snap = snapshot_at(&store, &Period::H1, now);
-        let summary = &snap.models.period_summary;
-        assert_eq!(summary.sends, 24);
-        assert_eq!(summary.terminal_operations, 1);
-        assert_eq!(summary.final_failures, 0);
-        assert_eq!(summary.successful_execution_n, 24);
-        assert_eq!(summary.successful_execution_p95_ms, Some(1000));
-        assert_eq!(summary.queue_n, 24);
-        assert_eq!(summary.queue_p95_ms, Some(200));
-        assert_eq!(
-            snap.models
-                .amplification
-                .iter()
-                .find(|row| row.terminal_operations > 0)
-                .unwrap()
-                .ratio,
-            Some(24.0)
-        );
-        let parent = snap
-            .models
-            .performance
-            .iter()
-            .find(|row| !row.is_model_row)
-            .unwrap();
-        assert_eq!(parent.sends, 24);
-        assert_eq!(parent.attempt_error_pct, Some(0.0));
-        let filtered = snapshot(
-            store.connection(),
-            &Period::H1,
-            &StatFilters {
-                provider: "google".into(),
-                ..Default::default()
-            },
-            now,
-        )
-        .unwrap();
-        assert_eq!(filtered.models.period_summary.sends, 0);
-        assert_eq!(filtered.models.period_summary.terminal_operations, 0);
     }
 
     #[test]
@@ -5247,433 +5050,6 @@ mod snapshot_tests {
         assert_eq!(cell.duration_n(), 100);
         assert_eq!(cell.p95_ms(), quantile_from_bins(&bins, 0.95));
         assert_ne!(cell.p95_ms(), Some((1000 + 100_000) / 2));
-    }
-
-    #[test]
-    fn distinct_article_body_cohort_deduplicates_tags_and_excludes_empty_cache_rows() {
-        let store = store();
-        let now = Utc::now();
-        for (article, tag) in [
-            ("article-1", "tag-a"),
-            ("article-1", "tag-b"),
-            ("article-2", "tag-a"),
-        ] {
-            record(
-                &store,
-                TelemetryEvent::new(EventKind::IntelArticle)
-                    .at(now.to_rfc3339())
-                    .article(article)
-                    .category(tag)
-                    .app("intel"),
-            );
-        }
-        store.connection().execute("INSERT INTO article_bodies (id,article_id,original_url,body_markdown,quality,created_at,updated_at) VALUES ('body-1','article-1','https://example.test/1','Fixture body','partial',?1,?1),('body-2','article-2','https://example.test/2','','unavailable',?1,?1)",[now.to_rfc3339()]).unwrap();
-        let snap = snapshot_at(&store, &Period::H1, now);
-        assert_eq!(snap.intel.distinct_new_articles, Some(2));
-        assert_eq!(snap.intel.body_eligible_articles, Some(2));
-        assert_eq!(snap.intel.body_available_articles, Some(1));
-        assert_eq!(
-            snap.intel
-                .enrichment
-                .iter()
-                .map(|row| row.articles as u64)
-                .sum::<u64>(),
-            3
-        );
-        assert_eq!(
-            snap.intel
-                .volume
-                .iter()
-                .map(|bucket| bucket.total as u64)
-                .sum::<u64>(),
-            2
-        );
-    }
-
-    #[test]
-    fn rollup_only_articles_do_not_invent_distinct_identity_or_body_coverage() {
-        let store = store();
-        let now = Utc::now();
-        let at = now - ChronoDuration::days(100);
-        let bucket = at.format("%Y-%m-%dT%H").to_string();
-        let dims = ["intel", "", "", "tag-a", "", "", "", "", "", "", ""].join("\u{1f}");
-        store.connection().execute("INSERT INTO telemetry_hourly (bucket,event_type,dim_key,events) VALUES (?1,'intel_article',?2,7)",rusqlite::params![bucket,dims]).unwrap();
-        let period = Period::Custom {
-            from: (at - ChronoDuration::hours(2)).to_rfc3339(),
-            to: (at + ChronoDuration::hours(2)).to_rfc3339(),
-        };
-        let snap = snapshot_at(&store, &period, now);
-        assert_eq!(snap.intel.distinct_new_articles, None);
-        assert_eq!(snap.intel.body_available_articles, None);
-        assert_eq!(snap.intel.body_eligible_articles, None);
-        assert_eq!(
-            snap.intel
-                .volume
-                .iter()
-                .map(|bucket| bucket.total as u64)
-                .sum::<u64>(),
-            7
-        );
-    }
-
-    #[test]
-    fn collection_backlog_uses_durable_article_stages_without_legacy_units() {
-        let store = store();
-        store
-            .atlas_insert_run(
-                "collection",
-                "{}",
-                r#"{"contract_version":"atlas-collection-v1"}"#,
-            )
-            .unwrap();
-        store
-            .atlas_set_state("collection", "paused", "", false)
-            .unwrap();
-        store.connection().execute("INSERT INTO atlas_articles(run_id,article_id,title,description,url,country,source_name,source_domain,published_at,provider,temperature,category,seen_at) VALUES('collection','article','Title','','https://example.com/article','us','Wire','example.com','','fixture',0,'unk','2026-10-12T00:00:00Z')",[]).unwrap();
-        let snapshot = snapshot_at(&store, &Period::H1, Utc::now());
-        for stage in ["classification", "entities", "publishers"] {
-            let row = snapshot
-                .atlas
-                .backlog
-                .iter()
-                .find(|row| row.stage == stage)
-                .unwrap();
-            assert_eq!(row.unit, "article");
-            assert_eq!(row.waiting, 1);
-            assert_eq!(
-                row.oldest_pending_ms, None,
-                "queue age is unavailable without a native timestamp"
-            );
-        }
-        assert!(!snapshot
-            .atlas
-            .backlog
-            .iter()
-            .any(|row| matches!(row.unit.as_str(), "memory" | "packet")));
-    }
-
-    #[test]
-    fn live_backlog_and_bounded_attention_keep_owner_ids_outside_period() {
-        let store = store();
-        let now = Utc::now();
-        let earlier = now - ChronoDuration::days(3);
-        for index in 0..70 {
-            record(&store,TelemetryEvent::new(EventKind::AtlasStage).at(earlier.to_rfc3339()).run(format!("atlas-run-{index}")).outcome("blocked").payload(serde_json::json!({"stage":"verify","unit":"packet","unit_id":format!("packet-{index}"),"terminal_reason":"missing_provenance"})));
-        }
-        record(
-            &store,
-            TelemetryEvent::new(EventKind::AtlasStage)
-                .at(now.to_rfc3339())
-                .run("atlas-run-0")
-                .outcome("completed")
-                .payload(
-                    serde_json::json!({"stage":"verify","unit":"packet","unit_id":"packet-0"}),
-                ),
-        );
-        record(
-            &store,
-            TelemetryEvent::new(EventKind::AtlasStage)
-                .at(earlier.to_rfc3339())
-                .run("atlas-memory-run")
-                .outcome("queued")
-                .payload(
-                    serde_json::json!({"stage":"verify","unit":"memory","unit_id":"memory-1"}),
-                ),
-        );
-        let snap = snapshot_at(&store, &Period::H1, now);
-        let packets = snap
-            .atlas
-            .backlog
-            .iter()
-            .find(|row| row.unit == "packet")
-            .unwrap();
-        let memories = snap
-            .atlas
-            .backlog
-            .iter()
-            .find(|row| row.unit == "memory")
-            .unwrap();
-        assert_eq!(packets.blocked, 69);
-        assert_eq!(memories.queued, 1);
-        assert_eq!(packets.oldest_pending_ms, Some(3 * 86_400_000));
-        assert!(snap.attention.len() <= 64);
-        assert!(!snap.attention.is_empty());
-        assert!(snap
-            .attention
-            .iter()
-            .all(|row| row.owner_kind == "atlas_run" && row.owner_id.starts_with("atlas-run-")));
-        assert!(!snap
-            .attention
-            .iter()
-            .any(|row| row.owner_id == "atlas-run-0"));
-        let filtered = snapshot(
-            store.connection(),
-            &Period::H1,
-            &StatFilters {
-                app: "recon".into(),
-                ..Default::default()
-            },
-            now,
-        )
-        .unwrap();
-        assert_eq!(filtered.atlas.backlog, snap.atlas.backlog);
-    }
-
-    #[test]
-    fn live_unresolved_uses_canonical_directives_and_latest_assessment() {
-        let store = store();
-        let now = Utc::now();
-        let old = now - ChronoDuration::days(2);
-        record(
-            &store,
-            TelemetryEvent::new(EventKind::DirectiveAssessed)
-                .at(old.to_rfc3339())
-                .canonical("run-1:d1")
-                .run("run-1")
-                .outcome("blocked"),
-        );
-        record(
-            &store,
-            TelemetryEvent::new(EventKind::DirectiveAssessed)
-                .at(old.to_rfc3339())
-                .canonical("run-1:d2")
-                .run("run-1")
-                .outcome("unresolved"),
-        );
-        record(
-            &store,
-            TelemetryEvent::new(EventKind::DirectiveAssessed)
-                .at(now.to_rfc3339())
-                .canonical("run-1:d1")
-                .run("run-1")
-                .outcome("answered"),
-        );
-        let snap = snapshot_at(&store, &Period::H1, now);
-        assert_eq!(snap.recon.unresolved.len(), 1);
-        assert_eq!(snap.recon.unresolved[0].label, "d2");
-        assert_eq!(snap.recon.unresolved[0].run_id, "run-1");
-    }
-
-    #[test]
-    fn unrelated_model_filters_do_not_erase_intel_or_tool_cohorts() {
-        let store = store();
-        let now = Utc::now();
-        record(
-            &store,
-            TelemetryEvent::new(EventKind::IntelArticle)
-                .at(now.to_rfc3339())
-                .article("article-1")
-                .app("atlas")
-                .category("politics"),
-        );
-        record(
-            &store,
-            TelemetryEvent::new(EventKind::ToolInvocation)
-                .at(now.to_rfc3339())
-                .app("recon")
-                .tool("fixture")
-                .provider("public")
-                .mode("remote")
-                .outcome("completed_nonempty"),
-        );
-        let filters = StatFilters {
-            provider: "google".into(),
-            role: "synthesis".into(),
-            ..Default::default()
-        };
-        let snap = snapshot(store.connection(), &Period::H1, &filters, now).unwrap();
-        assert_eq!(snap.filters, filters);
-        assert_eq!(snap.intel.distinct_new_articles, Some(1));
-        assert_eq!(snap.tools.logical_calls, 0); // provider is supported here
-        let role_only = StatFilters {
-            role: "synthesis".into(),
-            ..Default::default()
-        };
-        let snap = snapshot(store.connection(), &Period::H1, &role_only, now).unwrap();
-        assert_eq!(snap.tools.logical_calls, 1); // role is not emitted by tools
-        assert!(!applicable_filter_dimensions(EventKind::IntelArticle).contains(&"provider"));
-        assert!(!applicable_filter_dimensions(EventKind::ToolInvocation).contains(&"role"));
-    }
-
-    #[test]
-    fn rollup_tool_totals_and_uncapped_live_directive_total_are_exact() {
-        let store = store();
-        let now = Utc::now();
-        let earlier = now - ChronoDuration::days(100);
-        let dims = [
-            "recon",
-            "",
-            "fixture",
-            "web",
-            "public",
-            "",
-            "",
-            "remote",
-            "",
-            "completed_nonempty",
-            "",
-        ]
-        .join("\u{1f}");
-        store.connection().execute("INSERT INTO telemetry_hourly (bucket,event_type,dim_key,events) VALUES (?1,'tool_invocation',?2,17)",rusqlite::params![earlier.format("%Y-%m-%dT%H").to_string(),dims]).unwrap();
-        let period = Period::Custom {
-            from: (earlier - ChronoDuration::hours(2)).to_rfc3339(),
-            to: (earlier + ChronoDuration::hours(2)).to_rfc3339(),
-        };
-        let snap = snapshot_at(&store, &period, now);
-        assert_eq!(snap.tools.logical_calls, 17);
-        for index in 0..205 {
-            record(
-                &store,
-                TelemetryEvent::new(EventKind::DirectiveAssessed)
-                    .at((now - ChronoDuration::days(2)).to_rfc3339())
-                    .run(format!("run-{index}"))
-                    .canonical(format!("run-{index}:d1"))
-                    .outcome("unresolved"),
-            );
-        }
-        let snap = snapshot_at(&store, &Period::H1, now);
-        assert_eq!(snap.recon.unresolved_live_total, 205);
-        assert_eq!(snap.recon.unresolved.len(), 200);
-    }
-
-    #[test]
-    fn evidence_acceptance_counts_logical_calls_and_keeps_zero_contributors() {
-        let store = store();
-        let now = Utc::now();
-        for (tool, call) in [
-            ("tool-a", "call-a1"),
-            ("tool-a", "call-a2"),
-            ("tool-b", "call-b1"),
-        ] {
-            record(
-                &store,
-                TelemetryEvent::new(EventKind::ToolInvocation)
-                    .at(now.to_rfc3339())
-                    .tool(tool)
-                    .call(call)
-                    .outcome("completed_nonempty"),
-            );
-        }
-        for (index, identity) in ["item-1", "item-2", "item-1"].iter().enumerate() {
-            record(
-                &store,
-                TelemetryEvent::new(EventKind::EvidenceItem)
-                    .with_id(format!("contribution-{index}"))
-                    .at(now.to_rfc3339())
-                    .tool("tool-a")
-                    .call("call-a1")
-                    .canonical("report:1")
-                    .article("article-1")
-                    .payload(serde_json::json!({"item_id": identity, "call_id": "call-a1", "citations": 2})),
-            );
-        }
-        let snap = snapshot_at(&store, &Period::H1, now);
-        let a = snap
-            .tools
-            .evidence
-            .iter()
-            .find(|row| row.tool_id == "tool-a")
-            .unwrap();
-        assert_eq!(a.successful_nonempty, 2);
-        assert_eq!(a.with_evidence, 1);
-        assert_eq!(a.acceptance_pct, Some(50.0));
-        assert_eq!(a.distinct_evidence, 2);
-        assert_eq!(a.cited_by_completed_reports, 2);
-        let b = snap
-            .tools
-            .evidence
-            .iter()
-            .find(|row| row.tool_id == "tool-b")
-            .unwrap();
-        assert_eq!(b.successful_nonempty, 1);
-        assert_eq!(b.acceptance_pct, Some(0.0));
-        assert_eq!(snap.tools.evidence_details.len(), 2);
-        assert!(snap
-            .tools
-            .evidence_details
-            .iter()
-            .all(|row| row.call_id == "call-a1" && row.cited));
-    }
-
-    #[test]
-    fn evidence_missing_provenance_and_rollups_do_not_invent_acceptance() {
-        let store = store();
-        let now = Utc::now();
-        record(
-            &store,
-            TelemetryEvent::new(EventKind::ToolInvocation)
-                .at(now.to_rfc3339())
-                .tool("tool-a")
-                .call("call-a")
-                .outcome("completed_nonempty"),
-        );
-        record(
-            &store,
-            TelemetryEvent::new(EventKind::EvidenceItem)
-                .at(now.to_rfc3339())
-                .tool("tool-a")
-                .call("item-1")
-                .canonical("report:1")
-                .payload(serde_json::json!({"item_id": "item-1", "call_id": ""})),
-        );
-        let snap = snapshot_at(&store, &Period::H1, now);
-        assert_eq!(snap.tools.evidence[0].acceptance_pct, None);
-        assert_eq!(snap.tools.evidence[0].with_evidence, 0);
-        assert_eq!(snap.tools.evidence_details[0].call_id, "");
-        let earlier = now - ChronoDuration::days(100);
-        let dims = [
-            "recon",
-            "",
-            "tool-b",
-            "web",
-            "public",
-            "",
-            "",
-            "remote",
-            "",
-            "completed_nonempty",
-            "",
-        ]
-        .join("\u{1f}");
-        store.connection().execute("INSERT INTO telemetry_hourly (bucket,event_type,dim_key,events) VALUES (?1,'tool_invocation',?2,17)",rusqlite::params![earlier.format("%Y-%m-%dT%H").to_string(),dims]).unwrap();
-        let period = Period::Custom {
-            from: (earlier - ChronoDuration::hours(2)).to_rfc3339(),
-            to: (earlier + ChronoDuration::hours(2)).to_rfc3339(),
-        };
-        let snap = snapshot_at(&store, &period, now);
-        assert_eq!(snap.tools.evidence[0].successful_nonempty, 17);
-        assert_eq!(snap.tools.evidence[0].acceptance_pct, None);
-        assert_eq!(snap.tools.evidence[0].coverage_n, 0);
-    }
-
-    #[test]
-    fn atlas_raw_candidate_occurrences_are_not_added_twice() {
-        let store = store();
-        let now = Utc::now();
-        record(
-            &store,
-            TelemetryEvent::new(EventKind::AtlasCandidate)
-                .at(now.to_rfc3339())
-                .app("atlas")
-                .outcome("retained_new"),
-        );
-        let snap = snapshot_at(&store, &Period::H1, now);
-        assert_eq!(
-            snap.atlas
-                .discovery
-                .iter()
-                .map(|row| row.fetched)
-                .sum::<u32>(),
-            1
-        );
-        assert_eq!(
-            snap.atlas
-                .discovery
-                .iter()
-                .map(|row| row.retained_new)
-                .sum::<u32>(),
-            1
-        );
     }
 
     #[test]
@@ -5743,20 +5119,6 @@ mod snapshot_tests {
         assert!(google.parser_version.is_empty());
     }
 
-    fn store() -> Store {
-        Store::memory().unwrap()
-    }
-
-    fn record(store: &Store, event: TelemetryEvent) {
-        let written = crate::telemetry::insert(store.connection(), &event);
-        written.unwrap();
-    }
-
-    fn snapshot_at(store: &Store, period: &Period, now: DateTime<Utc>) -> ProfileSnapshot {
-        let snap = snapshot(store.connection(), period, &StatFilters::default(), now);
-        snap.unwrap()
-    }
-
     fn dimension_values(options: &[(String, Vec<String>)], name: &str) -> Vec<String> {
         for (dimension, values) in options {
             if dimension == name {
@@ -5764,146 +5126,5 @@ mod snapshot_tests {
             }
         }
         Vec::new()
-    }
-
-    #[test]
-    fn an_empty_database_returns_empty_sections_not_zeros() {
-        let store = store();
-        let snap = snapshot_at(&store, &Period::H1, Utc::now());
-
-        // Sectors stay zero filled and empty of observations; nothing is
-        // fabricated as a completion, an average or a capacity row.
-        assert!(snap.intel.volume.iter().all(|bucket| bucket.total == 0));
-        assert!(snap.intel.origins.is_empty());
-        assert!(snap.intel.reports.is_empty());
-        assert!(snap.intel.publishers.is_empty());
-        assert_eq!(snap.intel.report_attempts, 0);
-        assert!(snap.recon.outcomes.is_empty());
-        assert!(snap.recon.stages.is_empty());
-        assert!(snap.recon.recall.is_empty());
-        assert!(snap.recon.workload.is_empty());
-        assert!(snap.recon.unresolved.is_empty());
-        assert!(snap.atlas.temperature_changes.is_empty());
-        assert!(snap.models.by_role.iter().all(|b| b.total == 0));
-        assert!(snap.tools.top_tools.is_empty());
-        assert!(snap.tools.failure_causes.is_empty());
-
-        // Nothing retained is unavailable, never zero: no observed window, no
-        // capacity, no live jobs and no retention window to report.
-        assert!(snap.observed_since.is_empty());
-        assert_eq!(snap.status.collection_health, "unknown");
-        assert_eq!(snap.status.active_jobs, 0);
-        assert!(snap.status.last_updated.is_empty());
-        assert!(!snap.status.provider_capacity_available);
-        assert!(!snap.models.capacity_available);
-        assert!(snap.retention.oldest_raw.is_empty());
-        assert!(snap.retention.oldest_rollup.is_empty());
-        assert!(snap.intel.confidence.mean_initial.is_none());
-        assert!(snap.tools.reliability.is_empty());
-    }
-
-    #[test]
-    fn observed_since_and_retention_report_the_retained_window() {
-        let store = store();
-        let now = Utc::now();
-        let run = TelemetryEvent::new(EventKind::ReconRun)
-            .at(now.to_rfc3339())
-            .app("tui")
-            .mode("deep")
-            .outcome("completed");
-        record(&store, run);
-        let call = TelemetryEvent::new(EventKind::ToolInvocation)
-            .at(now.to_rfc3339())
-            .app("tui")
-            .provider("firecrawl")
-            .role("recon")
-            .mode("remote")
-            .tool("firecrawl_scrape")
-            .category("web")
-            .outcome("completed_nonempty");
-        record(&store, call);
-
-        let snap = snapshot_at(&store, &Period::H1, now);
-
-        assert!(!snap.observed_since.is_empty());
-        assert_eq!(snap.retention.raw_days, telemetry::RAW_RETENTION_DAYS);
-        assert_eq!(snap.retention.rollup_days, telemetry::ROLLUP_RETENTION_DAYS);
-        assert!(!snap.retention.oldest_raw.is_empty());
-        assert!(!snap.status.last_updated.is_empty());
-        assert_eq!(snap.status.collection_health, "ok");
-        // Recorded work shows up as observations, not as a zero-filled skeleton.
-        assert_eq!(snap.recon.outcomes.len(), 1);
-        assert_eq!(snap.recon.outcomes[0].completed_with_evidence, 1);
-        assert_eq!(snap.tools.top_tools.len(), 1);
-        assert_eq!(snap.tools.top_tools[0].tool_id, "firecrawl_scrape");
-    }
-
-    #[test]
-    fn filter_options_lists_the_period_choices_and_no_phantom_dimensions() {
-        let store = store();
-        let empty = filter_options(store.connection());
-        let names: Vec<&str> = empty.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["period", "app", "provider", "role", "mode", "tool", "category"]
-        );
-        let expected: Vec<String> = Period::ALL.iter().map(|p| p.label().into()).collect();
-        let (first, periods) = &empty[0];
-        assert_eq!(first, "period");
-        assert_eq!(periods, &expected);
-        for (dimension, values) in &empty[1..] {
-            assert!(values.is_empty(), "empty database offered {dimension}");
-        }
-
-        let now = Utc::now();
-        let call = TelemetryEvent::new(EventKind::ToolInvocation)
-            .at(now.to_rfc3339())
-            .app("tui")
-            .provider("firecrawl")
-            .role("recon")
-            .mode("remote")
-            .tool("firecrawl_scrape")
-            .category("web")
-            .outcome("completed_nonempty");
-        record(&store, call);
-
-        let options = filter_options(store.connection());
-        assert_eq!(dimension_values(&options, "app"), ["tui"]);
-        assert_eq!(dimension_values(&options, "provider"), ["firecrawl"]);
-        assert_eq!(dimension_values(&options, "role"), ["recon"]);
-        assert_eq!(dimension_values(&options, "mode"), ["remote"]);
-        assert_eq!(dimension_values(&options, "tool"), ["firecrawl_scrape"]);
-        assert_eq!(dimension_values(&options, "category"), ["web"]);
-    }
-
-    #[test]
-    fn a_snapshot_never_panics_on_a_partially_migrated_store() {
-        let store = store();
-        let conn = store.connection();
-        let now = Utc::now();
-        let cycle = TelemetryEvent::new(EventKind::AtlasCycle)
-            .at(now.to_rfc3339())
-            .run("run-1")
-            .outcome("completed");
-        record(&store, cycle);
-        let before = snapshot_at(&store, &Period::H24, now);
-        assert!(!before.observed_since.is_empty());
-
-        // Drop one rollup table: a partially migrated store must degrade to the
-        // sections it still has instead of failing the whole dashboard.
-        conn.execute_batch("DROP TABLE telemetry_hourly").unwrap();
-        let after = snapshot_at(&store, &Period::H24, now);
-        assert!(!after.observed_since.is_empty());
-        assert!(!after.retention.oldest_raw.is_empty());
-        // The cycle still reports from the raw table, and the tool section
-        // stays empty instead of inventing invocations.
-        let outcomes = &after.atlas.cycle_outcomes;
-        assert!(outcomes.iter().any(|b| b.completed == 1));
-        assert!(after.tools.top_tools.is_empty());
-        assert_eq!(after.status.active_jobs, before.status.active_jobs);
-
-        // A repeated read is idempotent: no counter drifts between renders.
-        let again = snapshot_at(&store, &Period::H24, now);
-        assert_eq!(after, again);
     }
 }

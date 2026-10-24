@@ -10,7 +10,7 @@ edition = "2021"
 license = "Apache-2.0"
 version = "0.1.0"
 authors = ["the Argos OSINT authors"]
-rust-version = "1.91"
+rust-version = "1.95"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -19,11 +19,6 @@ clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 dirs = "5"
 futures-util = "0.3"
-# `remote` only works around a lancedb 0.39.0 bug: job.rs uses Error::Http, which
-# exists only with that feature, so the default (empty) feature set fails to compile.
-# Argos opens a local directory and never connects to LanceDB Cloud.
-lancedb = { version = "0.39", features = ["remote"] }
-protoc-bin-vendored = "3.3"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_28", "all-widgets", "layout-cache", "macros", "underline-color"] }
 ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
@@ -31,11 +26,15 @@ regex = "1"
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 rpassword = "7"
-rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 strsim = "0.11"
+# Remote-only SurrealDB client pinned to server 3.3.4. Loopback WebSocket only:
+# no embedded kv engines, no TLS (the server binds 127.0.0.1).
+# Engines/protocols come from the crates' `embedded` (RocksDB, default) and
+# `server` (WebSocket client) features.
+surrealdb = { version = "=3.3.4", default-features = false }
 sysinfo = "0.33"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-util", "fs", "sync", "net", "signal", "test-util"] }
@@ -48,3 +47,8 @@ scraper = "0.27"
 # The embedded JS engine must meet local interrupt deadlines in debug builds too.
 [profile.dev.package.rquickjs-sys]
 opt-level = 3
+
+# RocksDB's C++ (built by cc in librocksdb-sys' build script) is the single
+# biggest compile; skip -g for it in dev/test builds (local and CI).
+[profile.dev.package.surrealdb-librocksdb-sys]
+debug = false

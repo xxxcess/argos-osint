@@ -12,13 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::recon::model_exec::ModelExecEvent;
-use crate::store::Store;
-use crate::tasks::ClaimedTask;
 
 /// Locally measured phase of one stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -133,202 +129,6 @@ fn ms_between(a: &str, b: &str) -> i64 {
     }
 }
 
-/// When the task became runnable: created/eligible and all dependencies done.
-fn ready_at(conn: &Connection, task: &str) -> Result<String> {
-    let (created, eligible): (String, String) = conn.query_row(
-        "SELECT created_at, next_eligible_at FROM argos_tasks WHERE id=?1",
-        [task],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    let deps: Option<String> = conn
-        .query_row(
-            "SELECT MAX(t.updated_at) FROM argos_task_dependencies d
-             JOIN argos_tasks t ON t.id=d.depends_on WHERE d.task_id=?1",
-            [task],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    Ok([created, eligible, deps.unwrap_or_default()]
-        .into_iter()
-        .max()
-        .unwrap_or_default())
-}
-
-/// Build the timing record for a finished stage.
-pub fn collect(
-    conn: &Connection,
-    claimed: &ClaimedTask,
-    clock: &StageClock,
-    total: Duration,
-    persistence: Duration,
-    outcome: &str,
-) -> Result<StageTiming> {
-    let local = clock.lock().map(|m| m.clone()).unwrap_or_default();
-    let ready = ready_at(conn, &claimed.id).unwrap_or_default();
-    let mut t = StageTiming {
-        task_id: claimed.id.clone(),
-        job_id: claimed.job_id.clone(),
-        operation: claimed.operation.clone(),
-        queue_ms: if ready.is_empty() {
-            0
-        } else {
-            ms_between(&ready, &claimed.started_at)
-        },
-        local_ms: ms(local.get(&Phase::Local)),
-        first_output_ms: ms(local.get(&Phase::FirstOutput)),
-        fidelity_ms: ms(local.get(&Phase::Fidelity)),
-        persistence_ms: persistence.as_millis() as i64,
-        total_ms: total.as_millis() as i64,
-        outcome: outcome.to_string(),
-        task_epoch: Some(claimed.epoch),
-        ..Default::default()
-    };
-    let mut stmt = conn.prepare(
-        "SELECT a.provider, a.model, a.dispatched, a.outcome, a.queue_ms, a.wait_ms,
-                a.elapsed_ms, a.ttfb_ms
-         FROM recon_model_attempts a JOIN recon_model_operations o ON o.id=a.operation_id
-         WHERE o.task_id=?1
-           AND (o.task_epoch = ?3 OR (o.task_epoch IS NULL AND a.started_at >= ?2))
-         ORDER BY a.started_at, a.attempt",
-    )?;
-    // Current epoch only: a retried task never folds the previous lease's
-    // attempts into this execution's timing row.
-    let rows = stmt.query_map(
-        params![claimed.id, claimed.started_at, claimed.epoch],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?,
-                r.get::<_, i64>(6)?,
-                r.get::<_, i64>(7)?,
-            ))
-        },
-    )?;
-    let mut first_set = false;
-    for row in rows {
-        let (provider, model, dispatched, outcome, queue, wait, elapsed, ttfb) = row?;
-        t.admission_ms += queue;
-        t.backoff_ms += wait;
-        if dispatched != 0 {
-            t.attempts += 1;
-            t.generation_ms += elapsed;
-            let route = format!("{provider}/{model}");
-            if !t.routes.contains(&route) {
-                t.routes.push(route);
-            }
-        }
-        if !first_set && outcome == "ok" {
-            t.headers_ms = ttfb;
-            first_set = true;
-        }
-    }
-    // Requests the orchestrator timed but which wrote no attempt rows (test
-    // doubles, cache hits) still report their wall time as generation.
-    if t.generation_ms == 0 {
-        t.generation_ms = ms(local.get(&Phase::Model));
-    }
-    Ok(t)
-}
-
-/// Credit the chain's provider backoff to the task's `retry_wait_ms`, so the
-/// Jobs "retry wait" is the real sleep time (it is part of active time: the
-/// stage held its lease while waiting). Fenced by the lease epoch.
-pub fn record_retry_wait(
-    conn: &Connection,
-    claimed: &ClaimedTask,
-    t: &StageTiming,
-    now: &str,
-) -> Result<()> {
-    if t.backoff_ms <= 0 {
-        return Ok(());
-    }
-    let n = conn.execute(
-        "UPDATE argos_tasks SET retry_wait_ms=retry_wait_ms+?1 WHERE id=?2 AND lease_epoch=?3",
-        rusqlite::params![t.backoff_ms, claimed.id, claimed.epoch],
-    )?;
-    if n > 0 {
-        let _ = crate::tasks::refresh_job_state(conn, &claimed.job_id, now);
-    }
-    Ok(())
-}
-
-pub fn persist(conn: &Connection, t: &StageTiming, at: &str) -> Result<()> {
-    conn.execute(
-        "INSERT INTO intel_brief_stage_timings
-         (task_id, job_id, operation, queue_ms, local_ms, admission_ms, first_output_ms,
-          headers_ms, generation_ms, fidelity_ms, backoff_ms, persistence_ms, total_ms, attempts,
-          routes_json, outcome, recorded_at, task_epoch)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
-         ON CONFLICT(task_id) DO UPDATE SET
-          queue_ms=excluded.queue_ms, local_ms=excluded.local_ms,
-          admission_ms=excluded.admission_ms, first_output_ms=excluded.first_output_ms,
-          headers_ms=excluded.headers_ms,
-          generation_ms=excluded.generation_ms, fidelity_ms=excluded.fidelity_ms,
-          backoff_ms=excluded.backoff_ms, persistence_ms=excluded.persistence_ms,
-          total_ms=excluded.total_ms, attempts=excluded.attempts,
-          routes_json=excluded.routes_json, outcome=excluded.outcome,
-          recorded_at=excluded.recorded_at, task_epoch=excluded.task_epoch",
-        params![
-            t.task_id,
-            t.job_id,
-            t.operation,
-            t.queue_ms,
-            t.local_ms,
-            t.admission_ms,
-            t.first_output_ms,
-            t.headers_ms,
-            t.generation_ms,
-            t.fidelity_ms,
-            t.backoff_ms,
-            t.persistence_ms,
-            t.total_ms,
-            t.attempts,
-            serde_json::to_string(&t.routes)?,
-            t.outcome,
-            at,
-            t.task_epoch
-        ],
-    )?;
-    Ok(())
-}
-
-/// Read stored timings for a chain, stage order.
-pub fn for_job(conn: &Connection, job_id: &str) -> Result<Vec<StageTiming>> {
-    let mut stmt = conn.prepare(
-        "SELECT task_id, job_id, operation, queue_ms, local_ms, admission_ms, first_output_ms,
-                headers_ms, generation_ms, fidelity_ms, backoff_ms, persistence_ms, total_ms, attempts,
-                routes_json, outcome, task_epoch
-         FROM intel_brief_stage_timings WHERE job_id=?1 ORDER BY recorded_at",
-    )?;
-    let rows = stmt.query_map([job_id], |r| {
-        Ok(StageTiming {
-            task_id: r.get(0)?,
-            job_id: r.get(1)?,
-            operation: r.get(2)?,
-            queue_ms: r.get(3)?,
-            local_ms: r.get(4)?,
-            admission_ms: r.get(5)?,
-            first_output_ms: r.get(6)?,
-            headers_ms: r.get(7)?,
-            generation_ms: r.get(8)?,
-            fidelity_ms: r.get(9)?,
-            backoff_ms: r.get(10)?,
-            persistence_ms: r.get(11)?,
-            total_ms: r.get(12)?,
-            attempts: r.get(13)?,
-            routes: serde_json::from_str(&r.get::<_, String>(14)?).unwrap_or_default(),
-            outcome: r.get(15)?,
-            task_epoch: r.get(16)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
-}
-
 /// Compact counts-only summary for Logs.
 pub fn summary(t: &StageTiming) -> String {
     let routes = if t.routes.is_empty() {
@@ -434,11 +234,8 @@ pub fn activity_sink(
             }
             _ => None,
         };
-        if let Some(label) = label {
-            if let Ok(store) = Store::open_light(&db) {
-                let _ = super::brief_pipeline::set_activity(&store.conn, &task, &label);
-            }
-        }
+        // Stage activity labels were a SQLite-only side channel.
+        let _ = (label, &db, &task);
     })
 }
 

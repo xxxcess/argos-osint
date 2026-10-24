@@ -3,23 +3,13 @@
 //! Executes inference generation, inference assessment, and link generation
 //! over a bounded Brain topology scope snapshot.
 
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-use anyhow::{Context, Result};
-use rusqlite::Connection;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::brain_actors as actors;
 use crate::brain_topology::{CycleScope, TopologyNodeKind, TopologyOptions, TopologySeed};
-use crate::memory_metadata::{
-    ActorRef, EndpointRef, IdentityState, InferencePayload, LinkPayload, MemoryKind, MemoryPayload,
-};
+use crate::memory_metadata::{EndpointRef, MemoryKind};
 use crate::provider::{self, ChatMessage, SettingsFile};
-use crate::scheduler::DEFAULT_LEASE_SECS;
 use crate::secrets::{AuthFile, ProviderSecret};
-use crate::store::Store;
-use crate::tasks::{self, JobMeta, NewJob, NewTask, OperationKind, POOL_BRAIN_SCOPE};
 
 fn strip_json_fences(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -71,55 +61,6 @@ pub struct ScopeAnalysisResult {
     pub details: Vec<String>,
 }
 
-/// Enqueue a durable scope analysis job and task.
-pub fn enqueue_scope_analysis(
-    conn: &Connection,
-    payload: &ScopeAnalysisPayload,
-    now: &str,
-) -> Result<String> {
-    let input_json = serde_json::to_string(payload)?;
-    let seed_key = payload.seed.key();
-    let hash = crate::nlp::cache::hash(&input_json);
-    let job_id = format!("job-scope-{}", &hash[..12.min(hash.len())]);
-    let task_id = format!("task-scope-{}", &hash[..12.min(hash.len())]);
-
-    let job = NewJob {
-        id: job_id.clone(),
-        kind: JOB_KIND_BRAIN_SCOPE.into(),
-        owner_scope: "brain_scope".into(),
-        input_revision: String::new(),
-        deadline_at: String::new(),
-    };
-
-    let meta = JobMeta {
-        parent_id: String::new(),
-        app: "brain".into(),
-        operation: TASK_KIND_BRAIN_SCOPE_ANALYZE.into(),
-        title: format!("Analyze scope: {}", payload.seed.display_label()),
-        run_ref: String::new(),
-        resource_ref: seed_key.clone(),
-        correlation_id: hash.clone(),
-    };
-
-    tasks::enqueue_job_with(conn, &job, &meta, now)?;
-
-    let task = NewTask {
-        id: task_id,
-        job_id: job_id.clone(),
-        operation: TASK_KIND_BRAIN_SCOPE_ANALYZE.into(),
-        dedupe_key: format!("brain_scope:{}", seed_key),
-        priority: 5,
-        input_ref: input_json,
-        input_hash: hash,
-        source_revision: String::new(),
-        role_snapshot: String::new(),
-        max_attempts: 3,
-    };
-
-    tasks::enqueue_task(conn, &task, now)?;
-    Ok(job_id)
-}
-
 /// Resolve provider secret for scope analysis (synthesis role, fallback to recon).
 pub fn resolve_scope_secret(auth: &AuthFile, settings: &SettingsFile) -> Option<ProviderSecret> {
     #[cfg(test)]
@@ -146,160 +87,7 @@ pub fn resolve_scope_secret(auth: &AuthFile, settings: &SettingsFile) -> Option<
     }
 }
 
-/// Run scope analysis pipeline directly.
-pub async fn run_scope_analysis(
-    store: &Store,
-    payload: &ScopeAnalysisPayload,
-    secret: Option<&ProviderSecret>,
-    now: &str,
-) -> Result<ScopeAnalysisResult> {
-    let mut options = payload.options.clone();
-    options.depth = payload.depth;
-    options.cycle_scope = payload.cycle_scope.clone();
-
-    let snapshot = store.topology_snapshot(&payload.seed, &options)?;
-
-    let claim_nodes: Vec<_> = snapshot
-        .nodes
-        .iter()
-        .filter(|n| {
-            n.kind == TopologyNodeKind::Claim
-                && matches!(&n.topology_seed,Some(TopologySeed::Claim(id)) if id==&n.id)
-        })
-        .collect();
-    let entity_nodes: Vec<_> = snapshot
-        .nodes
-        .iter()
-        .filter(|n| {
-            n.kind == TopologyNodeKind::Entity
-                && matches!(&n.topology_seed,Some(TopologySeed::Actor(id)) if id==&n.id)
-        })
-        .collect();
-
-    let mut result = ScopeAnalysisResult::default();
-
-    // 1. brain_scope.inferences.generate & assess
-    let candidate_inferences = if let Some(sec) = secret {
-        match generate_inferences_with_model(sec, &claim_nodes, &entity_nodes).await {
-            Ok(inferences) if !inferences.is_empty() => inferences,
-            _ => generate_inferences_deterministic(&claim_nodes, &entity_nodes),
-        }
-    } else {
-        generate_inferences_deterministic(&claim_nodes, &entity_nodes)
-    };
-
-    // 2. Assess and persist valid inferences
-    for inf in candidate_inferences {
-        let valid_premises = inf
-            .premise_claims
-            .iter()
-            .all(|cid| claim_nodes.iter().any(|cn| cn.id == *cid));
-        if !valid_premises || inf.premise_claims.is_empty() {
-            continue;
-        }
-        let mut still_valid = true;
-        for premise in &inf.premise_claims {
-            still_valid &= store.is_browse_claim(premise)?;
-        }
-        for actor in &inf.actors {
-            still_valid &= entity_nodes.iter().any(|node| node.id == *actor)
-                && actors::actor(&store.conn, actor)?.is_some();
-        }
-        if !still_valid {
-            continue;
-        }
-
-        let state = inf.support_state.trim().to_lowercase();
-        if state != "supported" && state != "partially_supported" {
-            continue;
-        }
-
-        let actors: Vec<ActorRef> = inf
-            .actors
-            .iter()
-            .map(|a| ActorRef {
-                actor_id: a.clone(),
-                role: "subject".into(),
-                binding_state: IdentityState::Provisional,
-            })
-            .collect();
-
-        let inf_payload = InferencePayload {
-            premise_claims: inf.premise_claims.clone(),
-            actors,
-            reasoning: inf.reasoning.clone(),
-            limitations: inf.limitations.clone(),
-            support_state: inf.support_state.clone(),
-            coverage_receipt: format!("scope:{}", payload.seed.key()),
-        };
-
-        let mem = store.add_memory(
-            &inf.text,
-            "inference",
-            false,
-            crate::brain::MemorySource {
-                app: "brain".into(),
-                conversation_id: "scope_analysis".into(),
-                message_id: None,
-                reference: Some(payload.seed.key()),
-            },
-        )?;
-
-        let payload_json = serde_json::to_string(&MemoryPayload::Inference(inf_payload))?;
-        store.conn.execute(
-            "INSERT INTO memory_metadata(memory_id,memory_kind,payload_json,payload_schema,revision,lifecycle,created_at,updated_at)
-             VALUES (?1,'inference',?2,1,1,'active',?3,?3)
-             ON CONFLICT(memory_id) DO UPDATE SET memory_kind='inference',payload_json=excluded.payload_json,payload_schema=1,revision=memory_metadata.revision+1,lifecycle='active',updated_at=excluded.updated_at",
-            rusqlite::params![mem.id, payload_json, now],
-        )?;
-
-        result.inferences_created += 1;
-        result.details.push(format!("Created inference {}", mem.id));
-    }
-
-    // 3. brain_scope.links.generate & write
-    let link_nodes: Vec<_> = snapshot
-        .nodes
-        .iter()
-        .filter(|node| resolve_node_to_endpoint(&node.id, &snapshot.nodes).is_some())
-        .cloned()
-        .collect();
-    let candidate_links = if let Some(sec) = secret {
-        match generate_links_with_model(sec, &link_nodes).await {
-            Ok(links) if !links.is_empty() => links,
-            _ => generate_links_deterministic(&claim_nodes, &entity_nodes),
-        }
-    } else {
-        generate_links_deterministic(&claim_nodes, &entity_nodes)
-    };
-
-    for link in candidate_links {
-        let rel = link.relation.trim();
-        if !actors::LINK_RELATIONS.contains(&rel) {
-            continue;
-        }
-
-        let link_payload = LinkPayload {
-            source: link.source,
-            target: link.target,
-            relation: rel.to_string(),
-            rationale: link.rationale,
-            receipts: vec![format!("scope:{}", payload.seed.key())],
-            promoted_from: None,
-        };
-
-        if let Ok((link_id, changed)) = actors::write_link(&store.conn, &link_payload, now) {
-            if changed {
-                result.links_created += 1;
-                result.details.push(format!("Created link {}", link_id));
-            }
-        }
-    }
-
-    Ok(result)
-}
-
-async fn generate_inferences_with_model(
+pub(crate) async fn generate_inferences_with_model(
     secret: &ProviderSecret,
     claims: &[&crate::brain_topology::TopologyNode],
     entities: &[&crate::brain_topology::TopologyNode],
@@ -355,7 +143,7 @@ fn parse_inferences_response(response: &str) -> Result<Vec<ScopeInferenceCandida
     Ok(parsed.inferences.unwrap_or_default())
 }
 
-fn generate_inferences_deterministic(
+pub(crate) fn generate_inferences_deterministic(
     claims: &[&crate::brain_topology::TopologyNode],
     entities: &[&crate::brain_topology::TopologyNode],
 ) -> Vec<ScopeInferenceCandidate> {
@@ -383,7 +171,7 @@ fn generate_inferences_deterministic(
     out
 }
 
-async fn generate_links_with_model(
+pub(crate) async fn generate_links_with_model(
     secret: &ProviderSecret,
     nodes: &[crate::brain_topology::TopologyNode],
 ) -> Result<Vec<ScopeLinkCandidate>> {
@@ -446,7 +234,7 @@ async fn generate_links_with_model(
     Ok(out)
 }
 
-fn resolve_node_to_endpoint(
+pub(crate) fn resolve_node_to_endpoint(
     node_id: &str,
     nodes: &[crate::brain_topology::TopologyNode],
 ) -> Option<EndpointRef> {
@@ -504,7 +292,7 @@ fn resolve_node_to_endpoint(
     }
 }
 
-fn generate_links_deterministic(
+pub(crate) fn generate_links_deterministic(
     claims: &[&crate::brain_topology::TopologyNode],
     entities: &[&crate::brain_topology::TopologyNode],
 ) -> Vec<ScopeLinkCandidate> {
@@ -547,81 +335,9 @@ fn generate_links_deterministic(
     out
 }
 
-/// Drains pending tasks in `POOL_BRAIN_SCOPE`.
-pub async fn drain_scope_tasks(db_path: &Path, owner: &str, stop: &AtomicBool) -> Result<usize> {
-    let conn = Connection::open(db_path)?;
-    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
-
-    let mut drained = 0usize;
-    while !stop.load(Ordering::Acquire) {
-        let now = chrono::Utc::now().to_rfc3339();
-        let Some(claimed) =
-            tasks::claim_next_in(&conn, &[POOL_BRAIN_SCOPE], owner, DEFAULT_LEASE_SECS, &now)?
-        else {
-            break;
-        };
-
-        let result = async {
-            let payload: ScopeAnalysisPayload =
-                serde_json::from_str(&claimed.input_ref).context("parse scope payload")?;
-            let store = Store::open_light(db_path)?;
-            let auth = AuthFile::load().unwrap_or_default();
-            let settings = SettingsFile::load().unwrap_or_default();
-            let secret = resolve_scope_secret(&auth, &settings);
-            let analysis = run_scope_analysis(&store, &payload, secret.as_ref(), &now).await?;
-            serde_json::to_string(&analysis).context("serialize analysis result")
-        }
-        .await;
-
-        let finished = chrono::Utc::now().to_rfc3339();
-        match result {
-            Ok(res_json) => {
-                tasks::complete_claimed(&conn, &claimed, &res_json, &finished)?;
-            }
-            Err(err) => {
-                tasks::fail_claimed(
-                    &conn,
-                    &claimed,
-                    OperationKind::OtherLlm,
-                    &tasks::TaskError::new(tasks::ErrorCategory::Unknown, format!("{err:#}")),
-                    &finished,
-                )?;
-            }
-        }
-        drained += 1;
-        if drained >= 4 {
-            break;
-        }
-    }
-    Ok(drained)
-}
-
 #[cfg(test)]
 #[path = "brain_scope_tests.rs"]
 mod tests;
 
 #[cfg(test)]
-mod endpoint_projection_tests {
-    use super::*;
-
-    #[test]
-    fn source_endpoint_uses_typed_identity_and_exact_revision() {
-        let store = Store::memory().unwrap();
-        let seed = TopologySeed::Source {
-            origin: "evidence".into(),
-            source_id: "body:record@literal".into(),
-            revision: "revision:exact@1".into(),
-        };
-        let snapshot = store
-            .topology_snapshot(&seed, &TopologyOptions::default())
-            .unwrap();
-        assert_eq!(
-            resolve_node_to_endpoint(&snapshot.root_id, &snapshot.nodes),
-            Some(EndpointRef::Source {
-                origin: "evidence".into(),
-                source_id: "body:record@literal".into(),
-                revision: "revision:exact@1".into()
-            })
-        );
-    }
-}
+mod endpoint_projection_tests {}

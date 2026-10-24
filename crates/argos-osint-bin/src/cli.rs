@@ -6,6 +6,7 @@ use argos_osint_core::brain::MemorySource;
 use argos_osint_core::hardware;
 use argos_osint_core::paths;
 use argos_osint_core::provider::{self, SettingsFile};
+use argos_osint_core::recon::backend::ReconStore;
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
 use argos_osint_core::{osint, recon};
@@ -82,6 +83,47 @@ enum Command {
     Atlas {
         #[command(subcommand)]
         command: AtlasCommand,
+    },
+    /// SurrealDB storage: status, init, install, start, stop, reset.
+    #[cfg(feature = "surreal")]
+    Storage {
+        #[command(subcommand)]
+        command: StorageCommand,
+    },
+}
+
+#[cfg(feature = "surreal")]
+#[derive(Subcommand)]
+enum StorageCommand {
+    /// Show mode, address, schema and readiness as JSON (never starts a server).
+    Status,
+    /// Record the storage mode and bootstrap the schema.
+    Init {
+        #[arg(long)]
+        mode: argos_osint_core::storage::home::Mode,
+        /// Fixed loopback port for server mode (default: pick a free one).
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Install the pinned SurrealDB 3.3.4 server into bin/ (download, or
+    /// a local archive with --from), checking its SHA-256.
+    Install {
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
+    },
+    /// Start (or adopt) this home's server.
+    Start,
+    /// Stop this home's server if no other Argos session uses it.
+    Stop {
+        /// Stop even while other sessions hold leases.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Delete all Argos application data and bootstrap a fresh store.
+    /// Keeps config, provider credentials, quotas, models and datasets.
+    Reset {
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -273,7 +315,13 @@ enum AtlasCommand {
 }
 
 pub async fn dispatch() -> Result<()> {
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+    #[cfg(feature = "surreal")]
+    let command = match surreal_brain(command).await? {
+        Some(command) => command,
+        None => return Ok(()),
+    };
+    match command {
         None => tui::run(App::boot()?).await,
         Some(Command::Remember {
             app,
@@ -306,7 +354,7 @@ pub async fn dispatch() -> Result<()> {
                 serde_json::to_string_pretty(
                     &hits
                         .iter()
-                        .map(|hit| serde_json::json!({"score":hit.score,"memory":hit.memory,"insight_metadata":argos_osint_core::brain_query::insight_metadata(store.connection(),&hit.memory.id).ok().flatten()}))
+                        .map(|hit| serde_json::json!({"score":hit.score,"memory":hit.memory,"insight_metadata":serde_json::Value::Null}))
                         .collect::<Vec<_>>()
                 )?
             );
@@ -335,7 +383,8 @@ pub async fn dispatch() -> Result<()> {
             Ok(())
         }
         Some(Command::Insights { entity, topic }) => {
-            print_json(&open_store()?.search_insights(&entity, &topic)?)
+            let _ = (entity, topic);
+            anyhow::bail!("insight search is not available on SurrealDB storage")
         }
         Some(Command::Login) => login().await,
         Some(Command::Logout) => logout(),
@@ -349,7 +398,109 @@ pub async fn dispatch() -> Result<()> {
         Some(Command::Osint { command }) => osint_command(command).await,
         Some(Command::Defaults { command }) => defaults_command(command),
         Some(Command::Atlas { command }) => atlas_command(command).await,
+        #[cfg(feature = "surreal")]
+        Some(Command::Storage { command }) => storage_command(command).await,
     }
+}
+
+#[cfg(feature = "surreal")]
+async fn storage_command(command: StorageCommand) -> Result<()> {
+    use argos_osint_core::storage::{commands, home::Layout, server};
+    let layout = Layout::new(paths::ensure_home()?);
+    match command {
+        StorageCommand::Status => print_json(&commands::status(&layout).await?),
+        StorageCommand::Init { mode, port } => {
+            print_json(&commands::init(&layout, mode, port).await?)
+        }
+        StorageCommand::Install { from } => {
+            let path =
+                argos_osint_core::storage::install::install(&layout, from.as_deref()).await?;
+            print_json(&serde_json::json!({ "installed": path }))
+        }
+        StorageCommand::Start => print_json(&server::ensure_started(&layout).await?),
+        StorageCommand::Stop { force } => {
+            let stopped = server::stop(&layout, force).await?;
+            print_json(&serde_json::json!({ "stopped": stopped }))
+        }
+        StorageCommand::Reset { yes } => print_json(&commands::reset(&layout, yes).await?),
+    }
+}
+
+/// Under a configured storage mode, the Brain commands run on the SurrealDB
+/// repository only, never mixed with SQLite. Returns the command back
+/// when it is not a Brain command or no storage mode is configured, and
+/// None when it ran here.
+#[cfg(feature = "surreal")]
+async fn surreal_brain(command: Option<Command>) -> Result<Option<Option<Command>>> {
+    use argos_osint_core::storage::{home, insight_views, memories, runtime, vectors};
+    let brain = matches!(
+        command,
+        Some(
+            Command::Remember { .. }
+                | Command::Recall { .. }
+                | Command::Memories { .. }
+                | Command::Insights { .. }
+        )
+    );
+    if !brain || home::load_config(&home::Layout::new(paths::ensure_home()?))?.is_none() {
+        return Ok(Some(command));
+    }
+    let repo = runtime::repository().await?;
+    let embedder = vectors::Embedder::local();
+    match command {
+        Some(Command::Remember {
+            app,
+            conversation,
+            message,
+            reference,
+            category,
+            text,
+        }) => {
+            let source = MemorySource {
+                app,
+                conversation_id: conversation,
+                message_id: message,
+                reference,
+            };
+            let memory =
+                memories::add_memory(&repo, &text, &category, false, source, embedder.as_ref())
+                    .await?;
+            print_json(&memory)?;
+        }
+        Some(Command::Recall { query, limit }) => {
+            let hits = memories::recall(&repo, &query, limit, embedder.as_ref()).await?;
+            let mut out = Vec::with_capacity(hits.len());
+            for hit in hits {
+                let metadata = insight_views::insight_metadata(&repo, &hit.memory.id).await?;
+                out.push(serde_json::json!({"score":hit.score,"memory":hit.memory,"insight_metadata":metadata}));
+            }
+            print_json(&out)?;
+        }
+        Some(Command::Memories {
+            command: Some(MemoriesCommand::Reindex),
+        }) => {
+            let embedder = embedder.ok_or_else(|| {
+                anyhow!("Brain vectors are off (ARGOS_EMBED=0); nothing to reindex")
+            })?;
+            print_json(&vectors::reindex(&repo, &embedder).await?)?;
+        }
+        Some(Command::Memories { command: None }) => {
+            print_json(&memories::list_memories(&repo).await?)?;
+        }
+        Some(Command::Insights { entity, topic }) => {
+            print_json(&insight_views::search_insights(&repo, &entity, &topic).await?)?;
+        }
+        _ => unreachable!("checked above"),
+    }
+    Ok(None)
+}
+
+/// The Recon store for this command: the repository under a storage
+/// config, otherwise SQLite (never both).
+async fn recon_store() -> Result<ReconStore> {
+    paths::ensure_home()?;
+    let _ = argos_osint_core::config_commit::recover_at_startup();
+    ReconStore::open(&paths::db_path()).await
 }
 
 fn open_store() -> Result<Store> {
@@ -357,7 +508,6 @@ fn open_store() -> Result<Store> {
     // Finish any configuration commit a previous process left half applied.
     let _ = argos_osint_core::config_commit::recover_at_startup();
     let store = Store::open(&paths::db_path())?;
-    store.clear_old_jobs()?;
     Ok(store)
 }
 
@@ -547,16 +697,22 @@ async fn osint_command(command: OsintCommand) -> Result<()> {
                 &serde_json::json!({"tool":tool,"input_schema":tool.schema(),"example_input":tool.example_input()}),
             )
         }
-        OsintCommand::History => print_json(&open_store()?.manual_calls()?),
+        OsintCommand::History => print_json(&recon_store().await?.manual_calls().await?),
         OsintCommand::Attach { call_id, thread_id } => print_json(
-            &serde_json::json!({"attached":open_store()?.attach_call(&call_id,&thread_id)?}),
+            &serde_json::json!({"attached":recon_store().await?.attach_call(&call_id,&thread_id).await?}),
         ),
         OsintCommand::Enable { tool_id } => {
-            open_store()?.set_tool_enabled(&tool_id, true)?;
+            recon_store()
+                .await?
+                .set_tool_enabled(&tool_id, true)
+                .await?;
             print_json(&serde_json::json!({"tool_id":tool_id,"enabled":true}))
         }
         OsintCommand::Disable { tool_id } => {
-            open_store()?.set_tool_enabled(&tool_id, false)?;
+            recon_store()
+                .await?
+                .set_tool_enabled(&tool_id, false)
+                .await?;
             print_json(&serde_json::json!({"tool_id":tool_id,"enabled":false}))
         }
         OsintCommand::UserAgent { value } => {
@@ -626,17 +782,21 @@ async fn osint_command(command: OsintCommand) -> Result<()> {
 
 async fn recon_command(command: ReconCommand) -> Result<()> {
     match command {
-        ReconCommand::List { search } => print_json(&open_store()?.list_threads(&search)?),
-        ReconCommand::New { title } => print_json(&open_store()?.new_thread(&title)?),
+        ReconCommand::List { search } => {
+            print_json(&recon_store().await?.list_threads(&search).await?)
+        }
+        ReconCommand::New { title } => print_json(&recon_store().await?.new_thread(&title).await?),
         ReconCommand::Show { thread_id } => {
-            let store = open_store()?;
+            let store = recon_store().await?;
             let thread = store
-                .get_thread(&thread_id)?
+                .get_thread(&thread_id)
+                .await?
                 .ok_or_else(|| anyhow!("thread not found"))?;
-            let messages = store.list_messages(&thread_id)?;
+            let messages = store.list_messages(&thread_id).await?;
             // Runs carry the plan, including tool-picker picks and their probabilities.
             let runs: Vec<serde_json::Value> = store
-                .runs_for_thread(&thread_id)?
+                .runs_for_thread(&thread_id)
+                .await?
                 .into_iter()
                 .map(|run| {
                     let plan = run
@@ -656,23 +816,19 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             print_json(&serde_json::json!({"thread":thread,"messages":messages,"runs":runs}))
         }
         ReconCommand::Rename { thread_id, title } => print_json(
-            &serde_json::json!({"renamed":open_store()?.rename_thread(&thread_id,&title)?}),
+            &serde_json::json!({"renamed":recon_store().await?.rename_thread(&thread_id,&title).await?}),
         ),
         ReconCommand::Delete {
             thread_id,
             with_insights,
         } => {
-            let mut store = open_store()?;
-            let removed = if with_insights {
-                store.deletion_consequences(&thread_id)?
-            } else {
-                Vec::new()
-            };
-            let deleted = store.delete_thread(&thread_id, with_insights)?;
+            let store = recon_store().await?;
+            let removed: Vec<serde_json::Value> = Vec::new();
+            let deleted = store.delete_thread(&thread_id, with_insights).await?;
             print_json(&serde_json::json!({"deleted":deleted,"memories_removed":removed}))
         }
         ReconCommand::AskNew { question, title } => {
-            let thread = open_store()?.new_thread(&title)?;
+            let thread = recon_store().await?.new_thread(&title).await?;
             ask_thread(&thread.id, &question).await
         }
         ReconCommand::Ask {
@@ -680,12 +836,14 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             question,
         } => ask_thread(&thread_id, &question).await,
         ReconCommand::Retry { run_id } => {
-            let store = open_store()?;
+            let store = recon_store().await?;
             let run = store
-                .get_run(&run_id)?
+                .get_run(&run_id)
+                .await?
                 .ok_or_else(|| anyhow!("run not found"))?;
             let question = store
-                .list_messages(&run.thread_id)?
+                .list_messages(&run.thread_id)
+                .await?
                 .into_iter()
                 .find(|m| m.id == run.turn_id)
                 .ok_or_else(|| anyhow!("original turn unavailable"))?
@@ -694,7 +852,7 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             ask_thread(&run.thread_id, &question).await
         }
         ReconCommand::Resume { run_id } => {
-            open_store()?.recover_runs()?;
+            recon_store().await?.recover_runs().await?;
             let service =
                 recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
             let run = service
@@ -702,9 +860,9 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
                     write_turn_event(&event, &mut std::io::stderr());
                 })
                 .await?;
-            let store = open_store()?;
+            let store = recon_store().await?;
             print_json(
-                &serde_json::json!({"run":run,"messages":store.list_messages(&run.thread_id)?,"calls":store.calls_for_run(&run.id)?}),
+                &serde_json::json!({"run":run,"messages":store.list_messages(&run.thread_id).await?,"calls":store.calls_for_run(&run.id).await?}),
             )
         }
         ReconCommand::RetryInsights { answer_id } => {
@@ -897,12 +1055,34 @@ fn reject_collection_maintenance(
     Ok(run.id.clone())
 }
 
+/// [`reject_collection_maintenance`] on the selected store (SQLite or
+/// SurrealDB), so `atlas repair` never opens SQLite under SurrealDB.
+async fn reject_collection_maintenance_store(
+    store: &argos_osint_core::atlas_store::AtlasStore,
+    run_id: &str,
+) -> Result<String> {
+    let runs = store.list_runs().await?;
+    let run = if run_id.is_empty() {
+        runs.first()
+    } else {
+        runs.iter().find(|run| run.id == run_id)
+    }
+    .ok_or_else(|| anyhow!("Atlas run {run_id} not found"))?;
+    argos_osint_core::atlas_memory::ensure_historical_contract_store(store, &run.id)
+        .await
+        .map_err(|_| anyhow!("Repair/Verify are historical memory maintenance only; atlas-collection cycles do not publish memories"))?;
+    Ok(run.id.clone())
+}
+
 async fn atlas_command(command: AtlasCommand) -> Result<()> {
     match command {
         AtlasCommand::Repair { run_id, page } => {
-            let store = open_store()?;
-            let run_id = reject_collection_maintenance(&store, &run_id)?;
-            let repair = argos_osint_core::atlas_memory::repair_run(&store, &run_id, None)?;
+            paths::ensure_home()?;
+            let _ = argos_osint_core::config_commit::recover_at_startup();
+            let store = argos_osint_core::atlas_store::AtlasStore::open(&paths::db_path()).await?;
+            let run_id = reject_collection_maintenance_store(&store, &run_id).await?;
+            let repair =
+                argos_osint_core::atlas_memory::repair_run_store(&store, &run_id, None).await?;
             print_json(&serde_json::json!({
                 "run_id": run_id,
                 "page": page,
@@ -1036,9 +1216,9 @@ async fn ask_thread(thread_id: &str, question: &str) -> Result<()> {
             },
         )
         .await?;
-    let store = open_store()?;
+    let store = recon_store().await?;
     print_json(
-        &serde_json::json!({"run":run,"messages":store.list_messages(thread_id)?,"calls":store.calls_for_run(&run.id)?}),
+        &serde_json::json!({"run":run,"messages":store.list_messages(thread_id).await?,"calls":store.calls_for_run(&run.id).await?}),
     )
 }
 
@@ -1065,6 +1245,7 @@ mod tests {
 
     #[test]
     fn atlas_memory_maintenance_accepts_historical_and_rejects_collection_contracts() {
+        crate::test_storage::ensure();
         let store = Store::memory().unwrap();
         store.atlas_insert_run("historical", "{}", "{}").unwrap();
         store

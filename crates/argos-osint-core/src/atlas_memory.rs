@@ -18,17 +18,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::atlas_insights::InsightStats;
-use crate::events::{self, NewEvent, Severity};
+use crate::events::{NewEvent, Severity};
 use crate::store::{
-    atlas_answer_id, atlas_brief_id, payload_revision, AtlasInsightClaim, PublicationReceipt,
-    PublicationVerification, PublishOptions, RejectedClaim, Store,
+    payload_revision, AtlasInsightClaim, PublicationReceipt, PublicationVerification,
+    PublishOptions, Store,
 };
-use crate::tasks;
 use crate::telemetry::{EventKind, TelemetryEvent, Trigger};
 
 /// Revision used for receipts reconstructed from pre-checkpoint data.
@@ -167,7 +165,7 @@ pub fn record_memory_stage_telemetry(
         if before == state {
             continue;
         }
-        let seq = crate::atlas_work::next_stage_seq(db_path, run_id, stage);
+        let seq = 0;
         let event = TelemetryEvent::new(EventKind::AtlasStage)
             .at(chrono::Utc::now().to_rfc3339())
             .trigger(Trigger::AtlasCycle)
@@ -452,14 +450,8 @@ pub struct CheckpointInput<'a> {
     pub initial_confidences: std::collections::BTreeMap<String, f64>,
 }
 
-/// Persist the validated extraction before publication. Idempotent per
-/// payload revision.
-pub fn save_checkpoint(
-    store: &Store,
-    run_id: &str,
-    input: CheckpointInput<'_>,
-) -> Result<Checkpoint> {
-    let checkpoint = Checkpoint {
+fn checkpoint_of(run_id: &str, input: CheckpointInput<'_>) -> Checkpoint {
+    Checkpoint {
         run_id: run_id.into(),
         revision: payload_revision(input.claims, input.brief),
         claims: input.claims.to_vec(),
@@ -470,38 +462,7 @@ pub fn save_checkpoint(
         partial: input.partial,
         notes: input.notes,
         initial_confidences: input.initial_confidences.clone(),
-    };
-    store.conn.execute(
-        "INSERT INTO argos_atlas_checkpoints(run_id,revision,payload_json,accepted,rejected,created_at)
-         VALUES (?1,?2,?3,?4,0,?5)
-         ON CONFLICT(run_id,revision) DO UPDATE SET payload_json=excluded.payload_json,
-            accepted=excluded.accepted, created_at=excluded.created_at",
-        params![
-            run_id,
-            checkpoint.revision,
-            serde_json::to_string(&checkpoint)?,
-            checkpoint.claims.len() as i64,
-            chrono::Utc::now().to_rfc3339(),
-        ],
-    )?;
-    Ok(checkpoint)
-}
-
-/// Latest checkpoint for a run.
-pub fn load_checkpoint(store: &Store, run_id: &str) -> Result<Option<Checkpoint>> {
-    let json: Option<String> = store
-        .conn
-        .query_row(
-            "SELECT payload_json FROM argos_atlas_checkpoints WHERE run_id=?1
-             ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            [run_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(match json {
-        Some(json) => Some(serde_json::from_str(&json)?),
-        None => None,
-    })
+    }
 }
 
 /// Publish a checkpoint through the transactional publisher. Indexing happens
@@ -616,120 +577,6 @@ pub fn index_and_verify(
     }
 }
 
-/// Receipt for a run published before checkpoints existed, reconstructed from
-/// its stored claim/source links. Unrecoverable links are reported as rejected
-/// with a reason; nothing is fabricated from a fingerprint. Index work is
-/// queued for every recoverable memory whose revision is missing or stale.
-pub fn legacy_receipt(
-    store: &Store,
-    run_id: &str,
-    parent_job: Option<&str>,
-) -> Result<PublicationReceipt> {
-    let answer_id = atlas_answer_id(run_id);
-    let links: Vec<(String, String, Option<String>)> = {
-        let mut stmt = store.conn.prepare(
-            "SELECT s.fingerprint, MIN(IFNULL(s.call_id,'')), c.memory_id
-             FROM insight_sources s LEFT JOIN insight_claims c ON c.fingerprint = s.fingerprint
-             WHERE s.run_id=?1 AND s.answer_id=?2
-             GROUP BY s.fingerprint ORDER BY MIN(s.rowid)",
-        )?;
-        let rows = stmt
-            .query_map(params![run_id, answer_id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-    let mut receipt = PublicationReceipt {
-        run_id: run_id.into(),
-        revision: LEGACY_REVISION.into(),
-        input_claims: links.len(),
-        ..Default::default()
-    };
-    for (index, (fingerprint, article_id, memory_id)) in links.into_iter().enumerate() {
-        let tombstoned: i64 = store.conn.query_row(
-            "SELECT COUNT(*) FROM argos_memory_tombstones WHERE (fingerprint=?1 AND fingerprint<>'') OR memory_id=?2",
-            params![fingerprint, memory_id.clone().unwrap_or_default()],
-            |r| r.get(0),
-        )?;
-        let row_exists = match &memory_id {
-            Some(id) => store
-                .conn
-                .query_row("SELECT 1 FROM memories WHERE id=?1", [id], |_| Ok(()))
-                .optional()?
-                .is_some(),
-            None => false,
-        };
-        let reason = match (&memory_id, row_exists) {
-            (Some(_), true) => None,
-            _ if tombstoned > 0 => Some("deleted by user (tombstoned); not recreated"),
-            (None, _) => Some("source link has no claim; claim text lost — re-extraction required"),
-            (Some(_), false) => {
-                Some("canonical memory row missing; claim text lost — re-extraction required")
-            }
-        };
-        match reason {
-            None => {
-                let id = memory_id.unwrap_or_default();
-                receipt.reused += 1;
-                if !receipt.reused_memory_ids.contains(&id) {
-                    receipt.reused_memory_ids.push(id.clone());
-                }
-                receipt.accepted_claims += 1;
-                receipt.claim_memory_ids.push((fingerprint, id));
-            }
-            Some(reason) => receipt.rejected.push(RejectedClaim {
-                index,
-                article_id,
-                reason: reason.into(),
-            }),
-        }
-    }
-    receipt.brief_memory_id = atlas_brief_id(&store.conn, run_id)?;
-    let mut affected: Vec<String> = Vec::new();
-    for (_, id) in &receipt.claim_memory_ids {
-        if !affected.contains(id) {
-            affected.push(id.clone());
-        }
-    }
-    if let Some(id) = &receipt.brief_memory_id {
-        if !affected.contains(id) {
-            affected.push(id.clone());
-        }
-    }
-    store.conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = (|| -> Result<()> {
-        let (queued, already) = store.enqueue_memory_index(&affected, parent_job)?;
-        receipt.affected_memory_ids = affected;
-        receipt.already_indexed = already;
-        receipt.queued_index_changes = queued.iter().map(|q| q.seq).collect();
-        receipt.index_tasks = queued.iter().map(|q| q.task_id.clone()).collect();
-        let now = chrono::Utc::now().to_rfc3339();
-        store.conn.execute(
-            "INSERT INTO argos_atlas_publications(run_id,revision,state,receipt_json,job_id,created_at,updated_at)
-             VALUES (?1,?2,'reconstructed',?3,?4,?5,?5)
-             ON CONFLICT(run_id,revision) DO UPDATE SET receipt_json=excluded.receipt_json,
-                job_id=excluded.job_id, updated_at=excluded.updated_at",
-            params![
-                run_id,
-                LEGACY_REVISION,
-                serde_json::to_string(&receipt)?,
-                parent_job.unwrap_or_default(),
-                now
-            ],
-        )?;
-        Ok(())
-    })();
-    match result {
-        Ok(()) => store.conn.execute_batch("COMMIT")?,
-        Err(err) => {
-            let _ = store.conn.execute_batch("ROLLBACK");
-            return Err(err);
-        }
-    }
-    Ok(receipt)
-}
-
 fn run_row(store: &Store, run_id: &str) -> Result<Option<crate::store::AtlasRunRow>> {
     Ok(store
         .atlas_list_runs()?
@@ -786,27 +633,64 @@ pub fn refresh_run_indexing(store: &Store, run_id: &str) -> Result<Option<Memory
     Ok(Some(stats.memories))
 }
 
-/// Re-verify finished runs whose memory phase is incomplete (partial or
-/// blocked indexing) so they reach their verified status once the index pool
-/// catches up or embeddings are enabled again. Bounded per call.
-pub fn refresh_incomplete_runs(store: &Store, limit: usize) -> Result<usize> {
-    let ids: Vec<String> = {
-        let mut stmt = store.conn.prepare(
-            "SELECT id FROM atlas_runs WHERE state IN ('partial','blocked','waiting') AND phase=5
-             ORDER BY started_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt
-            .query_map([limit as i64], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()?;
-        rows
+/// [`refresh_run_indexing`] on the selected store (SurrealDB included).
+pub async fn refresh_run_indexing_store(
+    store: &crate::atlas_store::AtlasStore,
+    run: &crate::store::AtlasRunRow,
+) -> Result<Option<MemoryPhase>> {
+    let raw: serde_json::Value = serde_json::from_str(&run.stats_json).unwrap_or_default();
+    if raw
+        .get("contract_version")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(crate::atlas_work::is_collection_contract)
+        || matches!(run.state.as_str(), "running" | "paused")
+    {
+        return Ok(None);
+    }
+    let mut stats: crate::atlas::RunStats =
+        serde_json::from_str(&run.stats_json).unwrap_or_default();
+    if !stats.memories.started() || stats.memories.publication == StepState::Failed {
+        return Ok(None);
+    }
+    let Some(receipt) = store.publication_receipt(&run.id).await? else {
+        return Ok(None);
     };
+    let verification = store.verify_publication(&receipt).await?;
+    stats.memories.apply_verification(&verification);
+    store
+        .save(&run.id, &run.cursor_json, &serde_json::to_string(&stats)?)
+        .await?;
+    let outcome = stats.memories.outcome();
+    if outcome.as_state() != run.state {
+        store
+            .set_state(&run.id, outcome.as_state(), &stats.memories.note(), false)
+            .await?;
+    }
+    Ok(Some(stats.memories))
+}
+
+/// [`refresh_incomplete_runs`] on the selected store. Returns the number
+/// of runs whose state changed.
+pub async fn refresh_incomplete_runs_store(
+    store: &crate::atlas_store::AtlasStore,
+    limit: usize,
+) -> Result<usize> {
+    let mut runs: Vec<crate::store::AtlasRunRow> = store
+        .list_runs()
+        .await?
+        .into_iter()
+        .filter(|run| {
+            matches!(run.state.as_str(), "partial" | "blocked" | "waiting") && run.phase == 5
+        })
+        .collect();
+    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    runs.truncate(limit);
     let mut changed = 0usize;
-    for id in ids {
-        let before = run_row(store, &id)?.map(|run| run.state);
-        refresh_run_indexing(store, &id)?;
-        let after = run_row(store, &id)?.map(|run| run.state);
-        if before != after {
-            changed += 1;
+    for run in runs {
+        if let Some(phase) = refresh_run_indexing_store(store, &run).await? {
+            if phase.outcome().as_state() != run.state {
+                changed += 1;
+            }
         }
     }
     Ok(changed)
@@ -850,164 +734,41 @@ pub struct RunRepair {
     pub detail: String,
 }
 
-/// Repair one retained run through the same phase-5 pipeline. Never rewrites
-/// the run's historical extraction outcome; status lands in
-/// `argos_atlas_repairs`.
-pub fn repair_run(store: &Store, run_id: &str, job_id: Option<&str>) -> Result<RunRepair> {
-    ensure_historical_contract(store, run_id)?;
-    let mut out = RunRepair {
-        run_id: run_id.into(),
-        status: RepairStatus::Verified,
-        restored_memory_ids: Vec::new(),
-        requeued: 0,
-        required: 0,
-        indexed: 0,
-        unrecoverable: Vec::new(),
-        reextract_available: false,
-        detail: String::new(),
-    };
-    let Some(run) = run_row(store, run_id)? else {
-        anyhow::bail!("Atlas run {run_id} not found");
-    };
-    if matches!(run.state.as_str(), "running" | "paused") {
-        out.status = RepairStatus::Active;
-        out.detail = "run is still active".into();
-        return Ok(out);
+/// The `atlas.memory_repair` event of a non-trivial repair.
+fn repair_event(
+    repair: &RunRepair,
+    status: &str,
+    job_id: Option<&str>,
+) -> Result<Option<NewEvent>> {
+    if repair.status == RepairStatus::Verified || repair.status == RepairStatus::NoInsights {
+        return Ok(None);
     }
-    let stats: crate::atlas::RunStats = serde_json::from_str(&run.stats_json).unwrap_or_default();
-    let prior = store.atlas_publication_receipt(run_id)?;
-    let has_links = store.atlas_has_insights(run_id)?;
-    let receipt = if let Some(checkpoint) = load_checkpoint(store, run_id)? {
-        // Never recreate a brief the user deleted.
-        let brief_deleted = match prior.as_ref().and_then(|r| r.brief_memory_id.clone()) {
-            Some(id) => store.is_tombstoned(&id)?,
-            None => false,
-        };
-        let receipt = publish_checkpoint(
-            store,
-            &checkpoint,
-            job_id,
-            true,
-            brief_deleted.then_some(""),
-        )?;
-        out.restored_memory_ids
-            .extend(receipt.created_memory_ids.iter().cloned());
-        out.restored_memory_ids
-            .extend(receipt.repaired_memory_ids.iter().cloned());
-        receipt
-    } else if has_links || prior.is_some() {
-        legacy_receipt(store, run_id, job_id)?
-    } else {
-        out.reextract_available = !store.atlas_list_articles(run_id)?.is_empty();
-        let produced = stats.insights.claims > 0
-            || !stats.insights.rows.is_empty()
-            || stats.memories.extracted > 0;
-        out.status = if produced {
-            out.detail = MISSING_PAYLOAD_LINE.into();
-            RepairStatus::MissingPayload
-        } else {
-            RepairStatus::NoInsights
-        };
-        record_repair(store, &out, job_id)?;
-        return Ok(out);
+    let severity = match repair.status {
+        RepairStatus::Partial | RepairStatus::MissingPayload => Severity::Warn,
+        _ => Severity::Info,
     };
-    for rejected in &receipt.rejected {
-        if !rejected.reason.contains("deleted by user") {
-            out.unrecoverable
-                .push((rejected.article_id.clone(), rejected.reason.clone()));
-        }
-    }
-    let verification = store.verify_atlas_publication(&receipt)?;
-    let requeued = store.requeue_uncovered(&verification.coverage, job_id)?;
-    out.requeued = requeued.len() + receipt.queued_index_changes.len();
-    out.required = verification.coverage.required;
-    out.indexed = verification.coverage.indexed.len();
-    out.status = if !out.unrecoverable.is_empty() {
-        out.reextract_available = !store.atlas_list_articles(run_id)?.is_empty();
-        out.detail = format!(
-            "{} claims unrecoverable; {MISSING_PAYLOAD_LINE}",
-            out.unrecoverable.len()
-        );
-        RepairStatus::Partial
-    } else if !out.restored_memory_ids.is_empty() {
-        RepairStatus::Repaired
-    } else if verification.coverage.disabled {
-        out.detail = INDEXING_DISABLED_LINE.into();
-        RepairStatus::IndexingDisabled
-    } else if out.requeued > 0 || !verification.coverage.complete() {
-        RepairStatus::IndexQueued
-    } else {
-        RepairStatus::Verified
-    };
-    // New-style runs: refresh the memory phase from the repaired receipt.
-    let _ = refresh_run_indexing(store, run_id);
-    record_repair(store, &out, job_id)?;
-    Ok(out)
-}
-
-fn record_repair(store: &Store, repair: &RunRepair, job_id: Option<&str>) -> Result<()> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let status = serde_json::to_value(repair.status)?
-        .as_str()
-        .unwrap_or("verified")
-        .to_string();
-    store.conn.execute(
-        "INSERT INTO argos_atlas_repairs(run_id,status,detail_json,job_id,updated_at) VALUES (?1,?2,?3,?4,?5)
-         ON CONFLICT(run_id) DO UPDATE SET status=excluded.status, detail_json=excluded.detail_json,
-            job_id=excluded.job_id, updated_at=excluded.updated_at",
-        params![
-            repair.run_id,
+    Ok(Some(NewEvent {
+        severity: Some(severity),
+        app: "atlas".into(),
+        event_type: "atlas.memory_repair".into(),
+        message: format!(
+            "Repair Atlas memories: {} — {}",
             status,
-            serde_json::to_string(repair)?,
-            job_id.unwrap_or_default(),
-            now
-        ],
-    )?;
-    if repair.status != RepairStatus::Verified && repair.status != RepairStatus::NoInsights {
-        let severity = match repair.status {
-            RepairStatus::Partial | RepairStatus::MissingPayload => Severity::Warn,
-            _ => Severity::Info,
-        };
-        let _ = events::record_event(
-            &store.conn,
-            &NewEvent {
-                severity: Some(severity),
-                app: "atlas".into(),
-                event_type: "atlas.memory_repair".into(),
-                message: format!(
-                    "Repair Atlas memories: {} — {}",
-                    status,
-                    if repair.detail.is_empty() {
-                        format!(
-                            "{} restored, {} index changes queued",
-                            repair.restored_memory_ids.len(),
-                            repair.requeued
-                        )
-                    } else {
-                        repair.detail.clone()
-                    }
-                ),
-                details: serde_json::to_string(repair)?,
-                job_id: job_id.unwrap_or_default().into(),
-                run_id: repair.run_id.clone(),
-                ..Default::default()
-            },
-        );
-    }
-    Ok(())
-}
-
-/// Stored repair status for a run.
-pub fn repair_status(store: &Store, run_id: &str) -> Result<Option<RunRepair>> {
-    let json: Option<String> = store
-        .conn
-        .query_row(
-            "SELECT detail_json FROM argos_atlas_repairs WHERE run_id=?1",
-            [run_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(json.and_then(|json| serde_json::from_str(&json).ok()))
+            if repair.detail.is_empty() {
+                format!(
+                    "{} restored, {} index changes queued",
+                    repair.restored_memory_ids.len(),
+                    repair.requeued
+                )
+            } else {
+                repair.detail.clone()
+            }
+        ),
+        details: serde_json::to_string(repair)?,
+        job_id: job_id.unwrap_or_default().into(),
+        run_id: repair.run_id.clone(),
+        ..Default::default()
+    }))
 }
 
 /// Resumable progress of the repair job (bounded pages over retained runs).
@@ -1039,44 +800,396 @@ fn save_progress(store: &Store, progress: &RepairProgress) -> Result<()> {
     store.app_state_set(REPAIR_PROGRESS_KEY, &serde_json::to_string(progress)?)
 }
 
-/// Process one bounded page of retained runs (oldest first) and persist the
-/// cursor. Returns the per-run results; an empty page marks the job done.
-pub fn repair_page(
-    store: &Store,
+static REPAIR_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Start the repair job on a background thread (no-op when one is already
+/// running in this process). `restart` = user-triggered fresh pass.
+pub fn spawn_repair(db_path: std::path::PathBuf, restart: bool) -> bool {
+    if REPAIR_RUNNING.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    // Under SurrealDB the repair runs on the process runtime, never SQLite.
+    let spawned = crate::storage::runtime::spawn(async move {
+        if let Ok(store) = AtlasStore::open(&db_path).await {
+            if let Err(e) = run_repair_job_store(&store, 16, restart).await {
+                tracing::warn!("atlas repair failed: {e:#}");
+            }
+        }
+        REPAIR_RUNNING.store(false, Ordering::SeqCst);
+    });
+    if !spawned {
+        REPAIR_RUNNING.store(false, Ordering::SeqCst);
+    }
+    spawned
+}
+
+/// Compatibility entry point: retire obsolete work without startup publication.
+pub fn spawn_startup_reconciliation(_db_path: std::path::PathBuf) -> bool {
+    // The retired Atlas insight work lives in SQLite's task tables only.
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Selected-store entry points. SQLite delegates to the functions above;
+// SurrealDB runs the same steps against the repository (publication through
+// `storage::insight::publish_atlas_insights`, reconstruction through
+// `storage::provenance::legacy_receipt`).
+
+use crate::atlas_store::AtlasStore;
+
+/// [`save_checkpoint`] on the selected store.
+pub async fn save_checkpoint_store(
+    store: &AtlasStore,
+    run_id: &str,
+    input: CheckpointInput<'_>,
+) -> Result<Checkpoint> {
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    let checkpoint = checkpoint_of(run_id, input);
+    crate::storage::atlas_memory::put_checkpoint(
+        repo.db(),
+        run_id,
+        &checkpoint.revision,
+        &serde_json::to_string(&checkpoint)?,
+        checkpoint.claims.len() as i64,
+    )
+    .await?;
+    Ok(checkpoint)
+}
+
+/// [`load_checkpoint`] on the selected store.
+pub async fn load_checkpoint_store(store: &AtlasStore, run_id: &str) -> Result<Option<Checkpoint>> {
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    Ok(
+        match crate::storage::atlas_memory::latest_checkpoint(repo.db(), run_id).await? {
+            Some(json) => Some(serde_json::from_str(&json)?),
+            None => None,
+        },
+    )
+}
+
+/// [`publish_checkpoint`] on the selected store. Under SurrealDB the brief
+/// summary flush (SQLite summarization queue) is not enqueued.
+pub async fn publish_checkpoint_store(
+    store: &AtlasStore,
+    checkpoint: &Checkpoint,
+    parent_job: Option<&str>,
+    repair: bool,
+    brief_override: Option<&str>,
+) -> Result<PublicationReceipt> {
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    let brief = brief_override.unwrap_or(&checkpoint.brief);
+    crate::storage::insight::publish_atlas_insights(
+        repo.publisher(),
+        &checkpoint.run_id,
+        checkpoint.claims.clone(),
+        checkpoint.relations.clone(),
+        brief,
+        PublishOptions {
+            revision: Some(checkpoint.revision.clone()),
+            parent_job: parent_job.map(str::to_string),
+            repair,
+            index_now: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("atlas publish checkpoint: {e}"))
+}
+
+/// [`legacy_receipt`] on the selected store.
+pub async fn legacy_receipt_store(
+    store: &AtlasStore,
+    run_id: &str,
+    parent_job: Option<&str>,
+) -> Result<PublicationReceipt> {
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    crate::storage::provenance::legacy_receipt(repo.publisher(), run_id, parent_job)
+        .await
+        .map_err(|e| anyhow::anyhow!("atlas legacy receipt: {e}"))
+}
+
+async fn requeue_uncovered_store(
+    store: &AtlasStore,
+    coverage: &crate::store::CoverageReport,
+    job_id: Option<&str>,
+) -> Result<usize> {
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    let _ = job_id;
+    crate::storage::atlas_memory::requeue_uncovered(repo.publisher(), coverage).await
+}
+
+async fn run_row_store(
+    store: &AtlasStore,
+    run_id: &str,
+) -> Result<Option<crate::store::AtlasRunRow>> {
+    Ok(store
+        .list_runs()
+        .await?
+        .into_iter()
+        .find(|run| run.id == run_id))
+}
+
+fn historical(run: &crate::store::AtlasRunRow) -> Result<()> {
+    let stats: serde_json::Value = serde_json::from_str(&run.stats_json).unwrap_or_default();
+    anyhow::ensure!(
+        !stats
+            .get("contract_version")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(crate::atlas_work::is_collection_contract),
+        "Repair/Verify are restricted to historical Atlas contracts"
+    );
+    Ok(())
+}
+
+/// [`ensure_historical_contract`] on the selected store.
+pub async fn ensure_historical_contract_store(store: &AtlasStore, run_id: &str) -> Result<()> {
+    let Some(run) = run_row_store(store, run_id).await? else {
+        anyhow::bail!("Atlas run {run_id} not found");
+    };
+    historical(&run)
+}
+
+/// [`index_and_verify`] on the selected store. Under SurrealDB the index
+/// pool owns the work: round 0 re-queues uncovered memories, later rounds
+/// only wait for it (there is no inline `index_now`).
+pub async fn index_and_verify_store(
+    store: &AtlasStore,
+    receipt: &PublicationReceipt,
+    pause: Option<&AtomicBool>,
+    barrier: Barrier,
+    mut progress: impl FnMut(u32, u32),
+) -> Result<Phase5Report> {
+    ensure_historical_contract_store(store, &receipt.run_id).await?;
+    let mut round = 0u32;
+    loop {
+        let verification = store.verify_publication(receipt).await?;
+        let coverage = &verification.coverage;
+        progress(coverage.indexed.len() as u32, coverage.required as u32);
+        if coverage.disabled || coverage.complete() || round >= barrier.rounds {
+            return Ok(Phase5Report {
+                verification,
+                paused: false,
+            });
+        }
+        if pause.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Ok(Phase5Report {
+                verification,
+                paused: true,
+            });
+        }
+        if round == 0 {
+            requeue_uncovered_store(store, coverage, None).await?;
+        }
+        round += 1;
+        if round < barrier.rounds {
+            tokio::time::sleep(barrier.wait).await;
+        }
+    }
+}
+
+async fn record_repair_store(
+    store: &AtlasStore,
+    repair: &RunRepair,
+    job_id: Option<&str>,
+) -> Result<()> {
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    let status = serde_json::to_value(repair.status)?
+        .as_str()
+        .unwrap_or("verified")
+        .to_string();
+    crate::storage::atlas::set_repair(
+        repo.db(),
+        &repair.run_id,
+        &status,
+        &serde_json::to_string(repair)?,
+        job_id.unwrap_or_default(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("atlas repair status: {e}"))?;
+    if let Some(event) = repair_event(repair, &status, job_id)? {
+        let _ = crate::storage::event_log::record_event(repo.db(), &event).await;
+    }
+    Ok(())
+}
+
+/// [`repair_status`] on the selected store.
+pub async fn repair_status_store(store: &AtlasStore, run_id: &str) -> Result<Option<RunRepair>> {
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    let json = crate::storage::atlas_memory::repair_detail(repo.db(), run_id).await?;
+    Ok(json.and_then(|json| serde_json::from_str(&json).ok()))
+}
+
+/// [`repair_run`] on the selected store: the CLI and the repair job use
+/// this, so SurrealDB never reopens SQLite.
+pub async fn repair_run_store(
+    store: &AtlasStore,
+    run_id: &str,
+    job_id: Option<&str>,
+) -> Result<RunRepair> {
+    #[cfg(feature = "surreal")]
+    {
+        let repo = store
+            .repository()
+            .ok_or_else(|| anyhow::anyhow!("atlas repair: no repository"))?;
+        let db = repo.db();
+        let Some(run) = run_row_store(store, run_id).await? else {
+            anyhow::bail!("Atlas run {run_id} not found");
+        };
+        historical(&run)?;
+        let mut out = RunRepair {
+            run_id: run_id.into(),
+            status: RepairStatus::Verified,
+            restored_memory_ids: Vec::new(),
+            requeued: 0,
+            required: 0,
+            indexed: 0,
+            unrecoverable: Vec::new(),
+            reextract_available: false,
+            detail: String::new(),
+        };
+        if matches!(run.state.as_str(), "running" | "paused") {
+            out.status = RepairStatus::Active;
+            out.detail = "run is still active".into();
+            return Ok(out);
+        }
+        let stats: crate::atlas::RunStats =
+            serde_json::from_str(&run.stats_json).unwrap_or_default();
+        let prior = store.publication_receipt(run_id).await?;
+        let has_links = crate::storage::atlas_memory::has_insights(db, run_id).await?;
+        let receipt = if let Some(checkpoint) = load_checkpoint_store(store, run_id).await? {
+            let brief_deleted = match prior.as_ref().and_then(|r| r.brief_memory_id.clone()) {
+                Some(id) => crate::storage::atlas_memory::is_tombstoned(db, &id).await?,
+                None => false,
+            };
+            let receipt = publish_checkpoint_store(
+                store,
+                &checkpoint,
+                job_id,
+                true,
+                brief_deleted.then_some(""),
+            )
+            .await?;
+            out.restored_memory_ids
+                .extend(receipt.created_memory_ids.iter().cloned());
+            out.restored_memory_ids
+                .extend(receipt.repaired_memory_ids.iter().cloned());
+            receipt
+        } else if has_links || prior.is_some() {
+            legacy_receipt_store(store, run_id, job_id).await?
+        } else {
+            out.reextract_available = !store.list_articles(run_id).await?.is_empty();
+            let produced = stats.insights.claims > 0
+                || !stats.insights.rows.is_empty()
+                || stats.memories.extracted > 0;
+            out.status = if produced {
+                out.detail = MISSING_PAYLOAD_LINE.into();
+                RepairStatus::MissingPayload
+            } else {
+                RepairStatus::NoInsights
+            };
+            record_repair_store(store, &out, job_id).await?;
+            return Ok(out);
+        };
+        for rejected in &receipt.rejected {
+            if !rejected.reason.contains("deleted by user") {
+                out.unrecoverable
+                    .push((rejected.article_id.clone(), rejected.reason.clone()));
+            }
+        }
+        let verification = store.verify_publication(&receipt).await?;
+        let requeued = requeue_uncovered_store(store, &verification.coverage, job_id).await?;
+        out.requeued = requeued + receipt.queued_index_changes.len();
+        out.required = verification.coverage.required;
+        out.indexed = verification.coverage.indexed.len();
+        out.status = if !out.unrecoverable.is_empty() {
+            out.reextract_available = !store.list_articles(run_id).await?.is_empty();
+            out.detail = format!(
+                "{} claims unrecoverable; {MISSING_PAYLOAD_LINE}",
+                out.unrecoverable.len()
+            );
+            RepairStatus::Partial
+        } else if !out.restored_memory_ids.is_empty() {
+            RepairStatus::Repaired
+        } else if verification.coverage.disabled {
+            out.detail = INDEXING_DISABLED_LINE.into();
+            RepairStatus::IndexingDisabled
+        } else if out.requeued > 0 || !verification.coverage.complete() {
+            RepairStatus::IndexQueued
+        } else {
+            RepairStatus::Verified
+        };
+        if let Some(run) = run_row_store(store, run_id).await? {
+            let _ = refresh_run_indexing_store(store, &run).await;
+        }
+        record_repair_store(store, &out, job_id).await?;
+        Ok(out)
+    }
+    #[cfg(not(feature = "surreal"))]
+    unreachable!("SurrealDB store without the surreal feature")
+}
+
+async fn load_progress_store(store: &AtlasStore) -> Result<RepairProgress> {
+    Ok(store
+        .app_state_get(REPAIR_PROGRESS_KEY)
+        .await?
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default())
+}
+
+async fn save_progress_store(store: &AtlasStore, progress: &RepairProgress) -> Result<()> {
+    store
+        .app_state_set(REPAIR_PROGRESS_KEY, &serde_json::to_string(progress)?)
+        .await
+}
+
+/// [`repair_page`] on the selected store. Under SurrealDB the keyset page
+/// is taken from `list_runs` (historical contracts, `(started_at, id)`
+/// ascending); SQLite's `retire_atlas_insight_work` and job registration
+/// have no SurrealDB counterpart here.
+pub async fn repair_page_store(
+    store: &AtlasStore,
     progress: &mut RepairProgress,
     page: usize,
 ) -> Result<Vec<RunRepair>> {
-    let ids: Vec<(String, String)> = {
-        let mut stmt = store.conn.prepare(
-            "SELECT started_at, id FROM atlas_runs
-             WHERE (NOT json_valid(stats_json) OR COALESCE(json_extract(stats_json,'$.contract_version'),'') NOT IN ('atlas-collection-v1','atlas-collection-v2'))
-             AND (started_at > ?1 OR (started_at = ?1 AND id > ?2))
-             ORDER BY started_at, id LIMIT ?3",
-        )?;
-        let rows = stmt
-            .query_map(
-                params![progress.after_started_at, progress.after_id, page as i64],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
+    let mut runs: Vec<(String, String)> = store
+        .list_runs()
+        .await?
+        .into_iter()
+        .filter(|run| historical(run).is_ok())
+        .map(|run| (run.started_at, run.id))
+        .filter(|(started, id)| {
+            (started.as_str(), id.as_str())
+                > (
+                    progress.after_started_at.as_str(),
+                    progress.after_id.as_str(),
+                )
+        })
+        .collect();
+    runs.sort();
+    runs.truncate(page.max(1));
     let mut results = Vec::new();
-    tasks::retire_atlas_insight_work(&store.conn, &chrono::Utc::now().to_rfc3339())?;
-    if !progress.job_id.is_empty() {
-        register_repair_job(store, &progress.job_id)?;
-    }
-    if ids.is_empty() {
+    if runs.is_empty() {
         progress.done = true;
-        save_progress(store, progress)?;
+        save_progress_store(store, progress).await?;
         return Ok(results);
     }
-    for (started_at, id) in ids {
-        let repair = repair_run(
-            store,
-            &id,
-            Some(progress.job_id.as_str()).filter(|j| !j.is_empty()),
-        )?;
+    for (started_at, id) in runs {
+        let job = Some(progress.job_id.clone()).filter(|j| !j.is_empty());
+        let repair = repair_run_store(store, &id, job.as_deref()).await?;
         progress.runs_checked += 1;
         if !matches!(
             repair.status,
@@ -1096,202 +1209,45 @@ pub fn repair_page(
         progress.after_id = id;
         results.push(repair);
     }
-    // Progress commits with each page so an interrupted job resumes here.
-    save_progress(store, progress)?;
+    save_progress_store(store, progress).await?;
     Ok(results)
 }
 
-/// Run (or resume) the "Repair Atlas memories" job to completion. `restart`
-/// begins a new pass from the oldest run (user-triggered repair).
-pub fn run_repair_job(store: &Store, page: usize, restart: bool) -> Result<RepairProgress> {
-    let mut progress = load_progress(store)?;
-    let now = chrono::Utc::now().to_rfc3339();
+/// [`run_repair_job`] on the selected store. Under SurrealDB progress is
+/// kept in `app_state` only; the job is not mirrored into the registry.
+pub async fn run_repair_job_store(
+    store: &AtlasStore,
+    page: usize,
+    restart: bool,
+) -> Result<RepairProgress> {
+    let mut progress = load_progress_store(store).await?;
     if restart || progress.done || progress.job_id.is_empty() {
         progress = RepairProgress {
             job_id: format!("atlas-repair-{}", chrono::Utc::now().timestamp_millis()),
             ..Default::default()
         };
     }
-    let _ = now;
-    register_repair_job(store, &progress.job_id)?;
-    let total: i64 = store
-        .conn
-        .query_row("SELECT COUNT(*) FROM atlas_runs", [], |r| r.get(0))?;
-    save_progress(store, &progress)?;
-    loop {
-        let now = chrono::Utc::now().to_rfc3339();
-        tasks::set_job_progress(
-            &store.conn,
-            &progress.job_id,
-            "running",
-            "repair",
-            progress.runs_checked as i64,
-            Some(total),
-            "",
-            &now,
-        )?;
-        let page_result = repair_page(store, &mut progress, page.max(1));
-        match page_result {
-            Ok(results) if results.is_empty() => break,
-            Ok(_) => continue,
-            Err(err) => {
-                let now = chrono::Utc::now().to_rfc3339();
-                let message = events::redact(&format!("{err:#}"));
-                tasks::set_job_progress(
-                    &store.conn,
-                    &progress.job_id,
-                    "failed",
-                    "repair",
-                    progress.runs_checked as i64,
-                    Some(total),
-                    &message,
-                    &now,
-                )?;
-                return Err(err);
-            }
-        }
-    }
-    let now = chrono::Utc::now().to_rfc3339();
-    let summary = if progress.missing_payload.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "{} runs need re-extraction ({MISSING_PAYLOAD_LINE})",
-            progress.missing_payload.len()
-        )
-    };
-    tasks::set_job_progress(
-        &store.conn,
-        &progress.job_id,
-        if progress.missing_payload.is_empty() {
-            "completed"
-        } else {
-            "partial"
-        },
-        "repair",
-        progress.runs_checked as i64,
-        Some(total),
-        &summary,
-        &now,
-    )?;
+    save_progress_store(store, &progress).await?;
+    while !repair_page_store(store, &mut progress, page.max(1))
+        .await?
+        .is_empty()
+    {}
+    #[cfg(feature = "surreal")]
     if progress.memories_restored > 0 {
-        let _ = store.conn.execute(
-            "INSERT INTO app_state(key,value) VALUES ('memories_changed_seq','1')
-             ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",
-            [],
-        );
+        if let Some(repo) = store.repository() {
+            let _ = crate::storage::atlas_memory::bump_memories_changed(repo.publisher()).await;
+        }
     }
     Ok(progress)
 }
 
-/// Register the repair job in the shared job registry (idempotent).
-fn register_repair_job(store: &Store, job_id: &str) -> Result<()> {
-    tasks::enqueue_job_with(
-        &store.conn,
-        &tasks::NewJob {
-            id: job_id.into(),
-            kind: "atlas_memory_repair".into(),
-            owner_scope: "atlas".into(),
-            input_revision: String::new(),
-            deadline_at: String::new(),
-        },
-        &tasks::JobMeta {
-            app: "atlas".into(),
-            operation: "atlas_memory_repair".into(),
-            title: "Repair Atlas memories".into(),
-            ..Default::default()
-        },
-        &chrono::Utc::now().to_rfc3339(),
-    )?;
-    // Owned by this process: if it exits mid-repair, the next start marks the
-    // job interrupted (and the resumable repair re-owns it when it continues).
-    store.conn.execute(
-        "UPDATE argos_jobs SET worker_owner=?2,
-            active_since=CASE WHEN active_since='' AND state IN ('queued','running') THEN ?3 ELSE active_since END
-         WHERE id=?1",
-        params![
-            job_id,
-            crate::scheduler::process_owner(),
-            chrono::Utc::now().to_rfc3339()
-        ],
-    )?;
-    Ok(())
-}
-
-static REPAIR_RUNNING: AtomicBool = AtomicBool::new(false);
-
-/// A repair that died mid-pass must not read "running" forever.
-fn mark_repair_interrupted(store: &Store, reason: &str) {
-    let Ok(progress) = load_progress(store) else {
-        return;
+/// [`prepare_reextraction`] on the selected store.
+pub async fn prepare_reextraction_store(store: &AtlasStore, run_id: &str) -> Result<bool> {
+    let Some(run) = run_row_store(store, run_id).await? else {
+        anyhow::bail!("Atlas run {run_id} not found");
     };
-    if progress.job_id.is_empty() {
-        return;
-    }
-    let (done, total): (i64, Option<i64>) = store
-        .conn
-        .query_row(
-            "SELECT IFNULL(progress_done,0), progress_total FROM argos_jobs WHERE id=?1",
-            [&progress.job_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap_or((0, None));
-    let _ = tasks::set_job_progress(
-        &store.conn,
-        &progress.job_id,
-        "failed",
-        "repair",
-        done,
-        total,
-        reason,
-        &chrono::Utc::now().to_rfc3339(),
-    );
-}
-
-/// Start the repair job on a background thread (no-op when one is already
-/// running in this process). `restart` = user-triggered fresh pass.
-pub fn spawn_repair(db_path: std::path::PathBuf, restart: bool) -> bool {
-    if REPAIR_RUNNING.swap(true, Ordering::SeqCst) {
-        return false;
-    }
-    let spawned = std::thread::Builder::new()
-        .name("argos-atlas-repair".into())
-        .spawn(move || {
-            if let Ok(store) = Store::open(&db_path) {
-                let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_repair_job(&store, 16, restart)
-                }));
-                if ran.is_err() {
-                    mark_repair_interrupted(&store, "repair stopped by a panic");
-                }
-            }
-            REPAIR_RUNNING.store(false, Ordering::SeqCst);
-        })
-        .is_ok();
-    if !spawned {
-        REPAIR_RUNNING.store(false, Ordering::SeqCst);
-    }
-    spawned
-}
-
-/// Compatibility entry point: retire obsolete work without startup publication.
-pub fn spawn_startup_reconciliation(db_path: std::path::PathBuf) -> bool {
-    if let Ok(store) = Store::open(&db_path) {
-        let _ = tasks::retire_atlas_insight_work(&store.conn, &chrono::Utc::now().to_rfc3339());
-    }
-    false
-}
-
-/// Targeted re-extraction for a run whose payload was lost: rewinds it to the
-/// phase-4 extraction step (retained articles are reused; no news is
-/// re-fetched) and parks it so `run_atlas` can resume that run. Returns false
-/// when no source articles are retained.
-pub fn prepare_reextraction(store: &Store, run_id: &str) -> Result<bool> {
-    ensure_historical_contract(store, run_id)?;
-    let Some(run) = run_row(store, run_id)? else {
-        return Ok(false);
-    };
-    if run.state == "running" || store.atlas_list_articles(run_id)?.is_empty() {
+    historical(&run)?;
+    if run.state == "running" || store.list_articles(run_id).await?.is_empty() {
         return Ok(false);
     }
     let mut cursor: crate::atlas::Cursor =
@@ -1301,26 +1257,28 @@ pub fn prepare_reextraction(store: &Store, run_id: &str) -> Result<bool> {
     let mut stats: crate::atlas::RunStats =
         serde_json::from_str(&run.stats_json).unwrap_or_default();
     stats.memories = MemoryPhase::default();
-    store.conn.execute(
-        "DELETE FROM argos_atlas_checkpoints WHERE run_id=?1",
-        [run_id],
-    )?;
-    store.atlas_save(
-        run_id,
-        &serde_json::to_string(&cursor)?,
-        &serde_json::to_string(&stats)?,
-    )?;
-    store.atlas_set_state(run_id, "paused", "Re-extraction requested", false)?;
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        crate::storage::atlas_memory::delete_checkpoints(repo.db(), run_id).await?;
+    }
+    store
+        .save(
+            run_id,
+            &serde_json::to_string(&cursor)?,
+            &serde_json::to_string(&stats)?,
+        )
+        .await?;
+    store
+        .set_state(run_id, "paused", "Re-extraction requested", false)
+        .await?;
     Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atlas::{Cursor, RunStats};
+    use crate::atlas::RunStats;
     use crate::atlas_insights::{Extraction, Settled};
-    use crate::embed::testing as embed_testing;
-    use crate::store::AtlasArticleRow;
 
     fn claim(entity: &str, object: &str, article: &str) -> AtlasInsightClaim {
         AtlasInsightClaim {
@@ -1374,282 +1332,6 @@ mod tests {
     }
 
     // ---- Repair Atlas memories -------------------------------------------
-
-    fn finished_run(store: &Store, id: &str, started: &str, stats: &RunStats) {
-        let cursor = Cursor {
-            phase: 4,
-            leg: "insights_done".into(),
-            ..Cursor::default()
-        };
-        store
-            .atlas_insert_run(
-                id,
-                &serde_json::to_string(&cursor).unwrap(),
-                &serde_json::to_string(stats).unwrap(),
-            )
-            .unwrap();
-        store.atlas_set_state(id, "completed", "", true).unwrap();
-        store
-            .conn
-            .execute(
-                "UPDATE atlas_runs SET started_at=?1 WHERE id=?2",
-                params![started, id],
-            )
-            .unwrap();
-    }
-
-    /// A pre-phase-5 run: links and memories exist, but no receipt, no
-    /// checkpoint and no index state (false "completed").
-    fn legacy_published(store: &Store, id: &str) -> PublicationReceipt {
-        let receipt = store
-            .publish_atlas_insights(
-                id,
-                &claims(),
-                &[],
-                "Legacy brief.",
-                &PublishOptions::default(),
-            )
-            .unwrap();
-        store
-            .conn
-            .execute_batch(
-                "DELETE FROM argos_atlas_publications; DELETE FROM argos_memory_index_state;
-                 DELETE FROM argos_index_changes; DELETE FROM argos_tasks;",
-            )
-            .unwrap();
-        receipt
-    }
-
-    fn disk_store(dir: &tempfile::TempDir) -> Store {
-        Store::open(&dir.path().join("argos.db")).unwrap()
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[test]
-    fn repair_requeues_vectors_for_a_false_completed_cycle_without_rewriting_it() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let store = disk_store(&dir);
-        finished_run(&store, "old", "2026-10-04T01:00:00Z", &RunStats::default());
-        let published = legacy_published(&store, "old");
-        let repair = repair_run(&store, "old", None).unwrap();
-        assert_eq!(repair.status, RepairStatus::IndexQueued, "{repair:?}");
-        assert_eq!(repair.required, 3);
-        assert!(repair.unrecoverable.is_empty());
-        let conn = rusqlite::Connection::open(dir.path().join("argos.db")).unwrap();
-        crate::scheduler::drain_index_once(&conn, &store, "pool", 16).unwrap();
-        let receipt = store.atlas_publication_receipt("old").unwrap().unwrap();
-        assert_eq!(receipt.revision, LEGACY_REVISION);
-        assert!(receipt.reconciles());
-        let coverage = store
-            .verify_memory_coverage(&published.affected_memory_ids)
-            .unwrap();
-        assert!(coverage.complete(), "{coverage:?}");
-        // Historical state is untouched; repair status is recorded separately.
-        let run = store.atlas_latest_run().unwrap().unwrap();
-        assert_eq!((run.state.as_str(), run.note.as_str()), ("completed", ""));
-        assert_eq!(
-            repair_status(&store, "old").unwrap().unwrap().status,
-            RepairStatus::IndexQueued
-        );
-        // A second pass is verified and idempotent.
-        assert_eq!(
-            repair_run(&store, "old", None).unwrap().status,
-            RepairStatus::Verified
-        );
-    }
-
-    #[test]
-    fn repair_restores_orphaned_links_from_the_checkpoint_and_respects_tombstones() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let store = disk_store(&dir);
-        finished_run(&store, "cp", "2026-10-04T02:00:00Z", &RunStats::default());
-        let x = extraction(claims(), false);
-        let cp = save_checkpoint(
-            &store,
-            "cp",
-            CheckpointInput {
-                claims: &x.settled.claims,
-                relations: &[],
-                brief: &x.settled.brief,
-                entity_path: "",
-                stats: &x.settled.stats,
-                partial: false,
-                notes: Vec::new(),
-                initial_confidences: x.settled.initial_confidences.clone(),
-            },
-        )
-        .unwrap();
-        let receipt = publish_checkpoint(&store, &cp, None, false, None).unwrap();
-        let (fp_a, mem_a) = receipt.claim_memory_ids[0].clone();
-        let (_, mem_b) = receipt.claim_memory_ids[1].clone();
-        // Damage: claim A lost its claim row and memory (orphan source link).
-        store.conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
-        store
-            .conn
-            .execute("DELETE FROM insight_claims WHERE fingerprint=?1", [&fp_a])
-            .unwrap();
-        store
-            .conn
-            .execute("DELETE FROM memories WHERE id=?1", [&mem_a])
-            .unwrap();
-        store.conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
-        // User deliberately deleted claim B.
-        store.delete_memory(&mem_b).unwrap();
-        let repair = repair_run(&store, "cp", None).unwrap();
-        assert_eq!(repair.status, RepairStatus::Repaired, "{repair:?}");
-        assert_eq!(repair.restored_memory_ids.len(), 1);
-        let texts: Vec<String> = store
-            .list_memories()
-            .unwrap()
-            .into_iter()
-            .map(|m| m.text)
-            .collect();
-        assert!(texts.iter().any(|t| t == "acme is located in lisbon."));
-        assert!(
-            !texts.iter().any(|t| t == "globex is located in porto."),
-            "a user deletion is never resurrected"
-        );
-        assert!(
-            repair.unrecoverable.is_empty(),
-            "tombstones are not gaps: {repair:?}"
-        );
-    }
-
-    #[test]
-    fn repair_reports_missing_payload_and_unrecoverable_links_without_fabricating() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let store = disk_store(&dir);
-        // (a) Insights counted, but the failed write lost every claim.
-        let mut stats = RunStats::default();
-        stats.insights.claims = 4;
-        finished_run(&store, "lost", "2026-10-04T03:00:00Z", &stats);
-        store
-            .atlas_upsert_article(&AtlasArticleRow {
-                run_id: "lost".into(),
-                id: "a".into(),
-                title: "t".into(),
-                description: String::new(),
-                url: "https://x.example/a".into(),
-                country: "pt".into(),
-                source_name: String::new(),
-                source_domain: String::new(),
-                published_at: String::new(),
-                provider: "newsapi".into(),
-                temperature: 1.0,
-                category: "economic".into(),
-                seen_at: String::new(),
-                author: String::new(),
-                image_url: String::new(),
-            })
-            .unwrap();
-        let repair = repair_run(&store, "lost", None).unwrap();
-        assert_eq!(repair.status, RepairStatus::MissingPayload);
-        assert_eq!(repair.detail, MISSING_PAYLOAD_LINE);
-        assert!(repair.reextract_available);
-        assert!(prepare_reextraction(&store, "lost").unwrap());
-        let run = store
-            .atlas_list_runs()
-            .unwrap()
-            .into_iter()
-            .find(|r| r.id == "lost")
-            .unwrap();
-        let cursor: Cursor = serde_json::from_str(&run.cursor_json).unwrap();
-        assert_eq!(
-            (run.state.as_str(), cursor.phase, cursor.leg.as_str()),
-            ("paused", 4, "insights")
-        );
-
-        // (b) Links survive but the canonical memory text is gone, no checkpoint.
-        finished_run(&store, "gap", "2026-10-04T04:00:00Z", &RunStats::default());
-        let published = legacy_published(&store, "gap");
-        let (_, gone) = published.claim_memory_ids[0].clone();
-        store.conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
-        store
-            .conn
-            .execute("DELETE FROM memories WHERE id=?1", [&gone])
-            .unwrap();
-        store.conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
-        let before = store.list_memories().unwrap().len();
-        let repair = repair_run(&store, "gap", None).unwrap();
-        assert_eq!(repair.status, RepairStatus::Partial, "{repair:?}");
-        assert_eq!(repair.unrecoverable.len(), 1);
-        assert!(repair.unrecoverable[0].1.contains("re-extraction required"));
-        assert_eq!(
-            store.list_memories().unwrap().len(),
-            before,
-            "nothing fabricated"
-        );
-    }
-
-    #[test]
-    fn repair_job_pages_resumably_and_records_job_progress() {
-        let _fake = embed_testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let store = disk_store(&dir);
-        for (i, id) in ["r1", "r2", "r3"].iter().enumerate() {
-            finished_run(
-                &store,
-                id,
-                &format!("2026-10-04T0{i}:00:00Z"),
-                &RunStats::default(),
-            );
-        }
-        legacy_published(&store, "r2");
-        let mut progress = RepairProgress {
-            job_id: "job-test".into(),
-            ..Default::default()
-        };
-        save_progress(&store, &progress).unwrap();
-        let page = repair_page(&store, &mut progress, 2).unwrap();
-        assert_eq!(page.len(), 2);
-        assert_eq!(progress.after_id, "r2");
-        // Interrupted here: the stored cursor resumes at r3.
-        let stored = load_progress(&store).unwrap();
-        assert_eq!((stored.after_id.as_str(), stored.runs_checked), ("r2", 2));
-        let done = run_repair_job(&store, 2, false).unwrap();
-        assert!(done.done);
-        assert_eq!(
-            done.runs_checked, 3,
-            "resumed pass covers only r3: {done:?}"
-        );
-        let (state, title): (String, String) = store
-            .conn
-            .query_row(
-                "SELECT state, title FROM argos_jobs WHERE id=?1",
-                [&done.job_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            (state.as_str(), title.as_str()),
-            ("completed", "Repair Atlas memories")
-        );
-        // Owned by this process; its running span is folded into active time.
-        let row = store.get_job(&done.job_id).unwrap().unwrap();
-        assert_eq!(row.active_since, "");
-        assert!(row.active_ms.is_some(), "active time recorded");
-        assert_eq!(row.active_now(chrono::Utc::now()), row.active_ms);
-        // A repair that dies mid-pass does not stay "running".
-        store
-            .conn
-            .execute(
-                "UPDATE argos_jobs SET state='running', finished_at='' WHERE id=?1",
-                [&done.job_id],
-            )
-            .unwrap();
-        mark_repair_interrupted(&store, "repair stopped by a panic");
-        assert_eq!(
-            store.get_job(&done.job_id).unwrap().unwrap().state,
-            "failed"
-        );
-        // User-triggered repair starts a fresh pass.
-        let fresh = run_repair_job(&store, 10, true).unwrap();
-        assert_ne!(fresh.job_id, done.job_id);
-        assert_eq!(fresh.runs_checked, 3);
-    }
 
     #[test]
     fn memory_phase_lines_and_outcomes_are_truthful() {

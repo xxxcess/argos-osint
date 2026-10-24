@@ -4,7 +4,6 @@ use crate::{
     store::{AtlasArticleRow, Store},
 };
 use anyhow::Result;
-use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 pub const MATCH_VERSION: &str = "shared-headline-entities-v4-possessive";
@@ -40,10 +39,10 @@ pub struct ArticleOrigin {
     pub article_id: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct SharedMention {
+pub(crate) struct SharedMention {
     key: String,
     type_hint: String,
-    original_text: String,
+    pub(crate) original_text: String,
     left: ArticleMention,
     right: ArticleMention,
 }
@@ -130,6 +129,23 @@ pub fn shared_entity_mentions(
         store.atlas_metadata(&left.run_id, &left.id)?,
         store.atlas_metadata(&right.run_id, &right.id)?,
     ];
+    Ok(shared_entity_mentions_with(
+        left,
+        metadata[0].as_ref(),
+        right,
+        metadata[1].as_ref(),
+    ))
+}
+
+/// [`shared_entity_mentions`] on metadata the caller already read (the
+/// SurrealDB actor index reads it from the repository).
+pub fn shared_entity_mentions_with(
+    left: &AtlasArticleRow,
+    left_metadata: Option<&crate::atlas_metadata::ArticleMetadata>,
+    right: &AtlasArticleRow,
+    right_metadata: Option<&crate::atlas_metadata::ArticleMetadata>,
+) -> Vec<String> {
+    let metadata = [left_metadata.cloned(), right_metadata.cloned()];
     let articles = [left, right];
     let mut shared = BTreeMap::new();
     for side in 0..2 {
@@ -205,7 +221,7 @@ pub fn shared_entity_mentions(
             }
         }
     }
-    Ok(shared.into_values().collect())
+    shared.into_values().collect()
 }
 /// Only ingest-owned Related records with both exact current endpoints qualify.
 pub(crate) fn current_ingest_related(
@@ -237,13 +253,13 @@ pub(crate) fn current_ingest_related(
     }
     Ok(true)
 }
-/// Inverted token and entity postings avoid comparing all article pairs.
-pub fn build(store: &Store, run_id: &str) -> Result<usize> {
-    let articles = store.atlas_list_articles(run_id)?;
-    let mut metadata = Vec::new();
-    for a in &articles {
-        metadata.push(store.atlas_metadata(run_id, &a.id)?);
-    }
+/// The cache key and input revision of one run's Related build: equal
+/// revisions (and an equal stored pair count) mean the stored pairs are current.
+pub fn build_input(
+    run_id: &str,
+    articles: &[AtlasArticleRow],
+    metadata: &[Option<crate::atlas_metadata::ArticleMetadata>],
+) -> Result<(String, String)> {
     let build_key = format!("atlas-related-input:{run_id}");
     let input_revision = crate::nlp::cache::hash(&serde_json::to_string(&(
         MATCH_VERSION,
@@ -260,21 +276,295 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
             })
             .collect::<Vec<_>>(),
     ))?);
-    if let Some(cached) = store
-        .app_state_get(&build_key)?
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-    {
-        let count: usize = store.conn.query_row(
-            "SELECT COUNT(*) FROM atlas_related_articles WHERE run_id=?1",
-            [run_id],
-            |r| r.get(0),
-        )?;
-        if cached.get("revision").and_then(|v| v.as_str()) == Some(input_revision.as_str())
-            && cached.get("count").and_then(|v| v.as_u64()) == Some(count as u64)
-        {
+    Ok((build_key, input_revision))
+}
+
+/// Whether a stored build marker matches this revision and pair count.
+pub fn build_is_current(marker: Option<&str>, input_revision: &str, count: usize) -> bool {
+    marker
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .is_some_and(|cached| {
+            cached.get("revision").and_then(|v| v.as_str()) == Some(input_revision)
+                && cached.get("count").and_then(|v| v.as_u64()) == Some(count as u64)
+        })
+}
+
+/// The build marker stored after publishing `count` pairs.
+pub fn build_marker(input_revision: &str, count: usize) -> Result<String> {
+    Ok(serde_json::to_string(
+        &serde_json::json!({"revision":input_revision,"count":count}),
+    )?)
+}
+
+/// One Related pair ready to store: `left`/`right` index the input articles
+/// (`left.id < right.id`); the caller checks both are still current.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlannedPair {
+    pub left: usize,
+    pub right: usize,
+    pub left_revision: String,
+    pub right_revision: String,
+    pub shared_json: String,
+    pub named_count: i64,
+    pub shared_count: i64,
+    pub rarity: f64,
+}
+
+/// Inverted token and entity postings avoid comparing all article pairs.
+pub fn build(store: &Store, run_id: &str) -> Result<usize> {
+    let articles = store.atlas_list_articles(run_id)?;
+    let mut metadata = Vec::new();
+    for a in &articles {
+        metadata.push(store.atlas_metadata(run_id, &a.id)?);
+    }
+    let (build_key, input_revision) = build_input(run_id, &articles, &metadata)?;
+    if let Some(marker) = store.app_state_get(&build_key)? {
+        let count = crate::storage::store_bridge::related_count(run_id)?;
+        if build_is_current(Some(&marker), &input_revision, count) {
             return Ok(count);
         }
     }
+    let planned = plan(&articles, &metadata)?;
+    let count = crate::storage::store_bridge::replace_related(run_id, &articles, &planned)?;
+    store.app_state_set(&build_key, &build_marker(&input_revision, count)?)?;
+    Ok(count)
+}
+
+/// [`build`] on the SurrealDB repository: same plan, same input marker
+/// (`app_state`), published by `storage::atlas_metadata::replace_related`.
+pub async fn build_on(store: &crate::atlas_store::AtlasStore, run_id: &str) -> Result<usize> {
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    build_surreal(store, repo, run_id).await
+}
+
+#[cfg(feature = "surreal")]
+async fn build_surreal(
+    store: &crate::atlas_store::AtlasStore,
+    repo: &crate::storage::repo::Repository,
+    run_id: &str,
+) -> Result<usize> {
+    let articles = store.list_articles(run_id).await?;
+    let mut metadata = Vec::new();
+    for a in &articles {
+        metadata.push(store.metadata(run_id, &a.id).await?);
+    }
+    let (build_key, input_revision) = build_input(run_id, &articles, &metadata)?;
+    if let Some(marker) = store.app_state_get(&build_key).await? {
+        let count = crate::storage::atlas_metadata::related_count(repo.db(), run_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("atlas related count: {e}"))?;
+        if build_is_current(Some(&marker), &input_revision, count) {
+            return Ok(count);
+        }
+    }
+    let planned = plan(&articles, &metadata)?;
+    let count =
+        crate::storage::atlas_metadata::replace_related(repo.db(), run_id, &articles, &planned)
+            .await
+            .map_err(|e| anyhow::anyhow!("atlas related articles: {e}"))?;
+    store
+        .app_state_set(&build_key, &build_marker(&input_revision, count)?)
+        .await?;
+    Ok(count)
+}
+
+/// `Store::related_articles` on the selected Atlas store: under SurrealDB
+/// the pairs come from `storage::atlas_metadata::related_pairs` and the
+/// articles and metadata from the repository; otherwise SQLite.
+pub async fn related_articles_on(
+    store: &crate::atlas_store::AtlasStore,
+    run_id: &str,
+    article_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<RelatedArticlePage> {
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    related_surreal(store, repo, run_id, article_id, offset, limit).await
+}
+
+#[cfg(feature = "surreal")]
+async fn related_surreal(
+    store: &crate::atlas_store::AtlasStore,
+    repo: &crate::storage::repo::Repository,
+    run_id: &str,
+    article_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<RelatedArticlePage> {
+    let limit = limit.clamp(1, 100);
+    let articles = store.list_articles(run_id).await?;
+    let lookup: HashMap<_, _> = articles.iter().map(|a| (a.id.as_str(), a)).collect();
+    let mut pairs = crate::storage::atlas_metadata::related_pairs(repo.db(), run_id, article_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("atlas related pairs: {e}"))?;
+    // SQLite joins the counterpart article; pairs whose counterpart is gone drop out.
+    let other = |p: &crate::storage::atlas_metadata::RelatedPairRow| {
+        if p.left_id == article_id {
+            p.right_id.clone()
+        } else {
+            p.left_id.clone()
+        }
+    };
+    pairs.retain(|p| lookup.contains_key(other(p).as_str()));
+    pairs.sort_by(|a, b| {
+        let (oa, ob) = (lookup[other(a).as_str()], lookup[other(b).as_str()]);
+        (a.named_count == 0)
+            .cmp(&(b.named_count == 0))
+            .then_with(|| b.shared_count.cmp(&a.shared_count))
+            .then_with(|| b.rarity.total_cmp(&a.rarity))
+            .then_with(|| ob.published_at.cmp(&oa.published_at))
+            .then_with(|| oa.id.cmp(&ob.id))
+    });
+    let mut metadata: HashMap<String, Option<crate::atlas_metadata::ArticleMetadata>> =
+        HashMap::new();
+    let mut rows = vec![];
+    for p in pairs {
+        let (Some(a), Some(b)) = (
+            lookup.get(p.left_id.as_str()),
+            lookup.get(p.right_id.as_str()),
+        ) else {
+            continue;
+        };
+        if revision(a) != p.left_revision || revision(b) != p.right_revision {
+            continue;
+        }
+        for id in [&a.id, &b.id] {
+            if !metadata.contains_key(id) {
+                metadata.insert(id.clone(), store.metadata(run_id, id).await?);
+            }
+        }
+        let shared: Vec<SharedMention> = serde_json::from_str(&p.shared_json)?;
+        if shared_entity_mentions_with(a, metadata[&a.id].as_ref(), b, metadata[&b.id].as_ref())
+            .len()
+            < MIN_SHARED_ENTITIES
+        {
+            continue;
+        }
+        let target = if p.left_id == article_id { b } else { a };
+        rows.push(RelatedArticle {
+            article: (*target).clone(),
+            shared_mentions: shared.into_iter().map(|m| m.original_text).collect(),
+            originating_run_ids: vec![run_id.into()],
+            place_only: p.named_count == 0,
+            ..RelatedArticle::default()
+        });
+    }
+    let total = rows.len();
+    let rows = rows.into_iter().skip(offset).take(limit).collect();
+    let coverage = match store.metadata(run_id, article_id).await? {
+        Some(m) if m.entity_state == MetadataState::Complete => "available",
+        Some(m) if m.entity_state == MetadataState::Pending => "loading",
+        _ => "unavailable",
+    }
+    .into();
+    Ok(RelatedArticlePage {
+        rows,
+        total,
+        offset,
+        has_more: offset.saturating_add(limit) < total,
+        coverage,
+    })
+}
+
+/// `Store::related_articles_for_memory` on the selected Atlas store: the
+/// memory's origins (`storage::browse_assoc::article_origins_for_memory`
+/// under SurrealDB) and the union of their Related pages.
+pub async fn related_articles_for_memory_on(
+    store: &crate::atlas_store::AtlasStore,
+    memory_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<RelatedArticlePage> {
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    let origins = crate::storage::browse_assoc::article_origins_for_memory(repo, memory_id).await?;
+    let mut pages = Vec::new();
+    for origin in &origins {
+        let mut start = 0;
+        loop {
+            let page =
+                related_articles_on(store, &origin.run_id, &origin.article_id, start, 100).await?;
+            let more = page.has_more;
+            pages.push(page);
+            if !more {
+                break;
+            }
+            start += 100;
+        }
+    }
+    Ok(union_pages(&origins, pages, offset, limit))
+}
+
+/// Merge the Related pages of a memory's origins (shared by both stores).
+pub(crate) fn union_pages(
+    origins: &[ArticleOrigin],
+    pages: Vec<RelatedArticlePage>,
+    offset: usize,
+    limit: usize,
+) -> RelatedArticlePage {
+    let excluded: BTreeSet<_> = origins.iter().map(|o| o.article_id.as_str()).collect();
+    let mut union: BTreeMap<String, RelatedArticle> = BTreeMap::new();
+    let mut available = false;
+    for page in pages {
+        available |= page.coverage == "available";
+        for row in page.rows {
+            if excluded.contains(row.article.id.as_str()) {
+                continue;
+            }
+            union
+                .entry(row.article.id.clone())
+                .and_modify(|r| {
+                    for mention in &row.shared_mentions {
+                        if !r.shared_mentions.contains(mention) {
+                            r.shared_mentions.push(mention.clone());
+                        }
+                    }
+                    for run in &row.originating_run_ids {
+                        if !r.originating_run_ids.contains(run) {
+                            r.originating_run_ids.push(run.clone());
+                        }
+                    }
+                    r.place_only &= row.place_only;
+                })
+                .or_insert(row);
+        }
+    }
+    let mut rows: Vec<_> = union.into_values().collect();
+    rows.sort_by(|a, b| {
+        a.place_only
+            .cmp(&b.place_only)
+            .then_with(|| b.shared_mentions.len().cmp(&a.shared_mentions.len()))
+            .then_with(|| b.article.published_at.cmp(&a.article.published_at))
+            .then_with(|| a.article.id.cmp(&b.article.id))
+    });
+    let total = rows.len();
+    let limit = limit.clamp(1, 100);
+    let rows = rows.into_iter().skip(offset).take(limit).collect();
+    RelatedArticlePage {
+        rows,
+        total,
+        offset,
+        has_more: offset.saturating_add(limit) < total,
+        coverage: if available {
+            "available"
+        } else {
+            "unavailable"
+        }
+        .into(),
+    }
+}
+
+/// The Related pairs of one run's articles and metadata (pure; both stores
+/// publish its output).
+pub fn plan(
+    articles: &[AtlasArticleRow],
+    metadata: &[Option<crate::atlas_metadata::ArticleMetadata>],
+) -> Result<Vec<PlannedPair>> {
     let mut tokens: HashMap<String, BTreeSet<usize>> = HashMap::new();
     for (i, a) in articles.iter().enumerate() {
         for token in a
@@ -394,12 +684,7 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
             }
         }
     }
-    let tx = store.conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM atlas_related_articles WHERE run_id=?1",
-        [run_id],
-    )?;
-    let mut count = 0;
+    let mut out = Vec::new();
     for ((i, j), mut shared) in pairs {
         shared.sort_by(|a, b| a.0.key.cmp(&b.0.key));
         shared.dedup_by(|a, b| a.0.key == b.0.key && a.0.type_hint == b.0.type_hint);
@@ -412,49 +697,33 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
         {
             continue;
         }
-        let a = &articles[i];
-        let b = &articles[j];
-        let (left, right) = if a.id < b.id {
-            (a, b)
+        let (left, right) = if articles[i].id < articles[j].id {
+            (i, j)
         } else {
             for (s, _) in &mut shared {
                 std::mem::swap(&mut s.left, &mut s.right);
             }
-            (b, a)
+            (j, i)
         };
-        // Source/category revisions are checked inside this transaction before publication.
-        let current_left = store.atlas_article(run_id, &left.id)?;
-        let current_right = store.atlas_article(run_id, &right.id)?;
-        if current_left.as_ref() != Some(left) || current_right.as_ref() != Some(right) {
-            continue;
-        }
         let named_count = shared
             .iter()
             .filter(|(s, _)| s.type_hint != "place")
             .count();
         let rarity: f64 = shared.iter().map(|(_, r)| r).sum();
-        tx.execute(
-            "INSERT INTO atlas_related_articles VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![
-                run_id,
-                left.id,
-                right.id,
-                revision(left),
-                revision(right),
-                serde_json::to_string(&shared.iter().map(|(s, _)| s).collect::<Vec<_>>())?,
-                MATCH_VERSION,
-                named_count as i64,
-                shared.len() as i64,
-                rarity
-            ],
-        )?;
-        count += 1;
+        out.push(PlannedPair {
+            left,
+            right,
+            left_revision: revision(&articles[left]),
+            right_revision: revision(&articles[right]),
+            shared_json: serde_json::to_string(&shared.iter().map(|(s, _)| s).collect::<Vec<_>>())?,
+            named_count: named_count as i64,
+            shared_count: shared.len() as i64,
+            rarity,
+        });
     }
-    tx.execute("INSERT INTO app_state(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![build_key,serde_json::to_string(&serde_json::json!({"revision":input_revision,"count":count}))?])?;
-    tx.commit()?;
-    Ok(count)
+    Ok(out)
 }
-fn revision(a: &AtlasArticleRow) -> String {
+pub(crate) fn revision(a: &AtlasArticleRow) -> String {
     crate::nlp::cache::hash(&format!("{}:{}", atlas_metadata::input_hash(a), a.category))
 }
 pub(crate) fn canonical_url(raw: &str) -> String {
@@ -465,304 +734,10 @@ pub(crate) fn canonical_url(raw: &str) -> String {
         })
         .unwrap_or_else(|_| raw.into())
 }
-impl Store {
-    /// Whether an occurrence participates in a retained ingest association
-    /// containing this actor name and at least one other distinct entity.
-    /// This checks stored pairs, never creates suggestions while browsing.
-    pub fn has_ingest_actor_association(
-        &self,
-        article: &AtlasArticleRow,
-        name_key: &str,
-    ) -> Result<bool> {
-        let mut offset = 0;
-        loop {
-            let page = self.related_articles(&article.run_id, &article.id, offset, 100)?;
-            for row in &page.rows {
-                if shared_entity_mentions(self, article, &row.article)?
-                    .iter()
-                    .any(|name| crate::brain_actors::normalize_alias(name) == name_key)
-                {
-                    return Ok(true);
-                }
-            }
-            if !page.has_more {
-                break;
-            }
-            offset += 100;
-        }
-        let mut stmt=self.conn.prepare("SELECT other.origin,other.ref_id,e.memory_id FROM brain_memory_endpoints e JOIN brain_memory_endpoints other ON other.memory_id=e.memory_id AND other.side<>e.side JOIN memory_metadata m ON m.memory_id=e.memory_id WHERE e.endpoint_kind='article' AND e.origin=?1 AND e.ref_id=?2 AND other.endpoint_kind='article' AND m.memory_kind='related' AND m.lifecycle='active'")?;
-        let candidates = stmt
-            .query_map(params![article.run_id, article.id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (run, id, memory) in candidates {
-            let Some(crate::memory_metadata::MemoryPayload::Related(payload)) =
-                self.memory_payload(&memory)?
-            else {
-                continue;
-            };
-            if !current_ingest_related(self, &payload)? {
-                continue;
-            }
-            let Some(candidate) = self.atlas_article(&run, &id)? else {
-                continue;
-            };
-            let shared = shared_entity_mentions(self, article, &candidate)?;
-            if shared.len() >= MIN_SHARED_ENTITIES
-                && shared
-                    .iter()
-                    .any(|name| crate::brain_actors::normalize_alias(name) == name_key)
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-    pub fn related_articles(
-        &self,
-        run_id: &str,
-        article_id: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<RelatedArticlePage> {
-        let limit = limit.clamp(1, 100);
-        let articles = self.atlas_list_articles(run_id)?;
-        let lookup: HashMap<_, _> = articles.iter().map(|a| (a.id.as_str(), a)).collect();
-        let mut stmt=self.conn.prepare("SELECT p.left_id,p.right_id,p.left_revision,p.right_revision,p.shared_json,p.named_count FROM atlas_related_articles p JOIN atlas_articles a ON a.run_id=p.run_id AND a.article_id=CASE WHEN p.left_id=?2 THEN p.right_id ELSE p.left_id END WHERE p.run_id=?1 AND (p.left_id=?2 OR p.right_id=?2) ORDER BY CASE WHEN p.named_count>0 THEN 0 ELSE 1 END,p.shared_count DESC,p.rarity DESC,a.published_at DESC,a.article_id")?;
-        let records = stmt
-            .query_map(params![run_id, article_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, i64>(5)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut rows = vec![];
-        for (left, right, lr, rr, json, named_count) in records {
-            let (Some(a), Some(b)) = (lookup.get(left.as_str()), lookup.get(right.as_str())) else {
-                continue;
-            };
-            if revision(a) != lr || revision(b) != rr {
-                continue;
-            }
-            let shared: Vec<SharedMention> = serde_json::from_str(&json)?;
-            if shared_entity_mentions(self, a, b)?.len() < MIN_SHARED_ENTITIES {
-                continue;
-            }
-            let target = if left == article_id { b } else { a };
-            rows.push(RelatedArticle {
-                article: (*target).clone(),
-                shared_mentions: shared.into_iter().map(|m| m.original_text).collect(),
-                originating_run_ids: vec![run_id.into()],
-                place_only: named_count == 0,
-                ..RelatedArticle::default()
-            });
-        }
-        let total = rows.len();
-        let rows = rows.into_iter().skip(offset).take(limit).collect();
-        let coverage = match self.atlas_metadata(run_id, article_id)? {
-            Some(m) if m.entity_state == MetadataState::Complete => "available",
-            Some(m) if m.entity_state == MetadataState::Pending => "loading",
-            _ => "unavailable",
-        }
-        .into();
-        Ok(RelatedArticlePage {
-            rows,
-            total,
-            offset,
-            has_more: offset.saturating_add(limit) < total,
-            coverage,
-        })
-    }
-    pub fn article_origins_for_memory(&self, memory_id: &str) -> Result<Vec<ArticleOrigin>> {
-        // Resolve each source independently: exact ids first, explicit URLs only as fallback.
-        let mut refs: Vec<(Option<String>, String, Option<String>)> = Vec::new();
-        let mut stmt=self.conn.prepare("SELECT s.owner_kind,s.owner_id,e.source_id,e.evidence_json FROM insight_derivations d JOIN insight_snapshots s ON s.id=d.snapshot_id LEFT JOIN insight_derivation_evidence e ON e.derivation_id=d.id WHERE d.memory_id=?1 AND d.status NOT IN ('deleted','retired')")?;
-        for row in stmt.query_map([memory_id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<String>>(3)?,
-            ))
-        })? {
-            let (kind, owner, source, json) = row?;
-            if kind == "article" {
-                refs.push((None, owner, None));
-            }
-            let url = json
-                .as_deref()
-                .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
-                .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(canonical_url));
-            let source = source.unwrap_or_default();
-            refs.push((
-                None,
-                source
-                    .strip_prefix("article:")
-                    .unwrap_or(&source)
-                    .to_string(),
-                url,
-            ));
-        }
-        let mut stmt=self.conn.prepare("SELECT s.run_id,s.call_id,s.source_url FROM insight_sources s JOIN insight_claims c ON c.fingerprint=s.fingerprint WHERE c.memory_id=?1 AND s.deleted_origin=0")?;
-        for row in stmt.query_map([memory_id], |r| {
-            Ok((
-                r.get::<_, Option<String>>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-            ))
-        })? {
-            let (run, id, url) = row?;
-            refs.push((
-                run,
-                id.strip_prefix("article:").unwrap_or(&id).to_string(),
-                url.map(|u| canonical_url(&u)),
-            ));
-        }
-        let mut articles = Vec::new();
-        for run in self.atlas_list_runs()? {
-            articles.extend(self.atlas_list_articles(&run.id)?);
-        }
-        let mut origins = BTreeSet::new();
-        for (run, id, url) in refs {
-            let exact: Vec<_> = articles
-                .iter()
-                .filter(|a| a.id == id && run.as_ref().is_none_or(|r| a.run_id == *r))
-                .collect();
-            if !exact.is_empty() {
-                for a in exact {
-                    origins.insert(ArticleOrigin {
-                        run_id: a.run_id.clone(),
-                        article_id: a.id.clone(),
-                    });
-                }
-            } else if let Some(url) = url {
-                for a in articles.iter().filter(|a| {
-                    !a.url.is_empty()
-                        && canonical_url(&a.url) == url
-                        && run.as_ref().is_none_or(|r| a.run_id == *r)
-                }) {
-                    origins.insert(ArticleOrigin {
-                        run_id: a.run_id.clone(),
-                        article_id: a.id.clone(),
-                    });
-                }
-            }
-        }
-        Ok(origins.into_iter().collect())
-    }
-    pub fn related_articles_for_memory(
-        &self,
-        memory_id: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<RelatedArticlePage> {
-        let origins = self.article_origins_for_memory(memory_id)?;
-        let excluded: BTreeSet<_> = origins.iter().map(|o| o.article_id.as_str()).collect();
-        let mut union: BTreeMap<String, RelatedArticle> = BTreeMap::new();
-        let mut available = false;
-        for origin in origins.iter() {
-            let mut start = 0;
-            loop {
-                let page = self.related_articles(&origin.run_id, &origin.article_id, start, 100)?;
-                available |= page.coverage == "available";
-                for row in page.rows {
-                    if excluded.contains(row.article.id.as_str()) {
-                        continue;
-                    }
-                    union
-                        .entry(row.article.id.clone())
-                        .and_modify(|r| {
-                            for mention in &row.shared_mentions {
-                                if !r.shared_mentions.contains(mention) {
-                                    r.shared_mentions.push(mention.clone());
-                                }
-                            }
-                            for run in &row.originating_run_ids {
-                                if !r.originating_run_ids.contains(run) {
-                                    r.originating_run_ids.push(run.clone());
-                                }
-                            }
-                            r.place_only &= row.place_only;
-                        })
-                        .or_insert(row);
-                }
-                if !page.has_more {
-                    break;
-                }
-                start += 100;
-            }
-        }
-        let mut rows: Vec<_> = union.into_values().collect();
-        rows.sort_by(|a, b| {
-            a.place_only
-                .cmp(&b.place_only)
-                .then_with(|| b.shared_mentions.len().cmp(&a.shared_mentions.len()))
-                .then_with(|| b.article.published_at.cmp(&a.article.published_at))
-                .then_with(|| a.article.id.cmp(&b.article.id))
-        });
-        let total = rows.len();
-        let limit = limit.clamp(1, 100);
-        let rows = rows.into_iter().skip(offset).take(limit).collect();
-        Ok(RelatedArticlePage {
-            rows,
-            total,
-            offset,
-            has_more: offset.saturating_add(limit) < total,
-            coverage: if available {
-                "available"
-            } else {
-                "unavailable"
-            }
-            .into(),
-        })
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn related_requires_two_distinct_entities_and_filters_old_single_entity_receipts() {
-        let s = store();
-        let mut source = article("source", "Ada and Ada meet Acme", "economic");
-        source.description.clear();
-        let mut one = article("one", "Ada mentions Ada", "unk");
-        one.description.clear();
-        let mut two = article("two", "Ada meets Acme", "unk");
-        two.description.clear();
-        for a in [&source, &one, &two] {
-            s.atlas_upsert_article(a).unwrap();
-        }
-        let mut metadata = atlas_metadata::ArticleMetadata::pending(&source);
-        metadata.entity_state = MetadataState::Complete;
-        for (name, kind) in [("Ada", "person"), ("Acme", "organization")] {
-            metadata
-                .mentions
-                .push(find_exact(&source.title, &name.to_lowercase(), kind, "title").unwrap());
-        }
-        s.atlas_save_metadata(&metadata).unwrap();
-        assert_eq!(shared_entity_mentions(&s, &source, &one).unwrap().len(), 1);
-        assert_eq!(shared_entity_mentions(&s, &source, &two).unwrap().len(), 2);
-        assert_eq!(build(&s, "r").unwrap(), 1);
-        let page = s.related_articles("r", "source", 0, 20).unwrap();
-        assert_eq!(page.total, 1);
-        assert_eq!(page.rows[0].article.id, "two");
-        assert!(s
-            .related_articles("r", "one", 0, 20)
-            .unwrap()
-            .rows
-            .is_empty());
-    }
     fn article(id: &str, title: &str, category: &str) -> AtlasArticleRow {
         AtlasArticleRow {
             run_id: "r".into(),
@@ -793,222 +768,5 @@ mod tests {
         m.mentions
             .push(find_exact(&a.description, "nairobi", "place", "description").unwrap());
         assert!(store.atlas_save_metadata(&m).unwrap());
-    }
-    fn store() -> Store {
-        let s = Store::memory().unwrap();
-        s.atlas_insert_run("r", "{}", "{}").unwrap();
-        s
-    }
-    #[test]
-    fn known_anchor_to_unk_is_reciprocal_and_boundary_checked() {
-        let s = store();
-        inventory(
-            &s,
-            &article("a", "José Acme speaks", "geopolitical"),
-            "José Acme",
-            "person",
-        );
-        inventory(&s, &article("b", "José Acme responds", "unk"), "", "person");
-        inventory(
-            &s,
-            &article("c", "José Acmeville responds", "unk"),
-            "",
-            "person",
-        );
-        assert_eq!(build(&s, "r").unwrap(), 1);
-        let p = s.related_articles("r", "a", 0, 20).unwrap();
-        assert_eq!(p.total, 1);
-        assert_eq!(p.rows[0].article.id, "b");
-        assert_eq!(p.rows[0].shared_mentions, vec!["José Acme", "Nairobi"]);
-        assert_eq!(
-            s.related_articles("r", "b", 0, 20).unwrap().rows[0]
-                .article
-                .id,
-            "a"
-        );
-    }
-    #[test]
-    fn two_unk_or_incompatible_types_never_seed_a_pair() {
-        let s = store();
-        inventory(&s, &article("a", "Acme opens", "unk"), "Acme", "person");
-        inventory(&s, &article("b", "Acme closes", "unk"), "Acme", "person");
-        assert_eq!(build(&s, "r").unwrap(), 0);
-        s.atlas_set_category("r", "a", "economic").unwrap();
-        inventory(
-            &s,
-            &article("b", "Acme closes", "unk"),
-            "Acme",
-            "organization",
-        );
-        assert_eq!(build(&s, "r").unwrap(), 0);
-    }
-    #[test]
-    fn metadata_revisions_category_and_delete_hide_stale_pairs() {
-        let s = store();
-        let a = article("a", "Jane Doe speaks", "geopolitical");
-        inventory(&s, &a, "Jane Doe", "person");
-        inventory(
-            &s,
-            &article("b", "Jane Doe responds", "unk"),
-            "Jane Doe",
-            "person",
-        );
-        assert_eq!(build(&s, "r").unwrap(), 1);
-        let captured = s.atlas_metadata("r", "a").unwrap().unwrap();
-        let mut changed = a.clone();
-        changed.title = "Different person speaks".into();
-        s.atlas_upsert_article(&changed).unwrap();
-        assert!(!s.atlas_save_metadata(&captured).unwrap());
-        assert_eq!(s.related_articles("r", "a", 0, 20).unwrap().total, 0);
-        inventory(&s, &a, "Jane Doe", "person");
-        assert_eq!(build(&s, "r").unwrap(), 1);
-        s.atlas_set_category("r", "a", "unk").unwrap();
-        assert_eq!(s.related_articles("r", "a", 0, 20).unwrap().total, 0);
-        inventory(&s, &a, "Jane Doe", "person");
-        assert_eq!(build(&s, "r").unwrap(), 1);
-        s.atlas_delete_article("r", "b").unwrap();
-        assert_eq!(s.related_articles("r", "a", 0, 20).unwrap().total, 0);
-    }
-    #[test]
-    fn textual_fallback_does_not_shorten_named_people_or_corporate_suffixes() {
-        let s = store();
-        inventory(
-            &s,
-            &article("a", "Acme reports", "economic"),
-            "Acme",
-            "organization",
-        );
-        inventory(
-            &s,
-            &article("b", "Acme Corp reports", "unk"),
-            "Acme Corp",
-            "organization",
-        );
-        inventory(
-            &s,
-            &article("c", "Jane reports", "geopolitical"),
-            "Jane",
-            "person",
-        );
-        inventory(
-            &s,
-            &article("d", "Jane Doe reports", "unk"),
-            "Jane Doe",
-            "person",
-        );
-        assert_eq!(build(&s, "r").unwrap(), 0);
-    }
-    #[test]
-    fn unknown_candidate_cannot_seed_a_known_article_that_missed_it() {
-        let s = store();
-        inventory(
-            &s,
-            &article("a", "Acme speaks", "geopolitical"),
-            "",
-            "person",
-        );
-        inventory(&s, &article("b", "Acme responds", "unk"), "Acme", "person");
-        assert_eq!(build(&s, "r").unwrap(), 0);
-    }
-    #[test]
-    fn v2_lineage_unions_exact_owner_and_per_source_explicit_url_fallback() {
-        let s = store();
-        inventory(
-            &s,
-            &article("a", "Jane Doe speaks", "geopolitical"),
-            "Jane Doe",
-            "person",
-        );
-        inventory(
-            &s,
-            &article("b", "Jane Doe responds", "unk"),
-            "Jane Doe",
-            "person",
-        );
-        inventory(
-            &s,
-            &article("c", "Jane Doe answers", "unk"),
-            "Jane Doe",
-            "person",
-        );
-        build(&s, "r").unwrap();
-        s.conn.execute_batch("INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES('m','Claim','fact',0,'now','{}'); INSERT INTO insight_snapshots(id,owner_kind,owner_id,generation,input_key,inputs_json,entities_json,coverage_json,readiness_json,contract_version,policy_version,created_at) VALUES('s','article','a',1,'key','{}','[]','{}','{}','investigation-v2','v2','now'); INSERT INTO insight_derivations(id,snapshot_id,memory_id,insight_kind,fingerprint,item_json,assessment_json,status,revision) VALUES('d','s','m','claim','f','{}','{}','active','rev'); INSERT INTO insight_derivation_evidence(derivation_id,source_id,source_revision,evidence_json) VALUES('d','missing-acquisition-id','rev','{\"url\":\"https://example.com/b\"}');").unwrap();
-        assert_eq!(s.article_origins_for_memory("m").unwrap().len(), 2);
-        let page = s.related_articles_for_memory("m", 0, 20).unwrap();
-        assert_eq!(page.total, 1);
-        assert_eq!(page.rows[0].article.id, "c");
-    }
-    #[test]
-    fn exact_lineage_keeps_all_cycle_memberships() {
-        let s = store();
-        s.atlas_insert_run("older", "{}", "{}").unwrap();
-        let a = article("a", "Jane Doe speaks", "geopolitical");
-        s.atlas_upsert_article(&a).unwrap();
-        let mut older = a.clone();
-        older.run_id = "older".into();
-        s.atlas_upsert_article(&older).unwrap();
-        s.conn.execute_batch("INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES('m','Claim','fact',0,'now','{}'); INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES('fp','m','e','p','o','t','geopolitical',0.5,'now','now'); INSERT INTO insight_sources(fingerprint,run_id,answer_id,call_id) VALUES('fp','older','answer','a');").unwrap();
-        assert_eq!(
-            s.article_origins_for_memory("m").unwrap(),
-            vec![ArticleOrigin {
-                run_id: "older".into(),
-                article_id: "a".into()
-            }]
-        );
-    }
-    #[test]
-    fn bounded_pages_have_true_total_and_named_matches_rank_first() {
-        let s = store();
-        inventory(
-            &s,
-            &article("a", "Jane Doe visits Geneva", "geopolitical"),
-            "Jane Doe",
-            "person",
-        );
-        let mut m = s.atlas_metadata("r", "a").unwrap().unwrap();
-        m.mentions
-            .push(find_exact("Jane Doe visits Geneva", "geneva", "place", "title").unwrap());
-        s.atlas_save_metadata(&m).unwrap();
-        inventory(&s, &article("b", "Geneva news", "unk"), "Geneva", "place");
-        inventory(
-            &s,
-            &article("c", "Jane Doe responds", "unk"),
-            "Jane Doe",
-            "person",
-        );
-        assert_eq!(build(&s, "r").unwrap(), 2);
-        let p = s.related_articles("r", "a", 0, 1).unwrap();
-        assert_eq!(p.total, 2);
-        assert!(p.has_more);
-        assert_eq!(p.rows[0].article.id, "c");
-        assert!(!p.rows[0].place_only);
-        let p = s.related_articles("r", "a", 1, 1).unwrap();
-        assert!(!p.has_more);
-        assert!(p.rows[0].place_only);
-    }
-    #[test]
-    fn legacy_multi_article_lineage_uses_exact_ids_and_deduplicates() {
-        let s = store();
-        let a = article("a", "Jane Doe speaks", "geopolitical");
-        inventory(&s, &a, "Jane Doe", "person");
-        inventory(
-            &s,
-            &article("b", "Jane Doe responds", "unk"),
-            "Jane Doe",
-            "person",
-        );
-        inventory(
-            &s,
-            &article("c", "Jane Doe answers", "unk"),
-            "Jane Doe",
-            "person",
-        );
-        build(&s, "r").unwrap();
-        s.conn.execute_batch("INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES('m','Claim','fact',0,'now','{}'); INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES('fp','m','e','p','o','t','geopolitical',0.5,'now','now'); INSERT INTO insight_sources(fingerprint,run_id,answer_id,call_id) VALUES('fp','r','answer','a'),('fp','r','answer','b');").unwrap();
-        assert_eq!(s.article_origins_for_memory("m").unwrap().len(), 2);
-        let page = s.related_articles_for_memory("m", 0, 20).unwrap();
-        assert_eq!(page.total, 1);
-        assert_eq!(page.rows[0].article.id, "c");
-        assert_eq!(page.rows[0].originating_run_ids, vec!["r"]);
     }
 }

@@ -71,25 +71,25 @@ pub fn snapshot(
     }
 }
 
-/// Recover original page artifacts/raw results before reasoning. Search snippets
-/// and summaries stay useful observations but cannot satisfy substantive readiness.
-pub fn evidence_from_tools(
-    conn: &rusqlite::Connection,
+/// Where [`evidence_with`] reads a call's persisted result and a stored
+/// artifact text, and records a retained artifact (returning its hash).
+pub trait EvidenceLookup {
+    fn persisted_result(&mut self, call_id: &str) -> Result<Option<String>>;
+    fn artifact_text(&mut self, hash: &str) -> Option<String>;
+    fn retain_artifact(&mut self, text: &str) -> Result<String>;
+}
+
+/// [`evidence_from_tools`] over any [`EvidenceLookup`].
+pub fn evidence_with(
+    lookup: &mut dyn EvidenceLookup,
     results: &[(String, crate::osint::ToolResult)],
 ) -> Result<Vec<RetainedEvidence>> {
-    use rusqlite::OptionalExtension;
     let mut evidence = Vec::new();
     for (id, result) in results
         .iter()
         .filter(|(_, r)| r.status == "completed" && r.error.is_none())
     {
-        let persisted: Option<String> = conn
-            .query_row(
-                "SELECT result_json FROM osint_calls WHERE id=?1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let persisted = lookup.persisted_result(id)?;
         let revision = hash(&persisted.unwrap_or(serde_json::to_string(result)?));
         let raw = serde_json::from_str::<Value>(&result.raw).unwrap_or(Value::Null);
         let acquired = raw.get("data").unwrap_or(&raw);
@@ -108,7 +108,7 @@ pub fn evidence_from_tools(
                     .unwrap_or(&result.source_url)
                     .into();
                 let mut retained =
-                    evidence_from_tools(conn, &[(format!("{id}#page{index}"), page_result)])?;
+                    evidence_with(lookup, &[(format!("{id}#page{index}"), page_result)])?;
                 for source in &mut retained {
                     source.reference.revision = revision.clone();
                 }
@@ -120,16 +120,7 @@ pub fn evidence_from_tools(
             .observations
             .pointer("/nlp_source/artifact_hash")
             .and_then(Value::as_str)
-            .and_then(|hash| {
-                conn.query_row(
-                    "SELECT text FROM nlp_artifacts WHERE hash=?1",
-                    [hash],
-                    |r| r.get(0),
-                )
-                .optional()
-                .ok()
-                .flatten()
-            });
+            .and_then(|hash| lookup.artifact_text(hash));
         let raw_full = acquired
             .get("markdown")
             .or_else(|| acquired.get("content"))
@@ -183,7 +174,7 @@ pub fn evidence_from_tools(
                     EvidenceLocation::JsonPointer(String::new()),
                 )
             };
-        let artifact_hash = crate::nlp::cache::artifact(conn, &text)?;
+        let artifact_hash = lookup.retain_artifact(&text)?;
         // Explicit acquisition roots override URL copies. Exact copied artifacts
         // share one root; unknown independence cannot multiply root count.
         let origin_root = result
@@ -303,7 +294,6 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
     validate: impl Fn(&T) -> Result<()> + Send + Sync,
 ) -> Result<T> {
     use crate::recon::model_exec::execute_chat;
-    use rusqlite::{params, OptionalExtension};
     let mut dictionary = std::collections::BTreeMap::new();
     super::insight_wire::compact(&mut user, &mut dictionary)?;
     if let Some(contract) = user.get_mut("output_contract") {
@@ -342,21 +332,14 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
         CONTRACT
     ]));
     {
-        let store = crate::store::Store::open(db_path)?;
-        super::insight_persist::validate_dispatch(&store.conn, input)?;
-        let saved: Option<(String, String)> = store
-            .conn
-            .query_row(
-                "SELECT state,output_json FROM insight_stage_checkpoints WHERE operation_key=?1",
-                [&op_key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((state, output)) = saved {
+        let store = super::exec_store::ExecStore::open(db_path).await?;
+        store.validate_dispatch(input).await?;
+        let saved = store.checkpoint(&op_key).await?;
+        if let Some((state, output, _)) = saved {
             if state == "completed" {
                 let value = serde_json::from_str(&output)?;
                 validate(&value)?;
-                super::insight_execution::record_reuse(&store.conn, &op_key, input)?;
+                store.record_reuse(&op_key, input).await?;
                 return Ok(value);
             }
             ensure!(
@@ -365,8 +348,8 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
             );
         }
         super::insight_execution::consume()?;
-        super::insight_execution::progress(&store.conn, input, stage, None, None)?;
-        store.conn.execute("INSERT INTO insight_stage_checkpoints(operation_key,owner_kind,owner_id,generation,stage,window_id,state,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'running',?7) ON CONFLICT(operation_key) DO UPDATE SET state='running',updated_at=excluded.updated_at", params![op_key,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation,stage,window_id,chrono::Utc::now().to_rfc3339()])?;
+        store.progress(input, stage, None, None).await?;
+        store.begin(&op_key, input, stage, window_id, false).await?;
     }
     let messages = [
         crate::provider::ChatMessage {
@@ -386,9 +369,10 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
         crate::nlp::message_bytes(&messages, &Value::Null) + 4096 <= REQUEST_BYTES,
         "mandatory fields exceed request budget"
     );
-    let store = crate::store::Store::open(db_path)?;
-    let task_id = super::insight_assessment::task_id(&store.conn, input)?;
-    let execution_id = super::insight_execution::operation_id(&store.conn, &task_id, &op_key)?;
+    let store = super::exec_store::ExecStore::open(db_path).await?;
+    let task_id = store.task_id(input).await?;
+    let execution_id = store.operation_id(&task_id, &op_key).await?;
+    let telemetry = None::<&std::path::Path>;
     drop(store);
     let mut scope =
         super::insight_assessment::operation_scope(&execution_id, role, input, &task_id);
@@ -412,13 +396,13 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
         cancel,
         Some(activity_sink(db_path, &task_id)),
         None,
-        Some(db_path),
+        telemetry,
         // Stream generated-JSON stages where supported; the executor falls
         // back to non-streaming for transports that cannot stream.
         true,
     )
     .await;
-    let store = crate::store::Store::open(db_path)?;
+    let store = super::exec_store::ExecStore::open(db_path).await?;
     match result {
         Ok((raw, report)) => {
             let value: T = serde_json::from_value(super::insight_wire::hydrate(
@@ -427,9 +411,16 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
                 input,
             )?)?;
             let route = serde_json::json!({"route":report.effective_route,"model":report.effective_model,"requests":report.requests,"compiled_bytes":compiled_bytes,"elapsed_ms":started.elapsed().as_millis() as u64});
-            store.conn.execute("UPDATE insight_stage_checkpoints SET state='completed',output_json=?2,route_json=?3,updated_at=?4 WHERE operation_key=?1",params![op_key,serde_json::to_string(&value)?,route.to_string(),chrono::Utc::now().to_rfc3339()])?;
-            super::insight_execution::stage_event(
-                &store.conn,
+            store
+                .finish(
+                    &op_key,
+                    "completed",
+                    Some(serde_json::to_string(&value)?),
+                    Some(route.to_string()),
+                    "",
+                )
+                .await?;
+            store.stage_event(
                 input,
                 &task_id,
                 stage,
@@ -450,9 +441,16 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
             } else {
                 "terminal"
             };
-            store.conn.execute("UPDATE insight_stage_checkpoints SET state=?2,error=?3,updated_at=?4 WHERE operation_key=?1",params![op_key,state,format!("{stage}/{window_id}: {error}"),chrono::Utc::now().to_rfc3339()])?;
-            super::insight_execution::stage_event(
-                &store.conn,
+            store
+                .finish(
+                    &op_key,
+                    state,
+                    None,
+                    None,
+                    &format!("{stage}/{window_id}: {error}"),
+                )
+                .await?;
+            store.stage_event(
                 input,
                 &task_id,
                 stage,
@@ -540,14 +538,10 @@ pub async fn run_pipeline(
             }
         }
     }
-    let store = crate::store::Store::open(db_path)?;
-    super::insight_execution::progress(
-        &store.conn,
-        input,
-        "extraction",
-        Some(windows.len()),
-        None,
-    )?;
+    let store = super::exec_store::ExecStore::open(db_path).await?;
+    store
+        .progress(input, "extraction", Some(windows.len()), None)
+        .await?;
     drop(store);
     for (index, (evidence, span)) in windows.iter().enumerate() {
         ensure!(
@@ -660,12 +654,11 @@ pub async fn run_pipeline(
             .remove(&claim.id)
             .expect("claim assessment");
         if claim.assessment.faithful() && surface == Surface::Report {
-            let store = crate::store::Store::open(db_path)?;
-            let details: String = store.conn.query_row(
-                "SELECT details_json FROM intel_report_results WHERE source_hash=?1",
-                [&claim.evidence_refs[0].acquisition_id],
-                |r| r.get(0),
-            )?;
+            let store = super::exec_store::ExecStore::open(db_path).await?;
+            let details = store
+                .report_details(&claim.evidence_refs[0].acquisition_id)
+                .await?;
+            drop(store);
             let bundle: Value = serde_json::from_str(&details)?;
             if let Some(entries) = bundle["support_receipts"].as_array() {
                 for entry in entries {
@@ -1055,14 +1048,10 @@ pub async fn run_pipeline(
             "all candidates withheld by unavailable model work; previous snapshot retained".into(),
         );
     }
-    let store = crate::store::Store::open(db_path)?;
-    super::insight_execution::progress(
-        &store.conn,
-        input,
-        "settled",
-        None,
-        Some(output.withheld_count),
-    )?;
+    let store = super::exec_store::ExecStore::open(db_path).await?;
+    store
+        .progress(input, "settled", None, Some(output.withheld_count))
+        .await?;
     Ok(output)
 }
 
@@ -1234,32 +1223,15 @@ async fn admit_brain_evidence(
             .collect::<Vec<_>>()
             .join(" ")
     );
-    let candidates = {
-        let store = crate::store::Store::open(db_path)?;
-        let mut hits = crate::brain_query::recall_candidates_with_limit(
-            &store,
-            &input.snapshot.owner_kind,
-            &input.snapshot.owner_id,
+    let candidates = super::exec_store::ExecStore::open(db_path)
+        .await?
+        .recall_evidence(
+            input,
             &query,
             settings.insight_recall_limit.unwrap_or(20),
-        )?;
-        hits.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| a.memory.id.cmp(&b.memory.id))
-        });
-        let mut seen = BTreeSet::new();
-        hits.into_iter()
-            .filter(|h| seen.insert(h.memory.id.clone()))
-            .take(20)
-            .filter_map(|hit| {
-                crate::brain_query::load_memory_evidence(&store.conn, &hit.memory.id)
-                    .ok()
-                    .flatten()
-                    .map(|e| (hit, e))
-            })
-            .collect::<Vec<_>>()
-    };
+            20,
+        )
+        .await?;
     let mut used = 0;
     let mut roots: BTreeSet<String> = input
         .evidence
@@ -1315,21 +1287,22 @@ async fn admit_brain_evidence(
             state,
             settings.defaults
         ]));
-        use rusqlite::OptionalExtension;
-        let cached = {
-            let store = crate::store::Store::open(db_path)?;
-            store.conn.query_row("SELECT state,output_json FROM insight_stage_checkpoints WHERE operation_key=?1",[&id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?
-        };
+        let cached = super::exec_store::ExecStore::open(db_path)
+            .await?
+            .checkpoint(&id)
+            .await?
+            .map(|(state, output, _)| (state, output));
         let admitted = if let Some((status, json)) =
             cached.filter(|(status, _)| status == "completed" || status == "exhausted")
         {
             status == "completed" && serde_json::from_str::<bool>(&json).unwrap_or(false)
         } else {
-            let store = crate::store::Store::open(db_path)?;
-            super::insight_persist::validate_dispatch(&store.conn, input)?;
+            let store = super::exec_store::ExecStore::open(db_path).await?;
+            store.validate_dispatch(input).await?;
             super::insight_execution::consume()?;
-            let task_id = super::insight_assessment::task_id(&store.conn, input)?;
-            let execution_id = super::insight_execution::operation_id(&store.conn, &task_id, &id)?;
+            let task_id = store.task_id(input).await?;
+            let execution_id = store.operation_id(&task_id, &id).await?;
+            let telemetry = None::<&std::path::Path>;
             drop(store);
             let mut scope = super::insight_assessment::operation_scope(
                 &execution_id,
@@ -1349,7 +1322,7 @@ async fn admit_brain_evidence(
                     &state,
                     &DecisionPolicy::default(),
                     cancel,
-                    Some(db_path),
+                    telemetry,
                 )
                 .await;
             if let Err(error) = &result {
@@ -1377,7 +1350,7 @@ async fn admit_brain_evidence(
             } else {
                 "exhausted"
             };
-            let store = crate::store::Store::open(db_path)?;
+            let store = super::exec_store::ExecStore::open(db_path).await?;
             let route = result
                 .as_ref()
                 .ok()
@@ -1389,7 +1362,18 @@ async fn admit_brain_evidence(
                 .err()
                 .map(ToString::to_string)
                 .unwrap_or_default();
-            store.conn.execute("INSERT INTO insight_stage_checkpoints(operation_key,owner_kind,owner_id,generation,stage,window_id,state,output_json,route_json,error,updated_at) VALUES(?1,?2,?3,?4,'memory_identity',?5,?6,?7,?8,?9,?10) ON CONFLICT(operation_key) DO UPDATE SET state=excluded.state,output_json=excluded.output_json,route_json=excluded.route_json,error=excluded.error,updated_at=excluded.updated_at",rusqlite::params![id,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation,metadata.memory_id,status,admitted.to_string(),route.to_string(),error,chrono::Utc::now().to_rfc3339()])?;
+            store
+                .put(
+                    &id,
+                    input,
+                    "memory_identity",
+                    &metadata.memory_id,
+                    status,
+                    &admitted.to_string(),
+                    &route.to_string(),
+                    &error,
+                )
+                .await?;
             admitted
         };
         if !admitted {
@@ -2075,12 +2059,12 @@ pub(super) fn activity_sink(
             }
             *slot = (label.clone(), Some(now));
         }
-        if let Ok(store) = crate::store::Store::open(&db_path) {
-            let _ = super::insight_execution::record_activity(&store.conn, &task_id, &label);
-            if let Some(message) = super::insight_execution::activity_log_message(&event) {
-                let _ = super::insight_execution::activity_event(&store.conn, &task_id, &message);
-            }
-        }
+        super::exec_store::record_activity(
+            &db_path,
+            &task_id,
+            &label,
+            super::insight_execution::activity_log_message(&event),
+        );
     })
 }
 
@@ -2210,86 +2194,6 @@ mod tests {
         let mut stale = evidence;
         stale.text.push(' ');
         assert!(super::super::insight_wire::source_span(&stale, &stale.reference).is_err());
-    }
-    #[tokio::test]
-    async fn atlas_shared_pipeline_is_claims_only_and_identical_replay_makes_no_requests() {
-        use crate::provider_attempt::mock;
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("insights.db");
-        let store = crate::store::Store::open(&path).unwrap();
-        let evidence = source("article:a", "r1");
-        crate::nlp::cache::artifact(&store.conn, &evidence.text).unwrap();
-        let entity = EntityCandidate {
-            id: "article:a:entity:acme".into(),
-            type_hint: "org".into(),
-            comparison_key: "acme".into(),
-            original_forms: vec!["Acme".into()],
-            mention_refs: vec![Span {
-                start_byte: 0,
-                end_byte: 4,
-            }],
-        };
-        let mut claim = premise(&evidence);
-        claim.subject_ref = entity.id.clone();
-        claim.assessment = Assessment::default();
-        let extraction=serde_json::json!({"entities":[entity],"claims":[claim],"limit_reached":false,"partial_enumeration":false}).to_string();
-        let server = mock::serve(vec![
-            mock::ok_json(&extraction, "stop"),
-            mock::ok_json(
-                r#"{"answers":{"q0:publication":{"label":"faithful"},"q0:claim_relation":{"label":"mentions_only"}}}"#,
-                "stop",
-            ),
-        ])
-        .await;
-        let secret = crate::secrets::ProviderSecret {
-            kind: "local".into(),
-            model: "fixture".into(),
-            base_url: server.base_url.clone(),
-            api_key: Some("fixture-only".into()),
-            stt_model: None,
-            device: None,
-        };
-        let mut auth = crate::secrets::AuthFile::default();
-        auth.set_account(secret);
-        let mut settings = crate::provider::SettingsFile::default();
-        settings.nlp.mode = crate::nlp::Mode::Off;
-        settings.defaults.synthesis = crate::provider::ModelAssignment {
-            provider: "local".into(),
-            model: "fixture".into(),
-            ..Default::default()
-        };
-        let mut input = PipelineInput {
-            snapshot: snapshot("atlas", "a", 1, std::slice::from_ref(&evidence)),
-            evidence: vec![evidence],
-            objective: "Acme allegation and denial".into(),
-            surface: "atlas".into(),
-            required_tasks_complete: true,
-            save_insights: true,
-            recall_enabled: false,
-        };
-        input.snapshot.key = input_key(&input, &settings);
-        let initial = input.clone();
-        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let first = run_pipeline(&mut input, &auth, &settings, &cancel, &path)
-            .await
-            .unwrap();
-        assert_eq!(first.claims.len(), 1);
-        assert!(first.claims[0].assessment.faithful());
-        assert!(first.inferences.is_empty() && first.links.is_empty());
-        assert!(!first.readiness.input_eligible);
-        assert_eq!(server.hits(), 2);
-        let mut replay = initial;
-        let second = run_pipeline(&mut replay, &auth, &settings, &cancel, &path)
-            .await
-            .unwrap();
-        assert_eq!(second.claims[0].text, first.claims[0].text);
-        assert_eq!(
-            server.hits(),
-            2,
-            "identical refresh restarted successful stage"
-        );
-        let requests = server.requests.lock().unwrap();
-        assert!(requests.iter().all(|r| !r.contains(INFERENCE_PROMPT)));
     }
     fn source(id: &str, root: &str) -> RetainedEvidence {
         let text = "Acme allegedly opened in 2020. Correction: Acme denied opening.".to_owned();

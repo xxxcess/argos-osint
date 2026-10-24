@@ -603,7 +603,7 @@ pub async fn extract(
     )
     .await;
     if let Ok(extraction) = &outcome {
-        record_article_telemetry(db_path, run_id, articles, origins, &extraction.settled);
+        record_article_telemetry(db_path, run_id, articles, origins, &extraction.settled).await;
     }
     outcome
 }
@@ -641,8 +641,10 @@ async fn extract_inner(
     let mut extract_error = None;
     let warnings = Vec::new();
     let mut diagnostics = Vec::new();
-    let existing = Store::open(db_path)?
-        .atlas_get_unit_manifests(run_id, crate::atlas_work::STAGE_EXTRACT)
+    let existing = crate::atlas_store::AtlasStore::open(db_path)
+        .await?
+        .unit_manifests(run_id, crate::atlas_work::STAGE_EXTRACT)
+        .await
         .unwrap_or_default();
 
     for packet in significant.chunks(PACKET_LIMIT) {
@@ -680,7 +682,8 @@ async fn extract_inner(
                     disposition,
                     None,
                     asked.history,
-                )?;
+                )
+                .await?;
                 diagnostics.push(packet_diag(
                     "lead",
                     packet,
@@ -707,7 +710,8 @@ async fn extract_inner(
                     crate::atlas_work::DISPOSITION_FAILED,
                     Some(&message),
                     Vec::new(),
-                )?;
+                )
+                .await?;
                 diagnostics.push(packet_diag(
                     "lead",
                     packet,
@@ -790,7 +794,7 @@ pub fn brief_rating_mean(confidences: &[f64]) -> Option<f64> {
 /// invents a new first sighting) and one Brief rating row per significant
 /// article. Best-effort by construction: every failure is ignored here so a
 /// telemetry problem can never fail the memory phase.
-fn record_article_telemetry(
+async fn record_article_telemetry(
     db_path: &Path,
     run_id: &str,
     articles: &[AtlasArticleRow],
@@ -817,7 +821,7 @@ fn record_article_telemetry(
                 .push(raw);
         }
     }
-    let known = seen_article_ids(db_path);
+    let known = seen_article_ids(db_path).await;
     let stamp = chrono::Utc::now().to_rfc3339();
     for article in select_significant(articles, origins) {
         let claim_count = current.get(article.id.as_str()).map(Vec::len).unwrap_or(0);
@@ -892,21 +896,13 @@ fn record_article_telemetry(
 /// raw events for 90 days, so an id missing here is genuinely unseen inside the
 /// observable window. Best-effort: an unreadable database reports nothing known
 /// and the caller records first sightings again (they replace, never add).
-fn seen_article_ids(db_path: &Path) -> std::collections::HashSet<String> {
-    rusqlite::Connection::open(db_path)
-        .ok()
-        .and_then(|conn| {
-            let mut stmt = conn
-                .prepare("SELECT article_id FROM telemetry_events WHERE event_type='intel_article'")
-                .ok()?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .ok()?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .ok()?;
-            Some(rows.into_iter().collect())
-        })
-        .unwrap_or_default()
+async fn seen_article_ids(_db_path: &Path) -> std::collections::HashSet<String> {
+    match crate::storage::runtime::repository().await {
+        Ok(repo) => crate::storage::atlas_memory::seen_article_ids(repo.db())
+            .await
+            .unwrap_or_default(),
+        Err(_) => Default::default(),
+    }
 }
 
 /// Re-extract lean elements from one article using title, description, and cleaned body.
@@ -920,7 +916,6 @@ pub async fn extract_for_article_body(
 ) -> Result<Settled> {
     use crate::investigation::insights;
     let db_path = crate::paths::db_path();
-    let store = Store::open(&db_path)?;
     let mut settings = crate::provider::SettingsFile::load().unwrap_or_default();
     let mut auth = crate::secrets::AuthFile::load().unwrap_or_default();
     auth.set_account(synthesis.clone());
@@ -928,7 +923,7 @@ pub async fn extract_for_article_body(
         settings.defaults.synthesis.provider = synthesis.kind.clone();
         settings.defaults.synthesis.model = synthesis.model.clone();
     }
-    let hash = crate::nlp::cache::artifact(&store.conn, body_markdown)?;
+    let hash = retain_artifact(&db_path, body_markdown).await?;
     let evidence = insights::RetainedEvidence {
         reference: insights::EvidenceRef {
             source_id: format!("body-api:{}", article.id),
@@ -963,7 +958,6 @@ pub async fn extract_for_article_body(
         recall_enabled: false,
     };
     input.snapshot.key = insights::input_key(&input, &settings);
-    drop(store);
     let output = insights::run_pipeline(
         &mut input,
         &auth,
@@ -1714,22 +1708,17 @@ fn packet_json(articles: &[AtlasArticleRow]) -> Result<String> {
                     &article.description,
                     DESCRIPTION_CHARS,
                 );
-                if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
-                    let req = crate::summarization::flush_request(
-                        crate::summarization::SummarizationMode::ArticleDescription,
-                        &article.id,
-                        &article.published_at,
-                        &format!("{}. {}", article.title, article.description),
-                        "atlas",
-                        DESCRIPTION_CHARS,
-                    );
-                    if let Ok(published) = crate::summarization::publish_deterministic_and_enqueue(
-                        &store.conn,
-                        &req,
-                        det.clone(),
-                    ) {
-                        det = published;
-                    }
+                let _db = crate::paths::db_path();
+                let req = crate::summarization::flush_request(
+                    crate::summarization::SummarizationMode::ArticleDescription,
+                    &article.id,
+                    &article.published_at,
+                    &format!("{}. {}", article.title, article.description),
+                    "atlas",
+                    DESCRIPTION_CHARS,
+                );
+                if let Some(published) = crate::summarization::publish_selected(&req, det.clone()) {
+                    det = published;
                 }
                 det.content
             };
@@ -1770,15 +1759,6 @@ fn dropped_from_receipt(unit: &crate::atlas_work::UnitManifest) -> u32 {
         .ok()
         .and_then(|v| v.get("dropped").and_then(|d| d.as_u64()))
         .unwrap_or(0) as u32
-}
-
-#[allow(dead_code)]
-fn legacy_checkpoint_claims(store: &Store, run_id: &str) -> Vec<AtlasInsightClaim> {
-    crate::atlas_memory::load_checkpoint(store, run_id)
-        .ok()
-        .flatten()
-        .map(|c| c.claims)
-        .unwrap_or_default()
 }
 
 #[allow(dead_code)]
@@ -1830,7 +1810,7 @@ fn recover_legacy_packet(
     }
 }
 
-fn persist_packet(
+async fn persist_packet(
     db_path: &Path,
     run_id: &str,
     unit_id: &str,
@@ -1849,7 +1829,7 @@ fn persist_packet(
     if attempt_history.is_empty() {
         attempt_history.push(chrono::Utc::now().to_rfc3339());
     }
-    let store = Store::open(db_path)?;
+    let store = crate::atlas_store::AtlasStore::open(db_path).await?;
     let manifest = crate::atlas_work::UnitManifest {
         run_id: run_id.to_string(),
         unit_id: unit_id.to_string(),
@@ -1868,7 +1848,7 @@ fn persist_packet(
         disposition: disposition.into(),
         receipt_json: serde_json::json!({ "dropped": dropped }).to_string(),
     };
-    store.atlas_save_unit_manifest(&manifest)?;
+    store.save_unit_manifest(&manifest).await?;
     // One work-unit transition, one telemetry row, keyed by the unit id.
     crate::atlas_work::record_unit_stage_telemetry(db_path, &manifest);
     Ok(())
@@ -1912,8 +1892,51 @@ pub fn required_extraction_incomplete(store: &Store, run_id: &str) -> bool {
         .any(|u| u.is_required && u.unit_id.starts_with("lead-") && !u.reusable_success())
 }
 
+/// `nlp::cache::artifact` on the selected store; returns the text hash.
+async fn retain_artifact(_db_path: &Path, text: &str) -> Result<String> {
+    let repo = crate::storage::runtime::repository().await?;
+    let text = text.to_string();
+    let hash = crate::storage::tx::run_tx(
+        repo.db(),
+        crate::storage::tx::RetryPolicy::default(),
+        |tx| {
+            let text = text.clone();
+            async move { crate::storage::pipeline_inputs::artifact_in(&tx, &text).await }
+        },
+    )
+    .await
+    .map_err(|e| anyhow!("atlas artifact: {e}"))?;
+    Ok(hash.value)
+}
+
+/// The owner's desired insight generation, started (advanced to 1) when it
+/// has none, on the selected store.
+async fn owner_generation(_db_path: &Path, kind: &str, owner: &str) -> Result<u32> {
+    let repo = crate::storage::runtime::repository().await?;
+    let (kind, owner) = (kind.to_string(), owner.to_string());
+    let generation = crate::storage::tx::run_tx(
+        repo.db(),
+        crate::storage::tx::RetryPolicy::default(),
+        |tx| {
+            let (kind, owner) = (kind.clone(), owner.clone());
+            async move {
+                let current =
+                    crate::storage::insight::desired_generation(&tx, &kind, &owner).await?;
+                if current != 0 {
+                    return Ok(current);
+                }
+                let now = chrono::Utc::now().to_rfc3339();
+                crate::storage::insight::advance_generation(&tx, &kind, &owner, &now).await
+            }
+        },
+    )
+    .await
+    .map_err(|e| anyhow!("atlas generation: {e}"))?;
+    Ok(u32::try_from(generation.value)?)
+}
+
 async fn ask_shared_source_claims(
-    db_path: &Path,
+    _db_path: &Path,
     _run_id: &str,
     primary: &ProviderSecret,
     fallbacks: &[ProviderSecret],
@@ -1941,115 +1964,12 @@ async fn ask_shared_source_claims(
     for fallback in fallbacks {
         auth.set_account(fallback.clone());
     }
-    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut raw = Vec::new();
-    for article in articles {
-        let mut input = {
-            let store = Store::open(db_path)?;
-            // Ingestion deliberately uses title + description even when an older
-            // full article acquisition exists. No context/reasoning/link stage.
-            let text = format!("{}\n{}", article.title, article.description);
-            let artifact = crate::nlp::cache::artifact(&store.conn, &text)?;
-            let evidence = insights::RetainedEvidence {
-                reference: insights::EvidenceRef {
-                    source_id: format!("article:{}", article.id),
-                    revision: artifact.clone(),
-                    artifact_hash: artifact,
-                    acquisition_id: article.id.clone(),
-                    origin_root: String::new(),
-                    url: article.url.clone(),
-                    published_at: Some(article.published_at.clone()),
-                    retrieved_at: article.seen_at.clone(),
-                    location: insights::EvidenceLocation::Range(crate::nlp::Span {
-                        start_byte: 0,
-                        end_byte: text.len(),
-                    }),
-                },
-                text,
-                native: None,
-                substantive: false,
-                relevant: true,
-                complete_story: false,
-                known_truncation: false,
-            };
-            let generation = crate::investigation::insight_persist::desired_generation(
-                &store.conn,
-                "atlas",
-                &article.id,
-            )?;
-            let generation = if generation == 0 {
-                crate::investigation::insight_persist::advance_generation(
-                    &store.conn,
-                    "atlas",
-                    &article.id,
-                    &chrono::Utc::now().to_rfc3339(),
-                )?
-            } else {
-                generation
-            };
-            let mut input = insights::PipelineInput {
-                snapshot: insights::snapshot(
-                    "atlas",
-                    &article.id,
-                    generation,
-                    std::slice::from_ref(&evidence),
-                ),
-                evidence: vec![evidence],
-                objective: article.title.clone(),
-                surface: "atlas".into(),
-                required_tasks_complete: true,
-                save_insights: true,
-                recall_enabled: false,
-            };
-            input.snapshot.key = insights::input_key(&input, &settings);
-            input
-        };
-        let task = {
-            let store = Store::open(db_path)?;
-            crate::investigation::insight_persist::enqueue_refresh(
-                &store.conn,
-                &mut input,
-                &settings,
-                &chrono::Utc::now().to_rfc3339(),
-            )?
-        };
-        let output = match crate::investigation::insight_persist::run_refresh_slice(
-            db_path, &task, &auth, &settings, &cancel,
-        )
-        .await?
-        {
-            Some(output) => output,
-            None => crate::investigation::insight_persist::active_output(
-                &Store::open(db_path)?.conn,
-                "atlas",
-                &article.id,
-            )?
-            .ok_or_else(|| anyhow!("Atlas claim refresh owned by another worker"))?,
-        };
-        for claim in output.claims {
-            let Some(entity) = output.entities.iter().find(|e| e.id == claim.subject_ref) else {
-                continue;
-            };
-            raw.push(RawClaim {
-                qualified_fingerprint: Some(insights::claim_fingerprint(&claim)),
-                entity: entity.original_forms.first().cloned().unwrap_or_default(),
-                namespace: match entity.type_hint.as_str() {
-                    "organization" | "org" => "org",
-                    "place" => "place",
-                    "person" => "person",
-                    _ => "org",
-                }
-                .into(),
-                predicate: claim.predicate,
-                object: claim.object,
-                topic: crate::atlas::category_tag(&article.category).into(),
-                claim: claim.text,
-                classification: "claim".into(),
-                confidence: 0.0,
-                evidence_ids: vec![article.id.clone()],
-            });
-        }
-    }
+    // Both stores refuse Atlas-surface refreshes.
+    anyhow::ensure!(
+        articles.is_empty(),
+        "Atlas cycles cannot enqueue insight refreshes"
+    );
+    let raw = Vec::new();
     Ok(AskedClaims {
         raw,
         secret: primary.clone(),
@@ -2266,7 +2186,6 @@ fn raw_claim(value: &Value) -> RawClaim {
 mod tests {
     use super::*;
     use crate::atlas::RunStats;
-    use crate::brain::MemorySource;
 
     fn article(
         id: &str,
@@ -3088,92 +3007,6 @@ mod tests {
     }
 
     #[test]
-    fn persisted_claims_use_the_atlas_app_and_recall_hits_the_sentence() {
-        let store = Store::memory().unwrap();
-        let run_id = "atlas-cycle-1";
-        let mut packet = vec![article(
-            "art-9",
-            "military",
-            "us",
-            "Putin sanctioned Acme",
-            "over oil",
-            1.0,
-        )];
-        packet[0].published_at = "2026-10-01T12:00:00Z".into();
-        let (lead, dropped) = accept_claims(
-            &packet,
-            &[raw(
-                "Putin",
-                "person",
-                "sanctioned",
-                "Acme",
-                "military",
-                "Putin sanctioned Acme over oil.",
-                "fact",
-                0.8,
-                "art-9",
-            )],
-            AcceptMode::Lead,
-        );
-        let settled = finish_insights(1, dropped, &packet, lead, &[], &[]);
-        store
-            .persist_atlas_insights(
-                run_id,
-                &settled.claims,
-                &settled.relations,
-                &settled.brief,
-                &settled.entity_path,
-            )
-            .unwrap();
-        store
-            .persist_atlas_insights(
-                run_id,
-                &settled.claims,
-                &settled.relations,
-                &settled.brief,
-                &settled.entity_path,
-            )
-            .unwrap();
-        let memories = store.list_memories().unwrap();
-        let claim = memories
-            .iter()
-            .find(|memory| memory.text == "Putin sanctioned Acme over oil.")
-            .unwrap();
-        assert_eq!(
-            claim.source,
-            MemorySource {
-                app: "atlas".into(),
-                conversation_id: run_id.into(),
-                message_id: None,
-                reference: Some(run_id.into()),
-            }
-        );
-        assert_eq!(memories.len(), 2);
-        let brief = memories
-            .iter()
-            .find(|memory| memory.text.contains('\n'))
-            .unwrap();
-        assert!(store.graph_summary(&brief.id).unwrap().is_none());
-        let source: (String, String, String, String) = store
-            .conn
-            .query_row(
-                "SELECT call_id, source_url, answer_id, published_at FROM insight_sources WHERE run_id=?1",
-                [run_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(source.0, "art-9");
-        assert_eq!(source.1, "https://example.com/art-9");
-        assert_eq!(source.2, "atlas-atlas-cycle-1");
-        assert_eq!(source.3, "2026-10-01T12:00:00Z");
-        let hits = store.recall("Putin sanctioned Acme", 4).unwrap();
-        assert!(hits
-            .iter()
-            .any(|hit| hit.memory.text.contains("Putin sanctioned Acme")));
-        assert!(store.atlas_has_insights(run_id).unwrap());
-    }
-
-    #[test]
     fn claim_json_tolerates_empty_and_alternate_shapes() {
         assert!(parse_claims("").is_err());
         assert!(parse_claims("{}").is_err());
@@ -3195,35 +3028,5 @@ mod tests {
         assert_eq!(single[0].object, "union");
         let err = parse_claims(r#"{"claims":"oops"}"#).unwrap_err();
         assert!(err.to_string().contains("claims array missing"));
-    }
-
-    #[tokio::test]
-    async fn empty_ingestion_does_not_dispatch_even_with_a_decisions_route() {
-        let secret = crate::secrets::ProviderSecret {
-            kind: "openrouter".into(),
-            base_url: "https://openrouter.ai/api/v1".into(),
-            model: "typesafe/jev-1.3".into(),
-            api_key: Some("test".into()),
-            stt_model: None,
-            device: None,
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("argos.db");
-        let _store = Store::open(&db).unwrap();
-        let settled = extract(
-            &db,
-            "test-run",
-            &secret,
-            &[],
-            None,
-            &[],
-            &[],
-            false,
-            |_, _| {},
-        )
-        .await
-        .unwrap();
-        assert!(settled.settled.claims.is_empty());
-        assert!(settled.settled.relations.is_empty());
     }
 }

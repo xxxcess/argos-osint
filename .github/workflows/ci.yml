@@ -4,48 +4,97 @@ on:
   push:
     branches: [main]
   pull_request:
+    # No builds on PR pushes (synchronize): CI runs when a PR is opened, reopened or
+    # marked ready for review (drafts skipped), and on every push to main.
+    types: [opened, reopened, ready_for_review]
+
+# Superseded pushes to the same PR cancel the older run (main always completes).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # No debuginfo in CI: smaller target dirs (cache fits the 10 GB repo quota),
+  # faster codegen/link, and cc builds librocksdb without -g.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   build:
-    name: ${{ matrix.name }}
+    name: ${{ matrix.platform.name }} / ${{ matrix.storage }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # GitHub retired the macos-13 image; macos-15-intel is its x86_64 replacement.
-          - { name: macOS Intel (x86_64), os: macos-15-intel }
-          - { name: macOS Apple Silicon (arm64), os: macos-14 }
+        platform:
           - { name: Linux x86_64, os: ubuntu-24.04 }
           - { name: Linux aarch64, os: ubuntu-24.04-arm }
-    runs-on: ${{ matrix.os }}
+          - { name: macOS arm64, os: macos-14 }
+          - { name: macOS Intel, os: macos-15-intel }
+        storage: [embedded, server]
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
-          components: clippy
+          components: clippy, rustfmt
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
       - uses: Swatinem/rust-cache@v2
-      # No protoc install step on purpose: .cargo/config.toml points PROTOC at
-      # tools/protoc, which uses the protoc-bin-vendored binary for this host.
-      - name: Show which protoc the build will use
+        with:
+          # One cache per OS x storage leg: embedded and server compile different feature sets.
+          key: ${{ matrix.storage }}
+          # local_matrix.sh builds through scripts/agent_cargo.py into target/agents.
+          workspaces: . -> target/agents
+          cache-on-failure: true
+      - name: No SQLite or LanceDB in the dependency graph
+        shell: bash
         run: |
-          uname -sm
-          command -v protoc || echo "no system protoc on PATH"
-          cargo fetch --locked
-          tools/protoc --version
-      # `--no-default-features` omits the lancedb feature so CI does not compile
-      # LanceDB, Arrow, or DataFusion. Local `cargo build` still includes them.
-      - name: Build
-        run: cargo build --locked --no-default-features
-      - name: Test (offline; no LanceDB; ARGOS_EMBED unset)
-        run: cargo test --workspace --locked --no-default-features
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+          set -euo pipefail
+          for c in rusqlite lancedb; do
+            if cargo tree --workspace --all-features -e normal,build -i "$c" --locked >/dev/null 2>&1; then
+              echo "::error::$c is still in the dependency graph"; exit 1
+            fi
+          done
 
-      - name: Clippy (NLP enabled; no LanceDB)
-        run: cargo clippy --workspace --all-targets --locked --no-default-features --features nlp -- -D warnings
-      - name: Test (NLP enabled; offline; no embeddings)
-        run: cargo test --workspace --locked --no-default-features --features nlp
+      # ---- Embedded legs: exactly what a local `cargo` build runs (default features = embedded RocksDB).
+      - name: Install libclang (RocksDB bindgen)
+        if: runner.os == 'Linux' && matrix.storage == 'embedded'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      # Same entry point as a local run: default-feature clippy, full cargo test, embedded contracts.
+      - name: Local matrix leg (embedded)
+        if: matrix.storage == 'embedded'
+        run: bash scripts/local_matrix.sh --storage embedded
+
+      # ---- Server legs: network client only, against a real pinned SurrealDB 3.3.4 server.
+      - name: Pinned SurrealDB hashes match design.md
+        if: matrix.storage == 'server'
+        shell: bash
+        run: |
+          set -euo pipefail
+          hashes=$(grep -oE '"[0-9a-f]{64}"' scripts/test_surreal.py | tr -d '"' | sort -u)
+          test "$(echo "$hashes" | wc -l)" -eq 4
+          for h in $hashes; do
+            grep -q "$h" .planning/2026-10-22-surrealdb/design.md || { echo "hash $h not in design.md"; exit 1; }
+          done
+      - name: Cache SurrealDB 3.3.4 server binary
+        if: matrix.storage == 'server'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/argos-surreal
+          key: surreal-3.3.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test_surreal.py') }}
+      - name: Install SurrealDB 3.3.4 server (SHA-256 verified)
+        if: matrix.storage == 'server'
+        run: python3 scripts/test_surreal.py --mode server --fetch-only
+      # Same entry point as a local run: server-feature clippy + server contracts (no full unit tests).
+      - name: Local matrix leg (server)
+        if: matrix.storage == 'server'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=$(find ~/.cache/argos-surreal -path '*3.3.4-*' -type f -name surreal | head -n1)
+          test -x "$bin" || { echo "fetched SurrealDB binary not found"; exit 1; }
+          bash scripts/local_matrix.sh --storage server --surreal-bin "$bin"

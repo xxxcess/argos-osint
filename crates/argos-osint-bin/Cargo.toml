@@ -12,9 +12,11 @@ name = "argos"
 path = "src/main.rs"
 
 [features]
-default = ["lancedb", "nlp"]
+default = ["embedded", "nlp"]
 nlp = ["argos-osint-core/nlp"]
-lancedb = ["argos-osint-core/lancedb"]
+surreal = ["argos-osint-core/surreal"]
+embedded = ["surreal", "argos-osint-core/embedded"]
+server = ["surreal", "argos-osint-core/server"]
 
 [dependencies]
 anyhow.workspace = true

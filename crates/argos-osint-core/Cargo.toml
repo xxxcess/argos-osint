@@ -8,19 +8,19 @@ description = "Brain recall, hardware, and providers for Argos"
 rust-version.workspace = true
 
 [dependencies]
+tracing = "0.1"
 anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
-lancedb = { workspace = true, optional = true }
 regex.workspace = true
 rquickjs = { workspace = true, optional = true }
 reqwest.workspace = true
-rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 strsim.workspace = true
+surrealdb = { workspace = true, optional = true }
 sysinfo.workspace = true
 tokio.workspace = true
 tempfile.workspace = true
@@ -31,18 +31,20 @@ url.workspace = true
 scraper.workspace = true
 
 [features]
-default = ["lancedb", "nlp"]
+# A local build runs Argos on embedded SurrealDB (RocksDB on disk, no network).
+default = ["embedded", "nlp"]
 nlp = ["dep:rquickjs"]
-# Local LanceDB vector index. CI builds with `--no-default-features` and skips this.
-lancedb = ["dep:lancedb"]
+# SurrealDB storage API without an engine; pick `embedded` and/or `server`.
+surreal = ["dep:surrealdb"]
+# Embedded RocksDB engine in-process (single owner per Argos home). Default.
+embedded = ["surreal", "surrealdb/kv-rocksdb"]
+# WebSocket client for the per-home loopback SurrealDB server. Opt-in
+# (`argos storage init --mode server` or ARGOS_STORAGE_MODE=server).
+server = ["surreal", "surrealdb/protocol-ws"]
 # Test/screenshot fixtures used by the binary's tests. Never enabled in release builds.
 fixtures = []
 # Paused-time Tokio tests (`tokio::time::pause`).
 test-util = ["tokio/test-util"]
-
-[build-dependencies]
-# Prebuilt protoc for every host; see tools/protoc and .cargo/config.toml.
-protoc-bin-vendored.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

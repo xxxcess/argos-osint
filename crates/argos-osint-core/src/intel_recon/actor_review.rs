@@ -4,12 +4,10 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
-use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
 use crate::provider::{self, ChatMessage, SettingsFile};
 use crate::secrets::{AuthFile, ProviderSecret};
-use crate::store::{AtlasArticleClaim, Store};
 
 /// Resolve the provider secret for the entity resolver role.
 /// If the model is a strict decisions model (like OpenRouter Jev),
@@ -288,57 +286,6 @@ fn strip_json_fences(text: &str) -> String {
         }
     }
     trimmed.to_string()
-}
-
-/// Apply reviewed actors into the database (insight_claims, memories, and intel_element_ledger).
-pub fn apply_reviewed_actors(
-    store: &Store,
-    run_id: &str,
-    article_id: &str,
-    review: &ActorReviewResult,
-) -> Result<usize> {
-    if review.mapping.is_empty() {
-        return Ok(0);
-    }
-
-    let claims: Vec<AtlasArticleClaim> = store.atlas_claims_for_article(run_id, article_id)?;
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut updated_claims = 0usize;
-
-    for claim in &claims {
-        let key = claim.entity.trim().to_ascii_lowercase();
-        if let Some(canonical) = review.mapping.get(&key) {
-            if canonical != &claim.entity {
-                store.conn.execute(
-                    "UPDATE insight_claims SET entity_id = ?1, updated_at = ?2 WHERE fingerprint = ?3",
-                    params![canonical, now, claim.fingerprint],
-                )?;
-                updated_claims += 1;
-            }
-        }
-    }
-
-    // Update matching elements in intel_element_ledger for investigations of this article
-    let _ = store.conn.execute(
-        "UPDATE intel_element_ledger SET original_text = (
-            CASE
-                WHEN original_text IN (SELECT entity_id FROM insight_claims) THEN original_text
-                ELSE original_text
-            END
-        ), updated_at = ?1
-        WHERE investigation_id IN (
-            SELECT investigation_id FROM intel_report_jobs WHERE article_id = ?2
-        )",
-        params![now, article_id],
-    );
-
-    // Notify Brain memory change watcher
-    let _ = store.app_state_set(
-        "memories_changed_seq",
-        &chrono::Utc::now().timestamp_millis().to_string(),
-    );
-
-    Ok(updated_claims)
 }
 
 #[cfg(test)]

@@ -22,7 +22,6 @@ use crate::brain_topology::{
     TopologySnapshot,
 };
 use crate::memory_metadata::MemoryPayload;
-use crate::store::Store;
 
 /// Bump when the rendering or selection rules change (part of `basis_key`).
 pub const FORMAT_VERSION: u32 = 1;
@@ -256,50 +255,6 @@ pub struct BriefInput<'a> {
     /// edge id (Link/Related edges, whose id is the memory id).
     pub payloads: BTreeMap<String, MemoryPayload>,
     pub payload_reads_skipped: usize,
-}
-
-/// Read the payloads of admitted records only (bounded, read-only).
-pub fn hydrate<'a>(
-    store: &Store,
-    snapshot: &'a TopologySnapshot,
-    seed: &'a TopologySeed,
-    depth: usize,
-    cycle: &'a CycleScope,
-) -> BriefInput<'a> {
-    let mut payloads = BTreeMap::new();
-    let mut skipped = 0;
-    let mut reads = 0;
-    let mut read = |id: &str, payloads: &mut BTreeMap<String, MemoryPayload>| {
-        if reads >= MAX_PAYLOAD_READS {
-            skipped += 1;
-            return;
-        }
-        reads += 1;
-        if let Ok(Some(p)) = store.memory_payload(id) {
-            payloads.insert(id.to_string(), p);
-        }
-    };
-    for n in &snapshot.nodes {
-        if matches!(
-            n.kind,
-            TopologyNodeKind::Entity | TopologyNodeKind::Claim | TopologyNodeKind::Inference
-        ) {
-            read(&n.id, &mut payloads);
-        }
-    }
-    for e in &snapshot.edges {
-        if matches!(e.kind, TopologyEdgeKind::Link | TopologyEdgeKind::Related) {
-            read(&e.id, &mut payloads);
-        }
-    }
-    BriefInput {
-        snapshot,
-        seed,
-        depth,
-        cycle,
-        payloads,
-        payload_reads_skipped: skipped,
-    }
 }
 
 // ---------------------------------------------------------------- builder
@@ -1462,12 +1417,10 @@ impl IdAliases {
 
 fn trim_value(v: &mut serde_json::Value, shortened: &mut usize) {
     match v {
-        serde_json::Value::String(s) => {
-            if s.chars().count() > FIELD_CHARS_MAX {
-                let cut: String = s.chars().take(FIELD_CHARS_MAX).collect();
-                *s = format!("{}…", cut.trim_end());
-                *shortened += 1;
-            }
+        serde_json::Value::String(s) if s.chars().count() > FIELD_CHARS_MAX => {
+            let cut: String = s.chars().take(FIELD_CHARS_MAX).collect();
+            *s = format!("{}…", cut.trim_end());
+            *shortened += 1;
         }
         serde_json::Value::Array(a) => {
             for x in a.iter_mut() {

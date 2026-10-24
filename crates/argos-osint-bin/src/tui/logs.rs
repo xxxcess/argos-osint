@@ -23,6 +23,27 @@ pub const PAGE: usize = 500;
 /// Retention shown in the dashboard and applied by pruning.
 pub const RETENTION_HOURS: i64 = argos_osint_core::events::DEFAULT_RETENTION_HOURS;
 
+/// Where the Logs pane reads events: the SQLite `Store`, or the
+/// repository's `argos_event` under a storage config
+/// (`surreal_brain::SurrealLogs`). Never both.
+pub trait LogsSource {
+    fn list(&self, filter: &EventFilter, limit: usize) -> anyhow::Result<Vec<EventRow>>;
+    fn counts(&self) -> anyhow::Result<EventCounts>;
+    fn apps(&self) -> anyhow::Result<Vec<String>>;
+}
+
+impl LogsSource for Store {
+    fn list(&self, filter: &EventFilter, limit: usize) -> anyhow::Result<Vec<EventRow>> {
+        self.list_events(filter, limit)
+    }
+    fn counts(&self) -> anyhow::Result<EventCounts> {
+        self.event_counts()
+    }
+    fn apps(&self) -> anyhow::Result<Vec<String>> {
+        self.event_apps()
+    }
+}
+
 /// Minimum severity shown.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LevelFilter {
@@ -137,8 +158,8 @@ impl LogsView {
 
     /// Reload the bounded page. Selection is kept by event id unless live
     /// follow is on; a read failure keeps the last good rows and says so.
-    pub fn reload(&mut self, store: &Store) {
-        match store.list_events(&self.filter(), PAGE) {
+    pub fn reload(&mut self, store: &impl LogsSource) {
+        match store.list(&self.filter(), PAGE) {
             Ok(mut rows) => {
                 rows.reverse();
                 self.rows = rows;
@@ -160,13 +181,13 @@ impl LogsView {
             Err(err) => self.error = Some(format!("Could not read events: {err:#}")),
         }
         self.refresh_counts(store);
-        if let Ok(apps) = store.event_apps() {
+        if let Ok(apps) = store.apps() {
             self.apps = apps;
         }
     }
 
-    pub fn refresh_counts(&mut self, store: &Store) {
-        if let Ok(counts) = store.event_counts() {
+    pub fn refresh_counts(&mut self, store: &impl LogsSource) {
+        if let Ok(counts) = store.counts() {
             self.counts = counts;
         }
     }

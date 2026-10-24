@@ -14,6 +14,12 @@
     clippy::empty_line_after_doc_comments
 )]
 
+#[cfg(not(feature = "surreal"))]
+compile_error!(
+    "argos-osint-core needs the `embedded` or `server` feature: SurrealDB is its only storage"
+);
+
+pub mod async_bridge;
 pub mod atlas;
 pub mod atlas_actor_index;
 pub mod atlas_classify;
@@ -23,6 +29,7 @@ pub mod atlas_insights;
 pub mod atlas_memory;
 pub mod atlas_metadata;
 pub mod atlas_recall_tests;
+pub mod atlas_store;
 pub mod atlas_work;
 pub mod brain;
 pub mod brain_actor_dedup;
@@ -30,8 +37,6 @@ pub mod brain_actors;
 pub mod brain_backfill;
 pub mod brain_browse;
 pub mod brain_kinds;
-#[cfg_attr(not(feature = "lancedb"), path = "brain_lance_off.rs")]
-pub mod brain_lance;
 pub mod brain_neighborhood_brief;
 pub mod brain_neighborhood_brief_exec;
 pub mod brain_query;
@@ -73,11 +78,11 @@ pub mod provider_request;
 pub mod recon;
 pub mod related_articles;
 pub mod related_global;
-pub mod related_memories;
-pub mod reliability_faults;
 pub mod request_policy;
 pub mod scheduler;
 pub mod secrets;
+#[cfg(feature = "surreal")]
+pub mod storage;
 pub mod store;
 pub mod subscription;
 pub mod summarization;

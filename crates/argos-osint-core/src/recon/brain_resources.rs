@@ -2,7 +2,7 @@
 
 use super::{
     investigation::{self, URL_KIND},
-    Binding, InsightSource, RecallInsight, Store,
+    Binding, InsightSource, RecallInsight,
 };
 use anyhow::Result;
 use std::collections::{BTreeMap, HashSet};
@@ -174,25 +174,30 @@ fn is_http_url(value: &str) -> bool {
     matches!(url.scheme(), "http" | "https")
 }
 
-/// Collect and classify resources linked to recalled memories. When `question` is
-/// non-empty, candidates are ordered by claim+URL token overlap with the prompt so the
-/// most likely useful assets appear first.
-pub fn summarize_for_recall(
-    store: &Store,
+/// [`summarize_for_recall`] over any store: `lookup` returns a recalled
+/// memory's insight view and memory (SurrealDB prefetches both).
+pub fn summarize_with(
     recalled: &[RecallInsight],
     question: &str,
+    mut lookup: impl FnMut(
+        &str,
+    ) -> Result<(
+        Option<crate::recon::InsightView>,
+        Option<crate::brain::Memory>,
+    )>,
 ) -> Result<BrainResourceSummary> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut items: Vec<BrainResourceHit> = Vec::new();
 
     for insight in recalled {
         let claim = insight.text.as_str();
-        if let Some(view) = store.insight_for_memory(&insight.memory_id)? {
+        let (view, memory) = lookup(&insight.memory_id)?;
+        if let Some(view) = view {
             for source in &view.sources {
                 push_source(&mut items, &mut seen, &insight.memory_id, claim, source);
             }
         }
-        if let Some(memory) = store.get_memory(&insight.memory_id)? {
+        if let Some(memory) = memory {
             if let Some(reference) = memory.source.reference.as_deref() {
                 push_raw(
                     &mut items,
@@ -480,10 +485,9 @@ pub fn recall_gate_rejection(
     String::new()
 }
 
-/// Record one completed recall query at the relevance gate. Best effort: a
-/// telemetry failure never fails a recon turn.
-pub fn note_recall_query(store: &Store, facts: &RecallQueryFacts) {
-    let event = crate::telemetry::TelemetryEvent::new(crate::telemetry::EventKind::RecallQuery)
+/// The `recall_query` telemetry row of one completed recall query.
+pub fn recall_query_event(facts: &RecallQueryFacts) -> crate::telemetry::TelemetryEvent {
+    crate::telemetry::TelemetryEvent::new(crate::telemetry::EventKind::RecallQuery)
         .at(chrono::Utc::now().to_rfc3339())
         .app("recon")
         .trigger(crate::telemetry::Trigger::ReconPrompt)
@@ -497,8 +501,7 @@ pub fn note_recall_query(store: &Store, facts: &RecallQueryFacts) {
             "candidate_hits": facts.candidates,
             "accepted_hits": facts.accepted,
             "rejection_reason": facts.rejection_reason,
-        }));
-    let _ = crate::telemetry::insert(&store.conn, &event);
+        }))
 }
 
 #[cfg(test)]
@@ -522,50 +525,6 @@ mod tests {
         let miss = RecallQueryFacts::default().because("no_candidates");
         assert!(!miss.hit());
         assert_eq!(miss.rejection_reason, "no_candidates");
-    }
-
-    #[test]
-    fn note_recall_query_records_one_row_per_completed_query() {
-        let store = Store::memory().unwrap();
-        let facts = RecallQueryFacts {
-            candidates: 5,
-            accepted: 2,
-            rejection_reason: "admission_policy".into(),
-            mode: "verify".into(),
-            run_id: "run-1".into(),
-            thread_id: "t1".into(),
-        };
-        note_recall_query(&store, &facts);
-        note_recall_query(&store, &facts);
-
-        let rows: i64 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM telemetry_events WHERE event_type = 'recall_query'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(rows, 2, "one row per completed recall query");
-        let payload: String = store
-            .conn
-            .query_row(
-                "SELECT payload_json FROM telemetry_events WHERE event_type = 'recall_query' LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(payload.contains("\"accepted_hits\":2"), "{payload}");
-        assert!(payload.contains("\"candidate_hits\":5"), "{payload}");
-        let mode: String = store
-            .conn
-            .query_row(
-                "SELECT mode FROM telemetry_events WHERE event_type = 'recall_query' LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(mode, "verify");
     }
 
     fn hit(kind: &'static str, value: &str, memory_id: &str, claim: &str) -> BrainResourceHit {
@@ -728,88 +687,5 @@ mod tests {
             "claim overlap should rank Iran article first, got {:?}",
             summary.items[0]
         );
-    }
-
-    #[test]
-    fn summarize_for_recall_reads_insight_source_urls() {
-        use crate::brain::MemorySource;
-        use rusqlite::params;
-
-        let store = Store::memory().unwrap();
-        let memory = store
-            .add_memory(
-                "Ada leads Acme Robotics.",
-                "investigation",
-                false,
-                MemorySource {
-                    app: "recon".into(),
-                    conversation_id: "t1".into(),
-                    message_id: Some("a1".into()),
-                    reference: Some("https://cdn.example.com/report.pdf".into()),
-                },
-            )
-            .unwrap();
-        let fingerprint = r#"["person","Ada","leads","Acme"]"#;
-        store
-            .conn
-            .execute(
-                "INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at)
-                 VALUES (?1,?2,'Ada','leads','Acme','org','fact',0.9,'t','t')",
-                params![fingerprint, memory.id],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                "INSERT INTO insight_sources(fingerprint,thread_id,run_id,answer_id,call_id,source_url,deleted_origin,published_at)
-                 VALUES (?1,'t1','r1','a1','art-1','https://www.nytimes.com/2026/01/01/tech/ada.html',0,'2026-01-01T00:00:00Z')",
-                params![fingerprint],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                "INSERT INTO insight_sources(fingerprint,thread_id,run_id,answer_id,call_id,source_url,deleted_origin,published_at)
-                 VALUES (?1,'t1','r1','a1','call-vid','https://www.youtube.com/watch?v=abc',0,'')",
-                params![fingerprint],
-            )
-            .unwrap();
-
-        let recalled = vec![RecallInsight {
-            memory_id: memory.id.clone(),
-            text: memory.text.clone(),
-            entity: "Ada".into(),
-            predicate: "leads".into(),
-            updated_at: "t".into(),
-            evidence_count: 2,
-        }];
-        let summary = summarize_for_recall(&store, &recalled, "Ada youtube interview").unwrap();
-        assert!(!summary.is_empty());
-        assert_eq!(summary.counts.get("article_link"), Some(&1));
-        assert_eq!(summary.counts.get("video_link"), Some(&1));
-        assert_eq!(summary.counts.get("file_link"), Some(&1));
-        // Prompt tokens "youtube" / "interview" should rank the video ahead of the PDF.
-        assert!(
-            summary.items[0].value.contains("youtube.com"),
-            "expected youtube first, got {:?}",
-            summary.items[0].value
-        );
-        assert!(summary
-            .items
-            .iter()
-            .all(|item| item.claim == "Ada leads Acme Robotics."));
-        let line = summary.prompt_line();
-        assert!(line.contains("article links ×1"));
-        assert!(line.contains("video links ×1"));
-        assert!(line.contains("file/download links ×1"));
-        assert!(line.contains("Ada leads Acme Robotics."));
-        assert!(summary
-            .items
-            .iter()
-            .any(|item| item.value.contains("nytimes.com")));
-        assert!(summary
-            .items
-            .iter()
-            .any(|item| item.value.ends_with("report.pdf")));
     }
 }

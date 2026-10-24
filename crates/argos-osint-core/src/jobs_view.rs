@@ -7,10 +7,9 @@
 //! never repeated and unsupported operations expose no Retry.
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::events::{self, EventFilter, EventRow, NewEvent};
+use crate::events::{EventFilter, EventRow, NewEvent};
 use crate::store::Store;
 use crate::tasks;
 
@@ -318,139 +317,6 @@ const JOB_COLUMNS: &str =
     j.active_since, j.cancel_requested,
     (j.kind<>'service' AND (j.cancellable OR EXISTS(SELECT 1 FROM argos_tasks t WHERE t.job_id=j.id)))";
 
-fn job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
-    Ok(JobRow {
-        id: r.get(0)?,
-        parent_id: r.get(1)?,
-        kind: r.get(2)?,
-        app: r.get(3)?,
-        operation: r.get(4)?,
-        title: r.get(5)?,
-        state: r.get(6)?,
-        phase: r.get(7)?,
-        progress_done: r.get(8)?,
-        progress_total: r.get(9)?,
-        created_at: r.get(10)?,
-        queued_at: r.get(11)?,
-        started_at: r.get(12)?,
-        heartbeat_at: r.get(13)?,
-        finished_at: r.get(14)?,
-        active_ms: r.get(15)?,
-        queue_ms: r.get(16)?,
-        retry_wait_ms: r.get(17)?,
-        attempts_used: r.get(18)?,
-        attempt_cap: r.get(19)?,
-        provider: r.get(20)?,
-        model: r.get(21)?,
-        tool: r.get(22)?,
-        worker_owner: r.get(23)?,
-        run_ref: r.get(24)?,
-        resource_ref: r.get(25)?,
-        result_ref: r.get(26)?,
-        error_category: r.get(27)?,
-        error_summary: r.get(28)?,
-        correlation_id: r.get(29)?,
-        stage_coverage_json: r.get(30)?,
-        children: r.get(31)?,
-        events: r.get(32)?,
-        attempt_rows: r.get(33)?,
-        open_attempt_started: r.get(34)?,
-        active_since: r.get(35)?,
-        cancel_requested: r.get(36)?,
-        cancellable: r.get(37)?,
-    })
-}
-
-/// Top-level jobs, active work first, then most recent. Bounded by `limit`.
-pub fn list_jobs(conn: &Connection, filter: &JobFilter, limit: usize) -> Result<Vec<JobRow>> {
-    let mut sql = format!("SELECT {JOB_COLUMNS} FROM argos_jobs j WHERE j.parent_id = ''");
-    sql.push_str(&format!(" AND ({})", crate::job_cleanup::eligible("j")));
-    let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    let states = filter.status.states();
-    if !states.is_empty() {
-        let marks = vec!["?"; states.len()].join(",");
-        sql.push_str(&format!(" AND j.state IN ({marks})"));
-        for state in states {
-            args.push(Box::new(state.to_string()));
-        }
-    }
-    if !filter.app.is_empty() {
-        sql.push_str(" AND j.app = ?");
-        args.push(Box::new(filter.app.clone()));
-    }
-    if !filter.operation.is_empty() {
-        sql.push_str(" AND j.operation = ?");
-        args.push(Box::new(filter.operation.clone()));
-    }
-    if !filter.text.trim().is_empty() {
-        sql.push_str(
-            " AND (j.title LIKE ? OR j.id LIKE ? OR j.operation LIKE ? OR j.error_summary LIKE ?)",
-        );
-        let needle = format!("%{}%", filter.text.trim().replace('%', ""));
-        for _ in 0..4 {
-            args.push(Box::new(needle.clone()));
-        }
-    }
-    if !filter.since.is_empty() {
-        sql.push_str(" AND j.created_at >= ?");
-        args.push(Box::new(filter.since.clone()));
-    }
-    sql.push_str(
-        " ORDER BY CASE WHEN j.state IN ('running','queued','retry_scheduled') AND j.kind <> 'service' THEN 0
-                        WHEN j.kind = 'service' THEN 2 ELSE 1 END,
-                   j.updated_at DESC, j.id
-          LIMIT ?",
-    );
-    args.push(Box::new(limit.max(1) as i64));
-    let mut stmt = conn.prepare(&sql)?;
-    let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
-    let rows = stmt
-        .query_map(refs.as_slice(), job_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-/// Header counts (top-level, non-service jobs).
-pub fn job_counts(conn: &Connection) -> Result<JobCounts> {
-    let since = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
-    Ok(conn.query_row(
-        &format!(
-            "SELECT
-            IFNULL(SUM(state='running'),0),
-            IFNULL(SUM(state='queued'),0),
-            IFNULL(SUM(state='retry_scheduled'),0),
-            IFNULL(SUM(state IN ('failed','partial')),0),
-            IFNULL(SUM(state='completed' AND finished_at >= ?1),0)
-         FROM argos_jobs j WHERE parent_id='' AND kind<>'service' AND ({})",
-            crate::job_cleanup::eligible("j")
-        ),
-        [since],
-        |r| {
-            Ok(JobCounts {
-                active: r.get(0)?,
-                queued: r.get(1)?,
-                retrying: r.get(2)?,
-                failed: r.get(3)?,
-                completed_recent: r.get(4)?,
-            })
-        },
-    )?)
-}
-
-/// One job by id (any depth), regardless of filters.
-pub fn get_job(conn: &Connection, id: &str) -> Result<Option<JobRow>> {
-    Ok(conn
-        .query_row(
-            &format!(
-                "SELECT {JOB_COLUMNS} FROM argos_jobs j WHERE j.id = ?1 AND ({})",
-                crate::job_cleanup::eligible("j")
-            ),
-            [id],
-            job_row,
-        )
-        .optional()?)
-}
-
 fn retryable_sql() -> String {
     let ops = tasks::INDEX_OPERATIONS
         .iter()
@@ -459,250 +325,6 @@ fn retryable_sql() -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!("state='failed' AND operation IN ({ops})")
-}
-
-/// Detail panel: children, bounded task tree and attempt history.
-pub fn job_detail(conn: &Connection, id: &str, task_limit: usize) -> Result<Option<JobDetail>> {
-    let Some(job) = get_job(conn, id)? else {
-        return Ok(None);
-    };
-    let children = {
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {JOB_COLUMNS} FROM argos_jobs j WHERE j.parent_id = ?1 ORDER BY j.created_at, j.id LIMIT 50"
-        ))?;
-        let rows = stmt
-            .query_map([id], job_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-    let task_total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM argos_tasks WHERE job_id=?1",
-        [id],
-        |r| r.get(0),
-    )?;
-    let tasks = {
-        let mut stmt = conn.prepare(
-            "SELECT id, operation, pool, state, attempts, max_attempts, active_ms, queue_ms, retry_wait_ms,
-                    next_eligible_at, error_category, error_message, result_ref, updated_at
-             FROM argos_tasks WHERE job_id=?1
-             ORDER BY CASE WHEN state IN ('running','queued','retry_scheduled','failed') THEN 0 ELSE 1 END,
-                      updated_at DESC, id
-             LIMIT ?2",
-        )?;
-        let rows = stmt
-            .query_map(params![id, task_limit.max(1) as i64], |r| {
-                Ok(TaskRow {
-                    id: r.get(0)?,
-                    operation: r.get(1)?,
-                    pool: r.get(2)?,
-                    state: r.get(3)?,
-                    attempts: r.get(4)?,
-                    max_attempts: r.get(5)?,
-                    active_ms: r.get(6)?,
-                    queue_ms: r.get(7)?,
-                    retry_wait_ms: r.get(8)?,
-                    next_eligible_at: r.get(9)?,
-                    error_category: r.get(10)?,
-                    error_message: r.get(11)?,
-                    result_ref: r.get(12)?,
-                    updated_at: r.get(13)?,
-                    stage_label: String::new(),
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut rows = rows;
-        if rows.iter().any(|t| t.operation.starts_with("intel_brief_")) {
-            // One immutable stage view across the brief panel, Jobs and Logs.
-            let views =
-                crate::intel_recon::brief_pipeline::stage_views(conn, id).unwrap_or_default();
-            for task in &mut rows {
-                if let Some(view) = views.iter().find(|v| v.operation == task.operation) {
-                    task.stage_label = format!("{} · {}", view.label, view.row);
-                }
-            }
-            let order = |op: &str| {
-                crate::intel_recon::brief_pipeline::STAGES
-                    .iter()
-                    .position(|(o, _)| *o == op)
-                    .unwrap_or(usize::MAX)
-            };
-            rows.sort_by_key(|t| order(&t.operation));
-        }
-        rows
-    };
-    let attempts = {
-        let mut stmt = conn.prepare(
-            "SELECT a.id, a.task_id, a.attempt_number, a.owner, a.started_at, a.finished_at, a.duration_ms,
-                    a.outcome, a.error_category, a.error_message, t.operation
-             FROM argos_attempts a JOIN argos_tasks t ON t.id = a.task_id
-             WHERE t.job_id = ?1 ORDER BY a.started_at DESC, a.id LIMIT 20",
-        )?;
-        let rows = stmt
-            .query_map([id], |r| {
-                Ok(AttemptRow {
-                    id: r.get(0)?,
-                    task_id: r.get(1)?,
-                    attempt_number: r.get(2)?,
-                    owner: r.get(3)?,
-                    started_at: r.get(4)?,
-                    finished_at: r.get(5)?,
-                    duration_ms: r.get(6)?,
-                    outcome: r.get(7)?,
-                    error_category: r.get(8)?,
-                    error_message: r.get(9)?,
-                    task_label: task_label(&r.get::<_, String>(10)?),
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-    let wire_requests: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM recon_model_attempts a
-             JOIN recon_model_operations o ON o.id = a.operation_id
-             WHERE a.dispatched = 1
-               AND o.task_id IN (SELECT id FROM argos_tasks WHERE job_id = ?1)",
-            [id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    let warnings: Vec<String> = conn
-        .prepare(
-            "SELECT stage,empty_reason FROM intel_brief_stage_outputs
-             WHERE job_id=?1 AND empty_reason LIKE 'warning:%' ORDER BY committed_at",
-        )
-        .and_then(|mut stmt| {
-            stmt.query_map([id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(stage, reason)| {
-            format!(
-                "{}: {}",
-                task_label(&stage),
-                reason.trim_start_matches("warning:").trim()
-            )
-        })
-        .collect();
-    let mut retryable: i64 = conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM argos_tasks WHERE job_id=?1 AND {}",
-            retryable_sql()
-        ),
-        [id],
-        |r| r.get(0),
-    )?;
-    if is_brief_chain(conn, id) {
-        let failed: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM argos_tasks WHERE job_id=?1 AND state='failed'",
-            [id],
-            |r| r.get(0),
-        )?;
-        retryable += failed + i64::from(!warnings.is_empty());
-    }
-    let mut insight_progress = Vec::new();
-    for task in &tasks {
-        if let Some(progress) =
-            crate::investigation::insight_execution::task_progress(conn, &task.id)?
-        {
-            retryable += i64::from(progress.retryable);
-            insight_progress.push(progress);
-        }
-    }
-    let cutoff = chrono::Utc::now() - chrono::Duration::hours(events::DEFAULT_RETENTION_HOURS);
-    let events_expired = job.events == 0
-        && parse(&job.finished_at)
-            .or_else(|| parse(&job.created_at))
-            .is_some_and(|t| t < cutoff);
-    Ok(Some(JobDetail {
-        job,
-        children,
-        tasks,
-        task_total,
-        attempts,
-        wire_requests,
-        warnings,
-        retryable,
-        events_expired,
-        insight_progress,
-    }))
-}
-
-fn is_brief_chain(conn: &Connection, id: &str) -> bool {
-    conn.query_row(
-        "SELECT 1 FROM intel_brief_runs WHERE job_id=?1",
-        [id],
-        |_| Ok(true),
-    )
-    .unwrap_or(false)
-}
-
-/// Requeue a job's failed tasks that a durable worker pool owns (index and
-/// summary work). Completed tasks are untouched, so successful work is never
-/// repeated. Returns how many tasks were requeued.
-pub fn retry_failed_tasks(conn: &Connection, id: &str) -> Result<usize> {
-    if get_job(conn, id)?.is_none_or(|job| job.cancel_requested) {
-        return Ok(0);
-    }
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut n = conn.execute(
-        &format!(
-            "UPDATE argos_tasks SET state='queued', attempts=0, next_eligible_at='', lease_owner='',
-                lease_until='', error_category='', error_message='', finished_at='', updated_at=?2
-             WHERE job_id=?1 AND {}",
-            retryable_sql()
-        ),
-        params![id, now],
-    )?;
-    // An Intel brief chain resumes through its own retry: failed branches, or
-    // a stage that completed with warnings (only its failed items re-run).
-    if is_brief_chain(conn, id)
-        && crate::intel_recon::brief_pipeline::retry_stage(conn, id, &now)?.is_some()
-    {
-        n += 1;
-    }
-    let ids = conn
-        .prepare("SELECT id FROM argos_tasks WHERE job_id=?1 AND operation='insight_refresh'")?
-        .query_map([id], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for task in ids {
-        if crate::investigation::insight_execution::retry_extraction(conn, &task)? {
-            n += 1;
-        }
-    }
-    if n > 0 {
-        conn.execute(
-            "UPDATE OR IGNORE argos_index_changes SET state='pending', error_category='', error_message='', updated_at=?2
-             WHERE state='failed' AND task_id IN (SELECT id FROM argos_tasks WHERE job_id=?1 AND state='queued')",
-            params![id, now],
-        )?;
-        tasks::refresh_job_state(conn, id, &now)?;
-        let _ = events::record_event(
-            conn,
-            &NewEvent {
-                app: "jobs".into(),
-                event_type: "job.retry".into(),
-                message: format!("Retry requested for {n} failed task(s)"),
-                job_id: id.into(),
-                ..Default::default()
-            },
-        );
-    }
-    Ok(n)
-}
-
-/// Bounded `(app, count)` list of apps that own jobs, for the app filter.
-pub fn job_apps(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        &format!("SELECT DISTINCT app FROM argos_jobs j WHERE app<>'' AND parent_id='' AND ({}) ORDER BY app LIMIT 32",crate::job_cleanup::eligible("j")),
-    )?;
-    let rows = stmt
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
 }
 
 /// Severity counts and recent failures for the Logs header.
@@ -716,92 +338,44 @@ pub struct EventCounts {
     pub recent_failures: i64,
 }
 
-pub fn event_counts(conn: &Connection) -> Result<EventCounts> {
-    let mut counts = EventCounts::default();
-    for (severity, n) in events::severity_counts(conn)? {
-        match severity.as_str() {
-            "error" => counts.error += n,
-            "warn" => counts.warn += n,
-            "debug" => counts.debug += n,
-            _ => counts.info += n,
-        }
-    }
-    let hour = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-    counts.recent_failures = conn.query_row(
-        "SELECT COUNT(*) FROM argos_events WHERE severity='error' AND ts >= ?1",
-        [hour],
-        |r| r.get(0),
-    )?;
-    Ok(counts)
-}
-
-/// Distinct apps that wrote events, for the Logs app filter.
-pub fn event_apps(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt =
-        conn.prepare("SELECT DISTINCT app FROM argos_events WHERE app<>'' ORDER BY app LIMIT 32")?;
-    let rows = stmt
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
 /// Store-level access for the TUI (which has no raw connection).
 impl Store {
     pub fn list_jobs(&self, filter: &JobFilter, limit: usize) -> Result<Vec<JobRow>> {
-        list_jobs(&self.conn, filter, limit)
+        crate::storage::jobs_store::list_jobs(filter, limit)
     }
 
     pub fn job_counts(&self) -> Result<JobCounts> {
-        job_counts(&self.conn)
+        crate::storage::jobs_store::job_counts()
     }
 
     pub fn job_detail(&self, id: &str, task_limit: usize) -> Result<Option<JobDetail>> {
-        job_detail(&self.conn, id, task_limit)
+        crate::storage::jobs_store::job_detail(id, task_limit)
     }
 
     pub fn get_job(&self, id: &str) -> Result<Option<JobRow>> {
-        get_job(&self.conn, id)
+        crate::storage::jobs_store::get_job(id)
     }
 
     pub fn retry_failed_tasks(&self, id: &str) -> Result<usize> {
-        retry_failed_tasks(&self.conn, id)
+        crate::storage::jobs_store::retry_failed_tasks(id)
     }
     pub fn set_job_stage_coverage(&self, job_id: &str, coverage_json: &str) -> Result<()> {
-        crate::tasks::set_job_stage_coverage(&self.conn, job_id, coverage_json)
+        crate::storage::jobs_store::set_job_stage_coverage(job_id, coverage_json)
     }
 
     pub fn job_apps(&self) -> Result<Vec<String>> {
-        job_apps(&self.conn)
+        crate::storage::jobs_store::job_apps()
     }
 
     /// Jobs → Stop: dequeue/fence durable work, or request cooperative
     /// cancellation from its registered owner. Service loops are excluded.
     pub fn request_job_cancel(&self, id: &str) -> Result<crate::job_registry::CancelRequest> {
-        let Some(job) = self.get_job(id)? else {
-            return Ok(crate::job_registry::CancelRequest::Missing);
-        };
-        if job.is_service() {
-            return Ok(crate::job_registry::CancelRequest::NotCancellable);
-        }
-        if !job.is_active() {
-            return Ok(crate::job_registry::CancelRequest::NotRunning);
-        }
-        let has_tasks: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM argos_tasks WHERE job_id=?1)",
-            [id],
-            |r| r.get(0),
-        )?;
-        if has_tasks {
-            crate::job_cleanup::stop_task_job(&self.conn, id)?;
-            Ok(crate::job_registry::CancelRequest::Requested)
-        } else {
-            crate::job_registry::request_cancel(&self.conn, id)
-        }
+        crate::storage::jobs_store::request_job_cancel(id)
     }
 
     /// Register a user-visible job before launching its work (idempotent).
     pub fn register_job(&self, job: &tasks::NewJob, meta: &tasks::JobMeta) -> Result<()> {
-        tasks::enqueue_job_with(&self.conn, job, meta, &chrono::Utc::now().to_rfc3339())
+        crate::storage::jobs_store::register_job(job, meta)
     }
 
     /// Lifecycle/progress for a task-less job (see [`tasks::set_job_progress`]).
@@ -814,380 +388,45 @@ impl Store {
         total: Option<i64>,
         error_summary: &str,
     ) -> Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
-        tasks::set_job_progress(
-            &self.conn,
-            id,
-            state,
-            phase,
-            done,
-            total,
-            error_summary,
-            &now,
-        )
+        crate::storage::jobs_store::set_job_progress(id, state, phase, done, total, error_summary)
     }
 
     pub fn record_event(&self, event: &NewEvent) -> Result<String> {
-        events::record_event(&self.conn, event)
+        crate::storage::jobs_store::record_event(event)
     }
 
     pub fn list_events(&self, filter: &EventFilter, limit: usize) -> Result<Vec<EventRow>> {
-        events::list_events(&self.conn, filter, limit)
+        crate::storage::jobs_store::list_events(filter, limit)
     }
 
     pub fn get_event(&self, id: &str) -> Result<Option<EventRow>> {
-        events::get_event(&self.conn, id)
+        crate::storage::jobs_store::get_event(id)
     }
 
     pub fn event_counts(&self) -> Result<EventCounts> {
-        event_counts(&self.conn)
+        crate::storage::jobs_store::event_counts()
     }
 
     pub fn event_apps(&self) -> Result<Vec<String>> {
-        event_apps(&self.conn)
+        crate::storage::jobs_store::event_apps()
     }
 
     /// Delete events past retention. Touches only `argos_events`.
     pub fn prune_events(&self, hours: i64) -> Result<usize> {
-        events::prune_events(&self.conn, hours)
+        crate::storage::jobs_store::prune_events(hours)
     }
 
     /// Logs "Clear events". Touches only `argos_events`: jobs, task results and
     /// memories are kept.
     pub fn clear_events(&self) -> Result<usize> {
-        events::clear_events(&self.conn)
-    }
-}
-
-/// Fixtures for the binary's tests and screenshot dumps (feature `fixtures`).
-#[cfg(any(test, feature = "fixtures"))]
-impl Store {
-    /// Enqueue one task under `job_id` and record its attempt as started
-    /// `started_secs_ago`; the attempt stays open unless `ran_secs` is given.
-    pub fn fixture_task_attempt(
-        &self,
-        job_id: &str,
-        task_id: &str,
-        operation: &str,
-        started_secs_ago: i64,
-        ran_secs: Option<i64>,
-    ) -> Result<()> {
-        let start = chrono::Utc::now() - chrono::Duration::seconds(started_secs_ago);
-        tasks::enqueue_task(
-            &self.conn,
-            &tasks::NewTask {
-                id: task_id.into(),
-                job_id: job_id.into(),
-                operation: operation.into(),
-                dedupe_key: String::new(),
-                priority: 100,
-                input_ref: String::new(),
-                input_hash: String::new(),
-                source_revision: String::new(),
-                role_snapshot: String::new(),
-                max_attempts: 3,
-            },
-            &start.to_rfc3339(),
-        )?;
-        let pool = tasks::pool_for_operation(operation);
-        let claimed =
-            tasks::claim_next_in(&self.conn, &[pool], "fixture", 3600, &start.to_rfc3339())?
-                .ok_or_else(|| anyhow::anyhow!("fixture task was not claimable"))?;
-        if let Some(ran) = ran_secs {
-            let end = start + chrono::Duration::seconds(ran);
-            tasks::complete_claimed(&self.conn, &claimed, "ok", &end.to_rfc3339())?;
-        }
-        tasks::refresh_job_state(&self.conn, job_id, &chrono::Utc::now().to_rfc3339())?;
-        Ok(())
+        crate::storage::jobs_store::clear_events()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tasks::{ErrorCategory, JobMeta, NewJob, NewTask, OperationKind, TaskError};
 
     fn now() -> String {
         chrono::Utc::now().to_rfc3339()
-    }
-
-    fn job(conn: &Connection, id: &str, parent: &str, app: &str, title: &str) {
-        tasks::enqueue_job_with(
-            conn,
-            &NewJob {
-                id: id.into(),
-                kind: "user".into(),
-                owner_scope: String::new(),
-                input_revision: String::new(),
-                deadline_at: String::new(),
-            },
-            &JobMeta {
-                parent_id: parent.into(),
-                app: app.into(),
-                operation: "test_op".into(),
-                title: title.into(),
-                ..Default::default()
-            },
-            &now(),
-        )
-        .unwrap();
-    }
-
-    /// Enqueue one single-attempt task and drive it to `outcome`
-    /// ("completed", "failed" or "queued").
-    fn task(conn: &Connection, job_id: &str, id: &str, operation: &str, outcome: &str) {
-        tasks::enqueue_task(
-            conn,
-            &NewTask {
-                id: id.into(),
-                job_id: job_id.into(),
-                operation: operation.into(),
-                dedupe_key: String::new(),
-                priority: 100,
-                input_ref: String::new(),
-                input_hash: String::new(),
-                source_revision: String::new(),
-                role_snapshot: String::new(),
-                max_attempts: 1,
-            },
-            &now(),
-        )
-        .unwrap();
-        if outcome == "queued" {
-            tasks::refresh_job_state(conn, job_id, &now()).unwrap();
-            return;
-        }
-        let pool = tasks::pool_for_operation(operation);
-        let claimed = tasks::claim_next_in(conn, &[pool], "worker", 30, &now())
-            .unwrap()
-            .expect("claimed");
-        assert_eq!(claimed.id, id);
-        if outcome == "completed" {
-            tasks::complete_claimed(conn, &claimed, "ok", &now()).unwrap();
-        } else {
-            tasks::fail_claimed(
-                conn,
-                &claimed,
-                OperationKind::Summarization,
-                &TaskError::new(ErrorCategory::AuthOrQuota, "provider said no"),
-                &now(),
-            )
-            .unwrap();
-        }
-    }
-
-    #[test]
-    fn jobs_list_active_first_with_counts_filters_detail_and_retry() {
-        let store = Store::memory().unwrap();
-        let conn = &store.conn;
-        job(conn, "j-done", "", "atlas", "Done cycle");
-        task(conn, "j-done", "t-done", "summarization", "completed");
-        job(conn, "j-part", "", "brain", "Graph summary");
-        task(conn, "j-part", "t-ok", "summarization", "completed");
-        task(conn, "j-part", "t-bad", "summarization", "failed");
-        job(conn, "j-net", "", "tools", "Lookup");
-        task(conn, "j-net", "t-net", "osint_collect", "failed");
-        job(conn, "j-wait", "", "atlas", "Queued cycle");
-        task(conn, "j-wait", "t-wait", "summarization", "queued");
-        tasks::ensure_service_job(conn, "svc-x", "index", "Local index", &now()).unwrap();
-        job(conn, "j-child", "j-part", "brain", "Phase");
-
-        let rows = store.list_jobs(&JobFilter::default(), 50).unwrap();
-        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids[0], "j-wait", "active work first: {ids:?}");
-        assert_eq!(*ids.last().unwrap(), "svc-x", "service health last");
-        assert!(
-            !ids.contains(&"j-child"),
-            "children live under their parent"
-        );
-        let part = rows.iter().find(|r| r.id == "j-part").unwrap();
-        assert_eq!(part.state, "partial");
-        assert_eq!(part.children, 1);
-
-        let counts = store.job_counts().unwrap();
-        assert_eq!(counts.queued, 1);
-        assert_eq!(counts.failed, 2);
-        assert_eq!(counts.completed_recent, 1);
-
-        let failed = store
-            .list_jobs(
-                &JobFilter {
-                    status: JobStatusFilter::Failed,
-                    ..Default::default()
-                },
-                50,
-            )
-            .unwrap();
-        assert_eq!(failed.len(), 2);
-        let text = store
-            .list_jobs(
-                &JobFilter {
-                    text: "graph".into(),
-                    ..Default::default()
-                },
-                50,
-            )
-            .unwrap();
-        assert_eq!(text.len(), 1);
-
-        let detail = store.job_detail("j-part", 10).unwrap().unwrap();
-        assert_eq!(detail.task_total, 2);
-        assert_eq!(detail.attempts.len(), 2);
-        assert_eq!(detail.children.len(), 1);
-        assert_eq!(detail.retryable, 1);
-        assert!(detail.job.error_summary.contains("provider said no"));
-        // A network lookup has no durable worker: no misleading Retry.
-        assert_eq!(store.job_detail("j-net", 10).unwrap().unwrap().retryable, 0);
-        assert_eq!(store.retry_failed_tasks("j-net").unwrap(), 0);
-
-        // Retry requeues only the failed child task; completed work stays.
-        assert_eq!(store.retry_failed_tasks("j-part").unwrap(), 1);
-        let states: Vec<(String, String, i64)> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, state, attempts FROM argos_tasks WHERE job_id='j-part' ORDER BY id",
-                )
-                .unwrap();
-            let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            rows
-        };
-        assert_eq!(
-            states,
-            vec![
-                ("t-bad".to_string(), "queued".to_string(), 0),
-                ("t-ok".to_string(), "completed".to_string(), 1)
-            ]
-        );
-        assert_eq!(store.get_job("j-part").unwrap().unwrap().state, "queued");
-        // The retry is visible in Logs, correlated with the job.
-        let events = store
-            .list_events(
-                &EventFilter {
-                    job_id: "j-part".into(),
-                    ..Default::default()
-                },
-                10,
-            )
-            .unwrap();
-        assert!(events.iter().any(|e| e.event_type == "job.retry"));
-    }
-
-    #[test]
-    fn active_time_is_live_for_open_attempts_and_unavailable_only_without_a_start() {
-        let store = Store::memory().unwrap();
-        let conn = &store.conn;
-        let t0 = chrono::Utc::now() - chrono::Duration::seconds(90);
-        job(conn, "j-live", "", "atlas", "Atlas news cycle");
-        tasks::enqueue_task(
-            conn,
-            &NewTask {
-                id: "t-live".into(),
-                job_id: "j-live".into(),
-                operation: "index_upsert".into(),
-                dedupe_key: String::new(),
-                priority: 100,
-                input_ref: String::new(),
-                input_hash: String::new(),
-                source_revision: String::new(),
-                role_snapshot: String::new(),
-                max_attempts: 3,
-            },
-            &t0.to_rfc3339(),
-        )
-        .unwrap();
-        let pool = tasks::pool_for_operation("index_upsert");
-        let claimed = tasks::claim_next_in(conn, &[pool], "worker", 600, &t0.to_rfc3339())
-            .unwrap()
-            .expect("claimed");
-        tasks::refresh_job_state(conn, "j-live", &t0.to_rfc3339()).unwrap();
-        let row = store.get_job("j-live").unwrap().unwrap();
-        assert_eq!(row.attempt_rows, 1);
-        assert!(!row.open_attempt_started.is_empty());
-        let live = row
-            .active_now(chrono::Utc::now())
-            .expect("live active time");
-        assert!((89_000..120_000).contains(&live), "live span {live}");
-        // Closing the attempt freezes the durable duration.
-        let t1 = (t0 + chrono::Duration::seconds(30)).to_rfc3339();
-        tasks::complete_claimed(conn, &claimed, "ok", &t1).unwrap();
-        tasks::refresh_job_state(conn, "j-live", &t1).unwrap();
-        let row = store.get_job("j-live").unwrap().unwrap();
-        assert_eq!(row.active_now(chrono::Utc::now()), Some(30_000));
-        // In-process job without task attempts: its run is the active span.
-        job(conn, "j-inproc", "", "brain", "Graph summary");
-        store
-            .set_job_progress("j-inproc", "running", "explanation", 0, None, "")
-            .unwrap();
-        let row = store.get_job("j-inproc").unwrap().unwrap();
-        assert!(row.active_now(chrono::Utc::now()).is_some());
-        // Never started: Unavailable, not zero.
-        job(conn, "j-queued", "", "intel", "Queued");
-        let row = store.get_job("j-queued").unwrap().unwrap();
-        assert_eq!(row.active_now(chrono::Utc::now()), None);
-        assert_eq!(
-            format_duration(row.active_now(chrono::Utc::now())),
-            "Unavailable"
-        );
-    }
-
-    #[test]
-    fn timing_is_unavailable_not_zero_and_expired_event_detail_is_explained() {
-        let store = Store::memory().unwrap();
-        let conn = &store.conn;
-        let old = (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
-        tasks::enqueue_job_with(
-            conn,
-            &NewJob {
-                id: "j-old".into(),
-                kind: "user".into(),
-                owner_scope: String::new(),
-                input_revision: String::new(),
-                deadline_at: String::new(),
-            },
-            &JobMeta {
-                app: "atlas".into(),
-                title: "Old cycle".into(),
-                ..Default::default()
-            },
-            &old,
-        )
-        .unwrap();
-        let row = store.get_job("j-old").unwrap().unwrap();
-        assert_eq!(row.active_ms, None);
-        assert_eq!(format_duration(row.active_ms), "Unavailable");
-        assert_eq!(format_duration(row.queue_ms), "Unavailable");
-        assert_eq!(format_duration(Some(65_000)), "1m 05s");
-        let detail = store.job_detail("j-old", 10).unwrap().unwrap();
-        assert!(
-            detail.events_expired,
-            "no events past retention is explained"
-        );
-
-        job(conn, "j-new", "", "atlas", "New cycle");
-        job(conn, "j-new-phase", "j-new", "atlas", "Phase");
-        store
-            .record_event(&NewEvent {
-                app: "atlas".into(),
-                message: "phase note".into(),
-                job_id: "j-new-phase".into(),
-                ..Default::default()
-            })
-            .unwrap();
-        let fresh = store.job_detail("j-new", 10).unwrap().unwrap();
-        assert_eq!(
-            fresh.job.events, 1,
-            "descendant events count toward the job"
-        );
-        assert!(!fresh.events_expired);
-        let counts = store.event_counts().unwrap();
-        assert_eq!(counts.info, 1);
-        assert_eq!(store.event_apps().unwrap(), vec!["atlas".to_string()]);
-        // Clearing events never deletes jobs.
-        assert_eq!(store.clear_events().unwrap(), 1);
-        assert!(store.get_job("j-new").unwrap().is_some());
     }
 }

@@ -17,7 +17,7 @@ use super::trace::InvestigationEvent;
 use crate::intel_recon::ReportMode;
 use crate::osint::{Executor, ProviderKeys};
 use crate::provider::SettingsFile;
-use crate::store::Store;
+use crate::recon::backend::ReconStore;
 
 /// Execution runtime configuration for the shared harness.
 #[derive(Clone)]
@@ -33,13 +33,20 @@ pub struct InvestigationRuntime {
 }
 
 /// Orchestrates an incremental execution step in the shared investigation harness.
-pub async fn execute_harness_step(store: &Store, runtime: &InvestigationRuntime) -> Result<bool> {
+/// Storage goes through [`ReconStore`]: SQLite, or the SurrealDB repository
+/// when the process selected it (`ReconStore::open`); never both.
+pub async fn execute_harness_step(
+    store: &ReconStore,
+    runtime: &InvestigationRuntime,
+) -> Result<bool> {
     if runtime.cancel.load(Ordering::Relaxed) {
         return Ok(false);
     }
 
     // 1. Fetch pending tasks
-    let tasks = store.list_investigation_tasks(&runtime.investigation_id)?;
+    let tasks = store
+        .list_investigation_tasks(&runtime.investigation_id)
+        .await?;
     let ready_task = tasks
         .into_iter()
         .find(|t| t.status == TaskStatus::Planned || t.status == TaskStatus::Ready);
@@ -50,33 +57,31 @@ pub async fn execute_harness_step(store: &Store, runtime: &InvestigationRuntime)
     };
 
     // 2. Task admission check
-    let deps = store.get_task_dependencies(&task.id)?;
-    let pending_deps = deps
-        .iter()
-        .filter(|dep_id| {
-            if let Ok(Some(dep_task)) = store.get_investigation_task(dep_id) {
-                !dep_task.status.is_terminal()
-            } else {
-                false
+    let deps = store.get_task_dependencies(&task.id).await?;
+    let mut pending_deps = 0;
+    for dep_id in &deps {
+        if let Ok(Some(dep_task)) = store.get_investigation_task(dep_id).await {
+            if !dep_task.status.is_terminal() {
+                pending_deps += 1;
             }
-        })
-        .count();
+        }
+    }
 
     let admission = validate_task_admission(&task, pending_deps);
     if !admission.is_passed() {
         task.status = TaskStatus::Deferred;
         task.terminal_reason = "dependencies pending or limits reached".into();
-        store.insert_investigation_task(&task)?;
+        store.insert_investigation_task(&task).await?;
         return Ok(false);
     }
 
     // 3. Mark task running
     task.status = TaskStatus::Running;
     task.attempts += 1;
-    store.insert_investigation_task(&task)?;
+    store.insert_investigation_task(&task).await?;
 
     // Record task started event
-    let seq = store.next_event_sequence(&runtime.investigation_id)?;
+    let seq = store.next_event_sequence(&runtime.investigation_id).await?;
     let ev = InvestigationEvent::new(
         &runtime.investigation_id,
         seq,
@@ -90,14 +95,14 @@ pub async fn execute_harness_step(store: &Store, runtime: &InvestigationRuntime)
         &task.task_id,
         task.revision,
     );
-    store.insert_investigation_event(&ev)?;
+    store.insert_investigation_event(&ev).await?;
 
     // 4. Execute tool if applicable
     let preferred = InvestigationPattern::detect(&task.objective, &[]).preferred_tools();
     let tool_id = preferred.first().copied().unwrap_or("firecrawl_search");
 
     let policy = SurfacePolicy::for_surface(runtime.surface);
-    let enabled = store.tool_enabled(tool_id).unwrap_or(true);
+    let enabled = store.tool_enabled(tool_id).await.unwrap_or(true);
     let proposal = super::contracts::CallProposal {
         task_id: task.task_id.clone(),
         directive_id: task.directive_id.clone(),
@@ -114,7 +119,7 @@ pub async fn execute_harness_step(store: &Store, runtime: &InvestigationRuntime)
     if !preflight.is_passed() {
         task.status = TaskStatus::Failed;
         task.terminal_reason = format!("Preflight rejected tool {tool_id}");
-        store.insert_investigation_task(&task)?;
+        store.insert_investigation_task(&task).await?;
         return Ok(true);
     }
 
@@ -140,7 +145,7 @@ pub async fn execute_harness_step(store: &Store, runtime: &InvestigationRuntime)
             );
 
             for passage in &passages {
-                store.insert_evidence_passage(passage)?;
+                store.insert_evidence_passage(passage).await?;
             }
 
             // 6. Assess claims
@@ -162,14 +167,14 @@ pub async fn execute_harness_step(store: &Store, runtime: &InvestigationRuntime)
                 rationale: outcome.rationale,
                 created_at: Utc::now().to_rfc3339(),
             };
-            store.insert_claim_assessment(&assessment)?;
+            store.insert_claim_assessment(&assessment).await?;
 
             // 7. Complete task
             task.status = TaskStatus::Completed;
             task.output_ref = format!("passages:{}", passages.len());
-            store.insert_investigation_task(&task)?;
+            store.insert_investigation_task(&task).await?;
 
-            let seq2 = store.next_event_sequence(&runtime.investigation_id)?;
+            let seq2 = store.next_event_sequence(&runtime.investigation_id).await?;
             let ev2 = InvestigationEvent::new(
                 &runtime.investigation_id,
                 seq2,
@@ -187,14 +192,14 @@ pub async fn execute_harness_step(store: &Store, runtime: &InvestigationRuntime)
                 &task.task_id,
                 task.revision,
             );
-            store.insert_investigation_event(&ev2)?;
+            store.insert_investigation_event(&ev2).await?;
 
             Ok(true)
         }
         Err(err) => {
             task.status = TaskStatus::Failed;
             task.terminal_reason = err.to_string();
-            store.insert_investigation_task(&task)?;
+            store.insert_investigation_task(&task).await?;
             Ok(true)
         }
     }

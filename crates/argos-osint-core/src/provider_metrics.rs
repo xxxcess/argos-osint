@@ -129,77 +129,31 @@ pub struct StoredCapacityRow {
     pub quota_source: String,
 }
 
-/// Publish a snapshot supplied by the orchestration companion.
-///
-/// The companion is the only writer; this crate replaces the cache and returns
-/// the row count so callers can confirm the write took effect.
-pub fn cache_capacity_rows(
-    conn: &rusqlite::Connection,
+/// [`cache_capacity_rows`] on the SurrealDB repository
+/// (`storage::profile_view::cache_capacity_rows`).
+#[cfg(feature = "surreal")]
+pub async fn cache_capacity_rows_on(
+    repo: &crate::storage::repo::Repository,
     rows: &[StoredCapacityRow],
 ) -> anyhow::Result<usize> {
-    conn.execute("DELETE FROM telemetry_provider_capacity", [])?;
-    let mut written = 0usize;
-    for row in rows {
-        conn.execute(
-            "INSERT OR REPLACE INTO telemetry_provider_capacity
-             (captured_at, provider, quota_group, scope, sends_60s, rpm_limit, pace_per_min,
-              active, max_concurrency, queued, oldest_wait_ms, cooldown_ms, quota_source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            rusqlite::params![
-                row.captured_at,
-                row.provider,
-                row.quota_group,
-                row.scope,
-                row.sends_60s,
-                row.rpm_limit,
-                row.pace_per_min,
-                row.active,
-                row.max_concurrency,
-                row.queued,
-                row.oldest_wait_ms,
-                row.cooldown_ms,
-                row.quota_source,
-            ],
-        )?;
-        written += 1;
-    }
-    Ok(written)
+    crate::storage::profile_view::cache_capacity_rows(repo.db(), rows).await
 }
 
-/// Load the most recent cached snapshot. Returns an unavailable snapshot when
-/// the companion has not published one.
-pub fn capacity_snapshot(conn: &rusqlite::Connection) -> CapacitySnapshot {
-    let mut stmt = match conn.prepare(
-        "SELECT captured_at, provider, quota_group, scope, sends_60s, rpm_limit, pace_per_min,
-                active, max_concurrency, queued, oldest_wait_ms, cooldown_ms, quota_source
-         FROM telemetry_provider_capacity ORDER BY captured_at DESC, provider, quota_group, scope",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return CapacitySnapshot::unavailable(),
-    };
-    let rows = stmt.query_map([], |row| {
-        Ok(StoredCapacityRow {
-            captured_at: row.get(0)?,
-            provider: row.get(1)?,
-            quota_group: row.get(2)?,
-            scope: row.get(3)?,
-            sends_60s: row.get(4)?,
-            rpm_limit: row.get(5)?,
-            pace_per_min: row.get(6)?,
-            active: row.get(7)?,
-            max_concurrency: row.get(8)?,
-            queued: row.get(9)?,
-            oldest_wait_ms: row.get(10)?,
-            cooldown_ms: row.get(11)?,
-            quota_source: row.get(12)?,
-        })
-    });
-    let Ok(rows) = rows else {
-        return CapacitySnapshot::unavailable();
-    };
+/// [`capacity_snapshot`] on the SurrealDB repository; unavailable on a
+/// storage error, as on SQLite.
+#[cfg(feature = "surreal")]
+pub async fn capacity_snapshot_on(repo: &crate::storage::repo::Repository) -> CapacitySnapshot {
+    crate::storage::profile_view::capacity_snapshot(repo.db())
+        .await
+        .unwrap_or_else(|_| CapacitySnapshot::unavailable())
+}
+
+/// Builds the snapshot from stored rows, newest capture first (the order
+/// `capacity_snapshot` reads them in). No rows is unavailable, never zero.
+pub fn capacity_from_rows(rows: Vec<StoredCapacityRow>) -> CapacitySnapshot {
     let mut capacity: Vec<CapacityRow> = Vec::new();
     let mut latest_captured_at = String::new();
-    for row in rows.flatten() {
+    for row in rows {
         if row.captured_at > latest_captured_at {
             latest_captured_at = row.captured_at.clone();
         }
@@ -233,47 +187,6 @@ pub fn capacity_snapshot(conn: &rusqlite::Connection) -> CapacitySnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn memory() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("schema_telemetry.sql"))
-            .unwrap();
-        conn
-    }
-
-    #[test]
-    fn missing_companion_snapshot_is_unavailable_not_zero() {
-        let conn = memory();
-        let snapshot = capacity_snapshot(&conn);
-        assert!(!snapshot.available);
-        assert!(snapshot.capacity.is_empty());
-    }
-
-    #[test]
-    fn cached_rows_become_an_available_snapshot() {
-        let conn = memory();
-        let rows = vec![StoredCapacityRow {
-            captured_at: "2026-10-09T12:00:00Z".into(),
-            provider: "openrouter".into(),
-            quota_group: "openrouter".into(),
-            scope: "*".into(),
-            sends_60s: 12,
-            rpm_limit: Some(60),
-            pace_per_min: Some(12.0),
-            active: 2,
-            max_concurrency: Some(4),
-            queued: 1,
-            oldest_wait_ms: Some(320),
-            cooldown_ms: None,
-            quota_source: "provider_docs".into(),
-        }];
-        assert_eq!(cache_capacity_rows(&conn, &rows).unwrap(), 1);
-        let snapshot = capacity_snapshot(&conn);
-        assert!(snapshot.available);
-        assert_eq!(snapshot.capacity.len(), 1);
-        assert_eq!(snapshot.capacity[0].sends_60s, 12);
-        assert_eq!(snapshot.capacity[0].rpm_limit, Some(60));
-    }
 
     #[test]
     fn quota_setting_effective_rpm_prefers_the_local_override() {

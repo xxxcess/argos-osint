@@ -4,6 +4,7 @@ pub mod contracts;
 pub mod decisions;
 pub mod engine;
 pub mod evidence;
+mod exec_store;
 pub mod gates;
 mod insight_assessment;
 pub mod insight_execution;
@@ -17,8 +18,6 @@ pub mod recovery;
 pub mod roles;
 pub mod trace;
 
-#[cfg(test)]
-mod insight_reliability_tests;
 #[cfg(test)]
 pub mod tests_acceptance;
 

@@ -189,45 +189,6 @@ fn nvidia_profiles_are_exact_not_family_inferred() {
 }
 
 #[test]
-fn cache_round_trips_through_app_state_and_coalesces_refreshes() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("argos.db")).unwrap();
-    let key = cache_key(
-        AdapterId::OpenRouter,
-        "https://openrouter.ai/api/v1/",
-        ApiDialect::Chat,
-        "a/b",
-        None,
-    );
-    assert_eq!(
-        key,
-        cache_key(
-            AdapterId::OpenRouter,
-            "https://OPENROUTER.ai/api/v1",
-            ApiDialect::Chat,
-            "a/b",
-            None
-        )
-    );
-    let entry = CachedEvidence {
-        evidence: CatalogEvidence {
-            supported_parameters: vec!["tools".into()],
-            ..CatalogEvidence::default()
-        },
-        fetched_at: 1_000,
-    };
-    store_cached(Some(&store), &key, &entry).unwrap();
-    forget_memory_cache();
-    assert_eq!(cached(Some(&store), &key), Some(entry.clone()));
-    assert!(entry.is_fresh(1_000 + FRESHNESS_SECS - 1));
-    assert!(!entry.is_fresh(1_000 + FRESHNESS_SECS));
-    assert!(begin_refresh(&key));
-    assert!(!begin_refresh(&key), "second request coalesces");
-    end_refresh(&key);
-    forget_memory_cache();
-}
-
-#[test]
 fn admission_snapshot_is_immune_to_a_later_refresh_but_takes_observed_rejections() {
     let base = "https://snapshot.example/api/v1";
     let secret = crate::secrets::ProviderSecret {

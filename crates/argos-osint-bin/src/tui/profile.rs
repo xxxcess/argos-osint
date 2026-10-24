@@ -14,16 +14,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use argos_osint_core::profile_stats::{self, ProfileSnapshot, StatFilters};
-#[cfg(test)]
-use argos_osint_core::store::Store;
-
 use super::app::App;
 use super::components::{self, ScrollPane};
 use super::profile_charts as charts;
 use super::profile_components::{self as panels, Kpi};
 use super::profile_layout::{DashboardPage, LayoutResult, ReportLayout};
 use super::theme;
+use argos_osint_core::profile_stats::{self, ProfileSnapshot, StatFilters};
 
 /// Which Profile tab is on screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1096,6 +1093,9 @@ pub struct ProfileView {
     pub filter_edit: String,
     /// The bounded option lists for every dimension.
     pub options: Vec<(String, Vec<String>)>,
+    /// The run whose investigation an attention action is looking up on
+    /// SurrealDB; a lookup result for any other run is dropped.
+    pub pending_run_owner: Option<String>,
 }
 
 impl Default for ProfileView {
@@ -1136,6 +1136,7 @@ impl Default for ProfileView {
             filter_popup: None,
             filter_edit: String::new(),
             options: Vec::new(),
+            pending_run_owner: None,
         }
     }
 }
@@ -1246,25 +1247,6 @@ impl ProfileView {
             }
         }
         choices
-    }
-
-    /// Reads one snapshot. Read-only: the writer is never locked.
-    #[cfg(test)]
-    pub fn reload(&mut self, store: &Store) {
-        match store.profile_snapshot(&self.filters.period, &self.filters) {
-            Ok(snapshot) => {
-                self.accept_snapshot(snapshot);
-                self.error = None;
-                self.loaded_at = Some(Instant::now());
-            }
-            Err(err) => {
-                // A failed read keeps the last good snapshot and says so.
-                self.error = Some(format!("Could not read profile: {err:#}"));
-            }
-        }
-        if self.options.is_empty() {
-            self.options = store.profile_filter_options();
-        }
     }
 
     /// Automatic snapshots refresh every 20 seconds, throttled by the caller.
@@ -1924,11 +1906,19 @@ fn open_selected_owner(app: &mut App) {
     }
 }
 fn open_run_owner(app: &mut App, run_id: &str) {
-    match app.store.get_run(run_id) {
-        Ok(Some(run)) => {
+    // The run lookup reads the repository on a plain worker thread
+    // (never the SQLite store); `ProfileRunOwner` opens the thread.
+    app.lookup_run_owner(run_id.to_string());
+}
+
+/// The run lookup's result: open its investigation, or say why not. Shared
+/// by the SQLite and SurrealDB paths.
+pub(crate) fn open_run_thread(app: &mut App, outcome: Result<Option<String>, String>) {
+    match outcome {
+        Ok(Some(thread_id)) => {
             app.profile.report = None;
             app.select(super::app::ModuleId::Recon.index());
-            if let Err(error) = app.open_thread(&run.thread_id) {
+            if let Err(error) = app.open_thread(&thread_id) {
                 app.status = format!("Could not open investigation: {error}");
             }
         }

@@ -10,6 +10,9 @@ use crate::osint::{self, ProviderKeys};
 use crate::secrets::ProviderSecret;
 use crate::store::{AtlasArticleRow, Store};
 
+use super::body_db::BodyDb;
+use super::ArticleBodyRow;
+
 use super::validate::{validate_article_body, BodyQuality};
 
 /// Default cooldown after a terminal retrieval failure.
@@ -105,39 +108,63 @@ pub fn enqueue_article_body(
         &article.source_domain,
         &article.source_name,
     )?;
+    let outcome = enqueue_decision(body, force_refresh);
+    if let EnqueueOutcome::Start { body_id, .. } = &outcome {
+        if force_refresh {
+            store.clear_article_body_content(body_id)?;
+        } else {
+            store.update_article_body_state(body_id, "running")?;
+        }
+    }
+    Ok(outcome)
+}
 
+/// `enqueue_article_body` against either store.
+pub async fn enqueue_on(
+    db: BodyDb<'_>,
+    article: &AtlasArticleRow,
+    force_refresh: bool,
+) -> Result<EnqueueOutcome> {
+    let body = db.ensure(article).await?;
+    let outcome = enqueue_decision(body, force_refresh);
+    if let EnqueueOutcome::Start { body_id, .. } = &outcome {
+        if force_refresh {
+            db.clear(body_id).await?;
+        } else {
+            db.set_state(body_id, "running").await?;
+        }
+    }
+    Ok(outcome)
+}
+
+fn enqueue_decision(body: ArticleBodyRow, force_refresh: bool) -> EnqueueOutcome {
     let usable = matches!(body.quality.as_str(), "complete" | "partial" | "uncertain")
         && !body.body_markdown.trim().is_empty();
 
     if usable && !force_refresh {
-        return Ok(EnqueueOutcome::Cached(body.id));
+        return EnqueueOutcome::Cached(body.id);
     }
 
     if body.state == "running" {
-        return Ok(EnqueueOutcome::AlreadyRunning {
+        return EnqueueOutcome::AlreadyRunning {
             body_id: body.id,
             generation: body.body_version,
-        });
+        };
     }
 
     if !force_refresh && !body.retry_after.is_empty() {
         if let Ok(until) = chrono::DateTime::parse_from_rfc3339(&body.retry_after) {
             if until > chrono::Utc::now() {
-                return Ok(EnqueueOutcome::Cooldown {
+                return EnqueueOutcome::Cooldown {
                     body_id: body.id,
                     retry_after: body.retry_after,
                     reason: body.quality_rationale,
-                });
+                };
             }
         }
     }
 
-    if force_refresh {
-        store.clear_article_body_content(&body.id)?;
-    } else {
-        store.update_article_body_state(&body.id, "running")?;
-    }
-    Ok(EnqueueOutcome::Start {
+    EnqueueOutcome::Start {
         body_id: body.id,
         generation: if force_refresh {
             body.body_version + 1
@@ -145,7 +172,7 @@ pub fn enqueue_article_body(
             body.body_version
         },
         force_refresh,
-    })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -186,8 +213,10 @@ pub async fn fetch_article_body(
     cancel: Arc<AtomicBool>,
     on_event: impl FnMut(BodyFetchEvent) + Send,
 ) -> Result<()> {
+    let _ = db_path;
+    let repo = crate::storage::runtime::repository().await?;
     fetch_article_body_with_runtime(
-        db_path,
+        BodyDb::Surreal(&repo),
         body_id,
         title,
         brief,
@@ -204,7 +233,7 @@ pub async fn fetch_article_body(
 }
 
 pub(crate) async fn fetch_article_body_with_runtime(
-    db_path: &std::path::Path,
+    db: BodyDb<'_>,
     body_id: &str,
     title: &str,
     brief: &str,
@@ -218,9 +247,9 @@ pub(crate) async fn fetch_article_body_with_runtime(
     runtime: Option<&super::worker::JobRuntime>,
 ) -> Result<()> {
     let (generation, article_id, url, source_domain) = {
-        let store = Store::open(db_path)?;
-        let body = store
-            .article_body_by_id(body_id)?
+        let body = db
+            .body(body_id)
+            .await?
             .ok_or_else(|| anyhow!("article body {body_id} missing"))?;
         (
             body.body_version + i64::from(force_refresh),
@@ -247,21 +276,20 @@ pub(crate) async fn fetch_article_body_with_runtime(
 
     for route in body_fetch_routes() {
         if cancel.load(Ordering::Relaxed) {
-            let store = Store::open(db_path)?;
-            store.update_article_body_state(body_id, "idle")?;
+            db.set_state(body_id, "idle").await?;
             return Ok(());
         }
         if is_sociavault(route) {
-            let store = Store::open(db_path)?;
-            let _ = store.insert_retrieval_attempt(
-                body_id,
-                route,
-                &url,
-                "skipped",
-                "SociaVault excluded from automatic article-body acquisition",
-                "",
-                generation,
-            )?;
+            let _ = db
+                .insert_attempt(
+                    body_id,
+                    route,
+                    &url,
+                    "skipped",
+                    "SociaVault excluded from automatic article-body acquisition",
+                    generation,
+                )
+                .await?;
             continue;
         }
 
@@ -280,10 +308,9 @@ pub(crate) async fn fetch_article_body_with_runtime(
             generation,
         });
 
-        let attempt_id = {
-            let store = Store::open(db_path)?;
-            store.insert_retrieval_attempt(body_id, route, &url, "running", "", "", generation)?
-        };
+        let attempt_id = db
+            .insert_attempt(body_id, route, &url, "running", "", generation)
+            .await?;
         attempted.push(route.to_string());
 
         let outcome = match route {
@@ -308,7 +335,6 @@ pub(crate) async fn fetch_article_body_with_runtime(
             other => Err(anyhow!("route {other} not applicable")),
         };
 
-        let store = Store::open(db_path)?;
         match outcome {
             Ok(fetched) => {
                 // Persist acquisition before cleanup, linked to this exact retrieval attempt.
@@ -319,18 +345,17 @@ pub(crate) async fn fetch_article_body_with_runtime(
                 );
                 source.attempt_id = attempt_id.clone();
                 source.raw_hash = Some(crate::nlp::cache::hash(&fetched.markdown));
-                crate::nlp::cache::register(
-                    &store.conn,
-                    "article",
+                db.register(
                     &article_id,
                     &source,
                     Some(&fetched.markdown),
                     "acquisition-v1",
-                )?;
+                )
+                .await?;
                 let validation = validate_article_body(&fetched.markdown, title, &url);
-                store.app_state_set(&format!("article-acquisition:{attempt_id}"),&json!({"complete_story":validation.quality==BodyQuality::Complete && !fetched.known_truncation,"known_truncation":fetched.known_truncation,"artifact_hash":source.prose_hash}).to_string())?;
+                db.app_state_set(&format!("article-acquisition:{attempt_id}"),&json!({"complete_story":validation.quality==BodyQuality::Complete && !fetched.known_truncation,"known_truncation":fetched.known_truncation,"artifact_hash":source.prose_hash}).to_string()).await?;
                 let reason = validation.rationale.clone();
-                store.finish_retrieval_attempt(
+                db.finish_attempt(
                     &attempt_id,
                     match validation.quality {
                         BodyQuality::Complete | BodyQuality::Partial | BodyQuality::Uncertain => {
@@ -339,8 +364,8 @@ pub(crate) async fn fetch_article_body_with_runtime(
                         BodyQuality::Unavailable => "failed",
                     },
                     &reason,
-                    "",
-                )?;
+                )
+                .await?;
                 on_event(BodyFetchEvent::Attempt {
                     article_id: article_id.clone(),
                     body_id: body_id.into(),
@@ -352,9 +377,8 @@ pub(crate) async fn fetch_article_body_with_runtime(
 
                 match validation.quality {
                     BodyQuality::Complete => {
-                        drop(store);
                         commit_refined_body(
-                            db_path,
+                            db,
                             body_id,
                             title,
                             &brief,
@@ -389,7 +413,7 @@ pub(crate) async fn fetch_article_body_with_runtime(
             }
             Err(err) => {
                 let reason = err.to_string();
-                store.finish_retrieval_attempt(&attempt_id, "failed", &reason, "")?;
+                db.finish_attempt(&attempt_id, "failed", &reason).await?;
                 on_event(BodyFetchEvent::Attempt {
                     article_id: article_id.clone(),
                     body_id: body_id.into(),
@@ -404,7 +428,7 @@ pub(crate) async fn fetch_article_body_with_runtime(
 
     if !best_partial.is_empty() {
         commit_refined_body(
-            db_path,
+            db,
             body_id,
             title,
             &brief,
@@ -426,15 +450,14 @@ pub(crate) async fn fetch_article_body_with_runtime(
         return Ok(());
     }
 
-    let store = Store::open(db_path)?;
-
     let retry_after =
         (chrono::Utc::now() + chrono::Duration::seconds(FAILURE_COOLDOWN_SECS)).to_rfc3339();
     let rationale = format!(
         "All eligible body routes exhausted ({})",
         attempted.join(", ")
     );
-    store.mark_article_body_failed(body_id, &rationale, &retry_after, "", "unavailable")?;
+    db.mark_failed(body_id, &rationale, &retry_after, "", "unavailable")
+        .await?;
     on_event(BodyFetchEvent::Failed {
         article_id,
         body_id: body_id.into(),
@@ -445,7 +468,7 @@ pub(crate) async fn fetch_article_body_with_runtime(
 }
 
 async fn commit_refined_body(
-    db_path: &std::path::Path,
+    db: BodyDb<'_>,
     body_id: &str,
     title: &str,
     brief: &str,
@@ -493,20 +516,14 @@ async fn commit_refined_body(
     source.attempt_id = attempt_id.into();
     source.raw_hash = Some(crate::nlp::cache::hash(scraped_markdown));
     let context = source.context();
-    let cached = {
-        let store = Store::open(db_path)?;
-        crate::nlp::cache::register(
-            &store.conn,
-            "article",
-            article_id,
-            &source,
-            Some(scraped_markdown),
-            "validated-baseline-v1",
-        )?;
-        crate::nlp::cache::get(&store.conn, &source, &context)
-            .ok()
-            .flatten()
-    };
+    db.register(
+        article_id,
+        &source,
+        Some(scraped_markdown),
+        "validated-baseline-v1",
+    )
+    .await?;
+    let cached = db.annotation(&source, &context).await;
     let mut annotation = cached.filter(|a| a.status == crate::nlp::Status::Complete);
     if runtime
         .map(|r| r.settings.nlp.mode)
@@ -518,8 +535,7 @@ async fn commit_refined_body(
             .annotate(source.clone(), context.clone(), cancel.clone())
             .await;
         if fresh.status == crate::nlp::Status::Complete {
-            let store = Store::open(db_path)?;
-            crate::nlp::cache::put(&store.conn, &source, &context, &fresh)?;
+            db.put_annotation(&source, &context, &fresh).await?;
             annotation = Some(fresh);
         }
     }
@@ -562,20 +578,20 @@ async fn commit_refined_body(
         annotation.as_ref(),
         &refined.spans,
     ));
-    let store = Store::open(db_path)?;
     anyhow::ensure!(!cancel.load(Ordering::Acquire), "cancelled");
-    let current = store
-        .article_body_by_id(body_id)?
+    let current = db
+        .body(body_id)
+        .await?
         .ok_or_else(|| anyhow!("body removed during refinement"))?;
     anyhow::ensure!(
-        store.atlas_article(&current.run_id, article_id)?.is_some(),
+        db.article(&current.run_id, article_id).await?.is_some(),
         "article owner removed during refinement"
     );
     anyhow::ensure!(
         current.body_version == generation - i64::from(force_refresh),
         "body revision changed during refinement"
     );
-    store.commit_article_body(
+    db.commit(
         body_id,
         &refined.markdown,
         &refined.content_hash,
@@ -584,21 +600,22 @@ async fn commit_refined_body(
         resolved_url,
         tool,
         force_refresh,
-    )?;
+    )
+    .await?;
     let mut derived =
         crate::nlp::Source::derived(body_id, &generation.to_string(), &refined.markdown);
     derived.attempt_id = attempt_id.into();
     derived.raw_hash = Some(crate::nlp::cache::hash(scraped_markdown));
-    crate::nlp::cache::register(
-        &store.conn,
-        "article",
+    db.register(
         article_id,
         &derived,
         Some(scraped_markdown),
         super::clean_body::TRANSFORM,
-    )?;
-    refined.acquisition_complete = store
-        .app_state_get(&format!("article-acquisition:{attempt_id}"))?
+    )
+    .await?;
+    refined.acquisition_complete = db
+        .app_state_get(&format!("article-acquisition:{attempt_id}"))
+        .await?
         .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
         .is_some_and(|c| {
             c["complete_story"] == true
@@ -606,10 +623,11 @@ async fn commit_refined_body(
                 && c["artifact_hash"].as_str()
                     == Some(crate::nlp::cache::hash(scraped_markdown).as_str())
         });
-    store.app_state_set(
+    db.app_state_set(
         &format!("intel-clean-body:{article_id}:{generation}"),
         &serde_json::to_string(&refined)?,
-    )?;
+    )
+    .await?;
     // Emit Ready first so the cleaned body can paint while insights re-extract.
     on_event(BodyFetchEvent::Ready {
         article_id: article_id.into(),
@@ -621,13 +639,9 @@ async fn commit_refined_body(
         .map(|r| r.settings.clone())
         .unwrap_or_else(|| crate::provider::SettingsFile::load().unwrap_or_default());
     let brief_owned = runtime.is_some_and(|r| r.job_id.starts_with("intel-brief:"));
-    if let Some(body) = store.article_body_by_id(body_id)?.filter(|_| !brief_owned) {
-        if let Some(article) = store.atlas_article(&body.run_id, article_id)? {
-            if crate::investigation::insight_persist::schedule_article_refresh(
-                &store, &article, &settings, false,
-            )?
-            .is_some()
-            {
+    if let Some(body) = db.body(body_id).await?.filter(|_| !brief_owned) {
+        if let Some(article) = db.article(&body.run_id, article_id).await? {
+            if db.schedule_refresh(&article, &settings).await? {
                 on_event(BodyFetchEvent::InsightsRefreshing {
                     article_id: article_id.into(),
                     body_id: body_id.into(),

@@ -6,15 +6,11 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use anyhow::Result;
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::osint::contracts::IntelligenceCategory;
 use crate::osint::{self, ProviderKeys, ToolResult};
-use crate::provider::ReconLimits;
-use crate::recon::{Binding, PlanCall, Store};
-use crate::telemetry::{EventKind, TelemetryEvent};
+use crate::recon::{Binding, PlanCall};
 
 /// Authorship and verification state for an intelligence category within a turn.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -110,117 +106,6 @@ pub fn credentials_available(tool_id: &str, keys: &ProviderKeys) -> bool {
     }
 }
 
-/// Plan category diversity for a single directive and intelligence category.
-pub fn plan_category_diversity(
-    scope: &str,
-    generation: u32,
-    directive_index: u32,
-    category: IntelligenceCategory,
-    bindings: &[Binding],
-    keys: &ProviderKeys,
-    limits: &ReconLimits,
-    store: &Store,
-) -> CoverageRecord {
-    let ranked = IntelligenceCategory::ranked_candidates_for(category);
-    let mut candidates = Vec::new();
-    let mut planned = Vec::new();
-    let mut chosen_datasets = HashSet::new();
-
-    for &tool_id in ranked {
-        let canonical = osint::canonical_tool_id(tool_id);
-        let dataset = IntelligenceCategory::dataset_for_tool(canonical);
-        let enabled = store.tool_enabled(canonical).unwrap_or(true);
-        let has_creds = credentials_available(canonical, keys);
-        let (has_bindings, missing_reqs) = prerequisites_satisfied(canonical, bindings);
-        let cost = osint::endpoint_cost(canonical)
-            .map(|c| c.credits)
-            .unwrap_or(0);
-        let provider = osint::primary_provider(canonical).unwrap_or("public");
-
-        let mut rejection_reason = None;
-        if !enabled {
-            rejection_reason = Some("disabled in catalog".into());
-        } else if !has_creds {
-            rejection_reason = Some(format!("missing API key for {provider}"));
-        } else if !has_bindings {
-            rejection_reason = Some(format!("missing bindings: {}", missing_reqs.join(", ")));
-        } else if let Some((prov, req_cost)) =
-            limits.configured_cost_for(canonical, &serde_json::Value::Null)
-        {
-            if req_cost > 0 && store.credits_available(prov, limits).unwrap_or(0) < req_cost {
-                rejection_reason = Some(format!("credit allowance exhausted for {prov}"));
-            }
-        }
-
-        let eligible = rejection_reason.is_none();
-        candidates.push(CoverageCandidate {
-            tool_id: tool_id.to_string(),
-            canonical_id: canonical.to_string(),
-            provider: provider.to_string(),
-            dataset_id: dataset.to_string(),
-            eligible,
-            rejection_reason: rejection_reason.clone(),
-            cost_credits: cost,
-        });
-
-        if eligible && planned.len() < 2 {
-            // Prefer distinct upstream datasets
-            if planned.is_empty() || !chosen_datasets.contains(dataset) {
-                planned.push(canonical.to_string());
-                chosen_datasets.insert(dataset.to_string());
-            } else if planned.len() == 1 && chosen_datasets.contains(dataset) {
-                // If only same dataset is available as second candidate, record it if no distinct exists
-                planned.push(canonical.to_string());
-            }
-        }
-    }
-
-    let gap = if planned.len() < 2 {
-        if category == IntelligenceCategory::PublisherContext
-            || category == IntelligenceCategory::EmailRegistration
-        {
-            None // Single tool categories legitimately have only one tool
-        } else if planned.is_empty() {
-            Some(format!(
-                "no eligible tool for {}: {}",
-                category.as_str(),
-                candidates
-                    .iter()
-                    .filter_map(|c| c.rejection_reason.as_deref())
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ))
-        } else {
-            Some(format!(
-                "second distinct tool unavailable for {}: single tool {} planned",
-                category.as_str(),
-                planned[0]
-            ))
-        }
-    } else {
-        None
-    };
-
-    CoverageRecord {
-        scope: scope.to_string(),
-        generation,
-        directive_index,
-        category: format!("{:?}", category),
-        candidates,
-        planned_tools: planned,
-        attempted_tools: Vec::new(),
-        successful_tools: Vec::new(),
-        provider_datasets: chosen_datasets.into_iter().collect(),
-        evidence_ids: Vec::new(),
-        independent_source_groups: Vec::new(),
-        engine_query_states: Vec::new(),
-        coverage_gap: gap,
-        two_tools_attempted: false,
-        two_tools_successful: false,
-        independent_claim_support: false,
-    }
-}
-
 /// Update coverage record with executed calls and results.
 pub fn update_coverage_with_results(
     record: &mut CoverageRecord,
@@ -263,31 +148,6 @@ pub fn update_coverage_with_results(
     record.two_tools_attempted = record.attempted_tools.len() >= 2;
     record.two_tools_successful = record.successful_tools.len() >= 2;
     record.independent_claim_support = record.independent_source_groups.len() >= 2;
-}
-
-/// Save a coverage record to the `recon_coverage` table.
-pub fn save_coverage_record(store: &Store, record: &CoverageRecord) -> Result<()> {
-    let payload = serde_json::to_string(record)?;
-    let now = Utc::now().to_rfc3339();
-    let id = coverage_record_id(record);
-    store.conn.execute(
-        "INSERT INTO recon_coverage(id, scope, generation, directive_index, category, payload_json, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(scope, generation, directive_index, category) DO UPDATE SET
-           payload_json = excluded.payload_json,
-           updated_at = excluded.updated_at",
-        rusqlite::params![
-            id,
-            record.scope,
-            record.generation,
-            record.directive_index,
-            record.category,
-            payload,
-            now,
-        ],
-    )?;
-    note_coverage(store, record);
-    Ok(())
 }
 
 /// Durable id of one coverage record; the same key the table's unique index uses.
@@ -439,68 +299,6 @@ fn shortfall_label(reason: &str) -> Option<&'static str> {
     }
 }
 
-/// One `recon_stage`-adjacent row per saved coverage record. The row is keyed by
-/// the durable record id, so a save and its later update cannot both count, and
-/// it carries counts rather than prose.
-fn note_coverage(store: &Store, record: &CoverageRecord) {
-    let stats = coverage_stats(record);
-    let id = format!("coverage-{}", coverage_record_id(record));
-    let event = TelemetryEvent::new(EventKind::ReconStage)
-        .with_id(id)
-        .canonical(coverage_record_id(record))
-        .run(&record.scope)
-        .category(&record.category)
-        .mode("coverage")
-        .outcome(if stats.shortfall_reason.is_some() {
-            "coverage_gap"
-        } else {
-            "covered"
-        })
-        .reason(stats.shortfall_reason.unwrap_or_default())
-        .count(1)
-        .payload(serde_json::json!({
-            "scope": record.scope,
-            "generation": record.generation,
-            "directive_index": record.directive_index,
-            "eligible_tools": stats.eligible_tools,
-            "planned_tools": stats.planned_tools,
-            "attempted_tools": stats.attempted_tools,
-            "successful_tools": stats.successful_tools,
-            "independent_source_groups": stats.independent_source_groups,
-            "two_tools_attempted": stats.two_tools_attempted,
-            "two_tools_successful": stats.two_tools_successful,
-            "independent_claim_support": stats.independent_claim_support,
-            "eligible_for_rate": stats.eligible_for_rate,
-            "provider_datasets": record.provider_datasets.len(),
-            "shortfall_reason": stats.shortfall_reason,
-        }));
-    // Best effort: a telemetry failure never fails coverage persistence.
-    let _ = crate::telemetry::insert(&store.conn, &event);
-}
-
-/// Load all coverage records for a scope and generation.
-pub fn load_coverage_records(
-    store: &Store,
-    scope: &str,
-    generation: u32,
-) -> Result<Vec<CoverageRecord>> {
-    let mut stmt = store.conn.prepare(
-        "SELECT payload_json FROM recon_coverage WHERE scope=?1 AND generation=?2 ORDER BY directive_index, category",
-    )?;
-    let rows = stmt.query_map([scope, &generation.to_string()], |row| {
-        let json_str: String = row.get(0)?;
-        Ok(json_str)
-    })?;
-    let mut records = Vec::new();
-    for row in rows {
-        let json_str = row?;
-        if let Ok(record) = serde_json::from_str::<CoverageRecord>(&json_str) {
-            records.push(record);
-        }
-    }
-    Ok(records)
-}
-
 /// Summarize active coverage gaps for synthesis prompts or UI display.
 pub fn coverage_gaps_summary(records: &[CoverageRecord]) -> Option<String> {
     let gaps: Vec<&str> = records
@@ -517,6 +315,7 @@ pub fn coverage_gaps_summary(records: &[CoverageRecord]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use serde_json::json;
 
     #[test]
@@ -535,47 +334,6 @@ mod tests {
         let (sat, missing) = prerequisites_satisfied("blockchain_address", &bindings);
         assert!(!sat);
         assert!(!missing.is_empty());
-    }
-
-    #[test]
-    fn test_plan_category_diversity_and_persistence() {
-        let store = Store::memory().unwrap();
-        let keys = ProviderKeys {
-            firecrawl: "key".into(),
-            ..ProviderKeys::default()
-        };
-        let limits = ReconLimits::default();
-
-        let bindings = vec![Binding {
-            kind: "domain".into(),
-            value: "example.com".into(),
-            evidence_id: "e1".into(),
-            source_tool: String::new(),
-            ..Binding::default()
-        }];
-
-        let record = plan_category_diversity(
-            "run-test",
-            1,
-            0,
-            IntelligenceCategory::DomainNetwork,
-            &bindings,
-            &keys,
-            &limits,
-            &store,
-        );
-
-        assert_eq!(record.scope, "run-test");
-        assert_eq!(record.generation, 1);
-        assert_eq!(record.directive_index, 0);
-        // Public domain tools like crtsh_certificates and mnemonic_passive_dns should be planned
-        assert!(record.planned_tools.len() >= 2);
-
-        save_coverage_record(&store, &record).unwrap();
-        let loaded = load_coverage_records(&store, "run-test", 1).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].scope, "run-test");
-        assert_eq!(loaded[0].planned_tools, record.planned_tools);
     }
 
     #[test]
@@ -723,36 +481,5 @@ mod tests {
             coverage_stats(&empty).shortfall_reason,
             Some("no_eligible_tool")
         );
-    }
-
-    #[test]
-    fn test_save_coverage_record_writes_one_telemetry_row() {
-        let store = Store::memory().unwrap();
-        let record = covered_record();
-        save_coverage_record(&store, &record).unwrap();
-        // A later update of the same record must not double count.
-        let mut updated = record.clone();
-        updated.successful_tools = vec!["crtsh_certificates".into()];
-        save_coverage_record(&store, &updated).unwrap();
-
-        let id = coverage_record_id(&record);
-        let rows: i64 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM telemetry_events WHERE id = ?1",
-                [format!("coverage-{id}")],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(rows, 1, "one authoritative row per coverage record");
-        let category: String = store
-            .conn
-            .query_row(
-                "SELECT category FROM telemetry_events WHERE id = ?1",
-                [format!("coverage-{id}")],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(category, "DomainNetwork");
     }
 }

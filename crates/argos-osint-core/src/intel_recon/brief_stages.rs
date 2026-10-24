@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, ensure, Result};
 use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
-use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 use super::brief_pipeline;
@@ -738,7 +737,7 @@ fn validate_inference_selection(raw: &str, offered: &HashSet<String>) -> Result<
 /// Bounded semantic selection sees candidate text/reasoning only, never the
 /// article body again. All returned IDs resolve to already validated objects.
 async fn dedup_inferences(
-    db_path: &Path,
+    st: &dyn StageStore,
     backend: &mut dyn StageBackend,
     ctx: &StageContext,
     cancel: &Arc<AtomicBool>,
@@ -776,7 +775,7 @@ async fn dedup_inferences(
             })
             .collect();
         let raw = generate(
-            db_path,
+            st,
             backend,
             cancel,
             StageRequest {
@@ -1008,45 +1007,6 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-fn article_for(store: &Store, article_id: &str) -> Result<AtlasArticleRow> {
-    let run: Option<String> = store
-        .conn
-        .query_row(
-            "SELECT run_id FROM atlas_articles WHERE article_id=?1 ORDER BY seen_at DESC LIMIT 1",
-            [article_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let run = run.ok_or_else(|| anyhow!("article {article_id} no longer exists"))?;
-    store
-        .atlas_article(&run, article_id)?
-        .ok_or_else(|| anyhow!("article {article_id} no longer exists"))
-}
-
-fn stage_output(store: &Store, job_id: &str, operation: &str) -> Result<Value> {
-    let raw: String = store
-        .conn
-        .query_row(
-            "SELECT output_json FROM intel_brief_stage_outputs WHERE task_id=?1",
-            [brief_pipeline::task_id(job_id, operation)],
-            |r| r.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| anyhow!("{operation} output missing"))?;
-    Ok(serde_json::from_str(&raw)?)
-}
-
-fn article_id_of(claimed: &ClaimedTask, store: &Store) -> Result<String> {
-    store
-        .conn
-        .query_row(
-            "SELECT article_id FROM intel_brief_runs WHERE job_id=?1",
-            [&claimed.job_id],
-            |r| r.get(0),
-        )
-        .map_err(Into::into)
-}
-
 /// Await until `flag` is set.
 async fn cancelled(flag: Arc<AtomicBool>) {
     while !flag.load(Ordering::Acquire) {
@@ -1054,19 +1014,17 @@ async fn cancelled(flag: Arc<AtomicBool>) {
     }
 }
 
-fn activity(db_path: &Path, task: &str, label: &str) {
-    if let Ok(store) = Store::open_light(db_path) {
-        let _ = brief_pipeline::set_activity(&store.conn, task, label);
-    }
+fn activity(st: &dyn StageStore, task: &str, label: &str) {
+    st.activity(task, label);
 }
 
 fn generate<'a>(
-    db_path: &'a Path,
+    st: &'a dyn StageStore,
     backend: &mut dyn StageBackend,
     cancel: &'a Arc<AtomicBool>,
     request: StageRequest,
 ) -> BoxFut<'a, Result<Value>> {
-    let dispatch = generate_unmeasured(db_path, backend, cancel, request);
+    let dispatch = generate_unmeasured(st, backend, cancel, request);
     Box::pin(super::brief_timing::timed(
         super::brief_timing::Phase::Model,
         dispatch,
@@ -1074,18 +1032,18 @@ fn generate<'a>(
 }
 
 fn generate_unmeasured<'a>(
-    db_path: &'a Path,
+    st: &'a dyn StageStore,
     backend: &mut dyn StageBackend,
     cancel: &'a Arc<AtomicBool>,
     request: StageRequest,
 ) -> BoxFut<'a, Result<Value>> {
     let validator = request.validator.clone();
     let task = request.task_id.clone();
-    activity(db_path, &task, "waiting for model");
+    activity(st, &task, "waiting for model");
     let dispatch = backend.generate(request, cancel);
     Box::pin(async move {
         let raw = dispatch.await?;
-        activity(db_path, &task, "validating");
+        activity(st, &task, "validating");
         validator(&raw).map_err(|e| anyhow!("invalid stage output: {e}"))?;
         strict_json(&raw)
     })
@@ -1095,13 +1053,11 @@ fn generate_unmeasured<'a>(
 /// sibling or a later synthesis/fidelity failure must not re-pay successful
 /// classification on Retry. The hash binds the original body spans, claim,
 /// policy and captured classifier route, never the lease epoch.
-fn classify_context_cached<'a>(
-    db_path: &'a Path,
-    backend: &mut dyn StageBackend,
-    ctx: &'a StageContext,
-    batch: super::brief_context::ContextBatch,
-    cancel: &'a Arc<AtomicBool>,
-) -> BoxFut<'a, Result<HashMap<String, String>>> {
+async fn context_checkpoint(
+    st: &dyn StageStore,
+    ctx: &StageContext,
+    batch: &super::brief_context::ContextBatch,
+) -> Result<(Option<HashMap<String, String>>, String, String)> {
     let payload = batch.user();
     let item = format!("context:{}", crate::nlp::cache::hash(&payload));
     let input_hash = crate::nlp::cache::hash(
@@ -1113,80 +1069,43 @@ fn classify_context_cached<'a>(
         ])
         .to_string(),
     );
-    let cached = (|| -> Result<Option<HashMap<String, String>>> {
-        let store = Store::open_initialized_light(db_path)?;
-        let output = brief_pipeline::checkpoint_get(
-            &store.conn,
-            &ctx.job_id,
-            "intel_brief_inferences",
-            &item,
-            &input_hash,
-        )?;
-        // A damaged checkpoint is reclassified, never accepted as evidence.
-        Ok(output
-            .and_then(|v| serde_json::from_value::<HashMap<String, String>>(v).ok())
-            .filter(|labels| batch.selected(labels).is_ok()))
-    })();
-    match cached {
+    let output = st
+        .checkpoint_get(&ctx.job_id, "intel_brief_inferences", &item, &input_hash)
+        .await?;
+    // A damaged checkpoint is reclassified, never accepted as evidence.
+    let cached = output
+        .and_then(|v| serde_json::from_value::<HashMap<String, String>>(v).ok())
+        .filter(|labels| batch.selected(labels).is_ok());
+    Ok((cached, item, input_hash))
+}
+
+fn classify_context_cached<'a>(
+    st: &'a dyn StageStore,
+    backend: &mut dyn StageBackend,
+    ctx: &'a StageContext,
+    batch: super::brief_context::ContextBatch,
+    cancel: &'a Arc<AtomicBool>,
+    checkpoint: Result<(Option<HashMap<String, String>>, String, String)>,
+) -> BoxFut<'a, Result<HashMap<String, String>>> {
+    let (item, input_hash) = match checkpoint {
         Err(error) => return Box::pin(async move { Err(error) }),
-        Ok(Some(labels)) => return Box::pin(async move { Ok(labels) }),
-        Ok(None) => {}
-    }
+        Ok((Some(labels), _, _)) => return Box::pin(async move { Ok(labels) }),
+        Ok((None, item, hash)) => (item, hash),
+    };
     let dispatch = backend.classify_context(ctx, batch.clone(), cancel);
     Box::pin(async move {
         let labels = dispatch.await?;
         batch.selected(&labels).map_err(anyhow::Error::msg)?;
         ensure!(!cancel.load(Ordering::Acquire), "cancelled");
-        let store = Store::open_initialized_light(db_path)?;
-        brief_pipeline::checkpoint_put(
-            &store.conn,
+        st.checkpoint_put(
             &ctx.job_id,
             "intel_brief_inferences",
             &item,
             &input_hash,
             &serde_json::to_value(&labels)?,
-        )?;
+        )
+        .await?;
         Ok(labels)
-    })
-}
-
-/// Run one stage: Ok(value, items, empty_reason).
-/// Build the immutable context for a claimed stage on its own connection.
-pub fn stage_context(store: &Store, claimed: &ClaimedTask) -> Result<StageContext> {
-    let (job_generation, route_snapshot): (i64, String) = store.conn.query_row(
-        "SELECT r.generation, t.role_snapshot FROM intel_brief_runs r JOIN argos_tasks t ON t.job_id=r.job_id
-         WHERE r.job_id=?1 AND t.id=?2",
-        [&claimed.job_id, &claimed.id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    // Roots carry the captured metadata; descendants read the Claims root's.
-    let own: Value = serde_json::from_str(&claimed.input_ref).unwrap_or(Value::Null);
-    let metadata_snapshot = if own["metadata"].is_object() {
-        own["metadata"].clone()
-    } else {
-        let raw: Option<String> = store
-            .conn
-            .query_row(
-                "SELECT input_ref FROM argos_tasks WHERE id=?1",
-                [brief_pipeline::task_id(
-                    &claimed.job_id,
-                    "intel_brief_claims",
-                )],
-                |r| r.get(0),
-            )
-            .optional()?;
-        raw.and_then(|r| serde_json::from_str::<Value>(&r).ok())
-            .map(|v| v["metadata"].clone())
-            .unwrap_or(Value::Null)
-    };
-    Ok(StageContext {
-        job_id: claimed.job_id.clone(),
-        task_id: claimed.id.clone(),
-        job_generation,
-        lease_epoch: claimed.epoch,
-        metadata_snapshot,
-        route_snapshot,
-        ledger: Arc::default(),
     })
 }
 
@@ -1206,20 +1125,15 @@ fn snapshot_article(mut article: AtlasArticleRow, ctx: &StageContext) -> AtlasAr
     article
 }
 
-async fn execute(
-    db_path: &Path,
+pub(crate) async fn execute(
+    st: &dyn StageStore,
     claimed: &ClaimedTask,
     backend: &mut dyn StageBackend,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(Value, usize, String)> {
     let (article, job, ctx) = {
-        let store = Store::open(db_path)?;
-        let ctx = stage_context(&store, claimed)?;
-        (
-            snapshot_article(article_for(&store, &article_id_of(claimed, &store)?)?, &ctx),
-            claimed.job_id.clone(),
-            ctx,
-        )
+        let (ctx, article) = st.load(claimed).await?;
+        (snapshot_article(article, &ctx), claimed.job_id.clone(), ctx)
     };
     match claimed.operation.as_str() {
         "intel_brief_body" => {
@@ -1227,9 +1141,9 @@ async fn execute(
                 .ok()
                 .and_then(|v| v["force_body"].as_bool())
                 .unwrap_or(false);
-            activity(db_path, &claimed.id, "retrieving / cleaning");
+            activity(st, &claimed.id, "retrieving / cleaning");
             let artifact = backend.prepare_body(&ctx, &article, force, cancel).await?;
-            activity(db_path, &claimed.id, "validating");
+            activity(st, &claimed.id, "validating");
             stage_one_admissible(&artifact, artifact.acquisition_complete)?;
             // Row: "Completed · validated clean body" (plus any diagnostics).
             let mut reason = String::from("validated clean body");
@@ -1254,7 +1168,7 @@ async fn execute(
                     .map_err(|e| e.to_string())
             });
             let raw = generate(
-                db_path,
+                st,
                 backend,
                 cancel,
                 StageRequest {
@@ -1281,7 +1195,7 @@ async fn execute(
             let mut out = validate_claims(&raw.to_string(), &meta)?;
             let index: HashMap<&str, &Sentence> = meta.iter().map(|s| (s.id.as_str(), s)).collect();
             apply_fidelity(
-                db_path,
+                st,
                 backend,
                 &ctx,
                 &ctx.route_key(None, "evidence_curator"),
@@ -1303,26 +1217,13 @@ async fn execute(
             Ok((out, n, reason))
         }
         "intel_brief_inferences" => {
-            let (body, claims) = {
-                let store = Store::open(db_path)?;
-                (
-                    stage_output(&store, &job, "intel_brief_body")?,
-                    stage_output(&store, &job, "intel_brief_claims")?,
-                )
-            };
+            let (body, claims) = (
+                st.stage_output(&job, "intel_brief_body").await?,
+                st.stage_output(&job, "intel_brief_claims").await?,
+            );
             let (all, index_full) = super::sentence_index::body_sentences(&body);
-            let actors: Vec<super::brief_context::ContextActor> = {
-                let store = Store::open(db_path)?;
-                store
-                    .atlas_metadata(&article.run_id, &article.id)?
-                    .map(|metadata| {
-                        crate::atlas_metadata::article_actors(&article, &metadata)
-                            .iter()
-                            .map(super::brief_context::ContextActor::from)
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            };
+            let actors: Vec<super::brief_context::ContextActor> =
+                st.article_actors(&article).await?;
             let system = format!(
                 "{INFERENCES_PROMPT}{}{STRICT_JSON}{INFERENCES_SHAPE}",
                 super::brief_contracts::inferences_limits()
@@ -1364,7 +1265,7 @@ async fn execute(
                     .collect::<Vec<_>>()
                     .into_iter();
                 let mut running = FuturesUnordered::new();
-                activity(db_path, &claimed.id, "selecting claim context");
+                activity(st, &claimed.id, "selecting claim context");
                 super::brief_timing::timed(super::brief_timing::Phase::Model, async {
                     loop {
                         while running.len() < INFERENCE_CONCURRENCY {
@@ -1372,12 +1273,14 @@ async fn execute(
                             let Some((n, batch)) = jobs.next() else {
                                 break;
                             };
+                            let checkpoint = context_checkpoint(st, &ctx, &batch).await;
                             let dispatch = classify_context_cached(
-                                db_path,
+                                st,
                                 backend,
                                 &ctx,
                                 batch.clone(),
                                 cancel,
+                                checkpoint,
                             );
                             running.push(dispatch.map(move |result| (n, batch, result)).boxed());
                         }
@@ -1488,33 +1391,28 @@ async fn execute(
             let mut reused_indices = HashSet::new();
             let mut todo = Vec::new();
             {
-                let store = Store::open(db_path)?;
                 for (n, (claim_id, _, user, _)) in requests.iter().enumerate() {
                     if context_failed.contains(&n) {
                         continue;
                     }
-                    let cached = super::brief_pipeline::checkpoint_get(
-                        &store.conn,
-                        &job,
-                        &claimed.operation,
-                        claim_id,
-                        &checkpoint_hash(user),
-                    )?
-                    .and_then(|output| {
-                        let mut output = validate_claim_inferences(
-                            &output.to_string(),
-                            claim_id,
-                            &requests[n].1,
-                        )
-                        .ok()?;
-                        retain_inference_counterevidence(
-                            &mut output,
-                            &requests[n].1,
-                            &requests[n].3,
-                        )
-                        .ok()?;
-                        Some(output)
-                    });
+                    let cached = st
+                        .checkpoint_get(&job, &claimed.operation, claim_id, &checkpoint_hash(user))
+                        .await?
+                        .and_then(|output| {
+                            let mut output = validate_claim_inferences(
+                                &output.to_string(),
+                                claim_id,
+                                &requests[n].1,
+                            )
+                            .ok()?;
+                            retain_inference_counterevidence(
+                                &mut output,
+                                &requests[n].1,
+                                &requests[n].3,
+                            )
+                            .ok()?;
+                            Some(output)
+                        });
                     match cached {
                         Some(output) => {
                             outputs[n] = output;
@@ -1527,7 +1425,7 @@ async fn execute(
             }
             if reused > 0 {
                 activity(
-                    db_path,
+                    st,
                     &claimed.id,
                     &format!(
                         "reusing {reused} analyzed claim{}",
@@ -1548,7 +1446,7 @@ async fn execute(
                         };
                         let (claim_id, selected, user, _) = &requests[n];
                         let dispatch = generate_unmeasured(
-                            db_path,
+                            st,
                             backend,
                             cancel,
                             request(claim_id, selected, user),
@@ -1575,16 +1473,15 @@ async fn execute(
                     });
                     match processed {
                         Ok(output) => {
-                            if let Ok(store) = Store::open(db_path) {
-                                let _ = super::brief_pipeline::checkpoint_put(
-                                    &store.conn,
+                            let _ = st
+                                .checkpoint_put(
                                     &job,
                                     &claimed.operation,
                                     &requests[n].0,
                                     &checkpoint_hash(&requests[n].2),
                                     &output,
-                                );
-                            }
+                                )
+                                .await;
                             outputs[n] = output;
                         }
                         Err(error) => {
@@ -1631,7 +1528,7 @@ async fn execute(
             }
             let index: HashMap<&str, &Sentence> = all.iter().map(|s| (s.id.as_str(), s)).collect();
             apply_fidelity(
-                db_path,
+                st,
                 backend,
                 &ctx,
                 &ctx.route_key(
@@ -1647,7 +1544,7 @@ async fn execute(
                 "no supported inferences",
             )
             .await?;
-            dedup_inferences(db_path, backend, &ctx, cancel, &mut last).await?;
+            dedup_inferences(st, backend, &ctx, cancel, &mut last).await?;
             last["analysis_requests"] = json!(requests.len() - context_failed.len() - reused);
             last["path"] = json!("claim_context");
             last["context_policy"] = json!(super::brief_context::CONTEXT_POLICY);
@@ -1683,10 +1580,7 @@ async fn execute(
             Ok((last, n, reason))
         }
         "intel_brief_links" => {
-            let inferences = {
-                let store = Store::open(db_path)?;
-                stage_output(&store, &job, "intel_brief_inferences")?
-            };
+            let inferences = st.stage_output(&job, "intel_brief_inferences").await?;
             let inference_ids: HashSet<String> = inferences["inferences"]
                 .as_array()
                 .into_iter()
@@ -1716,7 +1610,7 @@ async fn execute(
                     .map_err(|e| e.to_string())
             });
             let raw = generate(
-                db_path,
+                st,
                 backend,
                 cancel,
                 StageRequest {
@@ -1770,61 +1664,12 @@ async fn execute(
     }
 }
 
-/// Canonical inputs for the final commit; any preparation error becomes the
-/// Index footer reason rather than a stage failure.
-fn prepare_canonical(
-    store: &Store,
-    claimed: &ClaimedTask,
-    output: &Value,
-) -> std::result::Result<super::brief_canonical::CanonicalBrief, String> {
-    let prepared = (|| -> Result<_> {
-        let article = article_for(store, &article_id_of(claimed, store)?)?;
-        let ctx = stage_context(store, claimed)?;
-        if let Some(captured) = ctx.metadata_snapshot["source_revision"].as_str() {
-            ensure!(
-                metadata_snapshot(&article)["source_revision"].as_str() == Some(captured),
-                "article source revision changed since brief snapshot"
-            );
-        }
-        let article = snapshot_article(article, &ctx);
-        let claims = if claimed.operation == "intel_brief_claims" {
-            output.clone()
-        } else {
-            stage_output(store, &claimed.job_id, "intel_brief_claims")?
-        };
-        let (body, inferences) = if claimed.operation == "intel_brief_claims" {
-            (Value::Null, Value::Null)
-        } else {
-            (
-                stage_output(store, &claimed.job_id, "intel_brief_body")?,
-                if claimed.operation == "intel_brief_inferences" {
-                    output.clone()
-                } else {
-                    stage_output(store, &claimed.job_id, "intel_brief_inferences")?
-                },
-            )
-        };
-        super::brief_canonical::prepare_for_stage(
-            store,
-            &article,
-            &body,
-            &claims,
-            &inferences,
-            &claimed.operation,
-        )
-    })();
-    match prepared {
-        Ok(result) => result,
-        Err(error) => Err(error.to_string()),
-    }
-}
-
 /// Fidelity decisions with cached receipts; uncached items go to the
 /// Claim assessor in batches of at most [`super::brief_fidelity::BATCH`].
 /// Fidelity receipts are keyed by the item's source/contract receipt plus
 /// the actual resolved route, so a route change re-assesses.
-pub async fn assess_cached(
-    db_path: &Path,
+pub async fn assess_cached_on(
+    st: &dyn StageStore,
     backend: &mut dyn StageBackend,
     ctx: &StageContext,
     route_key: &str,
@@ -1837,9 +1682,8 @@ pub async fn assess_cached(
     let mut labels = HashMap::new();
     let mut pending = Vec::new();
     {
-        let store = Store::open(db_path)?;
         for item in items {
-            match store.app_state_get(&receipt(&item))? {
+            match st.receipt_get(&receipt(&item)).await? {
                 Some(label) => {
                     labels.insert(item.id.clone(), label);
                 }
@@ -1849,13 +1693,12 @@ pub async fn assess_cached(
     }
     for batch in pending.chunks(super::brief_fidelity::BATCH) {
         let decided = backend.assess(ctx, batch.to_vec(), cancel).await?;
-        let store = Store::open(db_path)?;
         for item in batch {
             let label = decided
                 .get(&item.id)
                 .cloned()
                 .ok_or_else(|| anyhow!("fidelity decision missing for {}", item.id))?;
-            store.app_state_set(&receipt(item), &label)?;
+            st.receipt_set(&receipt(item), &label).await?;
             labels.insert(item.id.clone(), label);
         }
     }
@@ -1865,7 +1708,7 @@ pub async fn assess_cached(
 /// Keep only items the Claim assessor judged faithful to their own passages.
 #[allow(clippy::too_many_arguments)]
 async fn apply_fidelity(
-    db_path: &Path,
+    st: &dyn StageStore,
     backend: &mut dyn StageBackend,
     ctx: &StageContext,
     route_key: &str,
@@ -1938,10 +1781,10 @@ async fn apply_fidelity(
             }
         })
         .collect();
-    activity(db_path, &ctx.task_id, "checking fidelity");
+    activity(st, &ctx.task_id, "checking fidelity");
     let labels = super::brief_timing::timed(
         super::brief_timing::Phase::Fidelity,
-        assess_cached(db_path, backend, ctx, route_key, items, cancel),
+        assess_cached_on(st, backend, ctx, route_key, items, cancel),
     )
     .await?;
     let mut kept = Vec::new();
@@ -1964,347 +1807,48 @@ async fn apply_fidelity(
     Ok(())
 }
 
-/// Claim and run the next eligible brief stage. Returns None when idle.
-///
-/// The heartbeat renews the lease from claim through commit/acknowledgement on
-/// its own connection; if renewal fails or the chain is cancelled, the stage's
-/// cancel flag is raised and the in-flight request future is dropped.
-pub async fn run_next_stage(
-    db_path: &Path,
-    owner: &str,
-    backend: &mut dyn StageBackend,
-    parent_cancel: &Arc<AtomicBool>,
-    config: &ExecConfig,
-) -> Result<Option<StageOutcome>> {
-    let Some(claimed) = claim_next(db_path, owner, config)? else {
-        return Ok(None);
-    };
-    run_claimed(db_path, claimed, backend, parent_cancel, config)
-        .await
-        .map(Some)
-}
-
-/// Reap expired leases and claim one ready stage on a fresh connection.
-pub fn claim_next(db_path: &Path, owner: &str, config: &ExecConfig) -> Result<Option<ClaimedTask>> {
-    let store = Store::open_initialized_light(db_path)?;
-    tasks::interrupt_expired_leases(&store.conn, &now())?;
-    brief_pipeline::claim_stage(&store.conn, owner, config.lease_secs, &now())
-}
-
-/// Execute one already-claimed stage through commit/acknowledgement. Every
-/// call opens its own connections, so concurrent stages never share a
-/// mutable SQLite handle.
-pub async fn run_claimed(
-    db_path: &Path,
-    claimed: ClaimedTask,
-    backend: &mut dyn StageBackend,
-    parent_cancel: &Arc<AtomicBool>,
-    config: &ExecConfig,
-) -> Result<StageOutcome> {
-    let operation = claimed.operation.clone();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let lost = Arc::new(AtomicBool::new(false));
-    let done = Arc::new(AtomicBool::new(false));
-    let heartbeat = {
-        let (db, c, cancel, lost, done, parent) = (
-            db_path.to_path_buf(),
-            claimed.clone(),
-            cancel.clone(),
-            lost.clone(),
-            done.clone(),
-            parent_cancel.clone(),
-        );
-        let (interval, lease) = (config.heartbeat, config.lease_secs);
-        tokio::spawn(async move {
-            while !done.load(Ordering::Acquire) {
-                let step = Duration::from_millis(50).min(interval);
-                let mut waited = Duration::ZERO;
-                while waited < interval && !done.load(Ordering::Acquire) {
-                    if parent.load(Ordering::Acquire) {
-                        cancel.store(true, Ordering::Release);
-                    }
-                    tokio::time::sleep(step).await;
-                    waited += step;
-                }
-                if done.load(Ordering::Acquire) {
-                    break;
-                }
-                // A single refused or late renewal under load is retried once
-                // before the lease is declared lost; a stolen or expired lease
-                // is refused both times.
-                let mut renewed = renew(&db, &c, lease);
-                if !renewed {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    renewed = renew(&db, &c, lease);
-                }
-                if !renewed {
-                    note_heartbeat(&db, &c.id, "lease renewal failed; stage cancelled");
-                    lost.store(true, Ordering::Release);
-                    cancel.store(true, Ordering::Release);
-                    break;
-                }
-            }
-        })
-    };
-    let stage_clock = std::time::Instant::now();
-    let clock = super::brief_timing::StageClock::default();
-    let result = tokio::select! {
-        r = super::brief_timing::with_clock(
-            clock.clone(),
-            execute(db_path, &claimed, backend, &cancel),
-        ) => r,
-        _ = cancelled(cancel.clone()) => Err(anyhow!("cancelled")),
-    };
-    {
-        // Local work = stage wall time not spent in model/fidelity chains.
-        use super::brief_timing::{note_on, peek, Phase};
-        let remote = peek(&clock, Phase::Model) + peek(&clock, Phase::Fidelity);
-        note_on(
-            &clock,
-            Phase::Local,
-            stage_clock.elapsed().saturating_sub(remote),
-        );
-    }
-    let persist_clock = std::time::Instant::now();
-    // Commit while the heartbeat still covers the lease, then stop it.
-    let outcome = {
-        let store = Store::open(db_path)?;
-        let at = now();
-        match result {
-            _ if lost.load(Ordering::Acquire) || cancel.load(Ordering::Acquire) => {
-                StageOutcome::Stale {
-                    operation: operation.clone(),
-                }
-            }
-            Ok((value, items, reason)) => {
-                let canonical = if matches!(
-                    operation.as_str(),
-                    "intel_brief_claims" | "intel_brief_inferences" | "intel_brief_links"
-                ) {
-                    Some(prepare_canonical(&store, &claimed, &value))
-                } else {
-                    None
-                };
-                if brief_pipeline::commit_stage_with(
-                    &store.conn,
-                    &claimed,
-                    &value.to_string(),
-                    items,
-                    &reason,
-                    &at,
-                    canonical.as_ref(),
-                )? {
-                    StageOutcome::Committed {
-                        operation: operation.clone(),
-                        items,
-                    }
-                } else {
-                    StageOutcome::Stale {
-                        operation: operation.clone(),
-                    }
-                }
-            }
-            Err(error) => {
-                // The model chain is the single retry owner; a stage failure
-                // waits for explicit Retry.
-                let mut once = claimed.clone();
-                once.max_attempts = 1;
-                let reason = error.to_string();
-                // The executor's typed category wins; only local validation
-                // and parse failures (no provider category) are invalid results.
-                let category = stage_error_category(&error);
-                match tasks::fail_claimed(
-                    &store.conn,
-                    &once,
-                    tasks::OperationKind::OtherLlm,
-                    &tasks::TaskError {
-                        category,
-                        message: reason.clone(),
-                    },
-                    &at,
-                )? {
-                    Some(_) => StageOutcome::Failed {
-                        operation: operation.clone(),
-                        reason,
-                    },
-                    None => StageOutcome::Stale {
-                        operation: operation.clone(),
-                    },
-                }
-            }
-        }
-    };
-    let persistence = persist_clock.elapsed();
-    done.store(true, Ordering::Release);
-    let _ = heartbeat.await;
-    // Logs carry the same stage row as the brief panel and Jobs.
-    if let Ok(store) = Store::open_light(db_path) {
-        let _ = brief_pipeline::set_activity(&store.conn, &claimed.id, "");
-        let outcome_label = match &outcome {
-            StageOutcome::Committed { .. } => "committed",
-            StageOutcome::Failed { .. } => "failed",
-            StageOutcome::Stale { .. } => "stale",
-        };
-        if let Ok(timing) = super::brief_timing::collect(
-            &store.conn,
-            &claimed,
-            &clock,
-            stage_clock.elapsed(),
-            persistence,
-            outcome_label,
-        ) {
-            let _ = super::brief_timing::persist(&store.conn, &timing, &now());
-            let _ = super::brief_timing::record_retry_wait(&store.conn, &claimed, &timing, &now());
-            let _ = crate::events::record_event(
-                &store.conn,
-                &crate::events::NewEvent {
-                    severity: None,
-                    app: "intel".into(),
-                    event_type: "intel_brief.timing".into(),
-                    message: format!(
-                        "{} · {}",
-                        claimed.operation,
-                        super::brief_timing::summary(&timing)
-                    ),
-                    job_id: claimed.job_id.clone(),
-                    task_id: claimed.id.clone(),
-                    ..Default::default()
-                },
-            );
-        }
-        if let Some(view) = brief_pipeline::stage_views(&store.conn, &claimed.job_id)
-            .ok()
-            .and_then(|v| v.into_iter().find(|v| v.operation == operation))
-        {
-            let _ = crate::events::record_event(
-                &store.conn,
-                &crate::events::NewEvent {
-                    severity: None,
-                    app: "intel".into(),
-                    event_type: "intel_brief.stage".into(),
-                    message: format!("{} · {}", view.label, view.row),
-                    job_id: claimed.job_id.clone(),
-                    task_id: claimed.id.clone(),
-                    ..Default::default()
-                },
-            );
-        }
-    }
-    Ok(outcome)
-}
-
-/// Durable heartbeat diagnostics (renewal failures and heartbeat age),
-/// surfaced in Logs alongside the task's own `heartbeat_at`.
-fn note_heartbeat(db: &Path, task: &str, message: &str) {
-    if let Ok(store) = Store::open_light(db) {
-        let age: Option<f64> = store
-            .conn
-            .query_row(
-                "SELECT (julianday(?2)-julianday(heartbeat_at))*86400.0 FROM argos_tasks WHERE id=?1 AND heartbeat_at<>''",
-                rusqlite::params![task, now()],
-                |r| r.get(0),
-            )
-            .optional()
-            .ok()
-            .flatten();
-        let _ = store.app_state_set(
-            &format!("intel-brief-heartbeat:{task}"),
-            &json!({"at": now(), "message": message, "heartbeat_age_secs": age}).to_string(),
-        );
-    }
-}
-
-fn renew(db: &Path, claimed: &ClaimedTask, lease: i64) -> bool {
-    for _ in 0..5 {
-        match Store::open_light(db).and_then(|s| {
-            tasks::renew_lease(
-                &s.conn,
-                &claimed.id,
-                &claimed.owner,
-                claimed.epoch,
-                lease,
-                &now(),
-            )
-        }) {
-            Ok(ok) => return ok,
-            Err(error) => {
-                note_heartbeat(db, &claimed.id, &format!("renewal retry: {error}"));
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-    }
-    false
-}
-
-/// Serial drain with one backend: run ready stages until none is claimable.
-/// A failed branch no longer stops the drain: its independent sibling still
-/// runs (spec §6). Stops after a stale outcome (cancel/supersede/lost lease).
-pub async fn drain(
-    db_path: &Path,
-    owner: &str,
-    backend: &mut dyn StageBackend,
-    cancel: &Arc<AtomicBool>,
-    config: &ExecConfig,
-) -> Result<Vec<StageOutcome>> {
-    let mut outcomes = Vec::new();
-    while !cancel.load(Ordering::Acquire) {
-        let Some(outcome) = run_next_stage(db_path, owner, backend, cancel, config).await? else {
-            break;
-        };
-        let stop = matches!(outcome, StageOutcome::Stale { .. });
-        outcomes.push(outcome);
-        if stop {
-            break;
-        }
-    }
-    Ok(outcomes)
-}
-
-/// Stage slots of the dedicated drainer: the two independent v2 roots.
-pub const STAGE_SLOTS: usize = 2;
-
-/// Bounded parallel drain (spec §6). A slot is taken *before* a lease is
-/// claimed, each claimed stage runs on its own Tokio task with its own
-/// backend (from `make_backend`) and connections, and task-local timing and
-/// cancellation stay per stage. Returns when nothing is running and nothing
-/// is claimable.
-pub async fn drain_parallel<F>(
-    db_path: &Path,
-    owner: &str,
-    make_backend: F,
-    cancel: &Arc<AtomicBool>,
-    config: &ExecConfig,
-    slots: usize,
-) -> Result<Vec<StageOutcome>>
-where
-    F: Fn() -> Box<dyn StageBackend + Send + 'static>,
-{
-    let mut running: tokio::task::JoinSet<Result<StageOutcome>> = tokio::task::JoinSet::new();
-    let mut outcomes = Vec::new();
-    loop {
-        // Fill free slots; each slot is reserved before its claim.
-        while running.len() < slots.max(1) && !cancel.load(Ordering::Acquire) {
-            let Some(claimed) = claim_next(db_path, owner, config)? else {
-                break;
-            };
-            let (db, parent, cfg) = (db_path.to_path_buf(), cancel.clone(), config.clone());
-            let mut backend = make_backend();
-            running.spawn(async move {
-                run_claimed(&db, claimed, backend.as_mut(), &parent, &cfg).await
-            });
-        }
-        match running.join_next().await {
-            Some(joined) => {
-                let outcome = joined.map_err(|e| anyhow!("stage task panicked: {e}"))??;
-                outcomes.push(outcome);
-            }
-            None => break,
-        }
-    }
-    Ok(outcomes)
+/// The reads and writes a running stage makes: its context and article,
+/// earlier stage outputs, the article's actors, per-item checkpoints,
+/// fidelity receipts and the live activity label. [`SqliteStages`] is the
+/// SQLite store; `storage::brief_stages` is the repository.
+pub trait StageStore: Send + Sync {
+    /// The stage context and the article as currently stored (the caller
+    /// applies the captured metadata snapshot).
+    fn load<'a>(
+        &'a self,
+        claimed: &'a ClaimedTask,
+    ) -> BoxFut<'a, Result<(StageContext, AtlasArticleRow)>>;
+    fn stage_output<'a>(&'a self, job_id: &'a str, operation: &'a str)
+        -> BoxFut<'a, Result<Value>>;
+    fn article_actors<'a>(
+        &'a self,
+        article: &'a AtlasArticleRow,
+    ) -> BoxFut<'a, Result<Vec<super::brief_context::ContextActor>>>;
+    fn checkpoint_get<'a>(
+        &'a self,
+        job_id: &'a str,
+        stage: &'a str,
+        item: &'a str,
+        input_hash: &'a str,
+    ) -> BoxFut<'a, Result<Option<Value>>>;
+    fn checkpoint_put<'a>(
+        &'a self,
+        job_id: &'a str,
+        stage: &'a str,
+        item: &'a str,
+        input_hash: &'a str,
+        output: &'a Value,
+    ) -> BoxFut<'a, Result<()>>;
+    fn receipt_get<'a>(&'a self, key: &'a str) -> BoxFut<'a, Result<Option<String>>>;
+    fn receipt_set<'a>(&'a self, key: &'a str, value: &'a str) -> BoxFut<'a, Result<()>>;
+    /// Best effort: a failed label write never fails the stage.
+    fn activity(&self, task: &str, label: &str);
 }
 
 // ---------- runtime backend ----------
+
+/// Concurrent brief stage slots of the background drainer.
+pub const STAGE_SLOTS: usize = 2;
 
 /// Production backend: Stage 1 reuses the body retrieval/cleanup path under
 /// the brief job; generated stages use the captured role chain with the
@@ -2319,6 +1863,89 @@ pub struct RuntimeBackend {
 }
 
 impl RuntimeBackend {
+    /// SQLite telemetry file, or `None` for a backend built without one
+    /// (the SurrealDB drainer), so nothing opens SQLite there.
+    fn telemetry(&self) -> Option<&Path> {
+        Some(self.db_path.as_path()).filter(|p| !p.as_os_str().is_empty())
+    }
+
+    /// Model-activity sink writing to the SQLite activity table, or `None`
+    /// without a telemetry file.
+    fn sink(
+        &self,
+        task_id: &str,
+        substep: &str,
+        role: &str,
+    ) -> Option<Arc<dyn Fn(crate::recon::model_exec::ModelExecEvent) + Send + Sync>> {
+        self.telemetry()
+            .map(|db| super::brief_timing::activity_sink(db, task_id, substep, role))
+    }
+
+    /// Acquire (or reuse) the article's clean body artifact through `db`.
+    pub(crate) async fn prepare_body_on(
+        &self,
+        db: super::body_db::BodyDb<'_>,
+        ctx: &StageContext,
+        article: &AtlasArticleRow,
+        force_reload: bool,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<CleanArtifact> {
+        let clean = |generation: i64| async move {
+            Ok::<_, anyhow::Error>(
+                db.app_state_get(&format!("intel-clean-body:{}:{generation}", article.id))
+                    .await?
+                    .and_then(|json| serde_json::from_str::<CleanArtifact>(&json).ok()),
+            )
+        };
+        let outcome = super::body::enqueue_on(db, article, force_reload).await?;
+        let (body_id, generation, force) = match outcome {
+            super::body::EnqueueOutcome::Cached(body_id) => {
+                let body = db
+                    .body(&body_id)
+                    .await?
+                    .ok_or_else(|| anyhow!("body missing"))?;
+                if let Some(artifact) = clean(body.body_version).await? {
+                    return Ok(artifact);
+                }
+                // Legacy display body without a clean artifact: re-derive.
+                (body_id, body.body_version + 1, true)
+            }
+            super::body::EnqueueOutcome::Start {
+                body_id,
+                generation,
+                force_refresh,
+            } => (body_id, generation, force_refresh),
+            super::body::EnqueueOutcome::AlreadyRunning { .. } => {
+                bail!("article retrieval already running")
+            }
+            super::body::EnqueueOutcome::Cooldown { reason, .. } => {
+                bail!("story unavailable: {reason}")
+            }
+        };
+        if force {
+            db.clear(&body_id).await?;
+        }
+        let runtime = self.job_runtime(ctx, article, cancel);
+        super::body::fetch_article_body_with_runtime(
+            db,
+            &body_id,
+            &article.title,
+            &article.description,
+            self.keys.clone(),
+            None,
+            runtime.classifier_secret.clone(),
+            self.user_agent.clone(),
+            force,
+            cancel.clone(),
+            |_| {},
+            Some(&runtime),
+        )
+        .await?;
+        clean(generation)
+            .await?
+            .ok_or_else(|| anyhow!("story missing: retrieval produced no validated body"))
+    }
+
     fn job_runtime(
         &self,
         ctx: &StageContext,
@@ -2366,59 +1993,15 @@ impl StageBackend for RuntimeBackend {
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<CleanArtifact>> {
         Box::pin(async move {
-            let outcome = {
-                let store = Store::open(&self.db_path)?;
-                super::body::enqueue_article_body(&store, article, force_reload)?
-            };
-            let (body_id, generation, force) = match outcome {
-                super::body::EnqueueOutcome::Cached(body_id) => {
-                    let store = Store::open(&self.db_path)?;
-                    let body = store
-                        .article_body_by_id(&body_id)?
-                        .ok_or_else(|| anyhow!("body missing"))?;
-                    if let Some(artifact) =
-                        load_clean_artifact(&store, &article.id, body.body_version)?
-                    {
-                        return Ok(artifact);
-                    }
-                    // Legacy display body without a clean artifact: re-derive.
-                    (body_id, body.body_version + 1, true)
-                }
-                super::body::EnqueueOutcome::Start {
-                    body_id,
-                    generation,
-                    force_refresh,
-                } => (body_id, generation, force_refresh),
-                super::body::EnqueueOutcome::AlreadyRunning { .. } => {
-                    bail!("article retrieval already running")
-                }
-                super::body::EnqueueOutcome::Cooldown { reason, .. } => {
-                    bail!("story unavailable: {reason}")
-                }
-            };
-            if force {
-                let store = Store::open(&self.db_path)?;
-                store.clear_article_body_content(&body_id)?;
-            }
-            let runtime = self.job_runtime(ctx, article, cancel);
-            super::body::fetch_article_body_with_runtime(
-                &self.db_path,
-                &body_id,
-                &article.title,
-                &article.description,
-                self.keys.clone(),
-                None,
-                runtime.classifier_secret.clone(),
-                self.user_agent.clone(),
-                force,
-                cancel.clone(),
-                |_| {},
-                Some(&runtime),
+            let repo = crate::storage::runtime::repository().await?;
+            self.prepare_body_on(
+                super::body_db::BodyDb::Surreal(&repo),
+                ctx,
+                article,
+                force_reload,
+                cancel,
             )
-            .await?;
-            let store = Store::open(&self.db_path)?;
-            load_clean_artifact(&store, &article.id, generation)?
-                .ok_or_else(|| anyhow!("story missing: retrieval produced no validated body"))
+            .await
         })
     }
 
@@ -2461,13 +2044,8 @@ impl StageBackend for RuntimeBackend {
                 &scope,
                 &adapter,
                 cancel,
-                Some(super::brief_timing::activity_sink(
-                    &self.db_path,
-                    task_id,
-                    "checking fidelity",
-                    scope.role,
-                )),
-                Some(self.db_path.as_path()),
+                self.sink(task_id, "checking fidelity", scope.role),
+                self.telemetry(),
             )
             .await?;
             Ok(labels)
@@ -2484,7 +2062,9 @@ impl StageBackend for RuntimeBackend {
         batch: super::brief_context::ContextBatch,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<HashMap<String, String>>> {
-        let (auth, db_path) = (self.auth.clone(), self.db_path.clone());
+        let auth = self.auth.clone();
+        let sink = self.sink(&ctx.task_id, "selecting claim context", "classifier");
+        let db_path = self.telemetry().map(Path::to_path_buf);
         let settings = ctx.routed(&self.settings);
         Box::pin(async move {
             let operation_id = ctx.operation_id("claim-context", &batch.user());
@@ -2503,34 +2083,17 @@ impl StageBackend for RuntimeBackend {
                 &scope,
                 &adapter,
                 cancel,
-                Some(super::brief_timing::activity_sink(
-                    &db_path,
-                    &ctx.task_id,
-                    "selecting claim context",
-                    "classifier",
-                )),
-                Some(db_path.as_path()),
+                sink,
+                db_path.as_deref(),
             )
             .await?;
             Ok(labels)
         })
     }
 
-    fn related(&mut self, article: &AtlasArticleRow) -> Result<Vec<AtlasArticleRow>> {
-        let store = Store::open(&self.db_path)?;
-        // All retained cycles by default, one row per URL.
-        Ok(store
-            .related_articles_global(
-                &article.run_id,
-                &article.id,
-                crate::related_global::RelatedScope::AllRetained,
-                None,
-                50,
-            )?
-            .rows
-            .into_iter()
-            .map(|r| r.article)
-            .collect())
+    fn related(&mut self, _article: &AtlasArticleRow) -> Result<Vec<AtlasArticleRow>> {
+        // `storage::brief_stages::SurrealRuntimeBackend` serves related reads.
+        anyhow::bail!("SurrealDB storage is not configured")
     }
 
     fn generate<'a>(
@@ -2580,14 +2143,9 @@ impl StageBackend for RuntimeBackend {
                 &messages,
                 move |raw| validator(raw),
                 cancel,
-                Some(super::brief_timing::activity_sink(
-                    &backend.db_path,
-                    &request.task_id,
-                    &request.stage,
-                    request.role,
-                )),
+                backend.sink(&request.task_id, &request.stage, request.role),
                 None,
-                Some(backend.db_path.as_path()),
+                backend.telemetry(),
                 true,
             )
             .await?;
@@ -2716,51 +2274,3 @@ pub fn input_revision(
 ) -> String {
     crate::nlp::cache::hash(&stage_revisions(article, settings).join(":"))
 }
-
-/// Reload: supersede the chain with a forced re-acquisition of the body.
-/// Later visits attach to this chain (same base inputs).
-pub fn reload_intel_brief_pipeline(
-    store: &Store,
-    article: &AtlasArticleRow,
-    settings: &crate::provider::SettingsFile,
-) -> Result<String> {
-    brief_pipeline::ensure_chain(
-        &store.conn,
-        &brief_pipeline::BriefInputs {
-            article_id: article.id.clone(),
-            input_revision: format!("{}:reload:{}", input_revision(article, settings), now()),
-            role_snapshot: serde_json::to_string(&settings.defaults).unwrap_or_default(),
-            title: article.title.clone(),
-            stage_revisions: stage_revisions(article, settings),
-            metadata: metadata_snapshot(article),
-        },
-        &now(),
-    )
-}
-
-/// The single idempotent entry point for opening a brief, body-ready events
-/// and recovery: attach to (or admit) this article's preparation chain.
-pub fn ensure_intel_brief_pipeline(
-    store: &Store,
-    article: &AtlasArticleRow,
-    settings: &crate::provider::SettingsFile,
-) -> Result<String> {
-    let job = brief_pipeline::ensure_chain(
-        &store.conn,
-        &brief_pipeline::BriefInputs {
-            article_id: article.id.clone(),
-            input_revision: input_revision(article, settings),
-            role_snapshot: serde_json::to_string(&settings.defaults).unwrap_or_default(),
-            title: article.title.clone(),
-            stage_revisions: stage_revisions(article, settings),
-            metadata: metadata_snapshot(article),
-        },
-        &now(),
-    )?;
-    super::brief_canonical::refresh_cached_publication(store, article, &job)?;
-    Ok(job)
-}
-
-#[cfg(test)]
-#[path = "brief_stages_tests.rs"]
-mod tests;

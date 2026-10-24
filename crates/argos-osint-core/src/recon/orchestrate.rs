@@ -10,10 +10,11 @@ use std::{
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
+use super::backend::{sqlite_path, ReconStore};
 use super::{
     brain_resources::{self, BrainResourceSummary},
     investigation, picker, AnswerContext, CreditHold, EntityView, HypothesisView, Plan, PlanCall,
-    Run, Store,
+    Run,
 };
 use crate::{
     intel_recon::{self, ReportMode},
@@ -66,29 +67,49 @@ impl StageClock {
             return;
         }
         self.recorded = true;
-        // A resumed or replayed stage is a new attempt, so the ordinal is
-        // derived from the rows already written for this run and stage.
-        let attempt = stage_attempt(&self.db_path, &self.run_id, &self.stage);
-        let event = TelemetryEvent::new(EventKind::ReconStage)
-            .with_id(format!("{}:{}:{}", self.run_id, self.stage, attempt))
-            .canonical(format!("{}:{}", self.run_id, self.stage))
-            .at(now_stamp())
-            .app("recon")
-            .trigger(Trigger::ReconPrompt)
-            .category(&self.stage)
-            .mode(&self.mode)
-            .outcome("completed")
-            .run(&self.run_id)
-            .duration_ms(Some(self.started.elapsed_ms()))
-            .count(1)
-            .payload(json!({
-                "stage": self.stage,
-                "mode": self.mode,
-                "attempt": attempt,
-                "resumed": attempt > 1,
-            }));
-        let _ = telemetry::record(&self.db_path, &event);
+        let elapsed = self.started.elapsed_ms();
+        // The attempt ordinal is read from the repository, so the whole
+        // write runs there; SQLite is never opened.
+        let (run_id, mode, stage) = (self.run_id.clone(), self.mode.clone(), self.stage.clone());
+        crate::storage::runtime::spawn(async move {
+            let Ok(repo) = crate::storage::runtime::repository().await else {
+                return;
+            };
+            let attempt = crate::storage::telemetry::stage_attempt(repo.db(), &run_id, &stage)
+                .await
+                .unwrap_or(1);
+            let event = stage_event(&run_id, &mode, &stage, attempt, elapsed);
+            let _ = crate::storage::telemetry::record(repo.db(), &event).await;
+        });
     }
+}
+
+/// The `recon_stage` row for one stage attempt.
+pub(crate) fn stage_event(
+    run_id: &str,
+    mode: &str,
+    stage: &str,
+    attempt: i64,
+    elapsed_ms: i64,
+) -> TelemetryEvent {
+    TelemetryEvent::new(EventKind::ReconStage)
+        .with_id(format!("{run_id}:{stage}:{attempt}"))
+        .canonical(format!("{run_id}:{stage}"))
+        .at(now_stamp())
+        .app("recon")
+        .trigger(Trigger::ReconPrompt)
+        .category(stage)
+        .mode(mode)
+        .outcome("completed")
+        .run(run_id)
+        .duration_ms(Some(elapsed_ms))
+        .count(1)
+        .payload(json!({
+            "stage": stage,
+            "mode": mode,
+            "attempt": attempt,
+            "resumed": attempt > 1,
+        }))
 }
 
 impl Drop for StageClock {
@@ -110,23 +131,6 @@ pub(crate) fn advance_stage(
         drop(previous);
     }
     *slot = Some(StageClock::start(db_path, run_id, mode, stage));
-}
-
-/// How many `recon_stage` rows already exist for this run and stage, so the next
-/// one is a separate attempt rather than a rewritten fact.
-fn stage_attempt(db_path: &Path, run_id: &str, stage: &str) -> i64 {
-    let Ok(conn) = rusqlite::Connection::open(db_path) else {
-        return 1;
-    };
-    let prefix = format!("{run_id}:{stage}:");
-    conn.query_row(
-        "SELECT COUNT(DISTINCT id) FROM telemetry_events
-         WHERE event_type = 'recon_stage' AND id >= ?1 AND id < ?2",
-        rusqlite::params![prefix, format!("{prefix}\u{10ffff}")],
-        |row| row.get::<_, i64>(0),
-    )
-    .unwrap_or(0)
-        + 1
 }
 
 fn now_stamp() -> String {
@@ -216,6 +220,7 @@ pub(crate) fn note_directives(
             .run(run_id)
             .turn(turn_id)
             .count(1);
+        // Routed to the repository under SurrealDB (`telemetry::record`).
         let _ = telemetry::record(db_path, &event);
     }
     assessments
@@ -323,6 +328,7 @@ pub(crate) fn note_run(
             "strategy": plan.strategy,
             "planning_mode": plan.planning_mode,
         }));
+    // Routed to the repository under SurrealDB (`telemetry::record`).
     let _ = telemetry::record(db_path, &event);
 }
 
@@ -362,7 +368,7 @@ pub async fn execute_budgeted(
         });
     }
     let limits = &service.settings.recon_limits;
-    let store = Store::open(&service.db_path)?;
+    let store = ReconStore::open(&service.db_path).await?;
     let mut affordable = Vec::new();
     let mut skipped = Vec::new();
     let mut holds: Vec<(String, CreditHold)> = Vec::new();
@@ -370,11 +376,14 @@ pub async fn execute_budgeted(
         if cancel.load(Ordering::Relaxed) {
             return Err(anyhow!("cancelled"));
         }
-        if !store.tool_enabled(&call.tool_id)? {
+        if !store.tool_enabled(&call.tool_id).await? {
             skipped.push(format!("{} — disabled in the catalog", call.tool_id));
             continue;
         }
-        if store.inflight_duplicate(&call.tool_id, &call.arguments)? {
+        if store
+            .inflight_duplicate(&call.tool_id, &call.arguments)
+            .await?
+        {
             skipped.push(format!(
                 "{} — a duplicate call is already queued or running",
                 call.tool_id
@@ -382,17 +391,17 @@ pub async fn execute_budgeted(
             continue;
         }
         let cache_key = crate::osint::cache_identity(&call.tool_id, &call.arguments);
-        let cached = store.cache_get(&cache_key)?.is_some();
+        let cached = store.cache_get(&cache_key).await?.is_some();
         if let Some((provider_name, cost)) =
             limits.configured_cost_for(&call.tool_id, &call.arguments)
         {
             if !cached && cost > 0 {
-                match store.reserve_credits(provider_name, cost, limits)? {
+                match store.reserve_credits(provider_name, cost, limits).await? {
                     Some(hold) => {
                         holds.push((format!("{}:{}", call.tool_id, call.arguments), hold));
                     }
                     None => {
-                        let available = store.credits_available(provider_name, limits)?;
+                        let available = store.credits_available(provider_name, limits).await?;
                         skipped.push(format!(
                             "{} — Argos {provider_name} credit allowance is exhausted ({available} left, needs {cost}; local monthly cap, not the provider dashboard)",
                             call.tool_id
@@ -424,23 +433,23 @@ pub async fn execute_budgeted(
     let results = match outcome {
         Ok(results) => results,
         Err(err) => {
-            let store = Store::open(&service.db_path)?;
+            let store = ReconStore::open(&service.db_path).await?;
             for (_, hold) in &holds {
-                store.release_credits(hold)?;
+                store.release_credits(hold).await?;
             }
             return Err(err);
         }
     };
-    settle_holds(service, &results, holds)?;
+    settle_holds(service, &results, holds).await?;
     Ok(BudgetedOutcome { results, skipped })
 }
 
-fn settle_holds(
+async fn settle_holds(
     service: &super::Service,
     results: &[(String, ToolResult)],
     mut holds: Vec<(String, CreditHold)>,
 ) -> Result<()> {
-    let store = Store::open(&service.db_path)?;
+    let store = ReconStore::open(&service.db_path).await?;
     for (_, result) in results {
         let signature = format!("{}:{}", result.tool_id, result.inputs);
         let Some(index) = holds.iter().position(|(sig, _)| sig == &signature) else {
@@ -451,13 +460,13 @@ fn settle_holds(
         if spend {
             let estimate = hold.trial_credits + hold.allowance_credits;
             let actual = result.credits_reported.unwrap_or(estimate);
-            store.reconcile_credits(&hold, actual)?;
+            store.reconcile_credits(&hold, actual).await?;
         } else {
-            store.release_credits(&hold)?;
+            store.release_credits(&hold).await?;
         }
     }
     for (_, hold) in holds {
-        store.release_credits(&hold)?;
+        store.release_credits(&hold).await?;
     }
     Ok(())
 }
@@ -486,19 +495,24 @@ pub async fn run_turn(
         "deriving directives",
     );
     stage(progress, "deriving directives");
-    let store = Store::open(&service.db_path)?;
-    store.set_run(&run.id, "running", "deriving directives", None, None)?;
+    let store = ReconStore::open(&service.db_path).await?;
+    store
+        .set_run(&run.id, "running", "deriving directives", None, None)
+        .await?;
     for (kind, value) in super::explicit_entities(question) {
-        store.link_entity(&run.thread_id, &kind, &value, None)?;
+        store
+            .link_entity(&run.thread_id, &kind, &value, None)
+            .await?;
     }
     // Brain recall stays first. Recalled insights are known facts, not instructions.
     let (recalled, unfamiliar, brain_resources) =
-        recall_for_turn(&store, &run.thread_id, question, "", &run.id)?;
+        recall_for_turn(&store, &run.thread_id, question, "", &run.id).await?;
     let brain_resource_line = brain_resources.prompt_line();
-    let history = store.list_messages(&run.thread_id)?;
+    let history = store.list_messages(&run.thread_id).await?;
     let opening = !history.iter().any(|message| message.role == "assistant");
     let titles: Vec<String> = store
-        .get_thread(&run.thread_id)?
+        .get_thread(&run.thread_id)
+        .await?
         .map(|thread| thread.title)
         .into_iter()
         .chain(
@@ -510,35 +524,38 @@ pub async fn run_turn(
                 .map(|message| message.content.chars().take(120).collect()),
         )
         .collect();
-    let useful = !store.calls_for_thread(&run.thread_id)?.is_empty();
+    let useful = !store.calls_for_thread(&run.thread_id).await?.is_empty();
     let previous = store
-        .latest_strategy_kind(&run.thread_id)?
+        .latest_strategy_kind(&run.thread_id)
+        .await?
         .unwrap_or_default();
     let choice = investigation::select_strategy(question, opening, useful, unfamiliar);
     let change = investigation::strategy_change_reason(&previous, &choice);
-    store.record_strategy(
-        &run.thread_id,
-        &run.id,
-        &choice.kind,
-        &choice.rationale,
-        if previous.is_empty() {
-            None
-        } else {
-            Some(previous.as_str())
-        },
-        change.as_deref(),
-    )?;
+    store
+        .record_strategy(
+            &run.thread_id,
+            &run.id,
+            &choice.kind,
+            &choice.rationale,
+            if previous.is_empty() {
+                None
+            } else {
+                Some(previous.as_str())
+            },
+            change.as_deref(),
+        )
+        .await?;
     drop(store);
     let known: Vec<String> = recalled.iter().map(|item| item.text.clone()).collect();
     let frame = investigation::investigation_frame(question, &known);
-    let enabled = enabled_tools(&service.db_path)?;
+    let enabled = enabled_tools(&service.db_path).await?;
     let unkeyed = unkeyed_tools(service);
     let catalog = picker::eligible_catalog(&enabled, &unkeyed);
     let gate = ModelGate::default();
     gate.bind_clock(clock.clone(), service.db_path.clone());
-    let opened = Store::open(&service.db_path)?;
-    let thread = thread_subject(&opened, &run.thread_id, &run.id)?;
-    let prior = previous_synthesis(&opened, &run.thread_id)?;
+    let opened = ReconStore::open(&service.db_path).await?;
+    let thread = thread_subject(&opened, &run.thread_id, &run.id).await?;
+    let prior = previous_synthesis(&opened, &run.thread_id).await?;
     drop(opened);
     advance_stage(
         &mut stage_slot,
@@ -548,7 +565,10 @@ pub async fn run_turn(
         "classifying mode",
     );
     stage(progress, "classifying mode");
-    Store::open(&service.db_path)?.set_run(&run.id, "running", "classifying mode", None, None)?;
+    ReconStore::open(&service.db_path)
+        .await?
+        .set_run(&run.id, "running", "classifying mode", None, None)
+        .await?;
     let report_mode = classify_turn_mode(service, question, &prior, &known).await;
     let derived = derive_directives(
         recon_secret,
@@ -586,13 +606,10 @@ pub async fn run_turn(
     );
     publish(&gate, &mut plan, progress);
     stage(progress, "picking tools");
-    Store::open(&service.db_path)?.set_run(
-        &run.id,
-        "running",
-        "picking tools",
-        Some(&plan),
-        None,
-    )?;
+    ReconStore::open(&service.db_path)
+        .await?
+        .set_run(&run.id, "running", "picking tools", Some(&plan), None)
+        .await?;
     let picker_secret = picker_secret(service, run)?;
     let picker_runtime =
         super::model_exec::RoleRuntime::new(service.auth.clone(), service.settings.clone());
@@ -702,7 +719,7 @@ pub async fn run_turn(
     apply_order(&mut plan, &ordered, question, &brain_resources);
     plan.picker_requests = picker.requests;
     plan.picker_cost = picker.cost;
-    sync_budget(&plan, &gate);
+    sync_budget(&plan, &gate).await;
     publish(&gate, &mut plan, progress);
     advance_stage(
         &mut stage_slot,
@@ -711,13 +728,10 @@ pub async fn run_turn(
         &plan.report_mode,
         "picking tools",
     );
-    Store::open(&service.db_path)?.set_run(
-        &run.id,
-        "running",
-        "picking tools",
-        Some(&plan),
-        None,
-    )?;
+    ReconStore::open(&service.db_path)
+        .await?
+        .set_run(&run.id, "running", "picking tools", Some(&plan), None)
+        .await?;
     let mut results = execute_ordered(
         service,
         run,
@@ -736,8 +750,8 @@ pub async fn run_turn(
         &mut stage_slot,
     )
     .await?;
-    let store = Store::open(&service.db_path)?;
-    for call in store.calls_for_run(&run.id)? {
+    let store = ReconStore::open(&service.db_path).await?;
+    for call in store.calls_for_run(&run.id).await? {
         if results.iter().any(|(id, _)| id == &call.id) {
             continue;
         }
@@ -754,13 +768,10 @@ pub async fn run_turn(
         &plan.report_mode,
         "synthesizing",
     );
-    Store::open(&service.db_path)?.set_run(
-        &run.id,
-        "running",
-        "synthesizing",
-        Some(&plan),
-        None,
-    )?;
+    ReconStore::open(&service.db_path)
+        .await?
+        .set_run(&run.id, "running", "synthesizing", Some(&plan), None)
+        .await?;
     let outcome = service
         .finish_answer(
             AnswerContext {
@@ -799,7 +810,7 @@ pub async fn continue_turn(
     clock: &Arc<std::sync::Mutex<super::budget::TurnClock>>,
     progress: &mut (impl FnMut(super::TurnEvent) + Send),
 ) -> Result<Option<String>> {
-    let enabled = enabled_tools(&service.db_path)?;
+    let enabled = enabled_tools(&service.db_path).await?;
     let unkeyed = unkeyed_tools(service);
     let catalog = picker::eligible_catalog(&enabled, &unkeyed);
     let _picker_secret = picker_secret(service, run)?;
@@ -837,8 +848,8 @@ pub async fn continue_turn(
     )
     .await?;
     refresh_directive_coverage(&mut plan);
-    let store = Store::open(&service.db_path)?;
-    for call in store.calls_for_run(&run.id)? {
+    let store = ReconStore::open(&service.db_path).await?;
+    for call in store.calls_for_run(&run.id).await? {
         if results.iter().any(|(id, _)| id == &call.id) {
             continue;
         }
@@ -847,26 +858,26 @@ pub async fn continue_turn(
         }
     }
     let (recalled, _, _) =
-        recall_for_turn(&store, &run.thread_id, question, &plan.report_mode, &run.id)?;
+        recall_for_turn(&store, &run.thread_id, question, &plan.report_mode, &run.id).await?;
     let opening = !store
-        .list_messages(&run.thread_id)?
+        .list_messages(&run.thread_id)
+        .await?
         .iter()
         .any(|message| message.role == "assistant");
-    let prior = previous_synthesis(&store, &run.thread_id)?;
+    let prior = previous_synthesis(&store, &run.thread_id).await?;
     if plan.report_mode.trim().is_empty() {
         let known: Vec<String> = recalled.iter().map(|item| item.text.clone()).collect();
         drop(store);
         let mode = classify_turn_mode(service, question, &prior, &known).await;
         plan.report_mode = mode.as_str().into();
-        Store::open(&service.db_path)?.set_run(
-            &run.id,
-            "running",
-            "synthesizing",
-            Some(&plan),
-            None,
-        )?;
+        ReconStore::open(&service.db_path)
+            .await?
+            .set_run(&run.id, "running", "synthesizing", Some(&plan), None)
+            .await?;
     } else {
-        store.set_run(&run.id, "running", "synthesizing", Some(&plan), None)?;
+        store
+            .set_run(&run.id, "running", "synthesizing", Some(&plan), None)
+            .await?;
         drop(store);
     }
     advance_stage(
@@ -1154,12 +1165,16 @@ struct TurnModels<'a> {
 /// on a thread's first turn, `sociavault_turn_credits_later` after; spec defaults D4, to
 /// confirm), never more than the remaining credits cover. Every SociaVault route in the
 /// catalog costs one call's price.
-fn sociavault_turn_calls(service: &super::Service, opening: bool) -> usize {
+async fn sociavault_turn_calls(service: &super::Service, opening: bool) -> usize {
     let limits = &service.settings.recon_limits;
     let cost = limits.sociavault_call_cost.max(1);
-    let credits = Store::open(&service.db_path)
-        .and_then(|store| store.credits_available("sociavault", limits))
-        .unwrap_or(0);
+    let credits = match ReconStore::open(&service.db_path).await {
+        Ok(store) => store
+            .credits_available("sociavault", limits)
+            .await
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
     (limits.sociavault_turn_credits(opening).min(credits) / cost) as usize
 }
 
@@ -1182,25 +1197,32 @@ async fn execute_ordered(
         recon_secret: models.recon_secret,
         gate: models.gate,
         cancel,
-        sociavault_calls: sociavault_turn_calls(service, models.opening),
+        sociavault_calls: sociavault_turn_calls(service, models.opening).await,
         google_min_results: service.settings.recon_limits.google_fallback_min_results as usize,
         news_calls: service.settings.recon_limits.news_calls_per_turn as usize,
         legal_calls: service.settings.recon_limits.legal_calls_per_turn as usize,
     };
     let db = service.db_path.clone();
     let run_id = run.id.clone();
-    let mut persist = move |plan: &Plan, stage: &str| -> Result<()> {
-        Store::open(&db)?.set_run(&run_id, "running", stage, Some(plan), None)?;
+    let mut persist = move |plan: &Plan, stage: &str| -> PersistFuture {
         // Stage retries are separate attempts: each stage start earns its own
         // measured row rather than rewriting the previous one.
         advance_stage(stage_slot, &db, &run_id, &plan.report_mode, stage);
-        Ok(())
+        let (db, run_id, plan, stage) =
+            (db.clone(), run_id.clone(), plan.clone(), stage.to_string());
+        Box::pin(async move {
+            ReconStore::open(&db)
+                .await?
+                .set_run(&run_id, "running", &stage, Some(&plan), None)
+                .await?;
+            Ok(())
+        })
     };
     let runner = |call: PlanCall| {
         let missing = missing.clone();
         async move {
-            let store = Store::open(&service.db_path)?;
-            if !store.tool_enabled(&call.tool_id)? {
+            let store = ReconStore::open(&service.db_path).await?;
+            if !store.tool_enabled(&call.tool_id).await? {
                 return Ok(StepOutcome::NotRun("disabled in the catalog".into()));
             }
             drop(store);
@@ -1232,7 +1254,7 @@ async fn execute_ordered(
     let outcome = execute_steps(plan, &env, picker, runner, progress, &mut persist).await;
     plan.picker_requests = plan.picker_requests.max(picker.requests);
     plan.picker_cost = plan.picker_cost.max(picker.cost);
-    let _ = persist(plan, "running tools");
+    let _ = persist(plan, "running tools").await;
     outcome
 }
 
@@ -1530,13 +1552,17 @@ fn usable(status: &str) -> bool {
 /// step per question platform with a handle, within the turn allowance. Disabled,
 /// unkeyed, or over-budget steps are deferred, with a replacement pick when fewer than
 /// three executable steps would remain.
+/// A plan checkpoint write (`execute_steps`' `persist`).
+pub(crate) type PersistFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
 pub(crate) async fn execute_steps<R, F>(
     plan: &mut Plan,
     env: &StepEnv<'_>,
     picker: &mut picker::Picker<'_>,
     mut runner: R,
     progress: &mut (impl FnMut(super::TurnEvent) + Send),
-    persist: &mut (impl FnMut(&Plan, &str) -> Result<()> + Send),
+    persist: &mut (impl FnMut(&Plan, &str) -> PersistFuture + Send),
 ) -> Result<Vec<(String, ToolResult)>>
 where
     R: FnMut(PlanCall) -> F + Send,
@@ -1633,7 +1659,7 @@ where
                 if !plan.unresolved_inputs.contains(&line) {
                     plan.unresolved_inputs.push(line);
                 }
-                persist(plan, "binding inputs")?;
+                persist(plan, "binding inputs").await?;
                 index += 1;
                 continue;
             }
@@ -1656,7 +1682,7 @@ where
             if !plan.unresolved_inputs.contains(&line) {
                 plan.unresolved_inputs.push(line);
             }
-            persist(plan, "binding inputs")?;
+            persist(plan, "binding inputs").await?;
             index += 1;
             continue;
         }
@@ -1695,20 +1721,20 @@ where
             }
         }
         let label = format!("running {}", step.tool_id);
-        sync_budget(plan, env.gate);
+        sync_budget(plan, env.gate).await;
         if let Some(clock) = env.gate.clock() {
             clock.lock().unwrap().begin_tools();
         }
         publish(env.gate, plan, progress);
         stage(progress, &label);
         refresh_unresolved(plan);
-        persist(plan, &label)?;
+        persist(plan, &label).await?;
         let call = plan.calls[index].clone();
         let outcome = match runner(call).await {
             Ok(outcome) => outcome,
             Err(err) if cancelled(&err) || env.cancel.load(Ordering::Relaxed) => {
                 plan.calls[index].status = "cancelled".into();
-                persist(plan, "cancelled")?;
+                persist(plan, "cancelled").await?;
                 return Err(err);
             }
             // One step's dispatch error fails that step, not the turn.
@@ -1724,7 +1750,7 @@ where
                     google_fallback(plan, env, index, "Firecrawl search failed to dispatch");
                 }
                 after_step(plan, env, picker, index, false, &mut fallback_for, progress).await?;
-                persist(plan, "running tools")?;
+                persist(plan, "running tools").await?;
                 index += 1;
                 continue;
             }
@@ -1760,7 +1786,7 @@ where
                 plan.calls[index].call_id = call_id.clone();
                 if result.status == "cancelled" || env.cancel.load(Ordering::Relaxed) {
                     plan.calls[index].status = "cancelled".into();
-                    persist(plan, "cancelled")?;
+                    persist(plan, "cancelled").await?;
                     return Err(anyhow!("cancelled"));
                 }
                 let ok = usable(&result.status);
@@ -1851,7 +1877,7 @@ where
             }
         }
         refresh_unresolved(plan);
-        persist(plan, "running tools")?;
+        persist(plan, "running tools").await?;
         index += 1;
     }
     // Every step was visited; anything still pending could not be bound.
@@ -1979,7 +2005,7 @@ async fn extract_bindings(
 ) -> Result<Vec<super::Binding>> {
     let step = plan.calls[index].clone();
     let expanded = if crate::nlp::configured_mode() == crate::nlp::Mode::Select {
-        crate::nlp::expanded_observations(observations)
+        crate::nlp::expanded_observations_async(observations).await
     } else {
         observations.clone()
     };
@@ -2357,10 +2383,8 @@ fn expand_dork_children(
         record_grounding(plan, &step_id, &grounds);
     }
 
-    let mut insert_pos = index + 1;
-    for child in children {
+    for (insert_pos, child) in (index + 1..).zip(children) {
         plan.calls.insert(insert_pos, child);
-        insert_pos += 1;
     }
 }
 
@@ -2761,23 +2785,40 @@ async fn classify_turn_mode(
 /// Text Brain recall plus entity-linked insights for one turn. The bool is true when
 /// Brain context is thin (fewer than two solid text hits). The summary lists resource
 /// types and URLs linked to those hits when any exist.
-pub(crate) fn recall_for_turn(
-    store: &Store,
+pub(crate) async fn recall_for_turn(
+    store: &ReconStore,
     thread_id: &str,
     question: &str,
     mode: &str,
     run_id: &str,
 ) -> Result<(Vec<super::RecallInsight>, bool, BrainResourceSummary)> {
-    if store
-        .get_thread(thread_id)?
-        .is_some_and(|t| !t.recall_insights)
-    {
-        return Ok((Vec::new(), true, BrainResourceSummary::default()));
-    }
-    let thread_entities = store.thread_entities(thread_id)?;
+    // SurrealDB: vector recall (DISKANN, lexical top-up; the full-text
+    // stopgap without a served embedding generation) over the same 20
+    // candidates, admission policy, five-memory cap, thin-Brain test and
+    // resource summary as SQLite, and the same recall_query telemetry row.
+    let Some(repo) = store.repository() else {
+        anyhow::bail!("SurrealDB storage is not configured");
+    };
+    let embedder = crate::storage::vectors::Embedder::local();
+    let hits = crate::storage::recon_extract::recall_candidates_for_turn(
+        repo,
+        thread_id,
+        question,
+        embedder.as_ref(),
+        20,
+        usize::MAX,
+    )
+    .await?;
+    let unfamiliar = super::scores_are_thin(hits.iter().map(|hit| hit.score));
+    let candidates = hits.len();
     let query = crate::brain_query::BrainQuery {
         current_question: question.to_string(),
-        confirmed_subjects: thread_entities.iter().map(|e| e.1.clone()).collect(),
+        confirmed_subjects: store
+            .thread_entities(thread_id)
+            .await?
+            .into_iter()
+            .map(|e| e.1)
+            .collect(),
         candidate_limit: 20,
         token_budget: 1500,
         ..Default::default()
@@ -2786,64 +2827,60 @@ pub(crate) fn recall_for_turn(
         strict_mode: true,
         allow_background: false,
     };
-
-    let text_hits = crate::brain_query::recall_candidates_for(
-        store,
-        "recon",
-        run_id,
-        question,
-        query.candidate_limit,
-        &query.allowed_kinds,
-    )?;
-    let unfamiliar = super::brain_is_thin(&text_hits);
-    let mut recalled: Vec<super::RecallInsight> = Vec::new();
     let subject = super::question_subject(question);
-
-    let mut admitted_count = 0;
-    for hit in &text_hits {
+    let mut recalled: Vec<super::RecallInsight> = Vec::new();
+    for hit in hits {
         if recalled.len() >= 5 {
             break;
         }
-        if !crate::brain_query::admit_memory(&query, &hit.memory, &policy) {
-            continue;
-        }
-        if recalled.iter().any(|item| item.memory_id == hit.memory.id) {
+        if !crate::brain_query::admit_text(&query, &hit.text, &policy)
+            || recalled.iter().any(|item| item.memory_id == hit.id)
+        {
             continue;
         }
         recalled.push(super::RecallInsight {
-            memory_id: hit.memory.id.clone(),
-            text: hit.memory.text.clone(),
+            memory_id: hit.id,
+            text: hit.text,
             entity: subject.clone(),
             predicate: "memory".into(),
-            updated_at: hit.memory.created_at.clone(),
+            updated_at: String::new(),
             evidence_count: 0,
         });
-        admitted_count += 1;
     }
-    recalled.truncate(5);
-    let resources = brain_resources::summarize_for_recall(store, &recalled, question)?;
-    // The recall relevance gate: one row per completed recall query, with the
-    // candidate and accepted hit counts and a bounded rejection label.
-    let candidates = text_hits.len();
+    let mut found = std::collections::HashMap::new();
+    for item in &recalled {
+        found.insert(
+            item.memory_id.clone(),
+            (
+                crate::storage::insight_views::insight_for_memory(repo, &item.memory_id).await?,
+                crate::storage::browse::get_memory(repo, &item.memory_id).await?,
+            ),
+        );
+    }
+    let resources = brain_resources::summarize_with(&recalled, question, |id| {
+        Ok(found.remove(id).unwrap_or((None, None)))
+    })?;
+    let accepted = recalled.len();
     let facts = brain_resources::RecallQueryFacts {
         candidates,
-        accepted: admitted_count,
+        accepted,
         rejection_reason: brain_resources::recall_gate_rejection(
             candidates,
-            admitted_count,
-            candidates.saturating_sub(admitted_count),
+            accepted,
+            candidates.saturating_sub(accepted),
         ),
         mode: mode.to_string(),
         run_id: run_id.to_string(),
         thread_id: thread_id.to_string(),
     };
-    brain_resources::note_recall_query(store, &facts);
+    let event = brain_resources::recall_query_event(&facts);
+    let _ = crate::storage::telemetry::record(repo.db(), &event).await;
     Ok((recalled, unfamiliar, resources))
 }
 
 /// The latest earlier assistant message, compacted for the next turn's prompts.
-pub(crate) fn previous_synthesis(store: &Store, thread_id: &str) -> Result<String> {
-    let messages = store.list_messages(thread_id)?;
+pub(crate) async fn previous_synthesis(store: &ReconStore, thread_id: &str) -> Result<String> {
+    let messages = store.list_messages(thread_id).await?;
     let Some(latest) = messages
         .iter()
         .rev()
@@ -2872,8 +2909,15 @@ pub(crate) fn previous_synthesis(store: &Store, thread_id: &str) -> Result<Strin
             .prompt_version()
             .into(),
     };
-    if let Ok(Some(hit)) = crate::summarization::cache_get(&store.conn, &req) {
-        return Ok(hit.content);
+    {
+        // `storage::summary_flush::cache_get`; SQLite is never opened here.
+        if let Ok(Some(hit)) = crate::summarization::cache_get_selected(&req, || {
+            anyhow::bail!("SQLite is not opened under SurrealDB")
+        })
+        .await
+        {
+            return Ok(hit.content);
+        }
     }
     let content = if crate::nlp::configured_mode() == crate::nlp::Mode::Select {
         latest.content.clone()
@@ -2881,9 +2925,10 @@ pub(crate) fn previous_synthesis(store: &Store, thread_id: &str) -> Result<Strin
         compact_prior_synthesis(&latest.content)
     };
     let det = crate::summarization::deterministic_follow_up(&content, PRIOR_SYNTHESIS_CHARS);
-    let published =
-        crate::summarization::publish_deterministic_and_enqueue(&store.conn, &req, det)?;
-    Ok(published.content)
+    Ok(match crate::summarization::publish_selected(&req, det) {
+        Some(published) => published.content,
+        None => content,
+    })
 }
 
 /// Drops citations, the evidence trailer, and repeated article lines, then keeps the
@@ -3071,12 +3116,12 @@ fn derived_note(count: usize, repair: Option<&str>) -> String {
 
 /// The thread's established subject: the directive entities of the latest earlier run
 /// whose plan has any.
-pub(crate) fn thread_subject(
-    store: &Store,
+pub(crate) async fn thread_subject(
+    store: &ReconStore,
     thread_id: &str,
     current_run: &str,
 ) -> Result<Vec<String>> {
-    for run in store.runs_for_thread(thread_id)?.into_iter().rev() {
+    for run in store.runs_for_thread(thread_id).await?.into_iter().rev() {
         if run.id == current_run {
             continue;
         }
@@ -3141,10 +3186,14 @@ async fn opening_discovery(
         "firecrawl_yandex_search",
         "firecrawl_mojeek_search",
     ];
-    let store = Store::open(&service.db_path)?;
-    let any_enabled = engines
-        .iter()
-        .any(|tool| store.tool_enabled(tool).unwrap_or(false));
+    let store = ReconStore::open(&service.db_path).await?;
+    let mut any_enabled = false;
+    for tool in engines {
+        if store.tool_enabled(tool).await.unwrap_or(false) {
+            any_enabled = true;
+            break;
+        }
+    }
     drop(store);
     if !any_enabled || service.provider_keys().firecrawl.trim().is_empty() {
         return Ok((
@@ -3489,11 +3538,11 @@ fn hypothesis_view(record: &investigation::HypothesisRecord) -> HypothesisView {
     }
 }
 
-fn enabled_tools(db: &std::path::Path) -> Result<HashSet<String>> {
-    let store = Store::open(db)?;
+async fn enabled_tools(db: &std::path::Path) -> Result<HashSet<String>> {
+    let store = ReconStore::open(db).await?;
     let mut ids = HashSet::new();
     for tool in crate::osint::registry() {
-        if store.tool_enabled(tool.id)? {
+        if store.tool_enabled(tool.id).await? {
             ids.insert(tool.id.to_string());
         }
     }
@@ -3501,14 +3550,14 @@ fn enabled_tools(db: &std::path::Path) -> Result<HashSet<String>> {
 }
 
 #[allow(dead_code)]
-fn note_cache(
+async fn note_cache(
     service: &super::Service,
     actions: &mut [investigation::ProposedAction],
 ) -> Result<()> {
-    let store = Store::open(&service.db_path)?;
+    let store = ReconStore::open(&service.db_path).await?;
     for action in actions.iter_mut() {
         let key = crate::osint::cache_identity(&action.tool_id, &action.arguments);
-        if store.cache_get(&key)?.is_some() {
+        if store.cache_get(&key).await?.is_some() {
             action.cache_available = true;
             action.credit_cost = 0;
             if !action.rank_reason.contains("cached") {
@@ -3529,14 +3578,14 @@ fn note_cache(
 }
 
 #[allow(dead_code)]
-fn credit_map(service: &super::Service) -> Result<HashMap<String, u32>> {
-    let store = Store::open(&service.db_path)?;
+async fn credit_map(service: &super::Service) -> Result<HashMap<String, u32>> {
+    let store = ReconStore::open(&service.db_path).await?;
     let limits = &service.settings.recon_limits;
     let mut map = HashMap::new();
     for provider_name in ["firecrawl", "hunter", "sociavault"] {
         map.insert(
             provider_name.into(),
-            store.credits_available(provider_name, limits)?,
+            store.credits_available(provider_name, limits).await?,
         );
     }
     Ok(map)
@@ -3743,43 +3792,46 @@ fn publish(gate: &ModelGate, plan: &mut Plan, _progress: &mut impl FnMut(super::
     drop(clock);
 }
 
-fn sync_budget(plan: &Plan, gate: &ModelGate) {
+async fn sync_budget(plan: &Plan, gate: &ModelGate) {
     let Some(clock) = gate.clock() else {
         return;
     };
-    let store = gate.db().and_then(|path| Store::open(&path).ok());
+    let store = match gate.db() {
+        Some(path) => ReconStore::open(&path).await.ok(),
+        None => None,
+    };
     let sequential = plan.calls.iter().any(|call| !call.depends_on.is_empty());
-    let calls = plan
+    let mut calls = Vec::new();
+    for call in plan
         .calls
         .iter()
         .filter(|call| !call.tool_id.is_empty())
         .filter(|call| !matches!(call.status.as_str(), "deferred" | "skipped" | "cancelled"))
-        .map(|call| {
-            let cached = store
-                .as_ref()
-                .and_then(|store| {
-                    let key = crate::osint::cache_identity(&call.tool_id, &call.arguments);
-                    store.cache_get(&key).ok().flatten()
-                })
-                .is_some();
-            super::budget::scheduled(&call.tool_id, cached)
-        })
-        .collect();
+    {
+        let cached = match &store {
+            Some(store) => {
+                let key = crate::osint::cache_identity(&call.tool_id, &call.arguments);
+                store.cache_get(&key).await.ok().flatten().is_some()
+            }
+            None => false,
+        };
+        calls.push(super::budget::scheduled(&call.tool_id, cached));
+    }
     clock
         .lock()
         .unwrap()
         .raise_calls_with_deps(calls, sequential);
 }
 
-fn call_cached(gate: &ModelGate, call: &PlanCall) -> bool {
+async fn call_cached(gate: &ModelGate, call: &PlanCall) -> bool {
     let Some(path) = gate.db() else {
         return false;
     };
-    let Ok(store) = Store::open(&path) else {
+    let Ok(store) = ReconStore::open(&path).await else {
         return false;
     };
     let key = crate::osint::cache_identity(&call.tool_id, &call.arguments);
-    store.cache_get(&key).ok().flatten().is_some()
+    store.cache_get(&key).await.ok().flatten().is_some()
 }
 
 /// Stops further Recon model calls in a turn after a provider rate limit, so the rule
@@ -3857,7 +3909,7 @@ async fn model_json(
         cancel,
         None,
         None,
-        db_path.as_deref(),
+        db_path.as_deref().and_then(sqlite_path),
         true,
     )
     .await;
@@ -3880,34 +3932,6 @@ async fn model_json(
 mod tests {
     use super::super::PickRecord;
     use super::*;
-    use std::time::Duration;
-
-    /// `recall_for_turn` stays sync and runs inside the async Recon turn; with the
-    /// Lance index on, its sync wrapper must not panic inside the runtime.
-    #[cfg(feature = "lancedb")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn recall_for_turn_uses_lance_inside_the_turn_runtime() {
-        let _fake = crate::embed::testing::fake();
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("argos.db")).unwrap();
-        let memory = store
-            .add_memory(
-                "Northwind ferry timetable changed in March",
-                "fact",
-                false,
-                crate::brain::MemorySource {
-                    app: "test".into(),
-                    conversation_id: "c".into(),
-                    message_id: None,
-                    reference: None,
-                },
-            )
-            .unwrap();
-        let (recalled, _, _) =
-            recall_for_turn(&store, "no-thread", "northwind ferry timetable", "", "").unwrap();
-        assert!(recalled.iter().any(|item| item.memory_id == memory.id));
-        assert!(dir.path().join("memory_lancedb").is_dir());
-    }
 
     fn action(tool_id: &str, arguments: Value) -> investigation::ProposedAction {
         investigation::ProposedAction {
@@ -4914,7 +4938,7 @@ mod tests {
                 progress_log.push(stage);
             }
         };
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         let results = execute_steps(
             &mut plan,
             &env,
@@ -5053,7 +5077,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         execute_steps(
             &mut plan,
             &env,
@@ -5126,7 +5150,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         let outcome = execute_steps(
             &mut plan,
             &env,
@@ -5139,72 +5163,6 @@ mod tests {
         assert!(outcome.is_err_and(|err| cancelled(&err)));
         assert_eq!(plan.calls[0].status, "cancelled");
         assert_eq!(plan.calls[1].status, "pending");
-    }
-
-    #[tokio::test]
-    async fn cancel_mid_dispatch_releases_credit_holds() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("argos.db");
-        let settings = SettingsFile {
-            firecrawl_api_key: "fc-test-not-a-key".into(),
-            ..SettingsFile::default()
-        };
-        let service =
-            super::super::Service::new(&db, crate::secrets::AuthFile::default(), settings).unwrap();
-        let store = Store::open(&db).unwrap();
-        let thread = store.new_thread("t").unwrap();
-        let user = store
-            .add_message(&thread.id, "user", "who is jane example?", None)
-            .unwrap();
-        let run = store
-            .new_run(&thread.id, &user.id, "local / m", "local / m")
-            .unwrap();
-        let before = store
-            .credits_available("firecrawl", &service.settings.recon_limits)
-            .unwrap();
-        drop(store);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let flag = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            flag.store(true, Ordering::Relaxed);
-        });
-        let call = PlanCall {
-            step_id: "s1".into(),
-            tool_id: "firecrawl_search".into(),
-            arguments: json!({"query": "jane example", "limit": 5}),
-            ..PlanCall::default()
-        };
-        let outcome = execute_budgeted(&service, &run, &[call], &cancel).await;
-        let store = Store::open(&db).unwrap();
-        let after = store
-            .credits_available("firecrawl", &service.settings.recon_limits)
-            .unwrap();
-        assert_eq!(before, after, "the hold is released, not spent");
-        if let Ok(budgeted) = outcome {
-            assert!(budgeted
-                .results
-                .iter()
-                .all(|(_, result)| result.status != "completed"));
-        }
-        let held: i64 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM credit_reservations WHERE state='held'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let reserved: i64 = store
-            .conn
-            .query_row(
-                "SELECT COALESCE(SUM(reserved),0) FROM provider_quota",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(reserved, 0);
-        assert_eq!(held, 0);
     }
 
     fn trump_search() -> Value {
@@ -5339,7 +5297,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         execute_steps(
             &mut plan,
             &env,
@@ -5495,7 +5453,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         execute_steps(
             &mut plan,
             &env,
@@ -5765,7 +5723,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         let results = execute_steps(
             &mut plan,
             &env,
@@ -5907,7 +5865,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         execute_steps(
             &mut plan,
             &env,
@@ -5998,7 +5956,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         let results = execute_steps(
             &mut plan,
             &env,
@@ -6016,41 +5974,6 @@ mod tests {
             .binding_notes
             .iter()
             .any(|note| note.starts_with("s1 crtsh_certificates: not run")));
-    }
-
-    #[tokio::test]
-    async fn a_budgeted_call_with_a_dependency_from_an_earlier_batch_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("argos.db");
-        let service = super::super::Service::new(
-            &db,
-            crate::secrets::AuthFile::default(),
-            SettingsFile::default(),
-        )
-        .unwrap();
-        let store = Store::open(&db).unwrap();
-        let thread = store.new_thread("t").unwrap();
-        let user = store
-            .add_message(&thread.id, "user", "who is elon musk?", None)
-            .unwrap();
-        let run = store
-            .new_run(&thread.id, &user.id, "local / m", "local / m")
-            .unwrap();
-        drop(store);
-        let cancel = Arc::new(AtomicBool::new(false));
-        // Invalid arguments fail inside the executor without a network request.
-        let call = PlanCall {
-            step_id: "s2".into(),
-            tool_id: "stackexchange_users".into(),
-            arguments: json!({}),
-            depends_on: vec!["s8".into()],
-            ..PlanCall::default()
-        };
-        let results = execute_budgeted(&service, &run, &[call], &cancel)
-            .await
-            .expect("no 'plan made no progress'");
-        assert_eq!(results.results.len(), 1);
-        assert_eq!(results.results[0].1.status, "failed");
     }
 
     // -- #27: primary providers ---------------------------------------------------
@@ -6149,7 +6072,7 @@ mod tests {
             async move { Ok(StepOutcome::Ran(id, Box::new(outcome))) }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         ground_fixtures(plan);
         execute_steps(
             plan,
@@ -6873,162 +6796,13 @@ mod tests {
         );
     }
 
-    /// AC7: a pronoun follow-up takes its entities from the thread subject.
-    #[test]
-    fn ac7_a_pronoun_follow_up_takes_the_thread_subject() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("argos.db")).unwrap();
-        let thread = store.new_thread("t").unwrap();
-        let first = store
-            .add_message(&thread.id, "user", WHO_ELON, None)
-            .unwrap();
-        let run1 = store
-            .new_run(&thread.id, &first.id, "local / m", "local / m")
-            .unwrap();
-        store
-            .set_run(
-                &run1.id,
-                "completed",
-                "done",
-                Some(&elon_plan(Vec::new())),
-                None,
-            )
-            .unwrap();
-        let follow = "what about his companies?";
-        let second = store.add_message(&thread.id, "user", follow, None).unwrap();
-        let run2 = store
-            .new_run(&thread.id, &second.id, "local / m", "local / m")
-            .unwrap();
-        let subject = thread_subject(&store, &thread.id, &run2.id).unwrap();
-        assert_eq!(subject, ["Elon Musk"]);
-        assert!(investigation::refers_back(follow));
-        assert_eq!(
-            investigation::directive_entities(follow, &subject),
-            ["Elon Musk"]
-        );
-        let directives = investigation::fallback_directives(follow, &subject);
-        assert!(
-            directives.iter().all(|item| item.entities == ["Elon Musk"]),
-            "{directives:?}"
-        );
-        // Recon's entities must come from the prompt or the thread subject.
-        let reply = |entity: &str| {
-            json!({"directives": [
-                {"id": "d1", "goal": "List the companies the subject runs", "entities": [entity], "targets": ["org_name"], "done_when": "an org is accepted"},
-                {"id": "d2", "goal": "Find each company's official website", "entities": [entity], "targets": ["domain"], "done_when": "a domain is accepted"},
-                {"id": "d3", "goal": "Find contact domains for those companies", "entities": [entity], "targets": ["email"], "done_when": "an email is accepted"}
-            ]})
-        };
-        let parsed =
-            investigation::parse_directives(&reply("Elon Musk"), follow, &subject).unwrap();
-        assert_eq!(parsed[0].entities, ["Elon Musk"]);
-        assert!(investigation::parse_directives(&reply("Jeff Bezos"), follow, &subject).is_err());
-        let bound = investigation::bind_step("firecrawl_search", &[], follow, Some(&directives[2]));
-        assert_eq!(bound.args["query"], json!("Elon Musk company"));
-        // A prompt with its own subject keeps it, even with a pronoun in a second clause.
-        let own = "who is jane example and what are her social media accounts?";
-        assert!(!investigation::refers_back(own));
-        assert_eq!(
-            investigation::directive_entities(own, &subject),
-            ["Jane Example"]
-        );
-        // Leading verbs and explicit identifiers.
-        assert_eq!(
-            investigation::directive_entities("Who runs Acme Robotics?", &[]),
-            ["Acme Robotics"]
-        );
-        assert_eq!(
-            investigation::directive_entities("Who runs acmerobotics.com?", &[]),
-            ["acmerobotics.com"]
-        );
-        assert_eq!(
-            investigation::directive_entities("who owns 8.8.8.8?", &[]),
-            ["8.8.8.8"]
-        );
-        // The first turn of a thread has no subject.
-        assert!(thread_subject(&store, &thread.id, &run1.id)
+    /// Run a store future from a synchronous test.
+    fn block<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .unwrap()
-            .is_empty());
-    }
-
-    /// A follow-up keeps names the previous synthesis established, and the directive
-    /// prompt carries that answer.
-    #[test]
-    fn a_follow_up_keeps_names_from_the_previous_synthesis() {
-        let follow = "what agendas are these billionaires pursuing?";
-        let subject = ["Elon Musk".to_string()];
-        let prior = "Musk, along with George Soros and Jeff Yass, has poured millions into the 2026 U.S. midterm elections.";
-        assert!(investigation::refers_back(follow));
-        let reply = |entities: serde_json::Value| {
-            json!({"directives": [
-                {"id": "d1", "goal": "Establish the political spending each named person is backing", "entities": entities, "targets": ["person_name", "org_name"], "done_when": "a spending target is named"},
-                {"id": "d2", "goal": "Find organizations receiving that spending", "entities": entities, "targets": ["org_name"], "done_when": "an organization is accepted"},
-                {"id": "d3", "goal": "Find public statements of the agenda behind the spending", "entities": entities, "targets": ["url"], "done_when": "a statement is cited"}
-            ]})
-        };
-        let parsed = investigation::parse_directives_with(
-            &reply(json!(["George Soros", "Jeff Yass"])),
-            follow,
-            &subject,
-            prior,
-        )
-        .unwrap();
-        assert_eq!(parsed[0].entities, ["George Soros", "Jeff Yass"]);
-        assert!(investigation::parse_directives_with(
-            &reply(json!(["Jeff Bezos"])),
-            follow,
-            &subject,
-            prior
-        )
-        .is_err());
-        let pronouns =
-            investigation::parse_directives_with(&reply(json!(["these"])), follow, &subject, prior)
-                .unwrap();
-        assert_eq!(pronouns[0].entities, ["Elon Musk"]);
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("argos.db")).unwrap();
-        let thread = store.new_thread("t").unwrap();
-        store
-            .add_message(
-                &thread.id,
-                "user",
-                "what is the latest news on elon musk?",
-                None,
-            )
-            .unwrap();
-        store
-            .add_message(&thread.id, "assistant", prior, None)
-            .unwrap();
-        let loaded = previous_synthesis(&store, &thread.id).unwrap();
-        assert_eq!(loaded, prior);
-        let user = directive_user(&DirectivePrompt {
-            question: follow,
-            titles: &[],
-            recalled: &[],
-            brain_resources: "",
-            thread: &subject,
-            prior: &loaded,
-            report_mode: ReportMode::Verify,
-        })
-        .unwrap();
-        assert!(user.contains("Previous turn synthesis"));
-        assert!(user.contains("George Soros"));
-        assert!(user.contains(follow));
-        let long = format!(
-            "Latest news names Donald Trump and the midterms.\n\n{}\n\nThese articles cover politics.\nDirective evaluation\nD1: Met — eight articles name Donald Trump [call-abc].\nD2: Met — Wired and BBC [call-def].\nD3: Met — key points [call-ghi].\n\nEvidence:\n- call-abc: firecrawl\n{}",
-            "- Wired story about data centers and the midterms.\n".repeat(40),
-            super::super::budget::CUT_SHORT
-        );
-        store
-            .add_message(&thread.id, "assistant", &long, None)
-            .unwrap();
-        let compact = previous_synthesis(&store, &thread.id).unwrap();
-        assert!(compact.contains("Donald Trump"));
-        assert!(compact.contains("D1: Met"));
-        assert!(!compact.contains("[call-"));
-        assert!(!compact.contains("Evidence:"));
-        assert!(compact.chars().count() <= super::PRIOR_SYNTHESIS_CHARS);
-        assert!(compact.chars().count() < long.chars().count());
+            .block_on(future)
     }
 
     #[test]
@@ -7434,7 +7208,7 @@ mod tests {
             async move { Ok(StepOutcome::Ran(id, Box::new(outcome))) }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         let results = execute_steps(
             &mut plan,
             &env,
@@ -7691,78 +7465,6 @@ mod tests {
         );
     }
 
-    /// AC3: a full turn with sentinel keys stores no key in tool inputs, cache keys,
-    /// plan_json, raw bodies, the run rows, or the progress log.
-    #[tokio::test]
-    async fn ac3_no_key_reaches_inputs_cache_keys_plan_json_raw_bodies_or_logs() {
-        use crate::osint::fixture::{article, articles, opinion, search, serve};
-        let fixture = serve(Arc::new(|line: &str| {
-            if line.contains("/v2/") {
-                (
-                    200,
-                    articles(&[article(
-                        "Elon Musk unveils robotaxi",
-                        "Elon Musk said Tesla will launch.",
-                        "https://www.reuters.com/a",
-                    )]),
-                )
-            } else {
-                (
-                    200,
-                    search(&[opinion(
-                        "Tornetta v. Musk",
-                        "Elon Musk compensation package.",
-                    )]),
-                )
-            }
-        }))
-        .await;
-        let turn =
-            context_service_turn("is Elon Musk in the news, and has Elon Musk been sued?").await;
-        drop(fixture);
-        let (dir, plan, progress, calls) = (turn.dir, turn.plan, turn.progress, turn.calls);
-        assert_eq!(turn.state, "completed", "{:?}", turn.error);
-        assert!(
-            calls.iter().any(|call| call.tool_id == "newsapi_search"),
-            "{:?}",
-            calls.iter().map(|call| &call.tool_id).collect::<Vec<_>>()
-        );
-        assert!(calls
-            .iter()
-            .any(|call| call.tool_id.starts_with("courtlistener_")));
-        for call in &calls {
-            assert!(
-                !call.inputs.to_string().contains(SENTINEL_KEY),
-                "{}: inputs",
-                call.tool_id
-            );
-            let raw = call
-                .result
-                .as_ref()
-                .map(|result| result.raw.clone())
-                .unwrap_or_default();
-            assert!(!raw.contains(SENTINEL_KEY), "{}: raw body", call.tool_id);
-        }
-        assert!(
-            !serde_json::to_string(&plan).unwrap().contains(SENTINEL_KEY),
-            "plan_json"
-        );
-        assert!(!progress.join("\n").contains(SENTINEL_KEY), "progress log");
-        // Every stored byte: the database (runs, calls, cache keys and values) and its WAL.
-        let mut scanned = 0;
-        for entry in std::fs::read_dir(dir.path()).unwrap() {
-            let bytes = std::fs::read(entry.unwrap().path()).unwrap();
-            scanned += bytes.len();
-            assert!(
-                !bytes
-                    .windows(SENTINEL_KEY.len())
-                    .any(|window| window == SENTINEL_KEY.as_bytes()),
-                "a stored row carries the key"
-            );
-        }
-        assert!(scanned > 0);
-    }
-
     struct ServiceTurn {
         dir: tempfile::TempDir,
         state: String,
@@ -7825,93 +7527,6 @@ mod tests {
             }
         });
         format!("http://127.0.0.1:{port}/v1")
-    }
-
-    /// One real `run_turn` with sentinel NewsAPI and CourtListener keys, every other tool
-    /// disabled (no network beyond the fixture), no Recon or picker model, and a local
-    /// Synthesis stand-in.
-    async fn context_service_turn(question: &str) -> ServiceTurn {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("argos.db");
-        let settings = SettingsFile {
-            newsapi_api_key: SENTINEL_KEY.into(),
-            courtlistener_api_token: SENTINEL_KEY.into(),
-            ..SettingsFile::default()
-        };
-        let service =
-            super::super::Service::new(&db, crate::secrets::AuthFile::default(), settings).unwrap();
-        let store = Store::open(&db).unwrap();
-        for tool in crate::osint::registry() {
-            store
-                .set_tool_enabled(tool.id, is_context(tool.id))
-                .unwrap();
-        }
-        let thread = store.new_thread("t").unwrap();
-        let user = store
-            .add_message(&thread.id, "user", question, None)
-            .unwrap();
-        let run = store
-            .new_run_with_models(
-                &thread.id,
-                &user.id,
-                ["local / ", "local / ", "local / test-chat"],
-                super::super::RunLimits {
-                    max_rounds: 6,
-                    max_calls: 12,
-                    turn_seconds: 300,
-                },
-            )
-            .unwrap();
-        drop(store);
-        let synthesis = chat_model(&citing_synthesis().await);
-        let recon = ProviderSecret {
-            model: String::new(),
-            ..chat_model("http://127.0.0.1:9/v1")
-        };
-        let cancel = Arc::new(AtomicBool::new(false));
-        let mut progress = Vec::new();
-        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
-            300, 900,
-        )));
-        let outcome = run_turn(
-            &service,
-            &run,
-            question,
-            &recon,
-            &synthesis,
-            &cancel,
-            &clock,
-            &mut |event| progress.push(event.to_string()),
-        )
-        .await;
-        let store = Store::open(&db).unwrap();
-        if outcome.is_ok() {
-            store
-                .set_run(&run.id, "completed", "complete", None, None)
-                .unwrap();
-        }
-        let stored = store.get_run(&run.id).unwrap().unwrap();
-        let plan: Plan = stored
-            .plan_json
-            .as_deref()
-            .map(|raw| serde_json::from_str(raw).unwrap())
-            .unwrap_or_default();
-        let answer = store
-            .list_messages(&thread.id)
-            .unwrap()
-            .into_iter()
-            .find(|message| message.role == "assistant")
-            .map(|message| message.content);
-        let calls = store.calls_for_run(&run.id).unwrap();
-        ServiceTurn {
-            dir,
-            state: stored.state,
-            error: outcome.err().map(|err| err.to_string()),
-            plan,
-            progress,
-            calls,
-            answer,
-        }
     }
 
     /// AC4: a news prompt targets news and runs NewsAPI search with the entity alone; a
@@ -8247,46 +7862,6 @@ mod tests {
             == "s2 courtlistener_docket_search: skipped: CourtListener rate limit reached"));
     }
 
-    /// AC6: after a real CourtListener 429 the turn still synthesizes an answer.
-    #[tokio::test]
-    async fn ac6_a_courtlistener_429_still_lets_the_turn_synthesize() {
-        let fixture = crate::osint::fixture::serve(Arc::new(|_: &str| {
-            (429, json!({"detail": "Request was throttled."}).to_string())
-        }))
-        .await;
-        let turn = context_service_turn(SUED_ELON).await;
-        let hits = fixture.requests().len();
-        drop(fixture);
-        assert_eq!(turn.state, "completed", "{:?}", turn.error);
-        assert!(turn.answer.is_some(), "the turn synthesized");
-        assert_eq!(
-            hits, 1,
-            "one CourtListener request, not retried, then the rest skipped"
-        );
-        let statuses: Vec<(String, String)> = turn
-            .plan
-            .calls
-            .iter()
-            .map(|call| (call.tool_id.clone(), call.status.clone()))
-            .collect();
-        assert!(
-            statuses.contains(&("courtlistener_case_search".into(), "rate_limited".into())),
-            "{statuses:?}"
-        );
-        assert!(
-            statuses.contains(&("courtlistener_docket_search".into(), "skipped".into())),
-            "{statuses:?}"
-        );
-        assert!(
-            turn.plan
-                .deferred
-                .iter()
-                .any(|line| line.ends_with("CourtListener rate limit reached")),
-            "{:?}",
-            turn.plan.deferred
-        );
-    }
-
     /// AC7: an article that does not mention the subject is dropped from the evidence.
     #[tokio::test]
     async fn ac7_the_relevance_gate_drops_an_off_topic_article() {
@@ -8354,194 +7929,12 @@ mod tests {
             .any(|call| call.tool_id == "newsapi_search"));
     }
 
-    /// AC8: NewsAPI status:error bodies and CourtListener 401/403 become failed results
-    /// with readable messages, and failed results are not cached (a success is).
-    #[tokio::test]
-    async fn ac8_status_errors_and_401_403_fail_readably_and_are_not_cached() {
-        use crate::osint::fixture::{article, articles, serve};
-        let fixture = serve(Arc::new(|line: &str| {
-            let news = line.contains("/v2/");
-            match (news, line) {
-                (true, l) if l.contains("Elon") => (401, json!({"status": "error", "code": "apiKeyInvalid", "message": "Your API key is invalid or incorrect."}).to_string()),
-                (true, l) if l.contains("Jeff") => (200, json!({"status": "error", "code": "parameterInvalid", "message": "You are trying to request results too far in the past."}).to_string()),
-                (true, _) => (200, articles(&[article("Ada Lovelace exhibit", "Ada Lovelace notes shown.", "https://www.reuters.com/ada")])),
-                (false, l) if l.contains("Elon") => (401, json!({"detail": "Invalid token."}).to_string()),
-                (false, _) => (403, json!({"detail": "You do not have permission to perform this action."}).to_string()),
-            }
-        }))
-        .await;
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("argos.db");
-        let settings = SettingsFile {
-            newsapi_api_key: SENTINEL_KEY.into(),
-            courtlistener_api_token: SENTINEL_KEY.into(),
-            ..SettingsFile::default()
-        };
-        let service =
-            super::super::Service::new(&db, crate::secrets::AuthFile::default(), settings).unwrap();
-        let cases = [
-            ("newsapi_search", "Elon Musk", "failed", "NewsAPI rejected the API key (apiKeyInvalid)"),
-            ("newsapi_search", "Jeff Bezos", "failed", "NewsAPI error parameterInvalid: You are trying to request results too far in the past."),
-            ("courtlistener_case_search", "Elon Musk", "failed", "CourtListener rejected the API token (HTTP 401: Invalid token.)"),
-            ("courtlistener_docket_search", "Jeff Bezos", "failed", "CourtListener refused the request (HTTP 403: You do not have permission to perform this action.)"),
-        ];
-        for (tool, query, status, message) in cases {
-            let inputs = json!({"query": query});
-            let result = service.execute(tool, inputs.clone(), false).await.unwrap();
-            assert_eq!(result.status, status, "{tool} {query}");
-            let error = result.error.clone().unwrap_or_default();
-            assert!(error.starts_with(message), "{tool} {query}: {error}");
-            assert!(!error.contains(SENTINEL_KEY));
-            let key = format!("{tool}:v1:{}", serde_json::to_string(&inputs).unwrap());
-            assert!(
-                Store::open(&db).unwrap().cache_get(&key).unwrap().is_none(),
-                "{tool} {query}: a failed result is not cached"
-            );
-            assert!(!super::super::cacheable(&result));
-        }
-        let before = fixture.requests().len();
-        let again = service
-            .execute("newsapi_search", json!({"query": "Elon Musk"}), false)
-            .await
-            .unwrap();
-        assert!(
-            !again.cached && fixture.requests().len() == before + 1,
-            "a failed call is asked again, not served from cache"
-        );
-        let ok = service
-            .execute("newsapi_search", json!({"query": "Ada Lovelace"}), false)
-            .await
-            .unwrap();
-        assert_eq!(ok.status, "completed");
-        let key = format!(
-            "newsapi_search:v1:{}",
-            serde_json::to_string(&json!({"query": "Ada Lovelace"})).unwrap()
-        );
-        assert!(
-            Store::open(&db).unwrap().cache_get(&key).unwrap().is_some(),
-            "a completed result is cached"
-        );
-        assert!(!key.contains(SENTINEL_KEY));
-        drop(fixture);
-    }
-
     struct Desk {
         _dir: tempfile::TempDir,
         db: std::path::PathBuf,
         service: super::super::Service,
         run: super::super::Run,
         question: String,
-    }
-
-    fn desk() -> Desk {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("argos.db");
-        let service = super::super::Service::new(
-            &db,
-            crate::secrets::AuthFile::default(),
-            SettingsFile::default(),
-        )
-        .unwrap();
-        let store = Store::open(&db).unwrap();
-        let thread = store.new_thread("t").unwrap();
-        let question = "What is known about example.org?".to_string();
-        let user = store
-            .add_message(&thread.id, "user", &question, None)
-            .unwrap();
-        let run = store
-            .new_run(&thread.id, &user.id, "local / m", "local / m")
-            .unwrap();
-        Desk {
-            _dir: dir,
-            db,
-            service,
-            run,
-            question,
-        }
-    }
-
-    fn answer_text(db: &std::path::Path, thread_id: &str) -> Option<String> {
-        Store::open(db)
-            .unwrap()
-            .list_messages(thread_id)
-            .unwrap()
-            .into_iter()
-            .find(|message| message.role == "assistant")
-            .map(|message| message.content)
-    }
-
-    fn settle_run(
-        db: &std::path::Path,
-        run_id: &str,
-        cancel: &AtomicBool,
-        outcome: Result<Option<String>>,
-    ) -> (String, String) {
-        let store = Store::open(db).unwrap();
-        match &outcome {
-            Ok(note) => {
-                let stage = if note.is_some() {
-                    "cut short"
-                } else {
-                    "complete"
-                };
-                store
-                    .set_run(run_id, "completed", stage, None, note.as_deref())
-                    .unwrap();
-            }
-            Err(err) => {
-                if cancel.load(Ordering::Relaxed) || err.to_string() == "cancelled" {
-                    store.cancel_run(run_id).unwrap();
-                } else {
-                    store
-                        .set_run(run_id, "failed", "failed", None, Some(&err.to_string()))
-                        .unwrap();
-                }
-            }
-        }
-        let run = store.get_run(run_id).unwrap().unwrap();
-        (run.state, run.stage)
-    }
-
-    fn remember(desk: &Desk, results: &[(String, ToolResult)]) {
-        let store = Store::open(&desk.db).unwrap();
-        for (id, found) in results {
-            store.conn.execute(
-                "INSERT INTO osint_calls(id,tool_id,run_id,thread_id,turn_id,origin,inputs_json,status,started_at) VALUES (?1,?2,?3,?4,?5,'recon','{}','queued',?6)",
-                rusqlite::params![id, found.tool_id, desk.run.id, desk.run.thread_id, desk.run.turn_id, super::super::now()],
-            ).unwrap();
-            assert!(store.finish_call(id, found).unwrap(), "{id}");
-        }
-    }
-
-    async fn synthesize(
-        desk: &Desk,
-        secret: &ProviderSecret,
-        plan: &Plan,
-        results: &[(String, ToolResult)],
-        clock: &Arc<std::sync::Mutex<super::super::budget::TurnClock>>,
-        cancel: &Arc<AtomicBool>,
-        progress: &mut (impl FnMut(super::super::TurnEvent) + Send),
-    ) -> Result<Option<String>> {
-        remember(desk, results);
-        let recalled: &[super::super::RecallInsight] = &[];
-        desk.service
-            .finish_answer(
-                super::super::AnswerContext {
-                    run: &desk.run,
-                    question: &desk.question,
-                    plan,
-                    results,
-                    recalled,
-                    max_calls: 8,
-                    opening: false,
-                    prior: "",
-                    synthesis_secret: secret,
-                    cancel,
-                    clock,
-                },
-                progress,
-            )
-            .await
     }
 
     enum ChatReply {
@@ -8645,493 +8038,6 @@ mod tests {
                 _ => None,
             })
             .collect()
-    }
-
-    /// Overflow calls are skipped as `turn budget`. A cache hit still runs, and synthesis
-    /// still produces the answer.
-    #[tokio::test]
-    async fn slow_tools_that_overrun_are_skipped_and_synthesis_still_answers() {
-        let desk = desk();
-        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
-            30, 900,
-        )));
-        let gate = ModelGate::default();
-        gate.bind_clock(clock.clone(), desk.db.clone());
-        let cached_args = json!({"domain": "cached.example"});
-        let cache_key = format!(
-            "crtsh_certificates:v1:{}",
-            serde_json::to_string(&cached_args).unwrap()
-        );
-        Store::open(&desk.db)
-            .unwrap()
-            .cache_put(
-                &cache_key,
-                &result(
-                    "crtsh_certificates",
-                    "completed",
-                    json!({"results": [{"title": "cached"}]}),
-                ),
-                3600,
-            )
-            .unwrap();
-        let mut plan = Plan {
-            calls: vec![
-                bound("s1", "crtsh_certificates", json!({"domain": "one.example"})),
-                bound("s2", "crtsh_certificates", json!({"domain": "two.example"})),
-                bound("s3", "crtsh_certificates", cached_args),
-            ],
-            ..Plan::default()
-        };
-        ground_fixtures(&mut plan);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let catalog = picker::eligible_catalog(&all_tools(), &HashSet::new());
-        let unkeyed = HashSet::new();
-        let none = ProviderSecret {
-            model: String::new(),
-            ..chat_model("http://127.0.0.1:9/v1")
-        };
-        let env = StepEnv {
-            question: &desk.question,
-            catalog: &catalog,
-            unkeyed: &unkeyed,
-            max_calls: 12,
-            recon_secret: &none,
-            gate: &gate,
-            cancel: &cancel,
-            sociavault_calls: 1,
-            google_min_results: 3,
-            news_calls: 2,
-            legal_calls: 3,
-        };
-        let mut session = picker::Picker::new(&none, &cancel);
-        let aged = clock.clone();
-        let runner = move |call: PlanCall| {
-            let aged = aged.clone();
-            async move {
-                if call.step_id == "s1" {
-                    aged.lock().unwrap().age(Duration::from_secs(31));
-                }
-                Ok(StepOutcome::Ran(
-                    format!("call-{}", call.step_id),
-                    Box::new(result(
-                        &call.tool_id,
-                        "completed",
-                        json!({"results": [{"title": call.step_id}]}),
-                    )),
-                ))
-            }
-        };
-        let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
-        let results = execute_steps(
-            &mut plan,
-            &env,
-            &mut session,
-            runner,
-            &mut progress,
-            &mut persist,
-        )
-        .await
-        .unwrap();
-        assert_eq!(plan.calls[1].status, "completed");
-        assert_eq!(plan.calls[2].status, "completed", "a cache hit still runs");
-        assert_eq!(results.len(), 3);
-        assert!(
-            results.iter().any(|(id, _)| id == "call-s1")
-                && results.iter().any(|(id, _)| id == "call-s2")
-                && results.iter().any(|(id, _)| id == "call-s3"),
-            "{:?}",
-            results.iter().map(|(id, _)| id).collect::<Vec<_>>()
-        );
-        let base = chat_server(|text| {
-            let cited = text
-                .match_indices("evidence_id")
-                .filter_map(|(at, _)| {
-                    let id: String = text[at + 11..]
-                        .trim_start_matches(['\\', '"', ':', ' '])
-                        .chars()
-                        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
-                        .collect();
-                    (!id.is_empty() && id != "question").then_some(id)
-                })
-                .next()
-                .unwrap_or_else(|| "call-s1".into());
-            ChatReply::Pieces(vec![format!("Certificates for example.org [{cited}].")])
-        })
-        .await;
-        let mut events = Vec::new();
-        let outcome = synthesize(
-            &desk,
-            &chat_model(&base),
-            &plan,
-            &results,
-            &clock,
-            &cancel,
-            &mut |event| events.push(event),
-        )
-        .await;
-        assert!(
-            outcome.as_ref().is_ok_and(|note| note.is_none()),
-            "{outcome:?} {events:?}"
-        );
-        let (state, stage) = settle_run(&desk.db, &desk.run.id, &cancel, outcome);
-        assert_eq!((state.as_str(), stage.as_str()), ("completed", "complete"));
-        let answer = answer_text(&desk.db, &desk.run.thread_id).unwrap();
-        assert!(answer.contains("Certificates for example.org"), "{answer}");
-        assert!(!deltas(&events).is_empty());
-    }
-
-    #[tokio::test]
-    async fn synthesis_past_its_allowance_completes_with_the_evidence_summary() {
-        let desk = desk();
-        let mut clock = super::super::budget::TurnClock::new(300, 900);
-        clock.synthesis_override = Some(0);
-        let clock = Arc::new(std::sync::Mutex::new(clock));
-        let cancel = Arc::new(AtomicBool::new(false));
-        let results = vec![sample_evidence()];
-        let plan = Plan::default();
-        let secret = chat_model("http://127.0.0.1:9/v1");
-        let outcome = synthesize(
-            &desk,
-            &secret,
-            &plan,
-            &results,
-            &clock,
-            &cancel,
-            &mut |_| {},
-        )
-        .await;
-        assert!(
-            outcome.is_err(),
-            "synthesis allowance cutoff no longer cuts short before model execution: {outcome:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn streamed_deltas_arrive_in_order_and_match_the_saved_answer() {
-        let desk = desk();
-        let parts = ["Alpha ", "beta ", "gamma [call-ev]."];
-        let sent: Vec<String> = parts.iter().map(|part| (*part).to_string()).collect();
-        let base = chat_server(move |_| ChatReply::Pieces(sent.clone())).await;
-        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
-            300, 900,
-        )));
-        let cancel = Arc::new(AtomicBool::new(false));
-        let results = vec![sample_evidence()];
-        let mut events = Vec::new();
-        let outcome = synthesize(
-            &desk,
-            &chat_model(&base),
-            &Plan::default(),
-            &results,
-            &clock,
-            &cancel,
-            &mut |event| events.push(event),
-        )
-        .await;
-        assert!(
-            outcome.as_ref().is_ok_and(|note| note.is_none()),
-            "{outcome:?}"
-        );
-        let streamed: String = parts.concat();
-        assert_eq!(deltas(&events), streamed);
-        settle_run(&desk.db, &desk.run.id, &cancel, outcome);
-        assert_eq!(
-            answer_text(&desk.db, &desk.run.thread_id).as_deref(),
-            Some(streamed.as_str())
-        );
-    }
-
-    #[tokio::test]
-    async fn a_streamed_answer_with_a_bad_citation_ends_on_the_repaired_answer() {
-        let desk = desk();
-        let bad = "The record names example.org [call-missing].";
-        let fixed = "The record names example.org [call-ev].";
-        let base = chat_server({
-            let bad = bad.to_string();
-            let fixed = fixed.to_string();
-            move |text| {
-                if text.contains("Repair this answer") {
-                    ChatReply::Pieces(vec![fixed.clone()])
-                } else {
-                    ChatReply::Pieces(vec![bad.clone()])
-                }
-            }
-        })
-        .await;
-        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
-            300, 900,
-        )));
-        let cancel = Arc::new(AtomicBool::new(false));
-        let results = vec![sample_evidence()];
-        let mut events = Vec::new();
-        let outcome = synthesize(
-            &desk,
-            &chat_model(&base),
-            &Plan::default(),
-            &results,
-            &clock,
-            &cancel,
-            &mut |event| events.push(event),
-        )
-        .await;
-        assert!(
-            outcome.as_ref().is_ok_and(|note| note.is_none()),
-            "{outcome:?}"
-        );
-        assert_eq!(deltas(&events), bad);
-        assert!(events.iter().any(|event| matches!(event, super::super::TurnEvent::AnswerNote(text) if text == "fixing citations…")));
-        settle_run(&desk.db, &desk.run.id, &cancel, outcome);
-        assert_eq!(
-            answer_text(&desk.db, &desk.run.thread_id).as_deref(),
-            Some(fixed)
-        );
-    }
-
-    #[tokio::test]
-    async fn an_idle_stall_or_the_ceiling_keeps_the_partial_answer() {
-        let partial = "Partial finding [call-ev].";
-        let idle_desk = desk();
-        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
-            300, 900,
-        )));
-        let cancel = Arc::new(AtomicBool::new(false));
-        let results = vec![sample_evidence()];
-        let base = chat_server(|_| ChatReply::Hang(partial.into())).await;
-        let outcome = tokio::time::timeout(
-            Duration::from_millis(500),
-            synthesize(
-                &idle_desk,
-                &chat_model(&base),
-                &Plan::default(),
-                &results,
-                &clock,
-                &cancel,
-                &mut |_| {},
-            ),
-        )
-        .await;
-        // Synthesis no longer terminates on TurnClock deadlines/idle cutoff; timeout hits the caller.
-        assert!(
-            outcome.is_err(),
-            "stalled synthesis does not cut short before caller timeout: {outcome:?}"
-        );
-        let (state, stage) = settle_run(
-            &idle_desk.db,
-            &idle_desk.run.id,
-            &cancel,
-            Err(anyhow!("stalled")),
-        );
-        assert_eq!((state.as_str(), stage.as_str()), ("failed", "failed"));
-        assert!(answer_text(&idle_desk.db, &idle_desk.run.thread_id).is_none());
-        assert!(!Store::open(&idle_desk.db)
-            .unwrap()
-            .has_final_answer_for_run(&idle_desk.run.id)
-            .unwrap());
-    }
-
-    /// A provider that drops the stream after the first tokens keeps that text as a draft.
-    #[tokio::test]
-    async fn a_dropped_provider_stream_keeps_the_text_already_received() {
-        let partial = "Common theme: the coverage is skeptical of Donald Trump [call-ev].";
-        let desk = desk();
-        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
-            300, 900,
-        )));
-        let cancel = Arc::new(AtomicBool::new(false));
-        let results = vec![sample_evidence()];
-        let base = chat_server(|_| ChatReply::DropAfter(partial.into())).await;
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(15),
-            synthesize(
-                &desk,
-                &chat_model(&base),
-                &Plan::default(),
-                &results,
-                &clock,
-                &cancel,
-                &mut |_| {},
-            ),
-        )
-        .await
-        .expect("stream drop returns");
-        assert!(outcome.is_err(), "dropped stream returns Err: {outcome:?}");
-        let (state, stage) = settle_run(&desk.db, &desk.run.id, &cancel, outcome);
-        assert_eq!((state.as_str(), stage.as_str()), ("failed", "failed"));
-        assert!(
-            answer_text(&desk.db, &desk.run.thread_id).is_none(),
-            "draft does not enter normal history as completed answer"
-        );
-        let draft: String = Store::open(&desk.db)
-            .unwrap()
-            .conn
-            .query_row(
-                "SELECT draft FROM recon_model_operations WHERE run_id=?1 AND role='synthesis'",
-                [&desk.run.id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(draft.contains(partial), "{draft}");
-    }
-
-    #[tokio::test]
-    async fn cancel_during_synthesis_marks_the_run_cancelled_and_keeps_partial_text() {
-        let desk = desk();
-        let partial = "Partial finding [call-ev].";
-        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
-            300, 900,
-        )));
-        let cancel = Arc::new(AtomicBool::new(false));
-        let results = vec![sample_evidence()];
-        let base = chat_server(|_| ChatReply::Hang(partial.into())).await;
-        let flag = cancel.clone();
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(15),
-            synthesize(
-                &desk,
-                &chat_model(&base),
-                &Plan::default(),
-                &results,
-                &clock,
-                &cancel,
-                &mut |event| {
-                    if matches!(event, super::super::TurnEvent::AnswerDelta(_)) {
-                        flag.store(true, Ordering::Relaxed);
-                    }
-                },
-            ),
-        )
-        .await
-        .expect("cancel stops the stream");
-        assert!(
-            outcome
-                .as_ref()
-                .is_err_and(|err| err.to_string() == "cancelled"),
-            "{outcome:?}"
-        );
-        let (state, stage) = settle_run(&desk.db, &desk.run.id, &cancel, outcome);
-        assert_eq!((state.as_str(), stage.as_str()), ("cancelled", "cancelled"));
-        assert!(
-            answer_text(&desk.db, &desk.run.thread_id).is_none(),
-            "draft is not published to normal history"
-        );
-        let draft: String = Store::open(&desk.db)
-            .unwrap()
-            .conn
-            .query_row(
-                "SELECT draft FROM recon_model_operations WHERE run_id=?1 AND role='synthesis'",
-                [&desk.run.id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(draft.contains(partial), "{draft}");
-    }
-
-    #[tokio::test]
-    async fn cancel_during_tools_marks_the_run_cancelled() {
-        let desk = desk();
-        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
-            300, 900,
-        )));
-        let gate = ModelGate::default();
-        gate.bind_clock(clock, desk.db.clone());
-        let mut plan = Plan {
-            calls: vec![
-                bound("s1", "crtsh_certificates", json!({"domain": "one.example"})),
-                bound("s2", "crtsh_certificates", json!({"domain": "two.example"})),
-            ],
-            ..Plan::default()
-        };
-        ground_fixtures(&mut plan);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let catalog = picker::eligible_catalog(&all_tools(), &HashSet::new());
-        let unkeyed = HashSet::new();
-        let none = ProviderSecret {
-            model: String::new(),
-            ..chat_model("http://127.0.0.1:9/v1")
-        };
-        let env = StepEnv {
-            question: &desk.question,
-            catalog: &catalog,
-            unkeyed: &unkeyed,
-            max_calls: 12,
-            recon_secret: &none,
-            gate: &gate,
-            cancel: &cancel,
-            sociavault_calls: 1,
-            google_min_results: 3,
-            news_calls: 2,
-            legal_calls: 3,
-        };
-        let mut session = picker::Picker::new(&none, &cancel);
-        let flag = cancel.clone();
-        let runner = move |call: PlanCall| {
-            let flag = flag.clone();
-            async move {
-                flag.store(true, Ordering::Relaxed);
-                Ok(StepOutcome::Ran(
-                    format!("call-{}", call.step_id),
-                    Box::new(result(&call.tool_id, "completed", json!({"raw": "ok"}))),
-                ))
-            }
-        };
-        let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
-        let outcome = execute_steps(
-            &mut plan,
-            &env,
-            &mut session,
-            runner,
-            &mut progress,
-            &mut persist,
-        )
-        .await;
-        assert!(outcome
-            .as_ref()
-            .is_err_and(|err| err.to_string() == "cancelled"));
-        assert_eq!(plan.calls[0].status, "cancelled");
-        assert_ne!(plan.calls[1].status, "completed");
-        let (state, stage) = settle_run(&desk.db, &desk.run.id, &cancel, outcome.map(|_| None));
-        assert_eq!((state.as_str(), stage.as_str()), ("cancelled", "cancelled"));
-    }
-
-    #[tokio::test]
-    async fn a_provider_that_rejects_streaming_fails_without_a_hidden_retry() {
-        let desk = desk();
-        let base = chat_server(|text| {
-            if text.contains("\"stream\":true") {
-                ChatReply::Raw(400, String::new())
-            } else {
-                ChatReply::Raw(
-                    200,
-                    json!({"choices": [{"message": {"content": "should not be used"}}]})
-                        .to_string(),
-                )
-            }
-        })
-        .await;
-        let clock = Arc::new(std::sync::Mutex::new(super::super::budget::TurnClock::new(
-            300, 900,
-        )));
-        let cancel = Arc::new(AtomicBool::new(false));
-        let results = vec![sample_evidence()];
-        let mut events = Vec::new();
-        let outcome = synthesize(
-            &desk,
-            &chat_model(&base),
-            &Plan::default(),
-            &results,
-            &clock,
-            &cancel,
-            &mut |event| events.push(event),
-        )
-        .await;
-        assert!(
-            outcome.as_ref().is_err(),
-            "stream rejection must not fall back to non-stream: {outcome:?} {events:?}"
-        );
-        settle_run(&desk.db, &desk.run.id, &cancel, outcome);
-        assert_eq!(answer_text(&desk.db, &desk.run.thread_id).as_deref(), None);
     }
 
     #[test]

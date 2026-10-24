@@ -25,11 +25,17 @@ Only Recon has a chat. Everything else is fields, lists, and buttons. Observatio
 
 ## Quick start
 
-Rust **1.91+** (this repo pins **1.94**). First build needs a C toolchain (`xcode-select --install` on macOS). Protoc is vendored.
+Rust **1.95+** (this repo pins **1.95**). First build needs a C toolchain (`xcode-select --install` on macOS). Protoc is vendored.
 
 ```sh
 cargo run -p argos-osint-bin
 ```
+
+A default build stores everything in embedded SurrealDB: RocksDB on disk under
+`~/.argos/storage/surreal` (`ARGOS_HOME` moves it), in-process, with no network.
+To use a per-home SurrealDB 3.3.4 server on 127.0.0.1 instead, build with
+`--no-default-features --features server,nlp` and run `argos storage init --mode server`
+(or set `ARGOS_STORAGE_MODE=server`).
 
 From Home: `↑↓` and Enter open an app. Keys `1`–`9` jump to Intel through Profile. Esc returns Home. `?` opens shortcuts.
 
@@ -39,6 +45,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace          # offline; ARGOS_EMBED unset
 ARGOS_EMBED=1 cargo test -p argos-osint-core -- --ignored minilm
+scripts/local_matrix.sh --storage embedded               # what CI runs, default build
+scripts/local_matrix.sh --storage server --surreal-bin /path/to/surreal
 ```
 
 Navigation, CLI, and state directory: [docs/usage.md](docs/usage.md). Agent commands and graphify: [AGENTS.md](AGENTS.md).

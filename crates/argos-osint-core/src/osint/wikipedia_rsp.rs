@@ -428,7 +428,7 @@ pub fn last_good_index() -> Option<RspIndex> {
     cache().lock().ok()?.as_ref().map(|c| c.index.clone())
 }
 static REFRESHING: AtomicBool = AtomicBool::new(false);
-fn refresh_in_background(user_agent: &str, db_path: Option<std::path::PathBuf>) {
+fn refresh_in_background(user_agent: &str, _db_path: Option<std::path::PathBuf>) {
     if REFRESHING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -438,12 +438,17 @@ fn refresh_in_background(user_agent: &str, db_path: Option<std::path::PathBuf>) 
     let agent = user_agent.to_owned();
     tokio::spawn(async move {
         if let Ok(index) = fetch_index(&agent).await {
-            if let Some(store) = db_path
-                .as_deref()
-                .and_then(|db| crate::store::Store::open(db).ok())
             {
-                if let Ok(json) = index_to_json(&index) {
-                    let _ = store.app_state_set(APP_STATE_KEY, &json);
+                // SurrealDB: the index lives in the repository's `app_state`;
+                // SQLite is never opened.
+                #[cfg(feature = "surreal")]
+                if let (Ok(repo), Ok(json)) = (
+                    crate::storage::runtime::repository().await,
+                    index_to_json(&index),
+                ) {
+                    let _ =
+                        crate::storage::pipeline_inputs::app_state_set(&repo, APP_STATE_KEY, &json)
+                            .await;
                 }
             }
         }

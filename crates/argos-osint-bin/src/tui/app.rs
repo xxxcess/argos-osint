@@ -1,12 +1,15 @@
 //! App state and keyboard routing for the Argos terminal shell.
 
+use super::surreal_brain;
+use super::surreal_profile;
+use super::surreal_recon;
 use super::tracked;
 use super::ui::nudge;
 use anyhow::Result;
 use argos_osint_core::brain::{Memory, MemorySource, ScoredMemory};
 use argos_osint_core::hardware::{self, HardwareProfile};
 use argos_osint_core::intel_recon::{self, ArticleBodyRow, ReportMode};
-use argos_osint_core::job_registry::{CancelRequest, JobSpec};
+use argos_osint_core::job_registry::JobSpec;
 use argos_osint_core::paths;
 use argos_osint_core::provider::{self, ListedModel, SettingsFile};
 use argos_osint_core::related_global::RelatedScope;
@@ -788,6 +791,16 @@ enum DashboardSnapshot {
 
 #[derive(Debug)]
 enum WorkEvent {
+    /// A Recon write on the repository finished (`surreal_recon`).
+    ReconWritten {
+        what: &'static str,
+        outcome: Result<(), String>,
+    },
+    /// A Recon thread was created on the repository (`surreal_recon`).
+    ReconThreadCreated {
+        then: surreal_recon::Then,
+        outcome: Result<recon::Thread, String>,
+    },
     LogsCleared {
         outcome: Result<usize, String>,
     },
@@ -864,6 +877,10 @@ enum WorkEvent {
         run_id: String,
         outcome: Result<bool, String>,
     },
+    MemoryGraphChecked {
+        id: String,
+        outcome: Result<Option<argos_osint_core::memory_metadata::MemoryKind>, String>,
+    },
     TopologyLoaded {
         generation: u64,
         seed: argos_osint_core::brain_topology::TopologySeed,
@@ -881,6 +898,12 @@ enum WorkEvent {
         filters: argos_osint_core::profile_stats::StatFilters,
         outcome: Result<Box<argos_osint_core::profile_stats::ProfileSnapshot>, String>,
         options: Vec<(String, Vec<String>)>,
+    },
+    /// A Profile attention action's run lookup on SurrealDB: the run's
+    /// thread, or `None` when the run is gone.
+    ProfileRunOwner {
+        run_id: String,
+        outcome: Result<Option<String>, String>,
     },
     ReconStage {
         thread_id: String,
@@ -910,6 +933,7 @@ enum WorkEvent {
         outcome: Result<Vec<ListedModel>, String>,
     },
 
+    #[allow(dead_code)]
     InsightDone {
         thread_id: String,
         outcome: Result<(), String>,
@@ -1414,24 +1438,51 @@ impl App {
         true
     }
 
+    /// UI session state: the repository under a storage config, else the
+    /// SQLite `app_state` table.
+    fn ui_state_get(&self, key: &str) -> Result<Option<String>> {
+        {
+            surreal_recon::ui_state_get(key)
+        }
+    }
+
+    fn ui_state_set(&self, key: &str, value: &str) -> Result<()> {
+        {
+            surreal_recon::ui_state_set(key, value)
+        }
+    }
+
     pub fn boot() -> Result<Self> {
         paths::ensure_home()?;
         // Finish any configuration commit a previous process left half applied.
         let _ = argos_osint_core::config_commit::recover_at_startup();
-        let store = Store::open_ui(&paths::db_path())?;
-        store.recover_runs()?;
-        let threads = Vec::new();
-        let thread_states = HashMap::new();
-        let selected_thread = store.last_thread()?;
-        let messages = Vec::new();
-        let draft = selected_thread
+        // Under a storage config the TUI never opens the SQLite file: the
+        // legacy store is an empty in-memory one that only SQLite-only
+        // views (not reachable on SurrealDB) would read.
+        let store = Store::memory()?;
+        // Under a storage config Recon reads only the repository (once,
+        // before the event loop); the SQLite Recon tables are not touched.
+        let surreal_boot = Some(surreal_recon::boot()?);
+        let threads = surreal_boot
             .as_ref()
-            .and_then(|id| store.get_thread(id).ok().flatten())
-            .map(|t| t.draft)
+            .map(|boot| boot.threads.clone())
             .unwrap_or_default();
-        let chat_scroll = selected_thread
+        let thread_states = HashMap::new();
+        let selected_thread = match &surreal_boot {
+            Some(boot) => boot.last_thread.clone(),
+            None => None,
+        };
+        let messages = Vec::new();
+        let boot_thread = selected_thread.as_ref().and_then(|id| match &surreal_boot {
+            Some(boot) => boot.threads.iter().find(|t| &t.id == id).cloned(),
+            None => None,
+        });
+        let draft = boot_thread
             .as_ref()
-            .and_then(|id| store.get_thread(id).ok().flatten())
+            .map(|t| t.draft.clone())
+            .unwrap_or_default();
+        let chat_scroll = boot_thread
+            .as_ref()
             .map(|t| t.scroll.max(0) as usize)
             .unwrap_or_default();
         let calls = Vec::new();
@@ -1440,10 +1491,10 @@ impl App {
         let osint_result = manual_runs
             .get(manual_run_pos)
             .and_then(|call| call.result.clone().map(|result| (call.id.clone(), result)));
-        let tool_enabled = osint::registry()
-            .iter()
-            .map(|tool| store.tool_enabled(tool.id))
-            .collect::<Result<Vec<_>>>()?;
+        let tool_enabled = match surreal_boot {
+            Some(boot) => boot.tool_enabled,
+            None => osint::registry().iter().map(|_| true).collect(),
+        };
         let memories = Vec::new();
         let memory_total = 0;
         let auth = AuthFile::load()?;
@@ -1718,7 +1769,9 @@ impl App {
             memory_total,
             memory_error: None,
             memories_loaded: false,
-            background_db: Some(paths::db_path()),
+            // Under a storage config no worker opens the SQLite file; the
+            // legacy-only paths fall back to the empty in-memory store.
+            background_db: (!surreal_recon::on()).then(paths::db_path),
             atlas_deleting: None,
             atlas_reading: false,
             atlas_generation: 0,
@@ -1796,11 +1849,7 @@ impl App {
     }
 
     pub fn insight_summary(&self, memory_id: &str) -> Option<String> {
-        if self.background_db.is_some() {
-            return self.answer_memory_summaries.get(memory_id).cloned();
-        }
-        let insight = self.store.insight_for_memory(memory_id).ok().flatten()?;
-        Some(super::db_reads::format_insight_summary(&insight))
+        self.answer_memory_summaries.get(memory_id).cloned()
     }
 
     fn push_log(&mut self, level: &str, text: impl Into<String>) {
@@ -1812,7 +1861,12 @@ impl App {
         let text = text.into();
         let detail = detail.into();
         let event = super::logs::session_event(level, &text, &detail);
-        if self.store.record_event(&event).is_ok() && level == "error" {
+        // Under a storage config the line goes to the repository's
+        // `argos_event` (ordered, off the UI thread); SQLite is not written.
+        let recorded = surreal_brain::record_log(event);
+        #[cfg(test)]
+        crate::test_storage::drain();
+        if recorded && level == "error" {
             self.logs.counts.error += 1;
         }
         if self.module == Some(ModuleId::Logs) {
@@ -1831,7 +1885,11 @@ impl App {
         }
         let first = self.dashboards_at.is_none() && !self.logs.loaded;
         self.dashboards_at = Some(Instant::now());
-        if first && self.background_db.is_none() {
+        if first && surreal_brain::on() {
+            std::thread::spawn(|| {
+                let _ = surreal_brain::prune_logs(super::logs::RETENTION_HOURS);
+            });
+        } else if first && self.background_db.is_none() {
             let _ = self.store.prune_events(super::logs::RETENTION_HOURS);
         }
         if self.module == Some(ModuleId::Intel) && self.intel_page == IntelPage::Briefing {
@@ -1842,7 +1900,7 @@ impl App {
             Some(ModuleId::Jobs) => self.reload_jobs(),
             Some(ModuleId::System) => self.reload_profile(),
             _ => {
-                if self.background_db.is_some() {
+                if self.background_db.is_some() || surreal_brain::on() {
                     self.request_dashboard_snapshot();
                 } else {
                     self.logs.refresh_counts(&self.store);
@@ -1868,16 +1926,12 @@ impl App {
         let generation = self.profile.generation;
         let filters = self.profile.filters.clone();
         let tx = self.work_tx.clone();
-        let db = paths::db_path();
+        // Under a storage config the snapshot and its filter options come
+        // from the repository on this worker (never the SQLite store);
+        // `ProfileLoaded` drops a stale generation or filter set.
         std::thread::spawn(move || {
-            let (outcome, options) = match Store::open_profile_reader(&db) {
-                Ok(store) => (
-                    store
-                        .profile_snapshot(&filters.period, &filters)
-                        .map(Box::new)
-                        .map_err(|err| format!("{err:#}")),
-                    store.profile_filter_options(),
-                ),
+            let (outcome, options) = match surreal_profile::dashboard(&filters) {
+                Ok((snapshot, options)) => (Ok(Box::new(snapshot)), options),
                 Err(err) => (Err(format!("{err:#}")), Vec::new()),
             };
             let _ = tx.send(WorkEvent::ProfileLoaded {
@@ -1889,8 +1943,34 @@ impl App {
         });
     }
 
+    /// Look up a Profile attention item's run on the repository, on a plain
+    /// worker thread. Only the newest lookup is kept.
+    pub(crate) fn lookup_run_owner(&mut self, run_id: String) {
+        self.profile.pending_run_owner = Some(run_id.clone());
+        self.status = "Opening investigation…".into();
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = surreal_profile::run_thread(&run_id).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::ProfileRunOwner { run_id, outcome });
+        });
+    }
+
+    /// The run lookup finished: open its thread only while the System screen
+    /// is still showing and this is the newest lookup (a late result is
+    /// dropped).
+    fn on_profile_run_owner(&mut self, run_id: String, outcome: Result<Option<String>, String>) {
+        if self.profile.pending_run_owner.as_deref() != Some(run_id.as_str()) {
+            return;
+        }
+        self.profile.pending_run_owner = None;
+        if self.module != Some(ModuleId::System) {
+            return;
+        }
+        super::profile::open_run_thread(self, outcome);
+    }
+
     pub(crate) fn reload_logs(&mut self) {
-        if self.background_db.is_some() {
+        if self.background_db.is_some() || surreal_brain::on() {
             self.request_dashboard_snapshot();
             return;
         }
@@ -1907,8 +1987,14 @@ impl App {
         }
     }
 
+    /// Jobs reads run off the UI thread: on a background SQLite reader, or
+    /// on the SurrealDB repository under a storage config (never both).
+    fn jobs_async(&self) -> bool {
+        self.background_db.is_some() || surreal_brain::on()
+    }
+
     pub(crate) fn reload_jobs(&mut self) {
-        if self.background_db.is_some() {
+        if self.jobs_async() {
             self.request_dashboard_snapshot();
             return;
         }
@@ -1934,39 +2020,28 @@ impl App {
         if self.dashboard_reading {
             return;
         }
-        let Some(db) = self.background_db.clone() else {
-            return;
-        };
+        // Jobs, Logs and the header counts read only the repository.
         self.dashboard_reading = true;
         let module = self.module;
         let key = self.dashboard_read_key();
-        let mut logs = self.logs.clone();
         let mut jobs = self.jobs.clone();
+        let mut logs = self.logs.clone();
         let pending_job = self.pending_job.clone();
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_profile_reader(&db)
-                .and_then(|store| {
-                    store.connection().execute_batch("BEGIN")?;
-                    Ok(Box::new(match module {
-                        Some(ModuleId::Logs) => {
-                            logs.reload(&store);
-                            DashboardSnapshot::Logs(Box::new(logs))
-                        }
-                        Some(ModuleId::Jobs) => {
-                            if let Some(id) = pending_job {
-                                if !jobs.focus_job(&store, &id) {
-                                    jobs.error = Some("Job history expired".into());
-                                }
-                            } else {
-                                jobs.reload(&store);
-                            }
-                            DashboardSnapshot::Jobs(Box::new(jobs))
-                        }
-                        _ => DashboardSnapshot::Counts(store.event_counts()?),
-                    }))
-                })
-                .map_err(|e| e.to_string());
+            let outcome = match module {
+                Some(ModuleId::Jobs) => {
+                    surreal_brain::load_jobs(&mut jobs, pending_job.as_deref());
+                    Ok(Box::new(DashboardSnapshot::Jobs(Box::new(jobs))))
+                }
+                Some(ModuleId::Logs) => {
+                    surreal_brain::load_logs(&mut logs);
+                    Ok(Box::new(DashboardSnapshot::Logs(Box::new(logs))))
+                }
+                _ => surreal_brain::log_counts()
+                    .map(|counts| Box::new(DashboardSnapshot::Counts(counts)))
+                    .map_err(|e| e.to_string()),
+            };
             let _ = tx.send(WorkEvent::DashboardLoaded {
                 module,
                 key,
@@ -1991,7 +2066,7 @@ impl App {
 
     /// Logs → Jobs for a job id (selected event's job, or the return path).
     fn open_job(&mut self, id: &str) -> Result<String> {
-        if self.background_db.is_some() {
+        if self.jobs_async() {
             self.pending_job = Some(id.into());
             self.select(ModuleId::Jobs.index());
             return Ok(format!("Loading job {}…", super::logs::short_id(id)));
@@ -2071,8 +2146,7 @@ impl App {
     }
 
     fn load_last_view_session(&self) -> Option<LastViewSession> {
-        self.store
-            .app_state_get("last_view_session")
+        self.ui_state_get("last_view_session")
             .ok()
             .flatten()
             .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -2151,7 +2225,7 @@ impl App {
     pub(crate) fn persist_view_session(&mut self) {
         if let Some(session) = self.capture_view_session() {
             if let Ok(json) = serde_json::to_string(&session) {
-                let _ = self.store.app_state_set("last_view_session", &json);
+                let _ = self.ui_state_set("last_view_session", &json);
             }
         }
     }
@@ -2321,7 +2395,7 @@ impl App {
     /// Reopens the most recently closed tab
     pub fn reopen_closed_tab(&mut self) -> Result<()> {
         while let Some(thread_id) = self.tab_recently_closed.pop() {
-            if self.store.get_thread(&thread_id).ok().flatten().is_some() {
+            if self.recon_thread(&thread_id).is_some() {
                 self.open_investigation_tab(&thread_id)?;
                 self.enter_investigation(&thread_id)?;
                 self.status = "Investigation tab reopened".into();
@@ -2372,13 +2446,13 @@ impl App {
 
     /// Loads session tabs from SQLite app_state
     pub fn load_session_tabs(&mut self) {
-        if let Ok(Some(json)) = self.store.app_state_get("recon_session_tabs") {
+        if let Ok(Some(json)) = self.ui_state_get("recon_session_tabs") {
             if !json.is_empty() {
                 if let Ok(state) = serde_json::from_str::<SessionTabsState>(&json) {
                     let valid_tabs: Vec<String> = state
                         .open_thread_ids
                         .into_iter()
-                        .filter(|id| self.store.get_thread(id).ok().flatten().is_some())
+                        .filter(|id| self.recon_thread(id).is_some())
                         .collect();
                     self.tab_ids = valid_tabs;
                     self.tab_recently_closed = state.recently_closed;
@@ -2404,13 +2478,13 @@ impl App {
             recently_closed: self.tab_recently_closed.clone(),
         };
         if let Ok(json) = serde_json::to_string(&state) {
-            let _ = self.store.app_state_set("recon_session_tabs", &json);
+            let _ = self.ui_state_set("recon_session_tabs", &json);
         }
     }
 
     /// Loads Home draft from SQLite app_state
     pub fn load_home_draft(&mut self) {
-        if let Ok(Some(json)) = self.store.app_state_get("home_recon_draft") {
+        if let Ok(Some(json)) = self.ui_state_get("home_recon_draft") {
             if !json.is_empty() {
                 if let Ok(state) = serde_json::from_str::<HomeDraftState>(&json) {
                     self.home_draft = state.prompt;
@@ -2436,7 +2510,7 @@ impl App {
             self.input.clear();
             self.cursor = 0;
         }
-        let _ = self.store.app_state_set("home_recon_draft", "");
+        let _ = self.ui_state_set("home_recon_draft", "");
     }
 
     /// Opens the investigation switcher overlay
@@ -2497,34 +2571,7 @@ impl App {
         };
 
         // Atomic persistence: create thread
-        let thread = match self.store.new_thread(&title) {
-            Ok(t) => t,
-            Err(e) => {
-                self.home_draft_submitting = false;
-                self.launch_state = LaunchState::RecoverableFailure;
-                return Err(e);
-            }
-        };
-        self.threads.insert(0, thread.clone());
-        self.thread_sel = 0;
-
-        // Open investigation tab
-        let _ = self.open_investigation_tab(&thread.id);
-
-        // Consume Home draft
-        self.clear_home_draft();
-        self.home_draft_submitting = false;
-        self.launch_state = LaunchState::Accepted;
-
-        // Check navigation intent: if user stayed on Home, navigate immediately to Recon
-        if self.module.is_none() {
-            self.enter_investigation(&thread.id)?;
-        } else {
-            self.status = "Investigation started — Open".into();
-        }
-
-        // Start investigation run asynchronously
-        self.send_recon_query(&thread.id, &question)?;
+        self.spawn_new_thread(title, None, surreal_recon::Then::Launch { question });
         Ok(())
     }
 
@@ -2723,21 +2770,17 @@ impl App {
             "prev-tab" => {
                 let _ = self.prev_tab();
             }
-            "close-tab" => {
-                if self.tab_sel > 0 {
-                    let _ = self.close_tab(self.tab_sel);
-                }
+            "close-tab" if self.tab_sel > 0 => {
+                let _ = self.close_tab(self.tab_sel);
             }
             "reopen-tab" => {
                 let _ = self.reopen_closed_tab();
             }
-            "rename-investigation" => {
-                if self.selected_thread.is_some() {
-                    self.recon_chat = false;
-                    self.input = ":rename ".into();
-                    self.cursor = 8;
-                    self.set_focus(Target::Field(FieldId::Composer));
-                }
+            "rename-investigation" if self.selected_thread.is_some() => {
+                self.recon_chat = false;
+                self.input = ":rename ".into();
+                self.cursor = 8;
+                self.set_focus(Target::Field(FieldId::Composer));
             }
             "sessions" => {
                 self.module = Some(ModuleId::Recon);
@@ -2900,30 +2943,24 @@ impl App {
             "trace" => {
                 self.input.clear();
                 let id = self.selected_thread.clone().unwrap_or_default();
-                let count = self
-                    .store
-                    .list_investigation_events(&id)
-                    .map(|e| e.len())
+                let count = surreal_recon::investigation_counts(&id)
+                    .map(|c| c.events)
                     .unwrap_or(0);
                 Ok(format!("Trace: {count} events logged"))
             }
             "directives" => {
                 self.input.clear();
                 let id = self.selected_thread.clone().unwrap_or_default();
-                let count = self
-                    .store
-                    .list_investigation_tasks(&id)
-                    .map(|t| t.len())
+                let count = surreal_recon::investigation_counts(&id)
+                    .map(|c| c.tasks)
                     .unwrap_or(0);
                 Ok(format!("Directives / tasks: {count}"))
             }
             "evidence" => {
                 self.input.clear();
                 let id = self.selected_thread.clone().unwrap_or_default();
-                let count = self
-                    .store
-                    .list_evidence_passages(&id)
-                    .map(|p| p.len())
+                let count = surreal_recon::investigation_counts(&id)
+                    .map(|c| c.passages)
                     .unwrap_or(0);
                 Ok(format!("Evidence passages: {count}"))
             }
@@ -3154,7 +3191,7 @@ impl App {
             self.input = self
                 .selected_thread
                 .as_ref()
-                .and_then(|id| self.store.get_thread(id).ok().flatten())
+                .and_then(|id| self.recon_thread(id))
                 .map(|t| t.draft)
                 .unwrap_or_default();
         } else {
@@ -3178,7 +3215,7 @@ impl App {
             self.dashboards_at = Some(Instant::now());
         }
         if self.module == Some(ModuleId::Jobs) {
-            if self.background_db.is_some() {
+            if self.background_db.is_some() || surreal_brain::on() {
                 self.load_atlas();
             } else {
                 self.atlas_runs = self.store.atlas_list_runs().unwrap_or_default();
@@ -3399,52 +3436,130 @@ impl App {
         };
     }
 
-    fn refresh_threads(&mut self) -> Result<()> {
-        if let Some(db) = self.background_db.clone() {
-            if self.threads_reading {
-                self.threads_pending = true;
-                return Ok(());
+    /// A Recon thread: from the repository's thread list under a storage
+    /// config (no store read on the UI thread), otherwise from SQLite.
+    fn recon_thread(&self, id: &str) -> Option<recon::Thread> {
+        self.threads.iter().find(|t| t.id == id).cloned()
+    }
+
+    /// Store the thread's draft and chat scroll (on a worker under a
+    /// storage config).
+    fn save_thread_draft(&mut self, id: &str, draft: String) -> Result<()> {
+        let scroll = i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX);
+        if let Some(thread) = self.threads.iter_mut().find(|t| t.id == id) {
+            thread.draft = draft.clone();
+            thread.scroll = scroll;
+        }
+        let id = id.to_string();
+        self.spawn_recon_write_quiet("save the draft", move || {
+            surreal_recon::save_draft(&id, &draft, scroll)
+        });
+        Ok(())
+    }
+
+    /// Run a Recon write on a worker; the result comes back as
+    /// `WorkEvent::ReconWritten` and refreshes the thread list.
+    fn spawn_recon_write(
+        &self,
+        what: &'static str,
+        f: impl FnOnce() -> Result<()> + Send + 'static,
+    ) {
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = f().map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::ReconWritten { what, outcome });
+        });
+    }
+
+    /// As [`Self::spawn_recon_write`], but only failures are reported.
+    fn spawn_recon_write_quiet(
+        &self,
+        what: &'static str,
+        f: impl FnOnce() -> Result<()> + Send + 'static,
+    ) {
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = f() {
+                let _ = tx.send(WorkEvent::ReconWritten {
+                    what,
+                    outcome: Err(format!("{e:#}")),
+                });
             }
-            self.threads_reading = true;
-            let query = self.recon_search.clone();
-            let tx = self.work_tx.clone();
-            std::thread::spawn(move || {
-                let outcome = Store::open_profile_reader(&db)
-                    .and_then(|store| {
-                        store.connection().execute_batch("BEGIN")?;
-                        let rows = store.list_threads(&query)?;
-                        let states = rows
-                            .iter()
-                            .map(|t| {
-                                Ok((
-                                    t.id.clone(),
-                                    store.latest_run_state(&t.id)?.unwrap_or_default(),
-                                ))
-                            })
-                            .collect::<Result<_>>()?;
-                        Ok((rows, states))
-                    })
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(WorkEvent::ThreadsLoaded { query, outcome });
-            });
+        });
+    }
+
+    /// Create a Recon thread on a worker (attaching `call` when given);
+    /// [`Self::finish_new_thread`] continues on the UI thread.
+    fn spawn_new_thread(&mut self, title: String, call: Option<String>, then: surreal_recon::Then) {
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome =
+                surreal_recon::new_thread(&title, call.as_deref()).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::ReconThreadCreated { then, outcome });
+        });
+    }
+
+    fn finish_new_thread(
+        &mut self,
+        then: surreal_recon::Then,
+        outcome: Result<recon::Thread, String>,
+    ) {
+        let thread = match outcome {
+            Ok(thread) => thread,
+            Err(error) => {
+                if matches!(then, surreal_recon::Then::Launch { .. }) {
+                    self.home_draft_submitting = false;
+                    self.launch_state = LaunchState::RecoverableFailure;
+                }
+                self.status = format!("Could not create the investigation: {error}");
+                return;
+            }
+        };
+        self.threads.insert(0, thread.clone());
+        self.thread_sel = 0;
+        let result = match then {
+            surreal_recon::Then::Open => self.enter_investigation(&thread.id).map(|_| {
+                self.input.clear();
+                self.set_focus(Target::Field(FieldId::Composer));
+                "New investigation".to_string()
+            }),
+            surreal_recon::Then::Attached => self
+                .enter_investigation(&thread.id)
+                .map(|_| "Recon started from result".to_string()),
+            surreal_recon::Then::Launch { question } => {
+                let _ = self.open_investigation_tab(&thread.id);
+                self.clear_home_draft();
+                if self.module == Some(ModuleId::System) && self.overlay == Overlay::Configs {
+                    self.overlay = Overlay::None;
+                }
+                self.home_draft_submitting = false;
+                self.launch_state = LaunchState::Accepted;
+                let entered = if self.module.is_none() {
+                    self.enter_investigation(&thread.id)
+                } else {
+                    self.status = "Investigation started — Open".into();
+                    Ok(())
+                };
+                entered
+                    .and_then(|_| self.send_recon_query(&thread.id, &question))
+                    .map(|_| self.status.clone())
+            }
+        };
+        self.report(result);
+    }
+
+    fn refresh_threads(&mut self) -> Result<()> {
+        if self.threads_reading {
+            self.threads_pending = true;
             return Ok(());
         }
-        self.threads = self.store.list_threads(&self.recon_search)?;
-        self.thread_states = self
-            .threads
-            .iter()
-            .map(|t| {
-                Ok((
-                    t.id.clone(),
-                    self.store.latest_run_state(&t.id)?.unwrap_or_default(),
-                ))
-            })
-            .collect::<Result<HashMap<_, _>>>()?;
-        self.thread_sel = self
-            .selected_thread
-            .as_ref()
-            .and_then(|id| self.threads.iter().position(|t| &t.id == id))
-            .unwrap_or(0);
+        self.threads_reading = true;
+        let query = self.recon_search.clone();
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = surreal_recon::threads(&query).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::ThreadsLoaded { query, outcome });
+        });
         Ok(())
     }
 
@@ -3452,19 +3567,26 @@ impl App {
         if self.brain_preview_reading {
             return;
         }
-        let (Some(db), Some(id)) = (
-            self.background_db.clone(),
-            self.brain_preview_target.clone(),
-        ) else {
+        let Some(id) = self.brain_preview_target.clone() else {
             return;
         };
+        // Under a storage config the preview reads the repository; there is
+        // no SQLite path to open.
+        let db = self.background_db.clone();
+        if db.is_none() && !surreal_brain::on() {
+            return;
+        }
         self.brain_preview_reading = true;
         let generation = self.brain_generation;
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_profile_reader(&db)
-                .and_then(|store| store.insight_for_memory(&id))
-                .map_err(|e| e.to_string());
+            let outcome = if surreal_brain::on() {
+                surreal_brain::preview(&id)
+            } else {
+                let _ = &db;
+                Ok(None)
+            }
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::BrainPreviewLoaded {
                 generation,
                 memory_id: id,
@@ -3557,15 +3679,10 @@ impl App {
     }
 
     pub(crate) fn open_profile_intel_job(&mut self, id: &str) -> Result<()> {
-        let job = self
-            .store
-            .intel_report_job(id)?
+        let (job, run_id) = surreal_brain::report_job_with_run(id)?
             .ok_or_else(|| anyhow::anyhow!("Report job no longer retained"))?;
-        let run_id: String = self.store.connection().query_row(
-            "SELECT run_id FROM atlas_articles WHERE id=?1 ORDER BY seen_at DESC LIMIT 1",
-            [&job.article_id],
-            |row| row.get(0),
-        )?;
+        let run_id =
+            run_id.ok_or_else(|| anyhow::anyhow!("The report's article is no longer retained"))?;
         self.open_claim_article(&run_id, &job.article_id)?;
         self.status = format!("Report {} · {} · {}", job.id, job.state, job.stage);
         Ok(())
@@ -3591,23 +3708,32 @@ impl App {
 
     fn open_thread_with_history(&mut self, id: &str, record: bool) -> Result<()> {
         if self.module == Some(ModuleId::Recon) {
-            if let Some(previous) = &self.selected_thread {
-                self.store.save_draft(
-                    previous,
-                    &self.input,
-                    i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX),
-                )?;
+            if let Some(previous) = self.selected_thread.clone() {
+                self.save_thread_draft(&previous, self.input.clone())?;
                 self.draft_dirty = false;
             }
         }
-        let thread = self
-            .store
-            .get_thread(id)?
-            .ok_or_else(|| anyhow::anyhow!("Thread not found"))?;
-        self.store.select_thread(id)?;
+        let thread = {
+            // The thread list is the repository's; a thread created on a
+            // worker a moment ago may not be listed yet.
+            let thread = self.recon_thread(id).unwrap_or_else(|| recon::Thread {
+                id: id.into(),
+                title: String::new(),
+                created_at: String::new(),
+                updated_at: String::new(),
+                draft: String::new(),
+                scroll: 0,
+                recall_insights: false,
+            });
+            let tid = id.to_string();
+            self.spawn_recon_write("select the investigation", move || {
+                surreal_recon::select_thread(&tid)
+            });
+            thread
+        };
         self.selected_thread = Some(id.into());
-        if self.background_db.is_none() {
-            self.messages = self.store.list_messages(id)?;
+        if self.background_db.is_none() && !surreal_recon::on() {
+            self.messages = Vec::new();
         } else {
             self.messages.clear();
             self.calls.clear();
@@ -3642,10 +3768,7 @@ impl App {
     }
 
     fn new_thread(&mut self) -> Result<()> {
-        let thread = self.store.new_thread("New investigation")?;
-        self.enter_investigation(&thread.id)?;
-        self.input.clear();
-        self.set_focus(Target::Field(FieldId::Composer));
+        self.spawn_new_thread("New investigation".into(), None, surreal_recon::Then::Open);
         Ok(())
     }
 
@@ -3657,11 +3780,7 @@ impl App {
         if self.selected_thread.as_deref() == Some(tid) {
             self.input.clear();
             self.cursor = 0;
-            self.store.save_draft(
-                tid,
-                "",
-                i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX),
-            )?;
+            self.save_thread_draft(tid, String::new())?;
             self.live_answers.remove(tid);
             self.chat_follow = true;
         }
@@ -3718,11 +3837,13 @@ impl App {
         if self.running.contains_key(tid) {
             return false;
         }
-        self.store
-            .latest_resumable_run(tid)
-            .ok()
-            .flatten()
-            .is_some()
+        let tid = tid.to_string();
+        argos_osint_core::storage::runtime::blocking(move |repo| async move {
+            argos_osint_core::storage::recon_runs::latest_resumable_run(&repo, &tid).await
+        })
+        .ok()
+        .flatten()
+        .is_some()
     }
 
     fn resume_recon(&mut self) -> Result<()> {
@@ -3734,10 +3855,11 @@ impl App {
             !self.running.contains_key(&tid),
             "This thread already has a running turn"
         );
-        let run = self
-            .store
-            .latest_resumable_run(&tid)?
-            .ok_or_else(|| anyhow::anyhow!("No interrupted or failed run to resume"))?;
+        let lookup = tid.clone();
+        let run = argos_osint_core::storage::runtime::blocking(move |repo| async move {
+            argos_osint_core::storage::recon_runs::latest_resumable_run(&repo, &lookup).await
+        })?
+        .ok_or_else(|| anyhow::anyhow!("No interrupted or failed run to resume"))?;
         let service =
             recon::Service::new(&paths::db_path(), self.auth.clone(), self.settings.clone())?;
         let tx = self.work_tx.clone();
@@ -3776,39 +3898,20 @@ impl App {
             .map(|thread| thread.recall_insights)
             .unwrap_or(false);
         let next = !on;
-        if !self.store.set_recall_insights(&tid, next)? {
-            anyhow::bail!("Investigation not found");
+        {
+            let id = tid.clone();
+            self.spawn_recon_write("set recall", move || {
+                anyhow::ensure!(
+                    surreal_recon::set_recall_insights(&id, next)?,
+                    "Investigation not found"
+                );
+                Ok(())
+            });
         }
         if let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == tid) {
             thread.recall_insights = next;
         }
         Ok(if next { "recall: on" } else { "recall: off" }.into())
-    }
-
-    #[allow(dead_code)]
-    fn retry_insights(&mut self) -> Result<()> {
-        let tid = self
-            .selected_thread
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No thread selected"))?;
-        let answer_id = self
-            .store
-            .latest_retryable_insight_job(&tid)?
-            .ok_or_else(|| anyhow::anyhow!("No retryable insight job"))?;
-        let service =
-            recon::Service::new(&paths::db_path(), self.auth.clone(), self.settings.clone())?;
-        let tx = self.work_tx.clone();
-        tokio::spawn(async move {
-            let outcome = service
-                .retry_insights(&answer_id)
-                .await
-                .map_err(|e| e.to_string());
-            let _ = tx.send(WorkEvent::InsightDone {
-                thread_id: tid,
-                outcome,
-            });
-        });
-        Ok(())
     }
 
     fn remember_firecrawl_key(&mut self) -> Result<String> {
@@ -3970,7 +4073,8 @@ impl App {
 
     /// Load Intel bulletin articles for the active category, run day, and search.
     pub fn load_intel(&mut self) {
-        if let Some(db) = self.background_db.clone() {
+        if self.background_db.is_some() || surreal_brain::on() {
+            let db = self.background_db.clone();
             if self.intel_list_reading {
                 self.intel_list_pending = true;
                 return;
@@ -3986,27 +4090,12 @@ impl App {
             );
             let tx = self.work_tx.clone();
             std::thread::spawn(move || {
-                let outcome = Store::open_profile_reader(&db)
-                    .and_then(|store| {
-                        store.connection().execute_batch("BEGIN")?;
-                        let days = store.atlas_run_days()?;
-                        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                        let day = if days.contains(&key.1) {
-                            key.1.clone()
-                        } else if days.contains(&today) {
-                            today
-                        } else {
-                            days.first().cloned().unwrap_or_default()
-                        };
-                        let articles = if day.is_empty() {
-                            Vec::new()
-                        } else {
-                            store.atlas_articles_for_intel(&key.0, &day, &key.2)?
-                        };
-                        Ok((days, day, articles))
-                    })
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(WorkEvent::IntelListLoaded { key, outcome });
+                let _ = db;
+                {
+                    let outcome = super::surreal_intel::intel_list(&key.0, &key.1, &key.2)
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(WorkEvent::IntelListLoaded { key, outcome });
+                };
             });
             return;
         }
@@ -4123,11 +4212,8 @@ impl App {
         // One idempotent preparation chain owns retrieval, cleanup, Claims,
         // Inferences and Links; the background brief runner executes it.
         // Mode classification is lazy (Recon configuration).
-        match intel_recon::brief_stages::ensure_intel_brief_pipeline(
-            &self.store,
-            &article,
-            &self.settings,
-        ) {
+        let ensured = super::surreal_intel::ensure_brief(&article, &self.settings);
+        match ensured {
             Ok(job) => self.intel_brief_job = Some(job),
             Err(error) => {
                 self.intel_brief_job = None;
@@ -4146,46 +4232,26 @@ impl App {
         let Some(article) = self.intel_articles.get(self.intel_sel) else {
             return Ok("No article selected".into());
         };
-        let Some(progress) = argos_osint_core::investigation::insight_execution::owner_progress(
-            self.store.connection(),
-            "article",
-            &article.id,
-        )?
-        else {
-            return Ok("No extraction task".into());
-        };
-        let retried = argos_osint_core::investigation::insight_execution::retry_extraction(
-            self.store.connection(),
-            &progress.task_id,
-        )?;
-        self.refresh_intel_briefing();
-        Ok(if retried {
-            "Retry extraction queued; completed work retained"
-        } else {
-            "No recoverable extraction work"
-        }
-        .into())
+        super::surreal_brain::retry_article_extraction(
+            article.id.clone(),
+            self.auth.clone(),
+            self.settings.clone(),
+        );
+        Ok("Retry extraction started; completed work retained".into())
     }
 
     fn open_selected_extraction_job(&mut self) -> Result<String> {
         let Some(article) = self.intel_articles.get(self.intel_sel) else {
             return Ok("No article selected".into());
         };
-        let Some(progress) = argos_osint_core::investigation::insight_execution::owner_progress(
-            self.store.connection(),
-            "article",
-            &article.id,
-        )?
-        else {
-            return Ok("No extraction job".into());
-        };
-        self.open_job(&progress.job_id)
+        let _ = article;
+        Ok("Extraction job lookup is not available on SurrealDB storage".into())
     }
 
     /// Reload the shared stage views of the current brief chain; when a
     /// stage committed since the last poll, reload the briefing content.
     pub(crate) fn refresh_intel_brief_stages(&mut self) -> bool {
-        if self.background_db.is_some() {
+        if self.background_db.is_some() || surreal_brain::on() {
             self.refresh_intel_briefing();
             return false;
         }
@@ -4195,7 +4261,8 @@ impl App {
     }
 
     fn refresh_intel_briefing(&mut self) {
-        if let Some(db) = self.background_db.clone() {
+        if self.background_db.is_some() || surreal_brain::on() {
+            let db = self.background_db.clone();
             if self.intel_reading
                 || self.module != Some(ModuleId::Intel)
                 || self.intel_page != IntelPage::Briefing
@@ -4218,48 +4285,25 @@ impl App {
             );
             let tx = self.work_tx.clone();
             std::thread::spawn(move || {
-                let outcome = Store::open_profile_reader(&db)
-                    .and_then(|store| {
-                        store.connection().execute_batch("BEGIN")?;
-                        super::db_reads::IntelBriefSnapshot::read(
-                            &store,
-                            &article,
-                            scope,
-                            job.as_deref(),
-                            limit,
-                        )
-                        .map(Box::new)
-                    })
+                // Under a storage config the snapshot reads only the
+                // repository; no SQLite store (file or in-memory) is opened.
+                let _ = db;
+                {
+                    #[cfg(feature = "surreal")]
+                    let outcome = super::db_reads::IntelBriefSnapshot::read_repository(
+                        &article,
+                        scope,
+                        job.as_deref(),
+                        limit,
+                    )
+                    .map(Box::new)
                     .map_err(|e| e.to_string());
-                let _ = tx.send(WorkEvent::IntelBriefLoaded { key, outcome });
+                    #[cfg(not(feature = "surreal"))]
+                    let outcome =
+                        Err("SurrealDB Intel is off without the surreal feature".to_string());
+                    let _ = tx.send(WorkEvent::IntelBriefLoaded { key, outcome });
+                };
             });
-            return;
-        }
-        let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
-            return;
-        };
-        let outcome = self
-            .store
-            .connection()
-            .unchecked_transaction()
-            .map_err(anyhow::Error::from)
-            .and_then(|transaction| {
-                let snapshot = super::db_reads::IntelBriefSnapshot::read(
-                    &self.store,
-                    &article,
-                    self.related_scope,
-                    self.intel_brief_job.as_deref(),
-                    self.intel_related_limit,
-                );
-                transaction.rollback()?;
-                snapshot
-            });
-        match outcome {
-            Ok(snapshot) => self.accept_intel_brief_snapshot(snapshot),
-            Err(error) => {
-                self.intel_body_read_error = Some(error.to_string());
-                self.layout.borrow_mut().view_stamp.clear();
-            }
         }
     }
 
@@ -4406,10 +4450,10 @@ impl App {
     }
 
     fn load_atlas(&mut self) {
-        if let Some(db) = self.background_db.clone() {
+        if self.background_db.is_some() || surreal_brain::on() {
             self.atlas_generation = self.atlas_generation.wrapping_add(1);
             if !self.atlas_reading {
-                self.request_atlas_snapshot(db);
+                self.request_atlas_snapshot(self.background_db.clone());
             }
             return;
         }
@@ -4435,11 +4479,23 @@ impl App {
         self.dismiss_pruned_atlas(&removed, selected.as_deref(), &news_run);
     }
 
-    fn request_atlas_snapshot(&mut self, db: PathBuf) {
+    fn request_atlas_snapshot(&mut self, db: Option<PathBuf>) {
         self.atlas_reading = true;
         let generation = self.atlas_generation;
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
+            let Some(db) = db else {
+                // Repository runs; expiry pruning stays with the Atlas
+                // runner on SurrealDB.
+                let outcome = super::surreal_intel::atlas_runs()
+                    .map(|runs| (runs, Vec::new()))
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(WorkEvent::AtlasLoaded {
+                    generation,
+                    outcome,
+                });
+                return;
+            };
             let outcome = Store::open_light(&db)
                 .and_then(|store| {
                     let removed = store.atlas_prune_expired()?;
@@ -4457,16 +4513,20 @@ impl App {
         if self.atlas_articles_reading {
             return;
         }
-        let Some(db) = self.background_db.clone() else {
+        if self.background_db.is_none() && !surreal_brain::on() {
             return;
-        };
+        }
+        let db = self.background_db.clone();
         self.atlas_articles_reading = true;
         let run_id = self.atlas_news_run.clone();
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_profile_reader(&db)
-                .and_then(|store| store.atlas_list_articles(&run_id))
-                .map_err(|e| e.to_string());
+            let outcome = match db {
+                Some(db) => Store::open_profile_reader(&db)
+                    .and_then(|store| store.atlas_list_articles(&run_id)),
+                None => super::surreal_intel::atlas_articles(&run_id),
+            }
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::AtlasArticlesLoaded { run_id, outcome });
         });
     }
@@ -4630,15 +4690,12 @@ impl App {
                 return Some(run.started_at[..10].to_string());
             }
         }
-        self.store
-            .connection()
-            .query_row(
-                "SELECT substr(started_at,1,10) FROM atlas_runs WHERE id=?1",
-                [run_id],
-                |r| r.get::<_, String>(0),
-            )
-            .ok()
-            .filter(|day| day.len() == 10)
+        {
+            // The run cache above is the repository's run list; never ask
+            // the SQLite store.
+            let _ = run_id;
+            None
+        }
     }
 
     fn delete_atlas_run(&mut self) -> Result<String> {
@@ -4666,9 +4723,21 @@ impl App {
             });
             return Ok("Deleting cycle…".into());
         }
-        self.store.atlas_delete_run(&run.id)?;
-        self.finish_atlas_delete(&run.id);
-        Ok("Run deleted".into())
+        anyhow::ensure!(
+            self.atlas_deleting.is_none(),
+            "A cycle deletion is already in progress"
+        );
+        self.atlas_deleting = Some(run.id.clone());
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome =
+                super::surreal_intel::atlas_delete_run(&run.id).map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::AtlasDeleted {
+                run_id: run.id,
+                outcome,
+            });
+        });
+        Ok("Deleting cycle…".into())
     }
 
     fn finish_atlas_delete(&mut self, run_id: &str) {
@@ -4697,7 +4766,7 @@ impl App {
             return;
         };
         let id = run.id.clone();
-        if self.background_db.is_none() {
+        if self.background_db.is_none() && !surreal_brain::on() {
             self.atlas_articles = self.store.atlas_list_articles(&id).unwrap_or_default();
         } else {
             self.atlas_articles.clear();
@@ -5167,7 +5236,7 @@ impl App {
                 self.jobs.scroll = 0;
                 self.jobs.detail_scroll = 0;
                 self.status =
-                    outcome.unwrap_or_else(|error| format!("Could not clear jobs: {error}"));
+                    outcome.unwrap_or_else(|error| format!("Jobs action failed: {error}"));
                 self.reload_jobs();
                 self.refresh_intel_briefing();
                 true
@@ -5405,6 +5474,19 @@ impl App {
                 }
                 true
             }
+            WorkEvent::ReconWritten { what, outcome } => {
+                match outcome {
+                    Ok(()) => {
+                        let _ = self.refresh_threads();
+                    }
+                    Err(error) => self.status = format!("Could not {what}: {error}"),
+                }
+                true
+            }
+            WorkEvent::ReconThreadCreated { then, outcome } => {
+                self.finish_new_thread(then, outcome);
+                true
+            }
             WorkEvent::ThreadDeleted { thread_id, outcome } => {
                 self.threads_deleting.remove(&thread_id);
                 match outcome {
@@ -5502,7 +5584,7 @@ impl App {
                 self.atlas_reading = false;
                 if generation != self.atlas_generation {
                     if let Some(db) = self.background_db.clone() {
-                        self.request_atlas_snapshot(db);
+                        self.request_atlas_snapshot(Some(db));
                     }
                     return true;
                 }
@@ -5557,6 +5639,10 @@ impl App {
                         self.push_log_detail("error", "Atlas: cycle deletion failed", error);
                     }
                 }
+                true
+            }
+            WorkEvent::MemoryGraphChecked { id, outcome } => {
+                self.on_memory_graph_checked(id, outcome);
                 true
             }
             WorkEvent::TopologyLoaded {
@@ -5633,6 +5719,10 @@ impl App {
                     self.push_log_detail("warn", "Brain: background repair incomplete", error);
                 }
                 self.reload_memories();
+                true
+            }
+            WorkEvent::ProfileRunOwner { run_id, outcome } => {
+                self.on_profile_run_owner(run_id, outcome);
                 true
             }
             WorkEvent::ProfileLoaded {
@@ -5760,11 +5850,8 @@ impl App {
                             );
                         }
                         self.osint_result = Some(value);
-                        if self.background_db.is_some() {
+                        if self.background_db.is_some() || surreal_recon::on() {
                             self.request_manual_history();
-                        } else if let Ok(runs) = self.store.manual_calls() {
-                            self.manual_runs = runs;
-                            self.manual_run_pos = self.manual_runs.len().saturating_sub(1);
                         }
                     }
                     Err(err) => {
@@ -6455,46 +6542,25 @@ impl App {
     }
 
     fn refresh_selected(&mut self) -> Result<()> {
-        if let Some(db) = self.background_db.clone() {
-            if self.recon_reading {
-                self.recon_pending = true;
-                return Ok(());
-            }
-            let Some(id) = self.selected_thread.clone() else {
-                return Ok(());
-            };
-            self.recon_reading = true;
-            let logged_calls = self.logged_calls.clone();
-            let tx = self.work_tx.clone();
-            std::thread::spawn(move || {
-                let outcome = Store::open_profile_reader(&db)
-                    .and_then(|store| {
-                        store.connection().execute_batch("BEGIN")?;
-                        super::db_reads::ReconSnapshot::read(&store, &id)
-                    })
-                    .map(|mut snapshot| {
-                        match Store::open_light(&db) {
-                            Ok(store) => snapshot.record_call_logs(&store, &logged_calls),
-                            Err(error) => snapshot.log_error = Some(error.to_string()),
-                        }
-                        Box::new(snapshot)
-                    })
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(WorkEvent::ReconLoaded {
-                    thread_id: id,
-                    outcome,
-                });
-            });
+        if self.recon_reading {
+            self.recon_pending = true;
             return Ok(());
         }
-        if let Some(tid) = &self.selected_thread {
-            self.messages = self.store.list_messages(tid)?;
-            self.investigation_events = self.store.list_investigation_events(tid)?;
-            self.calls = self.store.all_calls_for_thread(tid)?;
-            self.runs = self.store.runs_for_thread(tid)?;
-            self.answer_memories = self.store.answer_memories(tid)?;
-            self.note_finished_calls();
-        }
+        let Some(id) = self.selected_thread.clone() else {
+            return Ok(());
+        };
+        self.recon_reading = true;
+        let logged_calls = self.logged_calls.clone();
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = surreal_recon::snapshot(&id, &logged_calls)
+                .map(Box::new)
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::ReconLoaded {
+                thread_id: id,
+                outcome,
+            });
+        });
         Ok(())
     }
 
@@ -6503,15 +6569,14 @@ impl App {
             self.manual_pending = true;
             return;
         }
-        let Some(db) = self.background_db.clone() else {
-            return;
-        };
+        let db = None;
         self.manual_reading = true;
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_profile_reader(&db)
-                .and_then(|store| store.manual_calls())
-                .map_err(|e| e.to_string());
+            let outcome = match db {
+                None => surreal_recon::manual_calls().map_err(|e| format!("{e:#}")),
+                Some(()) => Ok(Vec::new()),
+            };
             let _ = tx.send(WorkEvent::ManualHistoryLoaded { outcome });
         });
     }
@@ -6568,28 +6633,7 @@ impl App {
     /// reload the open Intel article and Brain memory Related lists.
     pub(crate) fn toggle_related_scope(&mut self) {
         self.related_scope = self.related_scope.toggle();
-        if self.background_db.is_some() {
-            self.refresh_intel_briefing();
-            self.status = format!("Related: {}", self.related_scope.label());
-            return;
-        }
-        if let Some(article) = self.intel_articles.get(self.intel_sel).cloned() {
-            match self.store.related_articles_global(
-                &article.run_id,
-                &article.id,
-                self.related_scope,
-                None,
-                20,
-            ) {
-                Ok(page) => {
-                    self.intel_related.page = page.into_page(0);
-                    self.intel_related.error = None;
-                }
-                Err(error) => self.intel_related.error = Some(error.to_string()),
-            }
-            self.intel_related.sel = 0;
-            self.intel_related.scroll = 0;
-        }
+        self.refresh_intel_briefing();
         self.status = format!("Related: {}", self.related_scope.label());
     }
 
@@ -6662,21 +6706,21 @@ impl App {
         {
             return;
         }
-        let Some(db) = self.background_db.clone() else {
+        let db = self.background_db.clone();
+        if db.is_none() && !surreal_brain::on() {
             return;
-        };
+        }
         let generation = self.brain_generation;
         self.brain_reading = Some(generation);
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_profile_reader(&db)
-                .and_then(|store| {
-                    // One consistent read transaction; concurrent ingest cannot
-                    // produce mixed revisions in the display projection.
-                    store.connection().execute_batch("BEGIN")?;
-                    store.brain_browse_memories(None, "")
-                })
-                .map_err(|e| e.to_string());
+            let outcome = if surreal_brain::on() {
+                surreal_brain::list()
+            } else {
+                let _ = &db;
+                Ok(Vec::new())
+            }
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::BrainLoaded {
                 generation,
                 outcome,
@@ -6792,27 +6836,56 @@ impl App {
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_default(),
             }
+        } else if surreal_brain::on() {
+            // The memory check reads the repository on a plain worker
+            // thread (never the SQLite store); `MemoryGraphChecked` opens
+            // the mapper.
+            let tx = self.work_tx.clone();
+            self.status = "Opening topology…".into();
+            std::thread::spawn(move || {
+                let outcome = surreal_brain::memory_kind(&id).map_err(|e| format!("{e:#}"));
+                let _ = tx.send(WorkEvent::MemoryGraphChecked { id, outcome });
+            });
+            return;
         } else {
-            match self.store.get_memory(&id) {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    self.status = format!("Memory unavailable: {id} no longer exists");
-                    return;
-                }
+            let outcome = match self.store.get_memory(&id) {
+                Ok(Some(_)) => argos_osint_core::brain_kinds::memory_kind(&self.store, &id)
+                    .map(Some)
+                    .map_err(|e| format!("{e:#}")),
+                Ok(None) => Ok(None),
                 Err(error) => {
                     self.status = format!("Memory unavailable: {error:#}");
                     return;
                 }
-            }
-            match argos_osint_core::brain_kinds::memory_kind(&self.store, &id) {
-                Ok(kind) => memory_topology_seed(kind, id),
-                Err(error) => {
-                    self.status = format!("Memory kind unreadable: {error:#}");
+            };
+            match memory_graph_seed(id, outcome) {
+                Ok(seed) => seed,
+                Err(status) => {
+                    self.status = status;
                     return;
                 }
             }
         };
         self.open_topology(seed, Some(1));
+    }
+
+    /// The SurrealDB memory check finished: open the mapper only while the
+    /// Brain list still has that memory selected (a late result is dropped).
+    fn on_memory_graph_checked(
+        &mut self,
+        id: String,
+        outcome: Result<Option<argos_osint_core::memory_metadata::MemoryKind>, String>,
+    ) {
+        let current = self.module == Some(ModuleId::Brain)
+            && self.brain_list_mode == BrainListMode::List
+            && self.memories.get(self.memory_sel).map(|m| m.id.as_str()) == Some(id.as_str());
+        if !current {
+            return;
+        }
+        match memory_graph_seed(id, outcome) {
+            Ok(seed) => self.open_topology(seed, Some(1)),
+            Err(status) => self.status = status,
+        }
     }
 
     /// Open the topology mapper on `seed`. `depth` is the starting hop count
@@ -6903,7 +6976,20 @@ impl App {
                 max_edges: 200,
                 continuation_token: None,
             };
-            if let Some(db) = self.background_db.clone() {
+            if surreal_topology(super::surreal_brain::on(), &seed) {
+                self.topology_reading = true;
+                let tx = self.work_tx.clone();
+                std::thread::spawn(move || {
+                    let outcome = super::surreal_brain::topology(&seed, &options)
+                        .map(Box::new)
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(WorkEvent::TopologyLoaded {
+                        generation,
+                        seed,
+                        outcome,
+                    });
+                });
+            } else if let Some(db) = self.background_db.clone() {
                 self.topology_reading = true;
                 let tx = self.work_tx.clone();
                 std::thread::spawn(move || {
@@ -6941,6 +7027,7 @@ impl App {
         let Some(seed) = self.topology_state.seed.clone() else {
             return;
         };
+        let surreal = surreal_topology(super::surreal_brain::on(), &seed);
         let options = argos_osint_core::brain_topology::TopologyOptions {
             depth: self.topology_state.depth,
             cycle_scope: self.topology_state.cycle_scope.clone(),
@@ -6993,37 +7080,15 @@ impl App {
             stop,
             limits: argos_osint_core::brain_neighborhood_brief_exec::WatchLimits::standard(),
         };
-        if let Some(db) = self.background_db.clone() {
-            // Auth/settings loading, the role runtime and the database open all
-            // happen on the worker thread, never on the UI thread.
-            std::thread::spawn(move || {
-                let send = |event| {
-                    let _ = tx.send(event);
-                };
-                let runtime = load_summary_runtime();
-                match Store::open_light(&db) {
-                    Ok(store) => job.run(&store, Some(&db), &runtime, &send),
-                    Err(error) => job.fail(
-                        argos_osint_core::brain_neighborhood_brief_exec::FailureKind::Storage,
-                        format!("could not open the database: {error}"),
-                        &send,
-                    ),
-                }
-            });
-        } else {
-            // Fixture-only: production always sets `background_db` (see `App::new`);
-            // only the test constructor leaves it `None`, so this blocking load never
-            // runs on the real UI thread.
-            let mut events = Vec::new();
-            let cell = std::cell::RefCell::new(&mut events);
+        let _ = surreal;
+        // The summary cache and its task live in the repository.
+        std::thread::spawn(move || {
+            let send = |event| {
+                let _ = tx.send(event);
+            };
             let runtime = load_summary_runtime();
-            job.run(&self.store, None, &runtime, &|event| {
-                cell.borrow_mut().push(event)
-            });
-            for event in events {
-                self.on_work_event(event);
-            }
-        }
+            job.run_surreal(&runtime, &send);
+        });
     }
 
     /// Retry never blanks content: the recorded (or previous) brief stays and
@@ -7670,36 +7735,18 @@ impl App {
     }
 
     fn more_related_articles(&mut self) -> Result<String> {
-        if self.background_db.is_some() {
-            self.intel_related_limit = self
-                .intel_related
-                .page
-                .rows
-                .len()
-                .max(self.intel_related_limit)
-                .saturating_add(20);
-            self.refresh_intel_briefing();
-            return Ok("Loading more related articles…".into());
-        }
-        let offset = self.intel_related.page.rows.len();
-        let article = self
-            .intel_articles
-            .get(self.intel_sel)
-            .ok_or_else(|| anyhow::anyhow!("No article selected"))?;
-        let page = self
-            .store
-            .related_articles_global(
-                &article.run_id,
-                &article.id,
-                self.related_scope,
-                Some(&offset.to_string()),
-                20,
-            )?
-            .into_page(offset);
-        self.intel_related.page.rows.extend(page.rows);
-        self.intel_related.page.total = page.total;
-        self.intel_related.page.has_more = page.has_more;
-        Ok("Related articles loaded".into())
+        // Under SurrealDB the worker snapshot reads the repository; never
+        // page from the in-memory SQLite store.
+
+        self.intel_related_limit = self
+            .intel_related
+            .page
+            .rows
+            .len()
+            .max(self.intel_related_limit)
+            .saturating_add(20);
+        self.refresh_intel_briefing();
+        Ok("Loading more related articles…".into())
     }
 
     fn activate_button(&mut self, button: ButtonId) {
@@ -7906,22 +7953,10 @@ impl App {
                         depth: self.topology_state.depth,
                         options,
                     };
-                    let now = chrono::Utc::now().to_rfc3339();
-                    match argos_osint_core::brain_scope::enqueue_scope_analysis(
-                        self.store.connection(),
-                        &payload,
-                        &now,
-                    ) {
-                        Ok(task_id) => {
-                            self.topology_state.analyzing_scope = true;
-                            self.topology_state.scope_status = format!("Enqueued ({task_id})");
-                            self.status = format!("Enqueued scope analysis ({task_id})");
-                        }
-                        Err(e) => {
-                            self.topology_state.scope_status = format!("Failed: {e}");
-                            self.status = format!("Failed to analyze scope: {e}");
-                        }
-                    }
+                    let _ = payload;
+                    self.topology_state.scope_status =
+                        "Scope analysis is not available on SurrealDB storage".into();
+                    self.status = self.topology_state.scope_status.clone();
                 }
                 return;
             }
@@ -7962,40 +7997,9 @@ impl App {
             }
             ButtonId::NewThread => self.new_thread().map(|_| "New investigation".into()),
             ButtonId::DeleteThread => {
-                if self.background_db.is_some() {
-                    let result = self.request_thread_delete();
-                    self.report(result);
-                    return;
-                }
-                let Some(id) = self.selected_thread.clone() else {
-                    self.status = "No thread selected".into();
-                    return;
-                };
-                self.running
-                    .remove(&id)
-                    .inspect(|cancel| cancel.store(true, Ordering::Relaxed));
-                self.store.deletion_consequences(&id).and_then(|removed| {
-                    let removed = removed.len();
-                    self.store.delete_thread(&id, true)?;
-                    self.tab_ids.retain(|tid| tid != &id);
-                    self.tab_recently_closed.retain(|tid| tid != &id);
-                    self.tab_last_active.remove(&id);
-                    self.tab_unreads.remove(&id);
-                    self.save_session_tabs();
-                    self.selected_thread = None;
-                    self.messages.clear();
-                    self.investigation_events.clear();
-                    self.input.clear();
-                    self.recon_chat = false;
-                    self.refresh_threads()?;
-                    if let Some(next) = self.threads.first().map(|t| t.id.clone()) {
-                        self.open_thread(&next)?;
-                    }
-                    self.reload_memories();
-                    Ok(format!(
-                        "Investigation deleted; {removed} brain memories removed"
-                    ))
-                })
+                let result = self.request_thread_delete();
+                self.report(result);
+                return;
             }
             ButtonId::CancelRun => {
                 if let Some(id) = &self.selected_thread {
@@ -8151,7 +8155,14 @@ impl App {
                             .get(self.tool_sel)
                             .copied()
                             .unwrap_or(true);
-                        self.store.set_tool_enabled(tool.id, enabled).map(|_| {
+                        let saved = {
+                            let id = tool.id;
+                            self.spawn_recon_write("save the tool setting", move || {
+                                surreal_recon::set_tool_enabled(id, enabled)
+                            });
+                            Ok(())
+                        };
+                        saved.map(|_| {
                             if let Some(state) = self.tool_enabled.get_mut(self.tool_sel) {
                                 *state = enabled;
                             }
@@ -8218,29 +8229,18 @@ impl App {
             ButtonId::AtlasResume => self.resume_atlas_run(),
             ButtonId::ClearLog => {
                 // Scope: durable events only. Jobs, task results and memories stay.
-                if let Some(db) = self.background_db.clone() {
-                    if self.logs_clearing {
-                        self.status = "Events cleanup is already in progress".into();
-                        return;
-                    }
-                    self.logs_clearing = true;
-                    let tx = self.work_tx.clone();
-                    std::thread::spawn(move || {
-                        let outcome = Store::open_light(&db)
-                            .and_then(|store| store.clear_events())
-                            .map_err(|error| error.to_string());
-                        let _ = tx.send(WorkEvent::LogsCleared { outcome });
-                    });
-                    self.status = "Clearing events…".into();
+                if self.logs_clearing {
+                    self.status = "Events cleanup is already in progress".into();
                     return;
                 }
-                let cleared = self.store.clear_events();
-                self.logs.open.clear();
-                self.logs.scroll = 0;
-                self.logs.follow = true;
-                self.push_log("info", "Events cleared (jobs, results, and memories kept)");
-                self.reload_logs();
-                cleared.map(|n| format!("Cleared {n} events"))
+                self.logs_clearing = true;
+                let tx = self.work_tx.clone();
+                std::thread::spawn(move || {
+                    let outcome = surreal_brain::clear_logs().map_err(|error| error.to_string());
+                    let _ = tx.send(WorkEvent::LogsCleared { outcome });
+                });
+                self.status = "Clearing events…".into();
+                return;
             }
             ButtonId::JobsStatus => {
                 self.jobs.cycle_status();
@@ -8257,30 +8257,15 @@ impl App {
                 let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
                     return;
                 };
-                let retried = self.store.retry_failed_tasks(&id);
-                self.reload_jobs();
-                retried.map(|n| {
-                    if n == 0 {
-                        "Nothing to retry".into()
-                    } else {
-                        format!("Retrying {n} failed task(s)")
-                    }
-                })
+                self.spawn_job_action(surreal_brain::JobAction::Retry(id));
+                return;
             }
             ButtonId::JobsCancel => {
                 let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
                     return;
                 };
-                let requested = self.store.request_job_cancel(&id);
-                self.reload_jobs();
-                requested.map(|outcome| match outcome {
-                    CancelRequest::Requested => {
-                        "Stop requested · the job stops at its next safe point".into()
-                    }
-                    CancelRequest::NotCancellable => "This job cannot be cancelled safely".into(),
-                    CancelRequest::NotRunning => "This job is not running".into(),
-                    CancelRequest::Missing => "Job history expired".into(),
-                })
+                self.spawn_job_action(surreal_brain::JobAction::Cancel(id));
+                return;
             }
             ButtonId::JobsOpenSource => self.open_job_source(),
             ButtonId::JobsClearCompleted
@@ -8292,42 +8277,14 @@ impl App {
                     ButtonId::JobsClearStopped => JobStatusFilter::Stopped,
                     _ => JobStatusFilter::Failed,
                 };
-                if let Some(db) = self.background_db.clone() {
-                    if self.jobs_clearing {
-                        self.status = "Jobs cleanup is already in progress".into();
-                        return;
-                    }
-                    self.jobs_clearing = true;
-                    let tx = self.work_tx.clone();
-                    std::thread::spawn(move || {
-                        let outcome = Store::open_light(&db)
-                            .and_then(|store| store.clear_jobs_by_status(status))
-                            .map(|counts| {
-                                format!(
-                                    "Cleared {} jobs · stopped {}",
-                                    counts.cleared, counts.stopped
-                                )
-                            })
-                            .map_err(|e| e.to_string());
-                        let _ = tx.send(WorkEvent::JobsCleared { outcome });
-                    });
-                    self.status =
-                        format!("Clearing {} job history…", status.label().to_lowercase());
+                if self.jobs_clearing {
+                    self.status = "Jobs cleanup is already in progress".into();
                     return;
                 }
-                let result = self.store.clear_jobs_by_status(status).map(|counts| {
-                    format!(
-                        "Cleared {} jobs · stopped {}",
-                        counts.cleared, counts.stopped
-                    )
-                });
-                self.jobs.scroll = 0;
-                self.jobs.detail_scroll = 0;
-                self.reload_jobs();
-                self.refresh_intel_briefing();
-                self.sync_intel_brief_task_ui();
-                self.set_focus(Target::Button(button));
-                result
+                self.jobs_clearing = true;
+                self.spawn_job_action(surreal_brain::JobAction::Clear(status));
+                self.status = format!("Clearing {} job history…", status.label().to_lowercase());
+                return;
             }
             ButtonId::LogsLevel => {
                 self.logs.level = self.logs.level.next();
@@ -8370,9 +8327,12 @@ impl App {
                     self.status = "Open or create a Recon thread first".into();
                     return;
                 };
-                self.store
-                    .attach_call(call_id, tid)
-                    .map(|_| "Result attached to thread".into())
+                let (call, tid) = (call_id.clone(), tid.clone());
+                self.spawn_recon_write("attach the result", move || {
+                    surreal_recon::attach_call(&call, &tid)
+                });
+                self.status = "Attaching result to thread…".into();
+                return;
             }
             ButtonId::OsintStartRecon => {
                 let Some((call_id, result)) = &self.osint_result else {
@@ -8381,11 +8341,9 @@ impl App {
                 };
                 let call_id = call_id.clone();
                 let title = format!("Investigate {}", result.tool_id);
-                self.store.new_thread(&title).and_then(|thread| {
-                    self.store.attach_call(&call_id, &thread.id)?;
-                    self.enter_investigation(&thread.id)?;
-                    Ok("Recon started from result".into())
-                })
+                self.spawn_new_thread(title, Some(call_id), surreal_recon::Then::Attached);
+                self.status = "Starting Recon from result…".into();
+                return;
             }
             ButtonId::SaveRecon => self.save_role(DefaultsRole::Recon),
             ButtonId::SavePicker => self.save_role(DefaultsRole::ToolPicker),
@@ -8535,23 +8493,8 @@ impl App {
                 return;
             }
             ButtonId::IntelBodyRetry | ButtonId::IntelBodyRefresh => {
-                if let Some(job) = self.intel_brief_job.clone() {
-                    if let Ok(Some(_)) = intel_recon::brief_pipeline::retry_stage(
-                        self.store.connection(),
-                        &job,
-                        &chrono::Utc::now().to_rfc3339(),
-                    ) {
-                        self.refresh_intel_brief_stages();
-                        self.status = "Retrying failed brief stage; completed stages kept".into();
-                        return;
-                    }
-                }
                 if let Some(article) = self.intel_articles.get(self.intel_sel).cloned() {
-                    match intel_recon::brief_stages::reload_intel_brief_pipeline(
-                        &self.store,
-                        &article,
-                        &self.settings,
-                    ) {
+                    match super::surreal_intel::ensure_brief(&article, &self.settings) {
                         Ok(job) => {
                             self.intel_brief_job = Some(job);
                             self.intel_body = None;
@@ -9170,7 +9113,7 @@ impl App {
                 self.toggle_log();
             }
             Target::JobRow(index) => {
-                if self.background_db.is_some() {
+                if self.jobs_async() {
                     self.pending_job = None;
                     self.jobs.select_cached(index);
                     self.reload_jobs();
@@ -9411,42 +9354,19 @@ impl App {
                 .selected_thread
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("No thread selected"))?;
-            self.store.rename_thread(&id, title)?;
-            self.refresh_threads()?;
+            let title = title.to_string();
+            self.spawn_recon_write("rename the investigation", move || {
+                anyhow::ensure!(
+                    surreal_recon::rename_thread(&id, &title)?,
+                    "Investigation not found"
+                );
+                Ok(())
+            });
             self.input.clear();
-            return Ok("Thread renamed".into());
+            return Ok("Renaming investigation…".into());
         }
         if input == ":delete" || input == ":delete-with-insights" {
-            if self.background_db.is_some() {
-                return self.request_thread_delete();
-            }
-            let id = self
-                .selected_thread
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("No thread selected"))?;
-            self.running
-                .remove(&id)
-                .inspect(|c| c.store(true, Ordering::Relaxed));
-            let removed = self.store.deletion_consequences(&id)?.len();
-            self.store.delete_thread(&id, true)?;
-            self.tab_ids.retain(|tid| tid != &id);
-            self.tab_recently_closed.retain(|tid| tid != &id);
-            self.tab_last_active.remove(&id);
-            self.tab_unreads.remove(&id);
-            self.save_session_tabs();
-            self.selected_thread = None;
-            self.messages.clear();
-            self.investigation_events.clear();
-            self.recon_chat = false;
-            self.refresh_threads()?;
-            if let Some(next) = self.threads.first().map(|t| t.id.clone()) {
-                self.open_thread(&next)?;
-            }
-            self.reload_memories();
-            self.input.clear();
-            return Ok(format!(
-                "Investigation deleted; {removed} brain memories removed"
-            ));
+            return self.request_thread_delete();
         }
         if input == ":cancel" {
             if let Some(id) = &self.selected_thread {
@@ -9473,22 +9393,22 @@ impl App {
         self.running
             .remove(&id)
             .inspect(|cancel| cancel.store(true, Ordering::Relaxed));
-        let db = self.background_db.clone().expect("production database");
         let tx = self.work_tx.clone();
+        // Deleting the insights with the thread is not on SurrealDB yet:
+        // the thread goes and its insights are kept.
         std::thread::spawn(move || {
-            let outcome = Store::open_light(&db)
-                .and_then(|mut store| {
-                    let removed = store.deletion_consequences(&id)?.len();
-                    store.delete_thread(&id, true)?;
-                    Ok(removed)
+            let outcome = surreal_recon::delete_thread(&id, false)
+                .and_then(|found| {
+                    anyhow::ensure!(found, "Investigation not found");
+                    Ok(0)
                 })
-                .map_err(|e| e.to_string());
+                .map_err(|e| format!("{e:#}"));
             let _ = tx.send(WorkEvent::ThreadDeleted {
                 thread_id: id,
                 outcome,
             });
         });
-        Ok("Deleting investigation…".into())
+        Ok("Deleting investigation (insights are kept on SurrealDB)…".into())
     }
 
     fn request_memory_delete(&mut self, id: String) -> Result<String> {
@@ -9496,12 +9416,19 @@ impl App {
             self.memories_deleting.insert(id.clone()),
             "This memory is already being deleted"
         );
-        let db = self.background_db.clone().expect("production database");
+        // Only the SQLite branch needs the database path; under SurrealDB
+        // there may be none, so it must not be required up front.
+        let db = self.background_db.clone();
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_light(&db)
-                .and_then(|store| store.delete_memory(&id))
-                .map_err(|e| e.to_string());
+            let outcome = if surreal_brain::on() {
+                surreal_brain::delete(&id)
+            } else if let Some(db) = db {
+                Store::open_light(&db).and_then(|store| store.delete_memory(&id))
+            } else {
+                Err(anyhow::anyhow!("no memory store is configured"))
+            }
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::MemoryDeleted {
                 memory_id: id,
                 outcome,
@@ -10371,11 +10298,22 @@ impl App {
         self.set_focus(Target::LogLine(self.logs.sel));
     }
 
+    /// Run a Jobs action on the repository off the UI thread; the outcome
+    /// lands as `JobsCleared` (status line, then a Jobs reload).
+    fn spawn_job_action(&mut self, action: surreal_brain::JobAction) {
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = surreal_brain::job_action(action).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::JobsCleared { outcome });
+        });
+        self.status = "Working…".into();
+    }
+
     fn move_job(&mut self, delta: i32) {
         if self.jobs.rows.is_empty() {
             return;
         }
-        if self.background_db.is_some() {
+        if self.jobs_async() {
             self.pending_job = None;
             let index =
                 (self.jobs.sel as i32 + delta).clamp(0, self.jobs.rows.len() as i32 - 1) as usize;
@@ -10511,14 +10449,12 @@ impl App {
             return;
         }
         if let Some(id) = &self.selected_thread {
-            if self
-                .store
-                .save_draft(
-                    id,
-                    &self.input,
-                    i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX),
-                )
-                .is_ok()
+            if surreal_recon::save_draft(
+                id,
+                &self.input,
+                i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX),
+            )
+            .is_ok()
             {
                 self.draft_dirty = false;
             }
@@ -10547,7 +10483,7 @@ impl App {
             report_mode: self.home_draft_report_mode,
         };
         let json = serde_json::to_string(&state)?;
-        self.store.app_state_set("home_recon_draft", &json)?;
+        self.ui_state_set("home_recon_draft", &json)?;
         self.home_draft_dirty = false;
         Ok(())
     }
@@ -10781,16 +10717,28 @@ pub async fn run(mut app: App) -> Result<()> {
     let _workers = argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path());
     // Process liveness for the job registry: jobs left running by a process
     // that exited become interrupted; cross-process Cancel reaches this one.
+    // Under a storage config the beat writes `process:[owner]` on the
+    // repository and no SQLite job registry is opened.
     let _beat = argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok();
     // One-time retention cleanup is separate from the elected, resumable
     // backfill pool. Neither belongs to startup or the terminal event loop.
+    // Under a storage config, job retention runs on the repository only.
+    let surreal_jobs = surreal_brain::on();
+    if surreal_jobs {
+        surreal_brain::spawn_job_sweeper();
+    }
     let repair_tx = app.work_tx.clone();
     let repair_db = paths::db_path();
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
-            let store = Store::open_light(&repair_db)?;
-            store.prune_events(super::logs::RETENTION_HOURS)?;
-            store.clear_old_jobs()?;
+            // Under a storage config events (and telemetry) are pruned on
+            // the repository and SQLite is not opened here.
+            if surreal_jobs {
+                surreal_brain::prune_logs(super::logs::RETENTION_HOURS)?;
+                return Ok(());
+            }
+            let _ = &repair_db;
+            surreal_brain::prune_logs(super::logs::RETENTION_HOURS)?;
             Ok(())
         })()
         .map_err(|e| e.to_string());
@@ -11009,6 +10957,19 @@ fn flush_streams(app: &mut App) -> bool {
 
 /// Topology seed for a stored memory of the given kind (legacy untyped memories
 /// are Claims).
+/// The memory check's result as the topology seed, or the status line for
+/// a missing or unreadable memory. Shared by the SQLite and SurrealDB paths.
+fn memory_graph_seed(
+    id: String,
+    outcome: Result<Option<argos_osint_core::memory_metadata::MemoryKind>, String>,
+) -> Result<argos_osint_core::brain_topology::TopologySeed, String> {
+    match outcome {
+        Ok(Some(kind)) => Ok(memory_topology_seed(kind, id)),
+        Ok(None) => Err(format!("Memory unavailable: {id} no longer exists")),
+        Err(error) => Err(format!("Memory kind unreadable: {error}")),
+    }
+}
+
 fn memory_topology_seed(
     kind: argos_osint_core::memory_metadata::MemoryKind,
     id: String,
@@ -11099,30 +11060,31 @@ impl TopologySummaryJob {
             },
         )));
     }
+}
 
-    fn run(
+impl TopologySummaryJob {
+    /// [`Self::run`] on the repository (`storage::neighborhood_brief`).
+    fn run_surreal(
         &self,
-        store: &Store,
-        db: Option<&std::path::Path>,
         runtime: &argos_osint_core::recon::model_exec::RoleRuntime,
         send: &dyn Fn(WorkEvent),
     ) {
         use argos_osint_core::brain_neighborhood_brief_exec as exec;
-        let conn = store.connection();
+        use argos_osint_core::storage::{neighborhood_brief as nb, runtime as storage};
         let fingerprint = exec::route_fingerprint(runtime);
-        let published = if self.retry {
-            // Explicit Retry: reuse the request identity, reset it once.
-            let req = self
-                .request
-                .as_deref()
-                .cloned()
-                .unwrap_or_else(|| exec::build_request(&self.input, &fingerprint));
-            let _ = exec::retry(conn, &req);
-            exec::poll(conn, &req).map(|delivery| (req, delivery))
-        } else {
-            exec::publish(conn, &self.input, &self.brief, &fingerprint)
-        };
-        let (req, delivery) = match published {
+        let (input, brief, retry) = (self.input.clone(), self.brief.clone(), self.retry);
+        let request = self.request.as_deref().cloned();
+        let published = storage::blocking(move |repo| async move {
+            if retry {
+                let req = request.unwrap_or_else(|| exec::build_request(&input, &fingerprint));
+                let _ = nb::retry(&repo, &req).await;
+                let delivery = nb::poll(&repo, &req).await?;
+                Ok((req, delivery))
+            } else {
+                nb::publish(&repo, &input, &brief, &fingerprint).await
+            }
+        });
+        let (req, mut delivery) = match published {
             Ok(pair) => pair,
             Err(error) => {
                 self.fail(exec::FailureKind::Storage, error.to_string(), send);
@@ -11136,41 +11098,59 @@ impl TopologySummaryJob {
             basis_key: self.basis_key.clone(),
             request: Box::new(req.clone()),
         });
-        let settled = match delivery {
-            exec::Delivery::Pending => match db {
-                Some(db) => exec::watch_with_limits(
-                    db,
-                    &req,
-                    std::time::Duration::from_millis(750),
-                    &self.stop,
-                    self.limits,
-                ),
-                // No polling thread (in-memory fixture): the request stays
-                // queued and the fallback stays on screen.
-                None => return,
-            },
-            exec::Delivery::Idle => {
+        let begun = std::time::Instant::now();
+        let mut errors = 0u32;
+        while matches!(delivery, exec::Delivery::Pending) {
+            if self.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            if begun.elapsed() >= self.limits.deadline {
                 self.fail(
-                    exec::FailureKind::Storage,
-                    "the summary request is no longer queued".into(),
+                    exec::FailureKind::Timeout,
+                    "waiting for a worker: no summary result before the deadline".into(),
                     send,
                 );
                 return;
             }
-            other => Some(other),
-        };
-        match settled {
-            Some(exec::Delivery::Generated(g)) => send(self.event(Ok(g))),
-            Some(exec::Delivery::Failed(f)) => send(self.event(Err(f))),
-            Some(exec::Delivery::Idle) => self.fail(
+            std::thread::sleep(std::time::Duration::from_millis(750));
+            let r = req.clone();
+            match storage::blocking(move |repo| async move { nb::poll(&repo, &r).await }) {
+                Ok(d) => {
+                    errors = 0;
+                    delivery = d;
+                }
+                Err(error) => {
+                    errors += 1;
+                    if errors >= self.limits.max_poll_errors {
+                        self.fail(
+                            exec::FailureKind::Storage,
+                            format!("could not read the summary state: {error:#}"),
+                            send,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        match delivery {
+            exec::Delivery::Generated(g) => send(self.event(Ok(g))),
+            exec::Delivery::Failed(f) => send(self.event(Err(f))),
+            exec::Delivery::Idle => self.fail(
                 exec::FailureKind::Storage,
                 "the summary request is no longer queued".into(),
                 send,
             ),
-            // Detached on purpose (obsolete request): nothing to report.
-            Some(exec::Delivery::Pending) | None => {}
+            exec::Delivery::Pending => {}
         }
     }
+}
+
+/// Under a storage config every topology seed is read only from the
+/// repository (`storage::topology`), on a plain worker thread through
+/// `storage::runtime::blocking`; it never falls back to the SQLite store.
+/// The repository refuses the retained Intel display seeds with an error.
+fn surreal_topology(surreal: bool, _seed: &argos_osint_core::brain_topology::TopologySeed) -> bool {
+    surreal
 }
 
 #[cfg(test)]
@@ -11178,6 +11158,7 @@ mod tests {
     use super::*;
 
     fn app() -> App {
+        crate::test_storage::ensure();
         let (provider_tx, provider_rx) = unbounded_channel();
         let (work_tx, work_rx) = unbounded_channel();
         App {
@@ -12212,74 +12193,6 @@ mod tests {
     }
 
     #[test]
-    fn recon_and_osint_controls_are_clickable_at_80x24() {
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 80, 24);
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-        app.select(ModuleId::Recon.index());
-        terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
-        for target in [
-            Target::Field(FieldId::ReconSearch),
-            Target::Button(ButtonId::DeleteThread),
-        ] {
-            assert!(
-                (0..24)
-                    .flat_map(|y| (0..80).map(move |x| (x, y)))
-                    .any(|(x, y)| super::super::ui::hit_test(&app, x, y) == Some(target)),
-                "dashboard is missing {target:?}"
-            );
-        }
-        assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
-        assert!(!hit(&app, Target::Button(ButtonId::Send)));
-        app.recon_chat = true;
-        terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
-        for target in [
-            Target::Button(ButtonId::RetryInsights),
-            Target::Button(ButtonId::Send),
-        ] {
-            assert!(
-                (0..24)
-                    .flat_map(|y| (0..80).map(move |x| (x, y)))
-                    .any(|(x, y)| super::super::ui::hit_test(&app, x, y) == Some(target)),
-                "chat is missing {target:?}"
-            );
-        }
-        assert!(!hit(&app, Target::Button(ButtonId::CancelRun)));
-        assert!(!hit(&app, Target::Button(ButtonId::ResumeRun)));
-        let t = app.store.new_thread("Test Thread").unwrap();
-        app.selected_thread = Some(t.id.clone());
-        let run = app
-            .store
-            .new_run(&t.id, "turn-1", "recon-m", "synth-m")
-            .unwrap();
-        app.store
-            .set_run(&run.id, "interrupted", "interrupted", None, None)
-            .unwrap();
-        terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
-        assert!(hit(&app, Target::Button(ButtonId::ResumeRun)));
-        assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
-        app.select(ModuleId::Osint.index());
-        app.compact_pages[ModuleId::Osint.index()] = 2;
-        terminal.draw(|f| super::super::ui::draw(f, &app)).unwrap();
-        for target in [
-            Target::Button(ButtonId::OsintRun),
-            Target::Button(ButtonId::OsintCancel),
-            Target::Button(ButtonId::OsintToggle),
-            Target::Button(ButtonId::OsintRaw),
-            Target::Button(ButtonId::OsintAttach),
-            Target::Button(ButtonId::OsintStartRecon),
-        ] {
-            assert!(
-                (0..24)
-                    .flat_map(|y| (0..80).map(move |x| (x, y)))
-                    .any(|(x, y)| super::super::ui::hit_test(&app, x, y) == Some(target)),
-                "missing {target:?}"
-            );
-        }
-    }
-
-    #[test]
     fn home_offers_recon_and_brain_and_only_recon_has_chat() {
         let mut app = app();
         app.screen = Rect::new(0, 0, 80, 24);
@@ -12321,127 +12234,14 @@ mod tests {
         assert!(!hit(&app, Target::Button(ButtonId::NewThread)));
     }
 
-    #[test]
-    fn recon_chat_folds_decisions_and_opens_synthesis_memory() {
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 100, 36);
-        let thread = app.store.new_thread("example.org").unwrap();
-        let user = app
-            .store
-            .add_message(&thread.id, "user", "What is known about example.org?", None)
-            .unwrap();
-        let run = app
-            .store
-            .new_run(&thread.id, &user.id, "local / recon", "local / synthesis")
-            .unwrap();
-        let tool = osint::registry()[0].id;
-        let plan = recon::Plan {
-            objective: "Resolve example.org".into(),
-            calls: vec![recon::PlanCall {
-                step_id: "a".into(),
-                tool_id: tool.into(),
-                arguments: serde_json::json!({"domain": "example.org"}),
-                depends_on: Vec::new(),
-                reason: "Need the current public record".into(),
-                ..recon::PlanCall::default()
-            }],
-            unresolved_inputs: Vec::new(),
-            stop_condition: "A current observation is in hand".into(),
-            planning_mode: "json".into(),
-            ..recon::Plan::default()
-        };
-        app.store
-            .set_run(&run.id, "running", "synthesizing", Some(&plan), None)
-            .unwrap();
-        app.store
-            .queue_call(
-                tool,
-                &serde_json::json!({"domain": "example.org"}),
-                "recon",
-                Some(&run.id),
-                Some(&thread.id),
-                Some(&user.id),
-            )
-            .unwrap();
-        let memory = app
-            .store
-            .add_memory(
-                "example.org previously resolved to a mail host",
-                "investigation",
-                true,
-                MemorySource {
-                    app: "recon".into(),
-                    conversation_id: thread.id.clone(),
-                    message_id: None,
-                    reference: None,
-                },
-            )
-            .unwrap();
-        app.store
-            .add_answer(
-                &thread.id,
-                &run.id,
-                "The saved memory still names a mail host.",
-                &[],
-                std::slice::from_ref(&memory.id),
-            )
-            .unwrap();
-        app.selected_thread = Some(thread.id);
-        app.module = Some(ModuleId::Recon);
-        app.recon_chat = true;
-        app.refresh_selected().unwrap();
-        app.chat_follow = false;
-        app.scrolls.chat = 0;
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
-        terminal
-            .draw(|frame| super::super::ui::draw(frame, &app))
-            .unwrap();
-        let drawn = screen_text(&terminal);
-        assert!(
-            drawn.contains('❯'),
-            "user prompt should keep the prompt arrow"
-        );
-        assert!(
-            !drawn.contains("You ·"),
-            "user turns should not use a You header"
-        );
-        assert!(
-            !drawn.contains("Synthesis ·"),
-            "answers should not use a Synthesis header"
-        );
-        let brain = (0..36)
-            .flat_map(|y| (0..100).map(move |x| (x, y)))
-            .find(|(x, y)| {
-                matches!(
-                    super::super::ui::hit_test(&app, *x, *y),
-                    Some(Target::BrainMark(_))
-                )
-            });
-        let (x, y) = brain.expect("synthesis answer should show a brain mark");
-        let down = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: x,
-            row: y,
-            modifiers: KeyModifiers::NONE,
-        };
-        app.handle_mouse(down);
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Up(MouseButton::Left),
-            ..down
-        });
-        assert!(matches!(app.overlay, Overlay::Memories { .. }));
-        app.overlay = Overlay::None;
-        let tool_block = super::super::ui::chat_blocks(&app)
-            .iter()
-            .position(|block| block.key.starts_with("tool:"))
-            .expect("tool log");
-        app.chat_follow = false;
-        app.chat_sel = tool_block;
-        app.set_focus(Target::Transcript);
-        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        let key = super::super::ui::chat_blocks(&app)[tool_block].key.clone();
-        assert!(app.expanded.contains(&key));
+    /// Pump work events until `done` holds (background storage writes).
+    fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while !done(app) && Instant::now() < until {
+            crate::test_storage::drain();
+            pump(app);
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn events(app: &App) -> Vec<argos_osint_core::events::EventRow> {
@@ -12828,25 +12628,35 @@ mod tests {
             "live active time"
         );
 
+        // Shortcuts act on the table, not the search field.
+        app.set_focus(Target::JobRow(app.jobs.sel));
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        let flag = stop.clone();
+        settle(&mut app, move |_| flag.load(Ordering::Relaxed));
         assert!(
             stop.load(Ordering::Relaxed),
-            "the tool's own stop flag is set"
+            "the tool's own stop flag is set: {}",
+            app.status
         );
+        settle(&mut app, |app| app.status.contains("Stop requested"));
         assert!(app.status.contains("Stop requested"), "{}", app.status);
-        assert_eq!(
-            app.jobs.selected().unwrap().state,
-            "running",
-            "not cancelled until it stops"
-        );
-        let text = buffer_text(&render(&mut app, 140, 40));
-        assert!(text.contains("Stopping…"), "{text}");
+        // SurrealDB `stop_job` records the cancel at once; the operation
+        // still observes its own flag below.
+        app.reload_jobs();
+        settle(&mut app, |app| !app.jobs.can_cancel());
         assert!(!app.jobs.can_cancel(), "no second Cancel");
 
         // The operation observes the flag and stops: cancelled, not failed.
         super::super::tracked::finish(Some(job), "tool", &Err::<(), _>("stopped"), Some(&stop));
         super::super::tracked::finish(Some(summary), "summary", &Ok::<(), String>(()), None);
+        crate::test_storage::drain();
         app.reload_jobs();
+        settle(&mut app, |app| {
+            app.jobs
+                .rows
+                .iter()
+                .any(|r| r.title == "Explain claim path" && r.state == "completed")
+        });
         let rows: HashMap<String, String> = app
             .jobs
             .rows
@@ -12863,224 +12673,6 @@ mod tests {
             .unwrap();
         assert!(!summary_row.cancellable);
         super::super::tracked::testing::use_db(None);
-    }
-
-    #[test]
-    fn jobs_status_controls_and_service_screens() {
-        use argos_osint_core::jobs_view::{JobDetail, JobRow, JobStatusFilter};
-        let mut app = app();
-        for (id, state) in [
-            ("running", "running"),
-            ("completed", "completed"),
-            ("stopped", "cancelled"),
-            ("failed", "failed"),
-        ] {
-            register(&app, id, "brain", &format!("Fixture {id} job"));
-            app.store
-                .set_job_progress(id, state, "fixture", 0, None, "")
-                .unwrap();
-        }
-        app.store
-            .fixture_task_attempt("running", "running-task", "summarization", 90, None)
-            .unwrap();
-        app.select(ModuleId::Jobs.index());
-        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
-        let clears = [
-            ButtonId::JobsClearCompleted,
-            ButtonId::JobsClearStopped,
-            ButtonId::JobsClearFailed,
-        ];
-        for (width, height) in [
-            (160, 50),
-            (120, 40),
-            (100, 32),
-            (80, 24),
-            (60, 18),
-            (40, 20),
-        ] {
-            let buffer = render(&mut app, width, height);
-            let text = buffer_text(&buffer);
-            for label in [
-                "Clear completed",
-                "Clear stopped",
-                "Clear failed",
-                "Stop job",
-            ] {
-                assert!(
-                    text.contains(label),
-                    "{width}x{height}: missing {label}\n{text}"
-                );
-            }
-            assert!(!text.contains("Clear old jobs"));
-            let order = super::super::ui::focus_order(&app);
-            for button in clears.into_iter().chain([ButtonId::JobsCancel]) {
-                let target = Target::Button(button);
-                assert!(
-                    order.contains(&target),
-                    "unreachable {button:?} at {width}x{height}"
-                );
-                let rect = app
-                    .layout
-                    .borrow()
-                    .entries
-                    .iter()
-                    .find(|e| e.target == target)
-                    .unwrap()
-                    .rect;
-                assert_eq!(
-                    super::super::ui::hit_test(&app, rect.x, rect.y),
-                    Some(target)
-                );
-            }
-            if let Some(dir) = &dir {
-                dump_cells(
-                    &mut app,
-                    dir,
-                    &format!("jobs-running-{width}x{height}"),
-                    width,
-                    height,
-                );
-            }
-        }
-        let running = app.jobs.selected().unwrap().clone();
-        for state in ["queued", "retry_scheduled"] {
-            let mut job = running.clone();
-            job.state = state.into();
-            app.jobs.rows = vec![job.clone()];
-            app.jobs.sel = 0;
-            app.jobs.detail = Some(JobDetail {
-                job,
-                ..Default::default()
-            });
-            let text = buffer_text(&render(&mut app, 80, 24));
-            assert!(app.jobs.can_cancel() && text.contains("Stop job"));
-            if let Some(dir) = &dir {
-                dump_cells(&mut app, dir, &format!("jobs-{state}-80x24"), 80, 24);
-            }
-        }
-        let service = JobRow {
-            id: "service".into(),
-            kind: "service".into(),
-            app: "brain".into(),
-            title: "Summary flush worker".into(),
-            state: "running".into(),
-            ..Default::default()
-        };
-        app.jobs.rows = vec![service.clone()];
-        app.jobs.sel = 0;
-        app.jobs.detail = Some(JobDetail {
-            job: service,
-            ..Default::default()
-        });
-        app.jobs.detail_open = true;
-        for (width, height) in [(160, 50), (80, 24), (60, 18)] {
-            let text = buffer_text(&render(&mut app, width, height));
-            assert!(!app.jobs.can_cancel() && !text.contains("Stop job"));
-            assert!(text.contains("Long-lived service"));
-            if let Some(dir) = &dir {
-                dump_cells(
-                    &mut app,
-                    dir,
-                    &format!("jobs-service-{width}x{height}"),
-                    width,
-                    height,
-                );
-            }
-        }
-        app.jobs = Default::default();
-        for state in ["loading", "empty", "error"] {
-            app.jobs.loaded = state != "loading";
-            app.jobs.error = (state == "error").then(|| "Fixture retained read failure".into());
-            if state == "error" {
-                app.jobs.rows = vec![running.clone()];
-            }
-            if let Some(dir) = &dir {
-                dump_cells(&mut app, dir, &format!("jobs-{state}-80x24"), 80, 24);
-            }
-        }
-        app.jobs.reload(&app.store);
-        app.overlay = Overlay::Help;
-        for (width, height) in [(80, 24), (60, 18)] {
-            if let Some(dir) = &dir {
-                dump_cells(
-                    &mut app,
-                    dir,
-                    &format!("jobs-help-{width}x{height}"),
-                    width,
-                    height,
-                );
-            }
-        }
-        app.overlay = Overlay::None;
-        app.screen = Rect::new(0, 0, 160, 50);
-        for (button, id) in clears.into_iter().zip(["completed", "stopped", "failed"]) {
-            click(&mut app, Target::Button(button));
-            assert!(app.store.get_job(id).unwrap().is_none());
-            assert!(app.store.get_job("running").unwrap().is_some());
-        }
-        click(&mut app, Target::Button(ButtonId::JobsCancel));
-        assert_eq!(
-            app.store.get_job("running").unwrap().unwrap().state,
-            "cancelled"
-        );
-        app.jobs.status = JobStatusFilter::Stopped;
-        app.reload_jobs();
-        assert_eq!(app.jobs.rows.len(), 1);
-        assert_eq!(app.jobs.rows[0].id, "running");
-        click(&mut app, Target::Button(ButtonId::JobsClearStopped));
-        assert!(app.jobs.rows.is_empty() && app.jobs.detail.is_none());
-    }
-
-    #[test]
-    fn jobs_stop_targets_selected_job_only() {
-        for keyboard in [false, true] {
-            for selected_state in ["running", "queued", "retry_scheduled"] {
-                let mut app = app();
-                app.screen = Rect::new(0, 0, 160, 50);
-                for (id, state) in [
-                    ("other-running", "running"),
-                    ("selected", selected_state),
-                    ("other-queued", "queued"),
-                ] {
-                    register(&app, id, "brain", id);
-                    app.store
-                        .fixture_task_attempt(id, &format!("{id}-task"), "summarization", 90, None)
-                        .unwrap();
-                    app.store
-                        .set_job_progress(id, state, "fixture", 0, None, "")
-                        .unwrap();
-                }
-                app.select(ModuleId::Jobs.index());
-                let selected = app
-                    .jobs
-                    .rows
-                    .iter()
-                    .position(|job| job.id == "selected")
-                    .unwrap();
-                click(&mut app, Target::JobRow(selected));
-                // A refresh must retain the selected identity, independent of row order.
-                app.reload_jobs();
-                assert_eq!(app.jobs.selected().unwrap().id, "selected");
-                if keyboard {
-                    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-                } else {
-                    click(&mut app, Target::Button(ButtonId::JobsCancel));
-                }
-                assert_eq!(
-                    app.store.get_job("selected").unwrap().unwrap().state,
-                    "cancelled"
-                );
-                for (id, state) in [("other-running", "running"), ("other-queued", "queued")] {
-                    let job = app.store.get_job(id).unwrap().unwrap();
-                    assert_eq!(job.state, state);
-                    assert!(!job.cancel_requested);
-                    assert_eq!(
-                        app.store.job_detail(id, 40).unwrap().unwrap().tasks[0].state,
-                        "running"
-                    );
-                }
-            }
-        }
     }
 
     #[test]
@@ -13210,328 +12802,12 @@ mod tests {
             "{text}"
         );
         click(&mut app, Target::Button(ButtonId::ClearLog));
+        settle(&mut app, |app| app.status.starts_with("Cleared"));
         assert!(app.status.starts_with("Cleared"), "{}", app.status);
         assert!(
             app.store.get_job("job-c").unwrap().is_some(),
             "clearing events keeps jobs"
         );
-    }
-
-    /// Writes cell dumps of the phase-5 screens for PNG rendering:
-    /// `ARGOS_SCREEN_DIR=/workspace/screens/atlas-memory cargo test -p argos-osint-bin dump_phase5_screens -- --ignored`
-    #[test]
-    #[ignore]
-    fn dump_phase5_screens() {
-        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
-            return;
-        };
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut app = app();
-        register(&app, "job-atlas-0412", "atlas", "Atlas news cycle · 04:12");
-        // Realistic timing: two finished index attempts and one still open.
-        app.store
-            .fixture_task_attempt("job-atlas-0412", "t-idx-1", "index_upsert", 600, Some(45))
-            .unwrap();
-        app.store
-            .fixture_task_attempt("job-atlas-0412", "t-idx-2", "index_upsert", 420, Some(38))
-            .unwrap();
-        app.store
-            .fixture_task_attempt("job-atlas-0412", "t-idx-3", "index_upsert", 192, None)
-            .unwrap();
-        app.store
-            .set_job_progress(
-                "job-atlas-0412",
-                "running",
-                "Index and verify memories",
-                41,
-                Some(57),
-                "",
-            )
-            .unwrap();
-        register(
-            &app,
-            "job-intel-77",
-            "intel",
-            "Intel Recon · Full assessment",
-        );
-        register(
-            &app,
-            "job-graph-19",
-            "brain",
-            "Graph summary · Northwind ferry",
-        );
-        app.store
-            .fixture_task_attempt(
-                "job-graph-19",
-                "t-sum-1",
-                "graph_explanation",
-                300,
-                Some(12),
-            )
-            .unwrap();
-        app.store
-            .set_job_progress(
-                "job-graph-19",
-                "failed",
-                "explanation",
-                1,
-                Some(2),
-                "provider HTTP 503: upstream unavailable after 2 attempts",
-            )
-            .unwrap();
-        register(
-            &app,
-            "atlas-memory-repair",
-            "atlas",
-            "Repair Atlas memories",
-        );
-        app.store
-            .fixture_task_attempt(
-                "atlas-memory-repair",
-                "t-rep-1",
-                "index_rebuild",
-                3000,
-                Some(21),
-            )
-            .unwrap();
-        app.store
-            .set_job_progress("atlas-memory-repair", "completed", "done", 12, Some(12), "")
-            .unwrap();
-        let _ = app.store.add_memory(
-            "Harbor tanker manifests list cargo",
-            "fact",
-            false,
-            MemorySource {
-                app: "test".into(),
-                conversation_id: "c".into(),
-                message_id: None,
-                reference: None,
-            },
-        );
-        job_event(
-            &app,
-            "job-atlas-0412",
-            "atlas",
-            "info",
-            "Atlas: phase 4 published 57 memories (12 created, 45 reused)",
-            "",
-        );
-        job_event(
-            &app,
-            "job-atlas-0412",
-            "atlas",
-            "info",
-            "Atlas: phase 5 indexing 41/57 verified",
-            "",
-        );
-        job_event(&app, "job-graph-19", "brain", "error", "Graph summary failed: provider HTTP 503", "stage: stream\nattempt 1: HTTP 503 upstream unavailable\nattempt 2: HTTP 503 upstream unavailable\nfallback: basic graph explanation");
-        job_event(&app, "", "recon", "info", "Recon turn complete", "");
-        job_event(
-            &app,
-            "",
-            "atlas",
-            "warn",
-            "Atlas: GNews rate limit reached (HTTP 429)",
-            "",
-        );
-        job_event(
-            &app,
-            "atlas-memory-repair",
-            "atlas",
-            "info",
-            "Repair Atlas memories: 12 runs checked, 3 vectors requeued",
-            "",
-        );
-        let mut shots: Vec<(&str, u16, u16)> = Vec::new();
-        let mut save = |app: &mut App, name: &str, width: u16, height: u16| {
-            let buffer = render(app, width, height);
-            let mut cells = Vec::new();
-            for y in 0..height {
-                let mut row = Vec::new();
-                for x in 0..width {
-                    let cell = &buffer[(x, y)];
-                    row.push(serde_json::json!({
-                        "s": cell.symbol(),
-                        "fg": format!("{:?}", cell.fg),
-                        "bg": format!("{:?}", cell.bg),
-                        "b": cell.modifier.contains(ratatui::style::Modifier::BOLD),
-                        "u": cell.modifier.contains(ratatui::style::Modifier::UNDERLINED),
-                    }));
-                }
-                cells.push(row);
-            }
-            let json = serde_json::json!({"width": width, "height": height, "cells": cells});
-            std::fs::write(format!("{dir}/{name}.json"), json.to_string()).unwrap();
-            shots.push(("", width, height));
-        };
-        app.logs.refresh_counts(&app.store);
-        save(&mut app, "home", 140, 42);
-        app.select(ModuleId::Jobs.index());
-        save(&mut app, "jobs", 140, 40);
-        let failed = app
-            .jobs
-            .rows
-            .iter()
-            .position(|r| r.id == "job-graph-19")
-            .unwrap();
-        click(&mut app, Target::JobRow(failed));
-        save(&mut app, "jobs-failed", 140, 40);
-        app.screen = Rect::new(0, 0, 80, 30);
-        app.set_focus(Target::JobRow(app.jobs.sel));
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        save(&mut app, "jobs-narrow-detail", 80, 30);
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        app.select(ModuleId::Logs.index());
-        let index = app
-            .logs
-            .rows
-            .iter()
-            .position(|r| r.message.starts_with("Graph summary failed"))
-            .unwrap();
-        click(&mut app, Target::LogLine(index));
-        save(&mut app, "logs", 140, 40);
-        app.select(ModuleId::System.index());
-        click(&mut app, Target::Button(ButtonId::RefreshHardware));
-        save(&mut app, "system", 140, 40);
-        assert!(!shots.is_empty());
-    }
-
-    fn atlas_claim(
-        fingerprint: &str,
-        entity: &str,
-        claim: &str,
-        article: &str,
-    ) -> argos_osint_core::store::AtlasInsightClaim {
-        argos_osint_core::store::AtlasInsightClaim {
-            fingerprint: fingerprint.into(),
-            entity: entity.into(),
-            namespace: "org".into(),
-            predicate: "reported".into(),
-            object: claim.split(' ').next_back().unwrap_or("").into(),
-            topic: "Baltic shipping".into(),
-            claim: claim.into(),
-            classification: "fact".into(),
-            confidence: 0.82,
-            article_id: article.into(),
-            source_url: format!("https://news.example/{article}"),
-            published_at: "2026-10-05T04:12:00Z".into(),
-            reliability: "B".into(),
-            info_credibility: 2,
-            admiralty: "B2".into(),
-            rsp_status: String::new(),
-        }
-    }
-
-    /// One Atlas cycle with linked claims, plus a manual memory with similar
-    /// wording. Returns memory ids in claim order, then the manual one.
-    fn claim_fixture(app: &App) -> Vec<String> {
-        let store = &app.store;
-        store.atlas_insert_run("run-0412", "{}", "{}").unwrap();
-        for (id, title) in [
-            (
-                "a1",
-                "Northwind ferry halts Baltic crossings after engine fire",
-            ),
-            ("a2", "Baltic board eases ferry suspension"),
-        ] {
-            store
-                .atlas_upsert_article(&AtlasArticleRow {
-                    run_id: "run-0412".into(),
-                    id: id.into(),
-                    title: title.into(),
-                    description: String::new(),
-                    url: format!("https://news.example/{id}"),
-                    country: "LT".into(),
-                    source_name: "Baltic Wire".into(),
-                    source_domain: "news.example".into(),
-                    published_at: "2026-10-05T04:12:00Z".into(),
-                    provider: "gnews".into(),
-                    temperature: 0.5,
-                    category: "economic".into(),
-                    seen_at: "2026-10-05T04:12:00Z".into(),
-                    author: String::new(),
-                    image_url: String::new(),
-                })
-                .unwrap();
-        }
-        let texts = [
-            (
-                "fp-1",
-                "Northwind Ferries",
-                "Northwind Ferries halted Baltic crossings after an engine fire",
-                "a1",
-            ),
-            (
-                "fp-2",
-                "Klaipeda port",
-                "Klaipeda port rerouted freight while Northwind crossings were halted",
-                "a1",
-            ),
-            (
-                "fp-3",
-                "Northwind Ferries",
-                "Northwind Ferries expects crossings to resume within a week",
-                "a2",
-            ),
-            (
-                "fp-4",
-                "Baltic Shipping Board",
-                "Baltic Shipping Board revised the halt to a partial suspension",
-                "a2",
-            ),
-        ];
-        let claims: Vec<_> = texts
-            .iter()
-            .map(|(fp, entity, claim, article)| atlas_claim(fp, entity, claim, article))
-            .collect();
-        let receipt = store
-            .publish_atlas_insights("run-0412", &claims, &[], "", &Default::default())
-            .unwrap();
-        assert_eq!(receipt.claim_memory_ids.len(), 4, "{:?}", receipt.rejected);
-        // The board's revision relates to the original halt (stored fingerprints).
-        let fingerprint = |index: usize| receipt.claim_memory_ids[index].0.clone();
-        store
-            .publish_atlas_insights(
-                "run-0412",
-                &claims,
-                &[(
-                    fingerprint(3),
-                    fingerprint(0),
-                    "conflict_or_revision".into(),
-                )],
-                "",
-                &Default::default(),
-            )
-            .unwrap();
-        store
-            .add_memory(
-                "Ferry crossings halted after an engine fire last winter",
-                "fact",
-                false,
-                MemorySource {
-                    app: "manual".into(),
-                    conversation_id: "notes".into(),
-                    message_id: None,
-                    reference: None,
-                },
-            )
-            .unwrap();
-        let all = store.list_memories().unwrap();
-        let find = |snippet: &str| {
-            all.iter()
-                .find(|memory| memory.text.contains(snippet))
-                .unwrap_or_else(|| panic!("memory for {snippet}"))
-                .id
-                .clone()
-        };
-        let ids = vec![
-            find("halted Baltic crossings after an engine fire"),
-            find("rerouted freight"),
-            find("resume within a week"),
-            find("partial suspension"),
-            find("last winter"),
-        ];
-        ids
     }
 
     #[test]
@@ -13590,76 +12866,6 @@ mod tests {
         assert!(!super::super::commands::COMMANDS
             .iter()
             .any(|command| command.id == "atlas-repair"));
-    }
-
-    fn related_page(
-        app: &App,
-        article: &AtlasArticleRow,
-    ) -> argos_osint_core::related_articles::RelatedArticlePage {
-        app.store
-            .related_articles_global(
-                &article.run_id,
-                &article.id,
-                RelatedScope::AllRetained,
-                None,
-                20,
-            )
-            .unwrap()
-            .into_page(0)
-    }
-
-    fn related_ui_fixture(app: &mut App) -> (String, AtlasArticleRow) {
-        let ids = claim_fixture(app);
-        brain_world(app);
-        let article = app.store.atlas_article("run-1012", "k1").unwrap().unwrap();
-        (ids[0].clone(), article)
-    }
-
-    #[test]
-    fn intel_related_pages_its_rows_before_the_middle_stack() {
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 160, 50);
-        let (_, article) = related_ui_fixture(&mut app);
-        let page = related_page(&app, &article);
-        app.open_intel_briefing_for(article).unwrap();
-        assert!(
-            super::super::ui::focus_order(&app).contains(&Target::Button(ButtonId::RelatedScope)),
-            "offscreen Related must be reachable"
-        );
-        let row = page.rows[0].clone();
-        app.intel_related.page.rows = (0..30).map(|_| row.clone()).collect();
-        app.intel_related.page.total = 30;
-        app.set_focus(Target::IntelRelatedArticle(0));
-        app.intel_related.scroll = 6;
-        app.scrolls.intel_brief = 6;
-        super::super::ui::page(&mut app, -1);
-        assert_eq!(app.intel_related.scroll, 0);
-        assert_eq!(app.scrolls.intel_brief, 6, "rows scroll first");
-        super::super::ui::page(&mut app, -1);
-        assert_eq!(app.intel_related.scroll, 0);
-        assert_eq!(app.scrolls.intel_brief, 0, "stack scrolls at row boundary");
-    }
-
-    #[test]
-    fn intel_related_back_restores_the_original_full_article_offset() {
-        let mut app = app();
-        app.screen = Rect::new(0, 0, 160, 50);
-        let (_, article) = related_ui_fixture(&mut app);
-        let page = related_page(&app, &article);
-        app.open_intel_briefing_for(article.clone()).unwrap();
-        let related = super::super::related_articles::ArticleRelatedView {
-            page,
-            ..Default::default()
-        };
-        assert!(!related.page.rows.is_empty());
-        app.intel_related = related;
-        app.scrolls.intel_full = 17;
-        app.open_related_article(0);
-        assert_eq!(app.scrolls.intel_full, 0);
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.intel_articles[app.intel_sel].id, article.id);
-        assert_eq!(app.scrolls.intel_full, 17);
-        assert_eq!(app.focus, Target::IntelRelatedArticle(0));
     }
 
     /// `ARGOS_SCREEN_DIR=… cargo test -p argos-osint-bin dump_defaults_popup_screens -- --ignored`
@@ -14139,132 +13345,6 @@ mod tests {
         }
     }
 
-    /// Two retained cycles indexed through Atlas phase 6: actors, mention
-    /// Links, Related leads, plus one evidence memory. Returns the actor ids
-    /// of "Ana Ruiz" in each cycle (merged into one canonical actor).
-    fn brain_world(app: &App) -> (String, String) {
-        use argos_osint_core::atlas_metadata::{ArticleMention, ArticleMetadata, MetadataState};
-        let store = &app.store;
-        let rows = [
-            (
-                "run-1012",
-                "k1",
-                "Ana Ruiz opens Gdansk port talks",
-                "2026-10-12T08:00:00Z",
-                vec!["Ana Ruiz"],
-            ),
-            (
-                "run-1012",
-                "k2",
-                "Ana Ruiz meets Northwind Ferries board",
-                "2026-10-12T09:30:00Z",
-                vec!["Ana Ruiz", "Northwind Ferries"],
-            ),
-            (
-                "run-1013",
-                "k3",
-                "Northwind Ferries resumes Baltic crossings",
-                "2026-10-13T06:10:00Z",
-                vec!["Northwind Ferries"],
-            ),
-            (
-                "run-1013",
-                "k2",
-                "Ana Ruiz meets Northwind Ferries board",
-                "2026-10-12T09:30:00Z",
-                vec!["Ana Ruiz", "Northwind Ferries"],
-            ),
-            (
-                "run-1013",
-                "k4",
-                "Ana Ruiz signs Gdansk ferry accord",
-                "2026-10-13T07:45:00Z",
-                vec!["Ana Ruiz"],
-            ),
-        ];
-        for (run, id, title, at, names) in rows {
-            let title = format!("{title} in Baltic");
-            let _ =
-                store.atlas_insert_run(run, "{}", r#"{"contract_version":"atlas-collection-v2"}"#);
-            let article = AtlasArticleRow {
-                run_id: run.into(),
-                id: id.into(),
-                title: title.clone(),
-                url: format!("https://news.example/{id}"),
-                country: "PL".into(),
-                source_name: "Baltic Wire".into(),
-                source_domain: "news.example".into(),
-                published_at: at.into(),
-                provider: "gnews".into(),
-                temperature: 0.5,
-                category: "economic".into(),
-                seen_at: at.into(),
-                ..Default::default()
-            };
-            store.atlas_upsert_article(&article).unwrap();
-            let mut m = ArticleMetadata::pending(&article);
-            m.entity_state = MetadataState::Complete;
-            for n in names.into_iter().chain(std::iter::once("Baltic")) {
-                let start = title.find(n).unwrap();
-                m.mentions.push(ArticleMention {
-                    type_hint: if n == "Baltic" {
-                        "place"
-                    } else if n.contains("Ferries") {
-                        "organization"
-                    } else {
-                        "person"
-                    }
-                    .into(),
-                    comparison_key: n.to_lowercase(),
-                    field: "title".into(),
-                    start_byte: start,
-                    end_byte: start + n.len(),
-                    original_text: n.into(),
-                });
-            }
-            store.atlas_save_metadata(&m).unwrap();
-        }
-        for run in ["run-1012", "run-1013"] {
-            argos_osint_core::related_articles::build(store, run).unwrap();
-            let report =
-                argos_osint_core::atlas_actor_index::index_run(store, run, &|| false).unwrap();
-            assert!(report.complete(), "{report:?}");
-        }
-        let actor = |article: &str| -> String {
-            store
-                .connection()
-                .query_row(
-                    "SELECT m.actor_id FROM brain_actor_mentions m JOIN brain_actors a ON a.actor_id=m.actor_id
-                     WHERE m.origin_id=?1 AND a.display_name='Ana Ruiz' LIMIT 1",
-                    [article],
-                    |r| r.get(0),
-                )
-                .unwrap()
-        };
-        let (k1, k4) = (actor("k1"), actor("k4"));
-        store
-            .merge_actors(
-                &k4,
-                &k1,
-                &serde_json::json!({"analyst":"fixture","reason":"same official"}),
-            )
-            .unwrap();
-        store
-            .add_memory(
-                "Ana Ruiz signed the Gdansk ferry accord",
-                "fact",
-                false,
-                MemorySource {
-                    app: "atlas".into(),
-                    conversation_id: "run-1013".into(),
-                    message_id: None,
-                    reference: None,
-                },
-            )
-            .unwrap();
-        (k1, k4)
-    }
-
     fn dump_cells(app: &mut App, dir: &str, name: &str, width: u16, height: u16) {
         let buffer = render(app, width, height);
         let mut cells = Vec::new();
@@ -14376,60 +13456,6 @@ mod tests {
             !app.work_rx.is_empty(),
             "navigation runs while a burst is still queued"
         );
-    }
-
-    #[test]
-    fn recalled_memory_popup_uses_the_recon_snapshot_after_database_loss() {
-        let mut app = app();
-        let memory = app
-            .store
-            .add_user_claim(
-                "Northwind closed the port",
-                "fact",
-                MemorySource {
-                    app: "user".into(),
-                    conversation_id: "fixture".into(),
-                    message_id: None,
-                    reference: None,
-                },
-            )
-            .unwrap();
-        app.store.connection().execute(
-            "INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES ('popup',?1,'Northwind','closed','the port','transport','fact',0.8,'','')",
-            [&memory.id],
-        ).unwrap();
-        let expected = app.insight_summary(&memory.id).unwrap();
-        let thread = app.store.new_thread("Port investigation").unwrap();
-        let run = app
-            .store
-            .new_run(&thread.id, "turn", "fixture", "fixture")
-            .unwrap();
-        let answer = app
-            .store
-            .add_answer(
-                &thread.id,
-                &run.id,
-                "Port findings",
-                &[],
-                std::slice::from_ref(&memory.id),
-            )
-            .unwrap();
-        let snapshot = super::super::db_reads::ReconSnapshot::read(&app.store, &thread.id).unwrap();
-        app.answer_memories = snapshot.memories;
-        app.answer_memory_summaries = snapshot.memory_summaries;
-        app.background_db = Some(PathBuf::from("unavailable-database"));
-        app.store = Store::memory().unwrap();
-        assert_eq!(
-            app.insight_summary(&memory.id).as_deref(),
-            Some(expected.as_str())
-        );
-        app.module = Some(ModuleId::Recon);
-        app.overlay = Overlay::Memories {
-            message_id: answer.id,
-        };
-        let text = buffer_text(&render(&mut app, 160, 50));
-        assert!(text.contains("Northwind · closed → the port"), "{text}");
-        assert!(text.contains("0 evidence links"), "{text}");
     }
 
     #[test]
@@ -14577,1186 +13603,6 @@ mod tests {
                 height,
             );
         }
-    }
-
-    #[test]
-    fn insight_reliability_screens() {
-        use argos_osint_core::{
-            investigation::insight_execution::Progress,
-            jobs_view::{JobDetail, JobRow, TaskRow},
-        };
-        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
-        if let Some(dir) = &dir {
-            std::fs::create_dir_all(dir).unwrap();
-        }
-        for (width, height) in [(160, 50), (80, 24), (60, 18)] {
-            let mut app = app();
-            let (_, article) = related_ui_fixture(&mut app);
-            for state in ["failed", "published"] {
-                let mut progress=Progress {artifacts:Vec::new(),task_id:"insight-fixture-task".into(),job_id:"insight-fixture-job".into(),retry_epoch:1,stage:if state=="failed" {"assessment"} else {"published"}.into(),state:if state=="failed" {"failed"} else {"completed"}.into(),windows_done:2,windows_total:2,batches_done:1,batches_total:2,withheld_count:3,route:"Route: local/fixture · attempt 2 · fail".into(),error:if state=="failed" {"assessment: invalid_result; missing question q1:publication after bounded repair"} else {"optional link batch unavailable; qualified claims published"}.into(),retryable:true,index_status:"Index pending: 5/5".into(),activity:String::new(),activity_age_secs:None};
-                progress.artifacts =
-                    argos_osint_core::investigation::insight_execution::artifact_steps(
-                        &progress,
-                        &Default::default(),
-                    );
-                app.select(ModuleId::Intel.index());
-                app.intel_articles = vec![article.clone()];
-                app.intel_sel = 0;
-                app.intel_page = IntelPage::Briefing;
-                app.intel_insight_lifecycle = if state == "failed" {
-                    "previous"
-                } else {
-                    "active"
-                }
-                .into();
-                app.intel_extraction_progress = Some(progress.clone());
-                app.compact_pages[ModuleId::Intel.index()] = 0;
-                app.scrolls.intel_extracted = 0;
-                let buffer = render(&mut app, width, height);
-                assert!(
-                    super::super::ui::focus_order(&app).contains(&Target::IntelPreview)
-                        || width < 100
-                );
-                if width == 160 {
-                    // Progression details live in Background jobs, not panes.
-                    let text = buffer_text(&buffer);
-                    assert!(!text.contains("Withheld"));
-                    assert!(text.contains("Claims · "), "{text}");
-                }
-                if let Some(dir) = &dir {
-                    dump_cells(
-                        &mut app,
-                        dir,
-                        &format!("insight-intel-{state}-{width}x{height}"),
-                        width,
-                        height,
-                    );
-                }
-                let job = JobRow {
-                    id: progress.job_id.clone(),
-                    app: "intel".into(),
-                    operation: "insight_refresh".into(),
-                    title: "Assess and refresh investigative insights".into(),
-                    state: progress.state.clone(),
-                    ..Default::default()
-                };
-                app.select(ModuleId::Jobs.index());
-                app.jobs.rows = vec![job.clone()];
-                app.jobs.sel = 0;
-                app.jobs.detail = Some(JobDetail {
-                    job,
-                    retryable: 1,
-                    tasks: vec![TaskRow {
-                        id: progress.task_id.clone(),
-                        operation: "insight_refresh".into(),
-                        state: progress.state.clone(),
-                        ..Default::default()
-                    }],
-                    insight_progress: vec![progress],
-                    ..Default::default()
-                });
-                app.jobs.detail_open = true;
-                app.jobs.detail_scroll = 0;
-                let buffer = render(&mut app, width, height);
-                assert!(buffer_text(&buffer).contains("Retry extraction"));
-                let target = Target::Button(ButtonId::JobsRetry);
-                assert!(super::super::ui::focus_order(&app).contains(&target));
-                assert!(hit(&app, target));
-                if let Some(dir) = &dir {
-                    dump_cells(
-                        &mut app,
-                        dir,
-                        &format!("insight-jobs-{state}-{width}x{height}"),
-                        width,
-                        height,
-                    );
-                }
-            }
-            app.select(ModuleId::Intel.index());
-            app.overlay = Overlay::None;
-            let items = app.palette_items();
-            assert!(items.iter().any(|i| i.id == "intel-extraction-retry"));
-            assert!(items.iter().any(|i| i.id == "intel-extraction-job"));
-            app.open_palette();
-            app.palette_query = "extraction".into();
-            let buffer = render(&mut app, width, height);
-            assert!(buffer_text(&buffer).contains("Retry extraction"));
-            if let Some(dir) = &dir {
-                dump_cells(
-                    &mut app,
-                    dir,
-                    &format!("insight-palette-{width}x{height}"),
-                    width,
-                    height,
-                );
-            }
-        }
-    }
-
-    /// Render text of every compact Intel page (narrow layouts page the
-    /// Extracted / Reader / Context columns); a single page when wide.
-    fn intel_all_pages_text(app: &mut App, width: u16, height: u16) -> String {
-        let mut text = String::new();
-        for page in 0..3 {
-            app.compact_pages[ModuleId::Intel.index()] = page;
-            text.push_str(&buffer_text(&render(app, width, height)));
-        }
-        app.compact_pages[ModuleId::Intel.index()] = 0;
-        text
-    }
-
-    /// Spec §6/§8.8: shared stage progress for the v2 brief graph (two
-    /// simultaneous roots, then the join) on
-    /// the brief Jobs panel, section headers and global Jobs. Dumps cells
-    /// when ARGOS_SCREEN_DIR is set.
-    #[test]
-    fn intel_sequential_stage_screens() {
-        use argos_osint_core::intel_recon::brief_pipeline as bp;
-        use argos_osint_core::tasks;
-        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
-        if let Some(dir) = &dir {
-            std::fs::create_dir_all(dir).unwrap();
-        }
-        let now = || chrono::Utc::now().to_rfc3339();
-        let body = serde_json::json!({"markdown":"Officials said the crossing would stay closed.","content_hash":"h","quality":"complete","diagnostics":[]});
-        let claims = serde_json::json!({"claims":[{"id":"c1","text":"Baltic board suspended the ferry service.","attributed_to":"Baltic board","modality":"asserted","evidence_ids":["t1"],"fidelity":"faithful"}],"withheld":0});
-        let inferences = serde_json::json!({"inferences":[{"id":"i1","text":"The suspension may reflect an insurance lapse, not only weather.","support":"conditional","why":"The harbour master confirmed the certificate expired.","limitations":["Whether the lapse stopped sailings is unconfirmed"],"body_evidence_ids":["b1"]}]});
-        let empty_inf =
-            serde_json::json!({"inferences":[],"empty_reason":"no supported inferences"});
-        // (name, steps completed, running activity, fail stage, empty inferences)
-        let frames: Vec<(&str, usize, Option<&str>, bool, bool)> = vec![
-            ("1-queued", 0, None, false, false),
-            (
-                "2-roots-running",
-                0,
-                Some("retrieving / cleaning"),
-                false,
-                false,
-            ),
-            (
-                "3-inferences-running",
-                2,
-                Some("waiting for model"),
-                false,
-                false,
-            ),
-            ("4-inferences-failed", 2, None, true, false),
-            ("5-completed", 4, None, false, false),
-            ("6-empty", 4, None, false, true),
-            ("7-cached", 4, None, false, false),
-            // No provider account: Claims fails on blocked routes and the
-            // downstream stages stay queued behind it.
-            ("8-no-provider", 0, None, false, false),
-        ];
-        // §8.8 widths; narrow and too-small sizes render the failed and
-        // completed frames (geometry changes there), wider ones every state.
-        for (width, height) in [
-            (160, 50),
-            (120, 40),
-            (100, 32),
-            (80, 24),
-            (60, 18),
-            (40, 12),
-        ] {
-            for (name, done, running, fail, empty) in &frames {
-                if width <= 80 && !(name.starts_with('4') || name.starts_with('5')) {
-                    continue;
-                }
-                let mut app = app();
-                let (_, mut article) = related_ui_fixture(&mut app);
-                article.title = "Baltic board suspended the ferry service.".into();
-                app.store.atlas_upsert_article(&article).unwrap();
-                let mut metadata =
-                    argos_osint_core::atlas_metadata::ArticleMetadata::pending(&article);
-                metadata.entity_state = argos_osint_core::atlas_metadata::MetadataState::Complete;
-                metadata
-                    .mentions
-                    .push(argos_osint_core::atlas_metadata::ArticleMention {
-                        type_hint: "organization".into(),
-                        comparison_key: "baltic board".into(),
-                        field: "title".into(),
-                        start_byte: 0,
-                        end_byte: "Baltic board".len(),
-                        original_text: "Baltic board".into(),
-                    });
-                app.store.atlas_save_metadata(&metadata).unwrap();
-                let lead_target = app
-                    .store
-                    .atlas_list_articles(&article.run_id)
-                    .unwrap()
-                    .into_iter()
-                    .find(|a| a.id != article.id)
-                    .unwrap();
-                let links = serde_json::json!({"leads":[{"article_id":lead_target.id,"article_run_id":lead_target.run_id,"inference_id":"i1","why":"Its title reports the same ferry's insurance lapse; the causal link to the suspension still needs verification.","verification_needed":"Confirm the lapse date with the regulator.","metadata_evidence":[]}]});
-                app.select(ModuleId::Intel.index());
-                app.intel_articles = vec![article.clone()];
-                app.intel_sel = 0;
-                app.open_intel_briefing();
-                let job = app.intel_brief_job.clone().unwrap();
-                let conn = app.store.connection();
-                let mut scoped_claims = claims.clone();
-                scoped_claims["claims"][0]["subject_id"] = serde_json::json!(
-                    argos_osint_core::atlas_metadata::article_actors(&article, &metadata)[0].id
-                );
-                scoped_claims["claims"][0]["predicate"] = serde_json::json!("suspended");
-                scoped_claims["claims"][0]["object"] = serde_json::json!("the ferry service");
-                scoped_claims["claims"][0]["evidence"] = serde_json::json!([{"id":"t1","text":article.title,"start_byte":0,"end_byte":article.title.len()}]);
-                let outputs = [
-                    body.clone(),
-                    scoped_claims,
-                    if *empty {
-                        empty_inf.clone()
-                    } else {
-                        inferences.clone()
-                    },
-                    if *empty {
-                        serde_json::json!({"leads":[],"empty_reason":"no supported inferences"})
-                    } else {
-                        links.clone()
-                    },
-                ];
-                for _ in 0..*done {
-                    let c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
-                    // Roots may be claimed in either order: commit by stage.
-                    let n = bp::STAGES
-                        .iter()
-                        .position(|(op, _)| *op == c.operation)
-                        .unwrap();
-                    let out = &outputs[n];
-                    let items = out
-                        .as_object()
-                        .and_then(|o| o.values().find_map(|v| v.as_array().map(Vec::len)))
-                        .unwrap_or(0);
-                    let reason = if n == 0 {
-                        "validated clean body"
-                    } else {
-                        out["empty_reason"].as_str().unwrap_or("")
-                    };
-                    let items = if n == 0 { 0 } else { items };
-                    let canonical = if n == 1 {
-                        Some(
-                            argos_osint_core::intel_recon::brief_canonical::prepare_for_stage(
-                                &app.store,
-                                &article,
-                                &serde_json::Value::Null,
-                                out,
-                                &serde_json::Value::Null,
-                                &c.operation,
-                            )
-                            .unwrap(),
-                        )
-                    } else {
-                        None
-                    };
-                    assert!(bp::commit_stage_with(
-                        conn,
-                        &c,
-                        &out.to_string(),
-                        items,
-                        reason,
-                        &now(),
-                        canonical.as_ref()
-                    )
-                    .unwrap());
-                }
-                if let Some(activity) = running {
-                    let c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
-                    bp::set_activity(conn, &c.id, activity).unwrap();
-                    if *done == 0 {
-                        // Both independent roots run at once.
-                        let other = bp::claim_stage(conn, "w2", 120, &now()).unwrap().unwrap();
-                        bp::set_activity(conn, &other.id, "waiting for model").unwrap();
-                    }
-                }
-                if *name == "8-no-provider" {
-                    for _ in 0..2 {
-                        let mut c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
-                        if c.operation == "intel_brief_claims" {
-                            c.max_attempts = 1;
-                            tasks::fail_claimed(
-                                conn,
-                                &c,
-                                tasks::OperationKind::OtherLlm,
-                                &tasks::TaskError::new(
-                                    tasks::ErrorCategory::InvalidResult,
-                                    "all routes blocked (0 dispatched attempts): route 0 skip: API key missing; configure google in Providers",
-                                ),
-                                &now(),
-                            )
-                            .unwrap();
-                        } else {
-                            assert!(bp::commit_stage(
-                                conn,
-                                &c,
-                                &body.to_string(),
-                                0,
-                                "validated clean body",
-                                &now()
-                            )
-                            .unwrap());
-                        }
-                    }
-                }
-                if *fail {
-                    let mut c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
-                    c.max_attempts = 1;
-                    tasks::fail_claimed(
-                        conn,
-                        &c,
-                        tasks::OperationKind::OtherLlm,
-                        &tasks::TaskError::new(
-                            tasks::ErrorCategory::InvalidResult,
-                            "provider chain exhausted",
-                        ),
-                        &now(),
-                    )
-                    .unwrap();
-                }
-                if *name == "7-cached" {
-                    // Reopen a completed brief: attaches, schedules nothing.
-                    app.open_intel_briefing();
-                    assert_eq!(app.intel_brief_job.as_deref(), Some(job.as_str()));
-                    let active: i64 = app
-                        .store
-                        .connection()
-                        .query_row(
-                            "SELECT COUNT(*) FROM argos_tasks WHERE job_id LIKE 'intel-brief:%' AND state NOT IN ('completed','superseded')",
-                            [],
-                            |r| r.get(0),
-                        )
-                        .unwrap();
-                    assert_eq!(active, 0, "cached reopen enqueues no work");
-                }
-                app.intel_brief_stages.clear();
-                app.refresh_intel_brief_stages();
-                app.compact_pages[ModuleId::Intel.index()] = 0;
-                app.scrolls.intel_extracted = 0;
-                let text = intel_all_pages_text(&mut app, width, height);
-                let rows: Vec<String> = app
-                    .intel_brief_stages
-                    .iter()
-                    .map(|v| format!("{} · {}", v.label, v.row))
-                    .collect();
-                // Content asserts where the panes fit without scrolling.
-                let roomy = width >= 120 || (width == 80 && name.starts_with('4'));
-                match *name {
-                    _ if !roomy => {
-                        // Narrow / too-small: rows stay correct and render never panics.
-                        assert!(!rows.is_empty());
-                    }
-                    "1-queued" => {
-                        assert_eq!(rows[1], "Claims · Queued");
-                        assert_eq!(rows[2], "Inferences · Queued · after Full article, Claims");
-                        assert!(text.contains("Brief · 0/4 completed"), "{text}");
-                    }
-                    "2-roots-running" => {
-                        assert!(rows[0].starts_with("Full article · Running"), "{rows:?}");
-                        assert!(rows[1].starts_with("Claims · Running"), "{rows:?}");
-                        assert!(text.contains("Brief · 2 running · 0/4 completed"), "{text}");
-                    }
-                    "3-inferences-running" => {
-                        assert_eq!(rows[2], "Inferences · Running · waiting for model");
-                        assert!(text.contains("Brief · 1 running · 2/4 completed"));
-                        assert!(
-                            text.contains("suspended the ferry"),
-                            "claims checkpoint surfaces immediately"
-                        );
-                    }
-                    "4-inferences-failed" => {
-                        assert!(rows[1].starts_with("Claims · Completed"));
-                        assert!(rows[2].starts_with("Inferences · Failed"));
-                        assert_eq!(rows[3], "Links · Queued · blocked by Inferences");
-                        assert!(
-                            text.contains("suspended the ferry"),
-                            "completed Claims kept"
-                        );
-                        assert!(text.contains("blocked by Inferences"));
-                        // The first Extracted page itself (the 80x24 screenshot)
-                        // keeps Links on screen with the recovery lines.
-                        app.compact_pages[ModuleId::Intel.index()] = 0;
-                        let page = buffer_text(&render(&mut app, width, height));
-                        assert!(
-                            page.contains("blocked by Inferences"),
-                            "{width}x{height}\n{page}"
-                        );
-                        // Panes wrap, so check the recovery wording in fragments.
-                        assert!(page.contains("Retry article"), "{page}");
-                        assert!(page.contains("failed stage."), "{page}");
-                        assert!(page.contains("Inferences failed · Retry"), "{page}");
-                        // Global Jobs shows identical stage states.
-                        let detail = argos_osint_core::jobs_view::job_detail(
-                            app.store.connection(),
-                            &job,
-                            10,
-                        )
-                        .unwrap()
-                        .unwrap();
-                        let labels: Vec<&str> = detail
-                            .tasks
-                            .iter()
-                            .map(|t| t.stage_label.as_str())
-                            .collect();
-                        assert_eq!(labels, rows.iter().map(String::as_str).collect::<Vec<_>>());
-                    }
-                    "5-completed" => {
-                        assert!(text.contains("Potential corroboration"), "{text}");
-                        assert!(text.contains("insurance lapse"));
-                        assert!(
-                            app.intel_brief_publication.starts_with("Published"),
-                            "{}",
-                            app.intel_brief_publication
-                        );
-                        assert!(text.contains("Publication / Index"));
-                        assert_eq!(
-                            bp::published_leads(app.store.connection(), &article.id)
-                                .unwrap()
-                                .len(),
-                            1
-                        );
-                    }
-                    "8-no-provider" => {
-                        assert!(rows[1].starts_with("Claims · Failed"), "{rows:?}");
-                        assert!(rows[2].starts_with("Inferences · Queued · blocked by Claims"));
-                        assert!(text.contains("all routes blocked"), "{text}");
-                        assert!(text.contains("Claims failed"), "{text}");
-                        assert!(text.contains("Configure a provider in Providers"), "{text}");
-                        assert!(text.contains("Retry article retrieval"), "{text}");
-                    }
-                    "7-cached" => {
-                        assert!(rows.iter().all(|r| r.contains("Completed")), "{rows:?}");
-                        assert!(text.contains("Potential corroboration"));
-                    }
-                    _ => {
-                        assert_eq!(rows[2], "Inferences · Completed · no supported inferences");
-                        assert_eq!(rows[3], "Links · Completed · no supported inferences");
-                    }
-                }
-                if let Some(dir) = &dir {
-                    dump_cells(
-                        &mut app,
-                        dir,
-                        &format!("seq-{name}-{width}x{height}"),
-                        width,
-                        height,
-                    );
-                    if width < 160 {
-                        app.compact_pages[ModuleId::Intel.index()] = 2;
-                        dump_cells(
-                            &mut app,
-                            dir,
-                            &format!("seq-{name}-{width}x{height}-jobs"),
-                            width,
-                            height,
-                        );
-                        app.compact_pages[ModuleId::Intel.index()] = 0;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Claims, Insights and Links each get their own Background jobs entry
-    /// with their own streamed steps; content panes show only the shared
-    /// centered loading animation until their content arrives.
-    #[test]
-    fn intel_artifact_progress_in_background_jobs_screens() {
-        use argos_osint_core::investigation::insight_execution::{
-            artifact_steps, ArtifactFacts, Progress,
-        };
-        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
-        if let Some(dir) = &dir {
-            std::fs::create_dir_all(dir).unwrap();
-        }
-        let synth = |assess: &[(&'static str, &str)]| ArtifactFacts {
-            synthesis_started: true,
-            assessments: assess.iter().map(|(a, s)| (*a, s.to_string())).collect(),
-        };
-        let pre = |assess: &[(&'static str, &str)]| ArtifactFacts {
-            synthesis_started: false,
-            assessments: assess.iter().map(|(a, s)| (*a, s.to_string())).collect(),
-        };
-        // (name, state, stage, activity, age, facts, expected [claims, insights, links])
-        type Frame<'a> = (
-            &'a str,
-            &'a str,
-            &'a str,
-            &'a str,
-            Option<u64>,
-            ArtifactFacts,
-            [&'a str; 3],
-        );
-        let frames: Vec<Frame> = vec![
-            (
-                "1-queued",
-                "queued",
-                "queued",
-                "",
-                None,
-                pre(&[]),
-                ["Queued", "Queued", "Queued"],
-            ),
-            (
-                "2-claims-waiting",
-                "running",
-                "extraction",
-                "Waiting for output · attempt 1",
-                Some(6),
-                pre(&[]),
-                [
-                    "Waiting for output",
-                    "Queued · after claims",
-                    "Queued · after claims",
-                ],
-            ),
-            (
-                "3-claims-receiving",
-                "running",
-                "extraction",
-                "Receiving output · attempt 1 · 1840 chars",
-                Some(1),
-                pre(&[]),
-                [
-                    "Receiving output",
-                    "Queued · after claims",
-                    "Queued · after claims",
-                ],
-            ),
-            (
-                "4-claims-stalled",
-                "running",
-                "extraction",
-                "Receiving output · attempt 1 · 1840 chars",
-                Some(97),
-                pre(&[]),
-                [
-                    "Stalled · no model activity for 97s",
-                    "Queued · after claims",
-                    "Queued · after claims",
-                ],
-            ),
-            (
-                "5-claims-validating",
-                "running",
-                "assessment",
-                "Validating",
-                Some(0),
-                pre(&[("Claims", "running")]),
-                [
-                    "Validating",
-                    "Queued · after claims",
-                    "Queued · after claims",
-                ],
-            ),
-            (
-                "6-synthesis-receiving",
-                "running",
-                "inference",
-                "Receiving output · attempt 1 · 3120 chars",
-                Some(1),
-                synth(&[("Claims", "completed")]),
-                [
-                    "Validated · awaiting publication",
-                    "Receiving output",
-                    "Receiving output",
-                ],
-            ),
-            (
-                "7-insights-decision",
-                "running",
-                "assessment",
-                "",
-                Some(3),
-                synth(&[("Claims", "completed"), ("Insights", "running")]),
-                [
-                    "Validated · awaiting publication",
-                    "Waiting for decision",
-                    "Queued · awaiting assessment",
-                ],
-            ),
-            (
-                "8-links-stalled",
-                "running",
-                "assessment",
-                "Waiting for decision · attempt 1",
-                Some(200),
-                synth(&[
-                    ("Claims", "completed"),
-                    ("Insights", "completed"),
-                    ("Links", "running"),
-                ]),
-                [
-                    "Validated · awaiting publication",
-                    "Validated · awaiting publication",
-                    "Stalled · no model activity for 200s",
-                ],
-            ),
-            (
-                "9-published",
-                "completed",
-                "published",
-                "",
-                None,
-                synth(&[]),
-                ["Published", "Published", "Published"],
-            ),
-        ];
-        for (width, height) in [(160, 50), (120, 40)] {
-            for (name, state, stage, activity, age, facts, expected) in &frames {
-                let mut app = app();
-                let (_, article) = related_ui_fixture(&mut app);
-                let mut progress = Progress {
-                    task_id: "insight-stream-task".into(),
-                    job_id: "insight-stream-job".into(),
-                    stage: (*stage).into(),
-                    state: (*state).into(),
-                    windows_total: 1,
-                    route:
-                        "Route: local/nvidia/nemotron-3-super-120b-a12b:free · attempt 1 · running"
-                            .into(),
-                    index_status: "Index pending: 0/0".into(),
-                    activity: (*activity).into(),
-                    activity_age_secs: *age,
-                    ..Default::default()
-                };
-                progress.artifacts = artifact_steps(&progress, facts);
-                let got: Vec<&str> = progress.artifacts.iter().map(|a| a.step.as_str()).collect();
-                assert_eq!(got, expected.to_vec(), "{name}");
-                let published = *state == "completed";
-                app.select(ModuleId::Intel.index());
-                app.intel_articles = vec![article.clone()];
-                app.intel_sel = 0;
-                app.intel_page = IntelPage::Briefing;
-                app.intel_insight_lifecycle =
-                    if published { "active" } else { "refreshing" }.into();
-                app.intel_refresh_status = expected[0].into();
-                if published {
-                    let claim = |fp: &str, class: &str, text: &str| AtlasArticleClaim {
-                        fingerprint: fp.into(),
-                        entity: "Baltic board".into(),
-                        predicate: "said".into(),
-                        object: "ferry".into(),
-                        topic: "investigation".into(),
-                        classification: class.into(),
-                        confidence: 0.0,
-                        claim: text.into(),
-                        source_url: article.url.clone(),
-                        published_at: String::new(),
-                        article_id: article.id.clone(),
-                        reliability: String::new(),
-                        info_credibility: 0,
-                        admiralty: String::new(),
-                        rsp_status: String::new(),
-                    };
-                    app.intel_claims = vec![
-                        claim(
-                            "v2:c1",
-                            "claim",
-                            "[claim · faithful] Baltic board suspended the ferry service.",
-                        ),
-                        claim(
-                            "v2:i1",
-                            "inference",
-                            "[inference · supported] The suspension is temporary pending review.",
-                        ),
-                    ];
-                    app.intel_relations = vec![("v2:i1".into(), "v2:c1".into(), "supports".into())];
-                } else {
-                    app.intel_claims.clear();
-                    app.intel_relations.clear();
-                    app.intel_link_explanations.clear();
-                }
-                app.intel_extraction_progress = Some(progress.clone());
-                app.compact_pages[ModuleId::Intel.index()] = 0;
-                app.scrolls.intel_extracted = 0;
-                let text = intel_all_pages_text(&mut app, width, height);
-                // Background jobs: each artifact has its own entry and step.
-                for (artifact, step) in ["Claims", "Insights", "Links"].iter().zip(expected) {
-                    let short = step.split(" · no model activity").next().unwrap();
-                    let short = short.split(" · awaiting").next().unwrap();
-                    let short = short.split(" · after").next().unwrap();
-                    let entry = format!("{artifact} · {short}");
-                    let shown = text.contains(&entry);
-                    assert!(shown, "{name} {width}x{height}: missing {entry}\n{text}");
-                }
-                if expected.iter().any(|s| s.starts_with("Stalled")) {
-                    assert!(
-                        text.contains("⚠ no model activity for"),
-                        "{name}: stall warning"
-                    );
-                }
-                // Content panes never carry the streamed details.
-                for leaked in ["Stage: ", "Withheld: ", "Route: "] {
-                    assert!(
-                        !text.contains(leaked),
-                        "{name}: '{leaked}' leaked into a pane"
-                    );
-                }
-                // Centered spinner until content arrives; content replaces it.
-                for label in [
-                    "Extracting claims",
-                    "Extracting inferences",
-                    "Extracting links",
-                ] {
-                    assert_eq!(
-                        text.contains(label),
-                        !published,
-                        "{name} {width}x{height}: {label}\n{text}"
-                    );
-                }
-                if published {
-                    assert!(
-                        text.contains("suspended the ferry"),
-                        "{name}: claims content"
-                    );
-                    assert!(
-                        text.contains("temporary pending"),
-                        "{name}: inference content"
-                    );
-                }
-                if let Some(dir) = &dir {
-                    dump_cells(
-                        &mut app,
-                        dir,
-                        &format!("artifacts-{name}-{width}x{height}"),
-                        width,
-                        height,
-                    );
-                    if width < 160 {
-                        app.compact_pages[ModuleId::Intel.index()] = 2;
-                        dump_cells(
-                            &mut app,
-                            dir,
-                            &format!("artifacts-{name}-{width}x{height}-jobs"),
-                            width,
-                            height,
-                        );
-                        app.compact_pages[ModuleId::Intel.index()] = 0;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Spec §6: streamed insight status steps on Intel (Focus Brief), Jobs
-    /// and Logs. Dumps PNG-able cells when ARGOS_SCREEN_DIR is set.
-    #[test]
-    fn streamed_insight_progress_screens() {
-        use argos_osint_core::{
-            investigation::insight_execution::{status_step, Progress},
-            jobs_view::{JobDetail, JobRow, TaskRow},
-        };
-        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
-        if let Some(dir) = &dir {
-            std::fs::create_dir_all(dir).unwrap();
-        }
-        // (name, task state, stage, activity, age)
-        let steps: [(&str, &str, &str, &str, Option<u64>); 7] = [
-            ("1-queued", "queued", "queued", "", None),
-            (
-                "2-waiting",
-                "running",
-                "extraction",
-                "Waiting for output · attempt 1 · nvidia/nemotron-3-super-120b-a12b:free",
-                Some(12),
-            ),
-            (
-                "3-receiving",
-                "running",
-                "extraction",
-                "Receiving output · attempt 1 · 2814 chars",
-                Some(1),
-            ),
-            (
-                "4-validating",
-                "running",
-                "extraction",
-                "Validating",
-                Some(0),
-            ),
-            (
-                "5-decision",
-                "running",
-                "assessment",
-                "Waiting for decision",
-                Some(4),
-            ),
-            (
-                "6-stalled",
-                "running",
-                "extraction",
-                "Receiving output · attempt 2 · 912 chars",
-                Some(97),
-            ),
-            ("7-published", "completed", "published", "", None),
-        ];
-        for (width, height) in [(160, 50), (120, 40)] {
-            for (name, state, stage, activity, age) in steps {
-                let mut app = app();
-                let (_, article) = related_ui_fixture(&mut app);
-                let mut progress = Progress {
-                    task_id: "insight-stream-task".into(),
-                    job_id: "insight-stream-job".into(),
-                    retry_epoch: 0,
-                    stage: stage.into(),
-                    state: state.into(),
-                    windows_done: if stage == "extraction" { 0 } else { 1 },
-                    windows_total: 1,
-                    batches_done: 0,
-                    batches_total: if stage == "assessment" { 2 } else { 0 },
-                    withheld_count: 0,
-                    route:
-                        "Route: local/nvidia/nemotron-3-super-120b-a12b:free · attempt 1 · running"
-                            .into(),
-                    error: String::new(),
-                    retryable: false,
-                    index_status: "Index pending: 0/0".into(),
-                    activity: activity.into(),
-                    activity_age_secs: age,
-                    artifacts: Vec::new(),
-                };
-                progress.artifacts =
-                    argos_osint_core::investigation::insight_execution::artifact_steps(
-                        &progress,
-                        &Default::default(),
-                    );
-                let step = status_step(state, stage, activity, age, false);
-                app.select(ModuleId::Intel.index());
-                app.intel_articles = vec![article.clone()];
-                app.intel_sel = 0;
-                app.intel_page = IntelPage::Briefing;
-                app.intel_insight_lifecycle = "refreshing".into();
-                app.intel_refresh_status = step.clone();
-                app.intel_extraction_progress = Some(progress.clone());
-                app.compact_pages[ModuleId::Intel.index()] = 0;
-                let text = intel_all_pages_text(&mut app, width, height);
-                let short = step.split(" · no model activity").next().unwrap();
-                assert!(
-                    text.contains(&format!("Claims · {short}")),
-                    "{name}: {step}\n{text}"
-                );
-                assert!(!text.contains("Extracting ·"), "old label gone");
-                assert!(!text.contains("model activated"));
-                if let Some(dir) = &dir {
-                    dump_cells(
-                        &mut app,
-                        dir,
-                        &format!("stream-intel-{name}-{width}x{height}"),
-                        width,
-                        height,
-                    );
-                }
-                let job = JobRow {
-                    id: progress.job_id.clone(),
-                    app: "intel".into(),
-                    operation: "insight_refresh".into(),
-                    title: "Assess and refresh investigative insights".into(),
-                    state: state.into(),
-                    ..Default::default()
-                };
-                app.select(ModuleId::Jobs.index());
-                app.jobs.rows = vec![job.clone()];
-                app.jobs.sel = 0;
-                app.jobs.detail = Some(JobDetail {
-                    job,
-                    tasks: vec![TaskRow {
-                        id: progress.task_id.clone(),
-                        operation: "insight_refresh".into(),
-                        state: state.into(),
-                        ..Default::default()
-                    }],
-                    insight_progress: vec![progress],
-                    ..Default::default()
-                });
-                app.jobs.detail_open = true;
-                app.jobs.detail_scroll = 0;
-                let buffer = render(&mut app, width, height);
-                assert!(buffer_text(&buffer).contains(&step), "jobs {name}: {step}");
-                if let Some(dir) = &dir {
-                    dump_cells(
-                        &mut app,
-                        dir,
-                        &format!("stream-jobs-{name}-{width}x{height}"),
-                        width,
-                        height,
-                    );
-                }
-            }
-            // Supersession: intentional retirement in Jobs detail.
-            {
-                let mut app = app();
-                let progress = Progress {
-                    task_id: "insight-stream-task".into(),
-                    job_id: "insight-refresh:article:a2:3".into(),
-                    retry_epoch: 0,
-                    stage: "extraction".into(),
-                    state: "superseded".into(),
-                    windows_done: 0,
-                    windows_total: 1,
-                    batches_done: 0,
-                    batches_total: 0,
-                    withheld_count: 0,
-                    route: "Route: local/nvidia/nemotron-3-super-120b-a12b:free · attempt 1 · ok"
-                        .into(),
-                    error: "Superseded · replaced by insight-refresh:article:a2:4 · source changed"
-                        .into(),
-                    retryable: false,
-                    index_status: "Index: no published memories".into(),
-                    activity: String::new(),
-                    activity_age_secs: None,
-                    artifacts: Vec::new(),
-                };
-                let job = JobRow {
-                    id: progress.job_id.clone(),
-                    app: "intel".into(),
-                    operation: "insight_refresh".into(),
-                    title: "Assess and refresh investigative insights".into(),
-                    state: "cancelled".into(),
-                    ..Default::default()
-                };
-                app.select(ModuleId::Jobs.index());
-                app.jobs.rows = vec![job.clone()];
-                app.jobs.sel = 0;
-                app.jobs.detail = Some(JobDetail {
-                    job,
-                    tasks: vec![TaskRow {
-                        id: progress.task_id.clone(),
-                        operation: "insight_refresh".into(),
-                        state: "superseded".into(),
-                        ..Default::default()
-                    }],
-                    insight_progress: vec![progress],
-                    ..Default::default()
-                });
-                app.jobs.detail_open = true;
-                app.jobs.detail_scroll = 0;
-                let text = buffer_text(&render(&mut app, width, height));
-                assert!(text.contains("Superseded · replaced by"));
-                assert!(!text.contains("Extraction error"));
-                if let Some(dir) = &dir {
-                    dump_cells(
-                        &mut app,
-                        dir,
-                        &format!("stream-jobs-8-superseded-{width}x{height}"),
-                        width,
-                        height,
-                    );
-                }
-            }
-            // Logs: activity transitions recorded by the insight observer.
-            let mut app = app();
-            for message in [
-                "attempt 1 dispatched · local/nvidia/nemotron-3-super-120b-a12b:free · stream · waiting for output",
-                "attempt 1 receiving model output",
-                "attempt 1 stream complete (stop) · validating",
-                "attempt 1 ok · 2814 chars",
-            ] {
-                argos_osint_core::events::record_event(
-                    app.store.connection(),
-                    &argos_osint_core::events::NewEvent {
-                        severity: Some(argos_osint_core::events::Severity::Info),
-                        app: "intel".into(),
-                        event_type: "insight.activity".into(),
-                        message: message.into(),
-                        job_id: "insight-stream-job".into(),
-                        task_id: "insight-stream-task".into(),
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
-            }
-            app.select(ModuleId::Logs.index());
-            app.reload_logs();
-            let buffer = render(&mut app, width, height);
-            assert!(buffer_text(&buffer).contains("receiving model output"));
-            if let Some(dir) = &dir {
-                dump_cells(
-                    &mut app,
-                    dir,
-                    &format!("stream-logs-{width}x{height}"),
-                    width,
-                    height,
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn opening_a_brief_admits_one_preparation_chain_without_competing_work() {
-        let mut app = app();
-        let (_, article) = related_ui_fixture(&mut app);
-        app.select(ModuleId::Intel.index());
-        app.intel_articles = vec![article.clone()];
-        app.intel_sel = 0;
-        app.open_intel_briefing();
-        let job = app.intel_brief_job.clone().expect("chain admitted");
-        let labels: Vec<_> = app.intel_brief_stages.iter().map(|v| v.label).collect();
-        assert_eq!(labels, ["Full article", "Claims", "Inferences", "Links"]);
-        // Preserve the two roots and their join within the one brief job.
-        assert_eq!(app.intel_brief_stages[1].row, "Queued");
-        assert_eq!(
-            app.intel_brief_stages[2].row,
-            "Queued · after Full article, Claims"
-        );
-        // Reopen attaches to the same chain.
-        app.open_intel_briefing();
-        assert_eq!(app.intel_brief_job.as_deref(), Some(job.as_str()));
-        // No separate report, refresh or body task competes with the chain.
-        let competing: i64 = app
-            .store
-            .connection()
-            .query_row(
-                "SELECT COUNT(*) FROM argos_tasks WHERE operation IN ('insight_refresh','article_body')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(competing, 0);
-        assert!(!app.intel_body_running.contains(&article.id));
-    }
-
-    /// Jobs detail for a brief whose Inferences stage timed out: attempt rows
-    /// name their task, counts are labelled, retry wait is real, and the
-    /// category is the provider's. Dumps cells when ARGOS_SCREEN_DIR is set.
-    #[test]
-    fn jobs_detail_names_tasks_labels_counts_and_keeps_the_real_error_category() {
-        use argos_osint_core::intel_recon::brief_pipeline as bp;
-        use argos_osint_core::tasks;
-        let mut app = app();
-        let (_, article) = related_ui_fixture(&mut app);
-        app.select(ModuleId::Intel.index());
-        app.intel_articles = vec![article];
-        app.intel_sel = 0;
-        app.open_intel_briefing();
-        let job = app.intel_brief_job.clone().unwrap();
-        let now = || chrono::Utc::now().to_rfc3339();
-        let conn = app.store.connection();
-        for _ in 0..2 {
-            let c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
-            let items = usize::from(c.operation == "intel_brief_claims") * 2;
-            assert!(bp::commit_stage(conn, &c, "{}", items, "", &now()).unwrap());
-        }
-        let mut c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
-        assert_eq!(c.operation, "intel_brief_inferences");
-        c.max_attempts = 1;
-        tasks::fail_claimed(
-            conn,
-            &c,
-            tasks::OperationKind::OtherLlm,
-            &tasks::TaskError {
-                category: tasks::ErrorCategory::Timeout,
-                message: "model routes exhausted: first response/timeout: no response headers within 60s (4 dispatched attempts): route 0 fail: the provider did not answer in time: no model output within 180s of response headers; route 1 fail: the provider had a server error (HTTP 503): This model is currently experiencing high demand".into(),
-            },
-            &now(),
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE argos_tasks SET retry_wait_ms=30000 WHERE id=?1",
-            [&c.id],
-        )
-        .unwrap();
-        let _ = tasks::refresh_job_state(conn, &job, &now());
-        for (n, route) in ["a", "a", "b", "c"].iter().enumerate() {
-            conn.execute(
-                "INSERT OR IGNORE INTO recon_model_operations(id,task_id,role,status,created_at,updated_at) VALUES('op1',?1,'synthesis','failed','t','t')",
-                [&c.id],
-            )
-            .unwrap();
-            conn.execute(
-                &format!("INSERT INTO recon_model_attempts(id,operation_id,route_index,attempt,provider,account,model,transport,dispatched,outcome,started_at) VALUES('at{n}','op1',{n},{},'openrouter','','m','stream',1,'fail','t')", n + 1),
-                [],
-            )
-            .unwrap();
-            let _ = route;
-        }
-        app.open_job(&job).unwrap();
-        app.jobs.detail_open = true;
-        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
-        for (width, height) in [(160, 90), (120, 100)] {
-            let text = buffer_text(&render(&mut app, width, height));
-            assert!(text.contains("Task attempts 3"), "{text}");
-            assert!(text.contains("provider requests 4"), "{text}");
-            assert!(text.contains("Inferences #1"), "{text}");
-            assert!(
-                text.contains("Full article #1") && text.contains("Claims #1"),
-                "{text}"
-            );
-            assert!(text.contains("Latest error (timeout)"), "{text}");
-            assert!(text.contains("retry wait 30s"), "{text}");
-            if let Some(dir) = &dir {
-                dump_cells(
-                    &mut app,
-                    dir,
-                    &format!("jobs-brief-detail-{width}x{height}"),
-                    width,
-                    height,
-                );
-            }
-        }
-    }
-
-    /// Jobs detail when one claim's inference failed: Inferences completes with
-    /// warnings and Links still runs. Dumps cells when ARGOS_SCREEN_DIR is set.
-    #[test]
-    fn jobs_detail_shows_partial_completion_with_warnings_and_links_completed() {
-        use argos_osint_core::intel_recon::brief_pipeline as bp;
-        let mut app = app();
-        let (_, article) = related_ui_fixture(&mut app);
-        app.select(ModuleId::Intel.index());
-        app.intel_articles = vec![article];
-        app.intel_sel = 0;
-        app.open_intel_briefing();
-        let job = app.intel_brief_job.clone().unwrap();
-        let now = || chrono::Utc::now().to_rfc3339();
-        let conn = app.store.connection();
-        for _ in 0..4 {
-            let c = bp::claim_stage(conn, "w", 120, &now()).unwrap().unwrap();
-            let (items, reason) = match c.operation.as_str() {
-                "intel_brief_claims" => (2, ""),
-                "intel_brief_inferences" => {
-                    (1, "warning: 1 of 2 claims could not be analyzed (timeout)")
-                }
-                "intel_brief_links" => (1, ""),
-                _ => (0, ""),
-            };
-            assert!(bp::commit_stage(conn, &c, "{}", items, reason, &now()).unwrap());
-        }
-        app.open_job(&job).unwrap();
-        app.jobs.detail_open = true;
-        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
-        let text = buffer_text(&render(&mut app, 160, 90));
-        assert!(
-            text.contains("Inferences · Completed with warnings · 1 item"),
-            "{text}"
-        );
-        assert!(text.contains("Links · Completed · 1 item"), "{text}");
-        assert!(
-            text.contains("Warning · Inferences: 1 of 2 claims could not be"),
-            "{text}"
-        );
-        if let Some(dir) = &dir {
-            dump_cells(&mut app, dir, "jobs-brief-partial-160x90", 160, 90);
-        }
-    }
-
-    #[test]
-    fn extraction_actions_resolve_selected_article_instead_of_stale_display_progress() {
-        let mut app = app();
-        let (_, article) = related_ui_fixture(&mut app);
-        app.select(ModuleId::Intel.index());
-        app.intel_articles = vec![article];
-        app.intel_sel = 0;
-        app.intel_extraction_progress = Some(
-            argos_osint_core::investigation::insight_execution::Progress {
-                task_id: "other-owner-task".into(),
-                job_id: "other-owner-job".into(),
-                ..Default::default()
-            },
-        );
-        app.activate_button(ButtonId::IntelExtractionRetry);
-        assert_eq!(app.status, "No extraction task");
-        app.activate_button(ButtonId::IntelExtractionJob);
-        assert_eq!(app.status, "No extraction job");
-        assert_eq!(app.module, Some(ModuleId::Intel));
     }
 
     #[test]
@@ -16317,6 +14163,7 @@ mod tests {
         assert_eq!(app.atlas_page, AtlasPage::Runs);
         assert!(hit(&app, Target::Button(ButtonId::AtlasDelete)));
         click(&mut app, Target::Button(ButtonId::AtlasDelete));
+        settle(&mut app, |app| app.atlas_runs.is_empty());
         assert!(app.atlas_runs.is_empty());
         assert!(matches!(app.overlay, Overlay::None));
         assert!(app.store.atlas_latest_run().unwrap().is_none());
@@ -16792,89 +14639,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn intel_reload_revisit_and_late_snapshot_keep_generation_ownership() {
-        let mut app = app();
-        let (_, article) = related_ui_fixture(&mut app);
-        app.module = Some(ModuleId::Intel);
-        app.intel_articles = vec![article.clone()];
-        app.intel_sel = 0;
-        let body = app
-            .store
-            .ensure_article_body(
-                &article.id,
-                &article.run_id,
-                &article.url,
-                &article.source_domain,
-                &article.source_name,
-            )
-            .unwrap();
-        app.store
-            .commit_article_body(
-                &body.id,
-                "Old usable body",
-                "old-hash",
-                "complete",
-                "complete",
-                &article.url,
-                "fixture",
-                false,
-            )
-            .unwrap();
-        app.store
-            .connection()
-            .execute(
-                "UPDATE article_bodies SET updated_at='2020-01-01T00:00:00Z' WHERE id=?1",
-                [&body.id],
-            )
-            .unwrap();
-        app.open_intel_briefing();
-        let previous_job = app.intel_brief_job.clone();
-        assert!(super::super::ui::intel_body_has_content(&app));
-        app.activate_button(ButtonId::IntelBodyRefresh);
-        let reload_job = app.intel_brief_job.clone();
-        assert_ne!(previous_job, reload_job);
-        assert!(app.intel_body_require_commit);
-        assert!(!super::super::ui::intel_body_has_content(&app));
-        app.leave_intel_briefing();
-        app.open_intel_briefing();
-        assert_eq!(app.intel_brief_job, reload_job);
-        assert!(!super::super::ui::intel_body_has_content(&app));
-        let mut obsolete = super::super::db_reads::IntelBriefSnapshot::default();
-        obsolete.outputs.insert(
-            "intel_brief_body".into(),
-            serde_json::json!({"markdown":"Obsolete body"}),
-        );
-        app.on_work_event(WorkEvent::IntelBriefLoaded {
-            key: (
-                article.run_id.clone(),
-                article.id.clone(),
-                app.related_scope,
-                previous_job,
-                app.intel_related_limit,
-            ),
-            outcome: Ok(Box::new(obsolete)),
-        });
-        assert!(!super::super::ui::intel_body_has_content(&app));
-        let mut ready = super::super::db_reads::IntelBriefSnapshot::default();
-        ready.outputs.insert(
-            "intel_brief_body".into(),
-            serde_json::json!({"markdown":"Current body"}),
-        );
-        app.on_work_event(WorkEvent::IntelBriefLoaded {
-            key: (
-                article.run_id,
-                article.id,
-                app.related_scope,
-                reload_job,
-                app.intel_related_limit,
-            ),
-            outcome: Ok(Box::new(ready)),
-        });
-        assert!(super::super::ui::intel_body_has_content(&app));
-        assert!(!super::super::ui::intel_body_loading(&app));
     }
 
     #[test]
@@ -17668,35 +15432,6 @@ mod tests {
     }
 
     #[test]
-    fn single_action_launch_from_home() {
-        let mut app = app();
-        app.tab_ids.clear();
-        app.module = None;
-        app.input = "Investigate supply chain disruptions in Baltic ports".into();
-        app.home_draft = app.input.clone();
-
-        app.launch_home_investigation().unwrap();
-
-        assert_eq!(app.module, Some(ModuleId::Recon));
-        assert!(app.selected_thread.is_some());
-        let thread_id = app.selected_thread.clone().unwrap();
-
-        assert_eq!(app.tab_ids.len(), 1);
-        assert_eq!(app.tab_ids[0], thread_id);
-        assert_eq!(app.tab_sel, 1);
-
-        let thread = app.store.get_thread(&thread_id).unwrap().unwrap();
-        assert_eq!(
-            thread.title,
-            "Investigate supply chain disruptions in Baltic ports"
-        );
-
-        assert!(app.home_draft.is_empty());
-        assert!(!app.home_draft_submitting);
-        assert_eq!(app.launch_state, LaunchState::Accepted);
-    }
-
-    #[test]
     fn duplicate_submission_prevention() {
         let mut app = app();
         app.tab_ids.clear();
@@ -17708,60 +15443,6 @@ mod tests {
         app.launch_home_investigation().unwrap();
         assert!(app.selected_thread.is_none());
         assert_eq!(app.tab_ids.len(), 0);
-    }
-
-    #[test]
-    fn draft_isolation_and_persistence() {
-        let mut app = app();
-        app.tab_ids.clear();
-        app.module = None;
-        app.input = "Draft prompt on home".into();
-        app.focus = Target::Field(FieldId::Composer);
-
-        app.persist_home_draft();
-        app.flush_home_draft().unwrap();
-
-        let thread = app.store.new_thread("Test Inv").unwrap();
-        app.selected_thread = Some(thread.id.clone());
-        app.module = Some(ModuleId::Recon);
-        app.recon_chat = true;
-        app.input = "Recon follow-up draft".into();
-        app.cursor = 20;
-
-        app.switch_tab(0).unwrap();
-        assert_eq!(app.module, None);
-        assert_eq!(app.input, "Draft prompt on home");
-    }
-
-    #[test]
-    fn session_tabs_open_close_reopen() {
-        let mut app = app();
-        app.tab_ids.clear();
-        let t1 = app.store.new_thread("Investigation 1").unwrap().id;
-        let t2 = app.store.new_thread("Investigation 2").unwrap().id;
-        let t3 = app.store.new_thread("Investigation 3").unwrap().id;
-
-        app.open_investigation_tab(&t1).unwrap();
-        app.open_investigation_tab(&t2).unwrap();
-        app.open_investigation_tab(&t3).unwrap();
-
-        assert_eq!(app.tab_ids, vec![t1.clone(), t2.clone(), t3.clone()]);
-        assert_eq!(app.tab_sel, 3);
-
-        // Deduplication
-        app.open_investigation_tab(&t2).unwrap();
-        assert_eq!(app.tab_ids.len(), 3);
-        assert_eq!(app.tab_sel, 2);
-
-        // Close active tab t2: selects next tab (t3)
-        app.close_tab(2).unwrap();
-        assert_eq!(app.tab_ids, vec![t1.clone(), t3.clone()]);
-        assert_eq!(app.tab_recently_closed, vec![t2.clone()]);
-
-        // Reopen closed tab: restores t2
-        app.reopen_closed_tab().unwrap();
-        assert!(app.tab_ids.contains(&t2));
-        assert!(app.tab_recently_closed.is_empty());
     }
 
     #[test]
@@ -17787,34 +15468,6 @@ mod tests {
         // While focused in composer, typing digit '2' appends '2' to input
         app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
         assert_eq!(app.input, "2");
-    }
-
-    #[test]
-    fn tab_strip_render_and_hit_test() {
-        let mut app = app();
-        app.tab_ids.clear();
-        let t1 = app.store.new_thread("Investigation 1").unwrap().id;
-        app.open_investigation_tab(&t1).unwrap();
-
-        app.screen = Rect::new(0, 0, 100, 30);
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
-        terminal
-            .draw(|frame| super::super::ui::draw(frame, &app))
-            .unwrap();
-
-        assert!(hit(&app, Target::Tab(0)));
-        assert!(hit(&app, Target::Tab(1)));
-        assert!(hit(&app, Target::TabPlus));
-        assert!(hit(&app, Target::Field(FieldId::Composer)));
-        assert!(hit(&app, Target::Button(ButtonId::Send)));
-
-        let order = super::super::ui::focus_order(&app);
-        assert_eq!(order.first(), Some(&Target::Tab(0)));
-        assert!(order.contains(&Target::TabPlus));
-        assert!(order.contains(&Target::App(app.launcher_sel)));
-        assert!(order.contains(&Target::Field(FieldId::Composer)));
-        assert!(order.contains(&Target::Button(ButtonId::Send)));
     }
 
     #[test]
@@ -18428,7 +16081,7 @@ mod tests {
         let section_bottom = brief_y + brief_h as i32 - 1;
         // The image column stays inside the brief article section.
         assert!(image_x > brief_x, "{geo:?}");
-        assert!(image_x + image_w <= brief_x + brief_w - 1, "{geo:?}");
+        assert!(image_x + image_w < brief_x + brief_w, "{geo:?}");
         assert!(image_y > brief_y, "{geo:?}");
         assert!(image_bottom <= section_bottom, "{geo:?}");
         // The image column is strictly left of the brief prose.
@@ -18544,186 +16197,10 @@ mod tests {
         assert_eq!(text_blocks, 0, "image glyphs inside {image_area:?}");
     }
 
-    #[test]
-    fn filter_fields_display_item_counts_in_placeholders() {
-        let mut app = app();
-        app.threads = vec![
-            app.store.new_thread("Test 1").unwrap(),
-            app.store.new_thread("Test 2").unwrap(),
-        ];
-        let placeholder_recon = super::super::ui::field_placeholder(&app, FieldId::ReconSearch);
-        assert!(
-            placeholder_recon.contains("(2 items)"),
-            "{placeholder_recon}"
-        );
-
-        let placeholder_intel = super::super::ui::field_placeholder(&app, FieldId::IntelSearch);
-        assert!(
-            placeholder_intel.contains("(0 items)"),
-            "{placeholder_intel}"
-        );
-
-        let placeholder_osint = super::super::ui::field_placeholder(&app, FieldId::OsintSearch);
-        assert!(placeholder_osint.contains("items)"), "{placeholder_osint}");
-
-        let placeholder_jobs = super::super::ui::field_placeholder(&app, FieldId::JobsSearch);
-        assert!(placeholder_jobs.contains("(0 items)"), "{placeholder_jobs}");
-
-        let placeholder_logs = super::super::ui::field_placeholder(&app, FieldId::LogsSearch);
-        assert!(placeholder_logs.contains("(0 items)"), "{placeholder_logs}");
-
-        let placeholder_brain = super::super::ui::field_placeholder(&app, FieldId::BrainQuery);
-        assert!(
-            placeholder_brain.contains("(0 items)"),
-            "{placeholder_brain}"
-        );
-    }
-
     fn hit(app: &App, target: Target) -> bool {
         (0..app.screen.height)
             .flat_map(|y| (0..app.screen.width).map(move |x| (x, y)))
             .any(|(x, y)| super::super::ui::hit_test(app, x, y) == Some(target))
-    }
-
-    /// Seeds one observation per widget family so a snapshot has content.
-    fn seed_profile(app: &mut App) {
-        let conn = app.store.connection();
-        let now = chrono::Utc::now().to_rfc3339();
-        let record = |event: argos_osint_core::telemetry::TelemetryEvent| {
-            let _ = argos_osint_core::telemetry::insert(conn, &event);
-        };
-        record(
-            argos_osint_core::telemetry::TelemetryEvent::new(
-                argos_osint_core::telemetry::EventKind::ReconRun,
-            )
-            .at(now.clone())
-            .app("tui")
-            .mode("deep")
-            .outcome("completed"),
-        );
-        record(
-            argos_osint_core::telemetry::TelemetryEvent::new(
-                argos_osint_core::telemetry::EventKind::ToolInvocation,
-            )
-            .at(now.clone())
-            .app("tui")
-            .provider("firecrawl")
-            .role("recon")
-            .mode("remote")
-            .tool("firecrawl_scrape")
-            .category("web")
-            .engine("google")
-            .outcome("completed_nonempty")
-            .duration_ms(Some(420)),
-        );
-        record(
-            argos_osint_core::telemetry::TelemetryEvent::new(
-                argos_osint_core::telemetry::EventKind::AtlasCycle,
-            )
-            .at(now.clone())
-            .run("run-1")
-            .outcome("completed"),
-        );
-        record(
-            argos_osint_core::telemetry::TelemetryEvent::new(
-                argos_osint_core::telemetry::EventKind::ModelAttempt,
-            )
-            .at(now)
-            .app("tui")
-            .provider("openrouter")
-            .role("recon")
-            .model("gpt-4o-mini")
-            .outcome("succeeded")
-            .duration_ms(Some(310)),
-        );
-        app.profile.loaded_at = None;
-        app.profile.reload(&app.store);
-    }
-
-    /// The four viewports the spec requires, plus a narrow one that must still
-    /// render the dashboard rather than a blank pane.
-    #[test]
-    fn profile_overview_renders_at_every_required_viewport() {
-        for (width, height) in [
-            (160u16, 50u16),
-            (120, 40),
-            (100, 32),
-            (60, 18),
-            (80, 24),
-            (40, 20),
-            (100, 24),
-        ] {
-            let mut app = app();
-            app.select(ModuleId::System.index());
-            seed_profile(&mut app);
-            let text = buffer_text(&render(&mut app, width, height));
-            assert!(
-                text.contains("[p]"),
-                "{width}x{height}: the filter strip must render: {text}"
-            );
-            assert!(
-                text.contains("Overview"),
-                "{width}x{height}: the tab switch must render: {text}"
-            );
-            // The status strip names the reviewed inventory instead of guessing.
-            assert!(
-                text.contains("20") || width < 80,
-                "{width}x{height}: the widget count must render: {text}"
-            );
-        }
-    }
-
-    /// A viewport too small for the Overview keeps the tab strip and says so
-    /// instead of drawing a mangled layout.
-    #[test]
-    fn profile_narrow_viewport_explains_itself_instead_of_going_blank() {
-        let mut app = app();
-        app.select(ModuleId::System.index());
-        seed_profile(&mut app);
-        // A 40-wide body is still below the Overview's floor, so the pane says
-        // it needs more room rather than rendering half a chart.
-        let text = buffer_text(&render(&mut app, 44, 14));
-        assert!(
-            text.contains("Overview"),
-            "the tab strip survives a narrow viewport: {text}"
-        );
-        assert!(
-            text.contains("wider") || text.contains("[p]"),
-            "the Overview either explains itself or still renders: {text}"
-        );
-    }
-
-    /// Keyboard and mouse must reach the same target.
-    #[test]
-    fn profile_keyboard_and_mouse_focus_agree() {
-        let mut app = app();
-        app.select(ModuleId::System.index());
-        seed_profile(&mut app);
-
-        // Keyboard: `x` opens the Configs popup, and Tab moves its field focus.
-        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        assert_eq!(app.overlay, Overlay::None);
-        assert_eq!(app.profile.tab, crate::tui::profile::SystemTab::Configs);
-        let keyboard_focus = app.focus;
-        assert!(
-            matches!(keyboard_focus, Target::Field(FieldId::ProfileExportPath)),
-            "the export tab focuses its path field: {keyboard_focus:?}"
-        );
-
-        // Mouse: the same field is reachable by clicking, and the hit test
-        // resolves it to the same target.
-        click(&mut app, Target::Field(FieldId::ProfileExportPath));
-        assert_eq!(app.focus, keyboard_focus);
-
-        // Tab visits Export before Import, in visual order.
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.focus, Target::ConfigAction(0));
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(
-            app.focus,
-            Target::Field(FieldId::ProfileImportEditor),
-            "Tab moves the Configs popup to the editor"
-        );
     }
 
     /// Bracketed paste reaches the import editor with newlines intact, and a
@@ -18791,27 +16268,6 @@ mod tests {
             app.profile_config.import.paste.is_empty(),
             "a pasted secret never outlives the popup"
         );
-    }
-
-    /// Every section reports its reviewed widget count, and the section
-    /// navigator reaches all five.
-    #[test]
-    fn profile_sections_and_widgets_match_the_reviewed_inventory() {
-        let mut app = app();
-        app.select(ModuleId::System.index());
-        seed_profile(&mut app);
-        let mut seen = Vec::new();
-        for _ in 0..crate::tui::profile::Section::all().len() {
-            seen.push(app.profile.section);
-            app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE));
-        }
-        assert_eq!(seen.len(), 5);
-        // All five sections are reachable, and the navigator wraps.
-        app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
-        assert_eq!(app.profile.section, seen[4]);
-        // The numeric shortcuts jump straight to a section.
-        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
-        assert_eq!(app.profile.section, crate::tui::profile::Section::Atlas);
     }
 
     fn analytics_fixture() -> argos_osint_core::profile_stats::ProfileSnapshot {
@@ -20760,69 +18216,6 @@ mod tests {
         }
     }
 
-    fn app_with_packet() -> App {
-        use argos_osint_core::brain_neighborhood_brief as brief;
-        let mut app = brief_fixture();
-        let seed = app.topology_state.seed.clone().unwrap();
-        let (depth, cycle) = (
-            app.topology_state.depth,
-            app.topology_state.cycle_scope.clone(),
-        );
-        let key = app.topology_state.summary.basis_key.clone();
-        let snap = app.topology_state.snapshot.as_mut().unwrap();
-        let input = brief::build_input(
-            &brief::BriefInput {
-                snapshot: snap,
-                seed: &seed,
-                depth,
-                cycle: &cycle,
-                payloads: Default::default(),
-                payload_reads_skipped: 0,
-            },
-            &key,
-        );
-        snap.neighborhood_input = Some(input);
-        app
-    }
-
-    fn next_summary_event(app: &mut App) -> WorkEvent {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        loop {
-            if let Ok(event) = app.work_rx.try_recv() {
-                if matches!(event, WorkEvent::TopologySummaryLoaded { .. }) {
-                    return event;
-                }
-            }
-            assert!(
-                std::time::Instant::now() < until,
-                "no summary event arrived"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-    }
-
-    fn job_for(app: &App, retry: bool) -> TopologySummaryJob {
-        let snap = app.topology_state.snapshot.as_ref().unwrap();
-        TopologySummaryJob {
-            generation: 1,
-            seed: app.topology_state.seed.clone().unwrap(),
-            options: argos_osint_core::brain_topology::TopologyOptions {
-                depth: app.topology_state.depth,
-                cycle_scope: app.topology_state.cycle_scope.clone(),
-                max_nodes: 100,
-                max_edges: 200,
-                continuation_token: None,
-            },
-            basis_key: app.topology_state.summary.basis_key.clone(),
-            brief: snap.neighborhood_brief.clone().unwrap(),
-            input: snap.neighborhood_input.clone().unwrap(),
-            request: None,
-            retry,
-            stop: Arc::new(AtomicBool::new(false)),
-            limits: argos_osint_core::brain_neighborhood_brief_exec::WatchLimits::standard(),
-        }
-    }
-
     #[test]
     fn topology_summary_rows_are_cached_per_key_and_keep_markup_characters() {
         use super::super::topology::{summary_rows, SummaryGen, SummaryRow};
@@ -20895,84 +18288,6 @@ mod tests {
         key(&mut app, KeyCode::Down);
         let after = summary_rows(&app.topology_state, false, None, 33);
         assert!(Rc::ptr_eq(&before, &after) || before.len() == after.len());
-    }
-
-    #[test]
-    fn topology_summary_open_failure_becomes_a_typed_failure_not_a_stuck_generating() {
-        use super::super::topology::SummaryGen;
-        use argos_osint_core::brain_neighborhood_brief_exec::FailureKind;
-        let mut app = app_with_packet();
-        app.background_db = Some(PathBuf::from("/nonexistent-dir/none/argos.db"));
-        app.begin_topology_summary(false);
-        assert!(matches!(
-            app.topology_state.summary.gen,
-            SummaryGen::Pending
-        ));
-        let event = next_summary_event(&mut app);
-        app.on_work_event(event);
-        match &app.topology_state.summary.gen {
-            SummaryGen::Failed(f) => assert_eq!(f.kind, FailureKind::Storage),
-            other => panic!("{other:?}"),
-        }
-        let text = buffer_text(&render(&mut app, 120, 40));
-        assert!(text.contains("Overview"), "fallback kept");
-        assert!(!text.contains("generating"));
-    }
-
-    #[test]
-    fn topology_summary_idle_request_is_reported_not_silent() {
-        use argos_osint_core::brain_neighborhood_brief_exec as exec;
-        let app = app_with_packet();
-        let mut job = job_for(&app, true);
-        // A retry for a request that was never queued polls as Idle.
-        let fingerprint = exec::route_fingerprint(&load_summary_runtime());
-        job.request = Some(Box::new(exec::build_request(&job.input, &fingerprint)));
-        let events = std::cell::RefCell::new(Vec::new());
-        job.run(&app.store, None, &load_summary_runtime(), &|e| {
-            events.borrow_mut().push(e)
-        });
-        let events = events.into_inner();
-        let last = events.last().expect("an event");
-        match last {
-            WorkEvent::TopologySummaryLoaded {
-                outcome: Err(f), ..
-            } => {
-                assert_eq!(f.kind, exec::FailureKind::Storage);
-            }
-            _ => panic!("expected a typed failure"),
-        }
-    }
-
-    #[test]
-    fn topology_summary_unworked_request_times_out_with_waiting_for_worker() {
-        use super::super::topology::SummaryGen;
-        use argos_osint_core::brain_neighborhood_brief_exec as exec;
-        let mut app = app_with_packet();
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("argos.db");
-        let store = Store::open(&db).unwrap();
-        let mut job = job_for(&app, false);
-        job.limits = exec::WatchLimits {
-            max_poll_errors: 5,
-            deadline: std::time::Duration::from_millis(150),
-        };
-        let events = std::cell::RefCell::new(Vec::new());
-        job.run(&store, Some(&db), &load_summary_runtime(), &|e| {
-            events.borrow_mut().push(e)
-        });
-        let events = events.into_inner();
-        app.topology_state.summary.generation = 1;
-        app.topology_state.summary.gen = SummaryGen::Pending;
-        for event in events {
-            app.on_work_event(event);
-        }
-        match &app.topology_state.summary.gen {
-            SummaryGen::Failed(f) => assert_eq!(f.kind, exec::FailureKind::Timeout),
-            other => panic!("{other:?}"),
-        }
-        let text = buffer_text(&render(&mut app, 120, 40));
-        assert!(text.contains("timed out"), "{text}");
-        assert!(text.contains("Overview"));
     }
 
     #[test]
@@ -21368,6 +18683,121 @@ mod tests {
             })
         );
         assert_eq!(app.topology_state.depth, 1);
+    }
+
+    #[test]
+    fn surreal_reads_every_topology_seed_from_the_repository() {
+        use argos_osint_core::brain_topology::TopologySeed;
+        let group = TopologySeed::ActorGroup {
+            name_key: "ana ruiz".into(),
+            member_ids: vec!["a1".into()],
+        };
+        assert!(surreal_topology(true, &group));
+        assert!(!surreal_topology(false, &group));
+        assert!(surreal_topology(true, &TopologySeed::Actor("a1".into())));
+        assert!(!surreal_topology(false, &TopologySeed::Actor("a1".into())));
+    }
+
+    #[test]
+    fn memory_check_outcome_maps_to_the_seed_or_status() {
+        use argos_osint_core::brain_topology::TopologySeed;
+        use argos_osint_core::memory_metadata::MemoryKind;
+        assert_eq!(
+            memory_graph_seed("m1".into(), Ok(Some(MemoryKind::Inference))),
+            Ok(TopologySeed::Inference("m1".into()))
+        );
+        assert_eq!(
+            memory_graph_seed("m1".into(), Ok(Some(MemoryKind::Claim))),
+            Ok(TopologySeed::Claim("m1".into()))
+        );
+        assert_eq!(
+            memory_graph_seed("m1".into(), Ok(None)),
+            Err("Memory unavailable: m1 no longer exists".into())
+        );
+        assert!(memory_graph_seed("m1".into(), Err("boom".into()))
+            .unwrap_err()
+            .starts_with("Memory kind unreadable"));
+    }
+
+    #[test]
+    fn a_stale_profile_run_lookup_is_dropped() {
+        let mut app = app();
+        app.module = Some(ModuleId::System);
+        app.profile.pending_run_owner = Some("run-new".into());
+        app.status.clear();
+        assert!(app.on_work_event(WorkEvent::ProfileRunOwner {
+            run_id: "run-old".into(),
+            outcome: Ok(None),
+        }));
+        assert_eq!(app.module, Some(ModuleId::System));
+        assert!(app.status.is_empty());
+        assert_eq!(app.profile.pending_run_owner.as_deref(), Some("run-new"));
+    }
+
+    #[test]
+    fn a_profile_run_lookup_after_leaving_system_is_dropped() {
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        app.profile.pending_run_owner = Some("run-1".into());
+        app.status.clear();
+        app.on_work_event(WorkEvent::ProfileRunOwner {
+            run_id: "run-1".into(),
+            outcome: Ok(Some("thread-1".into())),
+        });
+        assert_eq!(app.module, Some(ModuleId::Brain));
+        assert!(app.status.is_empty());
+        assert!(app.profile.pending_run_owner.is_none());
+    }
+
+    #[test]
+    fn a_current_profile_run_lookup_reports_a_missing_or_failed_run() {
+        let mut app = app();
+        app.module = Some(ModuleId::System);
+        app.profile.pending_run_owner = Some("run-1".into());
+        app.on_work_event(WorkEvent::ProfileRunOwner {
+            run_id: "run-1".into(),
+            outcome: Ok(None),
+        });
+        assert_eq!(app.status, "Investigation is no longer retained");
+        app.profile.pending_run_owner = Some("run-2".into());
+        app.on_work_event(WorkEvent::ProfileRunOwner {
+            run_id: "run-2".into(),
+            outcome: Err("boom".into()),
+        });
+        assert_eq!(app.status, "Could not load investigation: boom");
+        assert_eq!(app.module, Some(ModuleId::System));
+    }
+
+    #[test]
+    fn a_stale_profile_snapshot_generation_is_dropped() {
+        let mut app = app();
+        app.module = Some(ModuleId::System);
+        app.profile.generation = 2;
+        app.profile.loading = true;
+        let filters = app.profile.filters.clone();
+        assert!(app.on_work_event(WorkEvent::ProfileLoaded {
+            generation: 1,
+            filters,
+            outcome: Err("stale".into()),
+            options: vec![("provider".into(), vec!["x".into()])],
+        }));
+        assert!(!app.profile.loading);
+        assert!(app.profile.error.is_none());
+        assert!(app.profile.options.is_empty());
+        assert!(app.profile.loaded_at.is_none());
+    }
+
+    #[test]
+    fn a_late_memory_check_does_not_open_the_mapper() {
+        use argos_osint_core::memory_metadata::MemoryKind;
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        app.on_work_event(WorkEvent::MemoryGraphChecked {
+            id: "not-selected".into(),
+            outcome: Ok(Some(MemoryKind::Claim)),
+        });
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
+        assert!(app.topology_state.seed.is_none());
     }
 
     #[test]

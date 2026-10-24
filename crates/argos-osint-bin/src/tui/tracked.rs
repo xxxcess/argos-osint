@@ -20,7 +20,8 @@ fn db() -> Option<std::path::PathBuf> {
     }
     #[cfg(not(test))]
     {
-        Some(argos_osint_core::paths::db_path())
+        // Under a storage config the SQLite job registry is not opened.
+        (!super::surreal_brain::on()).then(argos_osint_core::paths::db_path)
     }
 }
 

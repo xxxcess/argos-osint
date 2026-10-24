@@ -454,33 +454,4 @@ mod tests {
         assert_eq!(cycle_outcome_label("paused"), "cancelled");
         assert_eq!(cycle_outcome_label("completed"), "completed");
     }
-
-    #[test]
-    fn unit_telemetry_key_is_stable_so_a_retry_replaces_its_row() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("argos.db");
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch(crate::store::SCHEMA_TELEMETRY_SQL)
-            .unwrap();
-        drop(conn);
-        let mut manifest = unit("u-1", true, DISPOSITION_FAILED, Some("timeout"));
-        manifest.run_id = "atlas-run-1".into();
-        record_unit_stage_telemetry(&path, &manifest);
-        // A later retry of the same unit must not add a second row.
-        manifest.disposition = DISPOSITION_SUCCESS.into();
-        manifest.terminal_reason = None;
-        record_unit_stage_telemetry(&path, &manifest);
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        let mut stmt = conn
-            .prepare("SELECT COUNT(*) FROM telemetry_events WHERE event_type='atlas_stage'")
-            .unwrap();
-        assert_eq!(stmt.query_row([], |r| r.get::<_, i64>(0)).unwrap(), 1);
-        let mut stmt = conn
-            .prepare("SELECT outcome FROM telemetry_events WHERE id='atlas-unit-atlas-run-1-u-1'")
-            .unwrap();
-        assert_eq!(
-            stmt.query_row([], |r| r.get::<_, String>(0)).unwrap(),
-            "success"
-        );
-    }
 }

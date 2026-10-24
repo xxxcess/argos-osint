@@ -36,7 +36,6 @@ async fn publications_keep_the_newest_generation_and_other_stages() {
         return;
     };
     let repo = server.repo("argos", "brief_pub").await;
-    brief::apply_schema(&repo).await.unwrap();
     assert!(brief::published_brief(&repo, "a1").await.unwrap().is_none());
     assert!(
         brief::publish(&repo, &publication("j1", 1, Stage::Claims, "First"))
@@ -70,7 +69,6 @@ async fn retained_seeds_are_fenced_by_job_run_and_item() {
         return;
     };
     let repo = server.repo("argos", "brief_seed").await;
-    brief::apply_schema(&repo).await.unwrap();
     let db = repo.db().clone();
     atlas::insert_run(&db, "r1", "{}", "{}").await.unwrap();
     atlas::upsert_article(
@@ -193,7 +191,6 @@ async fn canonical_state_prefers_article_then_stage_receipt() {
         return;
     };
     let repo = server.repo("argos", "brief_receipts").await;
-    brief::apply_schema(&repo).await.unwrap();
 
     assert!(brief::retained_canonical_state(&repo, "a1", "j1", "claim")
         .await
@@ -240,7 +237,6 @@ async fn leads_are_replaced_per_article() {
         return;
     };
     let repo = server.repo("argos", "brief_leads").await;
-    brief::apply_schema(&repo).await.unwrap();
     let lead = |id: &str| brief::Lead {
         id: id.into(),
         inference_id: "i1".into(),

@@ -49,7 +49,6 @@ async fn checkpoints_reuse_and_fence() {
         return;
     };
     let repo = server.repo("argos", "pipeline_exec").await;
-    apply_schema(&repo).await.unwrap();
     let first = input("recon", "run-1", 1);
 
     assert_eq!(checkpoint(&repo, "k1").await.unwrap(), None);

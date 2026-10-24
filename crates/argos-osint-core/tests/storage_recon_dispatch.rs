@@ -182,11 +182,8 @@ async fn sqlite_and_surreal_dispatch_agree() {
     assert_eq!(ua.0.as_deref(), Some("true"));
     assert_eq!((ua.1.as_str(), ua.2, ua.3), ("half typed", 7, 1));
     assert!(ua.5 && ua.6);
-    let err = surreal.delete_thread("missing", true).await.unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        "deleting a thread with its insights is not on SurrealDB yet"
-    );
+    // Deleting with insights is ported (18f6b74): a missing thread is false.
+    assert!(!surreal.delete_thread("missing", true).await.unwrap());
     assert_eq!(a.roles, ["user", "assistant"]);
     assert_eq!(a.statuses, ["completed", "interrupted"]);
     assert!(a.evidence == ["call:<done>"], "{:?}", a.evidence);

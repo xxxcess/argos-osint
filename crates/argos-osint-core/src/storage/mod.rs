@@ -77,6 +77,7 @@ pub mod refresh_exec;
 pub mod repo;
 pub mod runtime;
 pub mod server;
+pub mod store_bridge;
 pub mod summaries;
 pub mod summary_flush;
 pub mod telemetry;

@@ -481,6 +481,10 @@ impl Store {
 
     /// Durable memories-changed counter (committed changes only).
     pub fn memories_changed_seq(&self) -> Result<i64> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::memories_changed_seq();
+        }
         Ok(self
             .conn
             .query_row(
@@ -496,6 +500,10 @@ impl Store {
     /// outbox tasks and acknowledges them through the same typed path. Returns
     /// the outcomes of tasks this call could claim (others are left to the pool).
     pub fn index_now(&self, queued: &[IndexEnqueue]) -> Vec<IndexOutcome> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::index_now(queued);
+        }
         if queued.is_empty() || self.vectors.is_none() || !self.conn.is_autocommit() {
             return Vec::new();
         }
@@ -567,6 +575,10 @@ impl Store {
     /// newest text instead of acknowledging stale content. `expected` may be
     /// older than the current revision: a newer indexed revision supersedes it.
     pub fn try_index_memory(&self, memory_id: &str, expected: &str) -> IndexOutcome {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::try_index_upsert(&[memory_id.to_string()]);
+        }
         let _ = expected;
         if let Some(outcome) = self.index_unavailable() {
             return outcome;
@@ -676,6 +688,10 @@ impl Store {
     /// recorded as indexed **and** the id must be present in the serving index.
     /// Never inferred from top-k similarity.
     pub fn verify_memory_coverage(&self, ids: &[String]) -> Result<CoverageReport> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::verify_memory_coverage(ids);
+        }
         let unique: Vec<String> = ids
             .iter()
             .cloned()
@@ -734,6 +750,10 @@ impl Store {
         report: &CoverageReport,
         parent_job: Option<&str>,
     ) -> Result<Vec<IndexEnqueue>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::requeue_uncovered(report);
+        }
         let ids: Vec<String> = report.pending.iter().map(|(id, _)| id.clone()).collect();
         if ids.is_empty() || report.disabled {
             return Ok(Vec::new());
@@ -760,6 +780,12 @@ impl Store {
         brief: &str,
         options: &PublishOptions,
     ) -> Result<PublicationReceipt> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::publish_atlas_insights(
+                run_id, claims, relations, brief, options,
+            );
+        }
         let revision = options
             .revision
             .clone()
@@ -1068,6 +1094,10 @@ impl Store {
 
     /// Latest stored receipt for a run (resume after restart).
     pub fn atlas_publication_receipt(&self, run_id: &str) -> Result<Option<PublicationReceipt>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_publication_receipt(run_id);
+        }
         let json: Option<String> = self
             .conn
             .query_row(
@@ -1087,6 +1117,10 @@ impl Store {
         &self,
         receipt: &PublicationReceipt,
     ) -> Result<PublicationVerification> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::verify_atlas_publication(receipt);
+        }
         let answer_id = atlas_answer_id(&receipt.run_id);
         let mut out = PublicationVerification {
             brief_ok: true,
@@ -1143,6 +1177,10 @@ impl Store {
     /// Record a user-deletion tombstone for a memory (and its claim fingerprint,
     /// with the cycles it was linked to) inside the caller's transaction.
     pub(crate) fn tombstone_memory(&self, memory_id: &str, reason: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::tombstone_memory(memory_id, reason);
+        }
         let now = chrono::Utc::now().to_rfc3339();
         let fingerprints: Vec<String> = {
             let mut stmt = self
@@ -1179,6 +1217,10 @@ impl Store {
 
     /// True when a tombstone suppresses this memory id.
     pub fn is_tombstoned(&self, memory_id: &str) -> Result<bool> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::is_tombstoned(memory_id);
+        }
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM argos_memory_tombstones WHERE memory_id=?1",
             [memory_id],

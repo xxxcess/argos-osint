@@ -231,6 +231,10 @@ impl Store {
     /// Typed Brain insight kind (`claim` = source claim, `inference`) from the
     /// canonical derivation row, newest first; `None` for untyped memories.
     pub fn memory_insight_kind(&self, memory_id: &str) -> Option<String> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::memory_insight_kind(memory_id);
+        }
         self.conn
             .query_row(
                 "SELECT d.insight_kind FROM insight_derivations d WHERE d.memory_id=?1 ORDER BY d.rowid DESC LIMIT 1",
@@ -312,6 +316,15 @@ impl Store {
             conn: Connection::open_in_memory()?,
             vectors: None,
         };
+        // Under a SurrealDB storage config every frozen `Store` method
+        // dispatches to `storage::{brain_store, store_bridge}`, so the SQLite
+        // handle is an unused, schema-less placeholder: no argos.db, no
+        // migrations, no vector index. The field itself goes away with the
+        // `feat!` removal commit.
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return Ok(store);
+        }
         store.ensure_schema()?;
         Ok(store)
     }
@@ -1299,6 +1312,10 @@ impl Store {
     /// sync barrier. Incremental id reconciliation still runs when the serving
     /// generation is compatible.
     pub fn ensure_memory_vectors(&self) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::ensure_memory_vectors();
+        }
         let index = self.vectors.as_deref().ok_or_else(|| {
             anyhow::anyhow!("Brain vectors are off (ARGOS_EMBED=0 or in-memory store)")
         })?;
@@ -1367,6 +1384,12 @@ impl Store {
 
     /// Count user-edited insight memories linked to one Atlas article.
     pub fn article_insight_user_edit_count(&self, run_id: &str, article_id: &str) -> Result<usize> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::article_insight_user_edit_count(
+                run_id, article_id,
+            );
+        }
         let answer_id = atlas_answer_id(run_id);
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(DISTINCT c.memory_id)
@@ -1390,6 +1413,12 @@ impl Store {
         claims: &[AtlasInsightClaim],
         relations: &[(String, String, String)],
     ) -> Result<ArticleInsightCommit> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::commit_article_insight_replacement(
+                run_id, article_id, claims, relations,
+            );
+        }
         let answer_id = atlas_answer_id(run_id);
         let now = chrono::Utc::now().to_rfc3339();
         let fingerprints: Vec<String> = {
@@ -1579,6 +1608,10 @@ impl Store {
     /// Drops and rebuilds the Lance table from every memory, then writes the
     /// fingerprint. Backs `argos memories reindex`.
     pub fn reindex_memory_vectors(&self) -> Result<ReindexReport> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::reindex_memory_vectors();
+        }
         let index = self.vectors.as_deref().ok_or_else(|| {
             anyhow::anyhow!("Brain vectors are off (ARGOS_EMBED=0); nothing to reindex")
         })?;
@@ -1612,6 +1645,10 @@ impl Store {
 
     /// Drain pending generation rebuild work in bounded batches (off the TUI path).
     pub fn process_pending_vector_rebuild(&self, max_batches: usize) -> Result<usize> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::process_pending_vector_rebuild(max_batches);
+        }
         let index = self
             .vectors
             .as_deref()
@@ -1649,6 +1686,10 @@ impl Store {
     /// memory row means the memory was deleted, so its vector is removed instead
     /// of resurrected.
     pub fn try_index_upsert(&self, ids: &[String]) -> crate::tasks::IndexOutcome {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::try_index_upsert(ids);
+        }
         use crate::tasks::IndexOutcome;
         let mut last = IndexOutcome::Ready {
             revision: String::new(),
@@ -1667,6 +1708,10 @@ impl Store {
 
     /// Typed removal of vectors whose memories are gone from SQLite.
     pub fn try_index_remove_missing(&self, ids: &[String]) -> crate::tasks::IndexOutcome {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::try_index_remove_missing(ids);
+        }
         use crate::tasks::IndexOutcome;
         if let Some(outcome) = self.index_unavailable() {
             return outcome;
@@ -1711,6 +1756,10 @@ impl Store {
     /// Drain generation rebuild batches with a typed outcome: a batch is
     /// progress (`Pending`), only an activated (or absent) generation is `Ready`.
     pub fn try_process_vector_rebuild(&self, max_batches: usize) -> crate::tasks::IndexOutcome {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::try_process_vector_rebuild(max_batches);
+        }
         use crate::tasks::IndexOutcome;
         if let Some(outcome) = self.index_unavailable() {
             return outcome;
@@ -1928,6 +1977,10 @@ impl Store {
     }
 
     pub fn atlas_insert_run(&self, id: &str, cursor_json: &str, stats_json: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_insert_run(id, cursor_json, stats_json);
+        }
         self.conn.execute(
             "INSERT INTO atlas_runs (id, state, phase, cursor_json, stats_json, note, started_at, finished_at)
              VALUES (?1, 'running', 1, ?2, ?3, '', ?4, '')",
@@ -1937,6 +1990,10 @@ impl Store {
     }
 
     pub fn atlas_save(&self, id: &str, cursor_json: &str, stats_json: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_save(id, cursor_json, stats_json);
+        }
         let phase = serde_json::from_str::<serde_json::Value>(cursor_json)
             .ok()
             .and_then(|value| value.get("phase").and_then(|phase| phase.as_i64()))
@@ -1952,6 +2009,10 @@ impl Store {
         &self,
         manifest: &crate::atlas_work::UnitManifest,
     ) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_save_unit_manifest(manifest);
+        }
         self.conn.execute(
             "INSERT OR REPLACE INTO atlas_work_units (
                 run_id, unit_id, stage, input_ids, input_rev, contract_version,
@@ -2013,6 +2074,10 @@ impl Store {
         run_id: &str,
         stage: i32,
     ) -> Result<Vec<crate::atlas_work::UnitManifest>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_get_unit_manifests(run_id, stage);
+        }
         let mut stmt = self.conn.prepare(
             "SELECT unit_id, stage, input_ids, input_rev, contract_version, dependency_ids, is_required, output_refs, effective_model, attempt_history, next_eligible_at, terminal_reason, output_json, disposition, receipt_json
              FROM atlas_work_units WHERE run_id = ?1 AND stage = ?2"
@@ -2031,6 +2096,10 @@ impl Store {
         &self,
         run_id: &str,
     ) -> Result<Vec<crate::atlas_work::UnitManifest>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_get_all_unit_manifests(run_id);
+        }
         let mut stmt = self.conn.prepare(
             "SELECT unit_id, stage, input_ids, input_rev, contract_version, dependency_ids, is_required, output_refs, effective_model, attempt_history, next_eligible_at, terminal_reason, output_json, disposition, receipt_json
              FROM atlas_work_units WHERE run_id = ?1 ORDER BY stage, unit_id"
@@ -2045,6 +2114,10 @@ impl Store {
         Ok(manifests)
     }
     pub fn atlas_set_state(&self, id: &str, state: &str, note: &str, finished: bool) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_set_state(id, state, note, finished);
+        }
         let finished_at = if finished {
             chrono::Utc::now().to_rfc3339()
         } else {
@@ -2058,10 +2131,18 @@ impl Store {
     }
 
     pub fn atlas_latest_run(&self) -> Result<Option<AtlasRunRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_latest_run();
+        }
         Ok(self.atlas_list_runs()?.into_iter().next())
     }
 
     pub fn atlas_list_runs(&self) -> Result<Vec<AtlasRunRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_list_runs();
+        }
         let mut stmt = self.conn.prepare(
             "SELECT id, state, phase, cursor_json, stats_json, note, started_at, finished_at
              FROM atlas_runs ORDER BY started_at DESC",
@@ -2093,15 +2174,27 @@ impl Store {
         period: &profile_stats::Period,
         filters: &profile_stats::StatFilters,
     ) -> anyhow::Result<profile_stats::ProfileSnapshot> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::profile_snapshot(period, filters);
+        }
         profile_stats::snapshot(&self.conn, period, filters, chrono::Utc::now())
     }
 
     /// The bounded filter option lists for the Profile filter strip.
     pub fn profile_filter_options(&self) -> Vec<(String, Vec<String>)> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::profile_filter_options();
+        }
         profile_stats::filter_options(&self.conn)
     }
 
     pub fn atlas_delete_run(&self, id: &str) -> Result<bool> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_delete_run(id);
+        }
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<bool> {
             self.delete_cycle_memories(id)?;
@@ -2145,6 +2238,10 @@ impl Store {
     /// no longer have any source. Fingerprints still linked from other articles/cycles keep
     /// their claim and memory.
     pub fn delete_article_insights(&self, run_id: &str, article_id: &str) -> Result<usize> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::delete_article_insights(run_id, article_id);
+        }
         let answer_id = atlas_answer_id(run_id);
         let fingerprints: Vec<String> = {
             let mut stmt = self.conn.prepare(
@@ -2231,6 +2328,10 @@ impl Store {
     /// Drops Brain memories written from one Atlas cycle.
     /// A claim that another cycle also sourced keeps its memory and loses only this cycle's source row.
     pub fn delete_cycle_memories(&self, run_id: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::delete_cycle_memories(run_id);
+        }
         let answer_id = atlas_answer_id(run_id);
         // A repeated article remains a live origin after one cycle is removed.
         // Move legacy source pointers before pruning this cycle's contributions.
@@ -2305,6 +2406,10 @@ impl Store {
     }
 
     pub fn atlas_upsert_article(&self, row: &AtlasArticleRow) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_upsert_article(row);
+        }
         self.conn.execute(
             "INSERT INTO atlas_articles (
                 run_id, article_id, title, description, url, country, source_name, source_domain,
@@ -2346,6 +2451,10 @@ impl Store {
     }
 
     pub fn atlas_delete_article(&self, run_id: &str, article_id: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_delete_article(run_id, article_id);
+        }
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<()> {
             crate::nlp::cache::remove_owner(&self.conn, "article", article_id)?;
@@ -2369,6 +2478,10 @@ impl Store {
     }
 
     pub fn atlas_set_category(&self, run_id: &str, article_id: &str, category: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_set_category(run_id, article_id, category);
+        }
         self.conn.execute(
             "UPDATE atlas_articles SET category=?3 WHERE run_id=?1 AND article_id=?2",
             params![run_id, article_id, category],
@@ -2377,6 +2490,10 @@ impl Store {
     }
 
     pub fn atlas_list_articles(&self, run_id: &str) -> Result<Vec<AtlasArticleRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_list_articles(run_id);
+        }
         let mut stmt = self.conn.prepare(
             "SELECT run_id, article_id, title, description, url, country, source_name, source_domain,
                     published_at, provider, temperature, category, seen_at, author, image_url
@@ -2389,6 +2506,10 @@ impl Store {
     /// Every stored article still within the retention window (prune drops older runs).
     /// Used to seed Atlas dedup so a new cycle skips headlines already processed.
     pub fn atlas_recent_articles(&self) -> Result<Vec<AtlasArticleRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_recent_articles();
+        }
         let mut stmt = self.conn.prepare(
             "SELECT run_id, article_id, title, description, url, country, source_name, source_domain,
                     published_at, provider, temperature, category, seen_at, author, image_url
@@ -2400,6 +2521,10 @@ impl Store {
     }
 
     pub fn atlas_article(&self, run_id: &str, article_id: &str) -> Result<Option<AtlasArticleRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_article(run_id, article_id);
+        }
         Ok(self
             .conn
             .query_row(
@@ -2415,11 +2540,19 @@ impl Store {
     /// Latest retained occurrence of one article, without decoding the whole
     /// retained corpus just to open a headline.
     pub fn atlas_latest_article_by_id(&self, article_id: &str) -> Result<Option<AtlasArticleRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_latest_article_by_id(article_id);
+        }
         Ok(self.conn.query_row("SELECT run_id,article_id,title,description,url,country,source_name,source_domain,published_at,provider,temperature,category,seen_at,author,image_url FROM atlas_articles WHERE article_id=?1 ORDER BY seen_at DESC LIMIT 1", [article_id], atlas_article_from_row).optional()?)
     }
 
     /// Distinct UTC calendar days (`YYYY-MM-DD`) that have an Atlas run, newest first.
     pub fn atlas_run_days(&self) -> Result<Vec<String>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_run_days();
+        }
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT substr(started_at, 1, 10) AS day
              FROM atlas_runs
@@ -2437,6 +2570,10 @@ impl Store {
         day: &str,
         query: &str,
     ) -> Result<Vec<AtlasArticleRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_articles_for_intel(category, day, query);
+        }
         let q = query.trim();
         let like = if q.is_empty() {
             String::new()
@@ -2485,6 +2622,10 @@ impl Store {
         run_id: &str,
         article_id: &str,
     ) -> Result<Vec<AtlasArticleClaim>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_claims_for_article(run_id, article_id);
+        }
         if let Some(rows) =
             crate::investigation::insight_persist::article_claim_rows(&self.conn, article_id)?
         {
@@ -2535,6 +2676,13 @@ impl Store {
         article_id: &str,
         explanations: &HashMap<(String, String), String>,
     ) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::save_intel_link_explanations(
+                article_id,
+                explanations,
+            );
+        }
         if explanations.is_empty() {
             return Ok(());
         }
@@ -2557,6 +2705,10 @@ impl Store {
         &self,
         article_id: &str,
     ) -> Result<HashMap<(String, String), String>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::get_intel_link_explanations(article_id);
+        }
         let active:Option<String>=self.conn.query_row("SELECT active_snapshot_id FROM insight_owner_state WHERE owner_kind='article' AND owner_id=?1 AND active_snapshot_id<>''",[article_id],|r|r.get(0)).optional()?;
         if let Some(active) = active {
             let mut stmt=self.conn.prepare("SELECT left_id,right_id,relation,rationale,status FROM insight_derivation_links WHERE snapshot_id=?1 ORDER BY id")?;
@@ -2599,6 +2751,10 @@ impl Store {
 
     /// Deletes persisted link explanations for an article.
     pub fn delete_intel_link_explanations(&self, article_id: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::delete_intel_link_explanations(article_id);
+        }
         self.conn.execute(
             "DELETE FROM intel_link_explanations WHERE article_id = ?1",
             [article_id],
@@ -2608,6 +2764,10 @@ impl Store {
 
     /// A run left `running` by a closed process can be resumed.
     pub fn atlas_park_running(&self) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_park_running();
+        }
         self.conn.execute(
             "UPDATE atlas_runs SET state='paused', note='Paused' WHERE state='running'",
             [],
@@ -2616,6 +2776,10 @@ impl Store {
     }
 
     pub fn atlas_quota_used(&self, provider: &str, day: &str) -> Result<u32> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_quota_used(provider, day);
+        }
         let used: Option<i64> = self
             .conn
             .query_row(
@@ -2628,6 +2792,10 @@ impl Store {
     }
 
     pub fn atlas_quota_bump(&self, provider: &str, day: &str) -> Result<u32> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_quota_bump(provider, day);
+        }
         self.conn.execute(
             "INSERT INTO atlas_quota (provider, day, used) VALUES (?1, ?2, 1)
              ON CONFLICT(provider, day) DO UPDATE SET used = used + 1",
@@ -2637,6 +2805,10 @@ impl Store {
     }
 
     pub fn app_state_get(&self, key: &str) -> Result<Option<String>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::app_state_get(key);
+        }
         let value: Option<String> = self
             .conn
             .query_row("SELECT value FROM app_state WHERE key=?1", [key], |row| {
@@ -2647,6 +2819,10 @@ impl Store {
     }
 
     pub fn app_state_set(&self, key: &str, value: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::app_state_set(key, value);
+        }
         self.conn.execute(
             "INSERT INTO app_state(key,value) VALUES (?1,?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -2657,6 +2833,10 @@ impl Store {
 
     /// Unix time of the next automatic Atlas run. Absent means auto run is off.
     pub fn atlas_auto_next(&self) -> Result<Option<u64>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_auto_next();
+        }
         let value: Option<String> = self
             .conn
             .query_row(
@@ -2669,6 +2849,10 @@ impl Store {
     }
 
     pub fn set_atlas_auto_next(&self, when: Option<u64>) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::set_atlas_auto_next(when);
+        }
         match when {
             Some(secs) => {
                 self.conn.execute(
@@ -2688,6 +2872,10 @@ impl Store {
     /// Drops finished runs that started more than 36 hours ago, including their
     /// statistics and articles. Runs that are still running or paused stay so they can resume.
     pub fn atlas_prune_expired(&self) -> Result<Vec<String>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_prune_expired();
+        }
         let cutoff = (chrono::Utc::now() - chrono::Duration::hours(36)).to_rfc3339();
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<Vec<String>> {
@@ -2764,6 +2952,10 @@ impl Store {
 
     /// True when this Atlas run already wrote insight sources. A resume skips the model.
     pub fn atlas_has_insights(&self, run_id: &str) -> Result<bool> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_has_insights(run_id);
+        }
         let answer_id = atlas_answer_id(run_id);
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM insight_sources WHERE run_id=?1 AND answer_id=?2",
@@ -2775,6 +2967,10 @@ impl Store {
 
     /// Claims whose sources point at this Atlas run.
     pub fn atlas_stored_claims(&self, run_id: &str) -> Result<Vec<AtlasStoredClaim>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::atlas_stored_claims(run_id);
+        }
         let answer_id = atlas_answer_id(run_id);
         let mut stmt = self.conn.prepare(
             "SELECT c.fingerprint, c.entity_id, c.predicate, c.object_value, c.topic, c.classification,
@@ -2806,6 +3002,10 @@ impl Store {
         &self,
         fingerprints: &[String],
     ) -> Result<Vec<(String, String, String)>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::insight_relations_among(fingerprints);
+        }
         if fingerprints.is_empty() {
             return Ok(Vec::new());
         }

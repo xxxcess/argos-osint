@@ -16,12 +16,20 @@ use rusqlite::{params, OptionalExtension};
 use super::insights::PipelineInput;
 
 pub(crate) enum ExecStore {
-    Sqlite(crate::store::Store),
+    /// Behind a mutex so `&ExecStore` is `Sync` and the async methods
+    /// stay `Send` for spawned pipelines; SQLite arms never await.
+    Sqlite(std::sync::Mutex<crate::store::Store>),
     #[cfg(feature = "surreal")]
     Surreal(crate::storage::repo::Repository),
 }
 
 /// A stored stage checkpoint: (state, output_json, error).
+fn lock(
+    m: &std::sync::Mutex<crate::store::Store>,
+) -> std::sync::MutexGuard<'_, crate::store::Store> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub(crate) type Saved = (String, String, String);
 
 impl ExecStore {
@@ -31,7 +39,9 @@ impl ExecStore {
         if crate::recon::backend::surreal_selected() {
             return Ok(Self::Surreal(crate::storage::runtime::repository().await?));
         }
-        Ok(Self::Sqlite(crate::store::Store::open(db_path)?))
+        Ok(Self::Sqlite(std::sync::Mutex::new(
+            crate::store::Store::open(db_path)?,
+        )))
     }
 
     /// The SQLite path model execution and decisions write telemetry to;
@@ -44,10 +54,10 @@ impl ExecStore {
         }
     }
 
-    /// The SQLite store, `None` on SurrealDB.
-    pub(crate) fn sqlite(&self) -> Option<&crate::store::Store> {
+    /// Run `f` on the SQLite store, `None` on SurrealDB.
+    pub(crate) fn with_sqlite<R>(&self, f: impl FnOnce(&crate::store::Store) -> R) -> Option<R> {
         match self {
-            Self::Sqlite(store) => Some(store),
+            Self::Sqlite(store) => Some(f(&lock(store))),
             #[cfg(feature = "surreal")]
             Self::Surreal(_) => None,
         }
@@ -55,7 +65,7 @@ impl ExecStore {
 
     pub(crate) async fn validate_dispatch(&self, input: &PipelineInput) -> Result<()> {
         match self {
-            Self::Sqlite(s) => super::insight_persist::validate_dispatch(&s.conn, input),
+            Self::Sqlite(s) => super::insight_persist::validate_dispatch(&lock(s).conn, input),
             #[cfg(feature = "surreal")]
             Self::Surreal(r) => crate::storage::pipeline_exec::validate_dispatch(r, input).await,
         }
@@ -63,7 +73,7 @@ impl ExecStore {
 
     pub(crate) async fn checkpoint(&self, key: &str) -> Result<Option<Saved>> {
         match self {
-            Self::Sqlite(s) => Ok(s
+            Self::Sqlite(s) => Ok(lock(s)
                 .conn
                 .query_row(
                     "SELECT state,output_json,error FROM insight_stage_checkpoints WHERE operation_key=?1",
@@ -80,7 +90,7 @@ impl ExecStore {
 
     pub(crate) async fn record_reuse(&self, key: &str, input: &PipelineInput) -> Result<()> {
         match self {
-            Self::Sqlite(s) => super::insight_execution::record_reuse(&s.conn, key, input),
+            Self::Sqlite(s) => super::insight_execution::record_reuse(&lock(s).conn, key, input),
             #[cfg(feature = "surreal")]
             Self::Surreal(r) => crate::storage::pipeline_exec::record_reuse(r, key, input).await,
         }
@@ -102,7 +112,7 @@ impl ExecStore {
                 } else {
                     "state='running',updated_at=excluded.updated_at"
                 };
-                s.conn.execute(&format!("INSERT INTO insight_stage_checkpoints(operation_key,owner_kind,owner_id,generation,stage,window_id,state,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'running',?7) ON CONFLICT(operation_key) DO UPDATE SET {update}"), params![key,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation,stage,window_id,chrono::Utc::now().to_rfc3339()])?;
+                lock(s).conn.execute(&format!("INSERT INTO insight_stage_checkpoints(operation_key,owner_kind,owner_id,generation,stage,window_id,state,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'running',?7) ON CONFLICT(operation_key) DO UPDATE SET {update}"), params![key,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation,stage,window_id,chrono::Utc::now().to_rfc3339()])?;
                 Ok(())
             }
             #[cfg(feature = "surreal")]
@@ -124,7 +134,7 @@ impl ExecStore {
     ) -> Result<()> {
         match self {
             Self::Sqlite(s) => {
-                s.conn.execute("UPDATE insight_stage_checkpoints SET state=?2,output_json=COALESCE(?3,output_json),route_json=COALESCE(?4,route_json),error=?5,updated_at=?6 WHERE operation_key=?1",params![key,state,output,route,error,chrono::Utc::now().to_rfc3339()])?;
+                lock(s).conn.execute("UPDATE insight_stage_checkpoints SET state=?2,output_json=COALESCE(?3,output_json),route_json=COALESCE(?4,route_json),error=?5,updated_at=?6 WHERE operation_key=?1",params![key,state,output,route,error,chrono::Utc::now().to_rfc3339()])?;
                 Ok(())
             }
             #[cfg(feature = "surreal")]
@@ -149,7 +159,7 @@ impl ExecStore {
     ) -> Result<()> {
         match self {
             Self::Sqlite(s) => {
-                s.conn.execute("INSERT INTO insight_stage_checkpoints(operation_key,owner_kind,owner_id,generation,stage,window_id,state,output_json,route_json,error,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(operation_key) DO UPDATE SET state=excluded.state,output_json=excluded.output_json,route_json=excluded.route_json,error=excluded.error,updated_at=excluded.updated_at",params![key,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation,stage,window_id,state,output,route,error,chrono::Utc::now().to_rfc3339()])?;
+                lock(s).conn.execute("INSERT INTO insight_stage_checkpoints(operation_key,owner_kind,owner_id,generation,stage,window_id,state,output_json,route_json,error,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(operation_key) DO UPDATE SET state=excluded.state,output_json=excluded.output_json,route_json=excluded.route_json,error=excluded.error,updated_at=excluded.updated_at",params![key,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation,stage,window_id,state,output,route,error,chrono::Utc::now().to_rfc3339()])?;
                 Ok(())
             }
             #[cfg(feature = "surreal")]
@@ -164,7 +174,7 @@ impl ExecStore {
 
     pub(crate) async fn task_id(&self, input: &PipelineInput) -> Result<String> {
         match self {
-            Self::Sqlite(s) => super::insight_assessment::task_id(&s.conn, input),
+            Self::Sqlite(s) => super::insight_assessment::task_id(&lock(s).conn, input),
             #[cfg(feature = "surreal")]
             Self::Surreal(r) => crate::storage::pipeline_exec::task_id(r, input).await,
         }
@@ -172,14 +182,12 @@ impl ExecStore {
 
     pub(crate) async fn operation_id(&self, task_id: &str, key: &str) -> Result<String> {
         match self {
-            Self::Sqlite(s) => super::insight_execution::operation_id(&s.conn, task_id, key),
+            Self::Sqlite(s) => super::insight_execution::operation_id(&lock(s).conn, task_id, key),
             #[cfg(feature = "surreal")]
             Self::Surreal(r) => crate::storage::pipeline_exec::operation_id(r, task_id, key).await,
         }
     }
 
-    /// The SQLite write runs before the future is built, so the future never
-    /// borrows the `!Sync` connection and stays `Send`.
     pub(crate) fn progress<'a>(
         &self,
         input: &'a PipelineInput,
@@ -189,7 +197,11 @@ impl ExecStore {
     ) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
         let sqlite = match self {
             Self::Sqlite(s) => Some(super::insight_execution::progress(
-                &s.conn, input, stage, windows, withheld,
+                &lock(s).conn,
+                input,
+                stage,
+                windows,
+                withheld,
             )),
             #[cfg(feature = "surreal")]
             Self::Surreal(_) => None,
@@ -226,7 +238,13 @@ impl ExecStore {
     ) -> Result<()> {
         match self {
             Self::Sqlite(s) => super::insight_execution::stage_event(
-                &s.conn, input, task_id, stage, outcome, message, details,
+                &lock(s).conn,
+                input,
+                task_id,
+                stage,
+                outcome,
+                message,
+                details,
             ),
             #[cfg(feature = "surreal")]
             Self::Surreal(_) => {
@@ -268,7 +286,7 @@ impl ExecStore {
     > {
         let mut hits = match self {
             Self::Sqlite(s) => crate::brain_query::recall_candidates_with_limit(
-                s,
+                &lock(s),
                 &input.snapshot.owner_kind,
                 &input.snapshot.owner_id,
                 query,
@@ -298,7 +316,7 @@ impl ExecStore {
         for hit in hits {
             let evidence = match self {
                 Self::Sqlite(s) => {
-                    crate::brain_query::load_memory_evidence(&s.conn, &hit.memory.id)
+                    crate::brain_query::load_memory_evidence(&lock(s).conn, &hit.memory.id)
                 }
                 #[cfg(feature = "surreal")]
                 Self::Surreal(r) => {

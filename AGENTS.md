@@ -19,7 +19,7 @@ Rust OSINT workbench (CLI + TUI) with Recon, Intel, Atlas and Brain pipelines, s
 
 ## Build and test
 
-Rust 1.95.0 pinned; `.cargo/config.toml` uses the vendored `tools/protoc`. Agents always build through `python3 scripts/agent_cargo.py … --locked` (artifacts in `target/agents`; `target/debug` is the user's), with `ARGOS_EMBED` unset and never `--features lancedb`. `cargo fmt` runs directly.
+Rust 1.95.0 pinned. Agents always build through `python3 scripts/agent_cargo.py … --locked` (artifacts in `target/agents`; `target/debug` is the user's), with `ARGOS_EMBED` unset. `cargo fmt` runs directly.
 
 ```sh
 scripts/local_matrix.sh --storage embedded   # fmt → clippy -D warnings → cargo test --workspace → test_surreal.py --mode embedded
@@ -31,7 +31,7 @@ That is the only leg agents run locally; the `server` leg runs in CI only ([docs
 
 - Default features `embedded,nlp`: embedded SurrealDB (RocksDB, in-process) under `<ARGOS_HOME>/storage/surreal`; `ARGOS_HOME` defaults to `~/.argos`.
 - Server mode is opt-in: `--no-default-features --features server,nlp`, selected by `argos storage init --mode server` or `ARGOS_STORAGE_MODE=server|embedded` (env → `storage/config.json` → embedded).
-- SQLite and LanceDB are being removed; don't add new code on them. `scripts/check_storage_deps.py` will guard their absence.
+- Storage is SurrealDB only; don't add another storage engine. `scripts/check_storage_deps.py` will guard this.
 - Storage tests pick their mode from `ARGOS_SURREAL_MODE` and skip without it (and without `ARGOS_SURREAL_BIN`); run them via `test_surreal.py`.
 
 ## Workflow rules

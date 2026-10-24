@@ -55,3 +55,7 @@ protoc-bin-vendored.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+# Thread CPU clock for test budgets that must ignore host scheduling delay.
+libc = "0.2"

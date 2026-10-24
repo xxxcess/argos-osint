@@ -32,6 +32,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Durable jobs | State machine | [jobs-lifecycle.html](diagrams/jobs-lifecycle.html) | [jobs-lifecycle.svg](diagrams/jobs-lifecycle.svg) |
 | Investigation harness | Process | [investigation-harness.html](diagrams/investigation-harness.html) | [investigation-harness.svg](diagrams/investigation-harness.svg) |
 | Agent exploration | Process | [agent-graphify.html](diagrams/agent-graphify.html) | [agent-graphify.svg](diagrams/agent-graphify.svg) |
+| Agent handoffs | Process | [agent-team.html](diagrams/agent-team.html) | [agent-team.svg](diagrams/agent-team.svg) |
 
 ## When to draw
 

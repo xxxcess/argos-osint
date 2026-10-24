@@ -13,7 +13,7 @@ Rust OSINT workbench (CLI + TUI) with Recon, Intel, Atlas and Brain pipelines, s
 
 - [docs/README.md](docs/README.md) index; [architecture](docs/architecture.md), [concepts](docs/concepts.md), [providers](docs/providers.md), [usage](docs/usage.md), [conventions](docs/conventions.md), [versioning](docs/versioning.md), [diagrams](docs/diagrams.md).
 - `.planning/<date-slug>/` — active designs; SurrealDB migration is `.planning/2026-10-22-surrealdb/` (design.md, acceptance.md).
-- `.opencode/skills/` — `argos-plan`, `argos-implement`, `argos-commit`, `argos-tui-verify`, `ecc-*`, `graphify`. Tool allowlist: `.opencode/opencode.json`; see [opencode-v2.md](docs/opencode-v2.md).
+- `.opencode/skills/` — `argos-plan`, `argos-implement`, `argos-commit`, `argos-tui-verify`, `ecc-*`, `graphify`. Tool allowlist: `.opencode/opencode.json`; see [opencode-v2.md](docs/opencode-v2.md). OpenCode roles: `architect` (default; audits/plans), coordinator `coder` (delegates disjoint EDIT_UNIT children, owns authorized commits) and `tester`; nesting depth 3, leaf modes never delegate.
 - If `graphify-out/graph.json` exists, start repo questions with `graphify query` (then `graphify-out/wiki/index.md` or `GRAPH_REPORT.md`).
 - TUI work: [tui-design-spec](docs/tui-design-spec.md), [tui-components](docs/tui-components.md), [tui-verification](docs/tui-verification.md) and the `argos-tui-verify` skill; Profile work also [profile-analytics-dashboard](docs/profile-analytics-dashboard.md). Capture with `scripts/tui_review.py`, scoped to affected views/sizes, and actually inspect the PNGs.
 

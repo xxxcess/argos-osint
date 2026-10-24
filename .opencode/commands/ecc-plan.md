@@ -1,7 +1,6 @@
 ---
 description: Plan a scoped Argos change with evidence and acceptance checks
-agent: ecc-planner
-subagent: true
+agent: architect
 ---
 Plan this Argos work: $ARGUMENTS
 

@@ -1095,6 +1095,21 @@ pub async fn recover_refreshes(
     Ok(completed)
 }
 
+/// [`validate_retry`] on the selected store: under SurrealDB it runs
+/// `storage::insight_retry::validate_retry` and never opens SQLite.
+pub(crate) async fn validate_retry_at(
+    db_path: &std::path::Path,
+    input: &PipelineInput,
+) -> Result<()> {
+    #[cfg(feature = "surreal")]
+    if crate::recon::backend::sqlite_path(db_path).is_none() {
+        let repo = crate::storage::runtime::repository().await?;
+        return crate::storage::insight_retry::validate_retry(repo.db(), input).await;
+    }
+    let store = crate::store::Store::open(db_path)?;
+    validate_retry(&store.conn, input)
+}
+
 pub(super) fn validate_retry(conn: &Connection, input: &PipelineInput) -> Result<()> {
     validate_live_evidence(conn, &input.snapshot)?;
     ensure!(

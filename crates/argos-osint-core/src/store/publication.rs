@@ -17,34 +17,17 @@ use serde::{Deserialize, Serialize};
 
 use super::{atlas_answer_id, atlas_brief_id, new_id, AtlasInsightClaim, Store};
 use crate::brain::MemorySource;
-use crate::brain_lance;
 use crate::tasks::{self, IndexEnqueue, IndexOutcome};
 
 /// Record kind used for memory rows in the index outbox.
 pub const MEMORY_RECORD: &str = "memory";
 /// Revision recorded for removal work of a deleted memory.
 pub const DELETED_REVISION: &str = "deleted";
-const INLINE_LEASE_SECS: i64 = 60;
 
-/// Test-only fault injection: runs right after the Lance write and before the
-/// compare-and-record step of [`Store::try_index_memory`] on this thread.
+/// Test-only fault injection for the publication rollback path.
 #[cfg(test)]
 pub(crate) mod fault {
     use std::cell::RefCell;
-
-    type Hook = Box<dyn Fn(&rusqlite::Connection)>;
-
-    thread_local! {
-        static AFTER_WRITE: RefCell<Option<Hook>> = const { RefCell::new(None) };
-    }
-
-    pub(crate) fn set_after_write(hook: impl Fn(&rusqlite::Connection) + 'static) {
-        AFTER_WRITE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
-    }
-
-    pub(crate) fn clear() {
-        AFTER_WRITE.with(|slot| *slot.borrow_mut() = None);
-    }
 
     thread_local! {
         static FAIL_PUBLISH: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -58,14 +41,6 @@ pub(crate) mod fault {
 
     pub(crate) fn publish_fault() -> Option<String> {
         FAIL_PUBLISH.with(|slot| slot.borrow().clone())
-    }
-
-    pub(crate) fn fire(conn: &rusqlite::Connection) {
-        AFTER_WRITE.with(|slot| {
-            if let Some(hook) = slot.borrow().as_ref() {
-                hook(conn);
-            }
-        });
     }
 }
 
@@ -295,7 +270,8 @@ pub(crate) fn record_index_states(
         conn.execute_batch("BEGIN IMMEDIATE")?;
     }
     let result = (|| -> Result<()> {
-        let fp = brain_lance::current_fingerprint();
+        // No Lance index: SQLite records carry no embedder fingerprint.
+        let fp = String::new();
         for (id, text) in rows {
             record_index_state(conn, id, &memory_revision(text), &fp, generation)?;
         }
@@ -504,51 +480,9 @@ impl Store {
         if crate::storage::store_bridge::on() {
             return crate::storage::store_bridge::index_now(queued);
         }
-        if queued.is_empty() || self.vectors.is_none() || !self.conn.is_autocommit() {
-            return Vec::new();
-        }
-        let owner = format!("inline-{}", crate::scheduler::process_owner());
-        let mut outcomes = Vec::new();
-        let mut seen = HashSet::new();
-        for q in queued {
-            if !seen.insert(q.task_id.clone()) {
-                continue;
-            }
-            let now = chrono::Utc::now().to_rfc3339();
-            let Ok(Some(claimed)) =
-                tasks::claim_task(&self.conn, &q.task_id, &owner, INLINE_LEASE_SECS, &now)
-            else {
-                continue;
-            };
-            let work = match self.conn.query_row(
-                "SELECT seq, task_id, record_kind, record_id, revision, content_hash, operation
-                 FROM argos_index_changes WHERE task_id=?1",
-                [&claimed.id],
-                |r| {
-                    Ok(tasks::IndexWork {
-                        seq: r.get(0)?,
-                        task_id: r.get(1)?,
-                        record_kind: r.get(2)?,
-                        record_id: r.get(3)?,
-                        revision: r.get(4)?,
-                        content_hash: r.get(5)?,
-                        operation: r.get(6)?,
-                    })
-                },
-            ) {
-                Ok(work) => work,
-                Err(_) => continue,
-            };
-            let _ = self.conn.execute(
-                "UPDATE argos_index_changes SET state='running', updated_at=?1 WHERE seq=?2",
-                params![now, work.seq],
-            );
-            let outcome = self.apply_index_work(&work);
-            let done = chrono::Utc::now().to_rfc3339();
-            let _ = tasks::finish_index_work(&self.conn, &claimed, &work, &outcome, &done);
-            outcomes.push(outcome);
-        }
-        outcomes
+        // SQLite has no vector index; SurrealDB indexes inline.
+        let _ = queued;
+        Vec::new()
     }
 
     /// Apply one outbox row with a typed, revision-aware outcome.
@@ -579,108 +513,9 @@ impl Store {
         if crate::storage::store_bridge::on() {
             return crate::storage::store_bridge::try_index_upsert(&[memory_id.to_string()]);
         }
-        let _ = expected;
-        if let Some(outcome) = self.index_unavailable() {
-            return outcome;
-        }
-        if let Some(reason) = self.rebuild_in_progress() {
-            return IndexOutcome::Pending { reason };
-        }
-        let Some(index) = self.vector_index() else {
-            return IndexOutcome::RetryableFailure {
-                message: brain_lance::last_error()
-                    .unwrap_or_else(|| "vector index is not ready".into()),
-            };
-        };
-        let fail = |err: anyhow::Error| {
-            brain_lance::note_error(&err);
-            index.mark_stale();
-            IndexOutcome::RetryableFailure {
-                message: format!("{err:#}"),
-            }
-        };
-        let ids = [memory_id.to_string()];
-        let text = match memory_text(&self.conn, memory_id) {
-            Ok(text) => text,
-            Err(err) => return fail(err),
-        };
-        let Some(text) = text else {
-            return match index.remove_many(&ids) {
-                Ok(()) => {
-                    if let Err(err) = self.reconcile_removed_vectors(&ids) {
-                        return fail(err);
-                    }
-                    IndexOutcome::Ready {
-                        revision: DELETED_REVISION.into(),
-                        fingerprint: brain_lance::current_fingerprint(),
-                        generation: index.serving_table_name(),
-                    }
-                }
-                Err(err) => fail(err),
-            };
-        };
-        let rev = memory_revision(&text);
-        let ready = |rev: String| IndexOutcome::Ready {
-            revision: rev,
-            fingerprint: brain_lance::current_fingerprint(),
-            generation: index.serving_table_name(),
-        };
-        let present = match index.present_ids(&ids) {
-            Ok(present) => present,
-            Err(err) => return fail(err),
-        };
-        if present.contains(memory_id)
-            && indexed_revision(&self.conn, memory_id)
-                .ok()
-                .flatten()
-                .as_deref()
-                == Some(rev.as_str())
-        {
-            return ready(rev);
-        }
-        if let Err(err) = index.upsert_texts(&[(memory_id.to_string(), text)]) {
-            return fail(err);
-        }
-        #[cfg(test)]
-        fault::fire(&self.conn);
-        match index.present_ids(&ids) {
-            Ok(present) if present.contains(memory_id) => {}
-            Ok(_) => {
-                return IndexOutcome::RetryableFailure {
-                    message: format!(
-                        "verification failed: {memory_id} absent from serving index after write"
-                    ),
-                }
-            }
-            Err(err) => return fail(err),
-        }
-        // Compare-and-record: only acknowledge the revision that was written.
-        match memory_text(&self.conn, memory_id) {
-            Ok(Some(now_text)) if memory_revision(&now_text) == rev => {
-                match record_index_state(
-                    &self.conn,
-                    memory_id,
-                    &rev,
-                    &brain_lance::current_fingerprint(),
-                    &index.serving_table_name(),
-                ) {
-                    Ok(()) => ready(rev),
-                    Err(err) => fail(err),
-                }
-            }
-            Ok(Some(_)) => IndexOutcome::Pending {
-                reason: "memory changed during indexing; re-running on the newer revision".into(),
-            },
-            Ok(None) => match index.remove_many(&ids) {
-                Ok(()) => {
-                    if let Err(err) = self.reconcile_removed_vectors(&ids) {
-                        return fail(err);
-                    }
-                    ready(DELETED_REVISION.into())
-                }
-                Err(err) => fail(err),
-            },
-            Err(err) => fail(err),
+        let _ = (memory_id, expected);
+        IndexOutcome::RetryableFailure {
+            message: "semantic indexing requires SurrealDB storage".into(),
         }
     }
 
@@ -709,37 +544,12 @@ impl Store {
                 Some(text) => candidates.push((id.clone(), memory_revision(&text))),
             }
         }
-        let Some(index) = self.vectors.as_deref() else {
-            report.disabled = true;
-            report.pending = candidates
-                .into_iter()
-                .map(|(id, _)| (id, "semantic indexing disabled".to_string()))
-                .collect();
-            return Ok(report);
-        };
-        let present = index.present_ids(
-            &candidates
-                .iter()
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>(),
-        )?;
-        for (id, rev) in candidates {
-            let recorded = indexed_revision(&self.conn, &id)?;
-            match (
-                recorded.as_deref() == Some(rev.as_str()),
-                present.contains(&id),
-            ) {
-                (true, true) => report.indexed.push(id),
-                (true, false) => report.pending.push((
-                    id,
-                    "recorded as indexed but absent from the serving index".into(),
-                )),
-                (false, _) if recorded.is_some() => report
-                    .pending
-                    .push((id, "an older revision is indexed".into())),
-                _ => report.pending.push((id, "not indexed yet".into())),
-            }
-        }
+        // SQLite has no vector index: every live candidate is pending.
+        report.disabled = true;
+        report.pending = candidates
+            .into_iter()
+            .map(|(id, _)| (id, "semantic indexing disabled".to_string()))
+            .collect();
         Ok(report)
     }
 
@@ -1389,340 +1199,6 @@ mod tests {
         assert_eq!(claims, 0);
     }
 
-    #[cfg(feature = "lancedb")]
-    #[test]
-    fn indexing_is_verified_by_exact_id_and_revision() {
-        let _fake = testing::fake();
-        let (_dir, store) = disk_store();
-        let receipt = store
-            .publish_atlas_insights(
-                "run-1",
-                &[claim("acme", "paris", "a1"), claim("globex", "rome", "a2")],
-                &[],
-                "Brief text.",
-                &PublishOptions {
-                    index_now: true,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let report = store
-            .verify_memory_coverage(&receipt.affected_memory_ids)
-            .unwrap();
-        assert!(report.complete(), "{report:?}");
-        assert_eq!(report.indexed.len(), 3);
-        // Lose a vector behind the metadata: exact lookup notices, top-k would not.
-        let lost = receipt.claim_memory_ids[0].1.clone();
-        store
-            .vectors
-            .as_deref()
-            .unwrap()
-            .remove_many(std::slice::from_ref(&lost))
-            .unwrap();
-        let report = store
-            .verify_memory_coverage(&receipt.affected_memory_ids)
-            .unwrap();
-        assert_eq!(report.pending.len(), 1);
-        assert_eq!(report.pending[0].0, lost);
-        let queued = store.requeue_uncovered(&report, None).unwrap();
-        assert_eq!(queued.len(), 1);
-        store.index_now(&queued);
-        assert!(store
-            .verify_memory_coverage(&receipt.affected_memory_ids)
-            .unwrap()
-            .complete());
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[test]
-    fn embedding_failure_keeps_memories_visible_and_retry_reaches_verified() {
-        let _fake = testing::fake();
-        let (_dir, store) = disk_store();
-        let receipt = {
-            let _fail = testing::fail();
-            store
-                .publish_atlas_insights(
-                    "run-1",
-                    &[claim("acme", "paris", "a1")],
-                    &[],
-                    "",
-                    &PublishOptions {
-                        index_now: true,
-                        ..Default::default()
-                    },
-                )
-                .unwrap()
-        };
-        assert_eq!(
-            store.list_memories().unwrap().len(),
-            1,
-            "memories stay visible"
-        );
-        let report = store
-            .verify_memory_coverage(&receipt.affected_memory_ids)
-            .unwrap();
-        assert!(!report.complete());
-        let (state, category): (String, String) = store
-            .conn
-            .query_row(
-                "SELECT state, error_category FROM argos_tasks WHERE id=?1",
-                [&receipt.index_tasks[0]],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            (state.as_str(), category.as_str()),
-            ("retry_scheduled", "index_failure")
-        );
-        store
-            .conn
-            .execute("UPDATE argos_tasks SET next_eligible_at=''", [])
-            .unwrap();
-        let n = crate::scheduler::drain_index_once(&store.conn, &store, "worker", 8).unwrap();
-        assert!(n >= 1);
-        assert!(store
-            .verify_memory_coverage(&receipt.affected_memory_ids)
-            .unwrap()
-            .complete());
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[test]
-    fn stale_work_cannot_overwrite_a_newer_revision() {
-        let _fake = testing::fake();
-        let (_dir, store) = disk_store();
-        let memory = store
-            .add_memory(
-                "Harbor tanker manifests list cargo",
-                "fact",
-                false,
-                crate::brain::MemorySource {
-                    app: "test".into(),
-                    conversation_id: "c".into(),
-                    message_id: None,
-                    reference: None,
-                },
-            )
-            .unwrap();
-        let old_rev = memory_revision(&memory.text);
-        store
-            .update_memory(&memory.id, "Northwind ferry timetable", "fact", false)
-            .unwrap();
-        // A stale worker now runs the old revision's work.
-        let outcome = store.try_index_memory(&memory.id, &old_rev);
-        match &outcome {
-            IndexOutcome::Ready { revision, .. } => {
-                assert_eq!(revision, &memory_revision("Northwind ferry timetable"))
-            }
-            other => panic!("{other:?}"),
-        }
-        let index = store.vectors.as_deref().unwrap();
-        let hit = index.search("northwind ferry timetable", 1).unwrap();
-        assert_eq!(hit[0].0, memory.id);
-        assert!(hit[0].1 > 0.99, "newest text stays indexed: {hit:?}");
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[test]
-    fn deletion_during_indexing_is_not_resurrected() {
-        let _fake = testing::fake();
-        let (_dir, store) = disk_store();
-        let claims = vec![claim("acme", "paris", "a1")];
-        let receipt = store
-            .publish_atlas_insights(
-                "run-1",
-                &claims,
-                &[],
-                "",
-                &PublishOptions {
-                    index_now: true,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let id = receipt.claim_memory_ids[0].1.clone();
-        let rev = memory_revision("acme is located in paris.");
-        assert!(store.delete_memory(&id).unwrap());
-        assert!(store.is_tombstoned(&id).unwrap());
-        // A late upsert for the deleted memory removes rather than resurrects.
-        let outcome = store.try_index_memory(&id, &rev);
-        assert!(
-            matches!(outcome, IndexOutcome::Ready { ref revision, .. } if revision == DELETED_REVISION),
-            "{outcome:?}"
-        );
-        assert!(!store
-            .vectors
-            .as_deref()
-            .unwrap()
-            .present_ids(std::slice::from_ref(&id))
-            .unwrap()
-            .contains(&id));
-        // Retrying the same run cannot recreate the deleted claim.
-        let retry = store
-            .publish_atlas_insights("run-1", &claims, &[], "", &PublishOptions::default())
-            .unwrap();
-        assert_eq!(retry.accepted_claims, 0);
-        assert_eq!(retry.rejected.len(), 1);
-        assert!(retry.rejected[0].reason.contains("tombstoned"));
-        assert!(store.list_memories().unwrap().is_empty());
-        // A different, later cycle with new evidence may publish it again.
-        let fresh = store
-            .publish_atlas_insights("run-2", &claims, &[], "", &PublishOptions::default())
-            .unwrap();
-        assert_eq!(fresh.created, 1);
-        // Repair mode suppresses every tombstoned fingerprint.
-        store.delete_memory(&fresh.claim_memory_ids[0].1).unwrap();
-        let repair = store
-            .publish_atlas_insights(
-                "run-3",
-                &claims,
-                &[],
-                "",
-                &PublishOptions {
-                    repair: true,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(repair.accepted_claims, 0);
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[test]
-    fn reused_claims_with_damaged_rows_are_repaired_and_reindexed() {
-        let _fake = testing::fake();
-        let (_dir, store) = disk_store();
-        let claims = vec![claim("acme", "paris", "a1")];
-        let first = store
-            .publish_atlas_insights(
-                "run-1",
-                &claims,
-                &[],
-                "",
-                &PublishOptions {
-                    index_now: true,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let id = first.claim_memory_ids[0].1.clone();
-        // Simulate an earlier failure (pre-FK legacy write) that lost the memory
-        // row and its vector state while the claim survived.
-        store.conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
-        store
-            .conn
-            .execute("DELETE FROM memories WHERE id=?1", [&id])
-            .unwrap();
-        store.conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
-        store
-            .conn
-            .execute(
-                "DELETE FROM argos_memory_index_state WHERE memory_id=?1",
-                [&id],
-            )
-            .unwrap();
-        let second = store
-            .publish_atlas_insights(
-                "run-2",
-                &claims,
-                &[],
-                "",
-                &PublishOptions {
-                    index_now: true,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert_eq!((second.created, second.reused, second.repaired), (0, 0, 1));
-        assert_eq!(second.claim_memory_ids[0].1, id, "same canonical memory id");
-        assert!(second.reconciles());
-        let verification = store.verify_atlas_publication(&second).unwrap();
-        assert!(verification.memories_ok(), "{verification:?}");
-        assert!(
-            verification.coverage.complete(),
-            "{:?}",
-            verification.coverage
-        );
-        // Both cycles keep their source links.
-        let runs: i64 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(DISTINCT run_id) FROM insight_sources",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(runs, 2);
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[test]
-    fn text_changed_mid_index_write_reruns_on_the_new_revision() {
-        let _fake = testing::fake();
-        let (_dir, store) = disk_store();
-        let memory = store
-            .add_memory(
-                "Harbor tanker manifests list cargo",
-                "fact",
-                false,
-                crate::brain::MemorySource {
-                    app: "test".into(),
-                    conversation_id: "c".into(),
-                    message_id: None,
-                    reference: None,
-                },
-            )
-            .unwrap();
-        // Force a fresh write of the current revision.
-        store
-            .conn
-            .execute(
-                "DELETE FROM argos_memory_index_state WHERE memory_id=?1",
-                [&memory.id],
-            )
-            .unwrap();
-        let old_rev = memory_revision(&memory.text);
-        let id = memory.id.clone();
-        fault::set_after_write(move |conn| {
-            conn.execute(
-                "UPDATE memories SET text='Northwind ferry timetable' WHERE id=?1",
-                [&id],
-            )
-            .unwrap();
-        });
-        let first = store.try_index_memory(&memory.id, &old_rev);
-        fault::clear();
-        assert!(matches!(first, IndexOutcome::Pending { .. }), "{first:?}");
-        assert_eq!(
-            indexed_revision(&store.conn, &memory.id).unwrap(),
-            None,
-            "the stale revision written mid-change is not acknowledged"
-        );
-        let new_rev = memory_revision("Northwind ferry timetable");
-        let second = store.try_index_memory(&memory.id, &old_rev);
-        assert!(
-            matches!(second, IndexOutcome::Ready { ref revision, .. } if *revision == new_rev),
-            "{second:?}"
-        );
-        assert_eq!(
-            indexed_revision(&store.conn, &memory.id).unwrap(),
-            Some(new_rev)
-        );
-        let hit = store
-            .vectors
-            .as_deref()
-            .unwrap()
-            .search("northwind ferry timetable", 1)
-            .unwrap();
-        assert_eq!(hit[0].0, memory.id);
-        assert!(hit[0].1 > 0.99, "{hit:?}");
-        // Through the durable path the pending outcome requeues the same task.
-        assert!(store
-            .verify_memory_coverage(std::slice::from_ref(&memory.id))
-            .unwrap()
-            .complete());
-    }
-
     fn source() -> crate::brain::MemorySource {
         crate::brain::MemorySource {
             app: "test".into(),
@@ -1824,90 +1300,5 @@ mod tests {
         assert_eq!(watch.poll(&store), None);
         other.delete_memory(&memory.id).unwrap();
         assert!(watch.poll(&store).is_some(), "deletes notify too");
-    }
-
-    #[cfg(feature = "lancedb")]
-    #[test]
-    fn worker_killed_after_the_lance_write_is_recovered_by_revision() {
-        let _fake = testing::fake();
-        let (_dir, store) = disk_store();
-        let memory = store
-            .add_memory(
-                "Harbor tanker manifests list cargo",
-                "fact",
-                false,
-                source(),
-            )
-            .unwrap();
-        // An external edit commits with its outbox row; no inline indexing.
-        let edit = |store: &Store, text: &str| {
-            store
-                .conn
-                .execute(
-                    "UPDATE memories SET text=?1 WHERE id=?2",
-                    rusqlite::params![text, memory.id],
-                )
-                .unwrap();
-            store
-                .enqueue_memory_index(std::slice::from_ref(&memory.id), None)
-                .unwrap();
-        };
-        edit(&store, "Northwind ferry timetable");
-        let now = chrono::Utc::now().to_rfc3339();
-        let (claimed, work) = tasks::claim_index_work(&store.conn, "worker-a", 30, &now)
-            .unwrap()
-            .expect("index work queued");
-        assert_eq!(work.record_id, memory.id);
-        // Worker A writes Lance, then the process dies before recording the
-        // revision or acknowledging the task.
-        store
-            .vectors
-            .as_deref()
-            .unwrap()
-            .upsert_texts(&[(memory.id.clone(), "Northwind ferry timetable".into())])
-            .unwrap();
-        // While A is dead, the memory changes again.
-        edit(&store, "Granite quarry shipping ledger");
-        assert_eq!(
-            indexed_revision(&store.conn, &memory.id).unwrap(),
-            Some(memory_revision("Harbor tanker manifests list cargo")),
-            "the unacknowledged write recorded nothing"
-        );
-        let later = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
-        assert!(tasks::interrupt_expired_leases(&store.conn, &later).unwrap() >= 1);
-        crate::scheduler::drain_index_once(&store.conn, &store, "worker-b", 16).unwrap();
-
-        let current = memory_revision("Granite quarry shipping ledger");
-        assert_eq!(
-            indexed_revision(&store.conn, &memory.id).unwrap(),
-            Some(current)
-        );
-        assert!(store
-            .verify_memory_coverage(std::slice::from_ref(&memory.id))
-            .unwrap()
-            .complete());
-        assert_eq!(active_index_rows(&store), 0);
-        let index = store.vectors.as_deref().unwrap();
-        let copies = index
-            .ids()
-            .unwrap()
-            .into_iter()
-            .filter(|id| *id == memory.id)
-            .count();
-        assert_eq!(copies, 1, "re-running the write does not duplicate vectors");
-        let hit = index.search("granite quarry shipping ledger", 1).unwrap();
-        assert_eq!(hit[0].0, memory.id);
-        assert!(hit[0].1 > 0.99, "{hit:?}");
-        // The dead worker's late acknowledgement is rejected by owner/epoch.
-        let stale = IndexOutcome::Ready {
-            revision: memory_revision("Northwind ferry timetable"),
-            fingerprint: String::new(),
-            generation: String::new(),
-        };
-        assert!(!tasks::finish_index_work(&store.conn, &claimed, &work, &stale, &later).unwrap());
-        assert_eq!(
-            indexed_revision(&store.conn, &memory.id).unwrap(),
-            Some(memory_revision("Granite quarry shipping ledger"))
-        );
     }
 }

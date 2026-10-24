@@ -666,7 +666,7 @@ fn validate_endpoint(conn: &Connection, e: &EndpointRef) -> Result<()> {
     }
 }
 
-fn endpoint_key(e: &EndpointRef) -> String {
+pub(crate) fn endpoint_key(e: &EndpointRef) -> String {
     let (k, id, origin, rev) = e.index_key();
     format!("{k}:{origin}:{id}:{rev}")
 }

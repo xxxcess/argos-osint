@@ -557,3 +557,236 @@ pub async fn reconcile_lifecycle_in(tx: &Tx) -> Result<Vec<String>, TxError> {
     }
     Ok(changed)
 }
+
+// ---- Atlas phase 6 (actor index) ----------------------------------------
+
+/// `atlas_article_index` receipts, keyed `codec::encode([run_id, article_id])`.
+/// Register in bootstrap as `("actor_index", lifecycle::ARTICLE_INDEX_SCHEMA)`.
+pub const ARTICLE_INDEX_SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS atlas_article_index SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS run_id ON atlas_article_index TYPE string;
+DEFINE FIELD IF NOT EXISTS article_id ON atlas_article_index TYPE string;
+DEFINE FIELD IF NOT EXISTS input_revision ON atlas_article_index TYPE string;
+DEFINE FIELD IF NOT EXISTS index_checksum ON atlas_article_index TYPE string;
+DEFINE FIELD IF NOT EXISTS actor_coverage ON atlas_article_index TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS indexed_at ON atlas_article_index TYPE string;
+DEFINE INDEX IF NOT EXISTS atlas_article_index_run ON atlas_article_index FIELDS run_id;";
+
+pub async fn apply_article_index_schema(db: &Surreal<Any>) -> Result<(), TxError> {
+    db.query(ARTICLE_INDEX_SCHEMA).await?.check()?;
+    Ok(())
+}
+
+/// One `atlas_article_index` receipt.
+#[derive(Debug, Clone, SurrealValue)]
+pub struct ArticleIndexRow {
+    pub article_id: String,
+    pub input_revision: String,
+    pub index_checksum: String,
+    pub actor_coverage: String,
+}
+
+/// Receipts of one run (checksums are checked by the caller).
+pub async fn article_index_receipts(
+    db: &Surreal<Any>,
+    run_id: &str,
+) -> Result<Vec<ArticleIndexRow>, TxError> {
+    let mut r = db
+        .query(
+            "SELECT article_id, input_revision, index_checksum, actor_coverage \
+             FROM atlas_article_index WHERE run_id = $run",
+        )
+        .bind(("run", run_id.to_string()))
+        .await?
+        .check()?;
+    Ok(r.take(0)?)
+}
+
+/// Upsert one occurrence's receipt inside the caller's transaction.
+pub async fn put_article_index_in(
+    tx: &Tx,
+    run_id: &str,
+    article_id: &str,
+    row: &ArticleIndexRow,
+    now: &str,
+) -> Result<(), TxError> {
+    if run_id.is_empty() || article_id.is_empty() {
+        return Err(TxError::Abort("atlas_article_index: empty id".into()));
+    }
+    run(
+        tx,
+        tx.query(
+            "UPSERT type::record('atlas_article_index', $key) SET run_id = $run, \
+             article_id = $article, input_revision = $rev, index_checksum = $sum, \
+             actor_coverage = $cov, indexed_at = $now RETURN NONE",
+        )
+        .bind(("key", super::codec::encode(&[run_id, article_id])))
+        .bind(("run", run_id.to_string()))
+        .bind(("article", article_id.to_string()))
+        .bind(("rev", row.input_revision.clone()))
+        .bind(("sum", row.index_checksum.clone()))
+        .bind(("cov", row.actor_coverage.clone()))
+        .bind(("now", now.to_string())),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Reindex prelude for one article occurrence: drop its mentions and
+/// retire Link/Related records with an endpoint on any revision of it.
+/// Returns the memory ids retired.
+pub async fn retire_article_occurrence_in(
+    tx: &Tx,
+    run_id: &str,
+    article_id: &str,
+) -> Result<Vec<String>, TxError> {
+    run(
+        tx,
+        tx.query(
+            "DELETE brain_actor_mention WHERE origin_kind = 'article' \
+             AND origin_scope = $run AND origin_id = $article RETURN NONE",
+        )
+        .bind(("run", run_id.to_string()))
+        .bind(("article", article_id.to_string())),
+    )
+    .await?;
+    let rels = relationships_touching(
+        tx,
+        "SELECT VALUE id FROM brain_graph_node WHERE kind = 'article' \
+         AND origin = $run AND ref_id = $article",
+        vec![
+            ("run", run_id.to_string()),
+            ("article", article_id.to_string()),
+        ],
+    )
+    .await?;
+    set_lifecycle_in(tx, &rels, "retired").await
+}
+
+/// `brain_actors::record_mention`: resolve the actor, revive it if
+/// retired, and upsert the deterministic mention receipt (spans refreshed).
+/// Returns the memory ids whose lifecycle changed.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_mention_in(
+    tx: &Tx,
+    actor_id: &str,
+    origin_kind: &str,
+    origin_scope: &str,
+    origin_id: &str,
+    origin_revision: &str,
+    spans_json: &str,
+    now: &str,
+) -> Result<Vec<String>, TxError> {
+    if actor_id.is_empty() {
+        return Err(TxError::Abort("mention: empty actor id".into()));
+    }
+    let canonical = super::actor_bind::resolve_in(tx, actor_id).await?;
+    let changed = set_lifecycle_in(tx, std::slice::from_ref(&canonical), "active").await?;
+    let id = crate::brain_actors::hid(
+        "mention",
+        &[
+            &canonical,
+            origin_kind,
+            origin_scope,
+            origin_id,
+            origin_revision,
+        ],
+    );
+    run(
+        tx,
+        tx.query(
+            "IF record::exists($m) { UPDATE $m SET spans_json = $spans RETURN NONE } \
+             ELSE { CREATE $m SET actor_id = $actor, origin_kind = $kind, \
+             origin_scope = $scope, origin_id = $origin, origin_revision = $rev, \
+             spans_json = $spans, created_at = $now RETURN NONE };",
+        )
+        .bind(("m", rid("brain_actor_mention", &id)))
+        .bind(("actor", canonical))
+        .bind(("kind", origin_kind.to_string()))
+        .bind(("scope", origin_scope.to_string()))
+        .bind(("origin", origin_id.to_string()))
+        .bind(("rev", origin_revision.to_string()))
+        .bind(("spans", spans_json.to_string()))
+        .bind(("now", now.to_string())),
+    )
+    .await?;
+    Ok(changed)
+}
+
+/// `brain_actors::direct_mentions`: (kind, scope, id, revision) of one actor.
+pub async fn direct_mentions_in(
+    tx: &Tx,
+    actor_id: &str,
+) -> Result<Vec<(String, String, String, String)>, TxError> {
+    #[derive(SurrealValue)]
+    struct Row {
+        origin_kind: String,
+        origin_scope: String,
+        origin_id: String,
+        origin_revision: String,
+    }
+    let mut r = run(
+        tx,
+        tx.query(
+            "SELECT origin_kind, origin_scope, origin_id, origin_revision \
+             FROM brain_actor_mention WHERE actor_id = $actor \
+             ORDER BY origin_scope, origin_id",
+        )
+        .bind(("actor", actor_id.to_string())),
+    )
+    .await?;
+    let rows: Vec<Row> = take(&mut r, 0)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            (
+                r.origin_kind,
+                r.origin_scope,
+                r.origin_id,
+                r.origin_revision,
+            )
+        })
+        .collect())
+}
+
+/// `brain_actors::candidates` minus `actor_id`: other canonical actors with
+/// the same normalized name (and subtype).
+pub async fn name_candidates_in(
+    tx: &Tx,
+    name: &str,
+    subtype: &str,
+    actor_id: &str,
+) -> Result<Vec<String>, TxError> {
+    let key = crate::brain_actors::normalize_alias(name);
+    if key.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut r = run(
+        tx,
+        tx.query(
+            "SELECT VALUE actor_id FROM brain_actor_alias \
+             WHERE normalized = $k AND alias_type = 'name'",
+        )
+        .bind(("k", key)),
+    )
+    .await?;
+    let ids: Vec<String> = take(&mut r, 0)?;
+    let mut out = BTreeSet::new();
+    for id in ids {
+        if !subtype.is_empty() {
+            let mut r = run(
+                tx,
+                tx.query("SELECT VALUE subtype FROM ONLY $a")
+                    .bind(("a", rid("brain_actor", &id))),
+            )
+            .await?;
+            if take::<Option<String>>(&mut r, 0)?.as_deref() != Some(subtype) {
+                continue;
+            }
+        }
+        let canonical = super::actor_bind::resolve_in(tx, &id).await?;
+        if canonical != actor_id {
+            out.insert(canonical);
+        }
+    }
+    Ok(out.into_iter().collect())
+}

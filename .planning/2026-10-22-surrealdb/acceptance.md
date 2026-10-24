@@ -3,6 +3,27 @@
 See [plan.md](design.md). Status is honest: unchecked means not done or not
 verified.
 
+## Still needs SQLite (2026-10-24, after 3dae43c)
+
+Authoritative list; older "Gaps" bullets below are historical where they
+conflict. Revision fence for cycle evidence and derivation membership
+(67ee9ee, 2049aa7) is closed.
+
+- [ ] Brief chain engine: `brief_stages::drain_parallel` / `claim_next` /
+  `run_claimed`, `brief_pipeline::publish` and `brief_canonical::publish_stage_on`
+  still read and write SQLite. `storage::brief` now has every table they need
+  (publications, runs, leads, index state, stage receipts), but no production
+  caller writes them, so `storage::brief::record_run` and `replace_leads`
+  have no callers yet. `spawn_intel_brief_drainer` is not gated on
+  `surreal_selected()`.
+- [ ] Events and telemetry writers (`argos_events` stage/activity events,
+  `insight.superseded`, recall telemetry): owned by the combined tree; the
+  `telemetry_event` table exists via `profile_view` but nothing writes it on
+  SurrealDB. Skipped (no-op) on SurrealDB runs, never dual-written.
+- [ ] Report surface of `run_pipeline` bails on SurrealDB.
+- [ ] `pipeline_exec::load_memory_evidence` has no legacy (pre-derivation)
+  fallback; its recall has no recall cache or kind filter.
+
 ## P0 — foundation (spec step 1)
 
 - [x] Branch from current `origin/main` (`71797ee`); diff since spec baseline `7569da1` is `AGENTS.md` only
@@ -60,7 +81,7 @@ verified.
 - [ ] `delete_memory` gaps: there is no SurrealDB `nlp_features` table, so there is nothing to collect there; the artifact reference check is a string match on the evidence/inputs JSON (conservative: it can only keep extra artifacts) and scans those tables (perf item, held). No SurrealDB NLP cache reader keyed by memory exists yet, so "missing memory is a miss" has no reader to change.
 
 - [x] `schedule_article_refresh` (`storage/refresh.rs`) with `enqueue_refresh_in`, `retire_replaced_in` and `supersession`. Intent, retirement check, prior-task comparison, generation advance, job/task creation, the owner's `refresh_job_id` and supersession all commit in one transaction. The refresh task's `input_ref`, `role_snapshot` and `source_revision`, plus the job's `owner_scope`, live in an `insight_refresh_task` sidecar, because `task` and `job` have no such fields.
-- [ ] `schedule_article_refresh` gaps: the caller still builds the `PipelineInput` from SQLite evidence (`article_input`), and does so before the intent check. The `insight.superseded` event is not recorded (`events` is still SQLite). The SQLite paused-task requeue (`blocked_reason='cancelled; evidence dirty'`) has no counterpart, because SurrealDB tasks have no `paused` state.
+- [x] `schedule_article_refresh`: paused SurrealDB refresh tasks are requeued by `enqueue_refresh_in` (d83bc2f). Still SQLite: the `insight.superseded` event (`events` table).
 - [x] Step 5: `storage::bootstrap::ensure_schema` applies all 13 module schemas plus `storage_meta` in dependency order, in one transaction, and records `storage_meta:schema.version` (`SCHEMA_VERSION = 1`). It is idempotent, and it refuses (and rolls back) a database whose version is newer, like the SQLite `user_version` check.
 - [x] `ensure_schema` caller: `home::open_home` (so `Repository::open_home` and `storage::runtime`) reaches it on both paths, through `open::open` (embedded and server) and also at server spawn. Covered by `storage_runtime::open_home_runs_ensure_schema` in both modes (every module table defined; reopen is a no-op).
 - [ ] `ensure_schema` gaps: SQLite `Store::open` is unaffected (SQLite mode never opens SurrealDB). There is no migration ladder between Surreal schema versions (the store starts fresh, P4). The embeddings DISKANN dimension is fixed at 384 in `embeddings.surql` rather than taken from the configured model.
@@ -122,7 +143,7 @@ verified.
     - Telemetry (`StageClock`, directive and run notes, tool-runner notes), model attempts and drafts and the model capability cache (`model_exec` gets no db), the job registry (Recon runs are untracked), the summarization/NLP cache (`nlp::cache::register`, `compact_page_evidence` caching), and the NewsAPI quota (`charge_quota`).
     - Recall: `recon_extract::recall_for_turn` only. `admit_memory`, `brain_is_thin` and the Brain resource summary are not ported, so recall telemetry is absent and the summary is the default.
     - `previous_synthesis` is the deterministic follow-up with no cache.
-    - Claim assessment: `insights::run_pipeline` / `insight_persist::run_refresh_slice` stay SQLite-only. Synthesis uses `insight_owner::active_output` or withholds inferences ("Claim assessment is not on SurrealDB yet"), and cited evidence is mined into claims after the answer (`recon_extract::persist_claims`, contract `surreal-mined-v1`). `pipeline_inputs::recon_evidence`, `live_evidence` and the refresh executor have no production caller yet.
+    - Claim assessment: `insights::run_pipeline` runs on SurrealDB through `investigation::exec_store::ExecStore` and `storage::pipeline_exec` (6ae61be); `refresh_driver::recover_and_run` drives refreshes at startup and a completed refresh does not fall through to mining (d83bc2f).
     - Retry: `retry_insights` on SurrealDB only re-mines the answer; there is no shared-refresh retry.
     - No end-to-end `Service` (ask/resume) test on SurrealDB; the contract test covers the store calls.
     - `ReconStore::open` per run/resume: under SurrealDB it returns the process repository cached by `storage::runtime::repository` (a `OnceCell`, opened once per process and cloned), so the embedded file is not reopened; under SQLite it opens a `Store` per call as before.
@@ -184,7 +205,7 @@ Under a storage config `App::open_topology` refuses `TopologySeed::ActorGroup` w
 
 - [x] `storage::topology::topology_snapshot` answers the Claim, Actor, Inference, Article, Topic, Source and Link/Related seeds as well as the Actor group, walking breadth-first to depth 1–3; admission still goes through the shared `brain_topology::query::admit`. Covered in both modes by `tests/storage_topology.rs` (every seed, premises both ways, stale revisions, cycle scope, depth 2 and 3), which supersedes the `DEPTH_GAP` above.
 - [x] TUI wiring (05880e0): under a storage config the topology worker reads every seed through `tui::surreal_brain::topology`, so topology never mixes stores.
-- Gaps: the retained Intel display seeds are refused with an error (Intel brief publications are still SQLite); the generated neighbourhood summary stays skipped on SurrealDB; no TUI test drives the SurrealDB worker (both-feature clippy only).
+- Retained Intel seeds read `storage::brief` publications and bind canonical memories through `intel_brief_stage_receipt` / `intel_brief_index_state` (3dae43c).
 
 ### Phase 5 — Profile read model (542b7c0, 9490f2f)
 
@@ -207,13 +228,13 @@ Bootstrap registers 21 schemas after the topology, Profile and Recon tracks merg
 ### Phase 5 — full Recon `delete_thread`
 
 - [x] `storage::recon::delete_thread` now runs the SQLite cascade (insights kept) in one transaction: actor mentions; insight sources detached and marked `deleted_origin`; in-flight calls cancelled; the runs' extraction jobs and model operations, strategies, messages (evidence and memory links by event), runs, entity links, message counter and `last_thread`; calls detached, then detached Recon calls no insight source or derivation evidence cites deleted. Manual calls and `osint_cache` stay (the cache is keyed by tool inputs, as in SQLite). Already-deleted threads return false. Covered in both modes by `tests/storage_recon_delete.rs`.
-- Gaps: the `insights = true` path (deleting the investigation's claims and memories, vector removal) and the insight owner-state/derivation-link retirement, NLP cache owner removal, job cleanup and actor lifecycle reconcile are not ported; nothing calls it outside tests yet.
+- [x] `delete_thread_with_insights`: hard delete of the doomed memories, recon owner generation bump, `origin_deleted` links, NLP cache owner removal (18f6b74).
 
 ### Phase 5 — Recon answer extraction and recall stopgap
 
 - [x] `storage::recon_extract::persist_claims` ports `recon::persist_claims` as one publisher transaction: answer/thread liveness check, opt-out completes the job with no claims, up to five validated claims (memory, `insight_claim`, subject binding, `conflict_or_revision` relations, `insight_source` rows for completed cited evidence), tombstoned claims from the same run skipped, extraction job completed, memory-index outbox work queued for every new or reused memory, `memories_changed` bumped only when a memory was written. Covered in both modes by `tests/storage_recon_extract.rs`.
 - [ ] `storage::recon_extract::recall_for_turn` is a **temporary stopgap** for `orchestrate::recall_for_turn`: SurrealDB full-text search (BM25, `memory_text_search` index) instead of LanceDB vector recall. It must be replaced when vector recall lands; the fixed-corpus contract test locks in today's ranking so the swap can be checked. It runs one `@1@` query per distinct question term (OR semantics) and ranks by terms matched, then summed BM25 score, because BM25 idf is negative for a term in more than half the memories and a positive-score cut dropped real matches. `persist_claims` reports the subject actor memories it binds in `actors` (index work is queued for them) and keeps `touched` to claim memories, as on SQLite.
-- Gaps: no `admit_memory` policy, thread-entity subjects, `brain_is_thin` or brain-resource summary on the stopgap; `index_now` after commit is not called (the outbox keeps the work); nothing calls these yet. Adds one schema entry (`recon_extract`), so bootstrap needs 23 schemas.
+- [x] Turn recall admits candidates before the five-memory cap and adds the brain resource summary (eb9814a). Recall telemetry: see "Still needs SQLite".
 
 ### Phase 5 — Recon insight owner state (Recon switch, step 2)
 

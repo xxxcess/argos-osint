@@ -226,17 +226,7 @@ impl Store {
     /// Typed Brain insight kind (`claim` = source claim, `inference`) from the
     /// canonical derivation row, newest first; `None` for untyped memories.
     pub fn memory_insight_kind(&self, memory_id: &str) -> Option<String> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::memory_insight_kind(memory_id);
-        }
-        self.conn
-            .query_row(
-                "SELECT d.insight_kind FROM insight_derivations d WHERE d.memory_id=?1 ORDER BY d.rowid DESC LIMIT 1",
-                [memory_id],
-                |r| r.get(0),
-            )
-            .ok()
+        crate::storage::store_bridge::memory_insight_kind(memory_id)
     }
 
     /// Analytics worker connection: no migrations, vector index, or writes.
@@ -304,11 +294,6 @@ impl Store {
         // handle is an unused, schema-less placeholder: no argos.db, no
         // migrations, no vector index. The field itself goes away with the
         // `feat!` removal commit.
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return Ok(store);
-        }
-        store.ensure_schema()?;
         Ok(store)
     }
 
@@ -1049,55 +1034,12 @@ impl Store {
     }
 
     pub fn list_memories(&self) -> Result<Vec<Memory>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::list_memories();
-        }
-        // Default Brain listing: evidence/user memories. Actor/Link/Related
-        // structural records are browsed through typed kind filters.
-        let mut stmt = self.conn.prepare("SELECT id,text,category,pinned,created_at,source_json FROM memories m WHERE NOT EXISTS (SELECT 1 FROM memory_metadata t WHERE t.memory_id=m.id AND (t.memory_kind IN ('actor','link','related') OR t.lifecycle<>'active')) ORDER BY pinned DESC,created_at DESC")?;
-        let rows = stmt.query_map([], |row| {
-            let source: String = row.get(5)?;
-            let source = serde_json::from_str(&source).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    5,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?;
-            Ok(Memory {
-                id: row.get(0)?,
-                text: row.get(1)?,
-                category: row.get(2)?,
-                pinned: row.get::<_, i64>(3)? != 0,
-                created_at: row.get(4)?,
-                source,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        crate::storage::brain_store::list_memories()
     }
 
     /// Substring search across memory text, category, claim fields, and source JSON.
     pub fn search_memories(&self, query: &str) -> Result<Vec<Memory>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::search_memories(query);
-        }
-        let needle = like_needle(query);
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT m.id,m.text,m.category,m.pinned,m.created_at,m.source_json
-             FROM memories m
-             LEFT JOIN insight_claims c ON c.memory_id = m.id
-             WHERE NOT EXISTS (SELECT 1 FROM memory_metadata mm WHERE mm.memory_id=m.id AND mm.lifecycle<>'active') AND (m.text LIKE ?1 ESCAPE '\\'
-                OR m.category LIKE ?1 ESCAPE '\\'
-                OR IFNULL(c.entity_id,'') LIKE ?1 ESCAPE '\\'
-                OR IFNULL(c.predicate,'') LIKE ?1 ESCAPE '\\'
-                OR IFNULL(c.object_value,'') LIKE ?1 ESCAPE '\\'
-                OR m.source_json LIKE ?1 ESCAPE '\\')
-             ORDER BY m.pinned DESC, m.created_at DESC",
-        )?;
-        let rows = stmt.query_map([needle], memory_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        crate::storage::brain_store::search_memories(query)
     }
 
     pub fn add_memory(
@@ -1107,37 +1049,7 @@ impl Store {
         pinned: bool,
         source: MemorySource,
     ) -> Result<Memory> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::add_memory(text, category, pinned, source);
-        }
-        source.validate()?;
-        let text = text.trim();
-        anyhow::ensure!(!text.is_empty(), "memory text is empty");
-        let memory = Memory {
-            id: new_id(),
-            text: text.into(),
-            category: normalize_category(category).into(),
-            pinned,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            source,
-        };
-        let source_json = serde_json::to_string(&memory.source)?;
-        self.write_then_index(|| {
-            self.conn.execute(
-                "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![
-                    memory.id,
-                    memory.text,
-                    memory.category,
-                    i64::from(memory.pinned),
-                    memory.created_at,
-                    source_json
-                ],
-            )?;
-            Ok(((), vec![memory.id.clone()]))
-        })?;
-        Ok(memory)
+        crate::storage::brain_store::add_memory(text, category, pinned, source)
     }
 
     /// Run a memory write, its durable index-outbox rows and the
@@ -1186,25 +1098,7 @@ impl Store {
     /// Falls back to Jaccard alone when embedding is off or the index fails; an
     /// index problem never fails the caller.
     pub fn recall(&self, query: &str, top_k: usize) -> Result<Vec<ScoredMemory>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::recall(query, top_k);
-        }
-        // Actor records serve identity lookup and Link/Related records serve
-        // exploration; neither is independent evidence for default recall.
-        let structural = self.structural_memory_ids()?;
-        let memories: Vec<Memory> = self
-            .list_memories()?
-            .into_iter()
-            .filter(|m| !structural.contains(&m.id))
-            .collect();
-        if query.trim().is_empty() || memories.is_empty() || top_k == 0 {
-            return Ok(Vec::new());
-        }
-        // SQLite keeps lexical recall only; vector recall is SurrealDB HNSW.
-        let mut ranked = recall(&memories, query, (top_k * 2).max(top_k));
-        ranked = boost_with_passage_hybrid(query, &memories, ranked, top_k);
-        Ok(ranked)
+        crate::storage::brain_store::recall(query, top_k)
     }
 
     /// Actor/Link/Related memory IDs (excluded from default evidence recall).
@@ -1220,23 +1114,14 @@ impl Store {
 
     /// True when recall will use the vector index (embedding on, file-backed store).
     pub fn vectors_enabled(&self) -> bool {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::embed::enabled();
-        }
-        false
+        crate::embed::enabled()
     }
 
     /// The closest existing memory to `text` at or above `threshold` cosine
     /// similarity (see `storage::memories` for the duplicate threshold).
     /// None when embedding is off or the index is unavailable.
     pub fn find_similar_memory(&self, text: &str, threshold: f32) -> Option<(String, f32)> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::find_similar_memory(text, threshold);
-        }
-        let _ = (text, threshold);
-        None
+        crate::storage::brain_store::find_similar_memory(text, threshold)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1267,32 +1152,12 @@ impl Store {
     /// sync barrier. Incremental id reconciliation still runs when the serving
     /// generation is compatible.
     pub fn ensure_memory_vectors(&self) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::ensure_memory_vectors();
-        }
-        anyhow::bail!("Brain vectors are off (no SurrealDB storage)")
+        crate::storage::store_bridge::ensure_memory_vectors()
     }
 
     /// Count user-edited insight memories linked to one Atlas article.
     pub fn article_insight_user_edit_count(&self, run_id: &str, article_id: &str) -> Result<usize> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::article_insight_user_edit_count(
-                run_id, article_id,
-            );
-        }
-        let answer_id = atlas_answer_id(run_id);
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(DISTINCT c.memory_id)
-             FROM insight_sources s
-             JOIN insight_claims c ON c.fingerprint = s.fingerprint
-             JOIN insight_user_edits e ON e.memory_id = c.memory_id
-             WHERE s.run_id=?1 AND s.answer_id=?2 AND s.call_id=?3",
-            params![run_id, answer_id, article_id],
-            |row| row.get(0),
-        )?;
-        Ok(count as usize)
+        crate::storage::store_bridge::article_insight_user_edit_count(run_id, article_id)
     }
 
     /// Atomically replace one article's insight sources with already-validated claims.
@@ -1305,216 +1170,20 @@ impl Store {
         claims: &[AtlasInsightClaim],
         relations: &[(String, String, String)],
     ) -> Result<ArticleInsightCommit> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::commit_article_insight_replacement(
-                run_id, article_id, claims, relations,
-            );
-        }
-        let answer_id = atlas_answer_id(run_id);
-        let now = chrono::Utc::now().to_rfc3339();
-        let fingerprints: Vec<String> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT DISTINCT fingerprint FROM insight_sources                  WHERE run_id=?1 AND answer_id=?2 AND call_id=?3",
-            )?;
-            let rows = stmt.query_map(params![run_id, answer_id, article_id], |row| row.get(0))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        let mut doomed: Vec<String> = Vec::new();
-        let mut written: Vec<String> = Vec::new();
-        let mut preserved = 0usize;
-        let mut queued = Vec::new();
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| -> Result<ArticleInsightCommit> {
-            self.conn.execute(
-                "DELETE FROM insight_sources WHERE run_id=?1 AND answer_id=?2 AND call_id=?3",
-                params![run_id, answer_id, article_id],
-            )?;
-            for fingerprint in &fingerprints {
-                let remaining: i64 = self.conn.query_row(
-                    "SELECT COUNT(*) FROM insight_sources WHERE fingerprint=?1",
-                    [fingerprint],
-                    |row| row.get(0),
-                )?;
-                if remaining > 0 {
-                    continue;
-                }
-                let memory_id: Option<String> = self
-                    .conn
-                    .query_row(
-                        "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
-                        [fingerprint],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                let Some(memory_id) = memory_id else {
-                    self.conn.execute(
-                        "DELETE FROM insight_relations WHERE left_fingerprint=?1 OR right_fingerprint=?1",
-                        [fingerprint],
-                    )?;
-                    self.conn.execute(
-                        "DELETE FROM insight_claims WHERE fingerprint=?1",
-                        [fingerprint],
-                    )?;
-                    continue;
-                };
-                let user_edited: i64 = self.conn.query_row(
-                    "SELECT COUNT(*) FROM insight_user_edits WHERE memory_id=?1",
-                    [&memory_id],
-                    |row| row.get(0),
-                )?;
-                if user_edited > 0 {
-                    preserved += 1;
-                    continue;
-                }
-                self.conn.execute(
-                    "DELETE FROM insight_relations WHERE left_fingerprint=?1 OR right_fingerprint=?1",
-                    [fingerprint],
-                )?;
-                self.conn.execute(
-                    "DELETE FROM insight_claims WHERE fingerprint=?1",
-                    [fingerprint],
-                )?;
-                self.conn.execute(
-                    "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
-                    [&memory_id],
-                )?;
-                self.conn
-                    .execute("DELETE FROM memories WHERE id=?1", [&memory_id])?;
-                doomed.push(memory_id);
-            }
-
-            let mut committed = 0usize;
-            for claim in claims {
-                let entity = claim.entity.trim().to_ascii_lowercase();
-                let namespace = claim.namespace.trim().to_ascii_lowercase();
-                let predicate = claim.predicate.trim().to_ascii_lowercase();
-                let object = claim.object.trim().to_ascii_lowercase();
-                let sentence = claim.claim.trim();
-                anyhow::ensure!(
-                    !entity.is_empty()
-                        && !namespace.is_empty()
-                        && !predicate.is_empty()
-                        && !object.is_empty()
-                        && !sentence.is_empty()
-                        && claim.article_id.trim() == article_id,
-                    "invalid staged claim during commit"
-                );
-                let fingerprint = atlas_claim_identity(claim);
-                let existing: Option<String> = self
-                    .conn
-                    .query_row(
-                        "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
-                        [&fingerprint],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if existing.is_none() {
-                    let memory_id = new_id();
-                    let source = MemorySource {
-                        app: "atlas".into(),
-                        conversation_id: run_id.into(),
-                        message_id: None,
-                        reference: Some(run_id.into()),
-                    };
-                    self.conn.execute(
-                        "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",
-                        params![memory_id, sentence, now, serde_json::to_string(&source)?],
-                    )?;
-                    written.push(memory_id.clone());
-                    self.conn.execute(
-                        "INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at,source_reliability,info_credibility,admiralty,rsp_status) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10,?11,?12,?13)",
-                        params![
-                            fingerprint,
-                            memory_id,
-                            entity,
-                            predicate,
-                            object,
-                            claim.topic.trim(),
-                            claim.classification.trim(),
-                            claim.confidence,
-                            now,
-                            claim.reliability.trim(),
-                            claim.info_credibility as i64,
-                            claim.admiralty.trim(),
-                            claim.rsp_status.trim(),
-                        ],
-                    )?;
-                    crate::brain_backfill::bind_claim_subject(&self.conn, &fingerprint)?;
-                }
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO insight_sources(fingerprint,thread_id,run_id,answer_id,call_id,source_url,published_at) VALUES (?1,NULL,?2,?3,?4,?5,?6)",
-                    params![
-                        fingerprint,
-                        run_id,
-                        answer_id,
-                        article_id,
-                        claim.source_url.trim(),
-                        claim.published_at.trim(),
-                    ],
-                )?;
-                self.conn.execute(
-                    "UPDATE insight_claims SET confidence=?1, source_reliability=?2, info_credibility=?3, admiralty=?4, rsp_status=?5, updated_at=?6 WHERE fingerprint=?7",
-                    params![
-                        claim.confidence,
-                        claim.reliability.trim(),
-                        claim.info_credibility as i64,
-                        claim.admiralty.trim(),
-                        claim.rsp_status.trim(),
-                        now,
-                        fingerprint,
-                    ],
-                )?;
-                committed += 1;
-            }
-            for (left, right, relation) in relations {
-                if left.is_empty() || right.is_empty() || relation.is_empty() || left == right {
-                    continue;
-                }
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO insight_relations(left_fingerprint,right_fingerprint,relation) VALUES (?1,?2,?3)",
-                    params![left, right, relation],
-                )?;
-            }
-            let mut touched = doomed.clone();
-            touched.extend(written.iter().cloned());
-            queued = self.queue_index_for(&touched)?;
-            Ok(ArticleInsightCommit {
-                claims: committed,
-                preserved_user_edits: preserved,
-            })
-        })();
-        match result {
-            Ok(outcome) => {
-                self.conn.execute_batch("COMMIT")?;
-                let _ = self.index_now(&queued);
-                Ok(outcome)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
-        }
+        crate::storage::store_bridge::commit_article_insight_replacement(
+            run_id, article_id, claims, relations,
+        )
     }
 
     /// Drops and rebuilds the Lance table from every memory, then writes the
     /// fingerprint. Backs `argos memories reindex`.
     pub fn reindex_memory_vectors(&self) -> Result<ReindexReport> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::reindex_memory_vectors();
-        }
-        anyhow::bail!("Brain vectors are off (no SurrealDB storage); nothing to reindex")
+        crate::storage::store_bridge::reindex_memory_vectors()
     }
 
     /// Drain pending generation rebuild work in bounded batches (off the TUI path).
     pub fn process_pending_vector_rebuild(&self, max_batches: usize) -> Result<usize> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::process_pending_vector_rebuild(max_batches);
-        }
-        let _ = max_batches;
-        anyhow::bail!("Brain vectors are off")
+        crate::storage::store_bridge::process_pending_vector_rebuild(max_batches)
     }
 
     /// Typed index upsert used by the reliable (outbox) path. Distinguishes
@@ -1522,39 +1191,18 @@ impl Store {
     /// memory row means the memory was deleted, so its vector is removed instead
     /// of resurrected.
     pub fn try_index_upsert(&self, ids: &[String]) -> crate::tasks::IndexOutcome {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::try_index_upsert(ids);
-        }
-        let _ = ids;
-        crate::tasks::IndexOutcome::Disabled {
-            reason: "semantic indexing disabled (no SurrealDB storage)".into(),
-        }
+        crate::storage::store_bridge::try_index_upsert(ids)
     }
 
     /// Typed removal of vectors whose memories are gone from SQLite.
     pub fn try_index_remove_missing(&self, ids: &[String]) -> crate::tasks::IndexOutcome {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::try_index_remove_missing(ids);
-        }
-        let _ = ids;
-        crate::tasks::IndexOutcome::Disabled {
-            reason: "semantic indexing disabled (no SurrealDB storage)".into(),
-        }
+        crate::storage::store_bridge::try_index_remove_missing(ids)
     }
 
     /// Drain generation rebuild batches with a typed outcome: a batch is
     /// progress (`Pending`), only an activated (or absent) generation is `Ready`.
     pub fn try_process_vector_rebuild(&self, max_batches: usize) -> crate::tasks::IndexOutcome {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::try_process_vector_rebuild(max_batches);
-        }
-        let _ = max_batches;
-        crate::tasks::IndexOutcome::Disabled {
-            reason: "semantic indexing disabled (no SurrealDB storage)".into(),
-        }
+        crate::storage::store_bridge::try_process_vector_rebuild(max_batches)
     }
 
     pub fn update_memory(
@@ -1564,148 +1212,29 @@ impl Store {
         category: &str,
         pinned: bool,
     ) -> Result<bool> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::update_memory(id, text, category, pinned);
-        }
-        let text = text.trim();
-        anyhow::ensure!(!text.is_empty(), "memory text is empty");
-        self.write_then_index(|| {
-            let changed = self.conn.execute(
-                "UPDATE memories SET text=?1,category=?2,pinned=?3 WHERE id=?4",
-                params![text, normalize_category(category), i64::from(pinned), id],
-            )? > 0;
-            if !changed {
-                return Ok((false, Vec::new()));
-            }
-            self.conn.execute("INSERT OR IGNORE INTO insight_user_edits(memory_id) SELECT memory_id FROM insight_claims WHERE memory_id=?1",[id])?;
-            Ok((true, vec![id.to_string()]))
-        })
+        crate::storage::brain_store::update_memory(id, text, category, pinned)
     }
 
     pub fn graph_summary(&self, memory_id: &str) -> Result<Option<GraphSummary>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::graph_summary(memory_id);
-        }
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT summary, focus FROM memory_graph_summaries WHERE memory_id=?1",
-                [memory_id],
-                |row| {
-                    Ok(GraphSummary {
-                        summary: row.get(0)?,
-                        focus: row.get(1)?,
-                    })
-                },
-            )
-            .optional()?)
+        crate::storage::brain_store::graph_summary(memory_id)
     }
 
     /// Stores the synthesis explanation for one memory's recon path.
     /// `focus` is the directive id the summary was written from.
     /// Returns false when that memory is already gone.
     pub fn save_graph_summary(&self, memory_id: &str, summary: &str, focus: &str) -> Result<bool> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::save_graph_summary(memory_id, summary, focus);
-        }
-        let summary = summary.trim();
-        anyhow::ensure!(!summary.is_empty(), "graph summary is empty");
-        let exists: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM memories WHERE id=?1",
-            [memory_id],
-            |row| row.get(0),
-        )?;
-        if exists == 0 {
-            return Ok(false);
-        }
-        self.conn.execute(
-            "INSERT INTO memory_graph_summaries(memory_id,summary,created_at,focus) VALUES (?1,?2,?3,?4)
-             ON CONFLICT(memory_id) DO UPDATE SET summary=excluded.summary, created_at=excluded.created_at, focus=excluded.focus",
-            params![memory_id, summary, chrono::Utc::now().to_rfc3339(), focus],
-        )?;
-        Ok(true)
+        crate::storage::brain_store::save_graph_summary(memory_id, summary, focus)
     }
 
     /// User deletion. Leaves a tombstone so retries/repair never recreate the
     /// memory, and queues durable vector removal in the same transaction.
     pub fn delete_memory(&self, id: &str) -> Result<bool> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::delete_memory(id);
-        }
-        let mut queued = Vec::new();
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| -> Result<bool> {
-            let exists: i64 =
-                self.conn
-                    .query_row("SELECT COUNT(*) FROM memories WHERE id=?1", [id], |r| {
-                        r.get(0)
-                    })?;
-            if exists > 0 {
-                self.tombstone_memory(id, "user_delete")?;
-                crate::nlp::cache::remove_owner(&self.conn, "memory", id)?;
-            }
-            self.conn.execute("UPDATE insight_owner_state SET lifecycle='previous',last_error='memory premise deleted' WHERE active_snapshot_id IN (SELECT d.snapshot_id FROM insight_derivations d JOIN insight_derivation_evidence e ON e.derivation_id=d.id WHERE e.memory_id=?1)",[id])?;
-            self.conn.execute("UPDATE insight_derivations SET status='blocked_premise' WHERE id IN (SELECT e.derivation_id FROM insight_derivation_evidence e WHERE e.premise_id IN (SELECT json_extract(item_json,'$.id') FROM insight_derivations WHERE memory_id=?1))",[id])?;
-            self.conn.execute("UPDATE insight_owner_state SET lifecycle='previous',last_error='claim premise deleted' WHERE active_snapshot_id IN (SELECT snapshot_id FROM insight_derivations WHERE status='blocked_premise')",[])?;
-            self.conn.execute("UPDATE insight_derivation_links SET status='deleted_endpoint' WHERE left_id IN (SELECT json_extract(item_json,'$.id') FROM insight_derivations WHERE memory_id=?1) OR right_id IN (SELECT json_extract(item_json,'$.id') FROM insight_derivations WHERE memory_id=?1)",[id])?;
-            self.conn.execute(
-                "UPDATE insight_derivations SET memory_id=NULL,status='deleted' WHERE memory_id=?1",
-                [id],
-            )?;
-            self.conn.execute(
-                "UPDATE insight_derivation_evidence SET memory_id=NULL WHERE memory_id=?1",
-                [id],
-            )?;
-            self.conn.execute("DELETE FROM insight_sources WHERE fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1)",[id])?;
-            self.conn.execute("DELETE FROM insight_relations WHERE left_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1) OR right_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE memory_id=?1)",[id])?;
-            self.conn
-                .execute("DELETE FROM insight_claims WHERE memory_id=?1", [id])?;
-            self.conn.execute(
-                "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
-                [id],
-            )?;
-            let deleted = self
-                .conn
-                .execute("DELETE FROM memories WHERE id=?1", [id])?
-                > 0;
-            if deleted {
-                crate::job_cleanup::cleanup_batch(&self.conn, chrono::Utc::now())?;
-                queued = self.enqueue_memory_index(&[id.to_string()], None)?.0;
-                publication::bump_memories_changed(&self.conn)?;
-            }
-            Ok(deleted)
-        })();
-        match result {
-            Ok(deleted) => {
-                self.conn.execute_batch("COMMIT")?;
-                let _ = self.index_now(&queued);
-                Ok(deleted)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
-        }
+        crate::storage::brain_store::delete_memory(id)
     }
 
     /// Fetch one memory by id directly (independent of any list filter).
     pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::get_memory(id);
-        }
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT id,text,category,pinned,created_at,source_json FROM memories WHERE id=?1",
-                [id],
-                memory_row,
-            )
-            .optional()?)
+        crate::storage::brain_store::get_memory(id)
     }
 
     /// Durable removal work for memories deleted inside the caller's transaction.
@@ -1718,68 +1247,18 @@ impl Store {
     }
 
     pub fn atlas_insert_run(&self, id: &str, cursor_json: &str, stats_json: &str) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_insert_run(id, cursor_json, stats_json);
-        }
-        self.conn.execute(
-            "INSERT INTO atlas_runs (id, state, phase, cursor_json, stats_json, note, started_at, finished_at)
-             VALUES (?1, 'running', 1, ?2, ?3, '', ?4, '')",
-            params![id, cursor_json, stats_json, chrono::Utc::now().to_rfc3339()],
-        )?;
-        Ok(())
+        crate::storage::store_bridge::atlas_insert_run(id, cursor_json, stats_json)
     }
 
     pub fn atlas_save(&self, id: &str, cursor_json: &str, stats_json: &str) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_save(id, cursor_json, stats_json);
-        }
-        let phase = serde_json::from_str::<serde_json::Value>(cursor_json)
-            .ok()
-            .and_then(|value| value.get("phase").and_then(|phase| phase.as_i64()))
-            .unwrap_or(1);
-        self.conn.execute(
-            "UPDATE atlas_runs SET phase=?2, cursor_json=?3, stats_json=?4 WHERE id=?1",
-            params![id, phase, cursor_json, stats_json],
-        )?;
-        Ok(())
+        crate::storage::store_bridge::atlas_save(id, cursor_json, stats_json)
     }
 
     pub fn atlas_save_unit_manifest(
         &self,
         manifest: &crate::atlas_work::UnitManifest,
     ) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_save_unit_manifest(manifest);
-        }
-        self.conn.execute(
-            "INSERT OR REPLACE INTO atlas_work_units (
-                run_id, unit_id, stage, input_ids, input_rev, contract_version,
-                dependency_ids, is_required, output_refs, effective_model, attempt_history,
-                next_eligible_at, terminal_reason, output_json, disposition, receipt_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-            rusqlite::params![
-                manifest.run_id,
-                manifest.unit_id,
-                manifest.stage,
-                serde_json::to_string(&manifest.input_ids).unwrap_or_default(),
-                manifest.input_rev,
-                manifest.contract_version,
-                serde_json::to_string(&manifest.dependency_ids).unwrap_or_default(),
-                manifest.is_required,
-                serde_json::to_string(&manifest.output_refs).unwrap_or_default(),
-                manifest.effective_model,
-                serde_json::to_string(&manifest.attempt_history).unwrap_or_default(),
-                manifest.next_eligible_at,
-                manifest.terminal_reason,
-                manifest.output_json,
-                manifest.disposition,
-                manifest.receipt_json,
-            ],
-        )?;
-        Ok(())
+        crate::storage::store_bridge::atlas_save_unit_manifest(manifest)
     }
 
     fn atlas_unit_from_row(
@@ -1815,92 +1294,25 @@ impl Store {
         run_id: &str,
         stage: i32,
     ) -> Result<Vec<crate::atlas_work::UnitManifest>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_get_unit_manifests(run_id, stage);
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT unit_id, stage, input_ids, input_rev, contract_version, dependency_ids, is_required, output_refs, effective_model, attempt_history, next_eligible_at, terminal_reason, output_json, disposition, receipt_json
-             FROM atlas_work_units WHERE run_id = ?1 AND stage = ?2"
-        )?;
-        let rows = stmt.query_map(rusqlite::params![run_id, stage], |row| {
-            Self::atlas_unit_from_row(run_id, row)
-        })?;
-        let mut manifests = Vec::new();
-        for row in rows {
-            manifests.push(row?);
-        }
-        Ok(manifests)
+        crate::storage::store_bridge::atlas_get_unit_manifests(run_id, stage)
     }
 
     pub fn atlas_get_all_unit_manifests(
         &self,
         run_id: &str,
     ) -> Result<Vec<crate::atlas_work::UnitManifest>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_get_all_unit_manifests(run_id);
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT unit_id, stage, input_ids, input_rev, contract_version, dependency_ids, is_required, output_refs, effective_model, attempt_history, next_eligible_at, terminal_reason, output_json, disposition, receipt_json
-             FROM atlas_work_units WHERE run_id = ?1 ORDER BY stage, unit_id"
-        )?;
-        let rows = stmt.query_map(rusqlite::params![run_id], |row| {
-            Self::atlas_unit_from_row(run_id, row)
-        })?;
-        let mut manifests = Vec::new();
-        for row in rows {
-            manifests.push(row?);
-        }
-        Ok(manifests)
+        crate::storage::store_bridge::atlas_get_all_unit_manifests(run_id)
     }
     pub fn atlas_set_state(&self, id: &str, state: &str, note: &str, finished: bool) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_set_state(id, state, note, finished);
-        }
-        let finished_at = if finished {
-            chrono::Utc::now().to_rfc3339()
-        } else {
-            String::new()
-        };
-        self.conn.execute(
-            "UPDATE atlas_runs SET state=?2, note=?3, finished_at=CASE WHEN ?4 = '' THEN finished_at ELSE ?4 END WHERE id=?1",
-            params![id, state, note, finished_at],
-        )?;
-        Ok(())
+        crate::storage::store_bridge::atlas_set_state(id, state, note, finished)
     }
 
     pub fn atlas_latest_run(&self) -> Result<Option<AtlasRunRow>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_latest_run();
-        }
-        Ok(self.atlas_list_runs()?.into_iter().next())
+        crate::storage::store_bridge::atlas_latest_run()
     }
 
     pub fn atlas_list_runs(&self) -> Result<Vec<AtlasRunRow>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_list_runs();
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT id, state, phase, cursor_json, stats_json, note, started_at, finished_at
-             FROM atlas_runs ORDER BY started_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(AtlasRunRow {
-                id: row.get(0)?,
-                state: row.get(1)?,
-                phase: row.get(2)?,
-                cursor_json: row.get(3)?,
-                stats_json: row.get(4)?,
-                note: row.get(5)?,
-                started_at: row.get(6)?,
-                finished_at: row.get(7)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        crate::storage::store_bridge::atlas_list_runs()
     }
 
     /// Read-only handle for dashboard and diagnostics reads. Never locks the
@@ -1915,393 +1327,66 @@ impl Store {
         period: &profile_stats::Period,
         filters: &profile_stats::StatFilters,
     ) -> anyhow::Result<profile_stats::ProfileSnapshot> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::profile_snapshot(period, filters);
-        }
-        profile_stats::snapshot(&self.conn, period, filters, chrono::Utc::now())
+        crate::storage::store_bridge::profile_snapshot(period, filters)
     }
 
     /// The bounded filter option lists for the Profile filter strip.
     pub fn profile_filter_options(&self) -> Vec<(String, Vec<String>)> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::profile_filter_options();
-        }
-        profile_stats::filter_options(&self.conn)
+        crate::storage::store_bridge::profile_filter_options()
     }
 
     pub fn atlas_delete_run(&self, id: &str) -> Result<bool> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_delete_run(id);
-        }
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| -> Result<bool> {
-            self.delete_cycle_memories(id)?;
-            // Remove this cycle's Brain origin contributions; shared Actors
-            // and records supported by another origin survive.
-            crate::brain_actors::retire_origin(
-                &self.conn,
-                "article",
-                id,
-                &chrono::Utc::now().to_rfc3339(),
-            )?;
-            self.conn.execute("DELETE FROM brain_backfill_receipts WHERE source='atlas_articles' AND unit_id LIKE ?1 || '/%'", [id])?;
-            // Article IDs are URL-based and shared across cycles: keep NLP refs
-            // an article still needs in another retained cycle.
-            self.conn.execute("DELETE FROM nlp_source_refs WHERE owner_kind='article' AND owner_id IN(SELECT article_id FROM atlas_articles WHERE run_id=?1) AND owner_id NOT IN(SELECT article_id FROM atlas_articles WHERE run_id<>?1)",[id])?;
-            crate::nlp::cache::remove_owner(&self.conn, "atlas_run", id)?;
-            self.conn
-                .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
-            crate::investigation::insight_persist::reconcile_deleted_articles(&self.conn)?;
-            let deleted = self
-                .conn
-                .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?
-                > 0;
-            crate::brain_actors::reconcile_lifecycle(&self.conn, &chrono::Utc::now().to_rfc3339())?;
-            crate::job_cleanup::cleanup_batch(&self.conn, chrono::Utc::now())?;
-            Ok(deleted)
-        })();
-        match result {
-            Ok(deleted) => {
-                self.conn.execute_batch("COMMIT")?;
-                Ok(deleted)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
-        }
+        crate::storage::store_bridge::atlas_delete_run(id)
     }
 
     /// Drops insight source rows for one Atlas article and orphans Brain memories that
     /// no longer have any source. Fingerprints still linked from other articles/cycles keep
     /// their claim and memory.
     pub fn delete_article_insights(&self, run_id: &str, article_id: &str) -> Result<usize> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::delete_article_insights(run_id, article_id);
-        }
-        let answer_id = atlas_answer_id(run_id);
-        let fingerprints: Vec<String> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT DISTINCT fingerprint FROM insight_sources \
-                 WHERE run_id=?1 AND (answer_id=?2 OR answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind='atlas' AND owner_id=?3)) AND (call_id=?3 OR call_id='article:'||?3)",
-            )?;
-            let rows = stmt.query_map(params![run_id, answer_id, article_id], |row| row.get(0))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        if fingerprints.is_empty() {
-            return Ok(0);
-        }
-        let mut doomed: Vec<String> = Vec::new();
-        let mut queued = Vec::new();
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| -> Result<usize> {
-            let removed = self.conn.execute(
-                "DELETE FROM insight_sources WHERE run_id=?1 AND (answer_id=?2 OR answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind='atlas' AND owner_id=?3)) AND (call_id=?3 OR call_id='article:'||?3)",
-                params![run_id, answer_id, article_id],
-            )?;
-            let mut orphaned = 0usize;
-            for fingerprint in &fingerprints {
-                let remaining: i64 = self.conn.query_row(
-                    "SELECT COUNT(*) FROM insight_sources WHERE fingerprint=?1",
-                    [fingerprint],
-                    |row| row.get(0),
-                )?;
-                if remaining > 0 {
-                    continue;
-                }
-                let memory_id: Option<String> = self
-                    .conn
-                    .query_row(
-                        "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
-                        [fingerprint],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                self.conn.execute(
-                    "DELETE FROM insight_relations WHERE left_fingerprint=?1 OR right_fingerprint=?1",
-                    [fingerprint],
-                )?;
-                self.conn.execute(
-                    "DELETE FROM insight_claims WHERE fingerprint=?1",
-                    [fingerprint],
-                )?;
-                if let Some(memory_id) = memory_id {
-                    self.conn.execute(
-                        "DELETE FROM insight_user_edits WHERE memory_id=?1",
-                        [&memory_id],
-                    )?;
-                    self.conn.execute(
-                        "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
-                        [&memory_id],
-                    )?;
-                    self.conn
-                        .execute("DELETE FROM memories WHERE id=?1", [&memory_id])?;
-                    doomed.push(memory_id);
-                    orphaned += 1;
-                }
-            }
-            let _ = removed;
-            let _ = self.conn.execute(
-                "DELETE FROM intel_link_explanations WHERE article_id = ?1",
-                [article_id],
-            );
-            queued = self.queue_index_for(&doomed)?;
-            crate::investigation::insight_persist::reconcile_deleted_memories(&self.conn)?;
-            Ok(orphaned)
-        })();
-        match result {
-            Ok(orphaned) => {
-                self.conn.execute_batch("COMMIT")?;
-                let _ = self.index_now(&queued);
-                Ok(orphaned)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
-        }
+        crate::storage::store_bridge::delete_article_insights(run_id, article_id)
     }
 
     /// Drops Brain memories written from one Atlas cycle.
     /// A claim that another cycle also sourced keeps its memory and loses only this cycle's source row.
     pub fn delete_cycle_memories(&self, run_id: &str) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::delete_cycle_memories(run_id);
-        }
-        let answer_id = atlas_answer_id(run_id);
-        // A repeated article remains a live origin after one cycle is removed.
-        // Move legacy source pointers before pruning this cycle's contributions.
-        self.conn.execute("UPDATE OR IGNORE insight_sources SET
-            run_id=(SELECT a.run_id FROM atlas_articles a WHERE a.run_id<>?1 AND a.article_id=insight_sources.call_id ORDER BY a.seen_at DESC,a.run_id LIMIT 1),
-            answer_id=CASE WHEN answer_id=?2 THEN 'atlas-'||(SELECT a.run_id FROM atlas_articles a WHERE a.run_id<>?1 AND a.article_id=insight_sources.call_id ORDER BY a.seen_at DESC,a.run_id LIMIT 1) ELSE answer_id END
-            WHERE run_id=?1 AND (answer_id=?2 OR answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind='atlas'))
-              AND EXISTS(SELECT 1 FROM atlas_articles a WHERE a.run_id<>?1 AND a.article_id=insight_sources.call_id)",params![run_id,answer_id])?;
-        let fingerprints: Vec<String> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT DISTINCT fingerprint FROM insight_sources WHERE run_id=?1 AND (answer_id=?2 OR answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind='atlas'))",
-            )?;
-            let rows = stmt.query_map(params![run_id, answer_id], |row| row.get(0))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        self.conn.execute(
-            "DELETE FROM insight_sources WHERE run_id=?1 AND (answer_id=?2 OR answer_id IN (SELECT id FROM insight_snapshots WHERE owner_kind='atlas'))",
-            params![run_id, answer_id],
-        )?;
-        let mut doomed: Vec<String> = Vec::new();
-        for fingerprint in fingerprints {
-            let remaining: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM insight_sources WHERE fingerprint=?1",
-                [&fingerprint],
-                |row| row.get(0),
-            )?;
-            if remaining > 0 {
-                continue;
-            }
-            let memory_id: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
-                    [&fingerprint],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            self.conn.execute(
-                "DELETE FROM insight_relations WHERE left_fingerprint=?1 OR right_fingerprint=?1",
-                [&fingerprint],
-            )?;
-            self.conn.execute(
-                "DELETE FROM insight_claims WHERE fingerprint=?1",
-                [&fingerprint],
-            )?;
-            if let Some(memory_id) = memory_id {
-                self.conn.execute(
-                    "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
-                    [&memory_id],
-                )?;
-                self.conn
-                    .execute("DELETE FROM memories WHERE id=?1", [&memory_id])?;
-                doomed.push(memory_id);
-            }
-        }
-        if let Some(memory_id) = atlas_brief_id(&self.conn, run_id)? {
-            self.conn.execute(
-                "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
-                [&memory_id],
-            )?;
-            self.conn
-                .execute("DELETE FROM memories WHERE id=?1", [&memory_id])?;
-            doomed.push(memory_id);
-        }
-        // Inside the caller's transaction: queue durable removal; the index pool
-        // deletes vectors after commit (no Lance writes under the SQLite lock).
-        self.queue_index_for(&doomed)?;
-        // Checkpoints, receipts and repair status follow the run's retention.
-        publication::delete_run_memory_state(&self.conn, run_id)?;
-        crate::investigation::insight_persist::reconcile_deleted_memories(&self.conn)?;
-        Ok(())
+        crate::storage::store_bridge::delete_cycle_memories(run_id)
     }
 
     pub fn atlas_upsert_article(&self, row: &AtlasArticleRow) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_upsert_article(row);
-        }
-        self.conn.execute(
-            "INSERT INTO atlas_articles (
-                run_id, article_id, title, description, url, country, source_name, source_domain,
-                published_at, provider, temperature, category, seen_at, author, image_url
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
-             ON CONFLICT(run_id, article_id) DO UPDATE SET
-                title=excluded.title,
-                description=excluded.description,
-                url=excluded.url,
-                country=excluded.country,
-                source_name=excluded.source_name,
-                source_domain=excluded.source_domain,
-                published_at=excluded.published_at,
-                provider=excluded.provider,
-                temperature=excluded.temperature,
-                category=excluded.category,
-                seen_at=excluded.seen_at,
-                author=excluded.author,
-                image_url=excluded.image_url",
-            params![
-                row.run_id,
-                row.id,
-                row.title,
-                row.description,
-                row.url,
-                row.country,
-                row.source_name,
-                row.source_domain,
-                row.published_at,
-                row.provider,
-                row.temperature,
-                row.category,
-                row.seen_at,
-                row.author,
-                row.image_url,
-            ],
-        )?;
-        Ok(())
+        crate::storage::store_bridge::atlas_upsert_article(row)
     }
 
     pub fn atlas_delete_article(&self, run_id: &str, article_id: &str) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_delete_article(run_id, article_id);
-        }
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| -> Result<()> {
-            crate::nlp::cache::remove_owner(&self.conn, "article", article_id)?;
-            self.conn.execute(
-                "DELETE FROM atlas_articles WHERE run_id=?1 AND article_id=?2",
-                params![run_id, article_id],
-            )?;
-            crate::investigation::insight_persist::reconcile_deleted_articles(&self.conn)?;
-            crate::brain_actors::reconcile_lifecycle(&self.conn, &chrono::Utc::now().to_rfc3339())?;
-            crate::job_cleanup::cleanup_batch(&self.conn, chrono::Utc::now())?;
-            Ok(())
-        })();
-        match result {
-            Ok(()) => self.conn.execute_batch("COMMIT")?,
-            Err(error) => {
-                self.conn.execute_batch("ROLLBACK")?;
-                return Err(error);
-            }
-        }
-        Ok(())
+        crate::storage::store_bridge::atlas_delete_article(run_id, article_id)
     }
 
     pub fn atlas_set_category(&self, run_id: &str, article_id: &str, category: &str) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_set_category(run_id, article_id, category);
-        }
-        self.conn.execute(
-            "UPDATE atlas_articles SET category=?3 WHERE run_id=?1 AND article_id=?2",
-            params![run_id, article_id, category],
-        )?;
-        Ok(())
+        crate::storage::store_bridge::atlas_set_category(run_id, article_id, category)
     }
 
     pub fn atlas_list_articles(&self, run_id: &str) -> Result<Vec<AtlasArticleRow>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_list_articles(run_id);
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT run_id, article_id, title, description, url, country, source_name, source_domain,
-                    published_at, provider, temperature, category, seen_at, author, image_url
-             FROM atlas_articles WHERE run_id=?1 ORDER BY seen_at, article_id",
-        )?;
-        let rows = stmt.query_map([run_id], |row| atlas_article_from_row(row))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        crate::storage::store_bridge::atlas_list_articles(run_id)
     }
 
     /// Every stored article still within the retention window (prune drops older runs).
     /// Used to seed Atlas dedup so a new cycle skips headlines already processed.
     pub fn atlas_recent_articles(&self) -> Result<Vec<AtlasArticleRow>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_recent_articles();
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT run_id, article_id, title, description, url, country, source_name, source_domain,
-                    published_at, provider, temperature, category, seen_at, author, image_url
-             FROM atlas_articles
-             ORDER BY seen_at DESC, article_id",
-        )?;
-        let rows = stmt.query_map([], |row| atlas_article_from_row(row))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        crate::storage::store_bridge::atlas_recent_articles()
     }
 
     pub fn atlas_article(&self, run_id: &str, article_id: &str) -> Result<Option<AtlasArticleRow>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_article(run_id, article_id);
-        }
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT run_id, article_id, title, description, url, country, source_name, source_domain,
-                        published_at, provider, temperature, category, seen_at, author, image_url
-                 FROM atlas_articles WHERE run_id=?1 AND article_id=?2",
-                params![run_id, article_id],
-                atlas_article_from_row,
-            )
-            .optional()?)
+        crate::storage::store_bridge::atlas_article(run_id, article_id)
     }
 
     /// Latest retained occurrence of one article, without decoding the whole
     /// retained corpus just to open a headline.
     pub fn atlas_latest_article_by_id(&self, article_id: &str) -> Result<Option<AtlasArticleRow>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_latest_article_by_id(article_id);
-        }
-        Ok(self.conn.query_row("SELECT run_id,article_id,title,description,url,country,source_name,source_domain,published_at,provider,temperature,category,seen_at,author,image_url FROM atlas_articles WHERE article_id=?1 ORDER BY seen_at DESC LIMIT 1", [article_id], atlas_article_from_row).optional()?)
+        crate::storage::store_bridge::atlas_latest_article_by_id(article_id)
     }
 
     /// Distinct UTC calendar days (`YYYY-MM-DD`) that have an Atlas run, newest first.
     pub fn atlas_run_days(&self) -> Result<Vec<String>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_run_days();
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT substr(started_at, 1, 10) AS day
-             FROM atlas_runs
-             WHERE length(started_at) >= 10
-             ORDER BY day DESC",
-        )?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        crate::storage::store_bridge::atlas_run_days()
     }
 
     /// Articles for the Intel bulletin: one OSINT category, one run day, optional search.
@@ -2311,50 +1396,7 @@ impl Store {
         day: &str,
         query: &str,
     ) -> Result<Vec<AtlasArticleRow>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_articles_for_intel(category, day, query);
-        }
-        let q = query.trim();
-        let like = if q.is_empty() {
-            String::new()
-        } else {
-            format!("%{}%", q.to_ascii_lowercase())
-        };
-        let sql = if like.is_empty() {
-            "SELECT a.run_id, a.article_id, a.title, a.description, a.url, a.country,
-                    a.source_name, a.source_domain, a.published_at, a.provider, a.temperature,
-                    a.category, a.seen_at, a.author, a.image_url
-             FROM atlas_articles a
-             JOIN atlas_runs r ON r.id = a.run_id
-             WHERE a.category = ?1 AND substr(r.started_at, 1, 10) = ?2
-             ORDER BY a.published_at DESC, a.seen_at DESC, a.article_id"
-        } else {
-            "SELECT a.run_id, a.article_id, a.title, a.description, a.url, a.country,
-                    a.source_name, a.source_domain, a.published_at, a.provider, a.temperature,
-                    a.category, a.seen_at, a.author, a.image_url
-             FROM atlas_articles a
-             JOIN atlas_runs r ON r.id = a.run_id
-             WHERE a.category = ?1 AND substr(r.started_at, 1, 10) = ?2
-               AND (
-                 lower(a.title) LIKE ?3 OR
-                 lower(a.description) LIKE ?3 OR
-                 lower(a.source_name) LIKE ?3 OR
-                 lower(a.source_domain) LIKE ?3 OR
-                 lower(a.url) LIKE ?3
-               )
-             ORDER BY a.published_at DESC, a.seen_at DESC, a.article_id"
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = if like.is_empty() {
-            stmt.query_map(params![category, day], atlas_article_from_row)?
-        } else {
-            stmt.query_map(params![category, day, like], atlas_article_from_row)?
-        };
-        // Same URL (article_id) can appear in multiple runs on one day; keep the newest.
-        Ok(dedupe_articles_by_id(
-            rows.collect::<rusqlite::Result<_>>()?,
-        ))
+        crate::storage::store_bridge::atlas_articles_for_intel(category, day, query)
     }
 
     /// Claims linked to one Atlas article (`insight_sources.call_id` stores article_id).
@@ -2363,52 +1405,7 @@ impl Store {
         run_id: &str,
         article_id: &str,
     ) -> Result<Vec<AtlasArticleClaim>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_claims_for_article(run_id, article_id);
-        }
-        if let Some(rows) =
-            crate::investigation::insight_persist::article_claim_rows(&self.conn, article_id)?
-        {
-            return Ok(rows);
-        }
-        if let Some(rows) =
-            crate::investigation::insight_persist::atlas_claim_rows(&self.conn, article_id)?
-        {
-            return Ok(rows);
-        }
-        let answer_id = atlas_answer_id(run_id);
-        let mut stmt = self.conn.prepare(
-            "SELECT c.fingerprint, c.entity_id, c.predicate, c.object_value, c.topic,
-                    c.classification, c.confidence, m.text, s.source_url, s.published_at, s.call_id,
-                    c.source_reliability, c.info_credibility, c.admiralty, c.rsp_status
-             FROM insight_claims c
-             JOIN insight_sources s ON s.fingerprint = c.fingerprint
-             JOIN memories m ON m.id = c.memory_id
-             WHERE s.run_id=?1 AND s.answer_id=?2 AND s.call_id=?3
-             GROUP BY c.fingerprint
-             ORDER BY c.created_at",
-        )?;
-        let rows = stmt.query_map(params![run_id, answer_id, article_id], |row| {
-            Ok(AtlasArticleClaim {
-                fingerprint: row.get(0)?,
-                entity: row.get(1)?,
-                predicate: row.get(2)?,
-                object: row.get(3)?,
-                topic: row.get(4)?,
-                classification: row.get(5)?,
-                confidence: row.get(6)?,
-                claim: row.get(7)?,
-                source_url: row.get(8)?,
-                published_at: row.get(9)?,
-                article_id: row.get(10)?,
-                reliability: row.get(11)?,
-                info_credibility: row.get::<_, i64>(12)? as u8,
-                admiralty: row.get(13)?,
-                rsp_status: row.get(14)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        crate::storage::store_bridge::atlas_claims_for_article(run_id, article_id)
     }
 
     /// Persists view-only link explanations for an article on the Intel Brief page.
@@ -2417,28 +1414,7 @@ impl Store {
         article_id: &str,
         explanations: &HashMap<(String, String), String>,
     ) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::save_intel_link_explanations(
-                article_id,
-                explanations,
-            );
-        }
-        if explanations.is_empty() {
-            return Ok(());
-        }
-        let now = chrono::Utc::now().to_rfc3339();
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO intel_link_explanations (article_id, left_id, right_id, explanation, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(article_id, left_id, right_id) DO UPDATE SET
-               explanation = excluded.explanation,
-               updated_at = excluded.updated_at",
-        )?;
-        for ((left, right), explanation) in explanations {
-            stmt.execute(params![article_id, left, right, explanation, now])?;
-        }
-        Ok(())
+        crate::storage::store_bridge::save_intel_link_explanations(article_id, explanations)
     }
 
     /// Fetches persisted view-only link explanations for an article on the Intel Brief page.
@@ -2446,296 +1422,58 @@ impl Store {
         &self,
         article_id: &str,
     ) -> Result<HashMap<(String, String), String>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::get_intel_link_explanations(article_id);
-        }
-        let active:Option<String>=self.conn.query_row("SELECT active_snapshot_id FROM insight_owner_state WHERE owner_kind='article' AND owner_id=?1 AND active_snapshot_id<>''",[article_id],|r|r.get(0)).optional()?;
-        if let Some(active) = active {
-            let mut stmt=self.conn.prepare("SELECT left_id,right_id,relation,rationale,status FROM insight_derivation_links WHERE snapshot_id=?1 ORDER BY id")?;
-            let mut map = HashMap::new();
-            for row in stmt.query_map([active], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            })? {
-                let (left, right, relation, rationale, status) = row?;
-                map.insert(
-                    (left, right),
-                    format!("[{relation} · {status}] {rationale}"),
-                );
-            }
-            return Ok(map);
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT left_id, right_id, explanation
-             FROM intel_link_explanations
-             WHERE article_id = ?1",
-        )?;
-        let rows = stmt.query_map([article_id], |row| {
-            Ok((
-                (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let mut map = HashMap::new();
-        for r in rows {
-            let (k, v) = r?;
-            map.insert(k, v);
-        }
-        Ok(map)
+        crate::storage::store_bridge::get_intel_link_explanations(article_id)
     }
 
     /// Deletes persisted link explanations for an article.
     pub fn delete_intel_link_explanations(&self, article_id: &str) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::delete_intel_link_explanations(article_id);
-        }
-        self.conn.execute(
-            "DELETE FROM intel_link_explanations WHERE article_id = ?1",
-            [article_id],
-        )?;
-        Ok(())
+        crate::storage::store_bridge::delete_intel_link_explanations(article_id)
     }
 
     /// A run left `running` by a closed process can be resumed.
     pub fn atlas_park_running(&self) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_park_running();
-        }
-        self.conn.execute(
-            "UPDATE atlas_runs SET state='paused', note='Paused' WHERE state='running'",
-            [],
-        )?;
-        Ok(())
+        crate::storage::store_bridge::atlas_park_running()
     }
 
     pub fn atlas_quota_used(&self, provider: &str, day: &str) -> Result<u32> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_quota_used(provider, day);
-        }
-        let used: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT used FROM atlas_quota WHERE provider=?1 AND day=?2",
-                params![provider, day],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(used.unwrap_or(0) as u32)
+        crate::storage::store_bridge::atlas_quota_used(provider, day)
     }
 
     pub fn atlas_quota_bump(&self, provider: &str, day: &str) -> Result<u32> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_quota_bump(provider, day);
-        }
-        self.conn.execute(
-            "INSERT INTO atlas_quota (provider, day, used) VALUES (?1, ?2, 1)
-             ON CONFLICT(provider, day) DO UPDATE SET used = used + 1",
-            params![provider, day],
-        )?;
-        self.atlas_quota_used(provider, day)
+        crate::storage::store_bridge::atlas_quota_bump(provider, day)
     }
 
     pub fn app_state_get(&self, key: &str) -> Result<Option<String>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::app_state_get(key);
-        }
-        let value: Option<String> = self
-            .conn
-            .query_row("SELECT value FROM app_state WHERE key=?1", [key], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        Ok(value)
+        crate::storage::store_bridge::app_state_get(key)
     }
 
     pub fn app_state_set(&self, key: &str, value: &str) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::app_state_set(key, value);
-        }
-        self.conn.execute(
-            "INSERT INTO app_state(key,value) VALUES (?1,?2)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![key, value],
-        )?;
-        Ok(())
+        crate::storage::store_bridge::app_state_set(key, value)
     }
 
     /// Unix time of the next automatic Atlas run. Absent means auto run is off.
     pub fn atlas_auto_next(&self) -> Result<Option<u64>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_auto_next();
-        }
-        let value: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT value FROM app_state WHERE key='atlas_auto_next'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(value.and_then(|text| text.parse().ok()))
+        crate::storage::store_bridge::atlas_auto_next()
     }
 
     pub fn set_atlas_auto_next(&self, when: Option<u64>) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::set_atlas_auto_next(when);
-        }
-        match when {
-            Some(secs) => {
-                self.conn.execute(
-                    "INSERT INTO app_state(key,value) VALUES ('atlas_auto_next',?1)
-                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    [secs.to_string()],
-                )?;
-            }
-            None => {
-                self.conn
-                    .execute("DELETE FROM app_state WHERE key='atlas_auto_next'", [])?;
-            }
-        }
-        Ok(())
+        crate::storage::store_bridge::set_atlas_auto_next(when)
     }
 
     /// Drops finished runs that started more than 36 hours ago, including their
     /// statistics and articles. Runs that are still running or paused stay so they can resume.
     pub fn atlas_prune_expired(&self) -> Result<Vec<String>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_prune_expired();
-        }
-        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(36)).to_rfc3339();
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| -> Result<Vec<String>> {
-            let mut stmt = self.conn.prepare(
-                "SELECT id FROM atlas_runs
-                 WHERE started_at < ?1 AND state NOT IN ('running', 'paused')",
-            )?;
-            let ids = stmt
-                .query_map([cutoff.as_str()], |row| row.get(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
-            drop(stmt);
-            // Retain articles linked to Intel Recon investigations/reports.
-            let protected: std::collections::HashSet<String> = {
-                let mut stmt = self
-                    .conn
-                    .prepare("SELECT DISTINCT article_id FROM intel_investigations")?;
-                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-                rows.collect::<rusqlite::Result<_>>()?
-            };
-            for id in &ids {
-                self.delete_cycle_memories(id)?;
-                crate::nlp::cache::remove_owner(&self.conn, "atlas_run", id)?;
-                if protected.is_empty() {
-                    self.conn.execute("DELETE FROM nlp_source_refs WHERE owner_kind='article' AND owner_id IN(SELECT article_id FROM atlas_articles WHERE run_id=?1)",[id])?;
-                    crate::nlp::cache::gc(&self.conn)?;
-                    self.conn
-                        .execute("DELETE FROM atlas_articles WHERE run_id=?1", [id])?;
-                } else {
-                    let mut stmt = self
-                        .conn
-                        .prepare("SELECT article_id FROM atlas_articles WHERE run_id=?1")?;
-                    let article_ids: Vec<String> = stmt
-                        .query_map([id], |row| row.get(0))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    drop(stmt);
-                    for article_id in article_ids {
-                        if protected.contains(&article_id) {
-                            continue;
-                        }
-                        crate::nlp::cache::remove_owner(&self.conn, "article", &article_id)?;
-                        self.conn.execute(
-                            "DELETE FROM atlas_articles WHERE run_id=?1 AND article_id=?2",
-                            params![id, article_id],
-                        )?;
-                    }
-                }
-                // Keep the run row only when it still owns protected articles.
-                let remaining: i64 = self.conn.query_row(
-                    "SELECT COUNT(*) FROM atlas_articles WHERE run_id=?1",
-                    [id],
-                    |row| row.get(0),
-                )?;
-                if remaining == 0 {
-                    self.conn
-                        .execute("DELETE FROM atlas_runs WHERE id=?1", [id])?;
-                }
-            }
-            crate::investigation::insight_persist::reconcile_deleted_articles(&self.conn)?;
-            crate::job_cleanup::cleanup_batch(&self.conn, chrono::Utc::now())?;
-            crate::brain_actors::reconcile_lifecycle(&self.conn, &chrono::Utc::now().to_rfc3339())?;
-            Ok(ids)
-        })();
-        match result {
-            Ok(ids) => {
-                self.conn.execute_batch("COMMIT")?;
-                Ok(ids)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
-        }
+        crate::storage::store_bridge::atlas_prune_expired()
     }
 
     /// True when this Atlas run already wrote insight sources. A resume skips the model.
     pub fn atlas_has_insights(&self, run_id: &str) -> Result<bool> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_has_insights(run_id);
-        }
-        let answer_id = atlas_answer_id(run_id);
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM insight_sources WHERE run_id=?1 AND answer_id=?2",
-            params![run_id, answer_id],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
+        crate::storage::store_bridge::atlas_has_insights(run_id)
     }
 
     /// Claims whose sources point at this Atlas run.
     pub fn atlas_stored_claims(&self, run_id: &str) -> Result<Vec<AtlasStoredClaim>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_stored_claims(run_id);
-        }
-        let answer_id = atlas_answer_id(run_id);
-        let mut stmt = self.conn.prepare(
-            "SELECT c.fingerprint, c.entity_id, c.predicate, c.object_value, c.topic, c.classification,
-                    c.source_reliability, c.info_credibility, c.admiralty
-             FROM insight_claims c
-             JOIN insight_sources s ON s.fingerprint = c.fingerprint
-             WHERE s.run_id=?1 AND s.answer_id=?2
-             GROUP BY c.fingerprint
-             ORDER BY c.created_at",
-        )?;
-        let rows = stmt.query_map(params![run_id, answer_id], |row| {
-            Ok(AtlasStoredClaim {
-                fingerprint: row.get(0)?,
-                entity: row.get(1)?,
-                predicate: row.get(2)?,
-                object: row.get(3)?,
-                topic: row.get(4)?,
-                classification: row.get(5)?,
-                reliability: row.get(6)?,
-                info_credibility: row.get::<_, i64>(7)? as u8,
-                admiralty: row.get(8)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        crate::storage::store_bridge::atlas_stored_claims(run_id)
     }
 
     /// Relations whose endpoints are both in `fingerprints`.
@@ -2743,33 +1481,7 @@ impl Store {
         &self,
         fingerprints: &[String],
     ) -> Result<Vec<(String, String, String)>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::insight_relations_among(fingerprints);
-        }
-        if fingerprints.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT left_fingerprint, right_fingerprint, relation FROM insight_relations",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let known: std::collections::HashSet<&str> =
-            fingerprints.iter().map(String::as_str).collect();
-        let mut kept = Vec::new();
-        for row in rows {
-            let (left, right, relation) = row?;
-            if known.contains(left.as_str()) && known.contains(right.as_str()) {
-                kept.push((left, right, relation));
-            }
-        }
-        Ok(kept)
+        crate::storage::store_bridge::insight_relations_among(fingerprints)
     }
 
     /// Cache a deterministic summary and enqueue a background LLM flush task

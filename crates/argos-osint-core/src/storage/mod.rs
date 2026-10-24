@@ -35,6 +35,7 @@ pub mod graph;
 pub mod home;
 pub mod insight;
 pub mod insight_owner;
+pub mod insight_retry;
 pub mod insight_views;
 pub mod install;
 pub mod intel;

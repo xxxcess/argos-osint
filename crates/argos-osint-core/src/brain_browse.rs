@@ -60,6 +60,10 @@ impl Store {
         category: &str,
         source: MemorySource,
     ) -> Result<Memory> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::add_user_claim(text, category, source);
+        }
         self.write_then_index(|| {
             let memory = self.add_memory(text, category, false, source)?;
             self.mark_user_claim(&memory.id)?;
@@ -68,10 +72,18 @@ impl Store {
         })
     }
     pub fn mark_user_claim(&self, memory_id: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::mark_user_claim(memory_id);
+        }
         crate::brain_actors::sync_claim_actor_payload(&self.conn, memory_id)
     }
     /// Typed Claims and legacy insight-backed, non-inference claims only.
     pub fn is_browse_claim(&self, id: &str) -> Result<bool> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::is_browse_claim(id);
+        }
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM memories m LEFT JOIN memory_metadata t ON t.memory_id=m.id WHERE m.id=?1 AND (t.lifecycle IS NULL OR t.lifecycle='active') AND (t.memory_kind IN ('claim','atomic_claim') OR (t.memory_kind IS NULL AND EXISTS(SELECT 1 FROM insight_claims c WHERE c.memory_id=m.id AND lower(c.classification)<>'inference'))))",
             [id], |r| r.get(0),
@@ -79,6 +91,10 @@ impl Store {
     }
 
     pub fn actor_groups(&self) -> Result<Vec<ActorGroup>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::actor_groups();
+        }
         let mut groups: BTreeMap<String, ActorGroup> = BTreeMap::new();
         let mut stmt = self.conn.prepare("SELECT a.actor_id FROM brain_actors a JOIN memories m ON m.id=a.actor_id JOIN memory_metadata t ON t.memory_id=m.id WHERE t.lifecycle='active' AND a.actor_id NOT IN(SELECT from_actor FROM brain_actor_redirects) ORDER BY a.actor_id")?;
         let ids = stmt
@@ -114,6 +130,10 @@ impl Store {
     }
 
     pub fn brain_browse(&self, kind: Option<MemoryKind>, query: &str) -> Result<Vec<BrowseRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::brain_browse(kind, query);
+        }
         let mut rows = Vec::new();
         if kind.is_none() || kind == Some(MemoryKind::Claim) {
             let mut stmt = self.conn.prepare("SELECT m.id,m.text,m.category,m.pinned,m.created_at,m.source_json FROM memories m LEFT JOIN memory_metadata t ON t.memory_id=m.id WHERE (t.lifecycle IS NULL OR t.lifecycle='active') AND (t.memory_kind IN ('claim','atomic_claim') OR (t.memory_kind IS NULL AND EXISTS(SELECT 1 FROM insight_claims c WHERE c.memory_id=m.id AND lower(c.classification)<>'inference'))) ORDER BY m.pinned DESC,m.created_at DESC,m.id")?;
@@ -142,6 +162,10 @@ impl Store {
         kind: Option<MemoryKind>,
         query: &str,
     ) -> Result<Vec<Memory>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::brain_browse_memories(kind, query);
+        }
         let rows = self.brain_browse(kind, query)?;
         let context = if rows.iter().any(|r| matches!(r, BrowseRow::ActorGroup(_))) {
             Some(self.browse_context()?)
@@ -215,6 +239,10 @@ impl Store {
     }
 
     pub fn claim_associations(&self, memory_id: &str) -> Result<Associations> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::claim_associations(memory_id);
+        }
         let mut out = Associations::default();
         let mut actor_ids = BTreeSet::new();
         let mut stmt = self
@@ -247,6 +275,10 @@ impl Store {
     }
 
     pub fn actor_group_associations(&self, group: &ActorGroup) -> Result<Associations> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::actor_group_associations(group);
+        }
         self.actor_group_associations_in(group, &self.browse_context()?)
     }
 
@@ -296,6 +328,10 @@ impl Store {
 
     /// Read actor groups scoped to an optional cycle run ID.
     pub fn actor_groups_scoped(&self, cycle: Option<&str>) -> Result<Vec<ActorGroup>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::actor_groups_scoped(cycle);
+        }
         let all = self.actor_groups()?;
         let Some(cycle) = cycle else {
             return Ok(all);
@@ -320,6 +356,10 @@ impl Store {
         group: &ActorGroup,
         cycle: Option<&str>,
     ) -> Result<Associations> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::actor_group_associations_scoped(group, cycle);
+        }
         let mut assoc = self.actor_group_associations(group)?;
         let Some(cycle) = cycle else {
             return Ok(assoc);
@@ -401,6 +441,10 @@ impl Store {
     /// Opt-in detection receipts survive switching Recall off; deletion removes
     /// only that origin. Replacement callers retire their previous detections.
     pub fn record_thread_actor(&self, thread: &str, name: &str, kind: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::record_thread_actor(thread, name, kind);
+        }
         let Some(t) = self.get_thread(thread)?.filter(|t| t.recall_insights) else {
             return Ok(());
         };
@@ -435,6 +479,10 @@ impl Store {
     }
 
     pub fn actor_group_graph(&self, group: &ActorGroup) -> Result<crate::recon::MemoryGraph> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::actor_group_graph(group);
+        }
         Ok(Self::actor_group_graph_from(
             group,
             self.actor_group_associations(group)?,

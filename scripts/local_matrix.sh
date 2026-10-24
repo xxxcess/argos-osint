@@ -41,6 +41,8 @@ case "$storage" in
     step cargo fmt --all -- --check
     step "${cargo[@]}" clippy --workspace --all-targets --locked -- -D warnings
     step "${cargo[@]}" test --workspace --locked
+    # Smoke: the built bin must carry the storage CLI (catches feature wiring gaps).
+    step "${cargo[@]}" run -q -p argos-osint-bin --locked -- storage init --help
     step python3 scripts/test_surreal.py --mode embedded --no-fail-fast
     ;;
   server)
@@ -50,6 +52,8 @@ case "$storage" in
     [ -n "$surreal_bin" ] || { echo "local_matrix: no surreal binary (pass --surreal-bin or put surreal on PATH)" >&2; exit 2; }
     step "${cargo[@]}" clippy -p argos-osint-core -p argos-osint-bin --all-targets --locked \
       --no-default-features --features server,nlp -- -D warnings
+    step "${cargo[@]}" run -q -p argos-osint-bin --locked --no-default-features --features server,nlp \
+      -- storage init --help
     step python3 scripts/test_surreal.py --mode server --bin "$surreal_bin" --no-fail-fast
     ;;
   *)

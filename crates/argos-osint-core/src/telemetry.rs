@@ -13,7 +13,6 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Result;
-use rusqlite::OptionalExtension;
 use serde_json::Value;
 
 #[cfg(test)]
@@ -449,78 +448,19 @@ pub fn is_forbidden_key(key: &str) -> bool {
     .any(|bad| lower == *bad || lower.ends_with(bad))
 }
 
-/// Opens a short-lived connection for a write. Mirrors how `model_exec` records
-/// progress with a raw `db_path` instead of a pooled `Store`.
-fn write_connection(db_path: &Path) -> Result<rusqlite::Connection> {
-    let conn =
-        rusqlite::Connection::open(db_path).map_err(|err| anyhow::anyhow!(err.to_string()))?;
-    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
-    Ok(conn)
-}
-
-fn rusqlite_result<T>(value: Result<T, rusqlite::Error>) -> anyhow::Result<T> {
-    value.map_err(|err| anyhow::anyhow!(err.to_string()))
-}
-
 /// Persists one event and refreshes its rollups.
 ///
 /// Under a storage config (SurrealDB selected) the event goes to the
 /// repository instead (`storage::telemetry::record`, started on the process
 /// runtime without waiting) and SQLite is never opened: the two stores are
 /// never both written.
-pub fn record(db_path: &Path, event: &TelemetryEvent) -> anyhow::Result<()> {
+pub fn record(_db_path: &Path, event: &TelemetryEvent) -> anyhow::Result<()> {
     let event = event.clone();
     crate::storage::runtime::spawn(async move {
         if let Ok(repo) = crate::storage::runtime::repository().await {
             let _ = crate::storage::telemetry::record(repo.db(), &event).await;
         }
     });
-    Ok(())
-}
-
-/// Writes an event on an existing connection.
-///
-/// Under a storage config the connection is ignored and the event goes to
-/// the repository exactly like [`record`]: callers still holding a legacy
-/// `Store` connection never write SQLite telemetry.
-pub fn insert(conn: &rusqlite::Connection, event: &TelemetryEvent) -> anyhow::Result<()> {
-    record(Path::new(""), event)
-}
-
-/// Folds an event into the hourly and daily rollups. Duration histograms are
-/// merged by bin counts, never by averaging averages.
-fn rollup(
-    conn: &rusqlite::Connection,
-    event: &TelemetryEvent,
-    hour: &str,
-    day: &str,
-) -> Result<()> {
-    let metric = event.metric_ms.unwrap_or(0).max(0) as u64;
-    let bins = event_bins(metric);
-    let bins_json = serde_json::to_string(&bins).unwrap_or_else(|_| "[]".into());
-    for (bucket, table) in [(hour, "telemetry_hourly"), (day, "telemetry_daily")] {
-        let sql = format!(
-            "INSERT INTO {table} (bucket, event_type, dim_key, events, total_ms, max_ms, bins_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(bucket, event_type, dim_key) DO UPDATE SET
-               events = events + excluded.events,
-               total_ms = total_ms + excluded.total_ms,
-               max_ms = MAX(max_ms, excluded.max_ms),
-               bins_json = ?7"
-        );
-        rusqlite_result(conn.execute(
-            &sql,
-            rusqlite::params![
-                bucket,
-                event.event_type,
-                event.rollup_key(),
-                event.count.max(0),
-                metric,
-                metric,
-                bins_json,
-            ],
-        ))?;
-    }
     Ok(())
 }
 
@@ -567,59 +507,13 @@ impl Measured {
 /// Under a storage config the prune runs on the repository
 /// (`storage::telemetry::prune`, started without waiting) and SQLite is
 /// never opened.
-pub fn prune(db_path: &Path, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
+pub fn prune(_db_path: &Path, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
     crate::storage::runtime::spawn(async move {
         if let Ok(repo) = crate::storage::runtime::repository().await {
             let _ = crate::storage::telemetry::prune(repo.db(), now).await;
         }
     });
     Ok(())
-}
-
-fn should_prune(
-    conn: &rusqlite::Connection,
-    now: chrono::DateTime<chrono::Utc>,
-) -> anyhow::Result<bool> {
-    let last = get_meta(conn, "raw_pruned_at")?;
-    match last {
-        None => Ok(true),
-        Some(value) => {
-            let parsed = chrono::DateTime::parse_from_rfc3339(&value)
-                .map(|ts| ts.with_timezone(&chrono::Utc))
-                .unwrap_or(now);
-            Ok((now - parsed).num_seconds() >= PRUNE_INTERVAL_SECS)
-        }
-    }
-}
-
-pub fn get_meta(conn: &rusqlite::Connection, key: &str) -> anyhow::Result<Option<String>> {
-    conn.query_row(
-        "SELECT value FROM telemetry_meta WHERE key = ?1",
-        rusqlite::params![key],
-        |row| row.get::<_, String>(0),
-    )
-    .optional()
-    .map_err(|err| anyhow::anyhow!(err.to_string()))
-}
-
-pub fn set_meta(conn: &rusqlite::Connection, key: &str, value: &str) -> anyhow::Result<()> {
-    rusqlite_result(conn.execute(
-        "INSERT INTO telemetry_meta (key, value, updated_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-        rusqlite::params![key, value, chrono::Utc::now().to_rfc3339()],
-    ))?;
-    Ok(())
-}
-
-/// Marks the first moment this installation recorded telemetry.
-pub fn ensure_observed_since(conn: &rusqlite::Connection) -> anyhow::Result<String> {
-    let existing = get_meta(conn, "observed_since")?;
-    if let Some(value) = existing {
-        return Ok(value);
-    }
-    let now = chrono::Utc::now().to_rfc3339();
-    set_meta(conn, "observed_since", &now)?;
-    Ok(now)
 }
 
 /// Sample counts read straight from raw events, used for the coverage and N/A
@@ -629,22 +523,6 @@ pub struct Coverage {
     pub raw_events: i64,
     pub rollup_events: i64,
     pub observed_since: String,
-}
-
-pub fn coverage(conn: &rusqlite::Connection) -> anyhow::Result<Coverage> {
-    let mut stmt = rusqlite_result(conn.prepare("SELECT COUNT(*) FROM telemetry_events"))?;
-    let raw_events =
-        rusqlite_result(stmt.query_row([], |row| row.get::<_, i64>(0))).unwrap_or_default();
-    let mut stmt =
-        rusqlite_result(conn.prepare("SELECT COALESCE(SUM(events), 0) FROM telemetry_hourly"))?;
-    let rollup_events =
-        rusqlite_result(stmt.query_row([], |row| row.get::<_, i64>(0))).unwrap_or_default();
-    let observed_since = get_meta(conn, "observed_since")?.unwrap_or_default();
-    Ok(Coverage {
-        raw_events,
-        rollup_events,
-        observed_since,
-    })
 }
 
 /// Merges `bins` from a rollup row into one histogram.

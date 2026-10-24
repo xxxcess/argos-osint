@@ -3,13 +3,10 @@
 //! Analytical conclusions stay with Synthesis. Summarization must not invent
 //! connections, promote inferences to facts, call tools, or decide that a
 //! directive is satisfied.
-
-use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::provider::ChatMessage;
 use crate::secrets::ProviderSecret;
-use crate::tasks::OperationKind;
 
 mod exec;
 pub use exec::{
@@ -272,83 +269,20 @@ pub fn fallback_excerpt(text: &str, budget: usize) -> String {
     out
 }
 
-/// Look up a cached derived summary by the request cache key fields.
-fn cache_get_exact(
-    conn: &Connection,
-    req: &SummaryRequest,
-) -> Result<Option<SummaryResult>, anyhow::Error> {
-    if req.sources.iter().any(|s| sha_hex(&s.text) != s.hash) {
-        return Ok(None);
-    }
-    let stored: Option<String> = conn
-        .query_row(
-            "SELECT result_json FROM argos_derived_summaries WHERE id=?1",
-            [format!("sum-{}", req.cache_key())],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(json) = stored {
-        if let Ok(result) = serde_json::from_str::<SummaryResult>(&json) {
-            return Ok(Some(result));
-        }
-    }
-    let row: Option<(String, String, String, i64, String)> = conn.query_row(
-        "SELECT content, source_refs_json, coverage_json, fallback, model FROM argos_derived_summaries WHERE id=?1",
-        [format!("sum-{}",req.cache_key())],
-        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
-    ).optional()?;
-    let Some((content, refs_json, cov_json, fallback, model)) = row else {
-        return Ok(None);
-    };
-    let source_refs: Vec<String> = serde_json::from_str(&refs_json).unwrap_or_default();
-    let coverage: CoverageMeta = serde_json::from_str(&cov_json).unwrap_or_default();
-    Ok(Some(SummaryResult {
-        content,
-        source_refs,
-        source_hash: req
-            .sources
-            .first()
-            .map(|s| s.hash.clone())
-            .unwrap_or_default(),
-        model,
-        prompt_version: req.prompt_version.clone(),
-        coverage,
-        source_hashes: req.sources.iter().map(|s| s.hash.clone()).collect(),
-        provider: req.provider.clone(),
-        preprocessing: req.preprocessing.clone(),
-        fallback: fallback != 0,
-    }))
-}
-
-/// Prefer an exact compatible model result, then its separately keyed local fallback.
-pub fn cache_get(conn: &Connection, req: &SummaryRequest) -> anyhow::Result<Option<SummaryResult>> {
-    if let Some(result) = cache_get_exact(conn, req)? {
-        return Ok(Some(result));
-    }
-    let mut local = req.clone();
-    local.provider = "local".into();
-    local.model = "deterministic".into();
-    Ok(cache_get_exact(conn, &local)?.filter(|r| r.fallback))
-}
-
 /// [`cache_get`] for async callers on the selected store: the repository
 /// (`storage::summary_flush::cache_get`) under SurrealDB, otherwise `conn`
 /// opened by `open` (SQLite is never opened under SurrealDB).
 pub async fn cache_get_selected(
     req: &SummaryRequest,
-    open: impl FnOnce() -> anyhow::Result<crate::store::Store>,
+    _open: impl FnOnce() -> anyhow::Result<crate::store::Store>,
 ) -> anyhow::Result<Option<SummaryResult>> {
-    if crate::recon::backend::surreal_selected() {
-        #[cfg(feature = "surreal")]
-        {
-            let repo = crate::storage::runtime::repository().await?;
-            return crate::storage::summary_flush::cache_get(&repo, req).await;
-        }
-        #[cfg(not(feature = "surreal"))]
-        return Ok(None);
+    #[cfg(feature = "surreal")]
+    {
+        let repo = crate::storage::runtime::repository().await?;
+        return crate::storage::summary_flush::cache_get(&repo, req).await;
     }
-    let store = open()?;
-    cache_get(&store.conn, req)
+    #[cfg(not(feature = "surreal"))]
+    Ok(None)
 }
 
 pub fn resolved_summary_route() -> (String, String) {
@@ -363,184 +297,6 @@ pub fn resolved_summary_route() -> (String, String) {
     .map(|s| (s.kind, s.model))
     .ok_or(())
     .unwrap_or_else(|_| ("local".into(), "deterministic".into()))
-}
-
-/// Persist a derived summary for later cache hits.
-pub fn cache_put(
-    conn: &Connection,
-    req: &SummaryRequest,
-    result: &SummaryResult,
-) -> Result<(), anyhow::Error> {
-    anyhow::ensure!(
-        req.sources.iter().all(|s| sha_hex(&s.text) == s.hash),
-        "summary source hash mismatch"
-    );
-    let now = chrono::Utc::now().to_rfc3339();
-    let id = format!("sum-{}", req.cache_key());
-    let focus_hash = sha_hex(&req.focus);
-    let source_id = req.sources.first().map(|s| s.id.as_str()).unwrap_or("");
-    let source_revision = req
-        .sources
-        .first()
-        .map(|s| s.revision.as_str())
-        .unwrap_or("");
-    let source_hash = req.sources.first().map(|s| s.hash.as_str()).unwrap_or("");
-    conn.execute(
-        "INSERT INTO argos_derived_summaries(
-            id, mode, source_id, source_revision, source_hash, focus_hash, budget,
-            model, provider, prompt_version, content, source_refs_json, coverage_json,
-            fallback, created_at, updated_at
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15)
-         ON CONFLICT(id) DO UPDATE SET
-            content=excluded.content,
-            source_refs_json=excluded.source_refs_json,
-            coverage_json=excluded.coverage_json,
-            fallback=excluded.fallback,
-            updated_at=excluded.updated_at
-         WHERE argos_derived_summaries.fallback=1 OR excluded.fallback=0",
-        params![
-            id,
-            req.mode.as_str(),
-            source_id,
-            source_revision,
-            source_hash,
-            focus_hash,
-            req.budget_chars as i64,
-            req.model,
-            req.provider,
-            req.prompt_version,
-            result.content,
-            serde_json::to_string(&result.source_refs)?,
-            serde_json::to_string(&result.coverage)?,
-            if result.fallback { 1 } else { 0 },
-            now,
-        ],
-    )?;
-    conn.execute(
-        "UPDATE argos_derived_summaries SET result_json=?2 WHERE id=?1 AND (fallback=1 OR ?3=0)",
-        params![
-            id,
-            serde_json::to_string(result)?,
-            i64::from(result.fallback)
-        ],
-    )?;
-    Ok(())
-}
-
-/// Persist the full SummaryRequest so a worker can run live LLM upgrade later.
-pub fn persist_flush_request(conn: &Connection, req: &SummaryRequest) -> anyhow::Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS argos_summary_flush_requests (
-            cache_key TEXT PRIMARY KEY,
-            request_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );",
-    )?;
-    let now = chrono::Utc::now().to_rfc3339();
-    conn.execute(
-        "INSERT INTO argos_summary_flush_requests(cache_key, request_json, created_at)
-         VALUES (?1,?2,?3)
-         ON CONFLICT(cache_key) DO UPDATE SET request_json=excluded.request_json, created_at=excluded.created_at",
-        params![req.cache_key(), serde_json::to_string(req)?, now],
-    )?;
-    Ok(())
-}
-
-pub fn load_flush_request(
-    conn: &Connection,
-    cache_key: &str,
-) -> anyhow::Result<Option<SummaryRequest>> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS argos_summary_flush_requests (
-            cache_key TEXT PRIMARY KEY,
-            request_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );",
-    )?;
-    let row: Option<String> = conn
-        .query_row(
-            "SELECT request_json FROM argos_summary_flush_requests WHERE cache_key=?1",
-            [cache_key],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(match row {
-        Some(json) => Some(serde_json::from_str(&json)?),
-        None => None,
-    })
-}
-
-/// When a provider secret is present, run [`complete_summary`] (2-attempt policy)
-/// and refresh the cache. Without a secret, returns the deterministic/cached value
-/// and does **not** invent network success.
-pub fn try_live_summary_upgrade(
-    conn: &Connection,
-    secret: Option<&ProviderSecret>,
-    cache_key: &str,
-) -> anyhow::Result<(SummaryResult, &'static str)> {
-    let Some(req) = load_flush_request(conn, cache_key)? else {
-        anyhow::bail!("flush request missing for {cache_key}");
-    };
-    let cached = cache_get(conn, &req)?
-        .or_else(|| req.deterministic.as_deref().cloned())
-        .unwrap_or_else(|| SummaryResult {
-            content: if req.prompt_version.ends_with(".v1") {
-                fallback_excerpt(
-                    &req.sources
-                        .iter()
-                        .map(|s| s.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n"),
-                    req.budget_chars,
-                )
-            } else {
-                String::new()
-            },
-            source_refs: req.sources.iter().map(|s| s.id.clone()).collect(),
-            source_hash: req
-                .sources
-                .first()
-                .map(|s| s.hash.clone())
-                .unwrap_or_default(),
-            model: "deterministic".into(),
-            prompt_version: req.prompt_version.clone(),
-            coverage: CoverageMeta::default(),
-            source_hashes: Vec::new(),
-            provider: "local".into(),
-            preprocessing: serde_json::Value::Null,
-            fallback: true,
-        });
-    if !cached.fallback {
-        return Ok((cached, "already_upgraded"));
-    }
-    if req.mode == SummarizationMode::TopologyNeighborhood {
-        // Structured generation needs the whole role chain, not one secret:
-        // `scheduler::drain_summary_flush_with_runtime` dispatches it. This
-        // single-secret path never reports it as upgraded.
-        return Ok((cached, "role_dispatch_required"));
-    }
-    let Some(secret) = secret else {
-        return Ok((cached, "cached_deterministic_no_secret"));
-    };
-    if req.prompt_version.ends_with(".v1") {
-        // Legacy requests contain a derived source. Their v1 identity stays isolated.
-        let mut legacy = req.clone();
-        legacy.model = secret.model.clone();
-        legacy.provider = secret.kind.clone();
-        legacy.preprocessing = serde_json::json!({"legacy_derived_source":true});
-        let upgraded =
-            crate::async_bridge::block_on(complete_summary(secret, &legacy, cached.clone()));
-        cache_put(conn, &legacy, &upgraded)?;
-        return Ok((upgraded, "legacy_derived_source"));
-    }
-    let upgraded = crate::async_bridge::block_on(complete_summary(secret, &req, cached.clone()));
-    cache_put(conn, &req, &upgraded)?;
-    let outcome = if upgraded.fallback {
-        "llm_fallback"
-    } else {
-        "llm_upgraded"
-    };
-    Ok((upgraded, outcome))
 }
 
 pub(crate) fn sha_hex(text: &str) -> String {
@@ -715,86 +471,6 @@ pub fn deterministic_section_digest(
         preprocessing: serde_json::Value::Null,
         fallback: true,
     }
-}
-
-/// Enqueue a background LLM polish for a mode that already published a
-/// deterministic (or cached) result. Uses the shared task schema and
-/// summarization attempt cap (2). Dedupes on the request cache key.
-pub fn enqueue_summary_flush(conn: &Connection, req: &SummaryRequest) -> anyhow::Result<bool> {
-    use crate::tasks::{enqueue_job, enqueue_task, NewJob, NewTask};
-    let now = chrono::Utc::now().to_rfc3339();
-    let key = req.cache_key();
-    let job_id = format!("sum-job-{key}");
-    let task_id = format!("sum-task-{key}");
-    enqueue_job(
-        conn,
-        &NewJob {
-            id: job_id.clone(),
-            kind: "summarization_flush".into(),
-            owner_scope: req.mode.as_str().into(),
-            input_revision: req
-                .sources
-                .first()
-                .map(|s| s.revision.clone())
-                .unwrap_or_default(),
-            deadline_at: String::new(),
-        },
-        &now,
-    )?;
-    enqueue_task(
-        conn,
-        &NewTask {
-            id: task_id,
-            job_id,
-            operation: req.mode.as_str().into(),
-            dedupe_key: format!("flush:{key}"),
-            priority: 50,
-            input_ref: req.focus.clone(),
-            input_hash: key,
-            source_revision: req
-                .sources
-                .first()
-                .map(|s| s.revision.clone())
-                .unwrap_or_default(),
-            role_snapshot: "summarization".into(),
-            max_attempts: OperationKind::Summarization.attempt_cap(),
-        },
-        &now,
-    )
-}
-
-/// Cache a deterministic result immediately and enqueue a background flush task
-/// under the shared 2-attempt summarization policy. Synchronous callers keep the
-/// deterministic text; an elected LLM worker may later upgrade the cache via
-/// [`complete_summary`] when a provider secret is available.
-pub fn publish_deterministic_and_enqueue(
-    conn: &Connection,
-    req: &SummaryRequest,
-    deterministic: SummaryResult,
-) -> anyhow::Result<SummaryResult> {
-    let mut req = req.clone();
-    // Factory-created requests already carry the route snapshot. Legacy/direct
-    // local envelopes resolve once here, before durable identity is calculated.
-    if req.provider.is_empty() {
-        let (provider, model) = resolved_summary_route();
-        req.provider = provider;
-        req.model = model;
-    }
-    if let Some(hit) = cache_get(conn, &req)? {
-        if !hit.fallback {
-            return Ok(hit);
-        }
-    }
-    let mut deterministic = deterministic;
-    deterministic.source_hashes = req.sources.iter().map(|s| s.hash.clone()).collect();
-    req.deterministic = Some(Box::new(deterministic.clone()));
-    let mut det_req = req.clone();
-    det_req.provider = "local".into();
-    det_req.model = "deterministic".into();
-    cache_put(conn, &det_req, &deterministic)?;
-    persist_flush_request(conn, &req)?;
-    let _ = enqueue_summary_flush(conn, &req)?;
-    Ok(deterministic)
 }
 
 /// Build a minimal request for a deterministic mode publish.
@@ -999,8 +675,6 @@ mod tests {
 #[cfg(test)]
 mod service_tests {
     use super::*;
-    use crate::tasks::migrate_tables;
-    use rusqlite::Connection;
 
     #[test]
     fn all_remaining_mode_fallbacks_non_empty() {
@@ -1035,9 +709,7 @@ mod service_tests {
 }
 
 #[cfg(test)]
-mod identity_tests {
-    use super::*;
-}
+mod identity_tests {}
 
 #[cfg(all(test, feature = "nlp"))]
 mod preparation_tests {
@@ -1111,9 +783,6 @@ pub fn publish_selected(
     req: &SummaryRequest,
     deterministic: SummaryResult,
 ) -> Option<SummaryResult> {
-    if !crate::recon::backend::surreal_selected() {
-        return None;
-    }
     #[cfg(feature = "surreal")]
     {
         let req = req.clone();

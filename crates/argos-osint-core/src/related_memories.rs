@@ -79,6 +79,10 @@ struct Candidate {
 impl Store {
     /// Total saved memories (used to explain an active filter).
     pub fn memory_count(&self) -> Result<usize> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::memory_count();
+        }
         let n: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;

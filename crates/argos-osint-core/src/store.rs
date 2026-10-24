@@ -1055,6 +1055,10 @@ impl Store {
     }
 
     pub fn list_memories(&self) -> Result<Vec<Memory>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::list_memories();
+        }
         // Default Brain listing: evidence/user memories. Actor/Link/Related
         // structural records are browsed through typed kind filters.
         let mut stmt = self.conn.prepare("SELECT id,text,category,pinned,created_at,source_json FROM memories m WHERE NOT EXISTS (SELECT 1 FROM memory_metadata t WHERE t.memory_id=m.id AND (t.memory_kind IN ('actor','link','related') OR t.lifecycle<>'active')) ORDER BY pinned DESC,created_at DESC")?;
@@ -1081,6 +1085,10 @@ impl Store {
 
     /// Substring search across memory text, category, claim fields, and source JSON.
     pub fn search_memories(&self, query: &str) -> Result<Vec<Memory>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::search_memories(query);
+        }
         let needle = like_needle(query);
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT m.id,m.text,m.category,m.pinned,m.created_at,m.source_json
@@ -1105,6 +1113,10 @@ impl Store {
         pinned: bool,
         source: MemorySource,
     ) -> Result<Memory> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::add_memory(text, category, pinned, source);
+        }
         source.validate()?;
         let text = text.trim();
         anyhow::ensure!(!text.is_empty(), "memory text is empty");
@@ -1180,6 +1192,10 @@ impl Store {
     /// Falls back to Jaccard alone when embedding is off or the index fails; an
     /// index problem never fails the caller.
     pub fn recall(&self, query: &str, top_k: usize) -> Result<Vec<ScoredMemory>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::recall(query, top_k);
+        }
         // Actor records serve identity lookup and Link/Related records serve
         // exploration; neither is independent evidence for default recall.
         let structural = self.structural_memory_ids()?;
@@ -1227,6 +1243,10 @@ impl Store {
     /// similarity (use [`brain_lance::DUPLICATE_THRESHOLD`] for near-duplicates).
     /// None when embedding is off or the index is unavailable.
     pub fn find_similar_memory(&self, text: &str, threshold: f32) -> Option<(String, f32)> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::find_similar_memory(text, threshold);
+        }
         let index = self.vector_index()?;
         match index.find_similar(text, threshold) {
             Ok(hit) => hit,
@@ -1754,6 +1774,10 @@ impl Store {
         category: &str,
         pinned: bool,
     ) -> Result<bool> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::update_memory(id, text, category, pinned);
+        }
         let text = text.trim();
         anyhow::ensure!(!text.is_empty(), "memory text is empty");
         self.write_then_index(|| {
@@ -1770,6 +1794,10 @@ impl Store {
     }
 
     pub fn graph_summary(&self, memory_id: &str) -> Result<Option<GraphSummary>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::graph_summary(memory_id);
+        }
         Ok(self
             .conn
             .query_row(
@@ -1789,6 +1817,10 @@ impl Store {
     /// `focus` is the directive id the summary was written from.
     /// Returns false when that memory is already gone.
     pub fn save_graph_summary(&self, memory_id: &str, summary: &str, focus: &str) -> Result<bool> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::save_graph_summary(memory_id, summary, focus);
+        }
         let summary = summary.trim();
         anyhow::ensure!(!summary.is_empty(), "graph summary is empty");
         let exists: i64 = self.conn.query_row(
@@ -1810,6 +1842,10 @@ impl Store {
     /// User deletion. Leaves a tombstone so retries/repair never recreate the
     /// memory, and queues durable vector removal in the same transaction.
     pub fn delete_memory(&self, id: &str) -> Result<bool> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::delete_memory(id);
+        }
         let mut queued = Vec::new();
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<bool> {
@@ -1868,6 +1904,10 @@ impl Store {
 
     /// Fetch one memory by id directly (independent of any list filter).
     pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::get_memory(id);
+        }
         Ok(self
             .conn
             .query_row(

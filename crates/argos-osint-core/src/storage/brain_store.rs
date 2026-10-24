@@ -347,3 +347,153 @@ pub fn split_actor(from: &str) -> Result<()> {
     }
     Ok(())
 }
+
+// ---- Memory CRUD, recall and vectors behind the frozen `Store` surface ----
+
+/// `Store::list_memories`.
+pub fn list_memories() -> Result<Vec<Memory>> {
+    runtime::blocking(|repo| async move { super::memories::list_memories(&repo).await })
+}
+
+/// `Store::add_memory`: publish, then index with the local embedder.
+pub fn add_memory(
+    text: &str,
+    category: &str,
+    pinned: bool,
+    source: MemorySource,
+) -> Result<Memory> {
+    let (text, category) = (text.to_string(), category.to_string());
+    runtime::blocking(|repo| async move {
+        let e = super::vectors::Embedder::local();
+        super::memories::add_memory(&repo, &text, &category, pinned, source, e.as_ref()).await
+    })
+}
+
+/// `Store::recall`: vector-first, lexical top-up (SurrealDB HNSW search
+/// replaces the Lance index).
+pub fn recall(query: &str, top_k: usize) -> Result<Vec<crate::brain::ScoredMemory>> {
+    let query = query.to_string();
+    let hits = runtime::blocking(|repo| async move {
+        let e = super::vectors::Embedder::local();
+        super::memories::recall(&repo, &query, top_k, e.as_ref()).await
+    })?;
+    Ok(hits
+        .into_iter()
+        .map(|h| crate::brain::ScoredMemory {
+            memory: h.memory,
+            score: h.score,
+        })
+        .collect())
+}
+
+/// `Store::find_similar_memory`: the best vector hit at or above `threshold`.
+pub fn find_similar_memory(text: &str, threshold: f32) -> Option<(String, f32)> {
+    let text = text.to_string();
+    runtime::blocking(|repo| async move {
+        let Some(e) = super::vectors::Embedder::local() else {
+            return Ok(None);
+        };
+        let hits = super::memories::recall(&repo, &text, 1, Some(&e)).await?;
+        Ok(hits
+            .into_iter()
+            .find(|h| h.score >= threshold)
+            .map(|h| (h.memory.id, h.score)))
+    })
+    .unwrap_or_else(|err| {
+        tracing::warn!("find_similar_memory: {err:#}");
+        None
+    })
+}
+
+/// `Store::get_memory`.
+pub fn get_memory(id: &str) -> Result<Option<Memory>> {
+    let id = id.to_string();
+    runtime::blocking(|repo| async move { super::browse::get_memory(&repo, &id).await })
+}
+
+/// `Store::delete_memory`.
+pub fn delete_memory(id: &str) -> Result<bool> {
+    let id = id.to_string();
+    runtime::blocking(|repo| async move { super::browse::delete_memory(&repo, &id).await })
+}
+
+/// `Store::update_memory`: rewrite text/category/pin and queue reindexing.
+pub fn update_memory(id: &str, text: &str, category: &str, pinned: bool) -> Result<bool> {
+    let text = text.trim().to_string();
+    anyhow::ensure!(!text.is_empty(), "memory text is empty");
+    let (id, category) = (
+        id.to_string(),
+        crate::brain::normalize_category(category).to_string(),
+    );
+    runtime::blocking(|repo| async move {
+        if super::browse::get_memory(&repo, &id).await?.is_none() {
+            return Ok(false);
+        }
+        let write: MemoryWrite = Arc::new(move |tx| {
+            let (id, text, category) = (id.clone(), text.clone(), category.clone());
+            Box::pin(async move {
+                run(
+                    &tx,
+                    tx.query(
+                        "UPDATE $m SET text = $text, category = $category, \
+                         pinned = $pinned RETURN NONE",
+                    )
+                    .bind(("m", rid("memory", &id)))
+                    .bind(("text", text))
+                    .bind(("category", category))
+                    .bind(("pinned", pinned)),
+                )
+                .await?;
+                Ok(vec![id])
+            })
+        });
+        write_then_index(repo.publisher(), write)
+            .await
+            .map_err(|e| anyhow!("update memory: {e}"))?;
+        Ok(true)
+    })
+}
+
+/// `Store::search_memories`: active memories whose text contains `query`.
+pub fn search_memories(query: &str) -> Result<Vec<Memory>> {
+    let needle = query.trim().to_lowercase();
+    let all = list_memories()?;
+    if needle.is_empty() {
+        return Ok(all);
+    }
+    Ok(all
+        .into_iter()
+        .filter(|m| m.text.to_lowercase().contains(&needle))
+        .collect())
+}
+
+/// `Store::memory_count`.
+pub fn memory_count() -> Result<usize> {
+    runtime::blocking(|repo| async move {
+        let mut r = repo
+            .db()
+            .query("RETURN count(SELECT VALUE id FROM memory)")
+            .await?
+            .check()?;
+        let n: Option<i64> = r.take(0usize)?;
+        Ok(n.unwrap_or(0).max(0) as usize)
+    })
+}
+
+/// `Store::graph_summary`.
+pub fn graph_summary(memory_id: &str) -> Result<Option<crate::store::GraphSummary>> {
+    let id = memory_id.to_string();
+    runtime::blocking(|repo| async move { super::summaries::graph_summary(&repo, &id).await })
+}
+
+/// `Store::save_graph_summary`.
+pub fn save_graph_summary(memory_id: &str, summary: &str, focus: &str) -> Result<bool> {
+    let (id, summary, focus) = (
+        memory_id.to_string(),
+        summary.to_string(),
+        focus.to_string(),
+    );
+    runtime::blocking(|repo| async move {
+        super::summaries::save_graph_summary(&repo, &id, &summary, &focus).await
+    })
+}

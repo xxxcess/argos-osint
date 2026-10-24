@@ -297,7 +297,7 @@ fn ensure_file(path: &Path, url: &str) -> Result<()> {
 
 fn download_file(path: &Path, url: &str) -> Result<()> {
     let url = url.to_string();
-    let bytes = crate::brain_lance::block_on(async move {
+    let bytes = crate::async_bridge::block_on(async move {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
             .user_agent("argos-osint (brain embeddings)")

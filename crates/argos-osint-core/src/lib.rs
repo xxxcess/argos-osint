@@ -14,6 +14,7 @@
     clippy::empty_line_after_doc_comments
 )]
 
+pub mod async_bridge;
 pub mod atlas;
 pub mod atlas_actor_index;
 pub mod atlas_classify;
@@ -31,8 +32,6 @@ pub mod brain_actors;
 pub mod brain_backfill;
 pub mod brain_browse;
 pub mod brain_kinds;
-#[cfg_attr(not(feature = "lancedb"), path = "brain_lance_off.rs")]
-pub mod brain_lance;
 pub mod brain_neighborhood_brief;
 pub mod brain_neighborhood_brief_exec;
 pub mod brain_query;
@@ -74,7 +73,6 @@ pub mod provider_request;
 pub mod recon;
 pub mod related_articles;
 pub mod related_global;
-pub mod related_memories;
 pub mod reliability_faults;
 pub mod request_policy;
 pub mod scheduler;

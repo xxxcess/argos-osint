@@ -529,11 +529,11 @@ pub fn try_live_summary_upgrade(
         legacy.provider = secret.kind.clone();
         legacy.preprocessing = serde_json::json!({"legacy_derived_source":true});
         let upgraded =
-            crate::brain_lance::block_on(complete_summary(secret, &legacy, cached.clone()));
+            crate::async_bridge::block_on(complete_summary(secret, &legacy, cached.clone()));
         cache_put(conn, &legacy, &upgraded)?;
         return Ok((upgraded, "legacy_derived_source"));
     }
-    let upgraded = crate::brain_lance::block_on(complete_summary(secret, &req, cached.clone()));
+    let upgraded = crate::async_bridge::block_on(complete_summary(secret, &req, cached.clone()));
     cache_put(conn, &req, &upgraded)?;
     let outcome = if upgraded.fallback {
         "llm_fallback"

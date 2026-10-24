@@ -640,7 +640,7 @@ pub fn run_claimed(
         )
     });
     let operation_id = format!("{}:e{}:topology", claimed.id, claimed.epoch);
-    let result = crate::brain_lance::block_on(generate(
+    let result = crate::async_bridge::block_on(generate(
         runtime,
         db_path,
         &operation_id,

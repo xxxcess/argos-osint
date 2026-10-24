@@ -256,7 +256,13 @@ pub async fn load_tables(db: &Surreal<Any>) -> Result<ProfileTables> {
         })
         .collect();
 
-    let recon = super::recon_jobs::profile_rows(db).await?;
+    // Until `recon_jobs::SCHEMA` is in the bootstrap, its tables may be
+    // missing: render them unavailable, like a missing SQLite table.
+    let recon = match super::recon_jobs::profile_rows(db).await {
+        Ok(rows) => Some(rows),
+        Err(e) if e.to_string().contains("does not exist") => None,
+        Err(e) => return Err(e),
+    };
     Ok(ProfileTables {
         telemetry_events: Some(
             events
@@ -338,12 +344,12 @@ pub async fn load_tables(db: &Surreal<Any>) -> Result<ProfileTables> {
                 })
                 .collect(),
         ),
-        recon_run_states: Some(recon.recon_run_states),
-        report_jobs: Some(recon.report_jobs),
-        report_tasks: Some(recon.report_tasks),
-        recon_coverage: Some(recon.recon_coverage),
-        model_operations: Some(recon.model_operations),
-        model_attempts: Some(recon.model_attempts),
+        recon_run_states: recon.as_ref().map(|r| r.recon_run_states.clone()),
+        report_jobs: recon.as_ref().map(|r| r.report_jobs.clone()),
+        report_tasks: recon.as_ref().map(|r| r.report_tasks.clone()),
+        recon_coverage: recon.as_ref().map(|r| r.recon_coverage.clone()),
+        model_operations: recon.as_ref().map(|r| r.model_operations.clone()),
+        model_attempts: recon.as_ref().map(|r| r.model_attempts.clone()),
     })
 }
 

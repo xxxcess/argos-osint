@@ -33,6 +33,7 @@ pub mod entities;
 pub mod event_log;
 pub mod graph;
 pub mod home;
+pub mod index_drain;
 pub mod insight;
 pub mod insight_owner;
 pub mod insight_retry;

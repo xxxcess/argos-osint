@@ -640,8 +640,15 @@ impl WorkerPool {
         // Under a storage config nothing may open SQLite: only the insight
         // refresh drainer has a repository path. The index, summary,
         // backfill, actor-dedup, Intel brief and brain-scope pools are
-        // SQLite subsystems and stay off until they are ported.
+        // SQLite subsystems and stay off until they are ported; the index
+        // pool has a repository drainer.
         if crate::recon::backend::surreal_selected() {
+            #[cfg(feature = "surreal")]
+            return vec![
+                Self::spawn_surreal_index_drainer(db_path.clone(), owner.clone()),
+                Self::spawn_insight_refresh_drainer(db_path, owner),
+            ];
+            #[cfg(not(feature = "surreal"))]
             return vec![Self::spawn_insight_refresh_drainer(db_path, owner)];
         }
         vec![
@@ -653,6 +660,54 @@ impl WorkerPool {
             Self::spawn_intel_brief_drainer(db_path.clone(), owner.clone()),
             Self::spawn_brain_scope_drainer(db_path, owner),
         ]
+    }
+
+    /// The index pool on SurrealDB: while elected on the repository's
+    /// scheduler lease, embed pending memory changes into the serving vector
+    /// generation (`storage::index_drain`). Off when local embedding is off.
+    #[cfg(feature = "surreal")]
+    pub fn spawn_surreal_index_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let _ = std::thread::Builder::new()
+            .name("argos-index".into())
+            .spawn(move || {
+                let Some(embedder) = crate::storage::vectors::Embedder::local() else {
+                    return;
+                };
+                let embedder = Arc::new(embedder);
+                while !flag.load(Ordering::Acquire) {
+                    let (owner, embedder) = (owner.clone(), embedder.clone());
+                    let drained = crate::storage::runtime::blocking(move |repo| async move {
+                        let elected = crate::storage::jobs::try_elect(
+                            repo.db(),
+                            &owner,
+                            DEFAULT_LEASE_SECS,
+                            chrono::Utc::now(),
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("elect: {e}"))?
+                        .value
+                        .elected;
+                        if !elected {
+                            return Ok(0);
+                        }
+                        let d =
+                            crate::storage::index_drain::drain_index(&repo, &embedder, 32).await?;
+                        Ok(d.completed + d.failed)
+                    });
+                    let busy = matches!(drained, Ok(n) if n > 0);
+                    report_drainer(&db_path, "index", drained);
+                    let pause = if busy { 1 } else { 8 };
+                    for _ in 0..pause {
+                        if flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                }
+            });
+        Self { stop }
     }
 
     /// Actor identity maintenance is separate from Atlas collection and never

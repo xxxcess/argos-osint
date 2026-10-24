@@ -1,6 +1,7 @@
 //! App state and keyboard routing for the Argos terminal shell.
 
 use super::surreal_brain;
+use super::surreal_profile;
 use super::surreal_recon;
 use super::tracked;
 use super::ui::nudge;
@@ -897,6 +898,12 @@ enum WorkEvent {
         filters: argos_osint_core::profile_stats::StatFilters,
         outcome: Result<Box<argos_osint_core::profile_stats::ProfileSnapshot>, String>,
         options: Vec<(String, Vec<String>)>,
+    },
+    /// A Profile attention action's run lookup on SurrealDB: the run's
+    /// thread, or `None` when the run is gone.
+    ProfileRunOwner {
+        run_id: String,
+        outcome: Result<Option<String>, String>,
     },
     ReconStage {
         thread_id: String,
@@ -1902,6 +1909,24 @@ impl App {
         let generation = self.profile.generation;
         let filters = self.profile.filters.clone();
         let tx = self.work_tx.clone();
+        if surreal_profile::on() {
+            // Under a storage config the snapshot and its filter options come
+            // from the repository on this worker (never the SQLite store);
+            // `ProfileLoaded` drops a stale generation or filter set.
+            std::thread::spawn(move || {
+                let (outcome, options) = match surreal_profile::dashboard(&filters) {
+                    Ok((snapshot, options)) => (Ok(Box::new(snapshot)), options),
+                    Err(err) => (Err(format!("{err:#}")), Vec::new()),
+                };
+                let _ = tx.send(WorkEvent::ProfileLoaded {
+                    generation,
+                    filters,
+                    outcome,
+                    options,
+                });
+            });
+            return;
+        }
         let db = paths::db_path();
         std::thread::spawn(move || {
             let (outcome, options) = match Store::open_profile_reader(&db) {
@@ -1921,6 +1946,32 @@ impl App {
                 options,
             });
         });
+    }
+
+    /// Look up a Profile attention item's run on the repository, on a plain
+    /// worker thread. Only the newest lookup is kept.
+    pub(crate) fn lookup_run_owner(&mut self, run_id: String) {
+        self.profile.pending_run_owner = Some(run_id.clone());
+        self.status = "Opening investigation…".into();
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = surreal_profile::run_thread(&run_id).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::ProfileRunOwner { run_id, outcome });
+        });
+    }
+
+    /// The run lookup finished: open its thread only while the System screen
+    /// is still showing and this is the newest lookup (a late result is
+    /// dropped).
+    fn on_profile_run_owner(&mut self, run_id: String, outcome: Result<Option<String>, String>) {
+        if self.profile.pending_run_owner.as_deref() != Some(run_id.as_str()) {
+            return;
+        }
+        self.profile.pending_run_owner = None;
+        if self.module != Some(ModuleId::System) {
+            return;
+        }
+        super::profile::open_run_thread(self, outcome);
     }
 
     pub(crate) fn reload_logs(&mut self) {
@@ -5868,6 +5919,10 @@ impl App {
                     self.push_log_detail("warn", "Brain: background repair incomplete", error);
                 }
                 self.reload_memories();
+                true
+            }
+            WorkEvent::ProfileRunOwner { run_id, outcome } => {
+                self.on_profile_run_owner(run_id, outcome);
                 true
             }
             WorkEvent::ProfileLoaded {
@@ -21830,6 +21885,74 @@ mod tests {
         assert!(memory_graph_seed("m1".into(), Err("boom".into()))
             .unwrap_err()
             .starts_with("Memory kind unreadable"));
+    }
+
+    #[test]
+    fn a_stale_profile_run_lookup_is_dropped() {
+        let mut app = app();
+        app.module = Some(ModuleId::System);
+        app.profile.pending_run_owner = Some("run-new".into());
+        app.status.clear();
+        assert!(app.on_work_event(WorkEvent::ProfileRunOwner {
+            run_id: "run-old".into(),
+            outcome: Ok(None),
+        }));
+        assert_eq!(app.module, Some(ModuleId::System));
+        assert!(app.status.is_empty());
+        assert_eq!(app.profile.pending_run_owner.as_deref(), Some("run-new"));
+    }
+
+    #[test]
+    fn a_profile_run_lookup_after_leaving_system_is_dropped() {
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        app.profile.pending_run_owner = Some("run-1".into());
+        app.status.clear();
+        app.on_work_event(WorkEvent::ProfileRunOwner {
+            run_id: "run-1".into(),
+            outcome: Ok(Some("thread-1".into())),
+        });
+        assert_eq!(app.module, Some(ModuleId::Brain));
+        assert!(app.status.is_empty());
+        assert!(app.profile.pending_run_owner.is_none());
+    }
+
+    #[test]
+    fn a_current_profile_run_lookup_reports_a_missing_or_failed_run() {
+        let mut app = app();
+        app.module = Some(ModuleId::System);
+        app.profile.pending_run_owner = Some("run-1".into());
+        app.on_work_event(WorkEvent::ProfileRunOwner {
+            run_id: "run-1".into(),
+            outcome: Ok(None),
+        });
+        assert_eq!(app.status, "Investigation is no longer retained");
+        app.profile.pending_run_owner = Some("run-2".into());
+        app.on_work_event(WorkEvent::ProfileRunOwner {
+            run_id: "run-2".into(),
+            outcome: Err("boom".into()),
+        });
+        assert_eq!(app.status, "Could not load investigation: boom");
+        assert_eq!(app.module, Some(ModuleId::System));
+    }
+
+    #[test]
+    fn a_stale_profile_snapshot_generation_is_dropped() {
+        let mut app = app();
+        app.module = Some(ModuleId::System);
+        app.profile.generation = 2;
+        app.profile.loading = true;
+        let filters = app.profile.filters.clone();
+        assert!(app.on_work_event(WorkEvent::ProfileLoaded {
+            generation: 1,
+            filters,
+            outcome: Err("stale".into()),
+            options: vec![("provider".into(), vec!["x".into()])],
+        }));
+        assert!(!app.profile.loading);
+        assert!(app.profile.error.is_none());
+        assert!(app.profile.options.is_empty());
+        assert!(app.profile.loaded_at.is_none());
     }
 
     #[test]

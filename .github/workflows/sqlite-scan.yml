@@ -1,0 +1,37 @@
+name: SQLite removal scan
+
+# Check-only compiler scan (no build or tests): runs on every push to a PR and
+# reports what still needs rusqlite/lancedb, by module, in the run summary.
+# Informational; remove once the SQLite removal commit lands.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: sqlite-scan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  scan:
+    name: Remaining SQLite call sites
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlite-scan
+          workspaces: . -> target/sqlite-scan
+          cache-on-failure: true
+      - name: Install libclang (RocksDB bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - name: Scan
+        run: python3 scripts/sqlite_scan.py

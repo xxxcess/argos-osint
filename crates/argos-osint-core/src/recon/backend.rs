@@ -121,6 +121,41 @@ impl ReconStore {
         }
     }
 
+    /// The thread's investigation trace (`investigation_events`).
+    pub async fn list_investigation_events(
+        &self,
+        tid: &str,
+    ) -> Result<Vec<crate::investigation::InvestigationEvent>> {
+        dispatch!(self, s => s.list_investigation_events(tid),
+            r => crate::storage::event_log::list_investigation_events(r.db(), tid).await)
+    }
+    /// Append to the investigation trace (insert, or update an existing id).
+    pub async fn insert_investigation_event(
+        &self,
+        ev: &crate::investigation::InvestigationEvent,
+    ) -> Result<()> {
+        dispatch!(self, s => s.insert_investigation_event(ev),
+            r => crate::storage::event_log::insert_investigation_event(r.db(), ev).await)
+    }
+    pub async fn next_event_sequence(&self, tid: &str) -> Result<i64> {
+        dispatch!(self, s => s.next_event_sequence(tid),
+            r => crate::storage::event_log::next_event_sequence(r.db(), tid).await)
+    }
+    /// Persist one redacted durable event (`argos_events`).
+    pub async fn record_event(&self, event: &crate::events::NewEvent) -> Result<String> {
+        dispatch!(self, s => crate::events::record_event(s.connection(), event),
+            r => crate::storage::event_log::record_event(r.db(), event).await)
+    }
+    /// Newest-first page of durable events.
+    pub async fn list_events(
+        &self,
+        filter: &crate::events::EventFilter,
+        limit: usize,
+    ) -> Result<Vec<crate::events::EventRow>> {
+        dispatch!(self, s => crate::events::list_events(s.connection(), filter, limit),
+            r => crate::storage::event_log::list_events(r.db(), filter, limit).await)
+    }
+
     pub async fn new_thread(&self, title: &str) -> Result<Thread> {
         dispatch!(self, s => s.new_thread(title),
             r => crate::storage::recon_threads::new_thread(r, title).await)

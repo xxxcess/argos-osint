@@ -6754,9 +6754,10 @@ impl App {
                 return Ok(());
             };
             self.recon_reading = true;
+            let logged_calls = self.logged_calls.clone();
             let tx = self.work_tx.clone();
             std::thread::spawn(move || {
-                let outcome = surreal_recon::snapshot(&id)
+                let outcome = surreal_recon::snapshot(&id, &logged_calls)
                     .map(Box::new)
                     .map_err(|e| format!("{e:#}"));
                 let _ = tx.send(WorkEvent::ReconLoaded {

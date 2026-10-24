@@ -55,6 +55,7 @@ pub mod live_evidence;
 pub mod memories;
 pub mod memory;
 pub mod neighborhood_brief;
+pub mod nlp_cache;
 pub mod open;
 pub mod outbox;
 pub mod pipeline_exec;

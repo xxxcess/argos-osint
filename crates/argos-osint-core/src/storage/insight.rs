@@ -1064,6 +1064,9 @@ pub async fn remove_nlp_owner_in(tx: &Tx, kind: &str, owner: &str) -> Result<(),
                 $refs.prose_hash, $refs.raw_hash), |$h| $h != NONE));
              DELETE nlp_source_ref WHERE owner_kind = $kind AND owner_id = $owner RETURN NONE;
              FOR $h IN $hashes {
+               IF (SELECT VALUE id FROM nlp_source_ref WHERE prose_hash = $h LIMIT 1) == [] {
+                 DELETE nlp_feature WHERE prose_hash = $h RETURN NONE;
+               };
                IF (SELECT VALUE id FROM nlp_source_ref WHERE prose_hash = $h OR raw_hash = $h LIMIT 1) == []
                  AND (SELECT VALUE id FROM insight_derivation_evidence
                       WHERE string::contains(evidence_json, $h) LIMIT 1) == []

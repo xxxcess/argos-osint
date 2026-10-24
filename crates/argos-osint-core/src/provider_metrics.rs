@@ -200,6 +200,25 @@ pub fn capacity_snapshot(conn: &rusqlite::Connection) -> CapacitySnapshot {
     capacity_from_rows(rows.flatten().collect())
 }
 
+/// [`cache_capacity_rows`] on the SurrealDB repository
+/// (`storage::profile_view::cache_capacity_rows`).
+#[cfg(feature = "surreal")]
+pub async fn cache_capacity_rows_on(
+    repo: &crate::storage::repo::Repository,
+    rows: &[StoredCapacityRow],
+) -> anyhow::Result<usize> {
+    crate::storage::profile_view::cache_capacity_rows(repo.db(), rows).await
+}
+
+/// [`capacity_snapshot`] on the SurrealDB repository; unavailable on a
+/// storage error, as on SQLite.
+#[cfg(feature = "surreal")]
+pub async fn capacity_snapshot_on(repo: &crate::storage::repo::Repository) -> CapacitySnapshot {
+    crate::storage::profile_view::capacity_snapshot(repo.db())
+        .await
+        .unwrap_or_else(|_| CapacitySnapshot::unavailable())
+}
+
 /// Builds the snapshot from stored rows, newest capture first (the order
 /// `capacity_snapshot` reads them in). No rows is unavailable, never zero.
 pub fn capacity_from_rows(rows: Vec<StoredCapacityRow>) -> CapacitySnapshot {

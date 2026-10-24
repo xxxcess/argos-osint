@@ -379,3 +379,94 @@ pub async fn dashboard(
     let snapshot = profile_stats::snapshot_from(&tables, period, filters, now)?;
     Ok((snapshot, profile_stats::filter_options_from(&tables)))
 }
+
+/// `provider_metrics::cache_capacity_rows` on SurrealDB: replace the
+/// published capacity snapshot with `rows`; returns the rows written.
+pub async fn cache_capacity_rows(db: &Surreal<Any>, rows: &[StoredCapacityRow]) -> Result<usize> {
+    let content: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            let mut v = serde_json::json!({
+                "captured_at": r.captured_at,
+                "provider": r.provider,
+                "quota_group": r.quota_group,
+                "scope": r.scope,
+                "sends_60s": r.sends_60s,
+                "active": r.active,
+                "queued": r.queued,
+                "quota_source": r.quota_source,
+            });
+            // Optional fields are omitted (NONE), never NULL.
+            let optional = [
+                ("rpm_limit", r.rpm_limit.map(serde_json::Value::from)),
+                ("pace_per_min", r.pace_per_min.map(serde_json::Value::from)),
+                (
+                    "max_concurrency",
+                    r.max_concurrency.map(serde_json::Value::from),
+                ),
+                (
+                    "oldest_wait_ms",
+                    r.oldest_wait_ms.map(serde_json::Value::from),
+                ),
+                ("cooldown_ms", r.cooldown_ms.map(serde_json::Value::from)),
+            ];
+            for (k, value) in optional
+                .into_iter()
+                .filter_map(|(k, value)| value.map(|value| (k, value)))
+            {
+                v[k] = value;
+            }
+            v
+        })
+        .collect();
+    db.query(
+        "BEGIN TRANSACTION;
+         DELETE telemetry_provider_capacity RETURN NONE;
+         FOR $row IN $rows {
+           UPSERT type::record('telemetry_provider_capacity',
+             [$row.provider, $row.quota_group, $row.scope, $row.captured_at])
+             CONTENT $row RETURN NONE;
+         };
+         COMMIT TRANSACTION;",
+    )
+    .bind(("rows", content))
+    .await?
+    .check()?;
+    Ok(rows.len())
+}
+
+/// `provider_metrics::capacity_snapshot` on SurrealDB: the published
+/// capacity rows, newest capture first, as one snapshot.
+pub async fn capacity_snapshot(
+    db: &Surreal<Any>,
+) -> Result<crate::provider_metrics::CapacitySnapshot> {
+    let mut r = db
+        .query(
+            "SELECT captured_at, provider, quota_group, scope, sends_60s, rpm_limit, pace_per_min,
+                active, max_concurrency, queued, oldest_wait_ms, cooldown_ms, quota_source
+             FROM telemetry_provider_capacity
+             ORDER BY captured_at DESC, provider, quota_group, scope",
+        )
+        .await?
+        .check()?;
+    let rows: Vec<Capacity> = r.take(0)?;
+    Ok(crate::provider_metrics::capacity_from_rows(
+        rows.into_iter()
+            .map(|c| StoredCapacityRow {
+                captured_at: c.captured_at,
+                provider: c.provider,
+                quota_group: c.quota_group,
+                scope: c.scope,
+                sends_60s: u32_of(c.sends_60s),
+                rpm_limit: c.rpm_limit.map(u32_of),
+                pace_per_min: c.pace_per_min,
+                active: u32_of(c.active),
+                max_concurrency: c.max_concurrency.map(u32_of),
+                queued: u32_of(c.queued),
+                oldest_wait_ms: c.oldest_wait_ms.map(|v| v.max(0) as u64),
+                cooldown_ms: c.cooldown_ms.map(|v| v.max(0) as u64),
+                quota_source: c.quota_source,
+            })
+            .collect(),
+    ))
+}

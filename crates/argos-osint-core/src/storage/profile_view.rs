@@ -363,3 +363,19 @@ pub async fn filter_options(db: &Surreal<Any>) -> Result<Vec<(String, Vec<String
     let tables = load_tables(db).await?;
     Ok(profile_stats::filter_options_from(&tables))
 }
+
+/// A dashboard snapshot with the filter options for every dimension.
+pub type Dashboard = (ProfileSnapshot, Vec<(String, Vec<String>)>);
+
+/// The TUI dashboard read on SurrealDB: the snapshot and the filter options
+/// from one load of the source tables.
+pub async fn dashboard(
+    db: &Surreal<Any>,
+    period: &Period,
+    filters: &StatFilters,
+    now: DateTime<Utc>,
+) -> Result<Dashboard> {
+    let tables = load_tables(db).await?;
+    let snapshot = profile_stats::snapshot_from(&tables, period, filters, now)?;
+    Ok((snapshot, profile_stats::filter_options_from(&tables)))
+}

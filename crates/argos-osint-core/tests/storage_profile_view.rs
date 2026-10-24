@@ -423,6 +423,16 @@ async fn profile_views_match_sqlite_for_every_period_and_filter() {
         view::filter_options(&db).await.unwrap(),
         profile_stats::filter_options(store.connection())
     );
+    // The TUI's one-load dashboard read matches both separate reads.
+    for (period, filters) in &cases {
+        let (snapshot, options) = view::dashboard(&db, period, filters, now).await.unwrap();
+        assert_eq!(
+            snapshot,
+            profile_stats::snapshot(store.connection(), period, filters, now).unwrap(),
+            "dashboard {period:?} {filters:?}"
+        );
+        assert_eq!(options, view::filter_options(&db).await.unwrap());
+    }
 
     // The views are populated, not just equally empty.
     let snap = view::snapshot(&db, &Period::H24, &StatFilters::default(), now)

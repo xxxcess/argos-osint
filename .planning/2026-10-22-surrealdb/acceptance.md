@@ -189,7 +189,8 @@ Under a storage config `App::open_topology` refuses `TopologySeed::ActorGroup` w
 ### Phase 5 — Profile read model (542b7c0, 9490f2f)
 
 - [x] Profile reads its rows through a `ProfileSource`; `storage::profile_view` loads the source tables from SurrealDB into `ProfileTables` and builds the snapshot with the shared aggregation, adding the telemetry tables schema. SQLite parity covered in both modes by `tests/storage_profile_view.rs`.
-- Gaps: the TUI Profile pane is not wired to SurrealDB yet; nothing writes the telemetry tables on SurrealDB; recon run/coverage, intel report jobs and recon model ops feeding Profile stay empty on SurrealDB until their writers move.
+- [x] TUI Profile on the repository under a storage config: the 20-second refresh reads the snapshot and filter options through `tui::surreal_profile::dashboard` (`profile_view::dashboard`, one table load) on a plain worker thread, and the attention actions' run lookup goes through `recon_runs::get_run` on a worker (`WorkEvent::ProfileRunOwner`, only the newest lookup while System is showing). Stale snapshots (generation or filters changed) and stale lookups are dropped; the SQLite path is unchanged and never mixed in. Covered by `storage_profile_view` (dashboard parity, both modes) and the TUI unit tests `a_stale_profile_run_lookup_is_dropped`, `a_profile_run_lookup_after_leaving_system_is_dropped`, `a_current_profile_run_lookup_reports_a_missing_or_failed_run`, `a_stale_profile_snapshot_generation_is_dropped`.
+- Gaps: nothing writes the telemetry tables on SurrealDB yet, so Profile's event-driven views are empty there; recon run states/coverage, intel report jobs/tasks and recon model operations/attempts stay unavailable on SurrealDB until their writers move; no end-to-end TUI test of the Profile screen on SurrealDB.
 
 ### Phase 5 — Recon runs, calls, evidence and cache (3fe8789)
 

@@ -19,13 +19,11 @@ use crate::{
     osint::{self, Executor, ToolResult},
     provider::{self, ChatMessage, SettingsFile},
     secrets::AuthFile,
-    store::Store,
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use backend::{sqlite_path, surreal_selected, ReconStore};
+use backend::{sqlite_path, ReconStore};
 use chrono::Utc;
 use futures_util::future::join_all;
-use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -584,1117 +582,6 @@ pub struct PlanCall {
     /// step or an accounts search fallback); the binder does not rebind them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bound: bool,
-}
-impl Store {
-    pub fn new_thread(&self, title: &str) -> Result<Thread> {
-        let time = now();
-        let thread = Thread {
-            id: id("thread"),
-            title: if title.trim().is_empty() {
-                PLACEHOLDER_TITLE.into()
-            } else {
-                title.trim().into()
-            },
-            created_at: time.clone(),
-            updated_at: time,
-            draft: String::new(),
-            scroll: 0,
-            recall_insights: false,
-        };
-        self.conn.execute("INSERT INTO recon_threads(id,title,created_at,updated_at,draft,scroll,recall_insights) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![thread.id,thread.title,thread.created_at,thread.updated_at,thread.draft,thread.scroll,0i64])?;
-        Ok(thread)
-    }
-    pub fn list_threads(&self, search: &str) -> Result<Vec<Thread>> {
-        let needle = format!("%{}%", search.trim());
-        let mut s=self.conn.prepare("SELECT id,title,created_at,updated_at,draft,scroll,recall_insights FROM recon_threads WHERE deleted=0 AND (title LIKE ?1 OR id IN (SELECT thread_id FROM recon_thread_entities e JOIN recon_entities a ON a.id=e.entity_id WHERE a.canonical LIKE ?1)) ORDER BY updated_at DESC")?;
-        let rows = s
-            .query_map([needle], |r| {
-                Ok(Thread {
-                    id: r.get(0)?,
-                    title: r.get(1)?,
-                    created_at: r.get(2)?,
-                    updated_at: r.get(3)?,
-                    draft: r.get(4)?,
-                    scroll: r.get(5)?,
-                    recall_insights: r.get::<_, i64>(6)? != 0,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(rows)
-    }
-    pub fn get_thread(&self, tid: &str) -> Result<Option<Thread>> {
-        Ok(self.conn.query_row("SELECT id,title,created_at,updated_at,draft,scroll,recall_insights FROM recon_threads WHERE id=?1 AND deleted=0",[tid],|r|Ok(Thread{id:r.get(0)?,title:r.get(1)?,created_at:r.get(2)?,updated_at:r.get(3)?,draft:r.get(4)?,scroll:r.get(5)?,recall_insights:r.get::<_,i64>(6)?!=0})).optional()?)
-    }
-    pub fn set_recall_insights(&self, tid: &str, on: bool) -> Result<bool> {
-        Ok(self.conn.execute(
-            "UPDATE recon_threads SET recall_insights=?1 WHERE id=?2 AND deleted=0",
-            params![i64::from(on), tid],
-        )? > 0)
-    }
-    pub fn rename_thread(&self, tid: &str, title: &str) -> Result<bool> {
-        ensure!(!title.trim().is_empty(), "title is empty");
-        Ok(self.conn.execute(
-            "UPDATE recon_threads SET title=?1,updated_at=?2 WHERE id=?3 AND deleted=0",
-            params![title.trim(), now(), tid],
-        )? > 0)
-    }
-    pub fn save_draft(&self, tid: &str, draft: &str, scroll: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE recon_threads SET draft=?1,scroll=?2 WHERE id=?3 AND deleted=0",
-            params![draft, scroll, tid],
-        )?;
-        Ok(())
-    }
-    pub fn select_thread(&self, tid: &str) -> Result<()> {
-        ensure!(self.get_thread(tid)?.is_some(), "thread not found");
-        self.conn.execute("INSERT INTO app_state(key,value) VALUES ('last_thread',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[tid])?;
-        Ok(())
-    }
-    pub fn last_thread(&self) -> Result<Option<String>> {
-        let id: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT value FROM app_state WHERE key='last_thread'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(id.filter(|x| self.get_thread(x).ok().flatten().is_some()))
-    }
-    pub fn list_messages(&self, tid: &str) -> Result<Vec<Message>> {
-        let mut s=self.conn.prepare("SELECT id,thread_id,sequence,role,content,run_id,created_at FROM recon_messages WHERE thread_id=?1 ORDER BY sequence")?;
-        let rows = s
-            .query_map([tid], |r| {
-                Ok(Message {
-                    id: r.get(0)?,
-                    thread_id: r.get(1)?,
-                    sequence: r.get(2)?,
-                    role: r.get(3)?,
-                    content: r.get(4)?,
-                    run_id: r.get(5)?,
-                    created_at: r.get(6)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(rows)
-    }
-    pub fn add_message(
-        &self,
-        tid: &str,
-        role: &str,
-        content: &str,
-        run_id: Option<&str>,
-    ) -> Result<Message> {
-        ensure!(self.get_thread(tid)?.is_some(), "thread not found");
-        let sequence: i64 = self.conn.query_row(
-            "SELECT COALESCE(MAX(sequence),0)+1 FROM recon_messages WHERE thread_id=?1",
-            [tid],
-            |r| r.get(0),
-        )?;
-        let m = Message {
-            id: id("msg"),
-            thread_id: tid.into(),
-            sequence,
-            role: role.into(),
-            content: content.into(),
-            run_id: run_id.map(str::to_string),
-            created_at: now(),
-        };
-        self.conn.execute("INSERT INTO recon_messages(id,thread_id,sequence,role,content,run_id,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![m.id,m.thread_id,m.sequence,m.role,m.content,m.run_id,m.created_at])?;
-        self.conn.execute(
-            "UPDATE recon_threads SET updated_at=?1 WHERE id=?2",
-            params![now(), tid],
-        )?;
-        Ok(m)
-    }
-    pub fn add_answer(
-        &mut self,
-        tid: &str,
-        run_id: &str,
-        content: &str,
-        evidence_ids: &[String],
-        memory_ids: &[String],
-    ) -> Result<Message> {
-        let tx = self.conn.transaction()?;
-        let active:i64=tx.query_row("SELECT COUNT(*) FROM recon_runs r JOIN recon_threads t ON t.id=r.thread_id WHERE r.id=?1 AND r.thread_id=?2 AND r.state='running' AND t.deleted=0",params![run_id,tid],|r|r.get(0))?;
-        ensure!(active == 1, "run no longer active");
-        let sequence: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(sequence),0)+1 FROM recon_messages WHERE thread_id=?1",
-            [tid],
-            |r| r.get(0),
-        )?;
-        let m = Message {
-            id: id("msg"),
-            thread_id: tid.into(),
-            sequence,
-            role: "assistant".into(),
-            content: content.into(),
-            run_id: Some(run_id.into()),
-            created_at: now(),
-        };
-        tx.execute("INSERT INTO recon_messages(id,thread_id,sequence,role,content,run_id,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![m.id,m.thread_id,m.sequence,m.role,m.content,m.run_id,m.created_at])?;
-        for call_id in evidence_ids {
-            ensure!(tx.execute("INSERT OR IGNORE INTO recon_message_evidence(message_id,call_id) SELECT ?1,id FROM osint_calls WHERE id=?2",params![m.id,call_id])?==1,"evidence call missing");
-        }
-        for (ordinal, memory_id) in memory_ids.iter().enumerate() {
-            let exists: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM memories WHERE id=?1",
-                [memory_id],
-                |row| row.get(0),
-            )?;
-            if exists == 1 {
-                tx.execute(
-                    "INSERT OR IGNORE INTO recon_message_memories(message_id,memory_id,ordinal) VALUES (?1,?2,?3)",
-                    params![m.id, memory_id, ordinal as i64],
-                )?;
-            }
-        }
-        tx.execute(
-            "INSERT INTO extraction_jobs(answer_id,run_id,state,updated_at) VALUES (?1,?2,'queued',?3)",
-            params![m.id, run_id, now()],
-        )?;
-        tx.execute(
-            "UPDATE recon_model_operations SET status='final', final_message_id=?1, updated_at=?2 WHERE id = (SELECT id FROM recon_model_operations WHERE run_id=?3 AND role='synthesis' ORDER BY created_at DESC LIMIT 1)",
-            params![m.id, now(), run_id],
-        )?;
-        tx.execute(
-            "UPDATE recon_threads SET updated_at=?1 WHERE id=?2",
-            params![now(), tid],
-        )?;
-        tx.execute(
-            "UPDATE recon_runs SET stage='complete', updated_at=?1 WHERE id=?2 AND state='running'",
-            params![now(), run_id],
-        )?;
-        tx.commit()?;
-        Ok(m)
-    }
-    pub fn has_final_answer_for_run(&self, run_id: &str) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM recon_model_operations WHERE run_id=?1 AND role='synthesis' AND status='final'",
-            [run_id],
-            |r| r.get(0),
-        ).unwrap_or(0);
-        Ok(count > 0)
-    }
-    pub fn answer_evidence(&self, answer_id: &str) -> Result<Vec<(String, ToolResult)>> {
-        let mut stmt=self.conn.prepare("SELECT c.id,c.result_json FROM recon_message_evidence e JOIN osint_calls c ON c.id=e.call_id WHERE e.message_id=?1 ORDER BY c.started_at")?;
-        let mut out = Vec::new();
-        for row in stmt.query_map([answer_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        })? {
-            let (id, raw) = row?;
-            if let Some(raw) = raw {
-                if let Ok(result) = serde_json::from_str(&raw) {
-                    out.push((id, result));
-                }
-            }
-        }
-        Ok(out)
-    }
-    pub fn latest_retryable_insight_job(&self, tid: &str) -> Result<Option<String>> {
-        Ok(self.conn.query_row("SELECT j.answer_id FROM extraction_jobs j JOIN recon_runs r ON r.id=j.run_id WHERE r.thread_id=?1 AND j.state IN ('failed','queued') ORDER BY j.updated_at DESC LIMIT 1",[tid],|r|r.get(0)).optional()?)
-    }
-    pub fn new_run(
-        &self,
-        tid: &str,
-        turn_id: &str,
-        recon_model: &str,
-        synthesis_model: &str,
-    ) -> Result<Run> {
-        self.new_run_with_limits(
-            tid,
-            turn_id,
-            recon_model,
-            synthesis_model,
-            RunLimits {
-                max_rounds: 6,
-                max_calls: 12,
-                turn_seconds: 300,
-            },
-        )
-    }
-    pub fn new_run_with_limits(
-        &self,
-        tid: &str,
-        turn_id: &str,
-        recon_model: &str,
-        synthesis_model: &str,
-        limits: RunLimits,
-    ) -> Result<Run> {
-        self.new_run_with_models(tid, turn_id, [recon_model, "", synthesis_model], limits)
-    }
-    /// Snapshots the Recon, tool-picker, and Synthesis models as `kind / model`.
-    pub fn new_run_with_models(
-        &self,
-        tid: &str,
-        turn_id: &str,
-        models: [&str; 3],
-        limits: RunLimits,
-    ) -> Result<Run> {
-        let [recon_model, tool_picker_model, synthesis_model] = models;
-        ensure!(self.get_thread(tid)?.is_some(), "thread not found");
-        ensure!(
-            (1..=8).contains(&limits.max_rounds),
-            "max_rounds must be 1..8"
-        );
-        ensure!(
-            (1..=24).contains(&limits.max_calls),
-            "max_calls must be 1..24"
-        );
-        ensure!(
-            (300..=900).contains(&limits.turn_seconds),
-            "turn_seconds must be 300..900"
-        );
-        let time = now();
-        let run = Run {
-            id: id("run"),
-            thread_id: tid.into(),
-            turn_id: turn_id.into(),
-            state: "running".into(),
-            stage: "extracting entities".into(),
-            recon_model: recon_model.into(),
-            synthesis_model: synthesis_model.into(),
-            tool_picker_model: tool_picker_model.into(),
-            max_rounds: limits.max_rounds,
-            max_calls: limits.max_calls,
-            turn_seconds: limits.turn_seconds,
-            plan_json: None,
-            error: None,
-            created_at: time.clone(),
-            updated_at: time,
-        };
-        self.conn.execute("INSERT INTO recon_runs(id,thread_id,turn_id,state,stage,recon_model,synthesis_model,tool_picker_model,max_rounds,max_calls,turn_seconds,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![run.id,run.thread_id,run.turn_id,run.state,run.stage,run.recon_model,run.synthesis_model,run.tool_picker_model,run.max_rounds,run.max_calls,run.turn_seconds,run.created_at,run.updated_at])?;
-        Ok(run)
-    }
-    pub fn get_run(&self, rid: &str) -> Result<Option<Run>> {
-        Ok(self.conn.query_row("SELECT id,thread_id,turn_id,state,stage,recon_model,synthesis_model,max_rounds,max_calls,turn_seconds,plan_json,error,created_at,updated_at,tool_picker_model FROM recon_runs WHERE id=?1",[rid],|r|Ok(Run{id:r.get(0)?,thread_id:r.get(1)?,turn_id:r.get(2)?,state:r.get(3)?,stage:r.get(4)?,recon_model:r.get(5)?,synthesis_model:r.get(6)?,tool_picker_model:r.get(14)?,max_rounds:r.get(7)?,max_calls:r.get(8)?,turn_seconds:r.get(9)?,plan_json:r.get(10)?,error:r.get(11)?,created_at:r.get(12)?,updated_at:r.get(13)?})).optional()?)
-    }
-    pub fn latest_resumable_run(&self, tid: &str) -> Result<Option<Run>> {
-        let id:Option<String>=self.conn.query_row("SELECT id FROM (SELECT id,state FROM recon_runs WHERE thread_id=?1 ORDER BY updated_at DESC LIMIT 1) WHERE state IN ('interrupted','failed')",[tid],|r|r.get(0)).optional()?;
-        id.map(|id| self.get_run(&id))
-            .transpose()
-            .map(Option::flatten)
-    }
-    pub fn runs_for_thread(&self, tid: &str) -> Result<Vec<Run>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM recon_runs WHERE thread_id=?1 ORDER BY created_at")?;
-        let ids = stmt
-            .query_map([tid], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()?;
-        ids.into_iter()
-            .map(|id| self.get_run(&id)?.ok_or_else(|| anyhow!("run disappeared")))
-            .collect()
-    }
-    pub fn answer_memories(&self, tid: &str) -> Result<HashMap<String, Vec<crate::brain::Memory>>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT e.message_id, e.memory_id, mem.text, mem.category, mem.pinned, mem.created_at, mem.source_json
-             FROM recon_message_memories e
-             JOIN recon_messages msg ON msg.id=e.message_id
-             LEFT JOIN memories mem ON mem.id=e.memory_id
-             WHERE msg.thread_id=?1
-             ORDER BY e.ordinal",
-        )?;
-        let mut out: HashMap<String, Vec<crate::brain::Memory>> = HashMap::new();
-        let rows = stmt.query_map([tid], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-            ))
-        })?;
-        for row in rows {
-            let (message_id, memory_id, text, category, pinned, created_at, source_json) = row?;
-            let memory = if let (
-                Some(text),
-                Some(category),
-                Some(pinned),
-                Some(created_at),
-                Some(source_json),
-            ) = (text, category, pinned, created_at, source_json)
-            {
-                let source =
-                    serde_json::from_str(&source_json).unwrap_or(crate::brain::MemorySource {
-                        app: "argos".into(),
-                        conversation_id: String::new(),
-                        message_id: None,
-                        reference: None,
-                    });
-                crate::brain::Memory {
-                    id: memory_id,
-                    text,
-                    category,
-                    pinned: pinned != 0,
-                    created_at,
-                    source,
-                }
-            } else {
-                crate::brain::Memory {
-                    id: memory_id,
-                    text: "This memory is no longer stored.".into(),
-                    category: "missing".into(),
-                    pinned: false,
-                    created_at: String::new(),
-                    source: crate::brain::MemorySource {
-                        app: "argos".into(),
-                        conversation_id: String::new(),
-                        message_id: None,
-                        reference: None,
-                    },
-                }
-            };
-            out.entry(message_id).or_default().push(memory);
-        }
-        Ok(out)
-    }
-    pub fn latest_run_state(&self, tid: &str) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT state FROM recon_runs WHERE thread_id=?1 ORDER BY updated_at DESC LIMIT 1",
-                [tid],
-                |r| r.get(0),
-            )
-            .optional()?)
-    }
-    pub fn set_run(
-        &self,
-        rid: &str,
-        state: &str,
-        stage: &str,
-        plan: Option<&Plan>,
-        error: Option<&str>,
-    ) -> Result<bool> {
-        let plan = plan.map(serde_json::to_string).transpose()?;
-        Ok(self.conn.execute("UPDATE recon_runs SET state=?1,stage=?2,plan_json=COALESCE(?3,plan_json),error=?4,updated_at=?5 WHERE id=?6 AND state NOT IN ('cancelled','deleted')",params![state,stage,plan,error,now(),rid])?>0)
-    }
-    pub fn cancel_run(&self, rid: &str) -> Result<bool> {
-        Ok(self.conn.execute("UPDATE recon_runs SET state='cancelled',stage='cancelled',updated_at=?1 WHERE id=?2 AND state='running'",params![now(),rid])?>0)
-    }
-    pub fn restart_run(&self, rid: &str) -> Result<bool> {
-        Ok(self.conn.execute("UPDATE recon_runs SET state='running',stage='resuming',updated_at=?1 WHERE id=?2 AND state IN ('interrupted','failed')",params![now(),rid])?>0)
-    }
-    pub fn recover_runs(&self) -> Result<usize> {
-        let n=self.conn.execute("UPDATE recon_runs SET state='interrupted',stage='interrupted',updated_at=?1 WHERE state='running'",[now()])?;
-        self.conn.execute("UPDATE osint_calls SET status='interrupted',completed_at=?1 WHERE status IN ('queued','running')",[now()])?;
-        self.conn.execute(
-            "UPDATE extraction_jobs SET state='queued',updated_at=?1 WHERE state='running'",
-            [now()],
-        )?;
-        self.release_held_credits()?;
-        Ok(n)
-    }
-    pub fn calls_for_run(&self, rid: &str) -> Result<Vec<Call>> {
-        self.calls("WHERE run_id=?1", rid)
-    }
-    pub fn calls_for_thread(&self, tid: &str) -> Result<Vec<Call>> {
-        self.calls("WHERE thread_id=?1 AND status='completed'", tid)
-    }
-    pub fn all_calls_for_thread(&self, tid: &str) -> Result<Vec<Call>> {
-        self.calls("WHERE thread_id=?1", tid)
-    }
-    pub fn manual_calls(&self) -> Result<Vec<Call>> {
-        self.calls("WHERE origin='manual' AND (?1='' OR tool_id=?1)", "")
-    }
-    fn calls(&self, filter: &str, key: &str) -> Result<Vec<Call>> {
-        let sql=format!("SELECT id,tool_id,run_id,thread_id,turn_id,origin,inputs_json,status,attempts,result_json,started_at,completed_at FROM osint_calls {filter} ORDER BY started_at,id");
-        let mut s = self.conn.prepare(&sql)?;
-        let rows = s.query_map([key], |r| {
-            let input: String = r.get(6)?;
-            let result: Option<String> = r.get(9)?;
-            Ok(Call {
-                id: r.get(0)?,
-                tool_id: r.get(1)?,
-                run_id: r.get(2)?,
-                thread_id: r.get(3)?,
-                turn_id: r.get(4)?,
-                origin: r.get(5)?,
-                inputs: serde_json::from_str(&input).unwrap_or(Value::Null),
-                status: r.get(7)?,
-                attempts: r.get(8)?,
-                result: result.and_then(|x| serde_json::from_str(&x).ok()),
-                started_at: r.get(10)?,
-                completed_at: r.get(11)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-    pub fn queue_call(
-        &self,
-        tool_id: &str,
-        inputs: &Value,
-        origin: &str,
-        run_id: Option<&str>,
-        thread_id: Option<&str>,
-        turn_id: Option<&str>,
-    ) -> Result<String> {
-        ensure!(osint::definition(tool_id).is_some(), "unknown tool");
-        if let Some(tid) = thread_id {
-            ensure!(self.get_thread(tid)?.is_some(), "thread was deleted");
-        }
-        if let Some(rid) = run_id {
-            ensure!(
-                self.get_run(rid)?.is_some_and(
-                    |r| r.state == "running" && Some(r.thread_id.as_str()) == thread_id
-                ),
-                "run is no longer active"
-            );
-        }
-        let call_id = id("call");
-        self.conn.execute("INSERT INTO osint_calls(id,tool_id,run_id,thread_id,turn_id,origin,inputs_json,status,started_at) VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8)",params![call_id,tool_id,run_id,thread_id,turn_id,origin,serde_json::to_string(inputs)?,now()])?;
-        Ok(call_id)
-    }
-    pub fn finish_call(&self, call_id: &str, result: &ToolResult) -> Result<bool> {
-        Ok(self.conn.execute("UPDATE osint_calls SET status=?1,attempts=attempts+1,result_json=?2,completed_at=?3 WHERE id=?4 AND status IN ('queued','running') AND (thread_id IS NULL OR thread_id IN (SELECT id FROM recon_threads WHERE deleted=0))",params![result.status,serde_json::to_string(result)?,now(),call_id])?>0)
-    }
-    pub fn cache_get(&self, key: &str) -> Result<Option<ToolResult>> {
-        self.cache_get_fresh(key, None)
-    }
-    pub fn cache_get_fresh(
-        &self,
-        key: &str,
-        freshness_cutoff: Option<&str>,
-    ) -> Result<Option<ToolResult>> {
-        let raw: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT result_json FROM osint_cache WHERE key=?1 AND expires_at>?2",
-                params![key, now()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(res): Option<ToolResult> = raw.and_then(|r| serde_json::from_str(&r).ok()) else {
-            return Ok(None);
-        };
-        if let Some(cutoff) = freshness_cutoff {
-            if !cutoff.is_empty()
-                && !res.retrieved_at.is_empty()
-                && res.retrieved_at.as_str() < cutoff
-            {
-                return Ok(None);
-            }
-        }
-        Ok(Some(res))
-    }
-    pub fn record_strategy(
-        &self,
-        thread_id: &str,
-        run_id: &str,
-        kind: &str,
-        rationale: &str,
-        previous_kind: Option<&str>,
-        change_reason: Option<&str>,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO investigation_strategies(id,thread_id,run_id,kind,rationale,previous_kind,change_reason,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![id("strategy"), thread_id, run_id, kind, rationale, previous_kind, change_reason, now()],
-        )?;
-        Ok(())
-    }
-    pub fn latest_strategy_kind(&self, thread_id: &str) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT kind FROM investigation_strategies WHERE thread_id=?1 ORDER BY created_at DESC LIMIT 1",
-                [thread_id],
-                |row| row.get(0),
-            )
-            .optional()?)
-    }
-    pub fn save_discovery(
-        &self,
-        thread_id: &str,
-        status: &str,
-        note: &str,
-        frame: &investigation::InvestigationFrame,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO investigation_discovery(thread_id,status,note,subject,objective,constraints_text,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(thread_id) DO UPDATE SET status=excluded.status,note=excluded.note,subject=excluded.subject,objective=excluded.objective,constraints_text=excluded.constraints_text,updated_at=excluded.updated_at",
-            params![thread_id, status, note, frame.subject, frame.objective, frame.constraints, now()],
-        )?;
-        Ok(())
-    }
-    pub fn save_hypotheses(
-        &self,
-        thread_id: &str,
-        run_id: &str,
-        record: &investigation::HypothesisRecord,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO investigation_hypotheses(id,thread_id,run_id,question,alternatives_json,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?7)",
-            params![
-                id("hypothesis"),
-                thread_id,
-                run_id,
-                record.question,
-                serde_json::to_string(&record.alternatives)?,
-                record.status,
-                now()
-            ],
-        )?;
-        Ok(())
-    }
-    pub fn save_gaps(
-        &self,
-        thread_id: &str,
-        run_id: &str,
-        gaps: &[investigation::Gap],
-    ) -> Result<()> {
-        for gap in gaps {
-            self.conn.execute(
-                "INSERT INTO investigation_gaps(id,thread_id,run_id,question,kind,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'open',?6,?6)",
-                params![id("gap"), thread_id, run_id, gap.question, gap.kind, now()],
-            )?;
-        }
-        Ok(())
-    }
-    pub fn save_actions(
-        &self,
-        thread_id: &str,
-        run_id: &str,
-        actions: &[investigation::ProposedAction],
-        status: &str,
-    ) -> Result<()> {
-        for action in actions {
-            self.conn.execute(
-                "INSERT INTO investigation_actions(id,thread_id,run_id,gap_id,tool_id,arguments_json,purpose,evidence_json,expected,credit_cost,cache_available,rank_reason,status,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-                params![
-                    id("action"),
-                    thread_id,
-                    run_id,
-                    action.gap_id,
-                    action.tool_id,
-                    serde_json::to_string(&action.arguments)?,
-                    action.purpose,
-                    serde_json::to_string(&action.evidence_ids)?,
-                    action.expected,
-                    action.credit_cost,
-                    i64::from(action.cache_available),
-                    action.rank_reason,
-                    status,
-                    now()
-                ],
-            )?;
-        }
-        Ok(())
-    }
-    pub fn save_investigation_entities(
-        &self,
-        thread_id: &str,
-        entities: &[investigation::SelectedEntity],
-    ) -> Result<()> {
-        if self
-            .get_thread(thread_id)?
-            .is_some_and(|t| t.recall_insights)
-        {
-            self.conn.execute(
-                "DELETE FROM brain_actor_mentions WHERE origin_kind='thread' AND origin_id=?1",
-                [thread_id],
-            )?;
-        }
-        self.conn.execute(
-            "DELETE FROM investigation_entities WHERE thread_id=?1",
-            [thread_id],
-        )?;
-        for entity in entities {
-            self.record_thread_actor(thread_id, &entity.canonical_name, &entity.entity_type)?;
-            self.conn.execute(
-                "INSERT INTO investigation_entities(id,thread_id,canonical_name,entity_type,identifiers_json,evidence_json,relationships_json,unresolved_json,certainty,why,selected,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12)",
-                params![
-                    id("entity"),
-                    thread_id,
-                    entity.canonical_name,
-                    entity.entity_type,
-                    serde_json::to_string(&entity.identifiers)?,
-                    serde_json::to_string(&entity.evidence_ids)?,
-                    serde_json::to_string(&entity.relationships)?,
-                    serde_json::to_string(&entity.unresolved)?,
-                    entity.certainty,
-                    entity.why,
-                    i64::from(entity.selected),
-                    now()
-                ],
-            )?;
-        }
-        Ok(())
-    }
-    pub fn load_investigation_entities(
-        &self,
-        thread_id: &str,
-    ) -> Result<Vec<investigation::SelectedEntity>> {
-        let mut stmt = self.conn.prepare("SELECT canonical_name,entity_type,identifiers_json,evidence_json,relationships_json,unresolved_json,certainty,why,selected FROM investigation_entities WHERE thread_id=?1 ORDER BY selected DESC, canonical_name")?;
-        let rows = stmt.query_map([thread_id], |row| {
-            let identifiers: String = row.get(2)?;
-            let evidence: String = row.get(3)?;
-            let relationships: String = row.get(4)?;
-            let unresolved: String = row.get(5)?;
-            let unresolved: Vec<String> = serde_json::from_str(&unresolved).unwrap_or_default();
-            let ambiguous = unresolved.iter().any(|item| item.contains("ambiguous"));
-            Ok(investigation::SelectedEntity {
-                canonical_name: row.get(0)?,
-                entity_type: row.get(1)?,
-                identifiers: serde_json::from_str(&identifiers).unwrap_or_default(),
-                evidence_ids: serde_json::from_str(&evidence).unwrap_or_default(),
-                relationships: serde_json::from_str(&relationships).unwrap_or_default(),
-                unresolved,
-                certainty: row.get(6)?,
-                why: row.get(7)?,
-                ambiguous,
-                selected: row.get::<_, i64>(8)? != 0,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-    fn touch_quota(&self, provider_name: &str, limits: &provider::ReconLimits) -> Result<()> {
-        let reset = if provider_name == "whoxy" || limits.credit_reset == "never" {
-            "never"
-        } else {
-            "monthly"
-        };
-        let allowance = i64::from(limits.allowance(provider_name));
-        let trial = i64::from(limits.trial_grant(provider_name));
-        self.conn.execute(
-            "INSERT INTO provider_quota(provider,allowance,trial_remaining,trial_seed,reserved,spent,reset_policy,period_start,updated_at) VALUES (?1,?2,?3,?3,0,0,?4,?5,?5) ON CONFLICT(provider) DO UPDATE SET allowance=excluded.allowance, reset_policy=excluded.reset_policy, updated_at=excluded.updated_at",
-            params![provider_name, allowance, trial, reset, now()],
-        )?;
-        let (seed, remaining, period, policy): (i64, i64, String, String) = self.conn.query_row(
-            "SELECT trial_seed,trial_remaining,period_start,reset_policy FROM provider_quota WHERE provider=?1",
-            [provider_name],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?;
-        if trial > seed {
-            self.conn.execute(
-                "UPDATE provider_quota SET trial_remaining=trial_remaining+?1, trial_seed=?2, updated_at=?3 WHERE provider=?4",
-                params![trial - seed, trial, now(), provider_name],
-            )?;
-        }
-        if policy != "never" && !same_budget_month(&period) {
-            self.conn.execute(
-                "UPDATE provider_quota SET spent=0, period_start=?1, updated_at=?1 WHERE provider=?2",
-                params![now(), provider_name],
-            )?;
-        }
-        let _ = remaining;
-        Ok(())
-    }
-    pub fn credits_available(
-        &self,
-        provider_name: &str,
-        limits: &provider::ReconLimits,
-    ) -> Result<u32> {
-        self.touch_quota(provider_name, limits)?;
-        let (trial, reserved, spent, allowance): (i64, i64, i64, i64) = self.conn.query_row(
-            "SELECT trial_remaining,reserved,spent,allowance FROM provider_quota WHERE provider=?1",
-            [provider_name],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?;
-        let allowance_left = allowance
-            .saturating_sub(spent)
-            .saturating_sub(reserved)
-            .max(0);
-        Ok(u32::try_from(trial.max(0) + allowance_left).unwrap_or(u32::MAX))
-    }
-    pub fn reserve_credits(
-        &self,
-        provider_name: &str,
-        cost: u32,
-        limits: &provider::ReconLimits,
-    ) -> Result<Option<CreditHold>> {
-        if cost == 0 {
-            return Ok(Some(CreditHold {
-                id: String::new(),
-                provider: provider_name.into(),
-                trial_credits: 0,
-                allowance_credits: 0,
-            }));
-        }
-        self.touch_quota(provider_name, limits)?;
-        let tx = self.conn.unchecked_transaction()?;
-        let (trial, reserved, spent, allowance): (i64, i64, i64, i64) = tx.query_row(
-            "SELECT trial_remaining,reserved,spent,allowance FROM provider_quota WHERE provider=?1",
-            [provider_name],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?;
-        let trial_left = u32::try_from(trial.max(0)).unwrap_or(0);
-        let allowance_left = u32::try_from(
-            allowance
-                .saturating_sub(spent)
-                .saturating_sub(reserved)
-                .max(0),
-        )
-        .unwrap_or(0);
-        if trial_left.saturating_add(allowance_left) < cost {
-            return Ok(None);
-        }
-        let from_trial = cost.min(trial_left);
-        let from_allowance = cost - from_trial;
-        let hold_id = id("hold");
-        tx.execute(
-            "UPDATE provider_quota SET trial_remaining=trial_remaining-?1, reserved=reserved+?2, updated_at=?3 WHERE provider=?4",
-            params![from_trial, from_allowance, now(), provider_name],
-        )?;
-        tx.execute(
-            "INSERT INTO credit_reservations(id,provider,trial_credits,allowance_credits,state,created_at) VALUES (?1,?2,?3,?4,'held',?5)",
-            params![hold_id, provider_name, from_trial, from_allowance, now()],
-        )?;
-        tx.commit()?;
-        Ok(Some(CreditHold {
-            id: hold_id,
-            provider: provider_name.into(),
-            trial_credits: from_trial,
-            allowance_credits: from_allowance,
-        }))
-    }
-    pub fn reconcile_credits(&self, hold: &CreditHold, actual: u32) -> Result<()> {
-        if hold.id.is_empty() {
-            return Ok(());
-        }
-        let tx = self.conn.unchecked_transaction()?;
-        let state: Option<String> = tx
-            .query_row(
-                "SELECT state FROM credit_reservations WHERE id=?1",
-                [&hold.id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if state.as_deref() != Some("held") {
-            return Ok(());
-        }
-        tx.execute(
-            "UPDATE provider_quota SET trial_remaining=trial_remaining+?1, reserved=CASE WHEN reserved>?2 THEN reserved-?2 ELSE 0 END, updated_at=?3 WHERE provider=?4",
-            params![hold.trial_credits, hold.allowance_credits, now(), hold.provider],
-        )?;
-        let trial_now: i64 = tx.query_row(
-            "SELECT trial_remaining FROM provider_quota WHERE provider=?1",
-            [&hold.provider],
-            |row| row.get(0),
-        )?;
-        let from_trial = actual.min(u32::try_from(trial_now.max(0)).unwrap_or(0));
-        let from_allowance = actual - from_trial;
-        tx.execute(
-            "UPDATE provider_quota SET trial_remaining=trial_remaining-?1, spent=spent+?2, updated_at=?3 WHERE provider=?4",
-            params![from_trial, from_allowance, now(), hold.provider],
-        )?;
-        tx.execute(
-            "UPDATE credit_reservations SET state='spent' WHERE id=?1",
-            [&hold.id],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-    pub fn release_credits(&self, hold: &CreditHold) -> Result<()> {
-        if hold.id.is_empty() {
-            return Ok(());
-        }
-        let tx = self.conn.unchecked_transaction()?;
-        let changed = tx.execute(
-            "UPDATE credit_reservations SET state='released' WHERE id=?1 AND state='held'",
-            [&hold.id],
-        )?;
-        if changed == 1 {
-            tx.execute(
-                "UPDATE provider_quota SET trial_remaining=trial_remaining+?1, reserved=CASE WHEN reserved>?2 THEN reserved-?2 ELSE 0 END, updated_at=?3 WHERE provider=?4",
-                params![hold.trial_credits, hold.allowance_credits, now(), hold.provider],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-    pub fn release_held_credits(&self) -> Result<()> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id,provider,trial_credits,allowance_credits FROM credit_reservations WHERE state='held'",
-        )?;
-        let holds: Vec<CreditHold> = stmt
-            .query_map([], |row| {
-                Ok(CreditHold {
-                    id: row.get(0)?,
-                    provider: row.get(1)?,
-                    trial_credits: row.get::<_, i64>(2)?.max(0) as u32,
-                    allowance_credits: row.get::<_, i64>(3)?.max(0) as u32,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        drop(stmt);
-        for hold in holds {
-            self.release_credits(&hold)?;
-        }
-        Ok(())
-    }
-    pub fn inflight_duplicate(&self, tool_id: &str, inputs: &Value) -> Result<bool> {
-        let canonical = osint::canonical_tool_id(tool_id);
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM osint_calls WHERE (tool_id=?1 OR tool_id=?2) AND inputs_json=?3 AND status IN ('queued','running')",
-            params![tool_id, canonical, serde_json::to_string(inputs)?],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
-    }
-    pub fn cache_put(&self, key: &str, result: &ToolResult, ttl: u64) -> Result<()> {
-        let expires = (Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339();
-        self.conn.execute("INSERT INTO osint_cache(key,result_json,expires_at) VALUES (?1,?2,?3) ON CONFLICT(key) DO UPDATE SET result_json=excluded.result_json,expires_at=excluded.expires_at",params![key,serde_json::to_string(result)?,expires])?;
-        Ok(())
-    }
-    pub fn save_coverage_record(&self, record: &diversity::CoverageRecord) -> Result<()> {
-        diversity::save_coverage_record(self, record)
-    }
-    pub fn load_coverage_records(
-        &self,
-        scope: &str,
-        generation: u32,
-    ) -> Result<Vec<diversity::CoverageRecord>> {
-        diversity::load_coverage_records(self, scope, generation)
-    }
-    pub fn tool_enabled(&self, id: &str) -> Result<bool> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT enabled FROM osint_preferences WHERE tool_id=?1",
-                [id],
-                |r| r.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(i64::from(osint::default_enabled(id)))
-            != 0)
-    }
-    pub fn set_tool_enabled(&self, id: &str, enabled: bool) -> Result<()> {
-        ensure!(osint::definition(id).is_some(), "unknown tool");
-        self.conn.execute("INSERT INTO osint_preferences(tool_id,enabled) VALUES (?1,?2) ON CONFLICT(tool_id) DO UPDATE SET enabled=excluded.enabled",params![id,i64::from(enabled)])?;
-        Ok(())
-    }
-    pub fn delete_thread(&mut self, tid: &str, insights: bool) -> Result<bool> {
-        let mut doomed_memories: Vec<String> = Vec::new();
-        let tx = self.conn.transaction()?;
-        let found = tx.execute(
-            "UPDATE recon_threads SET deleted=1 WHERE id=?1 AND deleted=0",
-            [tid],
-        )?;
-        if found == 0 {
-            return Ok(false);
-        }
-        crate::nlp::cache::remove_owner(&tx, "thread", tid)?;
-        tx.execute(
-            "DELETE FROM brain_actor_mentions WHERE origin_kind='thread' AND origin_id=?1",
-            [tid],
-        )?;
-        crate::job_cleanup::cleanup_batch(&tx, chrono::Utc::now())?;
-        tx.execute("UPDATE insight_owner_state SET desired_generation=desired_generation+1,lifecycle='previous',last_error='origin investigation deleted' WHERE owner_kind='recon' AND owner_id IN (SELECT id FROM recon_runs WHERE thread_id=?1)",[tid])?;
-        tx.execute("UPDATE insight_derivation_links SET status='origin_deleted' WHERE snapshot_id IN (SELECT active_snapshot_id FROM insight_owner_state WHERE owner_kind='recon' AND last_error='origin investigation deleted')",[])?;
-        tx.execute("UPDATE recon_runs SET state='deleted',stage='deleted' WHERE thread_id=?1 AND state='running'",[tid])?;
-        tx.execute("UPDATE osint_calls SET status='cancelled' WHERE thread_id=?1 AND status IN ('queued','running')",[tid])?;
-        if insights {
-            let doomed = investigation_memory_ids(&tx, tid)?;
-            tx.execute("DELETE FROM insight_sources WHERE thread_id=?1", [tid])?;
-            tx.execute("DELETE FROM insight_relations WHERE left_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE fingerprint NOT IN (SELECT fingerprint FROM insight_sources)) OR right_fingerprint IN (SELECT fingerprint FROM insight_claims WHERE fingerprint NOT IN (SELECT fingerprint FROM insight_sources))",[])?;
-            tx.execute("DELETE FROM insight_user_edits WHERE memory_id IN (SELECT memory_id FROM insight_claims WHERE fingerprint NOT IN (SELECT fingerprint FROM insight_sources))",[])?;
-            tx.execute("DELETE FROM memory_graph_summaries WHERE memory_id IN (SELECT memory_id FROM insight_claims WHERE fingerprint NOT IN (SELECT fingerprint FROM insight_sources))",[])?;
-            tx.execute("DELETE FROM insight_claims WHERE fingerprint NOT IN (SELECT fingerprint FROM insight_sources)",[])?;
-            for id in doomed {
-                tx.execute(
-                    "DELETE FROM memory_graph_summaries WHERE memory_id=?1",
-                    [id.as_str()],
-                )?;
-                tx.execute("DELETE FROM memories WHERE id=?1 AND id NOT IN (SELECT memory_id FROM insight_claims)",[id.as_str()])?;
-                doomed_memories.push(id);
-            }
-        } else {
-            tx.execute("UPDATE insight_sources SET deleted_origin=1,thread_id=NULL,run_id=NULL,answer_id='deleted-origin' WHERE thread_id=?1",[tid])?;
-        }
-        let deleted_source = crate::brain::MemorySource {
-            app: "recon-deleted".into(),
-            conversation_id: "deleted-origin".into(),
-            message_id: None,
-            reference: None,
-        };
-        let retagged = tx.execute("UPDATE memories SET source_json=?1 WHERE id IN (SELECT memory_id FROM insight_claims) AND source_json LIKE ?2",params![serde_json::to_string(&deleted_source)?,format!("%{tid}%")])?;
-        crate::brain_actors::reconcile_lifecycle(&tx, &chrono::Utc::now().to_rfc3339())?;
-        // Durable vector removal (or re-verification for survivors) commits with
-        // the deletion; the index pool applies it after commit.
-        let queued = if doomed_memories.is_empty() {
-            Vec::new()
-        } else {
-            crate::store::enqueue_memory_index_on(&tx, &doomed_memories, None)?.0
-        };
-        if !doomed_memories.is_empty() || retagged > 0 {
-            crate::store::bump_memories_changed(&tx)?;
-        }
-        tx.execute(
-            "DELETE FROM investigation_strategies WHERE thread_id=?1",
-            [tid],
-        )?;
-        tx.execute(
-            "DELETE FROM investigation_hypotheses WHERE thread_id=?1",
-            [tid],
-        )?;
-        tx.execute("DELETE FROM investigation_gaps WHERE thread_id=?1", [tid])?;
-        tx.execute(
-            "DELETE FROM investigation_actions WHERE thread_id=?1",
-            [tid],
-        )?;
-        tx.execute(
-            "DELETE FROM investigation_entities WHERE thread_id=?1",
-            [tid],
-        )?;
-        tx.execute(
-            "DELETE FROM investigation_discovery WHERE thread_id=?1",
-            [tid],
-        )?;
-        tx.execute("DELETE FROM recon_messages WHERE thread_id=?1", [tid])?;
-        tx.execute("DELETE FROM recon_runs WHERE thread_id=?1", [tid])?;
-        tx.execute(
-            "DELETE FROM recon_thread_entities WHERE thread_id=?1",
-            [tid],
-        )?;
-        tx.execute(
-            "UPDATE osint_calls SET thread_id=NULL,turn_id=NULL,run_id=NULL WHERE thread_id=?1",
-            [tid],
-        )?;
-        tx.execute("DELETE FROM osint_calls WHERE origin='recon' AND thread_id IS NULL AND run_id IS NULL AND id NOT IN (SELECT call_id FROM insight_sources) AND NOT EXISTS (SELECT 1 FROM insight_derivation_evidence e WHERE e.source_id='call:'||osint_calls.id OR e.source_id LIKE 'call:'||osint_calls.id||'#page%')",[])?;
-        tx.execute("DELETE FROM recon_threads WHERE id=?1", [tid])?;
-        tx.execute(
-            "DELETE FROM app_state WHERE key='last_thread' AND value=?1",
-            [tid],
-        )?;
-        crate::investigation::insight_persist::reconcile_deleted_memories(&tx)?;
-        tx.commit()?;
-        let _ = self.index_now(&queued);
-        Ok(true)
-    }
-    pub fn attach_call(&self, call_id: &str, tid: &str) -> Result<bool> {
-        ensure!(self.get_thread(tid)?.is_some(), "thread not found");
-        Ok(self.conn.execute("UPDATE osint_calls SET thread_id=?1 WHERE id=?2 AND origin='manual' AND status IN ('completed','no_results')",params![tid,call_id])?>0)
-    }
-    pub fn link_entity(
-        &self,
-        tid: &str,
-        kind: &str,
-        canonical: &str,
-        source_call_id: Option<&str>,
-    ) -> Result<()> {
-        let eid = format!("{}:{}", kind, canonical);
-        self.conn.execute("INSERT OR IGNORE INTO recon_entities(id,kind,namespace,canonical,label) VALUES (?1,?2,'',?3,?3)",params![eid,kind,canonical])?;
-        self.conn.execute("INSERT OR IGNORE INTO recon_thread_entities(thread_id,entity_id,source_call_id) VALUES (?1,?2,?3)",params![tid,eid,source_call_id.unwrap_or("")])?;
-        self.record_thread_actor(tid, canonical, kind)?;
-        Ok(())
-    }
-    pub fn thread_entities(&self, tid: &str) -> Result<Vec<(String, String)>> {
-        let mut s=self.conn.prepare("SELECT DISTINCT a.kind,a.canonical FROM recon_thread_entities e JOIN recon_entities a ON a.id=e.entity_id WHERE e.thread_id=?1 ORDER BY a.kind,a.canonical")?;
-        let rows = s
-            .query_map([tid], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(rows)
-    }
-    pub fn insight_for_memory(&self, mid: &str) -> Result<Option<InsightView>> {
-        let base:Option<(String,String,String,String,String,f64,String)>=self.conn.query_row("SELECT COALESCE(e.label,c.entity_id),c.predicate,c.object_value,c.topic,c.classification,c.confidence,c.fingerprint FROM insight_claims c LEFT JOIN recon_entities e ON e.id=c.entity_id WHERE c.memory_id=?1",[mid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
-        let Some((entity, predicate, object_value, topic, classification, confidence, fingerprint)) =
-            base
-        else {
-            return Ok(None);
-        };
-        let mut stmt=self.conn.prepare("SELECT thread_id,run_id,answer_id,call_id,source_url,deleted_origin,published_at FROM insight_sources WHERE fingerprint=?1 AND deleted_origin=0")?;
-        let sources = stmt
-            .query_map([&fingerprint], |r| {
-                Ok(InsightSource {
-                    thread_id: r.get(0)?,
-                    run_id: r.get(1)?,
-                    answer_id: r.get(2)?,
-                    call_id: r.get(3)?,
-                    source_url: r.get(4)?,
-                    deleted_origin: r.get::<_, i64>(5)? != 0,
-                    published_at: r.get(6)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut stmt=self.conn.prepare("SELECT CASE WHEN left_fingerprint=?1 THEN right_fingerprint ELSE left_fingerprint END FROM insight_relations WHERE left_fingerprint=?1 OR right_fingerprint=?1")?;
-        let related = stmt
-            .query_map([&fingerprint], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(Some(InsightView {
-            metadata: crate::brain_query::insight_metadata(&self.conn, mid)?,
-            memory_id: mid.into(),
-            entity,
-            predicate,
-            object_value,
-            topic,
-            classification,
-            confidence,
-            sources,
-            related,
-        }))
-    }
-    pub fn search_insights(&self, entity: &str, topic: &str) -> Result<Vec<InsightView>> {
-        let mut stmt=self.conn.prepare("SELECT c.memory_id FROM insight_claims c LEFT JOIN recon_entities e ON e.id=c.entity_id WHERE (c.entity_id LIKE ?1 OR e.label LIKE ?1) AND c.topic LIKE ?2 ORDER BY c.updated_at DESC")?;
-        let ids = stmt
-            .query_map(params![format!("%{entity}%"), format!("%{topic}%")], |r| {
-                r.get::<_, String>(0)
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        ids.iter()
-            .map(|id| self.insight_for_memory(id).map(Option::unwrap))
-            .collect()
-    }
-    pub fn deletion_consequences(&self, tid: &str) -> Result<Vec<String>> {
-        investigation_memory_ids(&self.conn, tid)
-    }
-}
-
-/// Memories this investigation owns: its extracted insights, and memories filed
-/// against the thread, unless another investigation still sources the claim.
-fn investigation_memory_ids(conn: &rusqlite::Connection, tid: &str) -> Result<Vec<String>> {
-    let source_like = format!("%\"conversation_id\":\"{tid}\"%");
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT m.id FROM memories m
-         WHERE (
-           m.id IN (
-             SELECT c.memory_id FROM insight_claims c
-             JOIN insight_sources s ON s.fingerprint = c.fingerprint
-             WHERE s.thread_id = ?1
-           )
-           OR m.source_json LIKE ?2
-         )
-         AND m.id NOT IN (
-           SELECT c.memory_id FROM insight_claims c
-           JOIN insight_sources s ON s.fingerprint = c.fingerprint
-           WHERE s.thread_id IS NOT NULL AND s.thread_id <> ?1
-         )",
-    )?;
-    let rows = stmt
-        .query_map(params![tid, source_like], |row| row.get(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-impl Store {
-    pub fn recon_recall(&self, entities: &[(String, String)]) -> Result<Vec<RecallInsight>> {
-        let mut out = Vec::new();
-        let mut seen = HashSet::new();
-        for (_, canonical) in entities {
-            let mut stmt=self.conn.prepare("SELECT m.id,m.text,c.entity_id,c.predicate,c.updated_at,(SELECT COUNT(*) FROM insight_sources s WHERE s.fingerprint=c.fingerprint AND s.deleted_origin=0) FROM insight_claims c JOIN memories m ON m.id=c.memory_id WHERE c.entity_id=?1 AND NOT EXISTS(SELECT 1 FROM memory_metadata mm WHERE mm.memory_id=m.id AND mm.lifecycle<>'active') ORDER BY c.updated_at DESC LIMIT 8")?;
-            for row in stmt.query_map([canonical], |r| {
-                Ok(RecallInsight {
-                    memory_id: r.get(0)?,
-                    text: r.get(1)?,
-                    entity: r.get(2)?,
-                    predicate: r.get(3)?,
-                    updated_at: r.get(4)?,
-                    evidence_count: r.get(5)?,
-                })
-            })? {
-                let value = row?;
-                if seen.insert(format!(
-                    "{}:{}:{}",
-                    value.entity, value.predicate, value.text
-                )) {
-                    out.push(value);
-                }
-            }
-        }
-        out.truncate(8);
-        Ok(out)
-    }
 }
 pub fn is_broad_question(question: &str) -> bool {
     let mut words = question.split_whitespace();
@@ -2560,19 +1447,6 @@ fn packet_observation(value: &Value) -> Value {
                     crate::summarization::publish_selected(&req, digest.clone())
                 {
                     digest = published;
-                } else if let Some(Ok(store)) =
-                    // SurrealDB: `publish_selected` already tried the
-                    // repository; keep the deterministic digest.
-                    (!surreal_selected())
-                        .then(|| Store::open(&crate::paths::db_path()))
-                {
-                    if let Ok(published) = crate::summarization::publish_deterministic_and_enqueue(
-                        &store.conn,
-                        &req,
-                        digest.clone(),
-                    ) {
-                        digest = published;
-                    }
                 }
                 json!({
                     "tool_observation_digest": digest.content,
@@ -2721,6 +1595,95 @@ fn clip_long_strings(value: &mut Value, limit: usize) {
         }
         _ => {}
     }
+}
+
+/// Prepare immutable page artifacts once, before compaction and synthesis retries.
+async fn prepare_page_result(
+    settings: &SettingsFile,
+    question: &str,
+    directives: &str,
+    id: &str,
+    result: &ToolResult,
+    cancel: &Arc<AtomicBool>,
+    _run_id: &str,
+    _db_path: Option<&Path>,
+) -> ToolResult {
+    if settings.nlp.mode == crate::nlp::Mode::Off
+        || result
+            .observations
+            .get("evidence_form")
+            .and_then(Value::as_str)
+            != Some("page")
+    {
+        return result.clone();
+    }
+    let raw = serde_json::from_str::<Value>(&result.raw).unwrap_or(Value::Null);
+    let data = raw.get("data").unwrap_or(&raw);
+    let mut out = result.clone();
+    let mut manifests = Vec::new();
+    let count = out
+        .observations
+        .get("pages")
+        .and_then(Value::as_array)
+        .map_or(1, Vec::len)
+        .max(1);
+    let mut pages = if let Some(pages) = out.observations.get("pages").and_then(Value::as_array) {
+        pages.clone()
+    } else {
+        vec![out.observations.clone()]
+    };
+    for (index, page) in pages.iter_mut().enumerate() {
+        let acquired = if let Some(array) = data.as_array() {
+            array.get(index).unwrap_or(&Value::Null)
+        } else {
+            data
+        };
+        let full = acquired
+            .get("markdown")
+            .or_else(|| acquired.get("content"))
+            .and_then(Value::as_str)
+            .or_else(|| page.get("markdown").and_then(Value::as_str))
+            .unwrap_or("");
+        let mut source =
+            crate::nlp::Source::derived(&format!("{id}:{index}"), &result.retrieved_at, full);
+        source.attempt_id = id.into();
+        source.retrieved_at = result.retrieved_at.clone();
+        let raw_available = acquired
+            .get("markdown")
+            .or_else(|| acquired.get("content"))
+            .and_then(Value::as_str)
+            .is_some();
+        if raw_available {
+            source.raw_hash = Some(source.prose_hash.clone());
+        }
+        let prepared = crate::nlp::prepare_mode(
+            source.clone(),
+            "recon-page",
+            &format!("{question} {directives}"),
+            (32 * 1024 / count).min(16000),
+            16000,
+            cancel.clone(),
+            settings.nlp.mode,
+        )
+        .await;
+        if matches!(
+            prepared.effective_action,
+            crate::nlp::EffectiveAction::Verbatim
+                | crate::nlp::EffectiveAction::Selected
+                | crate::nlp::EffectiveAction::RequiresWindows
+        ) {
+            page["markdown"] = json!(prepared.text);
+        }
+        let manifest=prepared.selection.as_ref().map(|s|json!({"ranges":s.ranges,"selection_key":s.selection_key,"partial":!s.omitted_sentence_ids.is_empty(),"selected_count":s.selected_sentence_ids.len(),"omitted_count":s.omitted_sentence_ids.len()})).unwrap_or(Value::Null);
+        manifests.push(json!({"source_id":source.source_id,"artifact_hash":source.prose_hash,"selection":manifest,"diagnostic":prepared.diagnostic}));
+    }
+    if out.observations.get("pages").is_some() {
+        out.observations["pages"] = json!(pages);
+    } else {
+        out.observations = pages.remove(0);
+    }
+    out.observations["nlp_manifest"] = json!(manifests);
+    out
 }
 
 async fn compact_page_evidence(
@@ -2953,7 +1916,6 @@ fn recon_finish(outcome: &Result<Run>, cancel: &AtomicBool) -> crate::job_regist
 /// The registry row of one Recon question: the SQLite job registry, or the
 /// repository's `job` table under SurrealDB (never both).
 enum ReconJob {
-    Sqlite(crate::job_registry::JobHandle),
     #[cfg(feature = "surreal")]
     Surreal {
         id: String,
@@ -2966,7 +1928,7 @@ impl ReconJob {
     /// Begin (or, with `resume_run`, resume that run's row) a cancellable
     /// Recon job. Best-effort: `None` when the registry is unavailable.
     async fn begin(
-        db_path: &Path,
+        _db_path: &Path,
         title: String,
         resource: String,
         resume_run: Option<&str>,
@@ -2998,7 +1960,6 @@ impl ReconJob {
     /// Phase heartbeat. On SurrealDB, Jobs → Cancel raises the cancel flag.
     fn phase(&self, stage: &str) {
         match self {
-            Self::Sqlite(job) => job.phase(stage, None, None),
             #[cfg(feature = "surreal")]
             Self::Surreal { id, cancel, .. } => {
                 let (id, stage, cancel) = (id.clone(), stage.to_string(), cancel.clone());
@@ -3018,7 +1979,6 @@ impl ReconJob {
 
     async fn finish(self, run_id: Option<&str>, outcome: &Result<Run>, cancel: &AtomicBool) {
         match self {
-            Self::Sqlite(job) => finish_recon_job(Some(job), run_id, outcome, cancel),
             #[cfg(feature = "surreal")]
             Self::Surreal { id, span, .. } => {
                 use crate::job_registry::Finish;
@@ -3117,40 +2077,31 @@ impl Service {
         if contract == crate::investigation::insights::CONTRACT {
             // New-policy insights were staged from originals before the answer.
             // Retry the durable refresh, never mine the saved answer.
-            #[cfg(feature = "surreal")]
-            if let Some(repo) = store.repository() {
-                let cancel = Arc::new(AtomicBool::new(false));
-                let (_, errors) = crate::storage::refresh_driver::recover_and_run(
-                    repo,
-                    &self.settings,
-                    &cancel,
-                    || {
-                        crate::storage::refresh_driver::pipeline(
-                            &self.auth,
-                            &self.settings,
-                            &cancel,
-                            self.db_path.clone(),
-                        )
-                    },
-                )
-                .await?;
-                if let Some(e) = errors.first() {
-                    return Err(anyhow!(
-                        "insight refresh recovery: {}: {}",
-                        e.resource,
-                        e.message
-                    ));
-                }
-                return Ok(());
-            }
-            drop(store);
-            crate::investigation::insight_persist::recover_refreshes(
-                &self.db_path,
-                &self.auth,
+            let Some(repo) = store.repository() else {
+                anyhow::bail!("SurrealDB storage is not configured");
+            };
+            let cancel = Arc::new(AtomicBool::new(false));
+            let (_, errors) = crate::storage::refresh_driver::recover_and_run(
+                repo,
                 &self.settings,
-                &Arc::new(AtomicBool::new(false)),
+                &cancel,
+                || {
+                    crate::storage::refresh_driver::pipeline(
+                        &self.auth,
+                        &self.settings,
+                        &cancel,
+                        self.db_path.clone(),
+                    )
+                },
             )
             .await?;
+            if let Some(e) = errors.first() {
+                return Err(anyhow!(
+                    "insight refresh recovery: {}: {}",
+                    e.resource,
+                    e.message
+                ));
+            }
             return Ok(());
         }
         ensure!(
@@ -3834,7 +2785,7 @@ impl Service {
         }
         let _ = (max_calls, opening);
         progress(TurnEvent::Stage("assessing source claims".into()));
-        let assessed = if surreal_selected() {
+        let assessed = {
             // The claim assessment pipeline is still SQLite-only: synthesize
             // from the active SurrealDB output, else withhold inferences.
             let store = ReconStore::open(&self.db_path).await?;
@@ -3858,9 +2809,6 @@ impl Service {
                     .push("Claim assessment is not on SurrealDB yet".into());
                 withheld
             }))
-        } else {
-            self.assess_sqlite(run, question, plan, results, cancel)
-                .await?
         };
         let synthesis_results = if self.settings.nlp.mode != crate::nlp::Mode::Off
             || results
@@ -3915,18 +2863,6 @@ impl Service {
                 self.settings.nlp.mode,
             )
             .await;
-            if self.settings.nlp.mode != crate::nlp::Mode::Off {
-                if let Some(Ok(store)) = sqlite_path(&self.db_path).map(Store::open) {
-                    let _ = crate::nlp::cache::register(
-                        &store.conn,
-                        "memory",
-                        &item.memory_id,
-                        &source,
-                        None,
-                        "historical-brain-v1",
-                    );
-                }
-            }
             item.text = prepared.text;
         }
         let (mut synthesis_prompt, mut synthesis_user) = synthesis_request(
@@ -3981,7 +2917,7 @@ impl Service {
             .flatten()
             .map_or(0, |(generation, _)| generation);
         let generation = u32::try_from(prev_gen.max(1)).unwrap_or(1);
-        if store.is_surreal() {
+        {
             // add_answer finalizes the run's synthesis operation.
             store
                 .begin_synthesis(&run.id, i64::from(generation), "")
@@ -4150,11 +3086,7 @@ impl Service {
             return Ok(None);
         }
         progress(TurnEvent::Stage("saving insights".into()));
-        if !store.is_surreal() {
-            store.complete_extraction_v1(&answer_msg.id).await?;
-            let _ = cited_results; // Shared pre-answer refresh already owns derivations.
-            return Ok(None);
-        }
+
         // SurrealDB has no pre-answer refresh yet: mine the cited evidence.
         drop(store);
         if let Err(err) = self
@@ -4167,94 +3099,6 @@ impl Service {
                 .await?;
         }
         Ok(None)
-    }
-
-    /// The SQLite claim assessment: refresh the run's insight snapshot and
-    /// return its output (withheld with the blocking error on failure).
-    async fn assess_sqlite(
-        &self,
-        run: &Run,
-        question: &str,
-        plan: &Plan,
-        results: &[(String, ToolResult)],
-        cancel: &Arc<AtomicBool>,
-    ) -> Result<Option<crate::investigation::insights::PipelineOutput>> {
-        let mut insight_input = {
-            let store = Store::open(&self.db_path)?;
-            let evidence =
-                crate::investigation::insights::evidence_from_tools(&store.conn, results)?;
-            let generation = crate::investigation::insight_persist::desired_generation(
-                &store.conn,
-                "recon",
-                &run.id,
-            )?;
-            let generation = if generation == 0 {
-                crate::investigation::insight_persist::advance_generation(
-                    &store.conn,
-                    "recon",
-                    &run.id,
-                    &now(),
-                )?
-            } else {
-                generation
-            };
-            crate::investigation::insights::PipelineInput {
-                snapshot: crate::investigation::insights::snapshot(
-                    "recon", &run.id, generation, &evidence,
-                ),
-                evidence,
-                objective: question.into(),
-                surface: "recon".into(),
-                required_tasks_complete: plan.calls.iter().all(|call| {
-                    results
-                        .iter()
-                        .any(|(_, r)| r.tool_id == call.tool_id && r.status == "completed")
-                }),
-                save_insights: store
-                    .get_thread(&run.thread_id)?
-                    .is_some_and(|t| t.recall_insights),
-                recall_enabled: store
-                    .get_thread(&run.thread_id)?
-                    .is_some_and(|t| t.recall_insights),
-            }
-        };
-        let refresh_task = {
-            let store = Store::open(&self.db_path)?;
-            crate::investigation::insight_persist::enqueue_refresh(
-                &store.conn,
-                &mut insight_input,
-                &self.settings,
-                &now(),
-            )?
-        };
-        let assessed = crate::investigation::insight_persist::run_refresh_slice(
-            &self.db_path,
-            &refresh_task,
-            &self.auth,
-            &self.settings,
-            cancel,
-        )
-        .await;
-        let assessed = match assessed {
-            Ok(Some(output)) => Some(output),
-            Ok(None) => crate::investigation::insight_persist::active_output(
-                &Store::open(&self.db_path)?.conn,
-                "recon",
-                &run.id,
-            )?,
-            Err(error) => {
-                if cancel.load(Ordering::Acquire) {
-                    return Err(error);
-                }
-                let mut withheld = crate::investigation::insights::PipelineOutput::default();
-                withheld
-                    .readiness
-                    .gaps
-                    .push(format!("Claim assessment blocked: {error}"));
-                Some(withheld)
-            }
-        };
-        Ok(assessed)
     }
 
     /// Saves the text streamed so far plus a deterministic evidence summary. The run stays
@@ -4353,10 +3197,7 @@ impl Service {
         let answer_msg = store
             .add_answer(&run.thread_id, &run.id, answer, &cited_ids, &memory_ids)
             .await?;
-        if !store.is_surreal() {
-            // SurrealDB answers stay queued until their claims are mined.
-            store.complete_extraction_v1(&answer_msg.id).await?;
-        }
+
         store.relink_sources(&run.id, &answer_msg.id).await?;
         Ok(answer_msg)
     }
@@ -4430,148 +3271,6 @@ impl Service {
             .persist_claims(answer, evidence, &claims)
             .await
     }
-}
-fn persist_claims(
-    store: &mut Store,
-    answer: &Message,
-    evidence: &[(String, ToolResult)],
-    claims: &[Value],
-) -> Result<()> {
-    let mut written: Vec<String> = Vec::new();
-    // Every canonical memory these claims resolve to (new and reused), so reused
-    // claims with missing/stale vectors are re-verified too.
-    let mut touched: Vec<String> = Vec::new();
-    let tx = store.conn.transaction()?;
-    let source_exists:i64=tx.query_row("SELECT COUNT(*) FROM recon_messages m JOIN recon_threads t ON t.id=m.thread_id WHERE m.id=?1 AND m.thread_id=?2 AND t.deleted=0",params![answer.id,answer.thread_id],|r|r.get(0))?;
-    ensure!(source_exists == 1, "source answer or thread was deleted");
-    let enabled: bool = tx.query_row(
-        "SELECT recall_insights=1 FROM recon_threads WHERE id=?1 AND deleted=0",
-        [&answer.thread_id],
-        |r| r.get(0),
-    )?;
-    if !enabled {
-        tx.execute("UPDATE extraction_jobs SET state='completed',error=NULL,updated_at=?1 WHERE answer_id=?2",params![now(),answer.id])?;
-        tx.commit()?;
-        return Ok(());
-    }
-    for claim_value in claims.iter().take(5) {
-        let entity = claim_value
-            .get("entity")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
-        let namespace = claim_value
-            .get("namespace")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
-        let predicate = claim_value
-            .get("predicate")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
-        let object = claim_value
-            .get("object")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
-        let claim = claim_value
-            .get("claim")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim();
-        let valid_ids: Vec<_> = claim_value
-            .get("evidence_ids")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .filter(|eid| {
-                evidence
-                    .iter()
-                    .any(|(id, r)| id == eid && r.status == "completed")
-            })
-            .collect();
-        if entity.is_empty()
-            || predicate.is_empty()
-            || object.is_empty()
-            || claim.is_empty()
-            || valid_ids.is_empty()
-        {
-            continue;
-        }
-        let fingerprint = serde_json::to_string(&(&namespace, &entity, &predicate, &object))?;
-        let existing: Option<String> = tx
-            .query_row(
-                "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
-                [&fingerprint],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if existing.is_none() {
-            // Never recreate a claim the user deleted from this run.
-            if let (Some(runs), Some(run_id)) = (
-                crate::store::tombstone_runs(&tx, &fingerprint)?,
-                answer.run_id.as_deref(),
-            ) {
-                if runs.iter().any(|r| r == run_id) {
-                    continue;
-                }
-            }
-        }
-        if let Some(memory_id) = &existing {
-            if !touched.contains(memory_id) {
-                touched.push(memory_id.clone());
-            }
-        }
-        if existing.is_none() {
-            let source = crate::brain::MemorySource {
-                app: "recon".into(),
-                conversation_id: answer.thread_id.clone(),
-                message_id: Some(answer.id.clone()),
-                reference: None,
-            };
-            let memory_id = id("mem");
-            tx.execute("INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",params![memory_id,claim,now(),serde_json::to_string(&source)?])?;
-            written.push(memory_id.clone());
-            touched.push(memory_id.clone());
-            tx.execute("INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![fingerprint,memory_id,entity,predicate,object,claim_value.get("topic").and_then(Value::as_str).unwrap_or(""),claim_value.get("classification").and_then(Value::as_str).unwrap_or("fact"),claim_value.get("confidence").and_then(Value::as_f64).unwrap_or(0.5),now(),now()])?;
-            crate::brain_backfill::bind_claim_subject(&tx, &fingerprint)?;
-            let mut stmt=tx.prepare("SELECT fingerprint FROM insight_claims WHERE entity_id=?1 AND predicate=?2 AND fingerprint<>?3")?;
-            let other: Vec<String> = stmt
-                .query_map(params![entity, predicate, fingerprint], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            drop(stmt);
-            for old in other {
-                tx.execute("INSERT OR IGNORE INTO insight_relations(left_fingerprint,right_fingerprint,relation) VALUES (?1,?2,'conflict_or_revision')",params![old,fingerprint])?;
-            }
-        }
-        for eid in valid_ids {
-            if let Some((_, r)) = evidence.iter().find(|(id, _)| id == eid) {
-                tx.execute("INSERT OR IGNORE INTO insight_sources(fingerprint,thread_id,run_id,answer_id,call_id,source_url) VALUES (?1,?2,?3,?4,?5,?6)",params![fingerprint,answer.thread_id,answer.run_id,answer.id,eid,r.source_url])?;
-            }
-        }
-        tx.execute(
-            "UPDATE insight_claims SET updated_at=?1 WHERE fingerprint=?2",
-            params![now(), fingerprint],
-        )?;
-    }
-    tx.execute(
-        "UPDATE extraction_jobs SET state='completed',updated_at=?1 WHERE answer_id=?2",
-        params![now(), answer.id],
-    )?;
-    // Index-outbox rows commit atomically with the memories and links.
-    let queued = crate::store::enqueue_memory_index_on(&tx, &touched, None)?.0;
-    if !written.is_empty() {
-        crate::store::bump_memories_changed(&tx)?;
-    }
-    tx.commit()?;
-    let _ = store.index_now(&queued);
-    Ok(())
 }
 fn turn_clock(floor: u16, max_turn: u16) -> Arc<std::sync::Mutex<budget::TurnClock>> {
     let floor = u64::from(floor);
@@ -5083,128 +3782,6 @@ fn citation_ids(answer: &str) -> Vec<String> {
         }
     }
     ids
-}
-/// Prepare immutable page artifacts once, before compaction and synthesis retries.
-async fn prepare_page_result(
-    settings: &SettingsFile,
-    question: &str,
-    directives: &str,
-    id: &str,
-    result: &ToolResult,
-    cancel: &Arc<AtomicBool>,
-    run_id: &str,
-    db_path: Option<&Path>,
-) -> ToolResult {
-    if settings.nlp.mode == crate::nlp::Mode::Off
-        || result
-            .observations
-            .get("evidence_form")
-            .and_then(Value::as_str)
-            != Some("page")
-    {
-        return result.clone();
-    }
-    let raw = serde_json::from_str::<Value>(&result.raw).unwrap_or(Value::Null);
-    let data = raw.get("data").unwrap_or(&raw);
-    let mut out = result.clone();
-    let mut manifests = Vec::new();
-    let count = out
-        .observations
-        .get("pages")
-        .and_then(Value::as_array)
-        .map_or(1, Vec::len)
-        .max(1);
-    // The NLP source cache is SQLite-only (`nlp::cache`); under SurrealDB no
-    // SQLite file is opened and pages are prepared uncached.
-    let db_path = db_path.filter(|_| !surreal_selected());
-    let owner = db_path
-        .and_then(|p| Store::open(p).ok())
-        .and_then(|s| {
-            s.conn
-                .query_row(
-                    "SELECT thread_id FROM recon_runs WHERE id=?1",
-                    [run_id],
-                    |r| r.get::<_, String>(0),
-                )
-                .ok()
-        })
-        .unwrap_or_else(|| run_id.to_owned());
-    let mut pages = if let Some(pages) = out.observations.get("pages").and_then(Value::as_array) {
-        pages.clone()
-    } else {
-        vec![out.observations.clone()]
-    };
-    for (index, page) in pages.iter_mut().enumerate() {
-        let acquired = if let Some(array) = data.as_array() {
-            array.get(index).unwrap_or(&Value::Null)
-        } else {
-            data
-        };
-        let full = acquired
-            .get("markdown")
-            .or_else(|| acquired.get("content"))
-            .and_then(Value::as_str)
-            .or_else(|| page.get("markdown").and_then(Value::as_str))
-            .unwrap_or("");
-        let mut source =
-            crate::nlp::Source::derived(&format!("{id}:{index}"), &result.retrieved_at, full);
-        source.attempt_id = id.into();
-        source.retrieved_at = result.retrieved_at.clone();
-        let raw_available = acquired
-            .get("markdown")
-            .or_else(|| acquired.get("content"))
-            .and_then(Value::as_str)
-            .is_some();
-        if raw_available {
-            source.raw_hash = Some(source.prose_hash.clone());
-        }
-        if let Some(path) = db_path {
-            if let Ok(store) = Store::open(path) {
-                let _ = crate::nlp::cache::register(
-                    &store.conn,
-                    "thread",
-                    &owner,
-                    &source,
-                    raw_available.then_some(full),
-                    "page-acquisition-v1",
-                );
-            }
-        }
-        let prepared = crate::nlp::prepare_mode(
-            source.clone(),
-            "recon-page",
-            &format!("{question} {directives}"),
-            (32 * 1024 / count).min(16000),
-            16000,
-            cancel.clone(),
-            settings.nlp.mode,
-        )
-        .await;
-        if matches!(
-            prepared.effective_action,
-            crate::nlp::EffectiveAction::Verbatim
-                | crate::nlp::EffectiveAction::Selected
-                | crate::nlp::EffectiveAction::RequiresWindows
-        ) {
-            page["markdown"] = json!(prepared.text);
-        }
-        if let Some(path) = db_path {
-            if let Ok(store) = Store::open(path) {
-                let coverage =
-                    serde_json::to_string(&prepared.selection).unwrap_or_else(|_| "null".into());
-                let _=store.conn.execute("UPDATE nlp_source_refs SET metadata_json=json_set(metadata_json,'$.coverage',json(?4)) WHERE owner_kind='thread' AND owner_id=?1 AND source_id=?2 AND prose_hash=?3",params![owner,source.source_id,source.prose_hash,coverage]);
-            }
-        }
-        let manifest=prepared.selection.as_ref().map(|s|json!({"ranges":s.ranges,"selection_key":s.selection_key,"partial":!s.omitted_sentence_ids.is_empty(),"selected_count":s.selected_sentence_ids.len(),"omitted_count":s.omitted_sentence_ids.len()})).unwrap_or(Value::Null);
-        manifests.push(json!({"source_id":source.source_id,"artifact_hash":source.prose_hash,"selection":manifest,"diagnostic":prepared.diagnostic}));
-    }
-    if out.observations.get("pages").is_some() {
-        out.observations["pages"] = json!(pages);
-    } else {
-        out.observations = pages.remove(0);
-    }
-    out.observations["nlp_manifest"] = json!(manifests);
-    out
 }
 
 #[cfg(test)]

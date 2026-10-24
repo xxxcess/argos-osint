@@ -1,4 +1,10 @@
 //! Store CRUD for Intel article bodies and report jobs.
+//!
+//! SQLite-only and retired: report jobs are gated off by
+//! `jobs::report_execution_enabled()`, and every live caller of these
+//! methods is the disabled worker, job cleanup, or the TUI. No SurrealDB
+//! path reaches this file; Intel article bodies use `body_db` over
+//! `storage::article_body`. Delete with the SQLite removal commit.
 
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};

@@ -179,6 +179,19 @@ pub async fn app_state_set(repo: &Repository, key: &str, value: &str) -> Result<
     Ok(())
 }
 
+/// `DELETE FROM app_state WHERE key=?1`.
+pub async fn app_state_delete(repo: &Repository, key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Ok(());
+    }
+    repo.db()
+        .query("DELETE $k RETURN NONE")
+        .bind(("k", rid("app_state", key)))
+        .await?
+        .check()?;
+    Ok(())
+}
+
 pub async fn app_state_get(repo: &Repository, key: &str) -> Result<Option<String>> {
     let mut r = repo
         .db()

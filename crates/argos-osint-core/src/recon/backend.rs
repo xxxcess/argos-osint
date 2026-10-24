@@ -137,6 +137,50 @@ impl ReconStore {
         dispatch!(self, s => s.insert_investigation_event(ev),
             r => crate::storage::event_log::insert_investigation_event(r.db(), ev).await)
     }
+    /// Investigation harness tasks (`investigation_tasks`).
+    pub async fn list_investigation_tasks(
+        &self,
+        investigation_id: &str,
+    ) -> Result<Vec<crate::investigation::TaskRecord>> {
+        dispatch!(self, s => s.list_investigation_tasks(investigation_id),
+            r => crate::storage::investigation::list_tasks(r.db(), investigation_id).await)
+    }
+    pub async fn get_investigation_task(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::investigation::TaskRecord>> {
+        dispatch!(self, s => s.get_investigation_task(id),
+            r => crate::storage::investigation::get_task(r.db(), id).await)
+    }
+    pub async fn insert_investigation_task(
+        &self,
+        task: &crate::investigation::TaskRecord,
+    ) -> Result<()> {
+        dispatch!(self, s => s.insert_investigation_task(task),
+            r => crate::storage::investigation::insert_task(r.db(), task).await)
+    }
+    pub async fn add_task_dependency(&self, task_id: &str, depends_on: &str) -> Result<()> {
+        dispatch!(self, s => s.add_task_dependency(task_id, depends_on),
+            r => crate::storage::investigation::add_dependency(r.db(), task_id, depends_on).await)
+    }
+    pub async fn get_task_dependencies(&self, task_id: &str) -> Result<Vec<String>> {
+        dispatch!(self, s => s.get_task_dependencies(task_id),
+            r => crate::storage::investigation::dependencies(r.db(), task_id).await)
+    }
+    pub async fn insert_evidence_passage(
+        &self,
+        passage: &crate::investigation::evidence::EvidencePassage,
+    ) -> Result<()> {
+        dispatch!(self, s => s.insert_evidence_passage(passage),
+            r => crate::storage::investigation::insert_passage(r.db(), passage).await)
+    }
+    pub async fn insert_claim_assessment(
+        &self,
+        assessment: &crate::investigation::evidence::ClaimAssessment,
+    ) -> Result<()> {
+        dispatch!(self, s => s.insert_claim_assessment(assessment),
+            r => crate::storage::investigation::insert_assessment(r.db(), assessment).await)
+    }
     pub async fn next_event_sequence(&self, tid: &str) -> Result<i64> {
         dispatch!(self, s => s.next_event_sequence(tid),
             r => crate::storage::event_log::next_event_sequence(r.db(), tid).await)

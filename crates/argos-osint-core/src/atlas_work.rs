@@ -108,6 +108,10 @@ pub fn cycle_outcome_label(state: &str) -> &'static str {
 /// Best-effort: a database that cannot be read returns zero.
 pub fn next_stage_seq(db_path: &Path, run_id: &str, stage: &str) -> i64 {
     let prefix = format!("atlas-stage-{run_id}-{stage}-");
+    // Stage telemetry is SQLite-only; never create a SQLite file under SurrealDB.
+    let Some(db_path) = crate::recon::backend::sqlite_path(db_path) else {
+        return 0;
+    };
     rusqlite::Connection::open(db_path)
         .ok()
         .and_then(|conn| {

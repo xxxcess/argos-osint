@@ -29,8 +29,6 @@ telemetry are wired (see "Combined tree" at the end).
   (`ExecStore::report_details`, `storage::intel::report_details_by_hash`).
   The Intel report worker stays retired (`report_execution_enabled()` is
   false), so no production run reaches it yet.
-- [ ] Atlas, Atlas insight/memory writers and the investigation harness
-  (wip/surreal-atlas).
 - [x] Article refresh input: `refresh_exec` builds it with
   `storage::pipeline_inputs::article_input` (no SQLite read).
 - [x] `pipeline_exec::load_memory_evidence`: SurrealDB is a clean reset with
@@ -44,6 +42,13 @@ telemetry are wired (see "Combined tree" at the end).
 - [x] Topology: retained Intel seeds are served; snapshot reads run in one
   transaction (385f879). The generated neighbourhood summary is still skipped
   and no TUI test drives the SurrealDB workers.
+- [x] The investigation harness (`investigation::engine`) runs on
+  `ReconStore` (`storage::investigation`, `tests/storage_investigation.rs`).
+- [x] Atlas run bookkeeping, articles, metadata, classification cache, work
+  units and receipts go through `AtlasStore` (`tests/storage_atlas_store.rs`).
+- [ ] Atlas actor indexing (skipped on SurrealDB), Atlas job/stage telemetry
+  and the Atlas insight/memory writers (`atlas_insights`, `atlas_memory`)
+  stay SQLite.
 
 ## P0 — foundation (spec step 1)
 
@@ -282,8 +287,8 @@ Bootstrap registers 21 schemas after the topology, Profile and Recon tracks merg
 - Gaps:
   - ~~The Logs pane, its severity counts, the TUI session log and the Jobs → Logs event counts still read/write SQLite `argos_events`~~ Done (logs track): under a storage config Logs reads `argos_event` on worker threads, `push_log` records there (ordered, `runtime::spawn_ordered`), startup and first-tick prune and Clear log run on the repository, `list_events` walks child jobs (`event_log::job_tree`), and `JobRow.events` counts `argos_event` plus `job_event` rows (job and direct children). `job.retry` is still written only to `job_event`, so it is counted but not listed in Logs.
   - Telemetry writes are fire-and-forget; a TUI killed mid-write can lose the last events. ~~`telemetry_meta`, `telemetry_backfill` and the 90/365-day prune are not on SurrealDB~~ Done (logs track): `storage::telemetry::{get_meta, set_meta, ensure_observed_since, coverage, prune}`; `telemetry::prune` routes there under a config and the TUI startup prune runs it. Register `("telemetry", super::telemetry::SCHEMA)` after `profile_view` at merge (+1 bootstrap count).
-  - Writers that are still SQLite-only paths keep writing SQLite only when no config is set: Atlas, Atlas insights/memory, model attempts (`model_exec`, jobs track) and recall telemetry (`admit_memory` not ported).
-  - The investigation harness (`investigation::engine`) has no production caller and still writes through the SQLite `Store`.
+  - Writers that are still SQLite-only paths keep writing SQLite only when no config is set: Atlas actor index and job telemetry, Atlas insights/memory, model attempts (`model_exec`, jobs track) and recall telemetry (`admit_memory` not ported).
+  - The investigation harness (`investigation::engine`) has no production caller; it runs on `ReconStore` (`storage::investigation`); the TUI task list (`tui/app.rs`) still reads SQLite.
   - No end-to-end TUI test of the Recon pane trace or Profile event views on SurrealDB.
 
 

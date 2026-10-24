@@ -23,6 +23,7 @@ pub mod atlas_insights;
 pub mod atlas_memory;
 pub mod atlas_metadata;
 pub mod atlas_recall_tests;
+pub mod atlas_store;
 pub mod atlas_work;
 pub mod brain;
 pub mod brain_actor_dedup;

@@ -667,6 +667,10 @@ impl Store {
     /// Run up to `max_units` pending backfill units in transactions of
     /// [`BATCH`]. Safe to call concurrently and repeatedly.
     pub fn brain_backfill(&self, max_units: usize) -> Result<BackfillReport> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::brain_backfill(max_units);
+        }
         let mut report = BackfillReport::default();
         let mut budget = max_units;
         for source in SOURCES {
@@ -717,6 +721,10 @@ impl Store {
 
     /// Per-source historical coverage (receipted units with a current revision).
     pub fn brain_backfill_coverage(&self) -> Result<Vec<SourceCoverage>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::brain_backfill_coverage();
+        }
         let mut out = Vec::new();
         for source in SOURCES {
             let have = receipts(&self.conn, source)?;

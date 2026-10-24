@@ -319,6 +319,19 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
         metadata.push(store.atlas_metadata(run_id, &a.id)?);
     }
     let (build_key, input_revision) = build_input(run_id, &articles, &metadata)?;
+    #[cfg(feature = "surreal")]
+    if crate::storage::store_bridge::on() {
+        if let Some(marker) = store.app_state_get(&build_key)? {
+            let count = crate::storage::store_bridge::related_count(run_id)?;
+            if build_is_current(Some(&marker), &input_revision, count) {
+                return Ok(count);
+            }
+        }
+        let planned = plan(&articles, &metadata)?;
+        let count = crate::storage::store_bridge::replace_related(run_id, &articles, &planned)?;
+        store.app_state_set(&build_key, &build_marker(&input_revision, count)?)?;
+        return Ok(count);
+    }
     if let Some(marker) = store.app_state_get(&build_key)? {
         let count: usize = store.conn.query_row(
             "SELECT COUNT(*) FROM atlas_related_articles WHERE run_id=?1",
@@ -804,6 +817,15 @@ impl Store {
             }
             offset += 100;
         }
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            let candidates = crate::storage::store_bridge::related_endpoint_candidates(
+                &article.run_id,
+                &article.id,
+                true,
+            )?;
+            return self.ingest_candidates_match(article, name_key, candidates);
+        }
         let mut stmt=self.conn.prepare("SELECT other.origin,other.ref_id,e.memory_id FROM brain_memory_endpoints e JOIN brain_memory_endpoints other ON other.memory_id=e.memory_id AND other.side<>e.side JOIN memory_metadata m ON m.memory_id=e.memory_id WHERE e.endpoint_kind='article' AND e.origin=?1 AND e.ref_id=?2 AND other.endpoint_kind='article' AND m.memory_kind='related' AND m.lifecycle='active'")?;
         let candidates = stmt
             .query_map(params![article.run_id, article.id], |r| {
@@ -814,6 +836,15 @@ impl Store {
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        self.ingest_candidates_match(article, name_key, candidates)
+    }
+
+    fn ingest_candidates_match(
+        &self,
+        article: &AtlasArticleRow,
+        name_key: &str,
+        candidates: Vec<(String, String, String)>,
+    ) -> Result<bool> {
         for (run, id, memory) in candidates {
             let Some(crate::memory_metadata::MemoryPayload::Related(payload)) =
                 self.memory_payload(&memory)?
@@ -847,19 +878,58 @@ impl Store {
         let limit = limit.clamp(1, 100);
         let articles = self.atlas_list_articles(run_id)?;
         let lookup: HashMap<_, _> = articles.iter().map(|a| (a.id.as_str(), a)).collect();
-        let mut stmt=self.conn.prepare("SELECT p.left_id,p.right_id,p.left_revision,p.right_revision,p.shared_json,p.named_count FROM atlas_related_articles p JOIN atlas_articles a ON a.run_id=p.run_id AND a.article_id=CASE WHEN p.left_id=?2 THEN p.right_id ELSE p.left_id END WHERE p.run_id=?1 AND (p.left_id=?2 OR p.right_id=?2) ORDER BY CASE WHEN p.named_count>0 THEN 0 ELSE 1 END,p.shared_count DESC,p.rarity DESC,a.published_at DESC,a.article_id")?;
-        let records = stmt
-            .query_map(params![run_id, article_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, i64>(5)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        #[cfg(feature = "surreal")]
+        let surreal_records = if crate::storage::store_bridge::on() {
+            let mut pairs: Vec<_> =
+                crate::storage::store_bridge::related_pairs(run_id, article_id)?
+                    .into_iter()
+                    .filter_map(|p| {
+                        let other = if p.left_id == article_id {
+                            &p.right_id
+                        } else {
+                            &p.left_id
+                        };
+                        lookup.get(other.as_str()).map(|a| ((*a).clone(), p))
+                    })
+                    .collect();
+            // Same order as the SQLite read: named first, shared count, rarity,
+            // newest, then article id.
+            pairs.sort_by(|(a, p), (b, q)| {
+                (p.named_count == 0)
+                    .cmp(&(q.named_count == 0))
+                    .then(q.shared_count.cmp(&p.shared_count))
+                    .then(
+                        q.rarity
+                            .partial_cmp(&p.rarity)
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                    )
+                    .then(b.published_at.cmp(&a.published_at))
+                    .then(a.id.cmp(&b.id))
+            });
+            Some(
+                pairs
+                    .into_iter()
+                    .map(|(_, p)| {
+                        (
+                            p.left_id,
+                            p.right_id,
+                            p.left_revision,
+                            p.right_revision,
+                            p.shared_json,
+                            p.named_count,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+        #[cfg(not(feature = "surreal"))]
+        let surreal_records: Option<Vec<(String, String, String, String, String, i64)>> = None;
+        let records = match surreal_records {
+            Some(r) => r,
+            None => self.related_pair_records(run_id, article_id)?,
+        };
         let mut rows = vec![];
         for (left, right, lr, rr, json, named_count) in records {
             let (Some(a), Some(b)) = (lookup.get(left.as_str()), lookup.get(right.as_str())) else {
@@ -897,7 +967,32 @@ impl Store {
             coverage,
         })
     }
+    #[allow(clippy::type_complexity)]
+    fn related_pair_records(
+        &self,
+        run_id: &str,
+        article_id: &str,
+    ) -> Result<Vec<(String, String, String, String, String, i64)>> {
+        let mut stmt=self.conn.prepare("SELECT p.left_id,p.right_id,p.left_revision,p.right_revision,p.shared_json,p.named_count FROM atlas_related_articles p JOIN atlas_articles a ON a.run_id=p.run_id AND a.article_id=CASE WHEN p.left_id=?2 THEN p.right_id ELSE p.left_id END WHERE p.run_id=?1 AND (p.left_id=?2 OR p.right_id=?2) ORDER BY CASE WHEN p.named_count>0 THEN 0 ELSE 1 END,p.shared_count DESC,p.rarity DESC,a.published_at DESC,a.article_id")?;
+        let records = stmt
+            .query_map(params![run_id, article_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
+    }
     pub fn article_origins_for_memory(&self, memory_id: &str) -> Result<Vec<ArticleOrigin>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::store_bridge::article_origins_for_memory(memory_id);
+        }
         // Resolve each source independently: exact ids first, explicit URLs only as fallback.
         let mut refs: Vec<(Option<String>, String, Option<String>)> = Vec::new();
         let mut stmt=self.conn.prepare("SELECT s.owner_kind,s.owner_id,e.source_id,e.evidence_json FROM insight_derivations d JOIN insight_snapshots s ON s.id=d.snapshot_id LEFT JOIN insight_derivation_evidence e ON e.derivation_id=d.id WHERE d.memory_id=?1 AND d.status NOT IN ('deleted','retired')")?;

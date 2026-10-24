@@ -10,6 +10,10 @@ use crate::store::Store;
 /// Kind of a stored memory. Memories without typed metadata are legacy
 /// evidence and browse as [`MemoryKind::Claim`].
 pub fn memory_kind(store: &Store, memory_id: &str) -> Result<MemoryKind> {
+    #[cfg(feature = "surreal")]
+    if crate::storage::store_bridge::on() {
+        return crate::storage::store_bridge::memory_kind(memory_id);
+    }
     use rusqlite::OptionalExtension;
     // A missing metadata row is a legacy untyped memory; a read error is not.
     let raw: Option<String> = store
@@ -63,6 +67,10 @@ impl Store {
                 self.search_memories(query)
             };
         };
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::storage::brain_store::brain_browse_memories(Some(kind), query);
+        }
         let spellings = kind.stored_spellings();
         // Legacy untyped memories browse as Claim.
         let legacy = kind == MemoryKind::Claim;
@@ -115,10 +123,7 @@ fn endpoint_label(store: &Store, e: &EndpointRef) -> String {
     match e {
         EndpointRef::Memory { memory_id, kind } => {
             let name = if *kind == MemoryKind::Actor {
-                crate::brain_actors::actor(&store.conn, memory_id)
-                    .ok()
-                    .flatten()
-                    .map(|a| a.display_name)
+                actor_display_name(store, memory_id)
             } else {
                 store.get_memory(memory_id).ok().flatten().map(|m| m.text)
             };
@@ -141,6 +146,38 @@ fn endpoint_label(store: &Store, e: &EndpointRef) -> String {
     }
 }
 
+fn actor_display_name(store: &Store, id: &str) -> Option<String> {
+    #[cfg(feature = "surreal")]
+    if crate::storage::store_bridge::on() {
+        return crate::storage::store_bridge::actor_display_name(id)
+            .ok()
+            .flatten();
+    }
+    crate::brain_actors::actor(&store.conn, id)
+        .ok()
+        .flatten()
+        .map(|a| a.display_name)
+}
+
+pub(crate) fn actor_resolve(store: &Store, id: &str) -> Result<String> {
+    #[cfg(feature = "surreal")]
+    if crate::storage::store_bridge::on() {
+        return crate::storage::store_bridge::actor_resolve(id);
+    }
+    crate::brain_actors::resolve(&store.conn, id)
+}
+
+pub(crate) fn actor_mentions(
+    store: &Store,
+    id: &str,
+) -> Result<Vec<(String, String, String, String)>> {
+    #[cfg(feature = "surreal")]
+    if crate::storage::store_bridge::on() {
+        return crate::storage::store_bridge::actor_mentions(id);
+    }
+    crate::brain_actors::mentions(&store.conn, id)
+}
+
 fn snake<T: serde::Serialize>(v: &T) -> String {
     serde_json::to_value(v)
         .ok()
@@ -160,7 +197,7 @@ pub fn typed_detail(store: &Store, memory_id: &str) -> Result<Vec<String>> {
     let mut lines = vec![format!("Kind: {}", kind_title(kind))];
     match store.memory_payload(memory_id)? {
         Some(MemoryPayload::Actor(p)) => {
-            let canonical = crate::brain_actors::resolve(&store.conn, memory_id)?;
+            let canonical = actor_resolve(store, memory_id)?;
             push(&mut lines, "Subtype", &snake(&p.subtype));
             push(&mut lines, "Identity", &snake(&p.identity_state));
             push(&mut lines, "Aliases", &p.aliases.join(", "));
@@ -168,7 +205,7 @@ pub fn typed_detail(store: &Store, memory_id: &str) -> Result<Vec<String>> {
             if canonical != memory_id {
                 push(&mut lines, "Merged into", &canonical);
             }
-            let mentions = crate::brain_actors::mentions(&store.conn, memory_id)?;
+            let mentions = actor_mentions(store, memory_id)?;
             let articles = mentions.iter().filter(|m| m.0 == "article").count();
             lines.push(format!(
                 "Mentions: {} ({articles} article occurrence{})",

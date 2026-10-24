@@ -781,3 +781,266 @@ pub fn is_tombstoned(memory_id: &str) -> Result<bool> {
     let m = s(memory_id);
     runtime::blocking(|repo| async move { super::atlas_memory::is_tombstoned(repo.db(), &m).await })
 }
+
+// ---- Brain kinds and actors (`brain_kinds.rs`, `related_global.rs`) ----
+
+/// `brain_kinds::memory_kind`: a missing or unknown kind reads as a Claim.
+pub fn memory_kind(memory_id: &str) -> Result<crate::memory_metadata::MemoryKind> {
+    let id = s(memory_id);
+    Ok(runtime::blocking(
+        |repo| async move { super::topology::memory_seed_kind(&repo, &id).await },
+    )?
+    .unwrap_or(crate::memory_metadata::MemoryKind::Claim))
+}
+
+/// `brain_actors::resolve`: follow merge redirects to the canonical actor.
+pub fn actor_resolve(actor_id: &str) -> Result<String> {
+    let id = s(actor_id);
+    runtime::blocking(|repo| async move {
+        let mut id = id;
+        for _ in 0..64 {
+            let mut r = repo
+                .db()
+                .query("SELECT VALUE to_actor FROM ONLY $r")
+                .bind(("r", super::jobs::rid("brain_actor_redirect", &id)))
+                .await?
+                .check()?;
+            match r.take::<Option<String>>(0usize)? {
+                Some(next) => id = next,
+                None => return Ok(id),
+            }
+        }
+        Err(anyhow!("actor redirect chain does not terminate"))
+    })
+}
+
+/// The canonical actor's display name (`brain_actors::actor`).
+pub fn actor_display_name(actor_id: &str) -> Result<Option<String>> {
+    let id = actor_resolve(actor_id)?;
+    runtime::blocking(|repo| async move {
+        let mut r = repo
+            .db()
+            .query("SELECT VALUE display_name FROM ONLY $r")
+            .bind(("r", super::jobs::rid("brain_actor", &id)))
+            .await?
+            .check()?;
+        Ok(r.take::<Option<String>>(0usize)?)
+    })
+}
+
+/// `brain_actors::mentions`: `(origin_kind, origin_scope, origin_id,
+/// origin_revision)` of an actor and everything merged into it.
+pub fn actor_mentions(actor_id: &str) -> Result<Vec<(String, String, String, String)>> {
+    let root = actor_resolve(actor_id)?;
+    #[derive(SurrealValue)]
+    struct MentionRow {
+        origin_kind: String,
+        origin_scope: String,
+        origin_id: String,
+        origin_revision: String,
+    }
+    runtime::blocking(|repo| async move {
+        let mut family = vec![root.clone()];
+        let mut frontier = vec![root];
+        while let Some(id) = frontier.pop() {
+            let mut r = repo
+                .db()
+                .query("SELECT VALUE record::id(id) FROM brain_actor_redirect WHERE to_actor = $to")
+                .bind(("to", id))
+                .await?
+                .check()?;
+            for from in r.take::<Vec<String>>(0usize)? {
+                if !family.contains(&from) {
+                    family.push(from.clone());
+                    frontier.push(from);
+                }
+            }
+        }
+        let mut r = repo
+            .db()
+            .query(
+                "SELECT origin_kind, origin_scope, origin_id, origin_revision
+                 FROM brain_actor_mention WHERE actor_id INSIDE $fam",
+            )
+            .bind(("fam", family))
+            .await?
+            .check()?;
+        let mut out: Vec<_> = r
+            .take::<Vec<MentionRow>>(0usize)?
+            .into_iter()
+            .map(|m| {
+                (
+                    m.origin_kind,
+                    m.origin_scope,
+                    m.origin_id,
+                    m.origin_revision,
+                )
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        Ok(out)
+    })
+}
+
+// ---- Brain backfill (`brain_backfill.rs`) ----
+
+pub fn brain_backfill(max_units: usize) -> Result<crate::brain_backfill::BackfillReport> {
+    runtime::blocking(|repo| async move { super::brain_backfill::backfill(&repo, max_units).await })
+}
+
+/// Coverage only: a zero-budget backfill pass processes nothing.
+pub fn brain_backfill_coverage() -> Result<Vec<crate::brain_backfill::SourceCoverage>> {
+    Ok(brain_backfill(0)?.coverage)
+}
+
+// ---- Related articles (`related_articles.rs`, `related_global.rs`) ----
+
+pub fn related_count(run_id: &str) -> Result<usize> {
+    let run_id = s(run_id);
+    runtime::blocking(|repo| async move {
+        super::atlas_metadata::related_count(repo.db(), &run_id)
+            .await
+            .map_err(tx_err)
+    })
+}
+
+pub fn replace_related(
+    run_id: &str,
+    articles: &[AtlasArticleRow],
+    planned: &[crate::related_articles::PlannedPair],
+) -> Result<usize> {
+    let (run_id, articles, planned) = (s(run_id), articles.to_vec(), planned.to_vec());
+    runtime::blocking(|repo| async move {
+        super::atlas_metadata::replace_related(repo.db(), &run_id, &articles, &planned)
+            .await
+            .map_err(tx_err)
+    })
+}
+
+pub fn related_pairs(
+    run_id: &str,
+    article_id: &str,
+) -> Result<Vec<super::atlas_metadata::RelatedPairRow>> {
+    let (run_id, article_id) = (s(run_id), s(article_id));
+    runtime::blocking(|repo| async move {
+        super::atlas_metadata::related_pairs(repo.db(), &run_id, &article_id)
+            .await
+            .map_err(tx_err)
+    })
+}
+
+pub fn article_origins_for_memory(
+    memory_id: &str,
+) -> Result<Vec<crate::related_articles::ArticleOrigin>> {
+    let id = s(memory_id);
+    runtime::blocking(|repo| async move {
+        super::browse_assoc::article_origins_for_memory(&repo, &id).await
+    })
+}
+
+#[derive(SurrealValue)]
+struct EndpointRow {
+    memory_id: String,
+    side: String,
+    origin: String,
+    ref_id: String,
+}
+
+/// `(run, article, memory)` for Related memories whose other article
+/// endpoint is not this occurrence. `active_only` keeps lifecycle `active`;
+/// otherwise anything not `retired`.
+pub fn related_endpoint_candidates(
+    run_id: &str,
+    article_id: &str,
+    active_only: bool,
+) -> Result<Vec<(String, String, String)>> {
+    let (run, art) = (s(run_id), s(article_id));
+    runtime::blocking(|repo| async move {
+        let mut r = repo
+            .db()
+            .query(
+                "LET $mine = (SELECT memory_id, side, origin, ref_id FROM brain_memory_endpoint
+                     WHERE endpoint_kind = 'article' AND ref_id = $art AND origin = $run);
+                 LET $mids = array::distinct($mine.memory_id);
+                 $mine;
+                 SELECT memory_id, side, origin, ref_id FROM brain_memory_endpoint
+                     WHERE endpoint_kind = 'article' AND memory_id INSIDE $mids;
+                 SELECT VALUE record::id(id) FROM memory
+                     WHERE record::id(id) INSIDE $mids AND memory_kind = 'related'
+                     AND (IF $active THEN lifecycle = 'active' ELSE lifecycle != 'retired' END);",
+            )
+            .bind(("art", art))
+            .bind(("run", run))
+            .bind(("active", active_only))
+            .await?
+            .check()?;
+        let mine: Vec<EndpointRow> = r.take(2usize)?;
+        let all: Vec<EndpointRow> = r.take(3usize)?;
+        let keep: std::collections::HashSet<String> =
+            r.take::<Vec<String>>(4usize)?.into_iter().collect();
+        let mut out = Vec::new();
+        for e in &mine {
+            if !keep.contains(&e.memory_id) {
+                continue;
+            }
+            for o in all
+                .iter()
+                .filter(|o| o.memory_id == e.memory_id && o.side != e.side)
+            {
+                out.push((o.origin.clone(), o.ref_id.clone(), o.memory_id.clone()));
+            }
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    })
+}
+
+/// `(run, article)` article endpoints of one memory.
+pub fn memory_article_endpoints(
+    memory_id: &str,
+) -> Result<Vec<crate::related_articles::ArticleOrigin>> {
+    let id = s(memory_id);
+    let rows: Vec<EndpointRow> = runtime::blocking(|repo| async move {
+        let mut r = repo
+            .db()
+            .query(
+                "SELECT memory_id, side, origin, ref_id FROM brain_memory_endpoint
+                 WHERE memory_id = $m AND endpoint_kind = 'article'",
+            )
+            .bind(("m", id))
+            .await?
+            .check()?;
+        Ok(r.take(0usize)?)
+    })?;
+    Ok(rows
+        .into_iter()
+        .map(|e| crate::related_articles::ArticleOrigin {
+            run_id: e.origin,
+            article_id: e.ref_id,
+        })
+        .collect())
+}
+
+/// `(run, article, url)` for every stored article with a URL.
+pub fn article_urls() -> Result<Vec<(String, String, String)>> {
+    #[derive(SurrealValue)]
+    struct UrlRow {
+        run_id: String,
+        article_id: String,
+        url: String,
+    }
+    let rows: Vec<UrlRow> = runtime::blocking(|repo| async move {
+        let mut r = repo
+            .db()
+            .query("SELECT run_id, article_id, url FROM atlas_article WHERE url != ''")
+            .await?
+            .check()?;
+        Ok(r.take(0usize)?)
+    })?;
+    Ok(rows
+        .into_iter()
+        .map(|u| (u.run_id, u.article_id, u.url))
+        .collect())
+}

@@ -236,6 +236,18 @@ fn finish(
 }
 
 fn occurrences_of_url(store: &Store, key: &str) -> Result<Vec<AtlasArticleRow>> {
+    #[cfg(feature = "surreal")]
+    if crate::storage::store_bridge::on() {
+        let mut out = Vec::new();
+        for (run, id, url) in crate::storage::store_bridge::article_urls()? {
+            if canonical_url(&url) == key {
+                if let Some(a) = store.atlas_article(&run, &id)? {
+                    out.push(a);
+                }
+            }
+        }
+        return Ok(out);
+    }
     let mut stmt = store
         .conn
         .prepare("SELECT run_id,article_id,url FROM atlas_articles WHERE url<>''")?;
@@ -261,6 +273,13 @@ fn occurrences_of_url(store: &Store, key: &str) -> Result<Vec<AtlasArticleRow>> 
 }
 
 fn actor_name(store: &Store, actor_id: &str) -> String {
+    #[cfg(feature = "surreal")]
+    if crate::storage::store_bridge::on() {
+        return crate::storage::store_bridge::actor_display_name(actor_id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| actor_id.into());
+    }
     actors::actor(&store.conn, actor_id)
         .ok()
         .flatten()
@@ -335,6 +354,35 @@ impl Store {
             return Ok(());
         }
         // Brain Related records touching this occurrence (active only).
+        #[cfg(feature = "surreal")]
+        let surreal_hits = if crate::storage::store_bridge::on() {
+            Some(crate::storage::store_bridge::related_endpoint_candidates(
+                &s.run_id, &s.id, false,
+            )?)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "surreal"))]
+        let surreal_hits: Option<Vec<(String, String, String)>> = None;
+        let hits = match surreal_hits {
+            Some(h) => h,
+            None => self.related_hits_sqlite(s)?,
+        };
+        for (run, id, memory) in hits {
+            let basis = match self.memory_payload(&memory)? {
+                Some(crate::memory_metadata::MemoryPayload::Related(p))
+                    if crate::related_articles::current_ingest_related(self, &p)? =>
+                {
+                    p.basis
+                }
+                _ => continue,
+            };
+            c.add_related(s, &run, &id, basis, false)?;
+        }
+        Ok(())
+    }
+
+    fn related_hits_sqlite(&self, s: &AtlasArticleRow) -> Result<Vec<(String, String, String)>> {
         let mut stmt = self.conn.prepare(
                 "SELECT o.origin,o.ref_id,mm.memory_id FROM brain_memory_endpoints e
                  JOIN brain_memory_endpoints o ON o.memory_id=e.memory_id AND o.side<>e.side AND o.endpoint_kind='article'
@@ -350,18 +398,7 @@ impl Store {
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (run, id, memory) in hits {
-            let basis = match self.memory_payload(&memory)? {
-                Some(crate::memory_metadata::MemoryPayload::Related(p))
-                    if crate::related_articles::current_ingest_related(self, &p)? =>
-                {
-                    p.basis
-                }
-                _ => continue,
-            };
-            c.add_related(s, &run, &id, basis, false)?;
-        }
-        Ok(())
+        Ok(hits)
     }
 
     /// Related articles for a memory: the union over every article origin of
@@ -383,17 +420,16 @@ impl Store {
         let mut exclude = BTreeSet::new();
         let mut origins = self.article_origins_for_memory(memory_id)?;
         // Link/Related records start from their article endpoints.
-        let mut stmt = self.conn.prepare(
-            "SELECT origin,ref_id FROM brain_memory_endpoints WHERE memory_id=?1 AND endpoint_kind='article'",
-        )?;
-        for row in stmt.query_map([memory_id], |r| {
-            Ok(ArticleOrigin {
-                run_id: r.get(0)?,
-                article_id: r.get(1)?,
-            })
-        })? {
-            origins.push(row?);
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            origins.extend(crate::storage::store_bridge::memory_article_endpoints(
+                memory_id,
+            )?);
+        } else {
+            origins.extend(self.memory_article_endpoints_sqlite(memory_id)?);
         }
+        #[cfg(not(feature = "surreal"))]
+        origins.extend(self.memory_article_endpoints_sqlite(memory_id)?);
         for origin in origins {
             if let Some(a) = self.atlas_article(&origin.run_id, &origin.article_id)? {
                 exclude.insert(url_key(&a));
@@ -411,6 +447,21 @@ impl Store {
         c.finish(cursor, limit, scope)
     }
 
+    fn memory_article_endpoints_sqlite(&self, memory_id: &str) -> Result<Vec<ArticleOrigin>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT origin,ref_id FROM brain_memory_endpoints WHERE memory_id=?1 AND endpoint_kind='article'",
+        )?;
+        let rows = stmt
+            .query_map([memory_id], |r| {
+                Ok(ArticleOrigin {
+                    run_id: r.get(0)?,
+                    article_id: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Articles mentioning a canonical actor (and everything merged into it),
     /// one row per URL across all retained cycles.
     pub fn actor_articles(
@@ -419,14 +470,14 @@ impl Store {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<GlobalRelatedPage> {
-        let canonical = actors::resolve(&self.conn, actor_id)?;
+        let canonical = crate::brain_kinds::actor_resolve(self, actor_id)?;
         let name = actor_name(self, &canonical);
         let mut c = Collector {
             store: self,
             exclude: BTreeSet::new(),
             rows: BTreeMap::new(),
         };
-        for (kind, run, id, revision) in actors::mentions(&self.conn, &canonical)? {
+        for (kind, run, id, revision) in crate::brain_kinds::actor_mentions(self, &canonical)? {
             if kind == "article" {
                 let Some(article) = self.atlas_article(&run, &id)? else {
                     continue;

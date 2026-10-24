@@ -224,3 +224,117 @@ async fn recovery_lists_queued_refreshes_and_skips_missing_articles() {
         serde_json::to_string(&s.defaults).unwrap()
     );
 }
+
+#[tokio::test]
+async fn retry_extraction_requeues_a_failed_refresh_with_an_exhausted_stage() {
+    use argos_osint_core::storage::insight_retry::retry_extraction;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "refresh_retry_extraction").await;
+    let db = repo.db().clone();
+    let s = SettingsFile::default();
+    let calm = Arc::new(AtomicBool::new(false));
+
+    // Live owner and evidence, so admission passes.
+    let text = "Body.";
+    let hash = argos_osint_core::nlp::cache::hash(text);
+    db.query(
+        "CREATE atlas_article SET run_id = 'run', article_id = 'r1', title = 'T',
+           description = '', url = 'https://example.test/a', country = '', source_name = '',
+           source_domain = '', published_at = '', provider = '', temperature = 0.0,
+           seen_at = '2026-10-01';
+         CREATE article_body:r1 SET article_id = 'r1', run_id = 'run', original_url = '',
+           resolved_url = '', source_domain = '', source_name = '', body_markdown = 'Body.',
+           content_hash = '', quality = '', quality_rationale = '', body_version = 1,
+           fetch_tool = '', fetched_at = '', retry_after = '', state = 'ready',
+           created_at = '', updated_at = '';
+         CREATE type::record('nlp_artifact', $h) SET text = $t, byte_len = 5, created_at = '';",
+    )
+    .bind(("h", hash.clone()))
+    .bind(("t", text.to_string()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let mut live = input("r1");
+    live.evidence[0].reference.revision = "1".into();
+    live.evidence[0].reference.artifact_hash = hash;
+    live.snapshot = snapshot("article", "r1", 0, &live.evidence);
+    let t = schedule_article_refresh(&db, "r1", Some(&live), &s, true)
+        .await
+        .unwrap()
+        .expect("task");
+    run_refresh_slice(&repo, &t, &s, &calm, ok_validate(), ctx(), failing())
+        .await
+        .unwrap_err();
+    assert_eq!(state(&db, &t).await, "failed");
+    // No exhausted stage yet: nothing to retry.
+    assert!(!retry_extraction(&db, &t).await.unwrap());
+
+    let generation: i64 = scalar(
+        &db,
+        "RETURN (SELECT VALUE desired_generation FROM ONLY insight_owner_state:['article', 'r1'])",
+    )
+    .await;
+    db.query(
+        "CREATE insight_stage_checkpoint SET owner_kind = 'article', owner_id = 'r1',
+           generation = $g, stage = 'claims', window_id = '', state = 'exhausted',
+           updated_at = '2026-10-24T00:00:00Z';
+         CREATE insight_stage_checkpoint SET owner_kind = 'article', owner_id = 'r1',
+           generation = $g, stage = 'body', window_id = '', state = 'completed',
+           updated_at = '2026-10-24T00:00:00Z';",
+    )
+    .bind(("g", generation))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let attempts: i64 = scalar(
+        &db,
+        &format!("RETURN (SELECT VALUE attempts FROM ONLY task:`{t}`)"),
+    )
+    .await;
+
+    assert!(retry_extraction(&db, &t).await.unwrap());
+    assert_eq!(state(&db, &t).await, "queued");
+    let max: i64 = scalar(
+        &db,
+        &format!("RETURN (SELECT VALUE max_attempts FROM ONLY task:`{t}`)"),
+    )
+    .await;
+    assert_eq!(max, attempts + 1);
+    let states: Vec<String> = {
+        let mut r = db
+            .query("SELECT VALUE state FROM insight_stage_checkpoint WHERE owner_id = 'r1' ORDER BY stage")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        r.take(0usize).unwrap()
+    };
+    assert_eq!(
+        states,
+        vec!["completed".to_string(), "retry_admitted".to_string()]
+    );
+    let epoch: i64 = scalar(
+        &db,
+        &format!("RETURN (SELECT VALUE retry_epoch FROM ONLY insight_refresh_execution:`{t}`)"),
+    )
+    .await;
+    assert_eq!(epoch, 1);
+    let life: String = scalar(
+        &db,
+        "RETURN (SELECT VALUE lifecycle FROM ONLY insight_owner_state:['article', 'r1'])",
+    )
+    .await;
+    assert_eq!(life, "pending");
+    let events: i64 = scalar(
+        &db,
+        "RETURN count(SELECT id FROM job_event WHERE event_type = 'insight.retry')",
+    )
+    .await;
+    assert_eq!(events, 1);
+    // Queued now: a second retry is refused.
+    assert!(!retry_extraction(&db, &t).await.unwrap());
+}

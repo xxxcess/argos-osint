@@ -129,6 +129,12 @@ async fn investigation_dependencies_passages_assessments_match_sqlite() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("argos.db")).unwrap();
 
+    // SQLite's dependency rows reference existing tasks.
+    for id in ["t0", "t1", "t2", "t3"] {
+        let mut t = task("inv-1", id);
+        t.id = id.into();
+        store.insert_investigation_task(&t).unwrap();
+    }
     for (t, d) in [("t2", "t1"), ("t2", "t0"), ("t2", "t1"), ("t3", "t2")] {
         store.add_task_dependency(t, d).unwrap();
         investigation::add_dependency(&db, t, d).await.unwrap();

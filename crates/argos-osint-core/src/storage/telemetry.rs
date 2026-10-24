@@ -248,23 +248,17 @@ pub async fn events_of_type(db: &Surreal<Any>, event_type: &str) -> Result<Vec<T
         .collect())
 }
 
-#[derive(SurrealValue)]
-struct MetaRow {
-    value: String,
-}
-
 /// `telemetry::get_meta` on SurrealDB.
 pub async fn get_meta(db: &Surreal<Any>, key: &str) -> Result<Option<String>> {
     if key.is_empty() {
         return Ok(None);
     }
     let mut r = db
-        .query("SELECT value FROM ONLY $m")
+        .query("RETURN $m.`value`")
         .bind(("m", rid("telemetry_meta", key)))
         .await?
         .check()?;
-    let row: Option<MetaRow> = r.take(0)?;
-    Ok(row.map(|m| m.value))
+    Ok(r.take(0)?)
 }
 
 /// `telemetry::set_meta` on SurrealDB (insert or replace).
@@ -289,7 +283,7 @@ pub async fn ensure_observed_since(db: &Surreal<Any>) -> Result<String> {
              IF !record::exists($m) {
                CREATE $m SET value = $now, updated_at = $now RETURN NONE;
              };
-             RETURN (SELECT VALUE value FROM ONLY $m);",
+             RETURN $m.`value`;",
         )
         .bind(("now", now.clone()))
         .await?

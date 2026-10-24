@@ -346,8 +346,8 @@ pub async fn event_apps(db: &Surreal<Any>) -> Result<Vec<String>> {
         )
         .await?
         .check()?;
-    let apps: Option<Vec<String>> = r.take(0)?;
-    Ok(apps.unwrap_or_default())
+    let apps: Vec<String> = r.take(0)?;
+    Ok(apps)
 }
 
 #[derive(SurrealValue, Clone)]

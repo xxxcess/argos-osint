@@ -130,6 +130,23 @@ pub fn shared_entity_mentions(
         store.atlas_metadata(&left.run_id, &left.id)?,
         store.atlas_metadata(&right.run_id, &right.id)?,
     ];
+    Ok(shared_entity_mentions_with(
+        left,
+        metadata[0].as_ref(),
+        right,
+        metadata[1].as_ref(),
+    ))
+}
+
+/// [`shared_entity_mentions`] on metadata the caller already read (the
+/// SurrealDB actor index reads it from the repository).
+pub fn shared_entity_mentions_with(
+    left: &AtlasArticleRow,
+    left_metadata: Option<&crate::atlas_metadata::ArticleMetadata>,
+    right: &AtlasArticleRow,
+    right_metadata: Option<&crate::atlas_metadata::ArticleMetadata>,
+) -> Vec<String> {
+    let metadata = [left_metadata.cloned(), right_metadata.cloned()];
     let articles = [left, right];
     let mut shared = BTreeMap::new();
     for side in 0..2 {
@@ -205,7 +222,7 @@ pub fn shared_entity_mentions(
             }
         }
     }
-    Ok(shared.into_values().collect())
+    shared.into_values().collect()
 }
 /// Only ingest-owned Related records with both exact current endpoints qualify.
 pub(crate) fn current_ingest_related(

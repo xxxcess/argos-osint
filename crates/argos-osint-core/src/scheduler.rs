@@ -617,6 +617,13 @@ impl WorkerPool {
     /// Spawn the default local pools (index + summary) for one state root.
     pub fn spawn_default(db_path: std::path::PathBuf) -> Vec<WorkerPool> {
         let owner = process_owner();
+        // Under a storage config nothing may open SQLite: only the insight
+        // refresh drainer has a repository path. The index, summary,
+        // backfill, actor-dedup, Intel brief and brain-scope pools are
+        // SQLite subsystems and stay off until they are ported.
+        if crate::recon::backend::surreal_selected() {
+            return vec![Self::spawn_insight_refresh_drainer(db_path, owner)];
+        }
         vec![
             Self::spawn_index_drainer(db_path.clone(), owner.clone()),
             Self::spawn_summary_flush_drainer(db_path.clone(), owner.clone()),

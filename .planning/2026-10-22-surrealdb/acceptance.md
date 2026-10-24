@@ -3,7 +3,7 @@
 See [plan.md](design.md). Status is honest: unchecked means not done or not
 verified.
 
-## Still needs SQLite (2026-10-24, combined tree at 4760a9e)
+## Still needs SQLite (2026-10-24, at 385f879)
 
 Authoritative list; older "Gaps" bullets below are historical where they
 conflict. Revision fence for cycle evidence and derivation membership
@@ -13,27 +13,28 @@ telemetry are wired (see "Combined tree" at the end).
 
 - [ ] Brief chain engine: `brief_stages::drain_parallel` / `claim_next` /
   `run_claimed`, `brief_pipeline::publish` and `brief_canonical::publish_stage_on`
-  still read and write SQLite. `storage::brief` is registered and has every
-  table they need, but no production caller writes them, so
-  `storage::brief::record_run` and `replace_leads` have no callers yet.
-  `spawn_intel_brief_drainer` is not gated on `surreal_selected()`.
-- [ ] Logs pane, its severity counts, the TUI session log and Jobs → Logs
-  counts read SQLite `argos_events`; `argos_event` has no prune or clear.
-  `telemetry_meta`, backfill and the telemetry prune are not on SurrealDB.
-- [ ] Report surface of `run_pipeline` bails on SurrealDB (the Intel report
-  worker is retired: `report_execution_enabled()` is false).
-- [ ] Article refresh input: `insight_persist::article_input` reads SQLite
-  evidence tables.
-- [ ] `pipeline_exec::load_memory_evidence` has no legacy (pre-derivation)
-  fallback; its recall has no recall cache or kind filter. Turn recall is the
-  BM25 stopgap until vector recall lands.
-- [ ] `enqueue_refresh` does not requeue paused tasks; `validate_retry` and
-  `retire_atlas_insight_work` stay SQLite.
-- [ ] Topology: retained Intel seeds are refused, the neighbourhood summary
-  is skipped, snapshot reads are not one transaction, no TUI test drives the
-  SurrealDB workers.
+  still read and write SQLite; `storage::brief` has every table they need but
+  no production caller. Under a storage config `WorkerPool::spawn_default`
+  now starts only the insight refresh drainer, so the Intel brief (and the
+  index, summary, backfill, actor-dedup and brain-scope) pools no longer open
+  SQLite; Intel briefs are not produced on SurrealDB until the engine moves.
+- [ ] Logs pane / Jobs → Logs / telemetry meta and prune (wip/surreal-logs).
+- [ ] Report surface of `run_pipeline` (wip/surreal-logs).
 - [ ] Atlas, Atlas insight/memory writers and the investigation harness
-  (`investigation::engine`) stay SQLite.
+  (wip/surreal-atlas).
+- [x] Article refresh input: `refresh_exec` builds it with
+  `storage::pipeline_inputs::article_input` (no SQLite read).
+- [x] `pipeline_exec::load_memory_evidence`: SurrealDB is a clean reset with
+  no SQLite import, so it has no pre-derivation fallback by design. Vector
+  recall landed (4381aed).
+- [x] Paused requeue (d83bc2f); on SurrealDB the TUI extraction retry goes
+  through `refresh_driver::retry_owner` (`validate_retry` is SQLite-only) and
+  the drainer retires Atlas insight work with
+  `storage::refresh::retire_atlas_insight_work` (1c9032c, test in
+  `tests/storage_refresh.rs`); drainer reports go to `argos_event`.
+- [x] Topology: retained Intel seeds are served; snapshot reads run in one
+  transaction (385f879). The generated neighbourhood summary is still skipped
+  and no TUI test drives the SurrealDB workers.
 
 ## P0 — foundation (spec step 1)
 

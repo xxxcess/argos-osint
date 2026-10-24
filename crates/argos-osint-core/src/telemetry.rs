@@ -484,7 +484,15 @@ pub fn record(db_path: &Path, event: &TelemetryEvent) -> anyhow::Result<()> {
 }
 
 /// Writes an event on an existing connection.
+///
+/// Under a storage config the connection is ignored and the event goes to
+/// the repository exactly like [`record`]: callers still holding a legacy
+/// `Store` connection never write SQLite telemetry.
 pub fn insert(conn: &rusqlite::Connection, event: &TelemetryEvent) -> anyhow::Result<()> {
+    #[cfg(feature = "surreal")]
+    if crate::storage::runtime::configured() {
+        return record(Path::new(""), event);
+    }
     let id = if event.id.is_empty() {
         next_id()
     } else {

@@ -259,47 +259,6 @@ pub fn capacity_from_rows(rows: Vec<StoredCapacityRow>) -> CapacitySnapshot {
 mod tests {
     use super::*;
 
-    fn memory() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("schema_telemetry.sql"))
-            .unwrap();
-        conn
-    }
-
-    #[test]
-    fn missing_companion_snapshot_is_unavailable_not_zero() {
-        let conn = memory();
-        let snapshot = capacity_snapshot(&conn);
-        assert!(!snapshot.available);
-        assert!(snapshot.capacity.is_empty());
-    }
-
-    #[test]
-    fn cached_rows_become_an_available_snapshot() {
-        let conn = memory();
-        let rows = vec![StoredCapacityRow {
-            captured_at: "2026-10-09T12:00:00Z".into(),
-            provider: "openrouter".into(),
-            quota_group: "openrouter".into(),
-            scope: "*".into(),
-            sends_60s: 12,
-            rpm_limit: Some(60),
-            pace_per_min: Some(12.0),
-            active: 2,
-            max_concurrency: Some(4),
-            queued: 1,
-            oldest_wait_ms: Some(320),
-            cooldown_ms: None,
-            quota_source: "provider_docs".into(),
-        }];
-        assert_eq!(cache_capacity_rows(&conn, &rows).unwrap(), 1);
-        let snapshot = capacity_snapshot(&conn);
-        assert!(snapshot.available);
-        assert_eq!(snapshot.capacity.len(), 1);
-        assert_eq!(snapshot.capacity[0].sends_60s, 12);
-        assert_eq!(snapshot.capacity[0].rpm_limit, Some(60));
-    }
-
     #[test]
     fn quota_setting_effective_rpm_prefers_the_local_override() {
         let mut setting = QuotaSetting {

@@ -3009,31 +3009,46 @@ impl App {
             "trace" => {
                 self.input.clear();
                 let id = self.selected_thread.clone().unwrap_or_default();
-                let count = self
-                    .store
-                    .list_investigation_events(&id)
-                    .map(|e| e.len())
-                    .unwrap_or(0);
+                let count = if surreal_recon::on() {
+                    surreal_recon::investigation_counts(&id)
+                        .map(|c| c.events)
+                        .unwrap_or(0)
+                } else {
+                    self.store
+                        .list_investigation_events(&id)
+                        .map(|e| e.len())
+                        .unwrap_or(0)
+                };
                 Ok(format!("Trace: {count} events logged"))
             }
             "directives" => {
                 self.input.clear();
                 let id = self.selected_thread.clone().unwrap_or_default();
-                let count = self
-                    .store
-                    .list_investigation_tasks(&id)
-                    .map(|t| t.len())
-                    .unwrap_or(0);
+                let count = if surreal_recon::on() {
+                    surreal_recon::investigation_counts(&id)
+                        .map(|c| c.tasks)
+                        .unwrap_or(0)
+                } else {
+                    self.store
+                        .list_investigation_tasks(&id)
+                        .map(|e| e.len())
+                        .unwrap_or(0)
+                };
                 Ok(format!("Directives / tasks: {count}"))
             }
             "evidence" => {
                 self.input.clear();
                 let id = self.selected_thread.clone().unwrap_or_default();
-                let count = self
-                    .store
-                    .list_evidence_passages(&id)
-                    .map(|p| p.len())
-                    .unwrap_or(0);
+                let count = if surreal_recon::on() {
+                    surreal_recon::investigation_counts(&id)
+                        .map(|c| c.passages)
+                        .unwrap_or(0)
+                } else {
+                    self.store
+                        .list_evidence_passages(&id)
+                        .map(|e| e.len())
+                        .unwrap_or(0)
+                };
                 Ok(format!("Evidence passages: {count}"))
             }
             "brain" | "atlas" | "osint" | "providers" | "tools" | "models" | "jobs" | "logs"

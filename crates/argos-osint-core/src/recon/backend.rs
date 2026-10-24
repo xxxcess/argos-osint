@@ -174,6 +174,13 @@ impl ReconStore {
         dispatch!(self, s => s.insert_evidence_passage(passage),
             r => crate::storage::investigation::insert_passage(r.db(), passage).await)
     }
+    pub async fn list_evidence_passages(
+        &self,
+        investigation_id: &str,
+    ) -> Result<Vec<crate::investigation::evidence::EvidencePassage>> {
+        dispatch!(self, s => s.list_evidence_passages(investigation_id),
+            r => crate::storage::investigation::list_passages(r.db(), investigation_id).await)
+    }
     pub async fn insert_claim_assessment(
         &self,
         assessment: &crate::investigation::evidence::ClaimAssessment,

@@ -216,3 +216,29 @@ async fn harness_store_dispatches_to_surreal() {
         1
     );
 }
+
+/// The TUI's `/evidence` count reads passages through `ReconStore`.
+#[tokio::test]
+async fn evidence_passages_dispatch_to_surreal() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server
+        .repo("argos", "investigation_passages_dispatch")
+        .await;
+    investigation::apply_schema(repo.db()).await.unwrap();
+    let store = ReconStore::from_repository(repo);
+    assert!(store
+        .list_evidence_passages("inv-1")
+        .await
+        .unwrap()
+        .is_empty());
+    store
+        .insert_evidence_passage(&passage("p1", "2026-01-01T00:00:00Z", ClaimStance::Mention))
+        .await
+        .unwrap();
+    let listed = store.list_evidence_passages("inv-1").await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "p1");
+    assert!(store.list_evidence_passages("").await.unwrap().is_empty());
+}

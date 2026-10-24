@@ -4,7 +4,8 @@
 //!
 //! `argos_event` is keyed by the event id and ordered by `seq`, assigned in
 //! the write's transaction from the highest stored `seq` (a concurrent writer
-//! conflicts and retries). Messages and details are redacted and bounded
+//! conflicts and retries). The highest value is read with ORDER BY/LIMIT,
+//! because `math::max` of no rows is -Infinity on a server. Messages and details are redacted and bounded
 //! before they are stored, as in SQLite. `investigation_event` is keyed by
 //! the event id; a rewrite of an existing id only updates its status, summary
 //! and payload, like SQLite's `ON CONFLICT(id) DO UPDATE`.
@@ -155,7 +156,7 @@ pub async fn record_event(db: &Surreal<Any>, event: &NewEvent) -> Result<String>
             run(
                 &tx,
                 tx.query(
-                    "LET $top = math::max(SELECT VALUE seq FROM argos_event) ?? 0;
+                    "LET $top = (SELECT VALUE seq FROM argos_event ORDER BY seq DESC LIMIT 1)[0] ?? 0;
                      CREATE $e CONTENT $row RETURN NONE;
                      UPDATE $e SET seq = $top + 1 RETURN NONE;",
                 )
@@ -304,8 +305,8 @@ pub async fn insert_investigation_event(db: &Surreal<Any>, ev: &InvestigationEve
 pub async fn next_event_sequence(db: &Surreal<Any>, investigation_id: &str) -> Result<i64> {
     let mut r = db
         .query(
-            "RETURN math::max(SELECT VALUE sequence FROM investigation_event
-               WHERE investigation_id = $i) ?? 0;",
+            "RETURN (SELECT VALUE sequence FROM investigation_event
+               WHERE investigation_id = $i ORDER BY sequence DESC LIMIT 1)[0] ?? 0;",
         )
         .bind(("i", investigation_id.to_string()))
         .await?

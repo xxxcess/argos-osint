@@ -2819,28 +2819,76 @@ pub(crate) async fn recall_for_turn(
     mode: &str,
     run_id: &str,
 ) -> Result<(Vec<super::RecallInsight>, bool, BrainResourceSummary)> {
-    // SurrealDB: the full-text stopgap (no admission policy, resource
-    // summary or recall telemetry yet).
+    // SurrealDB: vector recall (DISKANN, lexical top-up; the full-text
+    // stopgap without a served embedding generation) over the same 20
+    // candidates, admission policy, five-memory cap, thin-Brain test and
+    // resource summary as SQLite. The recall_query telemetry row waits for
+    // the combined tree's SurrealDB telemetry writer.
     #[cfg(feature = "surreal")]
     if let Some(repo) = store.repository() {
-        let hits =
-            crate::storage::recon_extract::recall_for_turn(repo, thread_id, question).await?;
-        let unfamiliar = hits.iter().filter(|hit| hit.score >= 0.3).count() < 2;
+        let embedder = crate::storage::vectors::Embedder::local();
+        let hits = crate::storage::recon_extract::recall_candidates_for_turn(
+            repo,
+            thread_id,
+            question,
+            embedder.as_ref(),
+            20,
+            usize::MAX,
+        )
+        .await?;
+        let unfamiliar = super::scores_are_thin(hits.iter().map(|hit| hit.score));
+        let query = crate::brain_query::BrainQuery {
+            current_question: question.to_string(),
+            confirmed_subjects: store
+                .thread_entities(thread_id)
+                .await?
+                .into_iter()
+                .map(|e| e.1)
+                .collect(),
+            candidate_limit: 20,
+            token_budget: 1500,
+            ..Default::default()
+        };
+        let policy = crate::brain_query::AdmissionPolicy {
+            strict_mode: true,
+            allow_background: false,
+        };
         let subject = super::question_subject(question);
-        let recalled = hits
-            .into_iter()
-            .take(5)
-            .map(|hit| super::RecallInsight {
+        let mut recalled: Vec<super::RecallInsight> = Vec::new();
+        for hit in hits {
+            if recalled.len() >= 5 {
+                break;
+            }
+            if !crate::brain_query::admit_text(&query, &hit.text, &policy)
+                || recalled.iter().any(|item| item.memory_id == hit.id)
+            {
+                continue;
+            }
+            recalled.push(super::RecallInsight {
                 memory_id: hit.id,
                 text: hit.text,
                 entity: subject.clone(),
                 predicate: "memory".into(),
                 updated_at: String::new(),
                 evidence_count: 0,
-            })
-            .collect();
+            });
+        }
+        let mut found = std::collections::HashMap::new();
+        for item in &recalled {
+            found.insert(
+                item.memory_id.clone(),
+                (
+                    crate::storage::insight_views::insight_for_memory(repo, &item.memory_id)
+                        .await?,
+                    crate::storage::browse::get_memory(repo, &item.memory_id).await?,
+                ),
+            );
+        }
+        let resources = brain_resources::summarize_with(&recalled, question, |id| {
+            Ok(found.remove(id).unwrap_or((None, None)))
+        })?;
         let _ = (mode, run_id);
-        return Ok((recalled, unfamiliar, BrainResourceSummary::default()));
+        return Ok((recalled, unfamiliar, resources));
     }
     store.sqlite("recall", |s| {
         recall_sqlite(s, thread_id, question, mode, run_id)

@@ -5,12 +5,16 @@
 //! findings and the deterministic neighbourhood brief reuse the SQLite code
 //! (`brain_topology::admit`, `brain_neighborhood_brief::build`).
 //!
-//! Gaps (see acceptance.md): the retained Intel display seeds
-//! (`RetainedClaim`, `RetainedInference`, `RetainedActor`) are refused, since
-//! the Intel brief publications are still SQLite; the `current_metadata_sql`
-//! article-revision fence is not applied to derivation provenance or cycle
-//! scope; memory nodes carry no revision (SurrealDB memories have none);
-//! reads are not one snapshot transaction.
+//! The retained Intel display seeds read the repository's brief
+//! publications and stage receipts (`storage::brief`): a matching item binds
+//! its canonical memory when the receipt snapshot still matches the article,
+//! else it is shown as a retained source node; `RetainedActor` is always
+//! provisional.
+//!
+//! The `current_metadata_sql` article-revision fence (with sibling-kind
+//! carried refs) applies to derivation provenance and to cycle-scoped
+//! evidence. Gaps (see acceptance.md): memory nodes carry no revision
+//! (SurrealDB memories have none); reads are not one snapshot transaction.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
@@ -32,6 +36,31 @@ use crate::brain_topology::{
 use crate::memory_metadata::{EndpointRef, MemoryKind, MemoryPayload};
 
 type Adjacency = (TopologyNode, TopologyEdge);
+
+/// The receipt snapshot fields `retained_canonical` fences on.
+#[derive(SurrealValue)]
+struct RetainedSnapshot {
+    owner_id: String,
+    owner_kind: String,
+    inputs_json: Option<String>,
+    readiness_json: Option<String>,
+}
+
+/// A live derivation's kind and snapshot owner, inputs and readiness, for
+/// the article-revision fence.
+#[derive(SurrealValue)]
+struct Cited {
+    kind: String,
+    owner_id: Option<String>,
+    inputs_json: Option<String>,
+    readiness_json: Option<String>,
+}
+
+/// The [`Cited`] projection of an `insight_derivation` row.
+const CITED: &str = "insight_kind AS kind,
+    type::record('insight_snapshot', snapshot_id).owner_id AS owner_id,
+    type::record('insight_snapshot', snapshot_id).inputs_json AS inputs_json,
+    type::record('insight_snapshot', snapshot_id).readiness_json AS readiness_json";
 
 /// Derivation statuses that no longer support a node or its scope.
 const DEAD: [&str; 3] = ["deleted", "retired", "rejected"];
@@ -487,26 +516,92 @@ impl Query<'_> {
         let mut r = self
             .repo
             .db()
-            .query(
-                "LET $owners = (SELECT VALUE type::record('insight_snapshot', snapshot_id).owner_id
-                   FROM insight_derivation WHERE memory_id = $m AND status NOTINSIDE $dead);
-                 SELECT VALUE count() FROM atlas_article
-                   WHERE run_id = $c AND article_id INSIDE $owners GROUP ALL;
+            .query(format!(
+                "SELECT {CITED} FROM insight_derivation WHERE memory_id = $m AND status NOTINSIDE $dead;
                  LET $fps = (SELECT VALUE record::id(id) FROM insight_claim WHERE memory_id = $m);
                  SELECT VALUE count() FROM insight_source
                    WHERE fingerprint INSIDE $fps AND run_id = $c AND deleted_origin = false
-                   GROUP ALL;",
-            )
+                   GROUP ALL;"
+            ))
             .bind(("m", memory.to_string()))
             .bind(("c", cycle.to_string()))
             .bind(("dead", dead()))
             .await?
             .check()?;
-        let derived: Option<i64> = r.take(1)?;
-        let sourced: Option<i64> = r.take(3)?;
-        Ok(derived.unwrap_or(0) > 0 || sourced.unwrap_or(0) > 0)
+        let cited: Vec<Cited> = r.take(0)?;
+        let sourced: Option<i64> = r.take(2)?;
+        Ok(sourced.unwrap_or(0) > 0 || self.current_in_cycle(cited, cycle).await?)
     }
 
+    /// Whether one of `cited` is owned by an article retained in `cycle`
+    /// whose metadata its retained refs still match (`current_metadata_sql`).
+    async fn current_in_cycle(&self, cited: Vec<Cited>, cycle: &str) -> Result<bool> {
+        let db = self.repo.db();
+        for c in cited {
+            let Some(owner) = c.owner_id else { continue };
+            let refs = super::provenance::retained_refs(
+                c.inputs_json.as_deref().unwrap_or(""),
+                c.readiness_json.as_deref().unwrap_or(""),
+                &c.kind,
+            );
+            for a in super::provenance::articles(db, &owner).await? {
+                if a.run_id == cycle && super::provenance::current_metadata(db, &refs, &a).await? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// The brief stage receipt's canonical memory for `local_id`: `None`
+    /// when the receipt snapshot no longer matches the retained article
+    /// (`snapshot_matches_article`), `Some(None)` when no assessed
+    /// derivation exists for the item.
+    async fn retained_canonical(
+        &self,
+        snapshot: &str,
+        run: &str,
+        article: &str,
+        kind: &str,
+        local_id: &str,
+    ) -> Result<Option<Option<String>>> {
+        let db = self.repo.db();
+        let mut r = db
+            .query(
+                "SELECT owner_id, owner_kind, inputs_json, readiness_json
+                   FROM ONLY type::record('insight_snapshot', $s);
+                 RETURN (SELECT VALUE memory_id FROM type::record('insight_derivation', $d)
+                   WHERE snapshot_id = $s AND insight_kind = $k AND status = 'assessed')[0];",
+            )
+            .bind(("s", snapshot.to_string()))
+            .bind(("d", format!("{snapshot}:{local_id}")))
+            .bind(("k", kind.to_string()))
+            .await?
+            .check()?;
+        let snap: Option<RetainedSnapshot> = r.take(0)?;
+        let memory: Option<String> = r.take(1)?;
+        let Some(snap) = snap.filter(|s| {
+            s.owner_id == article && matches!(s.owner_kind.as_str(), "article" | "atlas")
+        }) else {
+            return Ok(None);
+        };
+        let refs = super::provenance::retained_refs(
+            snap.inputs_json.as_deref().unwrap_or(""),
+            snap.readiness_json.as_deref().unwrap_or(""),
+            kind,
+        );
+        for a in super::provenance::articles(db, article).await? {
+            if a.run_id == run && super::provenance::current_metadata(db, &refs, &a).await? {
+                return Ok(Some(memory));
+            }
+        }
+        Ok(None)
+    }
+
+    /// `ScopedRows::Evidence`: a live derivation cites this source revision,
+    /// its snapshot owner is an article retained in `cycle`, and that
+    /// derivation's retained refs (the sibling kind's carried refs for a
+    /// scoped publication) still match the article's current metadata.
     async fn evidence_in_cycle(
         &mut self,
         source: &str,
@@ -516,21 +611,19 @@ impl Query<'_> {
         let mut r = self
             .repo
             .db()
-            .query(
+            .query(format!(
                 "LET $ds = (SELECT VALUE derivation_id FROM insight_derivation_evidence
                    WHERE source_id = $s AND source_revision = $rev);
-                 LET $owners = (SELECT VALUE type::record('insight_snapshot', snapshot_id).owner_id
-                   FROM insight_derivation WHERE record::id(id) INSIDE $ds AND status NOTINSIDE $dead);
-                 SELECT VALUE count() FROM atlas_article
-                   WHERE run_id = $c AND article_id INSIDE $owners GROUP ALL;",
-            )
+                 SELECT {CITED} FROM insight_derivation
+                   WHERE record::id(id) INSIDE $ds AND status NOTINSIDE $dead;"
+            ))
             .bind(("s", source.to_string()))
             .bind(("rev", revision.to_string()))
-            .bind(("c", cycle.to_string()))
             .bind(("dead", dead()))
             .await?
             .check()?;
-        Ok(r.take::<Option<i64>>(2)?.unwrap_or(0) > 0)
+        let cited: Vec<Cited> = r.take(1)?;
+        self.current_in_cycle(cited, cycle).await
     }
 
     async fn in_scope(&mut self, n: &TopologyNode) -> Result<bool> {
@@ -2011,6 +2104,7 @@ pub async fn topology_snapshot(
     let mut roots = Vec::new();
     let mut initial_edges = Vec::new();
     let mut group_members = BTreeSet::new();
+    let mut retained_article: Option<TopologyNode> = None;
     let kind_root = |want: TopologyNodeKind| move |n: &TopologyNode| n.kind == want;
     match seed {
         TopologySeed::Claim(id) => roots.extend(
@@ -2053,10 +2147,120 @@ pub async fn topology_snapshot(
                 initial_edges.push(e);
             }
         }
-        TopologySeed::RetainedClaim { .. }
-        | TopologySeed::RetainedInference { .. }
-        | TopologySeed::RetainedActor { .. } => {
-            bail!("{} topology isn't available on SurrealDB yet", seed.key())
+        TopologySeed::RetainedClaim {
+            run_id,
+            article_id,
+            revision,
+            local_id,
+            text,
+            job_id,
+        }
+        | TopologySeed::RetainedInference {
+            run_id,
+            article_id,
+            revision,
+            local_id,
+            text,
+            job_id,
+        } => {
+            if let Some(article) = q.article_node(run_id, article_id, revision).await? {
+                let inference = matches!(seed, TopologySeed::RetainedInference { .. });
+                let (kind, retained, node_kind) = if inference {
+                    (
+                        "inference",
+                        super::brief::RetainedKind::Inference,
+                        TopologyNodeKind::Inference,
+                    )
+                } else {
+                    (
+                        "claim",
+                        super::brief::RetainedKind::Claim,
+                        TopologyNodeKind::Claim,
+                    )
+                };
+                // Fence the exact current job, generation and item identity,
+                // then bind the canonical memory through the brief stage
+                // receipts when its snapshot still matches the article.
+                let matches =
+                    super::brief::retained_item(repo, article_id, job_id, retained, local_id, text)
+                        .await?;
+                let mut canonical = None;
+                let mut status = "retained source · not indexed";
+                if matches {
+                    if let Some(state) =
+                        super::brief::retained_canonical_state(repo, article_id, job_id, kind)
+                            .await?
+                    {
+                        match q
+                            .retained_canonical(
+                                &state.snapshot_id,
+                                run_id,
+                                article_id,
+                                kind,
+                                local_id,
+                            )
+                            .await?
+                        {
+                            Some(Some(id)) => {
+                                canonical =
+                                    q.memory_node(&id).await?.filter(|n| n.kind == node_kind);
+                            }
+                            Some(None) => {}
+                            None => {
+                                status = "retained source · canonical revision unavailable";
+                                q.gaps.insert(format!("{job_id}:{local_id}: canonical publication metadata does not match the current retained article or is unavailable"));
+                            }
+                        }
+                    }
+                } else {
+                    status = "retained source · canonical revision unavailable";
+                    q.gaps.insert(format!(
+                        "{job_id}:{local_id}: the retained Intel publication changed or is unavailable"
+                    ));
+                }
+                if let Some(n) = canonical {
+                    roots.push(n);
+                } else {
+                    let mut n = node(seed.key(), node_kind, text.clone());
+                    n.status = status.into();
+                    n.subtype = format!("retained_{kind}");
+                    n.article_id = article_id.clone();
+                    n.run_id = run_id.clone();
+                    n.cycle = Some(run_id.clone());
+                    n.revision = revision.clone();
+                    n.topology_seed = Some(seed.clone());
+                    n.passages.push(format!(
+                        "Intel {job_id}:{local_id} · {run_id}/{article_id}@{revision}"
+                    ));
+                    retained_article = Some(article);
+                    roots.push(n);
+                }
+            }
+        }
+        TopologySeed::RetainedActor {
+            run_id,
+            article_id,
+            revision,
+            actor_ref,
+            name,
+        } => {
+            // Provisional only: the native-mention and canonical actor
+            // resolution of the SQLite seed are not ported.
+            if let Some(article) = q.article_node(run_id, article_id, revision).await? {
+                let mut n = node(seed.key(), TopologyNodeKind::Entity, name.clone());
+                n.status = "retained source · provisional".into();
+                n.subtype = "retained_actor".into();
+                n.article_id = article_id.clone();
+                n.run_id = run_id.clone();
+                n.cycle = Some(run_id.clone());
+                n.revision = revision.clone();
+                n.topology_seed = Some(seed.clone());
+                n.passages.push(format!(
+                    "Metadata actor {actor_ref} · {run_id}/{article_id}@{revision}"
+                ));
+                retained_article = Some(article);
+                roots.push(n);
+            }
         }
     }
     let Some(root) = roots.first() else {
@@ -2084,6 +2288,29 @@ pub async fn topology_snapshot(
     }
     for e in initial_edges {
         edges.insert(e.id.clone(), e);
+    }
+    let retained_article = match retained_article {
+        Some(article) if q.in_scope(&article).await? => Some(article),
+        _ => None,
+    };
+    if let Some(mut article) = retained_article {
+        article.min_hops = 1;
+        article.predecessor = Some(root_id.clone());
+        let mut e = edge(
+            format!("retained-evidence:{root_id}"),
+            &article.id,
+            &root_id,
+            TopologyEdgeKind::Source,
+            format!("{}@{}", article.id, article.revision),
+        );
+        if matches!(seed, TopologySeed::RetainedActor { .. }) {
+            e.label = "retained source context".into();
+            e.status = "unresolved actor binding".into();
+            e.rationale = "The retained display actor is scoped to this source; no current native mention or canonical identity is asserted.".into();
+        }
+        edges.insert(e.id.clone(), e);
+        queue.push_back(article.id.clone());
+        nodes.insert(article.id.clone(), article);
     }
     let candidate_limit = options.max_nodes.saturating_mul(8).clamp(256, 4096);
     let edge_limit = options.max_edges.saturating_mul(8).clamp(512, 8192);

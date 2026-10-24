@@ -8,9 +8,9 @@
 //! statement (or one batch). The `_in` forms join a caller's transaction;
 //! `reconcile_deleted_memories_in` is meant to run inside a deletion.
 //!
-//! Not ported: `enqueue_refresh`'s requeue of a paused task
-//! (`blocked_reason='cancelled; evidence dirty'`), because SurrealDB tasks
-//! have no `paused` state.
+//! `enqueue_refresh` requeues a task paused with `blocked_reason =
+//! 'cancelled; evidence dirty'` (on its `insight_refresh_task` sidecar), as
+//! SQLite does.
 
 use anyhow::{anyhow, Result};
 use surrealdb::types::SurrealValue;

@@ -1080,7 +1080,17 @@ pub async fn remove_nlp_owner_in(tx: &Tx, kind: &str, owner: &str) -> Result<(),
     Ok(())
 }
 
-async fn delete_memory_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
+pub(crate) async fn delete_memory_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
+    delete_memory_with(tx, id, true).await
+}
+
+/// [`delete_memory_in`] without the `user_delete` tombstone: an origin
+/// deletion removes the memory outright, as `Store::delete_thread` does.
+pub(crate) async fn hard_delete_memory_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
+    delete_memory_with(tx, id, false).await
+}
+
+async fn delete_memory_with(tx: &Tx, id: &str, tombstone: bool) -> Result<bool, TxError> {
     let mut r = run(
         tx,
         tx.query("RETURN record::exists(type::record('memory', $id));")
@@ -1089,7 +1099,9 @@ async fn delete_memory_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
     .await?;
     let exists = take::<Option<bool>>(&mut r, 0)? == Some(true);
     if exists {
-        tombstone_memory(tx, id, "user_delete").await?;
+        if tombstone {
+            tombstone_memory(tx, id, "user_delete").await?;
+        }
         remove_nlp_owner_in(tx, "memory", id).await?;
     }
     let items = derivation_item_ids(tx, id).await?;

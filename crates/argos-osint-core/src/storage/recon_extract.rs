@@ -390,6 +390,81 @@ fn terms(question: &str) -> Vec<String> {
     out
 }
 
+/// `orchestrate::recall_for_turn` on SurrealDB: with an embedder whose
+/// model serves the current generation, fenced vector recall (DISKANN,
+/// lexical top-up; `recall::recall`) within [`RECALL_LIMIT`] and
+/// [`RECALL_TOKENS`]; without one, or when the query cannot be embedded or
+/// no vector hit lands, [`recall_for_turn`]. Nothing when the thread opted
+/// out of insights.
+pub async fn recall_for_turn_with(
+    repo: &Repository,
+    thread_id: &str,
+    question: &str,
+    vectors: Option<&super::vectors::Embedder>,
+) -> Result<Vec<RecallHit>> {
+    recall_candidates_for_turn(
+        repo,
+        thread_id,
+        question,
+        vectors,
+        RECALL_LIMIT,
+        RECALL_TOKENS,
+    )
+    .await
+}
+
+/// [`recall_for_turn_with`] capped at `limit` hits within `tokens`: the
+/// candidate pool the Recon admission policy filters before the
+/// [`RECALL_LIMIT`] cap, as SQLite's `recall_sqlite` does.
+pub async fn recall_candidates_for_turn(
+    repo: &Repository,
+    thread_id: &str,
+    question: &str,
+    vectors: Option<&super::vectors::Embedder>,
+    limit: usize,
+    tokens: usize,
+) -> Result<Vec<RecallHit>> {
+    let Some(e) = vectors else {
+        return lexical_for_turn(repo, thread_id, question, limit, tokens).await;
+    };
+    if question.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut r = repo
+        .db()
+        .query("SELECT VALUE recall_insights FROM ONLY type::record('recon_thread', $t)")
+        .bind(("t", thread_id.to_string()))
+        .await?
+        .check()?;
+    if r.take::<Option<bool>>(0usize)? == Some(false) {
+        return Ok(Vec::new());
+    }
+    let (state, embedding) = match super::vectors::query_vector(repo, e, question).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return lexical_for_turn(repo, thread_id, question, limit, tokens).await,
+        Err(err) => {
+            eprintln!("query embedding failed; using lexical recall: {err:#}");
+            return lexical_for_turn(repo, thread_id, question, limit, tokens).await;
+        }
+    };
+    let q = super::recall::RecallQuery {
+        text: question.to_string(),
+        embedding: Some(embedding),
+        model: state.model,
+        generation: state.generation,
+        max_memories: limit,
+        token_budget: tokens,
+        ..Default::default()
+    };
+    let hits = super::recall::recall(repo.db(), &q)
+        .await
+        .map_err(|e| anyhow!("recall: {e}"))?;
+    if hits.iter().any(|hit| hit.source == RecallSource::Vector) {
+        return Ok(hits);
+    }
+    lexical_for_turn(repo, thread_id, question, limit, tokens).await
+}
+
 /// STOPGAP for `orchestrate::recall_for_turn`: nothing when the thread
 /// opted out of insights; otherwise up to [`RECALL_LIMIT`] memories within
 /// [`RECALL_TOKENS`], ranked by SurrealDB full-text search. Replace with
@@ -398,6 +473,16 @@ pub async fn recall_for_turn(
     repo: &Repository,
     thread_id: &str,
     question: &str,
+) -> Result<Vec<RecallHit>> {
+    lexical_for_turn(repo, thread_id, question, RECALL_LIMIT, RECALL_TOKENS).await
+}
+
+async fn lexical_for_turn(
+    repo: &Repository,
+    thread_id: &str,
+    question: &str,
+    limit: usize,
+    tokens: usize,
 ) -> Result<Vec<RecallHit>> {
     let terms = terms(question);
     if terms.is_empty() {
@@ -453,5 +538,5 @@ pub async fn recall_for_turn(
             source: RecallSource::Lexical,
         })
         .collect();
-    Ok(apply_caps(ranked, RECALL_LIMIT, RECALL_TOKENS))
+    Ok(apply_caps(ranked, limit, tokens))
 }

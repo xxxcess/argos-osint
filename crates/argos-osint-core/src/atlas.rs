@@ -1266,7 +1266,7 @@ fn lookback_from() -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn utc_day() -> String {
+pub(crate) fn utc_day() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
 

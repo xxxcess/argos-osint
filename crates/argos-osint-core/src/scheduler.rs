@@ -766,6 +766,59 @@ impl WorkerPool {
                     return;
                 };
                 while !flag.load(Ordering::Acquire) {
+                    // SurrealDB: elect on the repository's scheduler lease and
+                    // drive the shared refresh tasks there (startup recovery
+                    // included); never the SQLite file.
+                    #[cfg(feature = "surreal")]
+                    if crate::recon::backend::surreal_selected() {
+                        let (owner, flag) = (owner.clone(), flag.clone());
+                        report_drainer(
+                            &db_path,
+                            "insight-refresh",
+                            crate::storage::runtime::blocking(move |repo| async move {
+                                let elected = crate::storage::jobs::try_elect(
+                                    repo.db(),
+                                    &owner,
+                                    DEFAULT_LEASE_SECS,
+                                    chrono::Utc::now(),
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("elect: {e}"))?
+                                .value
+                                .elected;
+                                if !elected {
+                                    return Ok(());
+                                }
+                                let auth = crate::secrets::AuthFile::load().unwrap_or_default();
+                                let settings =
+                                    crate::provider::SettingsFile::load().unwrap_or_default();
+                                let (_, errors) = crate::storage::refresh_driver::recover_and_run(
+                                    &repo,
+                                    &settings,
+                                    &flag,
+                                    || {
+                                        crate::storage::refresh_driver::pipeline(
+                                            &auth,
+                                            &settings,
+                                            &flag,
+                                            std::path::PathBuf::new(),
+                                        )
+                                    },
+                                )
+                                .await?;
+                                match errors.first() {
+                                    Some(e) => Err(anyhow::anyhow!(
+                                        "insight refresh recovery: {}: {}",
+                                        e.resource,
+                                        e.message
+                                    )),
+                                    None => Ok(()),
+                                }
+                            }),
+                        );
+                        std::thread::sleep(Duration::from_secs(2));
+                        continue;
+                    }
                     let elected = Connection::open(&db_path).ok().is_some_and(|conn| {
                         try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
                     });

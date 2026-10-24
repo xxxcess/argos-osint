@@ -402,8 +402,30 @@ pub async fn recall_for_turn_with(
     question: &str,
     vectors: Option<&super::vectors::Embedder>,
 ) -> Result<Vec<RecallHit>> {
+    recall_candidates_for_turn(
+        repo,
+        thread_id,
+        question,
+        vectors,
+        RECALL_LIMIT,
+        RECALL_TOKENS,
+    )
+    .await
+}
+
+/// [`recall_for_turn_with`] capped at `limit` hits within `tokens`: the
+/// candidate pool the Recon admission policy filters before the
+/// [`RECALL_LIMIT`] cap, as SQLite's `recall_sqlite` does.
+pub async fn recall_candidates_for_turn(
+    repo: &Repository,
+    thread_id: &str,
+    question: &str,
+    vectors: Option<&super::vectors::Embedder>,
+    limit: usize,
+    tokens: usize,
+) -> Result<Vec<RecallHit>> {
     let Some(e) = vectors else {
-        return recall_for_turn(repo, thread_id, question).await;
+        return lexical_for_turn(repo, thread_id, question, limit, tokens).await;
     };
     if question.trim().is_empty() {
         return Ok(Vec::new());
@@ -419,10 +441,10 @@ pub async fn recall_for_turn_with(
     }
     let (state, embedding) = match super::vectors::query_vector(repo, e, question).await {
         Ok(Some(found)) => found,
-        Ok(None) => return recall_for_turn(repo, thread_id, question).await,
+        Ok(None) => return lexical_for_turn(repo, thread_id, question, limit, tokens).await,
         Err(err) => {
             eprintln!("query embedding failed; using lexical recall: {err:#}");
-            return recall_for_turn(repo, thread_id, question).await;
+            return lexical_for_turn(repo, thread_id, question, limit, tokens).await;
         }
     };
     let q = super::recall::RecallQuery {
@@ -430,8 +452,8 @@ pub async fn recall_for_turn_with(
         embedding: Some(embedding),
         model: state.model,
         generation: state.generation,
-        max_memories: RECALL_LIMIT,
-        token_budget: RECALL_TOKENS,
+        max_memories: limit,
+        token_budget: tokens,
         ..Default::default()
     };
     let hits = super::recall::recall(repo.db(), &q)
@@ -440,7 +462,7 @@ pub async fn recall_for_turn_with(
     if hits.iter().any(|hit| hit.source == RecallSource::Vector) {
         return Ok(hits);
     }
-    recall_for_turn(repo, thread_id, question).await
+    lexical_for_turn(repo, thread_id, question, limit, tokens).await
 }
 
 /// STOPGAP for `orchestrate::recall_for_turn`: nothing when the thread
@@ -451,6 +473,16 @@ pub async fn recall_for_turn(
     repo: &Repository,
     thread_id: &str,
     question: &str,
+) -> Result<Vec<RecallHit>> {
+    lexical_for_turn(repo, thread_id, question, RECALL_LIMIT, RECALL_TOKENS).await
+}
+
+async fn lexical_for_turn(
+    repo: &Repository,
+    thread_id: &str,
+    question: &str,
+    limit: usize,
+    tokens: usize,
 ) -> Result<Vec<RecallHit>> {
     let terms = terms(question);
     if terms.is_empty() {
@@ -506,5 +538,5 @@ pub async fn recall_for_turn(
             source: RecallSource::Lexical,
         })
         .collect();
-    Ok(apply_caps(ranked, RECALL_LIMIT, RECALL_TOKENS))
+    Ok(apply_caps(ranked, limit, tokens))
 }

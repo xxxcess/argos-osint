@@ -236,7 +236,47 @@ async fn retry_reenqueues_a_failed_shared_refresh_and_runs_it() {
         )
         .await
         .unwrap(),
-        Retried::Nothing,
-        "a completed refresh is not retried"
+        Retried::Completed {
+            task_id: task_id.clone()
+        },
+        "a completed refresh is not retried (and the caller must not mine)"
     );
+}
+
+/// Admission runs over the candidate pool, not the capped five: the
+/// candidate recall returns more than `RECALL_LIMIT` hits, the turn recall
+/// never does.
+#[tokio::test]
+async fn turn_recall_candidates_exceed_the_cap() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "recall_candidates").await;
+    for i in 0..8 {
+        memories::add_memory(
+            &repo,
+            &format!("harbor crane {i} moved cargo"),
+            "fact",
+            false,
+            source(),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    let capped = recon_extract::recall_for_turn(&repo, "no-thread", "harbor crane")
+        .await
+        .unwrap();
+    assert_eq!(capped.len(), recon_extract::RECALL_LIMIT);
+    let pool = recon_extract::recall_candidates_for_turn(
+        &repo,
+        "no-thread",
+        "harbor crane",
+        None,
+        20,
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    assert_eq!(pool.len(), 8);
 }

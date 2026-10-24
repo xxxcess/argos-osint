@@ -202,6 +202,43 @@ pub async fn save(
     .await
 }
 
+/// `atlas::save_native_receipt`: the page receipt (`app_state`) and the
+/// run's cursor and stats commit in one transaction, so a crash can neither
+/// skip unapplied counts nor replay an applied page.
+pub async fn save_with_receipt(
+    db: &Surreal<Any>,
+    id: &str,
+    receipt_key: &str,
+    receipt_json: &str,
+    cursor_json: &str,
+    stats_json: &str,
+) -> Result<(), TxError> {
+    if id.is_empty() || receipt_key.is_empty() {
+        return Err(TxError::Abort("atlas receipt: empty id".into()));
+    }
+    let phase = serde_json::from_str::<serde_json::Value>(cursor_json)
+        .ok()
+        .and_then(|v| v.get("phase").and_then(|p| p.as_i64()))
+        .unwrap_or(1);
+    exec(
+        db,
+        db.query(
+            "BEGIN TRANSACTION;
+             UPSERT type::record('app_state', $key) SET value = $receipt RETURN NONE;
+             UPDATE type::record('atlas_run', $id) SET phase = $phase, cursor_json = $cursor,
+               stats_json = $stats RETURN NONE;
+             COMMIT TRANSACTION;",
+        )
+        .bind(("key", receipt_key.to_string()))
+        .bind(("receipt", receipt_json.to_string()))
+        .bind(("id", id.to_string()))
+        .bind(("phase", phase))
+        .bind(("cursor", cursor_json.to_string()))
+        .bind(("stats", stats_json.to_string())),
+    )
+    .await
+}
+
 /// `atlas_set_state`; `finished` stamps `finished_at`, otherwise it is kept.
 pub async fn set_state(
     db: &Surreal<Any>,

@@ -17,6 +17,7 @@ pub mod actor_bind;
 pub mod atlas;
 pub mod atlas_delete;
 pub mod atlas_metadata;
+pub mod atlas_work;
 pub mod bootstrap;
 pub mod brief;
 pub mod browse;

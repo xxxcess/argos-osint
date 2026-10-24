@@ -32,8 +32,13 @@ telemetry are wired (see "Combined tree" at the end).
 - [ ] Topology: retained Intel seeds are refused, the neighbourhood summary
   is skipped, snapshot reads are not one transaction, no TUI test drives the
   SurrealDB workers.
-- [ ] Atlas, Atlas insight/memory writers and the investigation harness
-  (`investigation::engine`) stay SQLite.
+- [x] The investigation harness (`investigation::engine`) runs on
+  `ReconStore` (`storage::investigation`, `tests/storage_investigation.rs`).
+- [x] Atlas run bookkeeping, articles, metadata, classification cache, work
+  units and receipts go through `AtlasStore` (`tests/storage_atlas_store.rs`).
+- [ ] Atlas actor indexing (skipped on SurrealDB), Atlas job/stage telemetry
+  and the Atlas insight/memory writers (`atlas_insights`, `atlas_memory`)
+  stay SQLite.
 
 ## P0 — foundation (spec step 1)
 
@@ -272,8 +277,8 @@ Bootstrap registers 21 schemas after the topology, Profile and Recon tracks merg
 - Gaps:
   - The Logs pane, its severity counts, the TUI session log (`push_log`) and the Jobs → Logs event counts still read/write SQLite `argos_events`; call logs written to `argos_event` are not shown until Logs moves. `list_events` matches `job_id` exactly (no child-job expansion); no retention prune or clear for `argos_event` yet.
   - Telemetry writes are fire-and-forget; a TUI killed mid-write can lose the last events. `telemetry_meta` (observed-since, prune markers), `telemetry_backfill` and the 90/365-day prune (`telemetry::prune`) are not on SurrealDB.
-  - Writers that are still SQLite-only paths keep writing SQLite only when no config is set: Atlas, Atlas insights/memory, model attempts (`model_exec`, jobs track) and recall telemetry (`admit_memory` not ported).
-  - The investigation harness (`investigation::engine`) has no production caller and still writes through the SQLite `Store`.
+  - Writers that are still SQLite-only paths keep writing SQLite only when no config is set: Atlas actor index and job telemetry, Atlas insights/memory, model attempts (`model_exec`, jobs track) and recall telemetry (`admit_memory` not ported).
+  - The investigation harness (`investigation::engine`) has no production caller; the TUI task list (`tui/app.rs`) still reads SQLite.
   - No end-to-end TUI test of the Recon pane trace or Profile event views on SurrealDB.
 
 

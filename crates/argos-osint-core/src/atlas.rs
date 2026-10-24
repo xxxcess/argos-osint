@@ -19,11 +19,12 @@ use url::Url;
 
 use crate::atlas_insights::{self, InsightStats};
 use crate::atlas_memory;
+use crate::atlas_store::AtlasStore;
 use crate::osint::atlas_news::{self, Hit};
 use crate::osint::ProviderKeys;
 use crate::provider::DecisionsResponse;
 use crate::secrets::ProviderSecret;
-use crate::store::{AtlasArticleRow, AtlasRunRow, Store};
+use crate::store::{AtlasArticleRow, AtlasRunRow};
 use crate::telemetry::{self, EventKind, TelemetryEvent, Trigger};
 
 /// Country-coded headlines collected from each phase-1 source.
@@ -471,8 +472,10 @@ struct CycleTelemetry {
 impl CycleTelemetry {
     fn new(db: &Path, run_id: &str, mode: &str, started_at: String) -> Self {
         // Continue the occurrence numbering so a resumed cycle appends.
-        let candidates = rusqlite::Connection::open(db)
-            .ok()
+        // SQLite only without a storage config: under SurrealDB the count
+        // starts at 0 rather than reopening SQLite.
+        let candidates = crate::recon::backend::sqlite_path(db)
+            .and_then(|db| rusqlite::Connection::open(db).ok())
             .and_then(|conn| {
                 conn.query_row(
                     "SELECT COUNT(*) FROM telemetry_events WHERE id GLOB ?1",
@@ -620,7 +623,8 @@ impl CycleTelemetry {
     /// Mean queue residence for this cycle's registry job, when the job recorded
     /// both a queue and an admission timestamp. Never derived from retry waits.
     fn queue_wait_ms(&self) -> Option<i64> {
-        let conn = rusqlite::Connection::open(&self.db).ok()?;
+        let conn =
+            rusqlite::Connection::open(crate::recon::backend::sqlite_path(&self.db)?).ok()?;
         let job = crate::job_registry::job_for_run(&conn, "atlas_cycle", &self.run_id)
             .ok()
             .flatten()?;
@@ -1353,22 +1357,24 @@ fn phase2_call(provider: &str, country: &str, key: &str) -> Result<CallSpec> {
 
 /// Primary account while its local daily cap is open and the key is not exhausted.
 /// Otherwise the fallback account, when that cap is still open.
-fn open_key<'a>(
-    store: &Store,
+async fn open_key<'a>(
+    store: &AtlasStore,
     provider: &str,
     primary: &'a str,
     fallback: &'a str,
 ) -> Result<Option<&'a str>> {
     let primary = primary.trim();
     let fallback = fallback.trim();
-    if !primary.is_empty() && !crate::osint::key_exhausted(primary) && quota_open(store, provider)?
+    if !primary.is_empty()
+        && !crate::osint::key_exhausted(primary)
+        && quota_open(store, provider).await?
     {
         return Ok(Some(primary));
     }
     if !fallback.is_empty()
         && fallback != primary
         && !crate::osint::key_exhausted(fallback)
-        && quota_open(store, &format!("{provider}:fallback"))?
+        && quota_open(store, &format!("{provider}:fallback")).await?
     {
         return Ok(Some(fallback));
     }
@@ -1449,13 +1455,13 @@ where
     }
 }
 
-fn apply_hits(
+async fn apply_hits(
     hits: &[Hit],
     provider: &str,
     stats: &mut RunStats,
     seen: &mut Vec<Seen>,
     emit: &mut impl FnMut(AtlasEvent),
-    store: &Store,
+    store: &AtlasStore,
     run_id: &str,
     tel: &mut CycleTelemetry,
 ) -> Result<Vec<AtlasArticleRow>> {
@@ -1481,7 +1487,8 @@ fn apply_hits(
     // Already-retained rows for this run, with the ingestion time first seen, so
     // a repeated headline is reported as retained-existing instead of new volume.
     let mut retained: HashMap<String, String> = store
-        .atlas_list_articles(run_id)?
+        .list_articles(run_id)
+        .await?
         .into_iter()
         .map(|row| (row.id, row.seen_at))
         .collect();
@@ -1522,7 +1529,7 @@ fn apply_hits(
                 };
                 remember(seen, &article, None);
                 let row = article_row(run_id, &article);
-                store.atlas_upsert_article(&row)?;
+                store.upsert_article(&row).await?;
                 inventory_rows.push(row);
                 retained.insert(article.id.clone(), article.seen_at.clone());
                 tel.candidate(&article, provider, disposition, None, None);
@@ -1531,7 +1538,7 @@ fn apply_hits(
             Verdict::Replace(id) => {
                 // Only replace inside this run. A hit already stored in another
                 // retained run is ignored so TTL history is not reprocessed.
-                let Some(replaced) = store.atlas_article(run_id, &id)? else {
+                let Some(replaced) = store.article(run_id, &id).await? else {
                     tel.candidate(&article, provider, "duplicate_in_cycle", None, None);
                     continue;
                 };
@@ -1551,10 +1558,10 @@ fn apply_hits(
                         origin.articles += 1;
                     }
                 }
-                store.atlas_delete_article(run_id, &id)?;
+                store.delete_article(run_id, &id).await?;
                 remember(seen, &article, Some(&id));
                 let row = article_row(run_id, &article);
-                store.atlas_upsert_article(&row)?;
+                store.upsert_article(&row).await?;
                 inventory_rows.push(row);
                 retained.remove(&id);
                 retained.insert(article.id.clone(), article.seen_at.clone());
@@ -1563,7 +1570,7 @@ fn apply_hits(
             }
         }
     }
-    stats.coverage.articles = store.atlas_list_articles(run_id)?.len() as u32;
+    stats.coverage.articles = store.list_articles(run_id).await?.len() as u32;
     Ok(inventory_rows)
 }
 
@@ -1696,6 +1703,11 @@ impl AtlasJob {
     fn start(&mut self, run_id: &str) {
         use crate::job_registry::{begin_optional, job_for_run, JobSpec};
         self.run_id = run_id.to_string();
+        // The registry is SQLite; under SurrealDB the cycle runs untracked
+        // rather than reopening SQLite.
+        if crate::recon::backend::sqlite_path(&self.db).is_none() {
+            return;
+        }
         let existing = rusqlite::Connection::open(&self.db)
             .ok()
             .and_then(|conn| job_for_run(&conn, "atlas_cycle", run_id).ok().flatten());
@@ -1793,34 +1805,36 @@ where
         emit(event);
     };
     let result = run_atlas_inner(input, tracked_emit, fetch, &tracker).await;
-    let run_state = || {
-        let run_id = tracker.lock().ok()?.run_id.clone();
-        if run_id.is_empty() {
-            return None;
-        }
-        Store::open(&db_path)
-            .ok()?
-            .atlas_list_runs()
-            .ok()?
-            .into_iter()
-            .find(|run| run.id == run_id)
-            .map(|run| (run.state, run.note))
-    };
-    if let Err(error) = &result {
-        if let Ok(tracker) = tracker.lock() {
-            if !tracker.run_id.is_empty() {
-                if let Ok(store) = Store::open(&db_path) {
-                    let message = error.to_string();
-                    let state = if message.starts_with("Enter the ") {
-                        "blocked"
-                    } else {
-                        "failed"
-                    };
-                    let _ = store.atlas_set_state(&tracker.run_id, state, &message, true);
-                }
-            }
+    // Read the run id first: the tracker guard is never held across an await.
+    let tracked_run = tracker
+        .lock()
+        .ok()
+        .map(|job| job.run_id.clone())
+        .filter(|id| !id.is_empty());
+    if let (Err(error), Some(run_id)) = (&result, tracked_run.as_deref()) {
+        if let Ok(store) = AtlasStore::open(&db_path).await {
+            let message = error.to_string();
+            let state = if message.starts_with("Enter the ") {
+                "blocked"
+            } else {
+                "failed"
+            };
+            let _ = store.set_state(run_id, state, &message, true).await;
         }
     }
+    let state_now = match tracked_run.as_deref() {
+        Some(run_id) => match AtlasStore::open(&db_path).await {
+            Ok(store) => store
+                .list_runs()
+                .await
+                .ok()
+                .and_then(|runs| runs.into_iter().find(|run| run.id == run_id))
+                .map(|run| (run.state, run.note)),
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let run_state = || state_now.clone();
     let outcome = match &result {
         Ok(Stop::Paused) => Finish::Paused {
             summary: "paused; resume continues from the saved cursor".into(),
@@ -1899,14 +1913,15 @@ where
         synthesizer_fallbacks: _,
         run_id: resume_id,
     } = input;
-    let store = Store::open(db_path)?;
+    let store = AtlasStore::open(db_path).await?;
     let (run_id, mut cursor, mut stats) = if resume {
         let run = match resume_id {
             Some(id) => store
-                .atlas_list_runs()?
+                .list_runs()
+                .await?
                 .into_iter()
                 .find(|run| run.id == id),
-            None => store.atlas_latest_run()?,
+            None => store.latest_run().await?,
         };
         let Some(run) = run else {
             return Ok(Stop::Failed("No Atlas run to resume".into()));
@@ -1914,7 +1929,9 @@ where
         if !resumable(&run) {
             return Ok(Stop::Failed("The latest Atlas run is not paused".into()));
         }
-        store.atlas_set_state(&run.id, "running", &run.note, false)?;
+        store
+            .set_state(&run.id, "running", &run.note, false)
+            .await?;
         (
             run.id,
             parse_cursor(&run.cursor_json),
@@ -1927,18 +1944,20 @@ where
             from: from.clone(),
             ..Cursor::default()
         };
-        store.atlas_insert_run(
-            &id,
-            &serde_json::to_string(&cursor)?,
-            &serde_json::to_string(&RunStats::default())?,
-        )?;
+        store
+            .insert_run(
+                &id,
+                &serde_json::to_string(&cursor)?,
+                &serde_json::to_string(&RunStats::default())?,
+            )
+            .await?;
         (id, cursor, RunStats::default())
     };
     let legacy = !crate::atlas_work::is_collection_contract(&stats.contract_version);
     if legacy && cursor.phase >= 3 {
         // Preserve historical categories and expose ambiguous completed unk rows.
         // Unprocessed old phase-3 rows still require classification.
-        for (index, article) in store.atlas_list_articles(&run_id)?.iter().enumerate() {
+        for (index, article) in store.list_articles(&run_id).await?.iter().enumerate() {
             let status = if article.category == "unk" {
                 if cursor.phase >= 4 || index < cursor.country {
                     "legacy_unknown"
@@ -1951,14 +1970,16 @@ where
                 "failed"
             };
             let hash = crate::atlas_metadata::input_hash(article);
-            store.atlas_set_classification(
-                &run_id,
-                &article.id,
-                &hash,
-                status,
-                r#"{"provenance":"legacy classification"}"#,
-                None,
-            )?;
+            store
+                .set_classification(
+                    &run_id,
+                    &article.id,
+                    &hash,
+                    status,
+                    r#"{"provenance":"legacy classification"}"#,
+                    None,
+                )
+                .await?;
         }
         if cursor.phase >= 4 {
             cursor.phase = 4;
@@ -1972,7 +1993,7 @@ where
         stats.acquisition_retry = None;
     }
     stats.contract_version = crate::atlas_work::COLLECTION_CONTRACT.into();
-    save(&store, &run_id, &cursor, &stats)?;
+    save(&store, &run_id, &cursor, &stats).await?;
     if let Ok(mut job) = tracker.lock() {
         job.start(&run_id);
     }
@@ -1982,7 +2003,8 @@ where
     // Cycle telemetry. `started_at` is the durable run start, so wall duration is
     // completion minus start even when this invocation is a resume.
     let cycle_started_at = store
-        .atlas_list_runs()?
+        .list_runs()
+        .await?
         .into_iter()
         .find(|run| run.id == run_id)
         .map(|run| run.started_at)
@@ -1996,13 +2018,13 @@ where
     let mut seen: Vec<Seen> = feed.iter().map(seen_of).collect();
     // Seed from every retained article (36h prune window), then this run's rows.
     // URL/title matches against that history are dropped so cycles stay efficient.
-    for row in store.atlas_recent_articles()? {
+    for row in store.recent_articles().await? {
         let article = article_from_row(&row);
         if seen.iter().all(|item| item.id != article.id) {
             seen.push(seen_of(&article));
         }
     }
-    for row in store.atlas_list_articles(&run_id)? {
+    for row in store.list_articles(&run_id).await? {
         let article = article_from_row(&row);
         if seen.iter().all(|item| item.id != article.id) {
             seen.push(seen_of(&article));
@@ -2045,10 +2067,10 @@ where
                     kept,
                 };
                 if cycle_paused(tracker, pause) {
-                    return park(&store, &run_id, &here, &stats, &mut emit, &mut tel);
+                    return park(&store, &run_id, &here, &stats, &mut emit, &mut tel).await;
                 }
                 let receipt_key = format!("atlas-native-v1:{run_id}:discovery:{provider}:{page}");
-                if let Some(raw) = store.app_state_get(&receipt_key)? {
+                if let Some(raw) = store.app_state_get(&receipt_key).await? {
                     let receipt: serde_json::Value = serde_json::from_str(&raw)?;
                     kept = receipt["kept"].as_u64().unwrap_or(kept as u64) as u32;
                     token = receipt["token"].as_str().unwrap_or("").into();
@@ -2059,7 +2081,7 @@ where
                     continue;
                 }
                 let (primary, fallback) = keys.pair(provider);
-                let Some(key) = open_key(&store, provider, primary, fallback)? else {
+                let Some(key) = open_key(&store, provider, primary, fallback).await? else {
                     emit(AtlasEvent::Note(format!("{provider} daily quota is spent")));
                     break;
                 };
@@ -2111,7 +2133,8 @@ where
                                 apply_hits(
                                     &hits, provider, &mut stats, &mut seen, &mut emit, &store,
                                     &run_id, &mut tel,
-                                )?;
+                                )
+                                .await?;
                                 token = if provider == "newsdata" {
                                     more.clone().unwrap_or_default()
                                 } else {
@@ -2156,9 +2179,9 @@ where
                         &here,
                         &stats,
                         &serde_json::json!({"kept":kept,"token":token,"stop":stop_provider || kept>=PHASE1_TARGET || page+1>=PHASE1_MAX_PAGES}),
-                    )?;
+                    ).await?;
                 }
-                let _ = store.atlas_quota_bump(&bucket, &utc_day())?;
+                let _ = store.quota_bump(&bucket, &utc_day()).await?;
                 page += 1;
                 emit(AtlasEvent::Stats(stats.clone()));
                 if stop_provider || kept >= PHASE1_TARGET || page >= PHASE1_MAX_PAGES {
@@ -2173,7 +2196,7 @@ where
                     page_token: token.clone(),
                     kept,
                 };
-                save(&store, &run_id, &next, &stats)?;
+                save(&store, &run_id, &next, &stats).await?;
                 cursor = next;
             }
         }
@@ -2203,7 +2226,7 @@ where
             page_token: String::new(),
             kept: 0,
         };
-        save(&store, &run_id, &cursor, &stats)?;
+        save(&store, &run_id, &cursor, &stats).await?;
         emit(AtlasEvent::Stats(stats.clone()));
         // One origin snapshot per cycle, taken here where the bands are computed,
         // never once per repaint.
@@ -2217,12 +2240,14 @@ where
         require_either(&keys.newsapi, &keys.newsapi_fallback, "NewsAPI key")?;
         require_either(&keys.currents, &keys.currents_fallback, "Currents API key")?;
         if stats.origins.is_empty() && stats.coverage.acquisition_failures == 0 {
-            store.atlas_set_state(
-                &run_id,
-                "completed",
-                "No flashpoints in the 48-hour window",
-                true,
-            )?;
+            store
+                .set_state(
+                    &run_id,
+                    "completed",
+                    "No flashpoints in the 48-hour window",
+                    true,
+                )
+                .await?;
             emit(AtlasEvent::Status(
                 "No flashpoints in the 48-hour window".into(),
             ));
@@ -2271,13 +2296,14 @@ where
                     &stats,
                     &mut emit,
                     &mut tel,
-                );
+                )
+                .await;
             }
             let receipt_key = format!(
                 "atlas-native-v1:{run_id}:coverage:{}:{}",
                 job.provider, countries[job.country]
             );
-            if store.app_state_get(&receipt_key)?.is_some() {
+            if store.app_state_get(&receipt_key).await?.is_some() {
                 continue;
             }
             let country = &countries[job.country];
@@ -2295,7 +2321,7 @@ where
                 continue;
             }
             let (primary, fallback) = keys.pair(job.provider);
-            let Some(key) = open_key(&store, job.provider, primary, fallback)? else {
+            let Some(key) = open_key(&store, job.provider, primary, fallback).await? else {
                 emit(AtlasEvent::Note(format!(
                     "{} daily quota is spent",
                     job.provider
@@ -2335,7 +2361,8 @@ where
                             &store,
                             &run_id,
                             &mut tel,
-                        )?;
+                        )
+                        .await?;
                         save_native_receipt(
                             &store,
                             &run_id,
@@ -2343,7 +2370,8 @@ where
                             &cursor_at(job, &cursor.from),
                             &stats,
                             &serde_json::json!({"completed":true}),
-                        )?;
+                        )
+                        .await?;
                         for row in rows {
                             let queued = inventory.queue(&row);
                             tokio::pin!(queued);
@@ -2354,7 +2382,7 @@ where
                                         if cycle_paused(tracker,pause) {
                                             inventory.cancel();
                                             let next = next_after_phase2(job,countries.len());
-                                            return park(&store,&run_id,&cursor_at(&next,&cursor.from),&stats,&mut emit,&mut tel);
+                                            return park(&store,&run_id,&cursor_at(&next,&cursor.from),&stats,&mut emit,&mut tel).await;
                                         }
                                     }
                                 }
@@ -2385,9 +2413,9 @@ where
                     }
                 }
             }
-            let _ = store.atlas_quota_bump(&bucket, &utc_day())?;
+            let _ = store.quota_bump(&bucket, &utc_day()).await?;
             let next = next_after_phase2(job, countries.len());
-            save(&store, &run_id, &cursor_at(&next, &cursor.from), &stats)?;
+            save(&store, &run_id, &cursor_at(&next, &cursor.from), &stats).await?;
             emit(AtlasEvent::Stats(stats.clone()));
         }
         if !newsapi_skipped.is_empty() {
@@ -2422,7 +2450,7 @@ where
             page_token: String::new(),
             kept: 0,
         };
-        save(&store, &run_id, &cursor, &stats)?;
+        save(&store, &run_id, &cursor, &stats).await?;
         emit(AtlasEvent::Stats(stats.clone()));
     }
 
@@ -2445,12 +2473,12 @@ where
     if cursor.phase == 3 {
         track(3);
         tel.enter_stage("classification", "article", &stats);
-        let articles = store.atlas_list_articles(&run_id)?;
+        let articles = store.list_articles(&run_id).await?;
         stats.coverage.articles = articles.len() as u32;
         let mut pending = Vec::new();
         for article in articles {
             let hash = crate::atlas_metadata::input_hash(&article);
-            let receipt = store.atlas_metadata(&run_id, &article.id)?;
+            let receipt = store.metadata(&run_id, &article.id).await?;
             if receipt.as_ref().is_some_and(|m| {
                 m.input_hash == hash
                     && matches!(
@@ -2471,7 +2499,7 @@ where
                     .enumerate()
             {
                 if cycle_paused(tracker, pause) {
-                    return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
+                    return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel).await;
                 }
                 emit(AtlasEvent::Status(format!(
                     "Classifier batch {} · {} articles",
@@ -2479,14 +2507,16 @@ where
                     batch.len()
                 )));
                 for article in &batch {
-                    store.atlas_set_classification(
-                        &run_id,
-                        &article.id,
-                        &crate::atlas_metadata::input_hash(article),
-                        "running",
-                        "",
-                        None,
-                    )?;
+                    store
+                        .set_classification(
+                            &run_id,
+                            &article.id,
+                            &crate::atlas_metadata::input_hash(article),
+                            "running",
+                            "",
+                            None,
+                        )
+                        .await?;
                 }
                 let work = crate::atlas_classify::execute(
                     db_path,
@@ -2527,14 +2557,16 @@ where
                     let receipt_json = serde_json::to_string(
                         &serde_json::json!({"category":category,"prompt_version":crate::atlas_classify::PROMPT_VERSION,"diagnostic":error}),
                     )?;
-                    store.atlas_set_classification(
-                        &run_id,
-                        &article.id,
-                        &crate::atlas_metadata::input_hash(article),
-                        status,
-                        &receipt_json,
-                        category.map(String::as_str),
-                    )?;
+                    store
+                        .set_classification(
+                            &run_id,
+                            &article.id,
+                            &crate::atlas_metadata::input_hash(article),
+                            status,
+                            &receipt_json,
+                            category.map(String::as_str),
+                        )
+                        .await?;
                     if let Some(category) = category {
                         emit(AtlasEvent::Classified {
                             id: article.id.clone(),
@@ -2542,9 +2574,9 @@ where
                         });
                     }
                 }
-                save(&store, &run_id, &cursor, &stats)?;
+                save(&store, &run_id, &cursor, &stats).await?;
                 if cycle_paused(tracker, pause) {
-                    return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
+                    return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel).await;
                 }
             }
         } else if !pending.is_empty() {
@@ -2552,26 +2584,28 @@ where
                 "Classifier is not configured; required classification is blocked.".into(),
             ));
             for article in pending {
-                store.atlas_set_classification(
-                    &run_id,
-                    &article.id,
-                    &crate::atlas_metadata::input_hash(&article),
-                    "blocked",
-                    r#"{"diagnostic":"Classifier is not configured"}"#,
-                    None,
-                )?;
+                store
+                    .set_classification(
+                        &run_id,
+                        &article.id,
+                        &crate::atlas_metadata::input_hash(&article),
+                        "blocked",
+                        r#"{"diagnostic":"Classifier is not configured"}"#,
+                        None,
+                    )
+                    .await?;
             }
         }
         cursor.phase = 4;
         cursor.leg = "metadata".into();
-        save(&store, &run_id, &cursor, &stats)?;
+        save(&store, &run_id, &cursor, &stats).await?;
     }
     // Stage-specific admission: a phase-6 resume never replays 4/5.
     if (4..6).contains(&cursor.phase) {
         track(4);
         tel.enter_stage("metadata", "article", &stats);
         if cycle_paused(tracker, pause) {
-            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
+            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel).await;
         }
         emit(AtlasEvent::Status(
             "Local entities and publisher priors".into(),
@@ -2585,7 +2619,7 @@ where
                     _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
                         if cycle_paused(tracker,pause) {
                             native_cancel.0.store(true,Ordering::Relaxed);
-                            return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel);
+                            return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;
                         }
                     }
                 }
@@ -2600,7 +2634,7 @@ where
             emit(AtlasEvent::Note(warning));
         }
         if cycle_paused(tracker, pause) {
-            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
+            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel).await;
         }
         cursor.phase = 5;
         cursor.leg = "related".into();
@@ -2612,7 +2646,7 @@ where
         stats.coverage.related_pairs = crate::related_articles::build(&store, &run_id)? as u32;
         cursor.phase = 6;
         cursor.leg = "actor_articles".into();
-        save(&store, &run_id, &cursor, &stats)?;
+        save(&store, &run_id, &cursor, &stats).await?;
     }
     let mut actor_index_incomplete = false;
     if cursor.phase >= 6 {
@@ -2623,8 +2657,18 @@ where
             &stats,
         );
         emit(AtlasEvent::Status("Index actors and articles".into()));
-        let report =
-            crate::atlas_actor_index::index_run(&store, &run_id, &|| cycle_paused(tracker, pause))?;
+        // Brain actor indexing is not on SurrealDB yet: skip it and leave the
+        // index marked incomplete rather than touching SQLite.
+        let report = if store.is_surreal() {
+            emit(AtlasEvent::Note(
+                "Actor index skipped: not yet available on SurrealDB".into(),
+            ));
+            crate::atlas_actor_index::IndexReport::default()
+        } else {
+            store.sqlite("Atlas actor index", |s| {
+                crate::atlas_actor_index::index_run(s, &run_id, &|| cycle_paused(tracker, pause))
+            })?
+        };
         stats.coverage.actor_indexed = report.reused + report.indexed;
         stats.coverage.actor_zero = report.zero_actor;
         stats.coverage.actor_index_failed = report.failed;
@@ -2632,14 +2676,14 @@ where
             emit(AtlasEvent::Note(format!("Actor index failed: {error}")));
         }
         if report.stopped {
-            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel);
+            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel).await;
         }
-        actor_index_incomplete = !report.complete();
+        actor_index_incomplete = store.is_surreal() || !report.complete();
         cursor.leg = "actor_articles_done".into();
-        save(&store, &run_id, &cursor, &stats)?;
+        save(&store, &run_id, &cursor, &stats).await?;
     }
     // Completion depends on article classification, never on Brain indexing.
-    let articles = store.atlas_list_articles(&run_id)?;
+    let articles = store.list_articles(&run_id).await?;
     stats.coverage.articles = articles.len() as u32;
     stats.coverage.classified = 0;
     stats.coverage.legacy_unknown = 0;
@@ -2647,7 +2691,8 @@ where
     stats.coverage.classification_blocked = 0;
     for article in &articles {
         match store
-            .atlas_metadata(&run_id, &article.id)?
+            .metadata(&run_id, &article.id)
+            .await?
             .map(|m| m.classification_status)
             .as_deref()
         {
@@ -2720,8 +2765,8 @@ where
             cursor.leg = "classify".into();
         }
     }
-    save(&store, &run_id, &cursor, &stats)?;
-    store.atlas_set_state(&run_id, state, &note, true)?;
+    save(&store, &run_id, &cursor, &stats).await?;
+    store.set_state(&run_id, state, &note, true).await?;
     emit(AtlasEvent::Stats(stats.clone()));
     emit(AtlasEvent::Status(note.clone()));
     tel.close_stage(state, &stats);
@@ -2735,19 +2780,23 @@ where
 
 /// The completion receipt and statistics commit together, preventing a crash
 /// from skipping unapplied discovery counts or replaying an applied page.
-fn save_native_receipt(
-    store: &Store,
+async fn save_native_receipt(
+    store: &AtlasStore,
     run_id: &str,
     key: &str,
     cursor: &Cursor,
     stats: &RunStats,
     receipt: &serde_json::Value,
 ) -> Result<()> {
-    let tx = store.conn.unchecked_transaction()?;
-    store.app_state_set(key, &serde_json::to_string(receipt)?)?;
-    save(store, run_id, cursor, stats)?;
-    tx.commit()?;
-    Ok(())
+    store
+        .save_with_receipt(
+            run_id,
+            key,
+            &serde_json::to_string(receipt)?,
+            &serde_json::to_string(cursor)?,
+            &serde_json::to_string(stats)?,
+        )
+        .await
 }
 
 fn next_after_phase2(job: &Job, countries: usize) -> Job {
@@ -2785,29 +2834,31 @@ fn published_in_window(published: &str, from: &str) -> bool {
         .unwrap_or(true)
 }
 
-fn quota_open(store: &Store, provider: &str) -> Result<bool> {
-    let used = store.atlas_quota_used(provider, &utc_day())?;
+async fn quota_open(store: &AtlasStore, provider: &str) -> Result<bool> {
+    let used = store.quota_used(provider, &utc_day()).await?;
     Ok(used < daily_cap(provider))
 }
 
-fn save(store: &Store, id: &str, cursor: &Cursor, stats: &RunStats) -> Result<()> {
-    store.atlas_save(
-        id,
-        &serde_json::to_string(cursor)?,
-        &serde_json::to_string(stats)?,
-    )
+async fn save(store: &AtlasStore, id: &str, cursor: &Cursor, stats: &RunStats) -> Result<()> {
+    store
+        .save(
+            id,
+            &serde_json::to_string(cursor)?,
+            &serde_json::to_string(stats)?,
+        )
+        .await
 }
 
-fn park(
-    store: &Store,
+async fn park(
+    store: &AtlasStore,
     id: &str,
     cursor: &Cursor,
     stats: &RunStats,
     emit: &mut impl FnMut(AtlasEvent),
     tel: &mut CycleTelemetry,
 ) -> Result<Stop> {
-    save(store, id, cursor, stats)?;
-    store.atlas_set_state(id, "paused", "Paused", false)?;
+    save(store, id, cursor, stats).await?;
+    store.set_state(id, "paused", "Paused", false).await?;
     // The open stage interval is closed as interrupted, so the age of work a
     // pause stopped mid-flight is derivable from its start timestamp.
     tel.close_stage("interrupted", stats);
@@ -3067,12 +3118,12 @@ pub async fn run_live(
     .await
 }
 
-pub fn charge_newsapi(store: &Store) {
-    charge_quota(store, "newsapi");
+pub async fn charge_newsapi(store: &AtlasStore) {
+    charge_quota(store, "newsapi").await;
 }
 
-pub fn charge_quota(store: &Store, bucket: &str) {
-    let _ = store.atlas_quota_bump(bucket, &utc_day());
+pub async fn charge_quota(store: &AtlasStore, bucket: &str) {
+    let _ = store.quota_bump(bucket, &utc_day()).await;
 }
 
 #[cfg(test)]
@@ -3257,6 +3308,7 @@ mod telemetry_tests {
 mod tests {
     use super::*;
     use crate::provider;
+    use crate::store::Store;
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]

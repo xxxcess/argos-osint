@@ -24,6 +24,7 @@ pub mod atlas_work;
 pub mod bootstrap;
 pub mod brain_backfill;
 pub mod brief;
+pub mod brief_stages;
 pub mod browse;
 pub mod browse_assoc;
 pub mod codec;

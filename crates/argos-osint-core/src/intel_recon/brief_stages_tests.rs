@@ -2,6 +2,9 @@ use super::*;
 
 #[path = "brief_configured_live_tests.rs"]
 mod configured_live;
+#[cfg(feature = "embedded")]
+#[path = "brief_stages_surreal_tests.rs"]
+mod surreal;
 #[path = "brief_user_chain_tests.rs"]
 mod user_chain;
 use crate::intel_recon::brief_pipeline::{ensure_chain, stage_views, BriefInputs};

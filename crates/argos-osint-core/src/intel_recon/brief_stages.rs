@@ -1205,7 +1205,7 @@ fn snapshot_article(mut article: AtlasArticleRow, ctx: &StageContext) -> AtlasAr
     article
 }
 
-async fn execute(
+pub(crate) async fn execute(
     st: &dyn StageStore,
     claimed: &ClaimedTask,
     backend: &mut dyn StageBackend,

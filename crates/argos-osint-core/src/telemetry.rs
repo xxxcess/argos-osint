@@ -463,7 +463,22 @@ fn rusqlite_result<T>(value: Result<T, rusqlite::Error>) -> anyhow::Result<T> {
 }
 
 /// Persists one event and refreshes its rollups.
+///
+/// Under a storage config (SurrealDB selected) the event goes to the
+/// repository instead (`storage::telemetry::record`, started on the process
+/// runtime without waiting) and SQLite is never opened: the two stores are
+/// never both written.
 pub fn record(db_path: &Path, event: &TelemetryEvent) -> anyhow::Result<()> {
+    #[cfg(feature = "surreal")]
+    if crate::storage::runtime::configured() {
+        let event = event.clone();
+        crate::storage::runtime::spawn(async move {
+            if let Ok(repo) = crate::storage::runtime::repository().await {
+                let _ = crate::storage::telemetry::record(repo.db(), &event).await;
+            }
+        });
+        return Ok(());
+    }
     let conn = write_connection(db_path)?;
     insert(&conn, event)
 }

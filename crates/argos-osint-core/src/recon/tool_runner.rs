@@ -885,9 +885,8 @@ struct InvocationFact<'a> {
 impl ToolRunner {
     /// Best-effort telemetry write; never fails a tool run.
     fn note(&self, event: &TelemetryEvent) {
-        if let Some(db) = sqlite_path(&self.db_path) {
-            let _ = telemetry::record(db, event);
-        }
+        // `telemetry::record` writes to the repository under SurrealDB.
+        let _ = telemetry::record(&self.db_path, event);
     }
 
     /// Stable id for one logical invocation. The durable call id wins so a

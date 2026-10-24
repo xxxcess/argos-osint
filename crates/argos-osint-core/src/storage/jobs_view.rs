@@ -457,8 +457,8 @@ pub async fn job_detail(
 /// `retry_failed_tasks`: requeue a job's failed tasks that a durable pool
 /// owns (index and summary work), under the tree's `job_guard`, and reopen a
 /// failed/partial job, resets the requeued tasks' failed index changes and
-/// records a `job.retry` event in the same transaction. Brief-chain and
-/// insight-extraction retries wait for those pipelines. Completed tasks are untouched. A job with a cancel
+/// records a `job.retry` event in the same transaction; insight refresh tasks
+/// then retry through `insight_retry::retry_extraction`. Brief-chain retries wait for that pipeline. Completed tasks are untouched. A job with a cancel
 /// request, a retired or missing job retries nothing.
 pub async fn retry_failed_tasks(db: &Surreal<Any>, id: &str) -> Result<usize> {
     if get_job(db, id).await?.is_none() {
@@ -526,6 +526,18 @@ pub async fn retry_failed_tasks(db: &Surreal<Any>, id: &str) -> Result<usize> {
     })
     .await?
     .value;
+    // Insight extraction resumes through its own explicit retry.
+    let mut r = db
+        .query("SELECT VALUE record::id(id) FROM task WHERE job = $j AND operation = 'insight_refresh'")
+        .bind(("j", rid("job", &id)))
+        .await?
+        .check()?;
+    let mut n = n;
+    for task in r.take::<Vec<String>>(0usize)? {
+        if super::insight_retry::retry_extraction(db, &task).await? {
+            n += 1;
+        }
+    }
     Ok(n)
 }
 

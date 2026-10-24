@@ -83,3 +83,15 @@ async fn exhausted_stage_is_scoped_to_owner_and_generation() {
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn retry_extraction_skips_a_missing_task() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "insight_retry_extraction").await;
+    bootstrap::ensure_schema(repo.db()).await.unwrap();
+    assert!(!insight_retry::retry_extraction(repo.db(), "missing")
+        .await
+        .unwrap());
+}

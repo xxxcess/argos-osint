@@ -490,9 +490,8 @@ pub async fn commit(
 /// article's newest live one, replace the links-stage leads, and bind the
 /// stage's canonical index state.
 ///
-/// Gap (acceptance.md): the canonical Brain snapshot of a brief
-/// (`brief_canonical::publish_stage_on`) is not ported, so the bound state
-/// is `not_indexed` with that reason.
+/// Canonical Brain publication runs through [`super::brief_publish`]; its
+/// failure is recorded in the bound state and never fails the stage.
 async fn publish_stage(repo: &Repository, job_id: &str, operation: &str, run: &Run) -> Result<()> {
     let stage = super::brief::Stage::from_operation(operation);
     if stage == super::brief::Stage::Other {
@@ -542,7 +541,7 @@ async fn publish_stage(repo: &Repository, job_id: &str, operation: &str, run: &R
             contract: brief_pipeline::CONTRACT.to_string(),
             body_hash: body["content_hash"].as_str().unwrap_or("").to_string(),
             snapshot_hash: snapshot_hash.clone(),
-            claims,
+            claims: claims.clone(),
             inferences: inferences.clone(),
             leads: links["leads"].clone(),
             stage,
@@ -590,14 +589,25 @@ async fn publish_stage(repo: &Repository, job_id: &str, operation: &str, run: &R
             .collect();
         super::brief::replace_leads(repo, &run.article_id, job_id, run.generation, &leads).await?;
     }
-    let state = crate::intel_recon::brief_canonical::IndexState {
-        publication_version: 0,
-        state: "not_indexed".into(),
-        snapshot_id: String::new(),
-        reason: "canonical brief publication is not available on SurrealDB yet".into(),
-        job_id: job_id.to_string(),
-        required: Vec::new(),
-    };
+    let prepared = super::brief_publish::prepare(
+        repo,
+        &run.article_id,
+        &body,
+        &claims,
+        &inferences,
+        operation,
+    )
+    .await
+    .unwrap_or_else(|error| Err(format!("canonical inputs not prepared: {error}")));
+    let state = super::brief_publish::publish_stage(
+        repo,
+        &run.article_id,
+        job_id,
+        operation,
+        &prepared,
+        &snapshot_hash,
+    )
+    .await?;
     super::brief::put_stage_receipt(repo, job_id, operation, &state).await?;
     super::brief::put_index_state(repo, &run.article_id, &state).await?;
     Ok(())

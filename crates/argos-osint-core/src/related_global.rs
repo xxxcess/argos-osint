@@ -6,9 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use rusqlite::params;
 
-use crate::brain_actors as actors;
 use crate::related_articles::{canonical_url, ArticleOrigin};
 use crate::store::{AtlasArticleRow, Store};
 
@@ -247,210 +245,11 @@ fn occurrences_of_url(store: &Store, key: &str) -> Result<Vec<AtlasArticleRow>> 
     Ok(out)
 }
 
-fn actor_name(store: &Store, actor_id: &str) -> String {
+fn actor_name(_store: &Store, actor_id: &str) -> String {
     crate::storage::store_bridge::actor_display_name(actor_id)
         .ok()
         .flatten()
         .unwrap_or_else(|| actor_id.into())
-}
-
-impl Store {
-    /// Related articles for one occurrence, grouped by URL. `AllRetained`
-    /// starts from every retained occurrence of the source URL and adds Brain
-    /// Related records and articles sharing a canonical actor; `ThisCycle`
-    /// keeps only the source cycle's shared-mention leads.
-    pub fn related_articles_global(
-        &self,
-        source_run: &str,
-        source_article: &str,
-        scope: RelatedScope,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<GlobalRelatedPage> {
-        let Some(source) = self.atlas_article(source_run, source_article)? else {
-            return Ok(GlobalRelatedPage {
-                scope,
-                ..GlobalRelatedPage::default()
-            });
-        };
-        let exclude = url_key(&source);
-        let sources = self.occurrences_for(&source, scope)?;
-        let mut c = Collector {
-            store: self,
-            exclude: BTreeSet::from([exclude]),
-            rows: BTreeMap::new(),
-        };
-        for s in &sources {
-            self.gather(&mut c, s, scope)?;
-        }
-        c.finish(cursor, limit, scope)
-    }
-
-    fn occurrences_for(
-        &self,
-        source: &AtlasArticleRow,
-        scope: RelatedScope,
-    ) -> Result<Vec<AtlasArticleRow>> {
-        let key = url_key(source);
-        Ok(match scope {
-            RelatedScope::AllRetained if !key.starts_with("occurrence:") => {
-                occurrences_of_url(self, &key)?
-            }
-            _ => vec![source.clone()],
-        })
-    }
-
-    fn gather(
-        &self,
-        c: &mut Collector<'_>,
-        s: &AtlasArticleRow,
-        scope: RelatedScope,
-    ) -> Result<()> {
-        let mut start = 0;
-        loop {
-            let page = self.related_articles(&s.run_id, &s.id, start, 100)?;
-            for row in &page.rows {
-                c.add_related(s, &row.article.run_id, &row.article.id, row.reason(), false)?;
-            }
-            if !page.has_more {
-                break;
-            }
-            start += 100;
-        }
-        if scope == RelatedScope::ThisCycle {
-            return Ok(());
-        }
-        // Brain Related records touching this occurrence (active only).
-        let surreal_hits = {
-            Some(crate::storage::store_bridge::related_endpoint_candidates(
-                &s.run_id, &s.id, false,
-            )?)
-        };
-        #[cfg(not(feature = "surreal"))]
-        let surreal_hits: Option<Vec<(String, String, String)>> = None;
-        let hits = match surreal_hits {
-            Some(h) => h,
-            None => self.related_hits_sqlite(s)?,
-        };
-        for (run, id, memory) in hits {
-            let basis = match self.memory_payload(&memory)? {
-                Some(crate::memory_metadata::MemoryPayload::Related(p))
-                    if crate::related_articles::current_ingest_related(self, &p)? =>
-                {
-                    p.basis
-                }
-                _ => continue,
-            };
-            c.add_related(s, &run, &id, basis, false)?;
-        }
-        Ok(())
-    }
-
-    fn related_hits_sqlite(&self, s: &AtlasArticleRow) -> Result<Vec<(String, String, String)>> {
-        let mut stmt = self.conn.prepare(
-                "SELECT o.origin,o.ref_id,mm.memory_id FROM brain_memory_endpoints e
-                 JOIN brain_memory_endpoints o ON o.memory_id=e.memory_id AND o.side<>e.side AND o.endpoint_kind='article'
-                 JOIN memory_metadata mm ON mm.memory_id=e.memory_id AND mm.memory_kind='related' AND mm.lifecycle<>'retired'
-                 WHERE e.endpoint_kind='article' AND e.origin=?1 AND e.ref_id=?2",
-            )?;
-        let hits = stmt
-            .query_map(params![s.run_id, s.id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(hits)
-    }
-
-    /// Related articles for a memory: the union over every article origin of
-    /// the memory, one row per URL, excluding the origins themselves.
-    pub fn related_articles_global_for_memory(
-        &self,
-        memory_id: &str,
-        scope: RelatedScope,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<GlobalRelatedPage> {
-        // An Actor's Related Articles are the articles that mention it.
-        if crate::brain_kinds::memory_kind(self, memory_id)?
-            == crate::memory_metadata::MemoryKind::Actor
-        {
-            return self.actor_articles(memory_id, cursor, limit);
-        }
-        let mut sources = Vec::new();
-        let mut exclude = BTreeSet::new();
-        let mut origins = self.article_origins_for_memory(memory_id)?;
-        // Link/Related records start from their article endpoints.
-        {
-            origins.extend(crate::storage::store_bridge::memory_article_endpoints(
-                memory_id,
-            )?);
-        }
-        #[cfg(not(feature = "surreal"))]
-        origins.extend(self.memory_article_endpoints_sqlite(memory_id)?);
-        for origin in origins {
-            if let Some(a) = self.atlas_article(&origin.run_id, &origin.article_id)? {
-                exclude.insert(url_key(&a));
-                sources.extend(self.occurrences_for(&a, scope)?);
-            }
-        }
-        let mut c = Collector {
-            store: self,
-            exclude,
-            rows: BTreeMap::new(),
-        };
-        for s in &sources {
-            self.gather(&mut c, s, scope)?;
-        }
-        c.finish(cursor, limit, scope)
-    }
-
-    fn memory_article_endpoints_sqlite(&self, memory_id: &str) -> Result<Vec<ArticleOrigin>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT origin,ref_id FROM brain_memory_endpoints WHERE memory_id=?1 AND endpoint_kind='article'",
-        )?;
-        let rows = stmt
-            .query_map([memory_id], |r| {
-                Ok(ArticleOrigin {
-                    run_id: r.get(0)?,
-                    article_id: r.get(1)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
-    }
-
-    /// Articles mentioning a canonical actor (and everything merged into it),
-    /// one row per URL across all retained cycles.
-    pub fn actor_articles(
-        &self,
-        actor_id: &str,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<GlobalRelatedPage> {
-        let canonical = crate::brain_kinds::actor_resolve(self, actor_id)?;
-        let name = actor_name(self, &canonical);
-        let mut c = Collector {
-            store: self,
-            exclude: BTreeSet::new(),
-            rows: BTreeMap::new(),
-        };
-        for (kind, run, id, revision) in crate::brain_kinds::actor_mentions(self, &canonical)? {
-            if kind == "article" {
-                let Some(article) = self.atlas_article(&run, &id)? else {
-                    continue;
-                };
-                if !revision.is_empty() && revision != crate::atlas_metadata::input_hash(&article) {
-                    continue;
-                }
-                c.add(&run, &id, format!("mentions {name}"), true)?;
-            }
-        }
-        c.finish(cursor, limit, RelatedScope::AllRetained)
-    }
 }
 
 /// `Store::related_articles_global` on SurrealDB: URL occurrences across
@@ -560,7 +359,3 @@ pub async fn related_articles_global_on(
     }
     Ok(finish(grouped, cursor, limit, scope))
 }
-
-#[cfg(test)]
-#[path = "related_global_tests.rs"]
-mod tests;

@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::tasks::{self, OperationKind};
 
@@ -83,7 +82,7 @@ fn redact_local_paths(message: &str) -> String {
 
 /// Surface a drainer failure as a redacted (secrets and local paths),
 /// rate-limited error event (Logs) instead of discarding it.
-fn report_drainer<T>(db_path: &std::path::Path, name: &str, result: Result<T>) {
+fn report_drainer<T>(_db_path: &std::path::Path, name: &str, result: Result<T>) {
     static SEEN: std::sync::OnceLock<std::sync::Mutex<Seen>> = std::sync::OnceLock::new();
     let Err(error) = result else {
         return;
@@ -128,74 +127,6 @@ impl PoolKind {
     }
 }
 
-/// Ensure the scheduler lease table exists (additive).
-pub fn migrate_scheduler(conn: &Connection) -> Result<()> {
-    // Lease renewal calls this helper too. Existing pools need a read-only
-    // existence check, not a CREATE statement on every polling interval.
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='argos_scheduler_lease')",
-        [],
-        |row| row.get(0),
-    )?;
-    if exists {
-        return Ok(());
-    }
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS argos_scheduler_lease (
-            id TEXT PRIMARY KEY,
-            owner TEXT NOT NULL,
-            lease_until TEXT NOT NULL,
-            epoch INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL
-        );",
-    )?;
-    Ok(())
-}
-
-/// Try to become (or renew) the elected scheduler owner for this state root.
-pub fn try_elect(conn: &Connection, owner: &str, lease_secs: i64) -> Result<bool> {
-    migrate_scheduler(conn)?;
-    let now = chrono::Utc::now();
-    let now_s = now.to_rfc3339();
-    let until = (now + chrono::Duration::seconds(lease_secs)).to_rfc3339();
-    let existing: Option<(String, String, i64)> = conn
-        .query_row(
-            "SELECT owner, lease_until, epoch FROM argos_scheduler_lease WHERE id=?1",
-            [SCHEDULER_LEASE_KEY],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-    match existing {
-        None => {
-            conn.execute(
-                "INSERT INTO argos_scheduler_lease(id,owner,lease_until,epoch,updated_at)
-                 VALUES (?1,?2,?3,1,?4)",
-                params![SCHEDULER_LEASE_KEY, owner, until, now_s],
-            )?;
-            Ok(true)
-        }
-        Some((cur_owner, lease_until, epoch)) => {
-            let expired = lease_until.as_str() < now_s.as_str();
-            if cur_owner == owner || expired {
-                let n = conn.execute(
-                    "UPDATE argos_scheduler_lease SET owner=?1, lease_until=?2, epoch=?3, updated_at=?4
-                     WHERE id=?5 AND (owner=?1 OR lease_until<?4)",
-                    params![
-                        owner,
-                        until,
-                        epoch + if expired && cur_owner != owner { 1 } else { 0 },
-                        now_s,
-                        SCHEDULER_LEASE_KEY
-                    ],
-                )?;
-                Ok(n > 0)
-            } else {
-                Ok(false)
-            }
-        }
-    }
-}
-
 /// Apply one index change with a typed outcome. Opening the store or any index
 /// error is a typed failure, never an "upserted" string.
 pub fn apply_index_change(
@@ -229,40 +160,6 @@ pub fn apply_index_with(
     }
 }
 
-/// Claim and apply up to `max` leased index tasks. Embedding/Lance work runs
-/// outside any SQLite write transaction; acknowledgement is owner/epoch guarded.
-pub fn drain_index_once(
-    conn: &Connection,
-    store: &crate::store::Store,
-    owner: &str,
-    max: usize,
-) -> Result<usize> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let _ = tasks::adopt_untracked_index_changes(conn, &now);
-    if store.vectors_enabled() {
-        // Enablement resumes work parked while embeddings were disabled.
-        let _ = tasks::resume_blocked(conn, tasks::EMBEDDINGS_DISABLED, &now);
-    }
-    let mut done = 0usize;
-    for _ in 0..max {
-        let now = chrono::Utc::now().to_rfc3339();
-        let Some((claimed, work)) = tasks::claim_index_work(conn, owner, DEFAULT_LEASE_SECS, &now)?
-        else {
-            break;
-        };
-        let mut outcome = store.apply_index_work(&work);
-        if let tasks::IndexOutcome::Ready { revision, .. } = &mut outcome {
-            if revision.is_empty() {
-                *revision = work.revision.clone();
-            }
-        }
-        let finished = chrono::Utc::now().to_rfc3339();
-        tasks::finish_index_work(conn, &claimed, &work, &outcome, &finished)?;
-        done += 1;
-    }
-    Ok(done)
-}
-
 /// One finished summary flush task, with its truthful terminal outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlushOutcome {
@@ -275,47 +172,6 @@ pub struct FlushOutcome {
     pub generated: bool,
     /// The lease was lost; the task was neither published nor completed.
     pub stale: bool,
-}
-
-/// Drain pending summarization flush tasks from the summary pool only.
-///
-/// When `secret` is `Some`, runs [`crate::summarization::try_live_summary_upgrade`]
-/// (2-attempt `complete_summary`). When `None`, keeps deterministic cache and
-/// records `cached_deterministic_no_secret` — never invents network success.
-/// Errors are recorded as typed failures under the shared retry policy, never
-/// as a completed result string. Topology neighborhood tasks need the whole
-/// role chain; use [`drain_summary_flush_with_runtime`].
-pub fn drain_summary_flush(
-    conn: &Connection,
-    owner: &str,
-    secret: Option<&crate::secrets::ProviderSecret>,
-) -> Result<usize> {
-    Ok(
-        drain_summary_flush_with_runtime(conn, owner, secret, None, None, DEFAULT_LEASE_SECS)?
-            .len(),
-    )
-}
-
-/// Role-aware drain. Topology neighborhood tasks receive the worker's full
-/// `RoleRuntime` (every route of the Summarization chain) and are generated,
-/// validated, published and completed under the lease fence. Other modes keep
-/// the single-secret path. Returns each task's terminal outcome.
-pub fn drain_summary_flush_with_runtime(
-    conn: &Connection,
-    owner: &str,
-    secret: Option<&crate::secrets::ProviderSecret>,
-    runtime: Option<&crate::recon::model_exec::RoleRuntime>,
-    db_path: Option<&std::path::Path>,
-    lease_secs: i64,
-) -> Result<Vec<FlushOutcome>> {
-    drain_summary_flush_lazy(
-        conn,
-        owner,
-        Lazy::given(secret),
-        Lazy::given(runtime),
-        db_path,
-        lease_secs,
-    )
 }
 
 /// A dependency that is either supplied or loaded on first use. The idle
@@ -352,100 +208,6 @@ impl<'a, T> Lazy<'a, T> {
             .get_or_init(|| self.load.and_then(|load| load()))
             .as_ref()
     }
-}
-
-pub(crate) fn drain_summary_flush_lazy(
-    conn: &Connection,
-    owner: &str,
-    secret: Lazy<crate::secrets::ProviderSecret>,
-    runtime: Lazy<crate::recon::model_exec::RoleRuntime>,
-    db_path: Option<&std::path::Path>,
-    lease_secs: i64,
-) -> Result<Vec<FlushOutcome>> {
-    let mut outcomes = Vec::new();
-    for _ in 0..8 {
-        let now = chrono::Utc::now().to_rfc3339();
-        let Some(claimed) =
-            tasks::claim_next_in(conn, &[tasks::POOL_SUMMARY], owner, lease_secs, &now)?
-        else {
-            break;
-        };
-        let outcome = |tag: &str, generated: bool, stale: bool| FlushOutcome {
-            task_id: claimed.id.clone(),
-            operation: claimed.operation.clone(),
-            cache_key: claimed.input_hash.clone(),
-            tag: tag.to_string(),
-            generated,
-            stale,
-        };
-        if claimed.operation == crate::brain_neighborhood_brief_exec::OPERATION {
-            match crate::brain_neighborhood_brief_exec::run_claimed(
-                conn,
-                &claimed,
-                runtime.get(),
-                db_path,
-                lease_secs,
-            ) {
-                Ok(o) => outcomes.push(outcome(&o.tag, o.generated, o.stale)),
-                Err(error) => {
-                    let finished = chrono::Utc::now().to_rfc3339();
-                    tasks::fail_claimed(
-                        conn,
-                        &claimed,
-                        OperationKind::Summarization,
-                        &error,
-                        &finished,
-                    )?;
-                    outcomes.push(outcome("storage_failed", false, false));
-                }
-            }
-            continue;
-        }
-        // Typed routing of failures: a missing request is permanent (nothing to
-        // upgrade); storage errors are not provider errors and are not retried
-        // blindly. No error text is ever stored as a completion result.
-        let result = match crate::summarization::load_flush_request(conn, &claimed.input_hash) {
-            Ok(Some(_)) => crate::summarization::try_live_summary_upgrade(
-                conn,
-                secret.get(),
-                &claimed.input_hash,
-            )
-            .map_err(|err| {
-                tasks::TaskError::new(tasks::ErrorCategory::Unknown, format!("{err:#}"))
-            }),
-            Ok(None) => Err(tasks::TaskError::new(
-                tasks::ErrorCategory::Unknown,
-                format!("flush request missing for {}", claimed.input_hash),
-            )),
-            Err(err) => Err(tasks::TaskError::new(
-                tasks::ErrorCategory::Unknown,
-                format!("{err:#}"),
-            )),
-        };
-        let finished = chrono::Utc::now().to_rfc3339();
-        match result {
-            Ok((summary, tag)) => {
-                tasks::complete_claimed(conn, &claimed, tag, &finished)?;
-                outcomes.push(outcome(tag, !summary.fallback, false));
-            }
-            Err(error) => {
-                tasks::fail_claimed(
-                    conn,
-                    &claimed,
-                    OperationKind::Summarization,
-                    &error,
-                    &finished,
-                )?;
-                outcomes.push(outcome("failed", false, false));
-            }
-        }
-    }
-    Ok(outcomes)
-}
-
-/// Drain without a provider secret (deterministic cache only).
-pub fn drain_summary_flush_cached(conn: &Connection, owner: &str) -> Result<usize> {
-    drain_summary_flush(conn, owner, None)
 }
 
 /// The worker's full role runtime (all routes), when auth and settings load.
@@ -497,74 +259,21 @@ impl WorkerPool {
         let flag = stop.clone();
         // Under SurrealDB the index pool is the repository's; only the Atlas
         // memory-phase refresh runs here, never reopening SQLite.
-        if crate::recon::backend::sqlite_path(&db_path).is_none() {
-            #[cfg(feature = "surreal")]
-            crate::storage::runtime::spawn(async move {
-                while !flag.load(Ordering::Relaxed) {
-                    if let Ok(store) = crate::atlas_store::AtlasStore::open(&db_path).await {
-                        let _ = crate::atlas_memory::refresh_incomplete_runs_store(&store, 8).await;
-                    }
-                    for _ in 0..60 {
-                        if flag.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                    }
+        #[cfg(feature = "surreal")]
+        crate::storage::runtime::spawn(async move {
+            while !flag.load(Ordering::Relaxed) {
+                if let Ok(store) = crate::atlas_store::AtlasStore::open(&db_path).await {
+                    let _ = crate::atlas_memory::refresh_incomplete_runs_store(&store, 8).await;
                 }
-            });
-            let _ = owner;
-            return Self { stop };
-        }
-        std::thread::Builder::new()
-            .name("argos-index-pool".into())
-            .spawn(move || {
-                let mut idle_loops = 0u32;
-                let mut schema_ready = false;
-                while !flag.load(Ordering::Relaxed) {
-                    let Ok(conn) = Connection::open(&db_path) else {
-                        std::thread::sleep(Duration::from_secs(2));
-                        continue;
-                    };
-                    let _ = conn.busy_timeout(Duration::from_secs(5));
-                    if !schema_ready {
-                        schema_ready = migrate_scheduler(&conn)
-                            .and_then(|_| tasks::migrate_tables(&conn))
-                            .is_ok();
+                for _ in 0..60 {
+                    if flag.load(Ordering::Relaxed) {
+                        return;
                     }
-                    if !try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false) {
-                        std::thread::sleep(Duration::from_secs(2));
-                        continue;
-                    }
-                    let now = chrono::Utc::now().to_rfc3339();
-                    if idle_loops.is_multiple_of(60) {
-                        if let Ok(service) = tasks::ensure_service_job(
-                            &conn,
-                            tasks::INDEX_SERVICE_JOB,
-                            "brain",
-                            "Local index worker",
-                            &now,
-                        ) {
-                            let _ = tasks::refresh_job_state(&conn, &service, &now);
-                        }
-                    }
-                    let _ = tasks::retire_atlas_insight_work(&conn, &now);
-                    let _ = tasks::interrupt_expired_leases(&conn, &now);
-                    if let Ok(store) = crate::store::Store::open_index_worker(&db_path) {
-                        let drained = drain_index_once(&conn, &store, &owner, 16).unwrap_or(0);
-                        // Catch up generation rebuilds even without an explicit change row.
-                        let _ = store.process_pending_vector_rebuild(2);
-                        // Atlas runs left partial/blocked by indexing reach their
-                        // verified status once this pool finishes their work.
-                        idle_loops += 1;
-                        if drained > 0 || idle_loops >= 60 {
-                            idle_loops = 0;
-                            let _ = crate::atlas_memory::refresh_incomplete_runs(&store, 8);
-                        }
-                    }
-                    std::thread::sleep(Duration::from_millis(500));
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
-            })
-            .ok();
+            }
+        });
+        let _ = owner;
         Self { stop }
     }
 
@@ -576,72 +285,28 @@ impl WorkerPool {
         std::thread::Builder::new()
             .name("argos-summary-pool".into())
             .spawn(move || {
-                let mut loops = 0u32;
-                let mut schema_ready = false;
+                let _loops = 0u32;
+                let _schema_ready = false;
                 while !flag.load(Ordering::Relaxed) {
-                    {
-                        let owner = owner.clone();
-                        let drained = crate::storage::runtime::blocking(move |repo| async move {
-                            if !surreal_elected(&repo, &owner).await? {
-                                return Ok(0);
-                            }
-                            let out = crate::storage::summary_flush::drain(
-                                &repo,
-                                &owner,
-                                load_summarization_secret,
-                                DEFAULT_LEASE_SECS,
-                            )
-                            .await?;
-                            Ok(out.len())
-                        });
-                        let busy = matches!(drained, Ok(n) if n > 0);
-                        report_drainer(&db_path, "summary", drained);
-                        if !busy {
-                            std::thread::sleep(Duration::from_millis(750));
+                    let owner = owner.clone();
+                    let drained = crate::storage::runtime::blocking(move |repo| async move {
+                        if !surreal_elected(&repo, &owner).await? {
+                            return Ok(0);
                         }
-                        continue;
+                        let out = crate::storage::summary_flush::drain(
+                            &repo,
+                            &owner,
+                            load_summarization_secret,
+                            DEFAULT_LEASE_SECS,
+                        )
+                        .await?;
+                        Ok(out.len())
+                    });
+                    let busy = matches!(drained, Ok(n) if n > 0);
+                    report_drainer(&db_path, "summary", drained);
+                    if !busy {
+                        std::thread::sleep(Duration::from_millis(750));
                     }
-                    let Ok(conn) = Connection::open(&db_path) else {
-                        std::thread::sleep(Duration::from_secs(2));
-                        continue;
-                    };
-                    let _ = conn.busy_timeout(Duration::from_secs(5));
-                    if !schema_ready {
-                        schema_ready = tasks::migrate_tables(&conn).is_ok();
-                    }
-                    if !try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false) {
-                        std::thread::sleep(Duration::from_secs(2));
-                        continue;
-                    }
-                    let _ =
-                        tasks::retire_atlas_insight_work(&conn, &chrono::Utc::now().to_rfc3339());
-                    // Best-effort: load summarization role secret when configured.
-                    // Never invents success when auth/settings/secret are missing.
-                    // Loaded lazily, only once a summary task is claimed.
-                    // Service-health row; batches/tasks supply the job history.
-                    if loops.is_multiple_of(40) {
-                        let now = chrono::Utc::now().to_rfc3339();
-                        let service = tasks::ensure_service_job(
-                            &conn,
-                            SUMMARY_SERVICE_JOB,
-                            "brain",
-                            "Summary flush worker",
-                            &now,
-                        );
-                        if let Ok(service) = service {
-                            let _ = tasks::refresh_job_state(&conn, &service, &now);
-                        }
-                    }
-                    loops = loops.wrapping_add(1);
-                    let _ = drain_summary_flush_lazy(
-                        &conn,
-                        &owner,
-                        Lazy::loaded_on_demand(load_summarization_secret),
-                        Lazy::loaded_on_demand(load_role_runtime),
-                        Some(&db_path),
-                        DEFAULT_LEASE_SECS,
-                    );
-                    std::thread::sleep(Duration::from_millis(750));
                 }
             })
             .ok();
@@ -653,29 +318,18 @@ impl WorkerPool {
         let owner = process_owner();
         // Under a storage config nothing may open SQLite: each pool below
         // has a repository drainer.
-        if crate::recon::backend::surreal_selected() {
-            #[cfg(feature = "surreal")]
-            return vec![
-                Self::spawn_surreal_index_drainer(db_path.clone(), owner.clone()),
-                Self::spawn_summary_flush_drainer(db_path.clone(), owner.clone()),
-                Self::spawn_insight_refresh_drainer(db_path.clone(), owner.clone()),
-                Self::spawn_brain_backfill_drainer(db_path.clone(), owner.clone()),
-                Self::spawn_actor_dedup_drainer(db_path.clone(), owner.clone()),
-                Self::spawn_intel_brief_drainer(db_path.clone(), owner.clone()),
-                Self::spawn_brain_scope_drainer(db_path, owner),
-            ];
-            #[cfg(not(feature = "surreal"))]
-            return vec![Self::spawn_insight_refresh_drainer(db_path, owner)];
-        }
-        vec![
-            Self::spawn_index_drainer(db_path.clone(), owner.clone()),
+        #[cfg(feature = "surreal")]
+        return vec![
+            Self::spawn_surreal_index_drainer(db_path.clone(), owner.clone()),
             Self::spawn_summary_flush_drainer(db_path.clone(), owner.clone()),
             Self::spawn_insight_refresh_drainer(db_path.clone(), owner.clone()),
             Self::spawn_brain_backfill_drainer(db_path.clone(), owner.clone()),
             Self::spawn_actor_dedup_drainer(db_path.clone(), owner.clone()),
             Self::spawn_intel_brief_drainer(db_path.clone(), owner.clone()),
             Self::spawn_brain_scope_drainer(db_path, owner),
-        ]
+        ];
+        #[cfg(not(feature = "surreal"))]
+        vec![Self::spawn_insight_refresh_drainer(db_path, owner)]
     }
 
     /// The index pool on SurrealDB: while elected on the repository's
@@ -734,50 +388,30 @@ impl WorkerPool {
         let _ = std::thread::Builder::new()
             .name("argos-actor-dedup".into())
             .spawn(move || {
-                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                let Ok(_runtime) = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                 else {
                     return;
                 };
                 while !flag.load(Ordering::Acquire) {
-                    {
-                        let (owner, stop) = (owner.clone(), flag.clone());
-                        report_drainer(
-                            &db_path,
-                            "actor-dedup",
-                            crate::storage::runtime::blocking(move |repo| async move {
-                                if !surreal_elected(&repo, &owner).await? {
-                                    return Ok(0);
-                                }
-                                let auth = crate::secrets::AuthFile::load().unwrap_or_default();
-                                let settings =
-                                    crate::provider::SettingsFile::load().unwrap_or_default();
-                                crate::storage::actor_dedup::drain(
-                                    &repo, &owner, &stop, &auth, &settings,
-                                )
-                                .await
-                            }),
-                        );
-                        for _ in 0..120 {
-                            if flag.load(Ordering::Acquire) {
-                                break;
+                    let (owner, stop) = (owner.clone(), flag.clone());
+                    report_drainer(
+                        &db_path,
+                        "actor-dedup",
+                        crate::storage::runtime::blocking(move |repo| async move {
+                            if !surreal_elected(&repo, &owner).await? {
+                                return Ok(0);
                             }
-                            std::thread::sleep(Duration::from_millis(250));
-                        }
-                        continue;
-                    }
-                    let elected = Connection::open(&db_path).ok().is_some_and(|conn| {
-                        try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
-                    });
-                    if elected {
-                        report_drainer(
-                            &db_path,
-                            "actor-dedup",
-                            runtime
-                                .block_on(crate::brain_actor_dedup::drain(&db_path, &owner, &flag)),
-                        );
-                    }
+                            let auth = crate::secrets::AuthFile::load().unwrap_or_default();
+                            let settings =
+                                crate::provider::SettingsFile::load().unwrap_or_default();
+                            crate::storage::actor_dedup::drain(
+                                &repo, &owner, &stop, &auth, &settings,
+                            )
+                            .await
+                        }),
+                    );
                     for _ in 0..120 {
                         if flag.load(Ordering::Acquire) {
                             break;
@@ -799,39 +433,21 @@ impl WorkerPool {
             .name("argos-brain-backfill".into())
             .spawn(move || {
                 while !flag.load(Ordering::Acquire) {
-                    {
-                        let owner = owner.clone();
-                        let ran = crate::storage::runtime::blocking(move |repo| async move {
-                            if !surreal_elected(&repo, &owner).await? {
-                                return Ok(None);
-                            }
-                            crate::storage::brain_backfill::backfill(
-                                &repo,
-                                crate::brain_backfill::BATCH,
-                            )
-                            .await
-                            .map(|r| Some(r.complete))
-                        });
-                        let busy = matches!(ran, Ok(Some(false)));
-                        report_drainer(&db_path, "brain-backfill", ran);
-                        let pause = if busy { 1 } else { 30 };
-                        for _ in 0..pause * 4 {
-                            if flag.load(Ordering::Acquire) {
-                                break;
-                            }
-                            std::thread::sleep(Duration::from_millis(250));
+                    let owner = owner.clone();
+                    let ran = crate::storage::runtime::blocking(move |repo| async move {
+                        if !surreal_elected(&repo, &owner).await? {
+                            return Ok(None);
                         }
-                        continue;
-                    }
-                    let elected = Connection::open(&db_path).ok().is_some_and(|conn| {
-                        try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
+                        crate::storage::brain_backfill::backfill(
+                            &repo,
+                            crate::brain_backfill::BATCH,
+                        )
+                        .await
+                        .map(|r| Some(r.complete))
                     });
-                    let complete = elected
-                        && crate::store::Store::open_light(&db_path)
-                            .and_then(|s| s.brain_backfill(crate::brain_backfill::BATCH))
-                            .map(|r| r.complete)
-                            .unwrap_or(false);
-                    let pause = if !elected || complete { 30 } else { 1 };
+                    let busy = matches!(ran, Ok(Some(false)));
+                    report_drainer(&db_path, "brain-backfill", ran);
+                    let pause = if busy { 1 } else { 30 };
                     for _ in 0..pause * 4 {
                         if flag.load(Ordering::Acquire) {
                             break;
@@ -863,14 +479,14 @@ impl WorkerPool {
     pub fn spawn_intel_brief_drainer_with(
         db_path: std::path::PathBuf,
         owner: String,
-        make_backend: IntelBackendFactory,
+        _make_backend: IntelBackendFactory,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let _ = std::thread::Builder::new()
             .name("argos-intel-brief".into())
             .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_multi_thread()
+                let _runtime = match tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .enable_all()
                     .build()
@@ -889,64 +505,45 @@ impl WorkerPool {
                 while !flag.load(Ordering::Acquire) {
                     // SurrealDB: elect on the repository's scheduler lease and
                     // drain the repository's brief chains; never the SQLite file.
-                                        {
-                        let (owner, flag, config) = (owner.clone(), flag.clone(), config.clone());
-                        report_drainer(
-                            &db_path,
-                            "intel-brief",
-                            crate::storage::runtime::blocking(move |repo| async move {
-                                let elected = crate::storage::jobs::try_elect(
-                                    repo.db(),
-                                    &owner,
-                                    DEFAULT_LEASE_SECS,
-                                    chrono::Utc::now(),
-                                )
-                                .await
-                                .map_err(|e| anyhow::anyhow!("elect: {e}"))?
-                                .value
-                                .elected;
-                                if !elected {
-                                    return Ok(0);
-                                }
-                                let r = repo.clone();
-                                crate::storage::brief_stages::drain_parallel(
-                                    &repo,
-                                    &format!("{owner}:intel-brief"),
-                                    move || {
-                                        Box::new(
-                                            crate::storage::brief_stages::SurrealRuntimeBackend::load(
-                                                r.clone(),
-                                            ),
-                                        )
-                                            as Box<
-                                                dyn crate::intel_recon::brief_stages::StageBackend
-                                                    + Send,
-                                            >
-                                    },
-                                    &flag,
-                                    &config,
-                                    crate::intel_recon::brief_stages::STAGE_SLOTS,
-                                )
-                                .await
-                            }),
-                        );
-                        std::thread::sleep(Duration::from_millis(750));
-                        continue;
-                    }
-                    // Two stage slots: the independent v2 roots really run
-                    // together, each with its own backend and connections.
-                    let factory = make_backend.clone();
+                    let (owner, flag, config) = (owner.clone(), flag.clone(), config.clone());
                     report_drainer(
                         &db_path,
                         "intel-brief",
-                        runtime.block_on(crate::intel_recon::brief_stages::drain_parallel(
-                            &db_path,
-                            &format!("{owner}:intel-brief"),
-                            move || factory(),
-                            &flag,
-                            &config,
-                            crate::intel_recon::brief_stages::STAGE_SLOTS,
-                        )),
+                        crate::storage::runtime::blocking(move |repo| async move {
+                            let elected = crate::storage::jobs::try_elect(
+                                repo.db(),
+                                &owner,
+                                DEFAULT_LEASE_SECS,
+                                chrono::Utc::now(),
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("elect: {e}"))?
+                            .value
+                            .elected;
+                            if !elected {
+                                return Ok(0);
+                            }
+                            let r = repo.clone();
+                            crate::storage::brief_stages::drain_parallel(
+                                &repo,
+                                &format!("{owner}:intel-brief"),
+                                move || {
+                                    Box::new(
+                                        crate::storage::brief_stages::SurrealRuntimeBackend::load(
+                                            r.clone(),
+                                        ),
+                                    )
+                                        as Box<
+                                            dyn crate::intel_recon::brief_stages::StageBackend
+                                                + Send,
+                                        >
+                                },
+                                &flag,
+                                &config,
+                                crate::intel_recon::brief_stages::STAGE_SLOTS,
+                            )
+                            .await
+                        }),
                     );
                     std::thread::sleep(Duration::from_millis(750));
                 }
@@ -960,7 +557,7 @@ impl WorkerPool {
         let _ = std::thread::Builder::new()
             .name("argos-insight-refresh".into())
             .spawn(move || {
-                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                let Ok(_runtime) = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                 else {
@@ -970,75 +567,54 @@ impl WorkerPool {
                     // SurrealDB: elect on the repository's scheduler lease and
                     // drive the shared refresh tasks there (startup recovery
                     // included); never the SQLite file.
-                    {
-                        let (owner, flag) = (owner.clone(), flag.clone());
-                        report_drainer(
-                            &db_path,
-                            "insight-refresh",
-                            crate::storage::runtime::blocking(move |repo| async move {
-                                let elected = crate::storage::jobs::try_elect(
-                                    repo.db(),
-                                    &owner,
-                                    DEFAULT_LEASE_SECS,
-                                    chrono::Utc::now(),
-                                )
-                                .await
-                                .map_err(|e| anyhow::anyhow!("elect: {e}"))?
-                                .value
-                                .elected;
-                                if !elected {
-                                    return Ok(());
-                                }
-                                // Same fence as the SQLite pools' sweep.
-                                let _ =
-                                    crate::storage::refresh::retire_atlas_insight_work(repo.db())
-                                        .await;
-                                let auth = crate::secrets::AuthFile::load().unwrap_or_default();
-                                let settings =
-                                    crate::provider::SettingsFile::load().unwrap_or_default();
-                                let (_, errors) = crate::storage::refresh_driver::recover_and_run(
-                                    &repo,
-                                    &settings,
-                                    &flag,
-                                    || {
-                                        crate::storage::refresh_driver::pipeline(
-                                            &auth,
-                                            &settings,
-                                            &flag,
-                                            std::path::PathBuf::new(),
-                                        )
-                                    },
-                                )
-                                .await?;
-                                match errors.first() {
-                                    Some(e) => Err(anyhow::anyhow!(
-                                        "insight refresh recovery: {}: {}",
-                                        e.resource,
-                                        e.message
-                                    )),
-                                    None => Ok(()),
-                                }
-                            }),
-                        );
-                        std::thread::sleep(Duration::from_secs(2));
-                        continue;
-                    }
-                    let elected = Connection::open(&db_path).ok().is_some_and(|conn| {
-                        try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
-                    });
-                    if elected {
-                        let auth = crate::secrets::AuthFile::load().unwrap_or_default();
-                        let settings = crate::provider::SettingsFile::load().unwrap_or_default();
-                        report_drainer(
-                            &db_path,
-                            "insight-refresh",
-                            runtime.block_on(
-                                crate::investigation::insight_persist::recover_refreshes(
-                                    &db_path, &auth, &settings, &flag,
-                                ),
-                            ),
-                        );
-                    }
+                    let (owner, flag) = (owner.clone(), flag.clone());
+                    report_drainer(
+                        &db_path,
+                        "insight-refresh",
+                        crate::storage::runtime::blocking(move |repo| async move {
+                            let elected = crate::storage::jobs::try_elect(
+                                repo.db(),
+                                &owner,
+                                DEFAULT_LEASE_SECS,
+                                chrono::Utc::now(),
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("elect: {e}"))?
+                            .value
+                            .elected;
+                            if !elected {
+                                return Ok(());
+                            }
+                            // Same fence as the SQLite pools' sweep.
+                            let _ =
+                                crate::storage::refresh::retire_atlas_insight_work(repo.db()).await;
+                            let auth = crate::secrets::AuthFile::load().unwrap_or_default();
+                            let settings =
+                                crate::provider::SettingsFile::load().unwrap_or_default();
+                            let (_, errors) = crate::storage::refresh_driver::recover_and_run(
+                                &repo,
+                                &settings,
+                                &flag,
+                                || {
+                                    crate::storage::refresh_driver::pipeline(
+                                        &auth,
+                                        &settings,
+                                        &flag,
+                                        std::path::PathBuf::new(),
+                                    )
+                                },
+                            )
+                            .await?;
+                            match errors.first() {
+                                Some(e) => Err(anyhow::anyhow!(
+                                    "insight refresh recovery: {}: {}",
+                                    e.resource,
+                                    e.message
+                                )),
+                                None => Ok(()),
+                            }
+                        }),
+                    );
                     std::thread::sleep(Duration::from_secs(2));
                 }
             });
@@ -1053,40 +629,24 @@ impl WorkerPool {
         let _ = std::thread::Builder::new()
             .name("argos-brain-scope".into())
             .spawn(move || {
-                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                let Ok(_runtime) = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                 else {
                     return;
                 };
                 while !flag.load(Ordering::Acquire) {
-                    {
-                        let (owner, stop) = (owner.clone(), flag.clone());
-                        report_drainer(
-                            &db_path,
-                            "brain-scope",
-                            crate::storage::runtime::blocking(move |repo| async move {
-                                if !surreal_elected(&repo, &owner).await? {
-                                    return Ok(0);
-                                }
-                                crate::storage::brain_scope::drain(&repo, &owner, &stop).await
-                            }),
-                        );
-                        std::thread::sleep(Duration::from_millis(750));
-                        continue;
-                    }
-                    let elected = Connection::open(&db_path).ok().is_some_and(|conn| {
-                        try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
-                    });
-                    if elected {
-                        report_drainer(
-                            &db_path,
-                            "brain-scope",
-                            runtime.block_on(crate::brain_scope::drain_scope_tasks(
-                                &db_path, &owner, &flag,
-                            )),
-                        );
-                    }
+                    let (owner, stop) = (owner.clone(), flag.clone());
+                    report_drainer(
+                        &db_path,
+                        "brain-scope",
+                        crate::storage::runtime::blocking(move |repo| async move {
+                            if !surreal_elected(&repo, &owner).await? {
+                                return Ok(0);
+                            }
+                            crate::storage::brain_scope::drain(&repo, &owner, &stop).await
+                        }),
+                    );
                     std::thread::sleep(Duration::from_millis(750));
                 }
             });
@@ -1170,17 +730,6 @@ mod tests {
     }
 
     use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn election_is_exclusive_until_expiry() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("t.db");
-        let conn = Connection::open(&path).unwrap();
-        assert!(try_elect(&conn, "a", 60).unwrap());
-        assert!(!try_elect(&conn, "b", 60).unwrap());
-        assert!(try_elect(&conn, "a", 60).unwrap(), "owner can renew");
-    }
 
     #[test]
     fn operation_kind_maps_summarization_modes() {

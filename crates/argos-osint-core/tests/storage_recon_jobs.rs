@@ -203,12 +203,15 @@ async fn recon_job_rows_begin_resume_and_finish() {
         .unwrap();
     let mut r = repo
         .db()
-        .query("SELECT VALUE [state, attempts_used] FROM ONLY type::record('job', $k)")
+        .query("SELECT state, attempts_used FROM ONLY type::record('job', $k)")
         .bind(("k", id.clone()))
         .await
         .unwrap();
     let v: Option<serde_json::Value> = r.take(0usize).unwrap();
-    assert_eq!(v, Some(serde_json::json!(["completed", 2])));
+    assert_eq!(
+        v,
+        Some(serde_json::json!({"state": "completed", "attempts_used": 2}))
+    );
     let rows = rj::profile_rows(repo.db()).await.unwrap();
     assert!(rows.report_jobs.is_empty());
 }

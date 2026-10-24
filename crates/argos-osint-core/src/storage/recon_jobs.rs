@@ -602,14 +602,15 @@ pub async fn next_job_revision(repo: &Repository, article_id: &str, mode: &str) 
     let mut r = repo
         .db()
         .query(
-            "RETURN (math::max(SELECT VALUE revision FROM intel_report_job
-               WHERE article_id = $a AND mode = $m) ?? 0) + 1",
+            "SELECT VALUE revision FROM intel_report_job
+               WHERE article_id = $a AND mode = $m ORDER BY revision DESC LIMIT 1",
         )
         .bind(("a", article_id.to_string()))
         .bind(("m", mode.to_string()))
         .await?
         .check()?;
-    Ok(r.take::<Option<i64>>(0usize)?.unwrap_or(1))
+    let top: Vec<i64> = r.take(0usize)?;
+    Ok(top.first().map_or(1, |rev| rev + 1))
 }
 
 fn report_terminal(state: &str) -> bool {

@@ -1003,7 +1003,8 @@ async fn surreal_recover(repo: &crate::storage::repo::Repository, me: &str) -> R
     if !fresh.iter().any(|o| o == me) {
         return Ok(0);
     }
-    #[derive(surrealdb::types::SurrealValue)]
+    use surrealdb::types::SurrealValue;
+    #[derive(SurrealValue)]
     struct Orphan {
         id: String,
         app: String,

@@ -11,10 +11,6 @@ use argos_osint_core::profile_stats::{ProfileSnapshot, StatFilters};
 /// A dashboard snapshot with the filter options for every dimension.
 type Dashboard = (ProfileSnapshot, Vec<(String, Vec<String>)>);
 
-pub(crate) fn on() -> bool {
-    super::surreal_brain::on()
-}
-
 /// One dashboard snapshot for `filters` and the filter options, read from
 /// one load of the Profile source tables.
 #[cfg(feature = "surreal")]

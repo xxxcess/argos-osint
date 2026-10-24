@@ -1,11 +1,11 @@
 //! Immutable database projections for background TUI reads.
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use anyhow::Result;
 use argos_osint_core::{
     atlas_metadata, intel_recon, investigation,
     related_global::RelatedScope,
-    store::{AtlasArticleClaim, AtlasArticleRow, Store},
+    store::{AtlasArticleClaim, AtlasArticleRow},
 };
 
 #[derive(Debug)]
@@ -18,47 +18,6 @@ pub(super) struct ReconSnapshot {
     pub memory_summaries: HashMap<String, String>,
     pub logged_calls: Vec<String>,
     pub log_error: Option<String>,
-}
-
-impl ReconSnapshot {
-    pub fn read(store: &Store, id: &str) -> Result<Self> {
-        let memories = store.answer_memories(id)?;
-        let ids: HashSet<_> = memories.values().flatten().map(|m| m.id.as_str()).collect();
-        let mut memory_summaries = HashMap::new();
-        for memory_id in ids {
-            if let Some(insight) = store.insight_for_memory(memory_id).ok().flatten() {
-                memory_summaries.insert(memory_id.to_string(), format_insight_summary(&insight));
-            }
-        }
-        Ok(Self {
-            messages: store.list_messages(id)?,
-            events: store.list_investigation_events(id)?,
-            calls: store.all_calls_for_thread(id)?,
-            runs: store.runs_for_thread(id)?,
-            memories,
-            memory_summaries,
-            logged_calls: Vec::new(),
-            log_error: None,
-        })
-    }
-
-    /// Format and record historical tool results on the reader worker, after
-    /// its read transaction ends. Large results never clone/format on the UI.
-    pub fn record_call_logs(&mut self, store: &Store, logged: &HashSet<String>) {
-        for call in &self.calls {
-            if call.result.is_none() || logged.contains(&call.id) {
-                continue;
-            }
-            if let Some(entry) = super::ui::tool_result_log(call) {
-                let event = super::logs::session_event(entry.level, &entry.summary, &entry.detail);
-                if let Err(error) = store.record_event(&event) {
-                    self.log_error = Some(error.to_string());
-                    break;
-                }
-            }
-            self.logged_calls.push(call.id.clone());
-        }
-    }
 }
 
 pub(super) fn format_insight_summary(insight: &argos_osint_core::recon::InsightView) -> String {
@@ -95,18 +54,6 @@ pub(super) struct IntelBriefSnapshot {
     pub outputs: HashMap<String, serde_json::Value>,
     pub lead_titles: HashMap<String, String>,
     pub publication: String,
-}
-
-impl IntelBriefSnapshot {
-    pub fn read(
-        store: &Store,
-        article: &AtlasArticleRow,
-        scope: RelatedScope,
-        job: Option<&str>,
-        related_limit: usize,
-    ) -> Result<Self> {
-        Self::read_repository(article, scope, job, related_limit)
-    }
 }
 
 /// Add the active output's entities not already listed as metadata actors.
@@ -214,24 +161,4 @@ impl IntelBriefSnapshot {
         }
         Ok(out)
     }
-}
-
-/// Related leads from the repository under a storage config, else SQLite.
-fn related_page(
-    store: &Store,
-    article: &AtlasArticleRow,
-    scope: RelatedScope,
-    cursor: Option<&str>,
-    limit: usize,
-) -> Result<argos_osint_core::related_global::GlobalRelatedPage> {
-    if super::surreal_brain::on() {
-        return super::surreal_brain::related_global(
-            &article.run_id,
-            &article.id,
-            scope,
-            cursor,
-            limit,
-        );
-    }
-    store.related_articles_global(&article.run_id, &article.id, scope, cursor, limit)
 }

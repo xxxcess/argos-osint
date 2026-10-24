@@ -1730,7 +1730,7 @@ fn packet_json(articles: &[AtlasArticleRow]) -> Result<String> {
                 );
                 let db = crate::paths::db_path();
                 if let Some(store) = crate::recon::backend::sqlite_path(&db)
-                    .and_then(|path| crate::store::Store::open(&path).ok())
+                    .and_then(|path| crate::store::Store::open(path).ok())
                 {
                     let req = crate::summarization::flush_request(
                         crate::summarization::SummarizationMode::ArticleDescription,

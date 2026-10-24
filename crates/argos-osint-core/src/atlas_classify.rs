@@ -66,7 +66,7 @@ impl BatchAdapter {
             let json = serde_json::to_string(&*valid).map_err(|e| e.to_string())?;
             match crate::recon::backend::sqlite_path(db) {
                 Some(path) => {
-                    let store = Store::open(&path).map_err(|e| e.to_string())?;
+                    let store = Store::open(path).map_err(|e| e.to_string())?;
                     store.app_state_set(key, &json).map_err(|e| e.to_string())?;
                 }
                 // `accept` is synchronous: under SurrealDB the batch write

@@ -64,7 +64,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
@@ -412,20 +411,6 @@ pub struct GlobalStatus {
 
 // ---------- snapshot assembly ----------
 
-/// Assembles one dashboard snapshot over `conn`.
-///
-/// Read-only: the writer is never locked, so a dashboard refresh never blocks
-/// recording. A missing table or an empty window yields empty sections, never
-/// fabricated numbers — the dashboard renders those as unavailable/N/A.
-pub fn snapshot(
-    conn: &Connection,
-    period: &Period,
-    filters: &StatFilters,
-    now: DateTime<chrono::Utc>,
-) -> Result<ProfileSnapshot> {
-    snapshot_from(conn, period, filters, now)
-}
-
 /// [`snapshot`] over any [`ProfileSource`]: the SQLite connection or the
 /// rows `storage::profile_view` loads from SurrealDB.
 pub fn snapshot_from(
@@ -456,15 +441,6 @@ pub fn snapshot_from(
         tools,
         attention,
     })
-}
-
-/// Every enum-ish value the filter strip can offer, for the filter popups.
-///
-/// The first pair is always the period choice list; every other pair is the
-/// sorted distinct non-empty values that dimension actually carries in
-/// `telemetry_events`, so the strip never offers a value that selects nothing.
-pub fn filter_options(conn: &Connection) -> Vec<(String, Vec<String>)> {
-    filter_options_from(conn)
 }
 
 /// [`filter_options`] over any [`ProfileSource`].
@@ -4992,8 +4968,6 @@ fn newest_stored(conn: &dyn ProfileSource) -> String {
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
-    use crate::store::Store;
-    use crate::telemetry::{EventKind, TelemetryEvent};
 
     #[test]
     fn retained_bucket_parser_defaults_hour_boundaries_to_zero_minutes() {
@@ -5143,16 +5117,6 @@ mod snapshot_tests {
         assert_eq!(google.cache_hits, 5);
         assert!(google.last_success.is_empty());
         assert!(google.parser_version.is_empty());
-    }
-
-    fn record(store: &Store, event: TelemetryEvent) {
-        let written = crate::telemetry::insert(store.connection(), &event);
-        written.unwrap();
-    }
-
-    fn snapshot_at(store: &Store, period: &Period, now: DateTime<Utc>) -> ProfileSnapshot {
-        let snap = snapshot(store.connection(), period, &StatFilters::default(), now);
-        snap.unwrap()
     }
 
     fn dimension_values(options: &[(String, Vec<String>)], name: &str) -> Vec<String> {

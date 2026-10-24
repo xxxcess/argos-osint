@@ -14,6 +14,11 @@
     clippy::empty_line_after_doc_comments
 )]
 
+#[cfg(not(feature = "surreal"))]
+compile_error!(
+    "argos-osint-core needs the `embedded` or `server` feature: SurrealDB is its only storage"
+);
+
 pub mod async_bridge;
 pub mod atlas;
 pub mod atlas_actor_index;
@@ -73,7 +78,6 @@ pub mod provider_request;
 pub mod recon;
 pub mod related_articles;
 pub mod related_global;
-pub mod reliability_faults;
 pub mod request_policy;
 pub mod scheduler;
 pub mod secrets;

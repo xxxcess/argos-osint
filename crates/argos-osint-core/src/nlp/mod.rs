@@ -651,7 +651,7 @@ pub async fn annotate_with_policy(
     policy: &PreparePolicy,
     cancel: Arc<AtomicBool>,
     mode: Mode,
-    db_path: Option<&std::path::Path>,
+    _db_path: Option<&std::path::Path>,
 ) -> Annotation {
     let context = source.context();
     if mode == Mode::Off || !cfg!(feature = "nlp") {
@@ -660,13 +660,7 @@ pub async fn annotate_with_policy(
     if cancel.load(Ordering::Acquire) {
         return Annotation::terminal(source, &context, Status::Cancelled);
     }
-    let cached = if surreal() {
-        surreal_get(source, &context).await
-    } else {
-        db_path
-            .and_then(|db| crate::store::Store::open_initialized_light(db).ok())
-            .and_then(|s| cache::get(&s.conn, source, &context).ok().flatten())
-    };
+    let cached = surreal_get(source, &context).await;
     let annotation = match cached {
         Some(a) => a,
         None => {
@@ -681,14 +675,8 @@ pub async fn annotate_with_policy(
     {
         return Annotation::terminal(source, &context, Status::Failed);
     }
-    if annotation.status == Status::Complete && surreal() {
+    if annotation.status == Status::Complete {
         surreal_put(source, &context, &annotation).await;
-    } else if annotation.status == Status::Complete {
-        if let Some(store) =
-            db_path.and_then(|db| crate::store::Store::open_initialized_light(db).ok())
-        {
-            let _ = cache::put(&store.conn, source, &context, &annotation);
-        }
     }
     annotation
 }
@@ -814,6 +802,21 @@ pub async fn prepare_with_policy(
     }
 }
 
+/// Persist coverage beside its exact derived artifact. Acquisition provenance is never inferred.
+pub fn record_view(owner_kind: &str, owner_id: &str, source: &Source, prepared: &Prepared) {
+    if configured_mode() == Mode::Off {
+        return;
+    }
+    let (kind, id, source) = (owner_kind.to_string(), owner_id.to_string(), source.clone());
+    let selection = serde_json::to_value(prepared).unwrap_or(serde_json::Value::Null);
+    crate::storage::runtime::spawn(async move {
+        if let Ok(repo) = crate::storage::runtime::repository().await {
+            let _ =
+                crate::storage::nlp_cache::record_view(&repo, &kind, &id, &source, selection).await;
+        }
+    });
+}
+
 /// UTF-8 wire accounting (escaping, message fields and supplied schema included).
 pub fn message_bytes(
     messages: &[crate::provider::ChatMessage],
@@ -824,49 +827,10 @@ pub fn message_bytes(
         .map_or(usize::MAX, |v| v.len())
 }
 
-/// Persist coverage beside its exact derived artifact. Acquisition provenance is never inferred.
-pub fn record_view(owner_kind: &str, owner_id: &str, source: &Source, prepared: &Prepared) {
-    if configured_mode() == Mode::Off {
-        return;
-    }
-    if surreal() {
-        #[cfg(feature = "surreal")]
-        {
-            let (kind, id, source) = (owner_kind.to_string(), owner_id.to_string(), source.clone());
-            let selection = serde_json::to_value(prepared).unwrap_or(serde_json::Value::Null);
-            crate::storage::runtime::spawn(async move {
-                if let Ok(repo) = crate::storage::runtime::repository().await {
-                    let _ = crate::storage::nlp_cache::record_view(
-                        &repo, &kind, &id, &source, selection,
-                    )
-                    .await;
-                }
-            });
-        }
-        return;
-    }
-    if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
-        if cache::register(
-            &store.conn,
-            owner_kind,
-            owner_id,
-            source,
-            None,
-            "historical-prose-v1",
-        )
-        .is_ok()
-        {
-            if let Ok(json) = serde_json::to_string(prepared) {
-                let _=store.conn.execute("UPDATE nlp_source_refs SET metadata_json=json_set(metadata_json,'$.selection',json(?4)) WHERE owner_kind=?1 AND owner_id=?2 AND prose_hash=?3 AND transform_version='historical-prose-v1'",rusqlite::params![owner_kind,owner_id,source.prose_hash,json]);
-            }
-        }
-    }
-}
-
 /// Acquisition reference placed in bounded observations; the exact body stays in artifacts.
 pub fn capture_page(url: &str, text: &str) -> serde_json::Value {
     let hash = cache::hash(text);
-    if surreal() {
+    {
         #[cfg(feature = "surreal")]
         {
             let text = text.to_string();
@@ -876,8 +840,6 @@ pub fn capture_page(url: &str, text: &str) -> serde_json::Value {
                 }
             });
         }
-    } else if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
-        let _ = cache::artifact(&store.conn, text);
     }
     serde_json::json!({"source_id":url,"artifact_hash":hash,"byte_len":text.len()})
 }
@@ -934,9 +896,6 @@ fn artifact_pages(value: &mut serde_json::Value) -> Vec<&mut serde_json::Value> 
 /// [`expanded_observations`] for async callers: under SurrealDB the
 /// artifacts are read from the repository, otherwise from SQLite.
 pub async fn expanded_observations_async(value: &serde_json::Value) -> serde_json::Value {
-    if !surreal() {
-        return expanded_observations(value);
-    }
     #[allow(unused_mut)]
     let mut out = value.clone();
     #[cfg(feature = "surreal")]
@@ -963,65 +922,31 @@ pub async fn expanded_observations_async(value: &serde_json::Value) -> serde_jso
 /// Under SurrealDB this restores only from synchronous code; async callers
 /// use [`expanded_observations_async`].
 pub fn expanded_observations(value: &serde_json::Value) -> serde_json::Value {
-    if surreal() {
-        #[cfg(feature = "surreal")]
-        if tokio::runtime::Handle::try_current().is_err() {
-            let owned = value.clone();
-            if let Ok(out) = crate::storage::runtime::blocking(move |repo| async move {
-                let mut out = owned;
-                for page in artifact_pages(&mut out) {
-                    let Some(hash) = page
-                        .pointer("/nlp_source/artifact_hash")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                    else {
-                        continue;
-                    };
-                    if let Some(text) =
-                        crate::storage::nlp_cache::artifact_text(&repo, &hash, MAX_SOURCE).await?
-                    {
-                        page["markdown"] = serde_json::json!(text);
-                    }
+    #[cfg(feature = "surreal")]
+    if tokio::runtime::Handle::try_current().is_err() {
+        let owned = value.clone();
+        if let Ok(out) = crate::storage::runtime::blocking(move |repo| async move {
+            let mut out = owned;
+            for page in artifact_pages(&mut out) {
+                let Some(hash) = page
+                    .pointer("/nlp_source/artifact_hash")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                else {
+                    continue;
+                };
+                if let Some(text) =
+                    crate::storage::nlp_cache::artifact_text(&repo, &hash, MAX_SOURCE).await?
+                {
+                    page["markdown"] = serde_json::json!(text);
                 }
-                Ok(out)
-            }) {
-                return out;
             }
-        }
-        return value.clone();
-    }
-    fn restore(page: &mut serde_json::Value, conn: &rusqlite::Connection) {
-        let Some(hash) = page
-            .pointer("/nlp_source/artifact_hash")
-            .and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
-        let text = conn.query_row(
-            "SELECT text FROM nlp_artifacts WHERE hash=?1 AND byte_len<=?2",
-            rusqlite::params![hash, MAX_SOURCE as i64],
-            |r| r.get::<_, String>(0),
-        );
-        if let Ok(text) = text {
-            if cache::hash(&text) == hash {
-                page["markdown"] = serde_json::json!(text);
-            }
+            Ok(out)
+        }) {
+            return out;
         }
     }
-    let mut out = value.clone();
-    if let Ok(store) = crate::store::Store::open(&crate::paths::db_path()) {
-        if let Some(pages) = out
-            .get_mut("pages")
-            .and_then(serde_json::Value::as_array_mut)
-        {
-            for page in pages {
-                restore(page, &store.conn);
-            }
-        } else {
-            restore(&mut out, &store.conn);
-        }
-    }
-    out
+    value.clone()
 }
 
 #[cfg(test)]

@@ -15,13 +15,11 @@ use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 
 pub(crate) mod atlas_news;
-mod news_legal;
-#[cfg(test)]
-pub(crate) use news_legal::fixture;
 pub mod contracts;
 pub mod dataset;
 pub mod dork_generator;
 pub mod holehe;
+mod news_legal;
 mod providers;
 pub mod results;
 pub mod search_engines;

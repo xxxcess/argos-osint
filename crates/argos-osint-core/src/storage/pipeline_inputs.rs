@@ -495,3 +495,76 @@ pub async fn recon_input(
         recall_enabled: opted_in,
     })
 }
+
+/// `insights::evidence_from_tools` on SurrealDB: the calls' persisted
+/// results and the referenced artifact texts are read up front, then the
+/// shared builder runs over them. Retained texts are hashed here; the
+/// artifacts themselves are written by [`recon_input`].
+pub async fn recon_evidence(
+    repo: &Repository,
+    results: &[(String, crate::osint::ToolResult)],
+) -> Result<Vec<RetainedEvidence>> {
+    use std::collections::HashMap;
+    let ids: Vec<String> = results
+        .iter()
+        .map(|(id, _)| id.split('#').next().unwrap_or(id).to_string())
+        .collect();
+    let hashes: Vec<String> = results
+        .iter()
+        .filter_map(|(_, r)| {
+            r.observations
+                .pointer("/nlp_source/artifact_hash")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    #[derive(SurrealValue)]
+    struct Persisted {
+        id: String,
+        result_json: Option<String>,
+    }
+    #[derive(SurrealValue)]
+    struct Text {
+        id: String,
+        text: String,
+    }
+    let mut r = repo
+        .db()
+        .query(
+            "SELECT meta::id(id) AS id, result_json FROM osint_call
+              WHERE meta::id(id) INSIDE $ids;
+             SELECT meta::id(id) AS id, text FROM nlp_artifact
+              WHERE meta::id(id) INSIDE $hs;",
+        )
+        .bind(("ids", ids))
+        .bind(("hs", hashes))
+        .await?
+        .check()?;
+    let persisted: Vec<Persisted> = r.take(0usize)?;
+    let texts: Vec<Text> = r.take(1usize)?;
+    let mut lookup = Prefetched {
+        results: persisted
+            .into_iter()
+            .filter_map(|p| p.result_json.map(|j| (p.id, j)))
+            .collect::<HashMap<_, _>>(),
+        texts: texts.into_iter().map(|t| (t.id, t.text)).collect(),
+    };
+    crate::investigation::insights::evidence_with(&mut lookup, results)
+}
+
+struct Prefetched {
+    results: std::collections::HashMap<String, String>,
+    texts: std::collections::HashMap<String, String>,
+}
+
+impl crate::investigation::insights::EvidenceLookup for Prefetched {
+    fn persisted_result(&mut self, call_id: &str) -> Result<Option<String>> {
+        Ok(self.results.get(call_id).cloned())
+    }
+    fn artifact_text(&mut self, hash: &str) -> Option<String> {
+        self.texts.get(hash).cloned()
+    }
+    fn retain_artifact(&mut self, text: &str) -> Result<String> {
+        Ok(hash(text))
+    }
+}

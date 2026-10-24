@@ -619,3 +619,26 @@ pub async fn cache_get_fresh(
     }
     Ok(Some(res))
 }
+
+/// A run's still-open calls (`queued`/`running`) settled as `status`
+/// (`cancelled` or `interrupted`) when the run ends early. Returns how many.
+pub async fn settle_open_calls(repo: &Repository, run_id: &str, status: &str) -> Result<usize> {
+    ensure!(
+        matches!(status, "cancelled" | "interrupted"),
+        "unexpected call settlement {status}"
+    );
+    let mut r = repo
+        .db()
+        .query(
+            "UPDATE osint_call SET status = $s, completed_at = $at
+              WHERE run_id = $rid AND status INSIDE ['queued', 'running']
+              RETURN VALUE meta::id(id)",
+        )
+        .bind(("s", status.to_string()))
+        .bind(("at", now()))
+        .bind(("rid", run_id.to_string()))
+        .await?
+        .check()?;
+    let ids: Vec<String> = r.take(0usize)?;
+    Ok(ids.len())
+}

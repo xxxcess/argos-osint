@@ -19,8 +19,6 @@ pub mod roles;
 pub mod trace;
 
 #[cfg(test)]
-mod insight_reliability_tests;
-#[cfg(test)]
 pub mod tests_acceptance;
 
 pub use contracts::{CallProposal, HandoffRecord, InvestigationSurface, TaskRecord, TaskStatus};

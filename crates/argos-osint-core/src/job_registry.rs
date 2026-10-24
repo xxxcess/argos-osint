@@ -22,9 +22,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::events::{self, NewEvent, Severity};
+use crate::events::{NewEvent, Severity};
 
 /// Job kind for registry-owned rows (task-backed jobs keep their own kinds).
 pub const KIND: &str = "inproc";
@@ -169,12 +168,6 @@ fn live() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
     LIVE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn open(db: &Path) -> Result<Connection> {
-    let conn = Connection::open(db)?;
-    conn.busy_timeout(Duration::from_secs(5))?;
-    Ok(conn)
-}
-
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -216,108 +209,7 @@ impl JobHandle {
     /// Like [`begin`](Self::begin) but adopts an existing cancel flag, so the
     /// operation's own stop flag and Jobs → Cancel are the same switch.
     pub fn begin_with(db: &Path, spec: JobSpec, cancel: Arc<AtomicBool>) -> Result<Self> {
-        if crate::recon::backend::surreal_selected() {
-            return Ok(Self::begin_surreal(db, spec, cancel));
-        }
-        let conn = open(db)?;
-        let _ = ensure_beat(db);
-        let ts = now();
-        let owner = crate::scheduler::process_owner();
-        let correlation = if spec.correlation_id.is_empty() {
-            spec.id.clone()
-        } else {
-            spec.correlation_id.clone()
-        };
-        let id = if spec.id.is_empty() {
-            new_job_id(&spec.operation)
-        } else {
-            spec.id.clone()
-        };
-        crate::job_cleanup::register_reference(&conn, &id, &spec.resource_ref, &spec.operation)?;
-        if let Err(error) = crate::job_cleanup::ensure_admissible(&conn, &id, &ts) {
-            cancel.store(true, Ordering::Release);
-            return Err(error);
-        }
-        let existing: Option<Option<i64>> = conn
-            .query_row("SELECT active_ms FROM argos_jobs WHERE id=?1", [&id], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        let prior_active_ms = existing.flatten().unwrap_or(0);
-        if existing.is_some() {
-            conn.execute(
-                "UPDATE argos_jobs SET state='running', updated_at=?2, heartbeat_at=?2,
-                    started_at=CASE WHEN started_at='' THEN ?2 ELSE started_at END,
-                    active_since=?2, finished_at='', attempts_used=attempts_used+1,
-                    error_category='', error_summary='', cancel_requested=0,
-                    cancellable=?3, worker_owner=?4,
-                    run_ref=CASE WHEN ?5<>'' THEN ?5 ELSE run_ref END
-                 WHERE id=?1",
-                params![id, ts, spec.cancellable, owner, spec.run_ref],
-            )?;
-        } else {
-            conn.execute(
-                "INSERT INTO argos_jobs(id,kind,owner_scope,input_revision,state,created_at,updated_at,deadline_at,
-                    parent_id,app,operation,title,run_ref,resource_ref,correlation_id,queued_at,
-                    started_at,heartbeat_at,active_since,active_ms,queue_ms,attempts_used,attempt_cap,
-                    provider,model,tool,worker_owner,cancellable)
-                 VALUES (?1,?2,?3,'','running',?4,?4,'',?5,?6,?7,?8,?9,?10,?11,?4,
-                    ?4,?4,?4,0,0,1,1,?12,?13,?14,?15,?16)",
-                params![
-                    id,
-                    KIND,
-                    spec.app,
-                    ts,
-                    spec.parent_id,
-                    spec.app,
-                    spec.operation,
-                    spec.title,
-                    spec.run_ref,
-                    spec.resource_ref,
-                    correlation,
-                    spec.provider,
-                    spec.model,
-                    spec.tool,
-                    owner,
-                    spec.cancellable,
-                ],
-            )?;
-        }
-        live()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id.clone(), cancel.clone());
-        let _ = events::record_event(
-            &conn,
-            &NewEvent {
-                severity: Some(Severity::Info),
-                app: spec.app.clone(),
-                event_type: "job.started".into(),
-                message: if existing.is_some() {
-                    format!("Resumed: {}", spec.title)
-                } else {
-                    format!("Started: {}", spec.title)
-                },
-                job_id: id.clone(),
-                run_id: spec.run_ref.clone(),
-                resource_ref: spec.resource_ref.clone(),
-                correlation_id: correlation.clone(),
-                ..Default::default()
-            },
-        );
-        Ok(Self {
-            db: db.to_path_buf(),
-            id,
-            app: spec.app,
-            correlation,
-            run_ref: spec.run_ref,
-            span: Instant::now(),
-            prior_active_ms,
-            surreal_prior: Arc::new(AtomicI64::new(0)),
-            cancel,
-            finished: false,
-            surreal: false,
-        })
+        Ok(Self::begin_surreal(db, spec, cancel))
     }
 
     /// [`begin_with`](Self::begin_with) on the repository: the `job` row and
@@ -428,62 +320,26 @@ impl JobHandle {
         JobHandle::begin(&self.db, spec)
     }
 
-    /// Link a run reference learned after launch (e.g. a new Atlas run id).
-    pub fn link_run(&mut self, run_ref: &str) {
-        self.run_ref = run_ref.into();
-        if self.surreal {
-            // Carried to the row by `finish` (`finish_recon_job` run_ref).
-            return;
-        }
-        if let Ok(conn) = open(&self.db) {
-            let _ = conn.execute(
-                "UPDATE argos_jobs SET run_ref=?2 WHERE id=?1",
-                params![self.id, run_ref],
-            );
-        }
-    }
-
+    /// Accumulated active time including the current span (monotonic).
     /// Current phase and progress; doubles as a heartbeat.
     pub fn phase(&self, phase: &str, done: Option<i64>, total: Option<i64>) {
-        if self.surreal {
-            #[cfg(feature = "surreal")]
+        let (id, phase, cancel) = (self.id.clone(), phase.to_string(), self.cancel.clone());
+        crate::storage::runtime::spawn_ordered(async move {
+            let Ok(repo) = crate::storage::runtime::repository().await else {
+                return;
+            };
+            if let Ok(true) =
+                crate::storage::recon_jobs::set_job_progress(&repo, &id, &phase, done, total).await
             {
-                let (id, phase, cancel) = (self.id.clone(), phase.to_string(), self.cancel.clone());
-                crate::storage::runtime::spawn_ordered(async move {
-                    let Ok(repo) = crate::storage::runtime::repository().await else {
-                        return;
-                    };
-                    if let Ok(true) = crate::storage::recon_jobs::set_job_progress(
-                        &repo, &id, &phase, done, total,
-                    )
-                    .await
-                    {
-                        cancel.store(true, Ordering::Relaxed);
-                    }
-                });
+                cancel.store(true, Ordering::Relaxed);
             }
-            return;
-        }
-        if let Ok(conn) = open(&self.db) {
-            let _ = conn.execute(
-                "UPDATE argos_jobs SET phase=?2, progress_done=?3, progress_total=?4,
-                    heartbeat_at=?5, updated_at=?5
-                 WHERE id=?1",
-                params![self.id, phase, done, total, now()],
-            );
-        }
+        });
     }
 
-    /// Accumulated active time including the current span (monotonic).
-    pub fn active_ms(&self) -> i64 {
-        self.prior_active_ms
-            + self.surreal_prior.load(Ordering::Acquire)
-            + self.span.elapsed().as_millis() as i64
-    }
-
-    /// Record the terminal (or paused) state.
-    pub fn finish(mut self, outcome: Finish) {
-        self.write_finish(&outcome);
+    /// Link a run reference learned after launch (e.g. a new Atlas run id);
+    /// carried to the row by `finish` (`finish_recon_job` run_ref).
+    pub fn link_run(&mut self, run_ref: &str) {
+        self.run_ref = run_ref.into();
     }
 
     fn write_finish(&mut self, outcome: &Finish) {
@@ -495,67 +351,18 @@ impl JobHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.id);
-        if self.surreal {
-            self.write_finish_surreal(outcome);
-            return;
-        }
-        let Ok(conn) = open(&self.db) else {
-            return;
-        };
-        let ts = now();
-        let (category, summary, result_ref) = match outcome {
-            Finish::Completed { result_ref } => (String::new(), String::new(), result_ref.clone()),
-            Finish::Partial { summary } => ("partial".into(), summary.clone(), String::new()),
-            Finish::Failed { category, summary } => {
-                (category.clone(), summary.clone(), String::new())
-            }
-            Finish::Paused { summary } => (String::new(), summary.clone(), String::new()),
-            Finish::Waiting { summary } => (String::new(), summary.clone(), String::new()),
-            Finish::Blocked { summary } => ("blocked".into(), summary.clone(), String::new()),
-            Finish::Cancelled { summary } => ("cancelled".into(), summary.clone(), String::new()),
-        };
-        let summary = events::redact(&summary);
-        let state = outcome.state();
-        let terminal = !matches!(state, "paused" | "waiting" | "blocked");
-        let _ = conn.execute(
-            "UPDATE argos_jobs SET state=?2, updated_at=?3, heartbeat_at=?3, active_since='',
-                active_ms=?4, finished_at=CASE WHEN ?5 THEN ?3 ELSE '' END,
-                error_category=?6, error_summary=substr(?7,1,500),
-                result_ref=CASE WHEN ?8<>'' THEN ?8 ELSE result_ref END
-             WHERE id=?1",
-            params![
-                self.id,
-                state,
-                ts,
-                self.active_ms(),
-                terminal,
-                category,
-                summary,
-                result_ref
-            ],
-        );
-        let (severity, message) = match outcome {
-            Finish::Completed { .. } => (Severity::Info, "Completed".to_string()),
-            Finish::Partial { summary } => (Severity::Warn, format!("Partial: {summary}")),
-            Finish::Failed { summary, .. } => (Severity::Error, format!("Failed: {summary}")),
-            Finish::Paused { .. } => (Severity::Info, "Paused".to_string()),
-            Finish::Waiting { summary } => (Severity::Info, format!("Waiting: {summary}")),
-            Finish::Blocked { summary } => (Severity::Warn, format!("Blocked: {summary}")),
-            Finish::Cancelled { .. } => (Severity::Warn, "Cancelled".to_string()),
-        };
-        let _ = events::record_event(
-            &conn,
-            &NewEvent {
-                severity: Some(severity),
-                app: self.app.clone(),
-                event_type: format!("job.{state}"),
-                message,
-                job_id: self.id.clone(),
-                run_id: self.run_ref.clone(),
-                correlation_id: self.correlation.clone(),
-                ..Default::default()
-            },
-        );
+        self.write_finish_surreal(outcome);
+    }
+
+    pub fn active_ms(&self) -> i64 {
+        self.prior_active_ms
+            + self.surreal_prior.load(Ordering::Acquire)
+            + self.span.elapsed().as_millis() as i64
+    }
+
+    /// Record the terminal (or paused) state.
+    pub fn finish(mut self, outcome: Finish) {
+        self.write_finish(&outcome);
     }
 }
 
@@ -708,150 +515,6 @@ pub enum CancelRequest {
     Missing,
 }
 
-/// Ask a running job to stop cooperatively. Works across processes: the
-/// owning process's heartbeat picks up `cancel_requested`.
-pub fn request_cancel(conn: &Connection, job_id: &str) -> Result<CancelRequest> {
-    let row: Option<(String, bool, String)> = conn
-        .query_row(
-            "SELECT state, cancellable, app FROM argos_jobs WHERE id=?1",
-            [job_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    let Some((state, cancellable, app)) = row else {
-        return Ok(CancelRequest::Missing);
-    };
-    if !matches!(state.as_str(), "running" | "queued") {
-        return Ok(CancelRequest::NotRunning);
-    }
-    if !cancellable {
-        return Ok(CancelRequest::NotCancellable);
-    }
-    conn.execute(
-        "UPDATE argos_jobs SET cancel_requested=1, updated_at=?2 WHERE id=?1",
-        params![job_id, now()],
-    )?;
-    if let Some(flag) = live().lock().unwrap_or_else(|e| e.into_inner()).get(job_id) {
-        flag.store(true, Ordering::Relaxed);
-    }
-    events::record_event(
-        conn,
-        &NewEvent {
-            severity: Some(Severity::Info),
-            app,
-            event_type: "job.cancel_requested".into(),
-            message: "Cancel requested".into(),
-            job_id: job_id.into(),
-            correlation_id: job_id.into(),
-            ..Default::default()
-        },
-    )?;
-    Ok(CancelRequest::Requested)
-}
-
-/// Refresh this process's liveness row and apply cancel requests made by
-/// other processes to jobs running here. Called by the heartbeat thread.
-pub fn beat(conn: &Connection, owner: &str) -> Result<()> {
-    let ts = now();
-    conn.execute(
-        "INSERT INTO argos_processes(owner,pid,started_at,heartbeat_at) VALUES (?1,?2,?3,?3)
-         ON CONFLICT(owner) DO UPDATE SET heartbeat_at=excluded.heartbeat_at",
-        params![owner, std::process::id(), ts],
-    )?;
-    let mut stmt = conn.prepare(
-        "SELECT id FROM argos_jobs WHERE worker_owner=?1 AND cancel_requested=1
-            AND state IN ('running','queued')",
-    )?;
-    let ids = stmt
-        .query_map([owner], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let live = live().lock().unwrap_or_else(|e| e.into_inner());
-    for (id, flag) in live.iter() {
-        if crate::job_cleanup::retired(conn, id)? {
-            flag.store(true, Ordering::Release);
-        }
-    }
-    for id in ids {
-        if let Some(flag) = live.get(&id) {
-            flag.store(true, Ordering::Relaxed);
-        }
-    }
-    Ok(())
-}
-
-/// Mark open jobs owned by processes that are gone (registry jobs and
-/// owned task-less jobs such as the repair pass) as interrupted failures. Their active time ends at the last heartbeat seen.
-pub fn recover_orphans(conn: &Connection, me: &str) -> Result<usize> {
-    crate::job_cleanup::cleanup_batch(conn, chrono::Utc::now())?;
-    let now_dt = chrono::Utc::now();
-    let stale = (now_dt - chrono::Duration::seconds(PROCESS_STALE_SECS)).to_rfc3339();
-    let mut stmt = conn.prepare(
-        "SELECT j.id, j.active_ms, j.active_since, j.heartbeat_at, IFNULL(p.heartbeat_at,''), j.app, j.run_ref
-         FROM argos_jobs j LEFT JOIN argos_processes p ON p.owner = j.worker_owner
-         WHERE j.kind<>'service' AND j.worker_owner<>'' AND j.worker_owner<>?1
-           AND j.state IN ('running','queued')
-           AND (p.owner IS NULL OR p.heartbeat_at < ?2)",
-    )?;
-    type Orphan = (String, Option<i64>, String, String, String, String, String);
-    let rows = stmt
-        .query_map(params![me, stale], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<Orphan>>>()?;
-    let parse = |ts: &str| {
-        chrono::DateTime::parse_from_rfc3339(ts)
-            .ok()
-            .map(|t| t.with_timezone(&chrono::Utc))
-    };
-    let ts = now_dt.to_rfc3339();
-    for (id, active, since, job_beat, proc_beat, app, run_ref) in &rows {
-        let last_seen = [proc_beat.as_str(), job_beat.as_str()]
-            .into_iter()
-            .filter_map(parse)
-            .max();
-        let span = match (parse(since), last_seen) {
-            (Some(start), Some(end)) => (end - start).num_milliseconds().max(0),
-            _ => 0,
-        };
-        let finished = last_seen
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_else(|| ts.clone());
-        conn.execute(
-            "UPDATE argos_jobs SET state='failed', error_category='interrupted',
-                error_summary='Argos exited before this job finished', active_since='',
-                active_ms=?2, finished_at=?3, updated_at=?4
-             WHERE id=?1 AND state IN ('running','queued')",
-            params![id, active.unwrap_or(0) + span, finished, ts],
-        )?;
-        let _ = events::record_event(
-            conn,
-            &NewEvent {
-                severity: Some(Severity::Warn),
-                app: app.clone(),
-                event_type: "job.interrupted".into(),
-                message: "Argos exited before this job finished".into(),
-                job_id: id.clone(),
-                run_id: run_ref.clone(),
-                correlation_id: id.clone(),
-                ..Default::default()
-            },
-        );
-    }
-    conn.execute(
-        "DELETE FROM argos_processes WHERE heartbeat_at < ?1 AND owner<>?2",
-        params![stale, me],
-    )?;
-    Ok(rows.len())
-}
-
 /// Background heartbeat for this process. Dropping it stops the thread.
 pub struct ProcessBeat {
     stop: Arc<AtomicBool>,
@@ -879,42 +542,19 @@ fn ensure_beat(db: &Path) -> Result<Arc<AtomicBool>> {
             return Ok(flag.clone());
         }
     }
-    let owner = crate::scheduler::process_owner();
-    beat(&open(db)?, &owner)?;
-    let stop = Arc::new(AtomicBool::new(false));
-    let flag = stop.clone();
-    let path = db.to_path_buf();
-    std::thread::Builder::new()
-        .name("argos-job-beat".into())
-        .spawn(move || {
-            let mut ticks = 0u32;
-            while !flag.load(Ordering::Relaxed) {
-                std::thread::sleep(BEAT_INTERVAL);
-                if let Ok(conn) = open(&path) {
-                    let _ = beat(&conn, &owner);
-                    ticks += 1;
-                    if ticks.is_multiple_of(12) {
-                        let _ = recover_orphans(&conn, &owner);
-                    }
-                    if ticks.is_multiple_of(60) {
-                        let _ = crate::job_cleanup::cleanup_batch(&conn, chrono::Utc::now());
-                    }
-                }
-            }
-        })?;
+    // The repository heartbeat (`storage::processes::beat`) also recovers
+    // orphans; keep its thread alive past this guard.
+    let beat = start_surreal_beat()?;
+    let stop = beat.stop.clone();
+    std::mem::forget(beat);
     running.insert(db.to_path_buf(), stop.clone());
     Ok(stop)
 }
 
 /// Write the first heartbeat, recover jobs left by exited processes, then
 /// keep beating on a thread until the returned guard is dropped.
-pub fn start_process_beat(db: &Path) -> Result<ProcessBeat> {
-    if crate::recon::backend::surreal_selected() {
-        return start_surreal_beat();
-    }
-    let stop = ensure_beat(db)?;
-    recover_orphans(&open(db)?, &crate::scheduler::process_owner())?;
-    Ok(ProcessBeat { stop })
+pub fn start_process_beat(_db: &Path) -> Result<ProcessBeat> {
+    start_surreal_beat()
 }
 
 /// [`start_process_beat`] on the repository: `process:[owner]` beats
@@ -1059,19 +699,6 @@ pub(crate) fn signal_retirement(id: &str) {
     }
 }
 
-/// Canonical job for a legacy run/job id (Atlas run, Intel Recon job): the
-/// existing registry row linked to it, so resumes reuse one top-level job.
-pub fn job_for_run(conn: &Connection, operation: &str, run_ref: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT id FROM argos_jobs WHERE operation=?1 AND run_ref=?2 AND parent_id=''
-             ORDER BY created_at LIMIT 1",
-            params![operation, run_ref],
-            |r| r.get(0),
-        )
-        .optional()?)
-}
-
 /// Optional handle: a registry write failure (e.g. a locked database) must
 /// never stop the operation itself, so callers run without tracking.
 pub fn begin_optional(db: &Path, spec: JobSpec) -> Option<JobHandle> {
@@ -1084,6 +711,4 @@ pub fn begin_optional_with(db: &Path, spec: JobSpec, cancel: Arc<AtomicBool>) ->
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-}
+mod tests {}

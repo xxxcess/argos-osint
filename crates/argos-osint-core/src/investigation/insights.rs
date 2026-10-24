@@ -71,52 +71,12 @@ pub fn snapshot(
     }
 }
 
-/// Recover original page artifacts/raw results before reasoning. Search snippets
-/// and summaries stay useful observations but cannot satisfy substantive readiness.
-pub fn evidence_from_tools(
-    conn: &rusqlite::Connection,
-    results: &[(String, crate::osint::ToolResult)],
-) -> Result<Vec<RetainedEvidence>> {
-    evidence_with(&mut SqliteEvidence(conn), results)
-}
-
 /// Where [`evidence_with`] reads a call's persisted result and a stored
 /// artifact text, and records a retained artifact (returning its hash).
 pub trait EvidenceLookup {
     fn persisted_result(&mut self, call_id: &str) -> Result<Option<String>>;
     fn artifact_text(&mut self, hash: &str) -> Option<String>;
     fn retain_artifact(&mut self, text: &str) -> Result<String>;
-}
-
-struct SqliteEvidence<'a>(&'a rusqlite::Connection);
-
-impl EvidenceLookup for SqliteEvidence<'_> {
-    fn persisted_result(&mut self, call_id: &str) -> Result<Option<String>> {
-        use rusqlite::OptionalExtension;
-        Ok(self
-            .0
-            .query_row(
-                "SELECT result_json FROM osint_calls WHERE id=?1",
-                [call_id],
-                |r| r.get(0),
-            )
-            .optional()?)
-    }
-    fn artifact_text(&mut self, hash: &str) -> Option<String> {
-        use rusqlite::OptionalExtension;
-        self.0
-            .query_row(
-                "SELECT text FROM nlp_artifacts WHERE hash=?1",
-                [hash],
-                |r| r.get(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-    }
-    fn retain_artifact(&mut self, text: &str) -> Result<String> {
-        crate::nlp::cache::artifact(self.0, text)
-    }
 }
 
 /// [`evidence_from_tools`] over any [`EvidenceLookup`].
@@ -412,7 +372,7 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
     let store = super::exec_store::ExecStore::open(db_path).await?;
     let task_id = store.task_id(input).await?;
     let execution_id = store.operation_id(&task_id, &op_key).await?;
-    let telemetry = store.telemetry_path(db_path);
+    let telemetry = None::<&std::path::Path>;
     drop(store);
     let mut scope =
         super::insight_assessment::operation_scope(&execution_id, role, input, &task_id);
@@ -1342,7 +1302,7 @@ async fn admit_brain_evidence(
             super::insight_execution::consume()?;
             let task_id = store.task_id(input).await?;
             let execution_id = store.operation_id(&task_id, &id).await?;
-            let telemetry = store.telemetry_path(db_path);
+            let telemetry = None::<&std::path::Path>;
             drop(store);
             let mut scope = super::insight_assessment::operation_scope(
                 &execution_id,

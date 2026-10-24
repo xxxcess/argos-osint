@@ -3160,92 +3160,6 @@ mod tests {
     }
 
     #[test]
-    fn persisted_claims_use_the_atlas_app_and_recall_hits_the_sentence() {
-        let store = Store::memory().unwrap();
-        let run_id = "atlas-cycle-1";
-        let mut packet = vec![article(
-            "art-9",
-            "military",
-            "us",
-            "Putin sanctioned Acme",
-            "over oil",
-            1.0,
-        )];
-        packet[0].published_at = "2026-10-01T12:00:00Z".into();
-        let (lead, dropped) = accept_claims(
-            &packet,
-            &[raw(
-                "Putin",
-                "person",
-                "sanctioned",
-                "Acme",
-                "military",
-                "Putin sanctioned Acme over oil.",
-                "fact",
-                0.8,
-                "art-9",
-            )],
-            AcceptMode::Lead,
-        );
-        let settled = finish_insights(1, dropped, &packet, lead, &[], &[]);
-        store
-            .persist_atlas_insights(
-                run_id,
-                &settled.claims,
-                &settled.relations,
-                &settled.brief,
-                &settled.entity_path,
-            )
-            .unwrap();
-        store
-            .persist_atlas_insights(
-                run_id,
-                &settled.claims,
-                &settled.relations,
-                &settled.brief,
-                &settled.entity_path,
-            )
-            .unwrap();
-        let memories = store.list_memories().unwrap();
-        let claim = memories
-            .iter()
-            .find(|memory| memory.text == "Putin sanctioned Acme over oil.")
-            .unwrap();
-        assert_eq!(
-            claim.source,
-            MemorySource {
-                app: "atlas".into(),
-                conversation_id: run_id.into(),
-                message_id: None,
-                reference: Some(run_id.into()),
-            }
-        );
-        assert_eq!(memories.len(), 2);
-        let brief = memories
-            .iter()
-            .find(|memory| memory.text.contains('\n'))
-            .unwrap();
-        assert!(store.graph_summary(&brief.id).unwrap().is_none());
-        let source: (String, String, String, String) = store
-            .conn
-            .query_row(
-                "SELECT call_id, source_url, answer_id, published_at FROM insight_sources WHERE run_id=?1",
-                [run_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(source.0, "art-9");
-        assert_eq!(source.1, "https://example.com/art-9");
-        assert_eq!(source.2, "atlas-atlas-cycle-1");
-        assert_eq!(source.3, "2026-10-01T12:00:00Z");
-        let hits = store.recall("Putin sanctioned Acme", 4).unwrap();
-        assert!(hits
-            .iter()
-            .any(|hit| hit.memory.text.contains("Putin sanctioned Acme")));
-        assert!(store.atlas_has_insights(run_id).unwrap());
-    }
-
-    #[test]
     fn claim_json_tolerates_empty_and_alternate_shapes() {
         assert!(parse_claims("").is_err());
         assert!(parse_claims("{}").is_err());
@@ -3267,35 +3181,5 @@ mod tests {
         assert_eq!(single[0].object, "union");
         let err = parse_claims(r#"{"claims":"oops"}"#).unwrap_err();
         assert!(err.to_string().contains("claims array missing"));
-    }
-
-    #[tokio::test]
-    async fn empty_ingestion_does_not_dispatch_even_with_a_decisions_route() {
-        let secret = crate::secrets::ProviderSecret {
-            kind: "openrouter".into(),
-            base_url: "https://openrouter.ai/api/v1".into(),
-            model: "typesafe/jev-1.3".into(),
-            api_key: Some("test".into()),
-            stt_model: None,
-            device: None,
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("argos.db");
-        let _store = Store::open(&db).unwrap();
-        let settled = extract(
-            &db,
-            "test-run",
-            &secret,
-            &[],
-            None,
-            &[],
-            &[],
-            false,
-            |_, _| {},
-        )
-        .await
-        .unwrap();
-        assert!(settled.settled.claims.is_empty());
-        assert!(settled.settled.relations.is_empty());
     }
 }

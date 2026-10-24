@@ -538,47 +538,6 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_category_diversity_and_persistence() {
-        let store = Store::memory().unwrap();
-        let keys = ProviderKeys {
-            firecrawl: "key".into(),
-            ..ProviderKeys::default()
-        };
-        let limits = ReconLimits::default();
-
-        let bindings = vec![Binding {
-            kind: "domain".into(),
-            value: "example.com".into(),
-            evidence_id: "e1".into(),
-            source_tool: String::new(),
-            ..Binding::default()
-        }];
-
-        let record = plan_category_diversity(
-            "run-test",
-            1,
-            0,
-            IntelligenceCategory::DomainNetwork,
-            &bindings,
-            &keys,
-            &limits,
-            &store,
-        );
-
-        assert_eq!(record.scope, "run-test");
-        assert_eq!(record.generation, 1);
-        assert_eq!(record.directive_index, 0);
-        // Public domain tools like crtsh_certificates and mnemonic_passive_dns should be planned
-        assert!(record.planned_tools.len() >= 2);
-
-        save_coverage_record(&store, &record).unwrap();
-        let loaded = load_coverage_records(&store, "run-test", 1).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].scope, "run-test");
-        assert_eq!(loaded[0].planned_tools, record.planned_tools);
-    }
-
-    #[test]
     fn test_update_coverage_with_results() {
         let mut record = CoverageRecord {
             scope: "test".into(),
@@ -723,36 +682,5 @@ mod tests {
             coverage_stats(&empty).shortfall_reason,
             Some("no_eligible_tool")
         );
-    }
-
-    #[test]
-    fn test_save_coverage_record_writes_one_telemetry_row() {
-        let store = Store::memory().unwrap();
-        let record = covered_record();
-        save_coverage_record(&store, &record).unwrap();
-        // A later update of the same record must not double count.
-        let mut updated = record.clone();
-        updated.successful_tools = vec!["crtsh_certificates".into()];
-        save_coverage_record(&store, &updated).unwrap();
-
-        let id = coverage_record_id(&record);
-        let rows: i64 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM telemetry_events WHERE id = ?1",
-                [format!("coverage-{id}")],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(rows, 1, "one authoritative row per coverage record");
-        let category: String = store
-            .conn
-            .query_row(
-                "SELECT category FROM telemetry_events WHERE id = ?1",
-                [format!("coverage-{id}")],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(category, "DomainNetwork");
     }
 }

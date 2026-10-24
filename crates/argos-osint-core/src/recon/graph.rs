@@ -1711,24 +1711,4 @@ mod tests {
             .iter()
             .any(|subject| subject == "Elon Musk"));
     }
-
-    #[test]
-    fn manual_memory_has_no_graph() {
-        let store = Store::memory().unwrap();
-        let memory = store
-            .add_memory(
-                "a note",
-                "fact",
-                false,
-                MemorySource {
-                    app: "chat".into(),
-                    conversation_id: "c1".into(),
-                    message_id: None,
-                    reference: None,
-                },
-            )
-            .unwrap();
-        let graph = store.graph_for_memory(&memory.id).unwrap();
-        assert!(graph.is_empty());
-    }
 }

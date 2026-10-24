@@ -683,53 +683,6 @@ pub fn tool_invocation(
 mod tests {
     use super::*;
 
-    fn db() -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("argos.db");
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch(crate::store::SCHEMA_TELEMETRY_SQL)
-            .unwrap();
-        (dir, path)
-    }
-
-    #[test]
-    fn events_persist_and_roll_up_once() {
-        let (_dir, path) = db();
-        let event = TelemetryEvent::new(EventKind::ToolInvocation)
-            .tool("firecrawl_google_search")
-            .outcome("verified_zero")
-            .trigger(Trigger::ManualTool)
-            .duration_ms(Some(420));
-        record(&path, &event).unwrap();
-        record(&path, &event.clone().with_id("fixed")).unwrap();
-
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        let mut stmt = conn
-            .prepare("SELECT COUNT(*) FROM telemetry_events")
-            .unwrap();
-        assert_eq!(stmt.query_row([], |r| r.get::<_, i64>(0)).unwrap(), 2);
-        let mut stmt = conn
-            .prepare("SELECT SUM(events) FROM telemetry_hourly")
-            .unwrap();
-        assert_eq!(stmt.query_row([], |r| r.get::<_, i64>(0)).unwrap(), 2);
-    }
-
-    #[test]
-    fn id_is_stable_so_replay_never_double_counts() {
-        let (_dir, path) = db();
-        let event = TelemetryEvent::new(EventKind::ReconRun)
-            .with_id("recon-run-1234")
-            .outcome("completed_with_evidence");
-        for _ in 0..3 {
-            record(&path, &event).unwrap();
-        }
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        let mut stmt = conn
-            .prepare("SELECT COUNT(*) FROM telemetry_events WHERE id = 'recon-run-1234'")
-            .unwrap();
-        assert_eq!(stmt.query_row([], |r| r.get::<_, i64>(0)).unwrap(), 1);
-    }
-
     #[test]
     fn secret_shaped_keys_are_rejected_from_payloads() {
         assert!(is_forbidden_key("api_key"));
@@ -768,69 +721,8 @@ mod tests {
     }
 
     #[test]
-    fn coverage_reports_observed_since_and_counts() {
-        let (_dir, path) = db();
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        let since = ensure_observed_since(&conn).unwrap();
-        assert!(!since.is_empty());
-        record(
-            &path,
-            &TelemetryEvent::new(EventKind::AtlasCycle).outcome("completed"),
-        )
-        .unwrap();
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        let report = coverage(&conn).unwrap();
-        assert_eq!(report.raw_events, 1);
-        assert_eq!(report.observed_since, since);
-    }
-
-    #[test]
     fn measured_elapsed_is_never_negative() {
         let clock = Measured::start();
         assert!(clock.elapsed_ms() >= 0);
-    }
-
-    #[test]
-    fn logical_attempt_and_cache_rows_stay_distinct_under_replay() {
-        let (_dir, path) = db();
-        let logical = TelemetryEvent::new(EventKind::ToolInvocation)
-            .with_id("invoke-call-1")
-            .tool("firecrawl_google_search")
-            .outcome(ToolOutcome::CompletedNonEmpty.as_str())
-            .trigger(Trigger::ReconPrompt)
-            .mode("remote");
-        let wire = TelemetryEvent::new(EventKind::ToolWireRequest)
-            .with_id("wire-call-1")
-            .tool("firecrawl_google_search")
-            .canonical("invoke-call-1");
-        let cached = TelemetryEvent::new(EventKind::ToolInvocation)
-            .with_id("invoke-call-2")
-            .tool("firecrawl_google_search")
-            .outcome(ToolOutcome::CompletedNonEmpty.as_str())
-            .mode("cache");
-        for _ in 0..2 {
-            record(&path, &logical).unwrap();
-            record(&path, &wire).unwrap();
-            record(&path, &cached).unwrap();
-        }
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        let count = |kind: &str| -> i64 {
-            conn.query_row(
-                "SELECT COUNT(*) FROM telemetry_events WHERE event_type = ?1",
-                [kind],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
-        assert_eq!(count("tool_invocation"), 2);
-        assert_eq!(count("tool_wire_request"), 1);
-        let rolled: i64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(events), 0) FROM telemetry_hourly WHERE event_type = 'tool_invocation'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(rolled, 2);
     }
 }

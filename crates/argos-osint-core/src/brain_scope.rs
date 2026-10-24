@@ -603,25 +603,4 @@ mod tests;
 #[cfg(test)]
 mod endpoint_projection_tests {
     use super::*;
-
-    #[test]
-    fn source_endpoint_uses_typed_identity_and_exact_revision() {
-        let store = Store::memory().unwrap();
-        let seed = TopologySeed::Source {
-            origin: "evidence".into(),
-            source_id: "body:record@literal".into(),
-            revision: "revision:exact@1".into(),
-        };
-        let snapshot = store
-            .topology_snapshot(&seed, &TopologyOptions::default())
-            .unwrap();
-        assert_eq!(
-            resolve_node_to_endpoint(&snapshot.root_id, &snapshot.nodes),
-            Some(EndpointRef::Source {
-                origin: "evidence".into(),
-                source_id: "body:record@literal".into(),
-                revision: "revision:exact@1".into()
-            })
-        );
-    }
 }

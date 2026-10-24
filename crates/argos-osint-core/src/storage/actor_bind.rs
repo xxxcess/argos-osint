@@ -72,7 +72,12 @@ async fn head(tx: &Tx, id: &str) -> Result<Option<ActorHead>, TxError> {
     take(&mut r, 0)
 }
 
-async fn add_alias_in(tx: &Tx, actor: &str, alias: &str, prov: &Value) -> Result<(), TxError> {
+pub(crate) async fn add_alias_in(
+    tx: &Tx,
+    actor: &str,
+    alias: &str,
+    prov: &Value,
+) -> Result<(), TxError> {
     let normalized = normalize_alias(alias);
     if normalized.is_empty() {
         return Ok(());

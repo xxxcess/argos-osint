@@ -14,6 +14,7 @@
 pub mod error;
 
 pub mod actor_bind;
+pub mod actor_dedup;
 pub mod atlas;
 pub mod atlas_delete;
 pub mod atlas_memory;

@@ -140,7 +140,7 @@ pub async fn add_mention_in(
     Ok(())
 }
 
-async fn redirects(tx: &Tx) -> Result<HashMap<String, String>, TxError> {
+pub(crate) async fn redirects(tx: &Tx) -> Result<HashMap<String, String>, TxError> {
     #[derive(SurrealValue)]
     struct Row {
         from: String,
@@ -155,7 +155,7 @@ async fn redirects(tx: &Tx) -> Result<HashMap<String, String>, TxError> {
     Ok(rows.into_iter().map(|r| (r.from, r.to)).collect())
 }
 
-fn resolve(map: &HashMap<String, String>, id: &str) -> String {
+pub(crate) fn resolve(map: &HashMap<String, String>, id: &str) -> String {
     let mut cur = id.to_string();
     let mut seen = HashSet::new();
     while let Some(next) = map.get(&cur) {
@@ -187,7 +187,7 @@ pub async fn add_redirect_in(tx: &Tx, from: &str, to: &str, now: &str) -> Result
 }
 
 /// `root` and every actor redirected into it, transitively.
-fn family(map: &HashMap<String, String>, root: &str) -> Vec<String> {
+pub(crate) fn family(map: &HashMap<String, String>, root: &str) -> Vec<String> {
     let mut out = vec![root.to_string()];
     let mut i = 0;
     while i < out.len() {

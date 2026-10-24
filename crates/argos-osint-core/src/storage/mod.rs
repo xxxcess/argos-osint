@@ -26,6 +26,7 @@ pub mod bootstrap;
 pub mod brain_backfill;
 pub mod brain_store;
 pub mod brief;
+pub mod brief_publish;
 pub mod brief_stages;
 pub mod browse;
 pub mod browse_assoc;

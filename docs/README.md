@@ -56,6 +56,7 @@ HTML + SVG under `docs/diagrams/`. Grammar: [cathrynlavery/diagram-design](https
 | Doc | What it is |
 | --- | --- |
 | [../AGENTS.md](../AGENTS.md) | Commands, graphify, planning-with-files, scratch rules |
+| [ci.md](ci.md) | CI matrix, commit policy and Release Please workflows |
 | [versioning.md](versioning.md) | SemVer, Conventional Commits, agent commit tasks and release PR automation |
 | [planning-artifacts.md](planning-artifacts.md) | Shared planning deliverables, local session evidence and selective Git retention |
 | [opencode-v2.md](opencode-v2.md) | Primary tool list, graph-first plugins, and ECC commands |

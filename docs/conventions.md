@@ -4,9 +4,9 @@ Rules that keep Argos and agent work aligned. Product behavior lives in [archite
 
 ## Checks
 
-Order matches CI: `cargo fmt --all --check` → `python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked --no-default-features -- -D warnings` → `python3 scripts/agent_cargo.py test --workspace --locked --no-default-features` (offline, `ARGOS_EMBED` unset, no LanceDB). Local default builds include the `lancedb` feature. MiniLM tests are `#[ignore]` and need `ARGOS_EMBED=1`.
+Run `scripts/local_matrix.sh --storage embedded` (fmt → clippy `-D warnings` → `cargo test --workspace` → embedded storage tests), the same leg CI runs; server mode is CI-only. See [ci.md](ci.md). MiniLM tests are `#[ignore]` and need `ARGOS_EMBED=1`.
 
-Agent compilation uses `scripts/agent_cargo.py` and `target/agents`; user runs keep `target/debug`. Screenshot capture uses the same isolated cache. See [agent Cargo isolation](../AGENTS.md#agent-cargo-isolation) for ownership and lock diagnosis.
+Agent compilation uses `scripts/agent_cargo.py` and `target/agents`; user runs keep `target/debug`. Screenshot capture uses the same isolated cache. See [agent Cargo isolation](../AGENTS.md#build-and-test) for ownership and lock diagnosis.
 
 ## Commits and versions
 

@@ -173,7 +173,13 @@ pub async fn retry_owner(
         return Ok(Retried::Nothing);
     };
     let task_id = match newest.state.as_str() {
-        "queued" | "retry_scheduled" => newest.id,
+        "queued" | "retry_scheduled" => {
+            // Same generation: admit it like `insight_persist::validate_retry`
+            // (live evidence, still the desired generation).
+            let input: PipelineInput = serde_json::from_str(&newest.input_ref)?;
+            super::insight_retry::validate_retry(repo.db(), &input).await?;
+            newest.id
+        }
         "running" => anyhow::bail!("the insight refresh is already running"),
         "completed" => return Ok(Retried::Completed { task_id: newest.id }),
         "paused" => {

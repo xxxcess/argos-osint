@@ -385,6 +385,16 @@ pub async fn memory_record_edges(
                 }
             }
             if let Some(thread) = s.thread_id.as_deref().filter(|t| !t.is_empty()) {
+                // Only live Recon threads (`recon_threads.deleted = 0`).
+                let mut r = db
+                    .query("SELECT VALUE deleted FROM ONLY type::record('recon_thread', $t)")
+                    .bind(("t", thread.to_string()))
+                    .await?
+                    .check()?;
+                let deleted: Option<bool> = r.take(0)?;
+                if deleted != Some(false) {
+                    continue;
+                }
                 let from = source_key("thread", thread, "");
                 out.insert(RecordEdge {
                     key: format!("thread-evidence:{thread}:{memory_id}"),

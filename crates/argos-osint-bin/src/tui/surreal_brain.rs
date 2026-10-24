@@ -54,6 +54,23 @@ pub(crate) fn topology(
     runtime::blocking(|repo| async move { topology::topology_snapshot(&repo, seed, options).await })
 }
 
+/// The memory check before Enter opens a memory's topology: its kind, or
+/// `None` when it no longer exists.
+#[cfg(feature = "surreal")]
+pub(crate) fn memory_kind(
+    id: &str,
+) -> Result<Option<argos_osint_core::memory_metadata::MemoryKind>> {
+    use argos_osint_core::storage::{runtime, topology};
+    runtime::blocking(|repo| async move { topology::memory_seed_kind(&repo, id).await })
+}
+
+#[cfg(not(feature = "surreal"))]
+pub(crate) fn memory_kind(
+    _id: &str,
+) -> Result<Option<argos_osint_core::memory_metadata::MemoryKind>> {
+    unreachable!("SurrealDB Brain is off without the surreal feature")
+}
+
 #[cfg(not(feature = "surreal"))]
 pub(crate) fn topology(
     _seed: &argos_osint_core::brain_topology::TopologySeed,

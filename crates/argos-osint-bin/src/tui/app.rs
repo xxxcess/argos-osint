@@ -876,6 +876,10 @@ enum WorkEvent {
         run_id: String,
         outcome: Result<bool, String>,
     },
+    MemoryGraphChecked {
+        id: String,
+        outcome: Result<Option<argos_osint_core::memory_metadata::MemoryKind>, String>,
+    },
     TopologyLoaded {
         generation: u64,
         seed: argos_osint_core::brain_topology::TopologySeed,
@@ -5786,6 +5790,10 @@ impl App {
                 }
                 true
             }
+            WorkEvent::MemoryGraphChecked { id, outcome } => {
+                self.on_memory_graph_checked(id, outcome);
+                true
+            }
             WorkEvent::TopologyLoaded {
                 generation,
                 seed,
@@ -7051,27 +7059,56 @@ impl App {
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_default(),
             }
+        } else if surreal_brain::on() {
+            // The memory check reads the repository on a plain worker
+            // thread (never the SQLite store); `MemoryGraphChecked` opens
+            // the mapper.
+            let tx = self.work_tx.clone();
+            self.status = "Opening topology…".into();
+            std::thread::spawn(move || {
+                let outcome = surreal_brain::memory_kind(&id).map_err(|e| format!("{e:#}"));
+                let _ = tx.send(WorkEvent::MemoryGraphChecked { id, outcome });
+            });
+            return;
         } else {
-            match self.store.get_memory(&id) {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    self.status = format!("Memory unavailable: {id} no longer exists");
-                    return;
-                }
+            let outcome = match self.store.get_memory(&id) {
+                Ok(Some(_)) => argos_osint_core::brain_kinds::memory_kind(&self.store, &id)
+                    .map(Some)
+                    .map_err(|e| format!("{e:#}")),
+                Ok(None) => Ok(None),
                 Err(error) => {
                     self.status = format!("Memory unavailable: {error:#}");
                     return;
                 }
-            }
-            match argos_osint_core::brain_kinds::memory_kind(&self.store, &id) {
-                Ok(kind) => memory_topology_seed(kind, id),
-                Err(error) => {
-                    self.status = format!("Memory kind unreadable: {error:#}");
+            };
+            match memory_graph_seed(id, outcome) {
+                Ok(seed) => seed,
+                Err(status) => {
+                    self.status = status;
                     return;
                 }
             }
         };
         self.open_topology(seed, Some(1));
+    }
+
+    /// The SurrealDB memory check finished: open the mapper only while the
+    /// Brain list still has that memory selected (a late result is dropped).
+    fn on_memory_graph_checked(
+        &mut self,
+        id: String,
+        outcome: Result<Option<argos_osint_core::memory_metadata::MemoryKind>, String>,
+    ) {
+        let current = self.module == Some(ModuleId::Brain)
+            && self.brain_list_mode == BrainListMode::List
+            && self.memories.get(self.memory_sel).map(|m| m.id.as_str()) == Some(id.as_str());
+        if !current {
+            return;
+        }
+        match memory_graph_seed(id, outcome) {
+            Ok(seed) => self.open_topology(seed, Some(1)),
+            Err(status) => self.status = status,
+        }
     }
 
     /// Open the topology mapper on `seed`. `depth` is the starting hop count
@@ -11379,6 +11416,19 @@ fn flush_streams(app: &mut App) -> bool {
 
 /// Topology seed for a stored memory of the given kind (legacy untyped memories
 /// are Claims).
+/// The memory check's result as the topology seed, or the status line for
+/// a missing or unreadable memory. Shared by the SQLite and SurrealDB paths.
+fn memory_graph_seed(
+    id: String,
+    outcome: Result<Option<argos_osint_core::memory_metadata::MemoryKind>, String>,
+) -> Result<argos_osint_core::brain_topology::TopologySeed, String> {
+    match outcome {
+        Ok(Some(kind)) => Ok(memory_topology_seed(kind, id)),
+        Ok(None) => Err(format!("Memory unavailable: {id} no longer exists")),
+        Err(error) => Err(format!("Memory kind unreadable: {error}")),
+    }
+}
+
 fn memory_topology_seed(
     kind: argos_osint_core::memory_metadata::MemoryKind,
     id: String,
@@ -21759,6 +21809,40 @@ mod tests {
         assert!(!surreal_topology(false, &group));
         assert!(surreal_topology(true, &TopologySeed::Actor("a1".into())));
         assert!(!surreal_topology(false, &TopologySeed::Actor("a1".into())));
+    }
+
+    #[test]
+    fn memory_check_outcome_maps_to_the_seed_or_status() {
+        use argos_osint_core::brain_topology::TopologySeed;
+        use argos_osint_core::memory_metadata::MemoryKind;
+        assert_eq!(
+            memory_graph_seed("m1".into(), Ok(Some(MemoryKind::Inference))),
+            Ok(TopologySeed::Inference("m1".into()))
+        );
+        assert_eq!(
+            memory_graph_seed("m1".into(), Ok(Some(MemoryKind::Claim))),
+            Ok(TopologySeed::Claim("m1".into()))
+        );
+        assert_eq!(
+            memory_graph_seed("m1".into(), Ok(None)),
+            Err("Memory unavailable: m1 no longer exists".into())
+        );
+        assert!(memory_graph_seed("m1".into(), Err("boom".into()))
+            .unwrap_err()
+            .starts_with("Memory kind unreadable"));
+    }
+
+    #[test]
+    fn a_late_memory_check_does_not_open_the_mapper() {
+        use argos_osint_core::memory_metadata::MemoryKind;
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        app.on_work_event(WorkEvent::MemoryGraphChecked {
+            id: "not-selected".into(),
+            outcome: Ok(Some(MemoryKind::Claim)),
+        });
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
+        assert!(app.topology_state.seed.is_none());
     }
 
     #[test]

@@ -1966,6 +1966,22 @@ async fn group_root(
     Ok(Some(root))
 }
 
+/// The TUI memory check before a Brain memory opens the topology mapper:
+/// `Store::get_memory` plus `brain_kinds::memory_kind` on SurrealDB. `None`
+/// when the memory does not exist (whatever its lifecycle, as SQLite); a
+/// missing or unknown `memory_kind` reads as a Claim, as SQLite's legacy
+/// untyped rows do.
+pub async fn memory_seed_kind(repo: &Repository, id: &str) -> Result<Option<MemoryKind>> {
+    let mut r = repo
+        .db()
+        .query("SELECT VALUE memory_kind ?? '' FROM ONLY type::record('memory', $id)")
+        .bind(("id", id.to_string()))
+        .await?
+        .check()?;
+    let kind: Option<String> = r.take(0)?;
+    Ok(kind.map(|k| MemoryKind::parse(&k).unwrap_or(MemoryKind::Claim)))
+}
+
 /// `Store::topology_snapshot` on SurrealDB: every seed except the retained
 /// Intel display seeds, walked breadth-first to `options.depth` (1..=3).
 pub async fn topology_snapshot(

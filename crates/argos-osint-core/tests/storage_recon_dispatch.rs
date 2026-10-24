@@ -97,7 +97,7 @@ async fn scenario(store: &ReconStore) -> Seen {
             &thread.id,
             &run.id,
             &format!("A is A [{done}]"),
-            &[done.clone()],
+            std::slice::from_ref(&done),
             &[],
         )
         .await

@@ -22,6 +22,7 @@ use crate::{
     store::Store,
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use backend::{sqlite_path, surreal_selected, ReconStore};
 use chrono::Utc;
 use futures_util::future::join_all;
 use rusqlite::{params, OptionalExtension};
@@ -2980,13 +2981,11 @@ impl Service {
         })
     }
     pub async fn retry_insights(&self, answer_id: &str) -> Result<()> {
-        let store = Store::open(&self.db_path)?;
-        let run_id:String=store.conn.query_row("SELECT run_id FROM extraction_jobs WHERE answer_id=?1 AND state IN ('queued','failed')",[answer_id],|r|r.get(0)).optional()?.ok_or_else(||anyhow!("retryable insight job not found"))?;
-        let contract: String = store.conn.query_row(
-            "SELECT contract_version FROM extraction_jobs WHERE answer_id=?1",
-            [answer_id],
-            |r| r.get(0),
-        )?;
+        let store = ReconStore::open(&self.db_path).await?;
+        let (run_id, contract) = store
+            .retryable_extraction(answer_id)
+            .await?
+            .ok_or_else(|| anyhow!("retryable insight job not found"))?;
         if contract == crate::investigation::insights::CONTRACT {
             // New-policy insights were staged from originals before the answer.
             // Retry the durable refresh, never mine the saved answer.
@@ -3000,17 +2999,22 @@ impl Service {
             .await?;
             return Ok(());
         }
-        ensure!(contract == "legacy-v1", "unknown extraction contract");
+        ensure!(
+            contract == "legacy-v1" || contract == backend::SURREAL_MINED,
+            "unknown extraction contract"
+        );
         let run = store
-            .get_run(&run_id)?
+            .get_run(&run_id)
+            .await?
             .ok_or_else(|| anyhow!("source run unavailable"))?;
         ensure!(
             store
-                .get_thread(&run.thread_id)?
+                .get_thread(&run.thread_id)
+                .await?
                 .is_some_and(|thread| thread.recall_insights),
             "Enable Recall for this investigation before retrying Brain insight extraction"
         );
-        let messages = store.list_messages(&run.thread_id)?;
+        let messages = store.list_messages(&run.thread_id).await?;
         let answer = messages
             .iter()
             .find(|m| m.id == answer_id)
@@ -3021,8 +3025,8 @@ impl Service {
             .ok_or_else(|| anyhow!("source question unavailable"))?
             .content
             .clone();
-        let evidence = store.answer_evidence(answer_id)?;
-        store.conn.execute("UPDATE extraction_jobs SET state='running',error=NULL,updated_at=?1 WHERE answer_id=?2",params![now(),answer_id])?;
+        let evidence = store.answer_evidence(answer_id).await?;
+        store.set_extraction(answer_id, "running", None).await?;
         let secret = snapshot_secret(&self.auth, &run.synthesis_model)?;
         let answer = answer.clone();
         drop(store);
@@ -3030,7 +3034,10 @@ impl Service {
             .extract_insights(&secret, &question, &answer, &evidence)
             .await;
         if let Err(err) = outcome {
-            Store::open(&self.db_path)?.conn.execute("UPDATE extraction_jobs SET state='failed',error=?1,updated_at=?2 WHERE answer_id=?3",params![err.to_string(),now(),answer_id])?;
+            ReconStore::open(&self.db_path)
+                .await?
+                .set_extraction(answer_id, "failed", Some(&err.to_string()))
+                .await?;
             return Err(err);
         }
         Ok(())
@@ -3046,12 +3053,17 @@ impl Service {
         cancel: Arc<AtomicBool>,
     ) -> Result<(String, ToolResult)> {
         osint::validate(tool_id, &inputs)?;
-        let store = Store::open(&self.db_path)?;
-        ensure!(store.tool_enabled(tool_id)?, "tool disabled");
-        let call_id = store.queue_call(tool_id, &inputs, "manual", None, None, None)?;
+        let store = ReconStore::open(&self.db_path).await?;
+        ensure!(store.tool_enabled(tool_id).await?, "tool disabled");
+        let call_id = store
+            .queue_call(tool_id, &inputs, "manual", None, None, None)
+            .await?;
         drop(store);
         let result = tokio::select! {r=self.execute(tool_id,inputs.clone(),false)=>match r{Ok(result)=>result,Err(err)=>ToolResult{tool_id:tool_id.into(),inputs:inputs.clone(),status:"failed".into(),source_url:String::new(),retrieved_at:now(),observations:Value::Null,raw:String::new(),error:Some(err.to_string()),cached:false,truncated:false,credits_charged:0,credits_reported:None}},_=wait_cancel(cancel)=>ToolResult{tool_id:tool_id.into(),inputs,status:"cancelled".into(),source_url:String::new(),retrieved_at:now(),observations:Value::Null,raw:String::new(),error:None,cached:false,truncated:false,credits_charged:0,credits_reported:None}};
-        Store::open(&self.db_path)?.finish_call(&call_id, &result)?;
+        ReconStore::open(&self.db_path)
+            .await?
+            .finish_call(&call_id, &result)
+            .await?;
         Ok((call_id, result))
     }
     pub(crate) fn provider_keys(&self) -> osint::ProviderKeys {
@@ -3089,9 +3101,9 @@ impl Service {
             .execute_tool_without_reservation(tool_id, inputs, refresh, &cancel)
             .await
     }
-    fn begin_title(&self, tid: &str, question: &str) -> Option<tokio::task::JoinHandle<()>> {
-        let store = Store::open(&self.db_path).ok()?;
-        let thread = store.get_thread(tid).ok()??;
+    async fn begin_title(&self, tid: &str, question: &str) -> Option<tokio::task::JoinHandle<()>> {
+        let store = ReconStore::open(&self.db_path).await.ok()?;
+        let thread = store.get_thread(tid).await.ok()??;
         if thread.title != PLACEHOLDER_TITLE {
             return None;
         }
@@ -3101,15 +3113,15 @@ impl Service {
         let auth = self.auth.clone();
         let settings = self.settings.clone();
         Some(tokio::spawn(async move {
-            let title = investigation_title(&auth, &settings, &question, Some(&db)).await;
-            let Ok(store) = Store::open(&db) else {
+            let title = investigation_title(&auth, &settings, &question, sqlite_path(&db)).await;
+            let Ok(store) = ReconStore::open(&db).await else {
                 return;
             };
-            let Ok(Some(current)) = store.get_thread(&tid) else {
+            let Ok(Some(current)) = store.get_thread(&tid).await else {
                 return;
             };
             if current.title == PLACEHOLDER_TITLE && title != PLACEHOLDER_TITLE {
-                let _ = store.rename_thread(&tid, &title);
+                let _ = store.rename_thread(&tid, &title).await;
             }
         }))
     }
@@ -3123,17 +3135,20 @@ impl Service {
         mut progress: impl FnMut(TurnEvent) + Send,
     ) -> Result<Run> {
         let title: String = question.trim().chars().take(80).collect();
-        let job = crate::job_registry::begin_optional_with(
-            &self.db_path,
-            crate::job_registry::JobSpec::new(
-                "recon",
-                "recon_investigation",
-                format!("Recon · {title}"),
+        // The job registry is SQLite-only: SurrealDB runs are untracked.
+        let job = sqlite_path(&self.db_path).and_then(|db| {
+            crate::job_registry::begin_optional_with(
+                db,
+                crate::job_registry::JobSpec::new(
+                    "recon",
+                    "recon_investigation",
+                    format!("Recon · {title}"),
+                )
+                .resource(format!("thread:{tid}"))
+                .cancellable(),
+                cancel.clone(),
             )
-            .resource(format!("thread:{tid}"))
-            .cancellable(),
-            cancel.clone(),
-        );
+        });
         let outcome = {
             let tracked = |event: TurnEvent| {
                 if let (Some(job), TurnEvent::Stage(stage)) = (&job, &event) {
@@ -3146,10 +3161,14 @@ impl Service {
         };
         let run_id = match &outcome {
             Ok(run) => Some(run.id.clone()),
-            Err(_) => Store::open(&self.db_path)
-                .ok()
-                .and_then(|store| store.runs_for_thread(tid).ok())
-                .and_then(|runs| runs.last().map(|run| run.id.clone())),
+            Err(_) => match ReconStore::open(&self.db_path).await {
+                Ok(store) => store
+                    .runs_for_thread(tid)
+                    .await
+                    .ok()
+                    .and_then(|runs| runs.last().map(|run| run.id.clone())),
+                Err(_) => None,
+            },
         };
         finish_recon_job(job, run_id.as_deref(), &outcome, &cancel);
         outcome
@@ -3166,27 +3185,29 @@ impl Service {
         let recon_secret = provider::role_secret(&self.auth, &self.settings, "recon")?;
         let synthesis_secret = provider::role_secret(&self.auth, &self.settings, "synthesis")?;
         let picker_secret = provider::role_secret(&self.auth, &self.settings, "tool-picker")?;
-        let store = Store::open(&self.db_path)?;
-        let turn = store.add_message(tid, "user", question, None)?;
+        let store = ReconStore::open(&self.db_path).await?;
+        let turn = store.add_message(tid, "user", question, None).await?;
         let max_rounds = self.settings.recon_limits.max_rounds.clamp(1, 8);
         let max_calls = self.settings.recon_limits.max_calls.clamp(1, 24);
         let turn_seconds = self.settings.recon_limits.turn_seconds.clamp(300, 900);
-        let run = store.new_run_with_models(
-            tid,
-            &turn.id,
-            [
-                &format!("{} / {}", recon_secret.kind, recon_secret.model),
-                &format!("{} / {}", picker_secret.kind, picker_secret.model),
-                &format!("{} / {}", synthesis_secret.kind, synthesis_secret.model),
-            ],
-            RunLimits {
-                max_rounds,
-                max_calls,
-                turn_seconds,
-            },
-        )?;
+        let run = store
+            .new_run_with_models(
+                tid,
+                &turn.id,
+                [
+                    &format!("{} / {}", recon_secret.kind, recon_secret.model),
+                    &format!("{} / {}", picker_secret.kind, picker_secret.model),
+                    &format!("{} / {}", synthesis_secret.kind, synthesis_secret.model),
+                ],
+                RunLimits {
+                    max_rounds,
+                    max_calls,
+                    turn_seconds,
+                },
+            )
+            .await?;
         drop(store);
-        let title_task = self.begin_title(tid, question);
+        let title_task = self.begin_title(tid, question).await;
         let clock = turn_clock(
             turn_seconds,
             self.settings.recon_limits.effective_max_turn_seconds(),
@@ -3212,28 +3233,29 @@ impl Service {
                 } else {
                     "complete"
                 };
-                Store::open(&self.db_path)?.set_run(
-                    &run.id,
-                    "completed",
-                    stage,
-                    None,
-                    note.as_deref(),
-                )?;
+                ReconStore::open(&self.db_path)
+                    .await?
+                    .set_run(&run.id, "completed", stage, None, note.as_deref())
+                    .await?;
             }
             Err(err) => {
-                let store = Store::open(&self.db_path)?;
+                let store = ReconStore::open(&self.db_path).await?;
                 if cancel.load(Ordering::Relaxed) {
-                    store.cancel_run(&run.id)?;
-                    store.conn.execute("UPDATE osint_calls SET status='cancelled',completed_at=?1 WHERE run_id=?2 AND status IN ('queued','running')",params![now(),run.id])?;
+                    store.cancel_run(&run.id).await?;
+                    store.settle_open_calls(&run.id, "cancelled").await?;
                 } else {
-                    store.set_run(&run.id, "failed", "failed", None, Some(&err.to_string()))?;
-                    store.conn.execute("UPDATE osint_calls SET status='interrupted',completed_at=?1 WHERE run_id=?2 AND status IN ('queued','running')",params![now(),run.id])?;
+                    store
+                        .set_run(&run.id, "failed", "failed", None, Some(&err.to_string()))
+                        .await?;
+                    store.settle_open_calls(&run.id, "interrupted").await?;
                 }
                 return Err(err);
             }
         }
-        Store::open(&self.db_path)?
-            .get_run(&run.id)?
+        ReconStore::open(&self.db_path)
+            .await?
+            .get_run(&run.id)
+            .await?
             .ok_or_else(|| anyhow!("run was deleted"))
     }
     /// Resume an interrupted or failed investigation. The run's existing job
@@ -3244,18 +3266,19 @@ impl Service {
         cancel: Arc<AtomicBool>,
         mut progress: impl FnMut(TurnEvent) + Send,
     ) -> Result<Run> {
-        let existing = rusqlite::Connection::open(&self.db_path)
-            .ok()
+        let existing = sqlite_path(&self.db_path)
+            .and_then(|db| rusqlite::Connection::open(db).ok())
             .and_then(|conn| {
                 crate::job_registry::job_for_run(&conn, "recon_investigation", rid)
                     .ok()
                     .flatten()
             });
-        let thread = Store::open(&self.db_path)
-            .ok()
-            .and_then(|store| store.get_run(rid).ok().flatten())
-            .map(|run| run.thread_id)
-            .unwrap_or_default();
+        let thread = match ReconStore::open(&self.db_path).await {
+            Ok(store) => store.get_run(rid).await.ok().flatten(),
+            Err(_) => None,
+        }
+        .map(|run| run.thread_id)
+        .unwrap_or_default();
         let mut spec = crate::job_registry::JobSpec::new(
             "recon",
             "recon_investigation",
@@ -3267,7 +3290,8 @@ impl Service {
         if let Some(id) = existing {
             spec = spec.with_id(id);
         }
-        let job = crate::job_registry::begin_optional_with(&self.db_path, spec, cancel.clone());
+        let job = sqlite_path(&self.db_path)
+            .and_then(|db| crate::job_registry::begin_optional_with(db, spec, cancel.clone()));
         let outcome = {
             let tracked = |event: TurnEvent| {
                 if let (Some(job), TurnEvent::Stage(stage)) = (&job, &event) {
@@ -3287,20 +3311,22 @@ impl Service {
         cancel: Arc<AtomicBool>,
         mut progress: impl FnMut(TurnEvent) + Send,
     ) -> Result<Run> {
-        let store = Store::open(&self.db_path)?;
+        let store = ReconStore::open(&self.db_path).await?;
         let run = store
-            .get_run(rid)?
+            .get_run(rid)
+            .await?
             .ok_or_else(|| anyhow!("run not found"))?;
         ensure!(
             matches!(run.state.as_str(), "interrupted" | "failed"),
             "only interrupted or failed runs can resume"
         );
         ensure!(
-            store.get_thread(&run.thread_id)?.is_some(),
+            store.get_thread(&run.thread_id).await?.is_some(),
             "source thread was deleted"
         );
         let question = store
-            .list_messages(&run.thread_id)?
+            .list_messages(&run.thread_id)
+            .await?
             .into_iter()
             .find(|m| m.id == run.turn_id)
             .ok_or_else(|| anyhow!("source question unavailable"))?
@@ -3317,35 +3343,32 @@ impl Service {
                 validate_ordered_plan(plan)?;
             }
         }
-        let prior_calls = store.calls_for_run(rid)?;
-        let answer_exists = store.has_final_answer_for_run(rid)?;
+        let prior_calls = store.calls_for_run(rid).await?;
+        let answer_exists = store.has_final_answer_for_run(rid).await?;
         if answer_exists {
-            Store::open(&self.db_path)?.set_run(rid, "completed", "complete", None, None)?;
-            return Store::open(&self.db_path)?
-                .get_run(rid)?
+            ReconStore::open(&self.db_path)
+                .await?
+                .set_run(rid, "completed", "complete", None, None)
+                .await?;
+            return ReconStore::open(&self.db_path)
+                .await?
+                .get_run(rid)
+                .await?
                 .ok_or_else(|| anyhow!("run missing"));
         }
-        let (prev_gen, last_draft): (u32, String) = store
-            .conn
-            .query_row(
-                "SELECT generation, draft FROM recon_model_operations WHERE run_id=?1 AND role='synthesis' ORDER BY generation DESC LIMIT 1",
-                [rid],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+        let (prev_gen, last_draft) = store
+            .synthesis_operation(rid)
+            .await
+            .ok()
+            .flatten()
             .unwrap_or((0, String::new()));
         let resume_gen = prev_gen + 1;
-        let op_id = format!("{rid}-synthesis");
-        let _ = store.conn.execute(
-            "INSERT INTO recon_model_operations(id, run_id, task_id, role, generation, status, draft, created_at, updated_at)
-             VALUES (?1, ?2, '', 'synthesis', ?3, 'running', ?4, ?5, ?5)
-             ON CONFLICT(id) DO UPDATE SET generation=excluded.generation, status='running', updated_at=excluded.updated_at",
-            rusqlite::params![op_id, rid, resume_gen, last_draft, now()],
-        );
+        let _ = store.begin_synthesis(rid, resume_gen, &last_draft).await;
         let recon_secret = provider::role_secret(&self.auth, &self.settings, "recon")
             .or_else(|_| snapshot_secret(&self.auth, &run.recon_model))?;
         let synthesis_secret = provider::role_secret(&self.auth, &self.settings, "synthesis")
             .or_else(|_| snapshot_secret(&self.auth, &run.synthesis_model))?;
-        ensure!(store.restart_run(rid)?, "run could not restart");
+        ensure!(store.restart_run(rid).await?, "run could not restart");
         drop(store);
         let clock = turn_clock(
             run.turn_seconds,
@@ -3410,9 +3433,10 @@ impl Service {
             progress(TurnEvent::Stage("resuming tools".into()));
             let new_results =
                 orchestrate::execute_budgeted(self, &run, &missing.calls, &cancel).await?;
-            let store = Store::open(&self.db_path)?;
+            let store = ReconStore::open(&self.db_path).await?;
             let mut results: Vec<_> = store
-                .calls_for_thread(&run.thread_id)?
+                .calls_for_thread(&run.thread_id)
+                .await?
                 .into_iter()
                 .rev()
                 .take(20)
@@ -3424,12 +3448,15 @@ impl Service {
                 }
             }
             let (recalled, _, _) =
-                orchestrate::recall_for_turn(&store, &run.thread_id, &question, "", &run.id)?;
-            let prior = orchestrate::previous_synthesis(&store, &run.thread_id)?;
+                orchestrate::recall_for_turn(&store, &run.thread_id, &question, "", &run.id)
+                    .await?;
+            let prior = orchestrate::previous_synthesis(&store, &run.thread_id).await?;
             drop(store);
             let max_calls = usize::from(run.max_calls);
-            let opening = !Store::open(&self.db_path)?
-                .list_messages(&run.thread_id)?
+            let opening = !ReconStore::open(&self.db_path)
+                .await?
+                .list_messages(&run.thread_id)
+                .await?
                 .iter()
                 .any(|message| message.role == "assistant");
             self.finish_answer(
@@ -3468,26 +3495,27 @@ impl Service {
                 } else {
                     "complete"
                 };
-                Store::open(&self.db_path)?.set_run(
-                    rid,
-                    "completed",
-                    stage,
-                    None,
-                    note.as_deref(),
-                )?;
+                ReconStore::open(&self.db_path)
+                    .await?
+                    .set_run(rid, "completed", stage, None, note.as_deref())
+                    .await?;
             }
             Err(err) => {
-                let store = Store::open(&self.db_path)?;
+                let store = ReconStore::open(&self.db_path).await?;
                 if cancel.load(Ordering::Relaxed) {
-                    store.cancel_run(rid)?;
+                    store.cancel_run(rid).await?;
                 } else {
-                    store.set_run(rid, "failed", "failed", None, Some(&err.to_string()))?;
+                    store
+                        .set_run(rid, "failed", "failed", None, Some(&err.to_string()))
+                        .await?;
                 }
                 return Err(err);
             }
         }
-        Store::open(&self.db_path)?
-            .get_run(rid)?
+        ReconStore::open(&self.db_path)
+            .await?
+            .get_run(rid)
+            .await?
             .ok_or_else(|| anyhow!("run missing"))
     }
 
@@ -3520,15 +3548,16 @@ impl Service {
                 {
                     continue;
                 }
-                let store = Store::open(&self.db_path)?;
+                let store = ReconStore::open(&self.db_path).await?;
                 ensure!(
                     store
-                        .get_run(&run.id)?
+                        .get_run(&run.id)
+                        .await?
                         .is_some_and(|r| r.state == "running")
-                        && store.get_thread(&run.thread_id)?.is_some(),
+                        && store.get_thread(&run.thread_id).await?.is_some(),
                     "run no longer active"
                 );
-                if !store.tool_enabled(&call.tool_id)? {
+                if !store.tool_enabled(&call.tool_id).await? {
                     finished.insert(call.step_id.clone());
                     continue;
                 }
@@ -3540,17 +3569,21 @@ impl Service {
                     .filter_map(Value::as_str)
                 {
                     for (kind, canonical) in explicit_entities(value) {
-                        store.link_entity(&run.thread_id, &kind, &canonical, None)?;
+                        store
+                            .link_entity(&run.thread_id, &kind, &canonical, None)
+                            .await?;
                     }
                 }
-                let call_id = store.queue_call(
-                    &call.tool_id,
-                    &call.arguments,
-                    "recon",
-                    Some(&run.id),
-                    Some(&run.thread_id),
-                    Some(&run.turn_id),
-                )?;
+                let call_id = store
+                    .queue_call(
+                        &call.tool_id,
+                        &call.arguments,
+                        "recon",
+                        Some(&run.id),
+                        Some(&run.thread_id),
+                        Some(&run.turn_id),
+                    )
+                    .await?;
                 ready.push((call.clone(), call_id));
             }
             if ready.is_empty() {
@@ -3566,8 +3599,8 @@ impl Service {
                 (call,call_id,result)
             })).await;
             for (call, call_id, result) in executed {
-                let store = Store::open(&self.db_path)?;
-                store.finish_call(&call_id, &result)?;
+                let store = ReconStore::open(&self.db_path).await?;
+                store.finish_call(&call_id, &result).await?;
                 if let Some(hosts) = result
                     .observations
                     .get("hostnames")
@@ -3575,7 +3608,9 @@ impl Service {
                 {
                     for host in hosts.iter().filter_map(Value::as_str).take(100) {
                         for (kind, canonical) in explicit_entities(host) {
-                            store.link_entity(&run.thread_id, &kind, &canonical, Some(&call_id))?;
+                            store
+                                .link_entity(&run.thread_id, &kind, &canonical, Some(&call_id))
+                                .await?;
                         }
                     }
                 }
@@ -3634,6 +3669,351 @@ impl Service {
         }
         let _ = (max_calls, opening);
         progress(TurnEvent::Stage("assessing source claims".into()));
+        let assessed = if surreal_selected() {
+            // The claim assessment pipeline is still SQLite-only: synthesize
+            // from the active SurrealDB output, else withhold inferences.
+            let store = ReconStore::open(&self.db_path).await?;
+            #[cfg(feature = "surreal")]
+            let active = match store.repository() {
+                Some(repo) => {
+                    crate::storage::insight_owner::active_output(repo, "recon", &run.id).await?
+                }
+                None => None,
+            };
+            #[cfg(not(feature = "surreal"))]
+            let active = {
+                drop(store);
+                None
+            };
+            Some(active.unwrap_or_else(|| {
+                let mut withheld = crate::investigation::insights::PipelineOutput::default();
+                withheld
+                    .readiness
+                    .gaps
+                    .push("Claim assessment is not on SurrealDB yet".into());
+                withheld
+            }))
+        } else {
+            self.assess_sqlite(run, question, plan, results, cancel)
+                .await?
+        };
+        let synthesis_results = if self.settings.nlp.mode != crate::nlp::Mode::Off
+            || results
+                .iter()
+                .any(|(_, result)| page_needs_compact(&result.observations))
+        {
+            progress(TurnEvent::Stage("compacting evidence".into()));
+            ReconStore::open(&self.db_path)
+                .await?
+                .set_run(&run.id, "running", "compacting evidence", None, None)
+                .await?;
+            compact_page_evidence(
+                &self.auth,
+                &self.settings,
+                question,
+                &directive_goals_line(plan),
+                results,
+                cancel,
+                progress,
+                &run.id,
+                sqlite_path(&self.db_path),
+            )
+            .await?
+        } else {
+            results.to_vec()
+        };
+        progress(TurnEvent::Stage("synthesizing".into()));
+        ReconStore::open(&self.db_path)
+            .await?
+            .set_run(&run.id, "running", "synthesizing", None, None)
+            .await?;
+        let prior_view = crate::nlp::prepare_mode(
+            crate::nlp::Source::derived(&run.thread_id, "prior", prior),
+            "synthesis-prior",
+            question,
+            8000,
+            orchestrate::PRIOR_SYNTHESIS_CHARS,
+            cancel.clone(),
+            self.settings.nlp.mode,
+        )
+        .await;
+        let mut recall_views = recalled.to_vec();
+        for item in &mut recall_views {
+            let source = crate::nlp::Source::derived(&item.memory_id, &item.updated_at, &item.text);
+            let prepared = crate::nlp::prepare_mode(
+                source.clone(),
+                "brain-context",
+                question,
+                200,
+                200,
+                cancel.clone(),
+                self.settings.nlp.mode,
+            )
+            .await;
+            if self.settings.nlp.mode != crate::nlp::Mode::Off {
+                if let Some(Ok(store)) = sqlite_path(&self.db_path).map(Store::open) {
+                    let _ = crate::nlp::cache::register(
+                        &store.conn,
+                        "memory",
+                        &item.memory_id,
+                        &source,
+                        None,
+                        "historical-brain-v1",
+                    );
+                }
+            }
+            item.text = prepared.text;
+        }
+        let (mut synthesis_prompt, mut synthesis_user) = synthesis_request(
+            question,
+            plan,
+            &synthesis_results,
+            &prior_view.text,
+            &recall_views,
+        )?;
+        if let Some(assessed) = &assessed {
+            synthesis_user.push_str(&format!(
+                "\nAssessed source claims, approved inferences, and coverage gaps:\n{}",
+                serde_json::to_string(assessed)?
+            ));
+            if !assessed.readiness.publication_eligible {
+                synthesis_prompt.push_str("\nEvidence readiness withholds investigative inferences. Return only factual observations, attributed source claims, direct factual answers and explicit coverage gaps. Do not derive analytical conclusions or infer identities from mentions. Brain recall and previous answers are leads, not independent corroboration.");
+            } else {
+                synthesis_prompt.push_str("\nGround analytical prose in the assessed premise IDs and approved inferences. Preserve limitations, speaker, uncertainty, allegation/denial and time. Do not mine this answer as independent evidence.");
+            }
+        } else {
+            synthesis_prompt.push_str("\nNo current assessment result: return observations, attributed claims and coverage gaps only; withhold analytical inferences.");
+        }
+        {
+            let note = {
+                let mut clock_guard = clock.lock().unwrap();
+                clock_guard.set_evidence(synthesis_user.chars().count());
+                clock_guard.begin_synthesis();
+                clock_guard.breakdown()
+            };
+            let mut logged = plan.clone();
+            logged.deadline_note = note;
+            ReconStore::open(&self.db_path)
+                .await?
+                .set_run(&run.id, "running", "synthesizing", Some(&logged), None)
+                .await?;
+        }
+        let synthesis_prompt = synthesis_prompt.as_str();
+        let synthesis_messages = [
+            chat("system", synthesis_prompt.into()),
+            chat("user", synthesis_user.clone()),
+        ];
+
+        ensure!(
+            crate::nlp::message_bytes(&synthesis_messages, &Value::Null) <= 48 * 1024,
+            "BudgetExceeded: mandatory synthesis evidence exceeds serialized byte budget"
+        );
+        let store = ReconStore::open(&self.db_path).await?;
+        let prev_gen = store
+            .synthesis_operation(&run.id)
+            .await
+            .ok()
+            .flatten()
+            .map_or(0, |(generation, _)| generation);
+        let generation = u32::try_from(prev_gen.max(1)).unwrap_or(1);
+        if store.is_surreal() {
+            // add_answer finalizes the run's synthesis operation.
+            store
+                .begin_synthesis(&run.id, i64::from(generation), "")
+                .await?;
+        }
+        drop(store);
+        let op_id = format!("{}-synthesis", run.id);
+        let scope = model_exec::OperationScope::new(&op_id, "synthesis")
+            .with_run(&run.id)
+            .with_generation(generation);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
+        let tx1 = tx.clone();
+        let text_observer: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |delta: &str| {
+            let _ = tx1.send(TurnEvent::AnswerDelta(delta.to_string()));
+        });
+        let tx2 = tx.clone();
+        let on_event: Arc<dyn Fn(model_exec::ModelExecEvent) + Send + Sync> =
+            Arc::new(move |evt: model_exec::ModelExecEvent| match evt {
+                model_exec::ModelExecEvent::AttemptReset { .. } => {
+                    let _ = tx2.send(TurnEvent::AnswerReset);
+                }
+                model_exec::ModelExecEvent::FinalReplacement { text, .. } => {
+                    let _ = tx2.send(TurnEvent::AnswerReplacement(text));
+                }
+                _ => {}
+            });
+        drop(tx);
+
+        let mut settings = self.settings.clone();
+        settings.defaults.synthesis = crate::provider::ModelAssignment {
+            provider: synthesis_secret.kind.clone(),
+            model: synthesis_secret.model.clone(),
+            ..Default::default()
+        };
+        let mut auth = self.auth.clone();
+        auth.set_account(synthesis_secret.clone());
+
+        let exec_fut = model_exec::execute_chat(
+            &auth,
+            &settings,
+            &scope,
+            &synthesis_messages,
+            |_| Ok(()),
+            cancel,
+            Some(on_event),
+            Some(text_observer),
+            sqlite_path(&self.db_path),
+            true,
+        );
+        tokio::pin!(exec_fut);
+
+        let streamed_res = loop {
+            tokio::select! {
+                res = &mut exec_fut => {
+                    while let Ok(evt) = rx.try_recv() {
+                        progress(evt);
+                    }
+                    break res;
+                }
+                Some(evt) = rx.recv() => {
+                    progress(evt);
+                }
+            }
+        };
+
+        let raw_answer = match streamed_res {
+            Ok((text, _)) => text,
+            Err(err) if err.to_string() == "cancelled" || err.to_string().contains("cancelled") => {
+                return Err(anyhow!("cancelled"));
+            }
+            Err(err) => {
+                return Err(err);
+            }
+        };
+
+        let mut answer = raw_answer.trim().to_string();
+        ensure!(!answer.is_empty(), "empty synthesis answer");
+        let watched = answer.clone();
+
+        if let Err(error) = validate_citations(&answer, results) {
+            progress(TurnEvent::AnswerNote("fixing citations…".into()));
+            let repair_op_id = format!("{}-synthesis-repair", run.id);
+            let repair_scope = model_exec::OperationScope::new(&repair_op_id, "synthesis")
+                .with_run(&run.id)
+                .with_generation(generation);
+            let repair = [
+                chat("system", synthesis_prompt.into()),
+                chat(
+                    "user",
+                    format!(
+                        "Repair this answer. {error}. Cite only these evidence IDs, one evidence ID per bracket like [id][id]: {}. Previous answer: {answer}",
+                        results.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")
+                    ),
+                ),
+            ];
+            let repaired_res = model_exec::execute_chat(
+                &auth,
+                &settings,
+                &repair_scope,
+                &repair,
+                |_| Ok(()),
+                cancel,
+                None,
+                None,
+                sqlite_path(&self.db_path),
+                true,
+            )
+            .await;
+            match repaired_res {
+                Ok((repaired_text, _)) => {
+                    answer = repaired_text.trim().to_string();
+                }
+                Err(err)
+                    if err.to_string() == "cancelled" || err.to_string().contains("cancelled") =>
+                {
+                    return Err(anyhow!("cancelled"));
+                }
+                Err(err) => {
+                    return Err(err);
+                }
+            }
+        }
+        let (answer, dropped) = match settle_citations(&answer, results) {
+            Ok(settled) => settled,
+            Err(_) => {
+                return self
+                    .keep_uncited(
+                        run,
+                        plan,
+                        question,
+                        recalled,
+                        results,
+                        &watched,
+                        synthesis_secret,
+                        progress,
+                    )
+                    .await;
+            }
+        };
+        if !dropped.is_empty() {
+            let mut logged = plan.clone();
+            logged.binding_notes.push(format!(
+                "Synthesis cited unknown evidence id(s) {}; they were dropped after the repair",
+                dropped.join(", ")
+            ));
+            ReconStore::open(&self.db_path)
+                .await?
+                .set_run(&run.id, "running", "synthesizing", Some(&logged), None)
+                .await?;
+        }
+        let answer_msg = self
+            .store_answer(run, recalled, &answer, results, &[])
+            .await?;
+        let cited_ids = citation_ids(&answer);
+        let cited_results: Vec<_> = synthesis_results
+            .iter()
+            .filter(|(id, _)| cited_ids.contains(id))
+            .cloned()
+            .collect();
+        let store = ReconStore::open(&self.db_path).await?;
+        if !cited_results.iter().any(|(_, r)| r.status == "completed") {
+            store
+                .set_extraction(&answer_msg.id, "skipped", None)
+                .await?;
+            return Ok(None);
+        }
+        progress(TurnEvent::Stage("saving insights".into()));
+        if !store.is_surreal() {
+            store.complete_extraction_v1(&answer_msg.id).await?;
+            let _ = cited_results; // Shared pre-answer refresh already owns derivations.
+            return Ok(None);
+        }
+        // SurrealDB has no pre-answer refresh yet: mine the cited evidence.
+        drop(store);
+        if let Err(err) = self
+            .extract_insights(synthesis_secret, question, &answer_msg, &cited_results)
+            .await
+        {
+            ReconStore::open(&self.db_path)
+                .await?
+                .set_extraction(&answer_msg.id, "failed", Some(&err.to_string()))
+                .await?;
+        }
+        Ok(None)
+    }
+
+    /// The SQLite claim assessment: refresh the run's insight snapshot and
+    /// return its output (withheld with the blocking error on failure).
+    async fn assess_sqlite(
+        &self,
+        run: &Run,
+        question: &str,
+        plan: &Plan,
+        results: &[(String, ToolResult)],
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Option<crate::investigation::insights::PipelineOutput>> {
         let mut insight_input = {
             let store = Store::open(&self.db_path)?;
             let evidence =
@@ -3709,299 +4089,12 @@ impl Service {
                 Some(withheld)
             }
         };
-        let synthesis_results = if self.settings.nlp.mode != crate::nlp::Mode::Off
-            || results
-                .iter()
-                .any(|(_, result)| page_needs_compact(&result.observations))
-        {
-            progress(TurnEvent::Stage("compacting evidence".into()));
-            Store::open(&self.db_path)?.set_run(
-                &run.id,
-                "running",
-                "compacting evidence",
-                None,
-                None,
-            )?;
-            compact_page_evidence(
-                &self.auth,
-                &self.settings,
-                question,
-                &directive_goals_line(plan),
-                results,
-                cancel,
-                progress,
-                &run.id,
-                Some(&self.db_path),
-            )
-            .await?
-        } else {
-            results.to_vec()
-        };
-        progress(TurnEvent::Stage("synthesizing".into()));
-        Store::open(&self.db_path)?.set_run(&run.id, "running", "synthesizing", None, None)?;
-        let prior_view = crate::nlp::prepare_mode(
-            crate::nlp::Source::derived(&run.thread_id, "prior", prior),
-            "synthesis-prior",
-            question,
-            8000,
-            orchestrate::PRIOR_SYNTHESIS_CHARS,
-            cancel.clone(),
-            self.settings.nlp.mode,
-        )
-        .await;
-        let mut recall_views = recalled.to_vec();
-        for item in &mut recall_views {
-            let source = crate::nlp::Source::derived(&item.memory_id, &item.updated_at, &item.text);
-            let prepared = crate::nlp::prepare_mode(
-                source.clone(),
-                "brain-context",
-                question,
-                200,
-                200,
-                cancel.clone(),
-                self.settings.nlp.mode,
-            )
-            .await;
-            if self.settings.nlp.mode != crate::nlp::Mode::Off {
-                if let Ok(store) = Store::open(&self.db_path) {
-                    let _ = crate::nlp::cache::register(
-                        &store.conn,
-                        "memory",
-                        &item.memory_id,
-                        &source,
-                        None,
-                        "historical-brain-v1",
-                    );
-                }
-            }
-            item.text = prepared.text;
-        }
-        let (mut synthesis_prompt, mut synthesis_user) = synthesis_request(
-            question,
-            plan,
-            &synthesis_results,
-            &prior_view.text,
-            &recall_views,
-        )?;
-        if let Some(assessed) = &assessed {
-            synthesis_user.push_str(&format!(
-                "\nAssessed source claims, approved inferences, and coverage gaps:\n{}",
-                serde_json::to_string(assessed)?
-            ));
-            if !assessed.readiness.publication_eligible {
-                synthesis_prompt.push_str("\nEvidence readiness withholds investigative inferences. Return only factual observations, attributed source claims, direct factual answers and explicit coverage gaps. Do not derive analytical conclusions or infer identities from mentions. Brain recall and previous answers are leads, not independent corroboration.");
-            } else {
-                synthesis_prompt.push_str("\nGround analytical prose in the assessed premise IDs and approved inferences. Preserve limitations, speaker, uncertainty, allegation/denial and time. Do not mine this answer as independent evidence.");
-            }
-        } else {
-            synthesis_prompt.push_str("\nNo current assessment result: return observations, attributed claims and coverage gaps only; withhold analytical inferences.");
-        }
-        {
-            let mut clock_guard = clock.lock().unwrap();
-            clock_guard.set_evidence(synthesis_user.chars().count());
-            clock_guard.begin_synthesis();
-            let note = clock_guard.breakdown();
-            drop(clock_guard);
-            let mut logged = plan.clone();
-            logged.deadline_note = note;
-            Store::open(&self.db_path)?.set_run(
-                &run.id,
-                "running",
-                "synthesizing",
-                Some(&logged),
-                None,
-            )?;
-        }
-        let synthesis_prompt = synthesis_prompt.as_str();
-        let synthesis_messages = [
-            chat("system", synthesis_prompt.into()),
-            chat("user", synthesis_user.clone()),
-        ];
-
-        ensure!(
-            crate::nlp::message_bytes(&synthesis_messages, &Value::Null) <= 48 * 1024,
-            "BudgetExceeded: mandatory synthesis evidence exceeds serialized byte budget"
-        );
-        let (prev_gen, _): (u32, String) = Store::open(&self.db_path)?
-            .conn
-            .query_row(
-                "SELECT generation, draft FROM recon_model_operations WHERE run_id=?1 AND role='synthesis' ORDER BY generation DESC LIMIT 1",
-                [&run.id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap_or((0, String::new()));
-        let generation = prev_gen.max(1);
-        let op_id = format!("{}-synthesis", run.id);
-        let scope = model_exec::OperationScope::new(&op_id, "synthesis")
-            .with_run(&run.id)
-            .with_generation(generation);
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
-        let tx1 = tx.clone();
-        let text_observer: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |delta: &str| {
-            let _ = tx1.send(TurnEvent::AnswerDelta(delta.to_string()));
-        });
-        let tx2 = tx.clone();
-        let on_event: Arc<dyn Fn(model_exec::ModelExecEvent) + Send + Sync> =
-            Arc::new(move |evt: model_exec::ModelExecEvent| match evt {
-                model_exec::ModelExecEvent::AttemptReset { .. } => {
-                    let _ = tx2.send(TurnEvent::AnswerReset);
-                }
-                model_exec::ModelExecEvent::FinalReplacement { text, .. } => {
-                    let _ = tx2.send(TurnEvent::AnswerReplacement(text));
-                }
-                _ => {}
-            });
-        drop(tx);
-
-        let mut settings = self.settings.clone();
-        settings.defaults.synthesis = crate::provider::ModelAssignment {
-            provider: synthesis_secret.kind.clone(),
-            model: synthesis_secret.model.clone(),
-            ..Default::default()
-        };
-        let mut auth = self.auth.clone();
-        auth.set_account(synthesis_secret.clone());
-
-        let exec_fut = model_exec::execute_chat(
-            &auth,
-            &settings,
-            &scope,
-            &synthesis_messages,
-            |_| Ok(()),
-            cancel,
-            Some(on_event),
-            Some(text_observer),
-            Some(&self.db_path),
-            true,
-        );
-        tokio::pin!(exec_fut);
-
-        let streamed_res = loop {
-            tokio::select! {
-                res = &mut exec_fut => {
-                    while let Ok(evt) = rx.try_recv() {
-                        progress(evt);
-                    }
-                    break res;
-                }
-                Some(evt) = rx.recv() => {
-                    progress(evt);
-                }
-            }
-        };
-
-        let raw_answer = match streamed_res {
-            Ok((text, _)) => text,
-            Err(err) if err.to_string() == "cancelled" || err.to_string().contains("cancelled") => {
-                return Err(anyhow!("cancelled"));
-            }
-            Err(err) => {
-                return Err(err);
-            }
-        };
-
-        let mut answer = raw_answer.trim().to_string();
-        ensure!(!answer.is_empty(), "empty synthesis answer");
-        let watched = answer.clone();
-
-        if let Err(error) = validate_citations(&answer, results) {
-            progress(TurnEvent::AnswerNote("fixing citations…".into()));
-            let repair_op_id = format!("{}-synthesis-repair", run.id);
-            let repair_scope = model_exec::OperationScope::new(&repair_op_id, "synthesis")
-                .with_run(&run.id)
-                .with_generation(generation);
-            let repair = [
-                chat("system", synthesis_prompt.into()),
-                chat(
-                    "user",
-                    format!(
-                        "Repair this answer. {error}. Cite only these evidence IDs, one evidence ID per bracket like [id][id]: {}. Previous answer: {answer}",
-                        results.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")
-                    ),
-                ),
-            ];
-            let repaired_res = model_exec::execute_chat(
-                &auth,
-                &settings,
-                &repair_scope,
-                &repair,
-                |_| Ok(()),
-                cancel,
-                None,
-                None,
-                Some(&self.db_path),
-                true,
-            )
-            .await;
-            match repaired_res {
-                Ok((repaired_text, _)) => {
-                    answer = repaired_text.trim().to_string();
-                }
-                Err(err)
-                    if err.to_string() == "cancelled" || err.to_string().contains("cancelled") =>
-                {
-                    return Err(anyhow!("cancelled"));
-                }
-                Err(err) => {
-                    return Err(err);
-                }
-            }
-        }
-        let (answer, dropped) = match settle_citations(&answer, results) {
-            Ok(settled) => settled,
-            Err(_) => {
-                return self
-                    .keep_uncited(
-                        run,
-                        plan,
-                        question,
-                        recalled,
-                        results,
-                        &watched,
-                        synthesis_secret,
-                        progress,
-                    )
-                    .await;
-            }
-        };
-        if !dropped.is_empty() {
-            let mut logged = plan.clone();
-            logged.binding_notes.push(format!(
-                "Synthesis cited unknown evidence id(s) {}; they were dropped after the repair",
-                dropped.join(", ")
-            ));
-            Store::open(&self.db_path)?.set_run(
-                &run.id,
-                "running",
-                "synthesizing",
-                Some(&logged),
-                None,
-            )?;
-        }
-        let answer_msg = self.store_answer(run, recalled, &answer, results, &[])?;
-        let cited_ids = citation_ids(&answer);
-        let cited_results: Vec<_> = synthesis_results
-            .iter()
-            .filter(|(id, _)| cited_ids.contains(id))
-            .cloned()
-            .collect();
-        if !cited_results.iter().any(|(_, r)| r.status == "completed") {
-            Store::open(&self.db_path)?.conn.execute(
-                "UPDATE extraction_jobs SET state='skipped',updated_at=?1 WHERE answer_id=?2",
-                params![now(), answer_msg.id],
-            )?;
-            return Ok(None);
-        }
-        progress(TurnEvent::Stage("saving insights".into()));
-        Store::open(&self.db_path)?.conn.execute("UPDATE extraction_jobs SET state='completed',contract_version='insights-v1',updated_at=?1 WHERE answer_id=?2",params![now(),answer_msg.id])?;
-        let _ = cited_results; // Shared pre-answer refresh already owns derivations.
-        Ok(None)
+        Ok(assessed)
     }
 
     /// Saves the text streamed so far plus a deterministic evidence summary. The run stays
     /// running; the caller marks it completed (cut short) or cancelled.
-    fn keep_partial(
+    async fn keep_partial(
         &self,
         run: &Run,
         plan: &Plan,
@@ -4014,18 +4107,12 @@ impl Service {
         let mut logged = plan.clone();
         logged.deadline_note = note.clone();
         logged.binding_notes.push(note.clone());
-        Store::open(&self.db_path)?.set_run(
-            &run.id,
-            "running",
-            "synthesizing",
-            Some(&logged),
-            None,
-        )?;
-        if let Ok(store) = Store::open(&self.db_path) {
-            let _ = store.conn.execute(
-                "UPDATE recon_model_operations SET draft = ?1, updated_at = ?2 WHERE run_id = ?3 AND role = 'synthesis'",
-                params![answer, now(), run.id],
-            );
+        ReconStore::open(&self.db_path)
+            .await?
+            .set_run(&run.id, "running", "synthesizing", Some(&logged), None)
+            .await?;
+        if let Ok(store) = ReconStore::open(&self.db_path).await {
+            let _ = store.set_synthesis_drafts(&run.id, &answer).await;
         }
         Ok(note)
     }
@@ -4051,32 +4138,32 @@ impl Service {
             .cloned()
             .collect();
         if gathered.is_empty() {
-            self.keep_partial(run, plan, results, watched, UNCITED)?;
+            self.keep_partial(run, plan, results, watched, UNCITED)
+                .await?;
             return Ok(None);
         }
         let note = cut_footer(UNCITED);
         let mut logged = plan.clone();
         logged.deadline_note = note.clone();
         logged.binding_notes.push(note);
-        Store::open(&self.db_path)?.set_run(
-            &run.id,
-            "running",
-            "synthesizing",
-            Some(&logged),
-            None,
-        )?;
+        ReconStore::open(&self.db_path)
+            .await?
+            .set_run(&run.id, "running", "synthesizing", Some(&logged), None)
+            .await?;
         let stored = cut_short_answer(watched, results, UNCITED);
-        let answer_msg = self.store_answer(run, recalled, &stored, results, &[])?;
+        let answer_msg = self
+            .store_answer(run, recalled, &stored, results, &[])
+            .await?;
         progress(TurnEvent::Stage("saving insights".into()));
         let _ = question;
-        Store::open(&self.db_path)?.conn.execute(
-            "UPDATE extraction_jobs SET state='completed',contract_version='insights-v1',updated_at=?1 WHERE answer_id=?2",
-            params![now(), answer_msg.id],
-        )?;
+        ReconStore::open(&self.db_path)
+            .await?
+            .complete_extraction_v1(&answer_msg.id)
+            .await?;
         Ok(None)
     }
 
-    fn store_answer(
+    async fn store_answer(
         &self,
         run: &Run,
         recalled: &[RecallInsight],
@@ -4084,10 +4171,11 @@ impl Service {
         results: &[(String, ToolResult)],
         _inferred_evidence: &[String],
     ) -> Result<Message> {
-        let mut store = Store::open(&self.db_path)?;
+        let store = ReconStore::open(&self.db_path).await?;
         ensure!(
             store
-                .get_run(&run.id)?
+                .get_run(&run.id)
+                .await?
                 .is_some_and(|r| r.state == "running"),
             "run no longer active"
         );
@@ -4097,10 +4185,14 @@ impl Service {
             .filter(|id| known.contains(id.as_str()))
             .collect();
         let memory_ids: Vec<String> = recalled.iter().map(|item| item.memory_id.clone()).collect();
-        let answer_msg =
-            store.add_answer(&run.thread_id, &run.id, answer, &cited_ids, &memory_ids)?;
-        store.conn.execute("UPDATE extraction_jobs SET contract_version='insights-v1',state='completed',updated_at=?1 WHERE answer_id=?2",params![now(),answer_msg.id])?;
-        store.conn.execute("UPDATE insight_sources SET answer_id=?1 WHERE run_id=?2 AND answer_id IN (SELECT active_snapshot_id FROM insight_owner_state WHERE owner_kind='recon' AND owner_id=?2)",params![answer_msg.id,run.id])?;
+        let answer_msg = store
+            .add_answer(&run.thread_id, &run.id, answer, &cited_ids, &memory_ids)
+            .await?;
+        if !store.is_surreal() {
+            // SurrealDB answers stay queued until their claims are mined.
+            store.complete_extraction_v1(&answer_msg.id).await?;
+        }
+        store.relink_sources(&run.id, &answer_msg.id).await?;
         Ok(answer_msg)
     }
     async fn extract_insights(
@@ -4110,12 +4202,13 @@ impl Service {
         answer: &Message,
         evidence: &[(String, ToolResult)],
     ) -> Result<()> {
-        let store = Store::open(&self.db_path)?;
+        let store = ReconStore::open(&self.db_path).await?;
         if store
-            .get_thread(&answer.thread_id)?
+            .get_thread(&answer.thread_id)
+            .await?
             .is_none_or(|thread| !thread.recall_insights)
         {
-            store.conn.execute("UPDATE extraction_jobs SET state='completed',error=NULL,updated_at=?1 WHERE answer_id=?2",params![now(),answer.id])?;
+            store.set_extraction(&answer.id, "completed", None).await?;
             return Ok(());
         }
         drop(store);
@@ -4156,7 +4249,7 @@ impl Service {
             &cancel,
             None,
             None,
-            Some(&self.db_path),
+            sqlite_path(&self.db_path),
             false,
         )
         .await?;
@@ -4167,8 +4260,10 @@ impl Service {
             .cloned()
             .ok_or_else(|| anyhow!("claims array missing"))?;
         infer_uncited_evidence(&answer.content, evidence, &mut claims);
-        let mut store = Store::open(&self.db_path)?;
-        persist_claims(&mut store, answer, evidence, &claims)
+        ReconStore::open(&self.db_path)
+            .await?
+            .persist_claims(answer, evidence, &claims)
+            .await
     }
 }
 fn persist_claims(

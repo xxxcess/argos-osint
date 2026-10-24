@@ -22,6 +22,10 @@ use crate::osint::ToolResult;
 use crate::provider::ReconLimits;
 use crate::store::Store;
 
+/// Extraction contract of SurrealDB answers: claims mined from the stored
+/// answer and its evidence (`storage::recon_extract::persist_claims`).
+pub const SURREAL_MINED: &str = "surreal-mined-v1";
+
 /// Whether this process keeps Recon on SurrealDB.
 pub fn surreal_selected() -> bool {
     #[cfg(feature = "surreal")]
@@ -357,8 +361,8 @@ impl ReconStore {
             Ok(())
         }, r => crate::storage::recon_exec::set_run_drafts(r, run_id, "synthesis", draft).await)
     }
-    /// Set an answer's extraction job state (`completed`, `skipped`,
-    /// `failed` with `error`); SQLite also stamps the `insights-v1` contract.
+    /// Set an answer's extraction job state (`running`, `completed`,
+    /// `skipped`, `failed` with `error`).
     pub async fn set_extraction(
         &self,
         answer_id: &str,
@@ -367,11 +371,36 @@ impl ReconStore {
     ) -> Result<()> {
         dispatch!(self, s => {
             s.conn.execute(
-                "UPDATE extraction_jobs SET state=?1,error=?2,contract_version=CASE WHEN ?1 IN ('completed','skipped') THEN 'insights-v1' ELSE contract_version END,updated_at=?3 WHERE answer_id=?4",
+                "UPDATE extraction_jobs SET state=?1,error=?2,updated_at=?3 WHERE answer_id=?4",
                 rusqlite::params![state, error, super::now(), answer_id],
             )?;
             Ok(())
         }, r => crate::storage::recon_exec::set_extraction_state(r, answer_id, state).await)
+    }
+    /// Persist mined answer claims as Brain memories and complete the
+    /// answer's extraction job.
+    pub async fn persist_claims(
+        &self,
+        answer: &Message,
+        evidence: &[(String, ToolResult)],
+        claims: &[serde_json::Value],
+    ) -> Result<()> {
+        dispatch!(self, s => {
+            let mut s = s;
+            super::persist_claims(&mut s, answer, evidence, claims)
+        }, r => crate::storage::recon_extract::persist_claims(r, answer, evidence, claims).await.map(|_| ()))
+    }
+
+    /// Complete an answer's extraction under the shared pre-answer refresh
+    /// (`insights-v1`); SurrealDB has no contract column, only the state.
+    pub async fn complete_extraction_v1(&self, answer_id: &str) -> Result<()> {
+        dispatch!(self, s => {
+            s.conn.execute(
+                "UPDATE extraction_jobs SET state='completed',contract_version='insights-v1',updated_at=?1 WHERE answer_id=?2",
+                rusqlite::params![super::now(), answer_id],
+            )?;
+            Ok(())
+        }, r => crate::storage::recon_exec::set_extraction_state(r, answer_id, "completed").await)
     }
     /// Point the run's active Recon snapshot sources at the stored answer.
     pub async fn relink_sources(&self, run_id: &str, answer_id: &str) -> Result<()> {
@@ -401,6 +430,32 @@ impl ReconStore {
             )?;
             Ok(())
         }, r => crate::storage::recon_exec::begin_operation(r, &op_id, Some(run_id), None, "synthesis", generation, draft).await)
+    }
+    /// A retryable (`queued`/`failed`) extraction job: its run and
+    /// contract. SurrealDB answers are mined after the answer
+    /// ([`SURREAL_MINED`]); the shared pre-answer refresh is SQLite-only.
+    pub async fn retryable_extraction(&self, answer_id: &str) -> Result<Option<(String, String)>> {
+        dispatch!(self, s => {
+            use rusqlite::OptionalExtension;
+            Ok(s.conn.query_row(
+                "SELECT run_id, contract_version FROM extraction_jobs WHERE answer_id=?1 AND state IN ('queued','failed')",
+                [answer_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ).optional()?)
+        }, r => {
+            let state = crate::storage::recon_exec::extraction_state(r, answer_id).await?;
+            if !matches!(state.as_deref(), Some("queued" | "failed")) {
+                return Ok(None);
+            }
+            let mut q = r
+                .db()
+                .query("SELECT VALUE run_id FROM ONLY type::record('extraction_job', $a)")
+                .bind(("a", answer_id.to_string()))
+                .await?
+                .check()?;
+            let run_id: Option<String> = q.take(0usize)?;
+            Ok(run_id.map(|run_id| (run_id, SURREAL_MINED.to_string())))
+        })
     }
     /// Retained evidence for the gathered tool results.
     pub async fn evidence(

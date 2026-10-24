@@ -59,11 +59,7 @@ impl AtlasStore {
     /// The selected store: the process repository under SurrealDB,
     /// otherwise `Store::open(db_path)`.
     pub async fn open(db_path: &Path) -> Result<Self> {
-        #[cfg(feature = "surreal")]
-        if surreal_selected() {
-            return Ok(Self::Surreal(crate::storage::runtime::repository().await?));
-        }
-        Ok(Self::Sqlite(Mutex::new(Store::open(db_path)?)))
+        Ok(Self::Surreal(crate::storage::runtime::repository().await?))
     }
 
     pub fn from_sqlite(store: Store) -> Self {

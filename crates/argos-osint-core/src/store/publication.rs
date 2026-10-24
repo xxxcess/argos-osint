@@ -457,32 +457,14 @@ impl Store {
 
     /// Durable memories-changed counter (committed changes only).
     pub fn memories_changed_seq(&self) -> Result<i64> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::memories_changed_seq();
-        }
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT CAST(value AS INTEGER) FROM app_state WHERE key='memories_changed_seq'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0))
+        crate::storage::store_bridge::memories_changed_seq()
     }
 
     /// Optional immediate indexing after commit: claims exactly the queued
     /// outbox tasks and acknowledges them through the same typed path. Returns
     /// the outcomes of tasks this call could claim (others are left to the pool).
     pub fn index_now(&self, queued: &[IndexEnqueue]) -> Vec<IndexOutcome> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::index_now(queued);
-        }
-        // SQLite has no vector index; SurrealDB indexes inline.
-        let _ = queued;
-        Vec::new()
+        crate::storage::store_bridge::index_now(queued)
     }
 
     /// Apply one outbox row with a typed, revision-aware outcome.
@@ -509,48 +491,14 @@ impl Store {
     /// newest text instead of acknowledging stale content. `expected` may be
     /// older than the current revision: a newer indexed revision supersedes it.
     pub fn try_index_memory(&self, memory_id: &str, expected: &str) -> IndexOutcome {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::try_index_upsert(&[memory_id.to_string()]);
-        }
-        let _ = (memory_id, expected);
-        IndexOutcome::RetryableFailure {
-            message: "semantic indexing requires SurrealDB storage".into(),
-        }
+        crate::storage::store_bridge::try_index_upsert(&[memory_id.to_string()])
     }
 
     /// Exact coverage for required memories: the current revision must be
     /// recorded as indexed **and** the id must be present in the serving index.
     /// Never inferred from top-k similarity.
     pub fn verify_memory_coverage(&self, ids: &[String]) -> Result<CoverageReport> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::verify_memory_coverage(ids);
-        }
-        let unique: Vec<String> = ids
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let mut report = CoverageReport {
-            required: unique.len(),
-            ..Default::default()
-        };
-        let mut candidates = Vec::new();
-        for id in &unique {
-            match memory_text(&self.conn, id)? {
-                None => report.missing_rows.push(id.clone()),
-                Some(text) => candidates.push((id.clone(), memory_revision(&text))),
-            }
-        }
-        // SQLite has no vector index: every live candidate is pending.
-        report.disabled = true;
-        report.pending = candidates
-            .into_iter()
-            .map(|(id, _)| (id, "semantic indexing disabled".to_string()))
-            .collect();
-        Ok(report)
+        crate::storage::store_bridge::verify_memory_coverage(ids)
     }
 
     /// Re-queue index work for every pending/absent required memory (e.g. index
@@ -560,18 +508,7 @@ impl Store {
         report: &CoverageReport,
         parent_job: Option<&str>,
     ) -> Result<Vec<IndexEnqueue>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::requeue_uncovered(report);
-        }
-        let ids: Vec<String> = report.pending.iter().map(|(id, _)| id.clone()).collect();
-        if ids.is_empty() || report.disabled {
-            return Ok(Vec::new());
-        }
-        for id in &ids {
-            clear_index_state(&self.conn, id)?;
-        }
-        Ok(self.enqueue_memory_index(&ids, parent_job)?.0)
+        crate::storage::store_bridge::requeue_uncovered(report)
     }
 
     /// Transaction-safe Atlas publisher (spec §3.1–§3.2).
@@ -590,336 +527,14 @@ impl Store {
         brief: &str,
         options: &PublishOptions,
     ) -> Result<PublicationReceipt> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::publish_atlas_insights(
-                run_id, claims, relations, brief, options,
-            );
-        }
-        let revision = options
-            .revision
-            .clone()
-            .unwrap_or_else(|| payload_revision(claims, brief));
-        let answer_id = atlas_answer_id(run_id);
-        let now = chrono::Utc::now().to_rfc3339();
-        let mut receipt = PublicationReceipt {
-            run_id: run_id.into(),
-            revision: revision.clone(),
-            input_claims: claims.len(),
-            ..Default::default()
-        };
-        let mut queued_all: Vec<IndexEnqueue> = Vec::new();
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| -> Result<()> {
-            let mut source = MemorySource {
-                app: "atlas".into(),
-                conversation_id: run_id.into(),
-                message_id: None,
-                reference: Some(run_id.into()),
-            };
-            if let Some(app) = &options.retag_app {
-                source = retag_source(source, app, run_id);
-            }
-            let source_json = serde_json::to_string(&source)?;
-            let mut retagged = 0usize;
-            for (index, claim) in claims.iter().enumerate() {
-                if let Some(reason) = reject_reason(claim) {
-                    receipt.rejected.push(RejectedClaim {
-                        index,
-                        article_id: claim.article_id.trim().into(),
-                        reason,
-                    });
-                    continue;
-                }
-                let entity = claim.entity.trim().to_ascii_lowercase();
-                let predicate = claim.predicate.trim().to_ascii_lowercase();
-                let object = claim.object.trim().to_ascii_lowercase();
-                let sentence = claim.claim.trim();
-                let fingerprint = super::atlas_claim_identity(claim);
-                let existing: Option<String> = self
-                    .conn
-                    .query_row(
-                        "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
-                        [&fingerprint],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if existing.is_none() {
-                    if let Some(runs) = tombstone_runs(&self.conn, &fingerprint)? {
-                        if options.repair || runs.iter().any(|r| r == run_id) {
-                            receipt.rejected.push(RejectedClaim {
-                                index,
-                                article_id: claim.article_id.trim().into(),
-                                reason: "deleted by user (tombstoned); not recreated".into(),
-                            });
-                            continue;
-                        }
-                    }
-                }
-                let memory_id = match existing {
-                    Some(memory_id) => {
-                        let row_exists = memory_text(&self.conn, &memory_id)?.is_some();
-                        if row_exists {
-                            // Shared extraction already committed this cycle's canonical
-                            // row. Count its creation once in the cycle receipt rather
-                            // than report it as a memory from an earlier investigation.
-                            let staged_here = if fingerprint.starts_with("v2:") && !options.repair {
-                                let json: String = self.conn.query_row(
-                                    "SELECT source_json FROM memories WHERE id=?1",
-                                    [&memory_id],
-                                    |r| r.get(0),
-                                )?;
-                                serde_json::from_str::<MemorySource>(&json).is_ok_and(|source| {
-                                    source.app == "atlas"
-                                        && source.conversation_id == run_id
-                                        && source.reference.as_deref().is_some_and(|reference| {
-                                            reference.starts_with("isnap:atlas:")
-                                        })
-                                })
-                            } else {
-                                false
-                            };
-                            if let Some(app) = &options.retag_app {
-                                let current: String = self.conn.query_row(
-                                    "SELECT source_json FROM memories WHERE id=?1",
-                                    [&memory_id],
-                                    |r| r.get(0),
-                                )?;
-                                let parsed: MemorySource = serde_json::from_str(&current)
-                                    .unwrap_or_else(|_| MemorySource {
-                                        app: app.clone(),
-                                        conversation_id: run_id.into(),
-                                        message_id: None,
-                                        reference: Some(run_id.into()),
-                                    });
-                                let tagged =
-                                    serde_json::to_string(&retag_source(parsed, app, run_id))?;
-                                if tagged != current {
-                                    self.conn.execute(
-                                        "UPDATE memories SET source_json=?1 WHERE id=?2",
-                                        params![tagged, memory_id],
-                                    )?;
-                                    retagged += 1;
-                                }
-                            }
-                            if staged_here && !receipt.created_memory_ids.contains(&memory_id) {
-                                receipt.created += 1;
-                                receipt.created_memory_ids.push(memory_id.clone());
-                            } else {
-                                receipt.reused += 1;
-                            }
-                            if !staged_here
-                                && !receipt.reused_memory_ids.contains(&memory_id)
-                                && !receipt.created_memory_ids.contains(&memory_id)
-                            {
-                                receipt.reused_memory_ids.push(memory_id.clone());
-                            }
-                        } else {
-                            // Damaged link from an earlier failure: restore the
-                            // canonical row from this authoritative claim text.
-                            self.conn.execute(
-                                "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",
-                                params![memory_id, sentence, now, source_json],
-                            )?;
-                            receipt.repaired += 1;
-                            receipt.repaired_memory_ids.push(memory_id.clone());
-                        }
-                        memory_id
-                    }
-                    None => {
-                        let memory_id = new_id();
-                        self.conn.execute(
-                            "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",
-                            params![memory_id, sentence, now, source_json],
-                        )?;
-                        self.conn.execute(
-                            "INSERT INTO memory_metadata (memory_id, memory_kind, created_at, updated_at) VALUES (?1, ?2, ?3, ?3) ON CONFLICT(memory_id) DO UPDATE SET memory_kind=excluded.memory_kind, updated_at=excluded.updated_at",
-                            params![
-                                memory_id,
-                                crate::memory_metadata::MemoryKind::from_classification(&claim.classification).as_str(),
-                                now
-                            ],
-                        )?;
-                        self.conn.execute(
-                            "INSERT INTO insight_claims(fingerprint,memory_id,entity_id,predicate,object_value,topic,classification,confidence,created_at,updated_at,source_reliability,info_credibility,admiralty,rsp_status) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10,?11,?12,?13)",
-                            params![
-                                fingerprint,
-                                memory_id,
-                                entity,
-                                predicate,
-                                object,
-                                claim.topic.trim(),
-                                claim.classification.trim(),
-                                claim.confidence,
-                                now,
-                                claim.reliability.trim(),
-                                claim.info_credibility as i64,
-                                claim.admiralty.trim(),
-                                claim.rsp_status.trim(),
-                            ],
-                        )?;
-                        crate::brain_backfill::bind_claim_subject(&self.conn, &fingerprint)?;
-                        let others: Vec<String> = {
-                            let mut stmt = self.conn.prepare(
-                                "SELECT fingerprint FROM insight_claims WHERE entity_id=?1 AND predicate=?2 AND fingerprint<>?3",
-                            )?;
-                            let rows = stmt
-                                .query_map(params![entity, predicate, fingerprint], |row| {
-                                    row.get(0)
-                                })?
-                                .collect::<rusqlite::Result<_>>()?;
-                            rows
-                        };
-                        for old in others {
-                            self.conn.execute(
-                                "INSERT OR IGNORE INTO insight_relations(left_fingerprint,right_fingerprint,relation) VALUES (?1,?2,'conflict_or_revision')",
-                                params![old, fingerprint],
-                            )?;
-                        }
-                        receipt.created += 1;
-                        receipt.created_memory_ids.push(memory_id.clone());
-                        memory_id
-                    }
-                };
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO insight_sources(fingerprint,thread_id,run_id,answer_id,call_id,source_url,published_at) VALUES (?1,NULL,?2,?3,?4,?5,?6)",
-                    params![
-                        fingerprint,
-                        run_id,
-                        answer_id,
-                        claim.article_id.trim(),
-                        claim.source_url.trim(),
-                        claim.published_at.trim(),
-                    ],
-                )?;
-                self.conn.execute(
-                    "UPDATE insight_sources SET published_at=?1 WHERE fingerprint=?2 AND answer_id=?3 AND call_id=?4",
-                    params![claim.published_at.trim(), fingerprint, answer_id, claim.article_id.trim()],
-                )?;
-                // Preserve classification; refresh reliability/confidence only.
-                self.conn.execute(
-                    "UPDATE insight_claims SET confidence=?1, source_reliability=?2, info_credibility=?3, admiralty=?4, rsp_status=?5, updated_at=?6 WHERE fingerprint=?7",
-                    params![
-                        claim.confidence,
-                        claim.reliability.trim(),
-                        claim.info_credibility as i64,
-                        claim.admiralty.trim(),
-                        claim.rsp_status.trim(),
-                        now,
-                        fingerprint,
-                    ],
-                )?;
-                receipt.accepted_claims += 1;
-                receipt.claim_memory_ids.push((fingerprint, memory_id));
-            }
-            for (left, right, relation) in relations {
-                if left.is_empty() || right.is_empty() || relation.is_empty() || left == right {
-                    continue;
-                }
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO insight_relations(left_fingerprint,right_fingerprint,relation) VALUES (?1,?2,?3)",
-                    params![left, right, relation],
-                )?;
-            }
-            let brief = brief.trim();
-            if !brief.is_empty() && receipt.accepted_claims > 0 {
-                if let Some(memory_id) = atlas_brief_id(&self.conn, run_id)? {
-                    let changed = self.conn.execute(
-                        "UPDATE memories SET text=?1 WHERE id=?2 AND text<>?1",
-                        params![brief, memory_id],
-                    )?;
-                    if changed > 0 {
-                        receipt.updated_memory_ids.push(memory_id.clone());
-                    }
-                    receipt.brief_memory_id = Some(memory_id);
-                } else {
-                    let memory_id = new_id();
-                    self.conn.execute(
-                        "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES (?1,?2,'investigation',0,?3,?4)",
-                        params![memory_id, brief, now, source_json],
-                    )?;
-                    receipt.brief_memory_id = Some(memory_id);
-                }
-            }
-            let mut affected: Vec<String> = Vec::new();
-            for (_, id) in &receipt.claim_memory_ids {
-                if !affected.contains(id) {
-                    affected.push(id.clone());
-                }
-            }
-            if let Some(id) = &receipt.brief_memory_id {
-                if !affected.contains(id) {
-                    affected.push(id.clone());
-                }
-            }
-            let (queued, already) =
-                self.enqueue_memory_index(&affected, options.parent_job.as_deref())?;
-            receipt.affected_memory_ids = affected;
-            receipt.already_indexed = already;
-            receipt.queued_index_changes = queued.iter().map(|q| q.seq).collect();
-            receipt.index_tasks = queued.iter().map(|q| q.task_id.clone()).collect();
-            queued_all = queued;
-            if !options.skip_receipt {
-                self.conn.execute(
-                    "INSERT INTO argos_atlas_publications(run_id,revision,state,receipt_json,job_id,created_at,updated_at)
-                     VALUES (?1,?2,'published',?3,?4,?5,?5)
-                     ON CONFLICT(run_id,revision) DO UPDATE SET state='published', receipt_json=excluded.receipt_json,
-                        job_id=excluded.job_id, updated_at=excluded.updated_at",
-                    params![
-                        run_id,
-                        revision,
-                        serde_json::to_string(&receipt)?,
-                        options.parent_job.clone().unwrap_or_default(),
-                        now
-                    ],
-                )?;
-            }
-            if retagged > 0
-                || receipt.created + receipt.repaired > 0
-                || !receipt.updated_memory_ids.is_empty()
-                || receipt.brief_memory_id.is_some()
-            {
-                bump_memories_changed(&self.conn)?;
-            }
-            #[cfg(test)]
-            if let Some(message) = fault::publish_fault() {
-                anyhow::bail!(message);
-            }
-            Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                self.conn.execute_batch("COMMIT")?;
-                if options.index_now {
-                    let _ = self.index_now(&queued_all);
-                }
-                Ok(receipt)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
-        }
+        crate::storage::store_bridge::publish_atlas_insights(
+            run_id, claims, relations, brief, options,
+        )
     }
 
     /// Latest stored receipt for a run (resume after restart).
     pub fn atlas_publication_receipt(&self, run_id: &str) -> Result<Option<PublicationReceipt>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::atlas_publication_receipt(run_id);
-        }
-        let json: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT receipt_json FROM argos_atlas_publications WHERE run_id=?1 ORDER BY updated_at DESC LIMIT 1",
-                [run_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(match json {
-            Some(json) => Some(serde_json::from_str(&json)?),
-            None => None,
-        })
+        crate::storage::store_bridge::atlas_publication_receipt(run_id)
     }
 
     /// Phase-completion verification of one receipt (spec §3.3).
@@ -927,116 +542,18 @@ impl Store {
         &self,
         receipt: &PublicationReceipt,
     ) -> Result<PublicationVerification> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::verify_atlas_publication(receipt);
-        }
-        let answer_id = atlas_answer_id(&receipt.run_id);
-        let mut out = PublicationVerification {
-            brief_ok: true,
-            reconciled: receipt.reconciles(),
-            ..Default::default()
-        };
-        for (fingerprint, memory_id) in &receipt.claim_memory_ids {
-            let claim_memory: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT memory_id FROM insight_claims WHERE fingerprint=?1",
-                    [fingerprint],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let row_ok = memory_text(&self.conn, memory_id)?.is_some();
-            if (claim_memory.as_deref() != Some(memory_id.as_str()) || !row_ok)
-                && !out.missing_claim_memories.contains(memory_id)
-            {
-                out.missing_claim_memories.push(memory_id.clone());
-            }
-            let linked: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM insight_sources WHERE fingerprint=?1 AND run_id=?2 AND answer_id=?3",
-                params![fingerprint, receipt.run_id, answer_id],
-                |r| r.get(0),
-            )?;
-            if linked == 0 && !out.broken_source_links.contains(fingerprint) {
-                out.broken_source_links.push(fingerprint.clone());
-            }
-        }
-        let orphan_links: Vec<String> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT DISTINCT s.fingerprint FROM insight_sources s
-                 LEFT JOIN insight_claims c ON c.fingerprint = s.fingerprint
-                 WHERE s.run_id=?1 AND s.answer_id=?2 AND c.fingerprint IS NULL",
-            )?;
-            let rows = stmt
-                .query_map(params![receipt.run_id, answer_id], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
-        };
-        for fp in orphan_links {
-            if !out.broken_source_links.contains(&fp) {
-                out.broken_source_links.push(fp);
-            }
-        }
-        if let Some(brief) = &receipt.brief_memory_id {
-            out.brief_ok = memory_text(&self.conn, brief)?.is_some();
-        }
-        out.coverage = self.verify_memory_coverage(&receipt.affected_memory_ids)?;
-        Ok(out)
+        crate::storage::store_bridge::verify_atlas_publication(receipt)
     }
 
     /// Record a user-deletion tombstone for a memory (and its claim fingerprint,
     /// with the cycles it was linked to) inside the caller's transaction.
     pub(crate) fn tombstone_memory(&self, memory_id: &str, reason: &str) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::tombstone_memory(memory_id, reason);
-        }
-        let now = chrono::Utc::now().to_rfc3339();
-        let fingerprints: Vec<String> = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT fingerprint FROM insight_claims WHERE memory_id=?1")?;
-            let rows = stmt
-                .query_map([memory_id], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
-        };
-        if fingerprints.is_empty() {
-            self.conn.execute(
-                "INSERT OR REPLACE INTO argos_memory_tombstones(memory_id,fingerprint,reason,created_at,run_ids) VALUES (?1,'',?2,?3,'[]')",
-                params![memory_id, reason, now],
-            )?;
-        }
-        for fp in fingerprints {
-            let runs: Vec<String> = {
-                let mut stmt = self.conn.prepare(
-                    "SELECT DISTINCT run_id FROM insight_sources WHERE fingerprint=?1 AND run_id IS NOT NULL",
-                )?;
-                let rows = stmt
-                    .query_map([&fp], |r| r.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
-            };
-            self.conn.execute(
-                "INSERT OR REPLACE INTO argos_memory_tombstones(memory_id,fingerprint,reason,created_at,run_ids) VALUES (?1,?2,?3,?4,?5)",
-                params![memory_id, fp, reason, now, serde_json::to_string(&runs)?],
-            )?;
-        }
-        Ok(())
+        crate::storage::store_bridge::tombstone_memory(memory_id, reason)
     }
 
     /// True when a tombstone suppresses this memory id.
     pub fn is_tombstoned(&self, memory_id: &str) -> Result<bool> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::is_tombstoned(memory_id);
-        }
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM argos_memory_tombstones WHERE memory_id=?1",
-            [memory_id],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
+        crate::storage::store_bridge::is_tombstoned(memory_id)
     }
 }
 

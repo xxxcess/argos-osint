@@ -10,24 +10,7 @@ use crate::store::Store;
 /// Kind of a stored memory. Memories without typed metadata are legacy
 /// evidence and browse as [`MemoryKind::Claim`].
 pub fn memory_kind(store: &Store, memory_id: &str) -> Result<MemoryKind> {
-    #[cfg(feature = "surreal")]
-    if crate::storage::store_bridge::on() {
-        return crate::storage::store_bridge::memory_kind(memory_id);
-    }
-    use rusqlite::OptionalExtension;
-    // A missing metadata row is a legacy untyped memory; a read error is not.
-    let raw: Option<String> = store
-        .conn
-        .query_row(
-            "SELECT memory_kind FROM memory_metadata WHERE memory_id=?1",
-            [memory_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(raw
-        .as_deref()
-        .and_then(MemoryKind::parse)
-        .unwrap_or(MemoryKind::Claim))
+    crate::storage::store_bridge::memory_kind(memory_id)
 }
 
 /// True when `kind` passes `allowed` (empty = default evidence kinds, i.e.
@@ -67,46 +50,7 @@ impl Store {
                 self.search_memories(query)
             };
         };
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::brain_store::brain_browse_memories(Some(kind), query);
-        }
-        let spellings = kind.stored_spellings();
-        // Legacy untyped memories browse as Claim.
-        let legacy = kind == MemoryKind::Claim;
-        let needle = format!(
-            "%{}%",
-            query
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        );
-        let sql = format!(
-            "SELECT m.id,m.text,m.category,m.pinned,m.created_at,m.source_json FROM memories m
-             LEFT JOIN memory_metadata t ON t.memory_id=m.id
-             WHERE (t.memory_kind IN ({}) {})
-               AND (t.memory_id IS NULL OR t.lifecycle='active')
-               AND (?1='' OR m.text LIKE ?2 ESCAPE '\\' OR m.category LIKE ?2 ESCAPE '\\' OR IFNULL(t.payload_json,'') LIKE ?2 ESCAPE '\\')
-             ORDER BY m.pinned DESC, m.created_at DESC",
-            spellings
-                .iter()
-                .map(|s| format!("'{s}'"))
-                .collect::<Vec<_>>()
-                .join(","),
-            if legacy { "OR t.memory_id IS NULL" } else { "" }
-        );
-        // Actors merged into another list once, as their canonical actor.
-        let sql = if kind == MemoryKind::Actor {
-            sql.replace(
-                "ORDER BY m.pinned",
-                "AND NOT EXISTS (SELECT 1 FROM brain_actor_redirects r WHERE r.from_actor=m.id) ORDER BY m.pinned",
-            )
-        } else {
-            sql
-        };
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![query, needle], crate::store::memory_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        crate::storage::brain_store::brain_browse_memories(Some(kind), query)
     }
 
     /// Count per core kind (legacy untyped memories count as Claim).
@@ -147,35 +91,20 @@ fn endpoint_label(store: &Store, e: &EndpointRef) -> String {
 }
 
 fn actor_display_name(store: &Store, id: &str) -> Option<String> {
-    #[cfg(feature = "surreal")]
-    if crate::storage::store_bridge::on() {
-        return crate::storage::store_bridge::actor_display_name(id)
-            .ok()
-            .flatten();
-    }
-    crate::brain_actors::actor(&store.conn, id)
+    crate::storage::store_bridge::actor_display_name(id)
         .ok()
         .flatten()
-        .map(|a| a.display_name)
 }
 
 pub(crate) fn actor_resolve(store: &Store, id: &str) -> Result<String> {
-    #[cfg(feature = "surreal")]
-    if crate::storage::store_bridge::on() {
-        return crate::storage::store_bridge::actor_resolve(id);
-    }
-    crate::brain_actors::resolve(&store.conn, id)
+    crate::storage::store_bridge::actor_resolve(id)
 }
 
 pub(crate) fn actor_mentions(
     store: &Store,
     id: &str,
 ) -> Result<Vec<(String, String, String, String)>> {
-    #[cfg(feature = "surreal")]
-    if crate::storage::store_bridge::on() {
-        return crate::storage::store_bridge::actor_mentions(id);
-    }
-    crate::brain_actors::mentions(&store.conn, id)
+    crate::storage::store_bridge::actor_mentions(id)
 }
 
 fn snake<T: serde::Serialize>(v: &T) -> String {

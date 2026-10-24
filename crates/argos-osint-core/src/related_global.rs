@@ -236,54 +236,21 @@ fn finish(
 }
 
 fn occurrences_of_url(store: &Store, key: &str) -> Result<Vec<AtlasArticleRow>> {
-    #[cfg(feature = "surreal")]
-    if crate::storage::store_bridge::on() {
-        let mut out = Vec::new();
-        for (run, id, url) in crate::storage::store_bridge::article_urls()? {
-            if canonical_url(&url) == key {
-                if let Some(a) = store.atlas_article(&run, &id)? {
-                    out.push(a);
-                }
-            }
-        }
-        return Ok(out);
-    }
-    let mut stmt = store
-        .conn
-        .prepare("SELECT run_id,article_id,url FROM atlas_articles WHERE url<>''")?;
-    let hits: Vec<(String, String)> = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?
-        .filter_map(|r| r.ok())
-        .filter(|(_, _, url)| canonical_url(url) == key)
-        .map(|(run, id, _)| (run, id))
-        .collect();
     let mut out = Vec::new();
-    for (run, id) in hits {
-        if let Some(a) = store.atlas_article(&run, &id)? {
-            out.push(a);
+    for (run, id, url) in crate::storage::store_bridge::article_urls()? {
+        if canonical_url(&url) == key {
+            if let Some(a) = store.atlas_article(&run, &id)? {
+                out.push(a);
+            }
         }
     }
     Ok(out)
 }
 
 fn actor_name(store: &Store, actor_id: &str) -> String {
-    #[cfg(feature = "surreal")]
-    if crate::storage::store_bridge::on() {
-        return crate::storage::store_bridge::actor_display_name(actor_id)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| actor_id.into());
-    }
-    actors::actor(&store.conn, actor_id)
+    crate::storage::store_bridge::actor_display_name(actor_id)
         .ok()
         .flatten()
-        .map(|a| a.display_name)
         .unwrap_or_else(|| actor_id.into())
 }
 
@@ -354,13 +321,10 @@ impl Store {
             return Ok(());
         }
         // Brain Related records touching this occurrence (active only).
-        #[cfg(feature = "surreal")]
-        let surreal_hits = if crate::storage::store_bridge::on() {
+        let surreal_hits = {
             Some(crate::storage::store_bridge::related_endpoint_candidates(
                 &s.run_id, &s.id, false,
             )?)
-        } else {
-            None
         };
         #[cfg(not(feature = "surreal"))]
         let surreal_hits: Option<Vec<(String, String, String)>> = None;
@@ -420,13 +384,10 @@ impl Store {
         let mut exclude = BTreeSet::new();
         let mut origins = self.article_origins_for_memory(memory_id)?;
         // Link/Related records start from their article endpoints.
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
+        {
             origins.extend(crate::storage::store_bridge::memory_article_endpoints(
                 memory_id,
             )?);
-        } else {
-            origins.extend(self.memory_article_endpoints_sqlite(memory_id)?);
         }
         #[cfg(not(feature = "surreal"))]
         origins.extend(self.memory_article_endpoints_sqlite(memory_id)?);

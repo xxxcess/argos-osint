@@ -950,24 +950,7 @@ impl Store {
         seed: &TopologySeed,
         options: &TopologyOptions,
     ) -> Result<TopologySnapshot> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::topology_snapshot(seed, options);
-        }
-        ensure!(
-            options.continuation_token.is_none(),
-            "Topology continuation is unavailable; refresh with a larger bounded limit"
-        );
-        let transaction = if self.conn.is_autocommit() {
-            Some(self.conn.unchecked_transaction()?)
-        } else {
-            None
-        };
-        let result = self.topology_snapshot_on(seed, options);
-        if let Some(tx) = transaction {
-            tx.commit()?;
-        }
-        result
+        crate::storage::brain_store::topology_snapshot(seed, options)
     }
 
     fn topology_snapshot_on(

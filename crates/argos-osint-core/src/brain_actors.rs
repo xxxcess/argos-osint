@@ -1048,12 +1048,7 @@ pub fn retire_origin(
 impl crate::store::Store {
     /// Transactional bind through [`bind`] (actor memory indexed via the outbox).
     pub fn bind_actor(&self, req: &BindRequest<'_>) -> Result<Binding> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::bind_actor(req);
-        }
-        let now = chrono::Utc::now().to_rfc3339();
-        self.write_then_index(|| bind(&self.conn, req, &now))
+        crate::storage::brain_store::bind_actor(req)
     }
 
     pub fn write_link_memory(&self, link: &LinkPayload) -> Result<String> {
@@ -1067,39 +1062,16 @@ impl crate::store::Store {
     }
 
     pub fn merge_actors(&self, from: &str, to: &str, receipt: &Value) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::merge_actors(from, to, receipt);
-        }
-        let now = chrono::Utc::now().to_rfc3339();
-        self.write_then_index(|| Ok((merge(&self.conn, from, to, receipt, &now)?, vec![])))
+        crate::storage::brain_store::merge_actors(from, to, receipt)
     }
 
     pub fn split_actor(&self, from: &str) -> Result<()> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::split_actor(from);
-        }
-        let now = chrono::Utc::now().to_rfc3339();
-        self.write_then_index(|| Ok((split(&self.conn, from, &now)?, vec![])))
+        crate::storage::brain_store::split_actor(from)
     }
 
     /// Typed payload of a core memory (validated discriminated decode).
     pub fn memory_payload(&self, memory_id: &str) -> Result<Option<MemoryPayload>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::brain_store::memory_payload(memory_id);
-        }
-        let raw: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT payload_json FROM memory_metadata WHERE memory_id=?1 AND payload_schema>0",
-                [memory_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        raw.map(|r| serde_json::from_str(&r).map_err(Into::into))
-            .transpose()
+        crate::storage::brain_store::memory_payload(memory_id)
     }
 }
 

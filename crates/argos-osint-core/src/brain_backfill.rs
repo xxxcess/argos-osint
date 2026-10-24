@@ -667,78 +667,12 @@ impl Store {
     /// Run up to `max_units` pending backfill units in transactions of
     /// [`BATCH`]. Safe to call concurrently and repeatedly.
     pub fn brain_backfill(&self, max_units: usize) -> Result<BackfillReport> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::brain_backfill(max_units);
-        }
-        let mut report = BackfillReport::default();
-        let mut budget = max_units;
-        for source in SOURCES {
-            let pending: Vec<(String, String)> = {
-                let have = receipts(&self.conn, source)?;
-                units(&self.conn, source)?
-                    .into_iter()
-                    .filter(|(id, rev)| have.get(id) != Some(rev))
-                    .collect()
-            };
-            for chunk in pending.chunks(BATCH) {
-                if budget == 0 {
-                    break;
-                }
-                let take = chunk.len().min(budget);
-                budget -= take;
-                let now = chrono::Utc::now().to_rfc3339();
-                self.write_then_index(|| {
-                    for (unit, rev) in &chunk[..take] {
-                        self.conn.execute_batch("SAVEPOINT unit")?;
-                        match process(self, source, unit, &now) {
-                            Ok(coverage) => {
-                                self.conn.execute(
-                                    "INSERT INTO brain_backfill_receipts(source,unit_id,revision,coverage,completed_at) VALUES(?1,?2,?3,?4,?5)
-                                     ON CONFLICT(source,unit_id) DO UPDATE SET revision=excluded.revision, coverage=excluded.coverage, completed_at=excluded.completed_at",
-                                    params![source, unit, rev, coverage, now],
-                                )?;
-                                self.conn.execute_batch("RELEASE unit")?;
-                                report.processed += 1;
-                            }
-                            Err(err) => {
-                                self.conn.execute_batch("ROLLBACK TO unit; RELEASE unit")?;
-                                report.failed += 1;
-                                report.errors.push(format!("{source}/{unit}: {err}"));
-                            }
-                        }
-                    }
-                    actors::reconcile_lifecycle(&self.conn, &now)?;
-                    crate::store::bump_memories_changed(&self.conn)?;
-                    Ok(((), vec![]))
-                })?;
-            }
-        }
-        report.coverage = self.brain_backfill_coverage()?;
-        report.complete = report.failed == 0 && report.coverage.iter().all(|c| c.done >= c.total);
-        Ok(report)
+        crate::storage::store_bridge::brain_backfill(max_units)
     }
 
     /// Per-source historical coverage (receipted units with a current revision).
     pub fn brain_backfill_coverage(&self) -> Result<Vec<SourceCoverage>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::brain_backfill_coverage();
-        }
-        let mut out = Vec::new();
-        for source in SOURCES {
-            let have = receipts(&self.conn, source)?;
-            let all = units(&self.conn, source)?;
-            out.push(SourceCoverage {
-                source: source.to_string(),
-                done: all
-                    .iter()
-                    .filter(|(id, rev)| have.get(id) == Some(rev))
-                    .count(),
-                total: all.len(),
-            });
-        }
-        Ok(out)
+        crate::storage::store_bridge::brain_backfill_coverage()
     }
 }
 

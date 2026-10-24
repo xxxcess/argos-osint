@@ -353,80 +353,11 @@ impl Store {
         run_id: &str,
         article_id: &str,
     ) -> Result<Option<ArticleMetadata>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::jobs_store::atlas_metadata(run_id, article_id);
-        }
-        let json:Option<String>=self.conn.query_row("SELECT metadata_json FROM atlas_article_metadata WHERE run_id=?1 AND article_id=?2",params![run_id,article_id],|r|r.get(0)).optional()?;
-        Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
+        crate::storage::jobs_store::atlas_metadata(run_id, article_id)
     }
     /// Reject work captured before a source replacement. The savepoint atomically replaces mentions.
     pub fn atlas_save_metadata(&self, metadata: &ArticleMetadata) -> Result<bool> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::jobs_store::atlas_save_metadata(metadata);
-        }
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.conn,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
-        let Some(article) = self.atlas_article(&metadata.run_id, &metadata.article_id)? else {
-            return Ok(false);
-        };
-        if input_hash(&article) != metadata.input_hash {
-            return Ok(false);
-        }
-        let mut metadata = metadata.clone();
-        if let Some(latest) = self.atlas_metadata(&metadata.run_id, &metadata.article_id)? {
-            if latest.input_hash == metadata.input_hash {
-                metadata.classification_status = latest.classification_status;
-                metadata.classification_receipt = latest.classification_receipt;
-            }
-        }
-        let serialized = serde_json::to_string(&metadata)?;
-        let existing:Option<String>=tx.query_row("SELECT metadata_json FROM atlas_article_metadata WHERE run_id=?1 AND article_id=?2",params![metadata.run_id,metadata.article_id],|r|r.get(0)).optional()?;
-        if existing.as_deref() == Some(serialized.as_str()) {
-            tx.commit()?;
-            return Ok(true);
-        }
-        tx.execute("INSERT OR REPLACE INTO atlas_article_metadata(run_id,article_id,input_hash,entity_state,reliability_state,classification_status,metadata_json) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![metadata.run_id,metadata.article_id,metadata.input_hash,metadata.entity_state.as_str(),metadata.reliability_state.as_str(),metadata.classification_status,serde_json::to_string(&metadata)?])?;
-        tx.execute(
-            "DELETE FROM atlas_article_mentions WHERE run_id=?1 AND article_id=?2",
-            params![metadata.run_id, metadata.article_id],
-        )?;
-        tx.execute(
-            "DELETE FROM atlas_related_articles WHERE run_id=?1 AND (left_id=?2 OR right_id=?2)",
-            params![metadata.run_id, metadata.article_id],
-        )?;
-        for m in &metadata.mentions {
-            let text = match m.field.as_str() {
-                "title" => &article.title,
-                "description" => &article.description,
-                _ => continue,
-            };
-            if text.get(m.start_byte..m.end_byte) != Some(m.original_text.as_str())
-                || comparison_key(&m.original_text) != m.comparison_key
-            {
-                continue;
-            }
-            tx.execute(
-                "INSERT OR IGNORE INTO atlas_article_mentions VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                params![
-                    metadata.run_id,
-                    metadata.article_id,
-                    m.type_hint,
-                    m.comparison_key,
-                    m.field,
-                    m.start_byte as i64,
-                    m.end_byte as i64,
-                    m.original_text,
-                    metadata.input_hash
-                ],
-            )?;
-        }
-        crate::intel_recon::persist_article_rating(&tx, &metadata.article_id)?;
-        tx.commit()?;
-        Ok(true)
+        crate::storage::jobs_store::atlas_save_metadata(metadata)
     }
 }
 
@@ -736,45 +667,14 @@ impl Store {
         receipt_json: &str,
         category: Option<&str>,
     ) -> Result<bool> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::brain_store::on() {
-            return crate::storage::jobs_store::atlas_set_classification(
-                run_id,
-                article_id,
-                captured_hash,
-                status,
-                receipt_json,
-                category,
-            );
-        }
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.conn,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
-        let Some(article) = self.atlas_article(run_id, article_id)? else {
-            return Ok(false);
-        };
-        if input_hash(&article) != captured_hash {
-            return Ok(false);
-        }
-        let mut metadata = self
-            .atlas_metadata(run_id, article_id)?
-            .unwrap_or_else(|| ArticleMetadata::pending(&article));
-        metadata.classification_status = status.into();
-        metadata.classification_receipt = if receipt_json.is_empty() {
-            None
-        } else {
-            Some(serde_json::from_str(receipt_json)?)
-        };
-        if let Some(category) = category {
-            tx.execute(
-                "UPDATE atlas_articles SET category=?3 WHERE run_id=?1 AND article_id=?2",
-                params![run_id, article_id, category],
-            )?;
-        }
-        tx.execute("INSERT OR REPLACE INTO atlas_article_metadata(run_id,article_id,input_hash,entity_state,reliability_state,classification_status,metadata_json) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![run_id,article_id,captured_hash,metadata.entity_state.as_str(),metadata.reliability_state.as_str(),status,serde_json::to_string(&metadata)?])?;
-        tx.commit()?;
-        Ok(true)
+        crate::storage::jobs_store::atlas_set_classification(
+            run_id,
+            article_id,
+            captured_hash,
+            status,
+            receipt_json,
+            category,
+        )
     }
 }
 

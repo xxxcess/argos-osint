@@ -319,63 +319,15 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
         metadata.push(store.atlas_metadata(run_id, &a.id)?);
     }
     let (build_key, input_revision) = build_input(run_id, &articles, &metadata)?;
-    #[cfg(feature = "surreal")]
-    if crate::storage::store_bridge::on() {
-        if let Some(marker) = store.app_state_get(&build_key)? {
-            let count = crate::storage::store_bridge::related_count(run_id)?;
-            if build_is_current(Some(&marker), &input_revision, count) {
-                return Ok(count);
-            }
-        }
-        let planned = plan(&articles, &metadata)?;
-        let count = crate::storage::store_bridge::replace_related(run_id, &articles, &planned)?;
-        store.app_state_set(&build_key, &build_marker(&input_revision, count)?)?;
-        return Ok(count);
-    }
     if let Some(marker) = store.app_state_get(&build_key)? {
-        let count: usize = store.conn.query_row(
-            "SELECT COUNT(*) FROM atlas_related_articles WHERE run_id=?1",
-            [run_id],
-            |r| r.get(0),
-        )?;
+        let count = crate::storage::store_bridge::related_count(run_id)?;
         if build_is_current(Some(&marker), &input_revision, count) {
             return Ok(count);
         }
     }
     let planned = plan(&articles, &metadata)?;
-    let tx = store.conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM atlas_related_articles WHERE run_id=?1",
-        [run_id],
-    )?;
-    let mut count = 0;
-    for p in planned {
-        let (left, right) = (&articles[p.left], &articles[p.right]);
-        // Source/category revisions are checked inside this transaction before publication.
-        let current_left = store.atlas_article(run_id, &left.id)?;
-        let current_right = store.atlas_article(run_id, &right.id)?;
-        if current_left.as_ref() != Some(left) || current_right.as_ref() != Some(right) {
-            continue;
-        }
-        tx.execute(
-            "INSERT INTO atlas_related_articles VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![
-                run_id,
-                left.id,
-                right.id,
-                p.left_revision,
-                p.right_revision,
-                p.shared_json,
-                MATCH_VERSION,
-                p.named_count,
-                p.shared_count,
-                p.rarity
-            ],
-        )?;
-        count += 1;
-    }
-    tx.execute("INSERT INTO app_state(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![build_key,build_marker(&input_revision, count)?])?;
-    tx.commit()?;
+    let count = crate::storage::store_bridge::replace_related(run_id, &articles, &planned)?;
+    store.app_state_set(&build_key, &build_marker(&input_revision, count)?)?;
     Ok(count)
 }
 
@@ -817,25 +769,11 @@ impl Store {
             }
             offset += 100;
         }
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            let candidates = crate::storage::store_bridge::related_endpoint_candidates(
-                &article.run_id,
-                &article.id,
-                true,
-            )?;
-            return self.ingest_candidates_match(article, name_key, candidates);
-        }
-        let mut stmt=self.conn.prepare("SELECT other.origin,other.ref_id,e.memory_id FROM brain_memory_endpoints e JOIN brain_memory_endpoints other ON other.memory_id=e.memory_id AND other.side<>e.side JOIN memory_metadata m ON m.memory_id=e.memory_id WHERE e.endpoint_kind='article' AND e.origin=?1 AND e.ref_id=?2 AND other.endpoint_kind='article' AND m.memory_kind='related' AND m.lifecycle='active'")?;
-        let candidates = stmt
-            .query_map(params![article.run_id, article.id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let candidates = crate::storage::store_bridge::related_endpoint_candidates(
+            &article.run_id,
+            &article.id,
+            true,
+        )?;
         self.ingest_candidates_match(article, name_key, candidates)
     }
 
@@ -878,8 +816,7 @@ impl Store {
         let limit = limit.clamp(1, 100);
         let articles = self.atlas_list_articles(run_id)?;
         let lookup: HashMap<_, _> = articles.iter().map(|a| (a.id.as_str(), a)).collect();
-        #[cfg(feature = "surreal")]
-        let surreal_records = if crate::storage::store_bridge::on() {
+        let surreal_records = {
             let mut pairs: Vec<_> =
                 crate::storage::store_bridge::related_pairs(run_id, article_id)?
                     .into_iter()
@@ -921,8 +858,6 @@ impl Store {
                     })
                     .collect::<Vec<_>>(),
             )
-        } else {
-            None
         };
         #[cfg(not(feature = "surreal"))]
         let surreal_records: Option<Vec<(String, String, String, String, String, i64)>> = None;
@@ -989,85 +924,7 @@ impl Store {
         Ok(records)
     }
     pub fn article_origins_for_memory(&self, memory_id: &str) -> Result<Vec<ArticleOrigin>> {
-        #[cfg(feature = "surreal")]
-        if crate::storage::store_bridge::on() {
-            return crate::storage::store_bridge::article_origins_for_memory(memory_id);
-        }
-        // Resolve each source independently: exact ids first, explicit URLs only as fallback.
-        let mut refs: Vec<(Option<String>, String, Option<String>)> = Vec::new();
-        let mut stmt=self.conn.prepare("SELECT s.owner_kind,s.owner_id,e.source_id,e.evidence_json FROM insight_derivations d JOIN insight_snapshots s ON s.id=d.snapshot_id LEFT JOIN insight_derivation_evidence e ON e.derivation_id=d.id WHERE d.memory_id=?1 AND d.status NOT IN ('deleted','retired')")?;
-        for row in stmt.query_map([memory_id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<String>>(3)?,
-            ))
-        })? {
-            let (kind, owner, source, json) = row?;
-            if kind == "article" {
-                refs.push((None, owner, None));
-            }
-            let url = json
-                .as_deref()
-                .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
-                .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(canonical_url));
-            let source = source.unwrap_or_default();
-            refs.push((
-                None,
-                source
-                    .strip_prefix("article:")
-                    .unwrap_or(&source)
-                    .to_string(),
-                url,
-            ));
-        }
-        let mut stmt=self.conn.prepare("SELECT s.run_id,s.call_id,s.source_url FROM insight_sources s JOIN insight_claims c ON c.fingerprint=s.fingerprint WHERE c.memory_id=?1 AND s.deleted_origin=0")?;
-        for row in stmt.query_map([memory_id], |r| {
-            Ok((
-                r.get::<_, Option<String>>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-            ))
-        })? {
-            let (run, id, url) = row?;
-            refs.push((
-                run,
-                id.strip_prefix("article:").unwrap_or(&id).to_string(),
-                url.map(|u| canonical_url(&u)),
-            ));
-        }
-        let mut articles = Vec::new();
-        for run in self.atlas_list_runs()? {
-            articles.extend(self.atlas_list_articles(&run.id)?);
-        }
-        let mut origins = BTreeSet::new();
-        for (run, id, url) in refs {
-            let exact: Vec<_> = articles
-                .iter()
-                .filter(|a| a.id == id && run.as_ref().is_none_or(|r| a.run_id == *r))
-                .collect();
-            if !exact.is_empty() {
-                for a in exact {
-                    origins.insert(ArticleOrigin {
-                        run_id: a.run_id.clone(),
-                        article_id: a.id.clone(),
-                    });
-                }
-            } else if let Some(url) = url {
-                for a in articles.iter().filter(|a| {
-                    !a.url.is_empty()
-                        && canonical_url(&a.url) == url
-                        && run.as_ref().is_none_or(|r| a.run_id == *r)
-                }) {
-                    origins.insert(ArticleOrigin {
-                        run_id: a.run_id.clone(),
-                        article_id: a.id.clone(),
-                    });
-                }
-            }
-        }
-        Ok(origins.into_iter().collect())
+        crate::storage::store_bridge::article_origins_for_memory(memory_id)
     }
     pub fn related_articles_for_memory(
         &self,

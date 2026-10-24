@@ -91,21 +91,43 @@ mod imp {
         })
     }
 
-    /// The open thread. Investigation events and call logs live in the
-    /// SQLite event log and stay empty here.
-    pub(crate) fn snapshot(id: &str) -> Result<ReconSnapshot> {
+    /// The open thread, with its investigation trace. Finished tool results
+    /// not yet in `logged` are formatted and recorded in the repository's
+    /// event log (`argos_event`) after the reads, like the SQLite worker.
+    pub(crate) fn snapshot(
+        id: &str,
+        logged: &std::collections::HashSet<String>,
+    ) -> Result<ReconSnapshot> {
         let snapshot = with(|s| {
             Box::pin(async move {
-                Ok(ReconSnapshot {
+                let mut snapshot = ReconSnapshot {
                     messages: s.list_messages(id).await?,
-                    events: Vec::new(),
+                    events: s.list_investigation_events(id).await?,
                     calls: s.all_calls_for_thread(id).await?,
                     runs: s.runs_for_thread(id).await?,
                     memories: s.answer_memories(id).await?,
                     memory_summaries: HashMap::new(),
                     logged_calls: Vec::new(),
                     log_error: None,
-                })
+                };
+                for call in &snapshot.calls {
+                    if call.result.is_none() || logged.contains(&call.id) {
+                        continue;
+                    }
+                    if let Some(entry) = super::super::ui::tool_result_log(call) {
+                        let event = super::super::logs::session_event(
+                            entry.level,
+                            &entry.summary,
+                            &entry.detail,
+                        );
+                        if let Err(error) = s.record_event(&event).await {
+                            snapshot.log_error = Some(error.to_string());
+                            break;
+                        }
+                    }
+                    snapshot.logged_calls.push(call.id.clone());
+                }
+                Ok(snapshot)
             })
         })?;
         let mut snapshot = snapshot;
@@ -194,7 +216,10 @@ mod imp {
     pub(crate) fn threads(_: &str) -> Result<(Vec<Thread>, HashMap<String, String>)> {
         off()
     }
-    pub(crate) fn snapshot(_: &str) -> Result<ReconSnapshot> {
+    pub(crate) fn snapshot(
+        _: &str,
+        _: &std::collections::HashSet<String>,
+    ) -> Result<ReconSnapshot> {
         off()
     }
     pub(crate) fn manual_calls() -> Result<Vec<Call>> {

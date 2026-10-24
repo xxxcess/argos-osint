@@ -89,3 +89,39 @@ where
         .handle
         .block_on(async { f(repository().await?).await })
 }
+
+static PENDING: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Run a best-effort write (telemetry) on the process runtime without
+/// waiting, from synchronous or async code. `false` without [`init`]. The
+/// task is tracked so [`drain`] can wait for it before the process exits.
+pub fn spawn<F>(work: F) -> bool
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let Some(entry) = ENTRY.get() else {
+        return false;
+    };
+    let handle = entry.handle.spawn(work);
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    pending.retain(|h| !h.is_finished());
+    pending.push(handle);
+    true
+}
+
+/// Wait for every write started by [`spawn`] (call before the process exits).
+pub async fn drain() {
+    loop {
+        let batch: Vec<_> = {
+            let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *pending)
+        };
+        if batch.is_empty() {
+            return;
+        }
+        for handle in batch {
+            let _ = handle.await;
+        }
+    }
+}

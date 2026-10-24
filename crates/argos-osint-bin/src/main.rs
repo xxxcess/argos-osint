@@ -17,7 +17,11 @@ async fn main() {
         eprintln!("argos: {err:#}");
         std::process::exit(1);
     }
-    if let Err(err) = cli::dispatch().await {
+    let outcome = cli::dispatch().await;
+    // Best-effort SurrealDB telemetry writes finish before the process exits.
+    #[cfg(feature = "surreal")]
+    argos_osint_core::storage::runtime::drain().await;
+    if let Err(err) = outcome {
         eprintln!("argos: {err:#}");
         std::process::exit(1);
     }

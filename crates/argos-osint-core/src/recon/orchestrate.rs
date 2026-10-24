@@ -10,7 +10,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
-use super::backend::{sqlite_path, surreal_selected, ReconStore};
+use super::backend::{sqlite_path, ReconStore};
 use super::{
     brain_resources::{self, BrainResourceSummary},
     investigation, picker, AnswerContext, CreditHold, EntityView, HypothesisView, Plan, PlanCall,
@@ -67,32 +67,59 @@ impl StageClock {
             return;
         }
         self.recorded = true;
-        if surreal_selected() {
+        let elapsed = self.started.elapsed_ms();
+        #[cfg(feature = "surreal")]
+        if super::backend::surreal_selected() {
+            // The attempt ordinal is read from the repository, so the whole
+            // write runs there; SQLite is never opened.
+            let (run_id, mode, stage) =
+                (self.run_id.clone(), self.mode.clone(), self.stage.clone());
+            crate::storage::runtime::spawn(async move {
+                let Ok(repo) = crate::storage::runtime::repository().await else {
+                    return;
+                };
+                let attempt = crate::storage::telemetry::stage_attempt(repo.db(), &run_id, &stage)
+                    .await
+                    .unwrap_or(1);
+                let event = stage_event(&run_id, &mode, &stage, attempt, elapsed);
+                let _ = crate::storage::telemetry::record(repo.db(), &event).await;
+            });
             return;
         }
         // A resumed or replayed stage is a new attempt, so the ordinal is
         // derived from the rows already written for this run and stage.
         let attempt = stage_attempt(&self.db_path, &self.run_id, &self.stage);
-        let event = TelemetryEvent::new(EventKind::ReconStage)
-            .with_id(format!("{}:{}:{}", self.run_id, self.stage, attempt))
-            .canonical(format!("{}:{}", self.run_id, self.stage))
-            .at(now_stamp())
-            .app("recon")
-            .trigger(Trigger::ReconPrompt)
-            .category(&self.stage)
-            .mode(&self.mode)
-            .outcome("completed")
-            .run(&self.run_id)
-            .duration_ms(Some(self.started.elapsed_ms()))
-            .count(1)
-            .payload(json!({
-                "stage": self.stage,
-                "mode": self.mode,
-                "attempt": attempt,
-                "resumed": attempt > 1,
-            }));
+        let event = stage_event(&self.run_id, &self.mode, &self.stage, attempt, elapsed);
         let _ = telemetry::record(&self.db_path, &event);
     }
+}
+
+/// The `recon_stage` row for one stage attempt.
+pub(crate) fn stage_event(
+    run_id: &str,
+    mode: &str,
+    stage: &str,
+    attempt: i64,
+    elapsed_ms: i64,
+) -> TelemetryEvent {
+    TelemetryEvent::new(EventKind::ReconStage)
+        .with_id(format!("{run_id}:{stage}:{attempt}"))
+        .canonical(format!("{run_id}:{stage}"))
+        .at(now_stamp())
+        .app("recon")
+        .trigger(Trigger::ReconPrompt)
+        .category(stage)
+        .mode(mode)
+        .outcome("completed")
+        .run(run_id)
+        .duration_ms(Some(elapsed_ms))
+        .count(1)
+        .payload(json!({
+            "stage": stage,
+            "mode": mode,
+            "attempt": attempt,
+            "resumed": attempt > 1,
+        }))
 }
 
 impl Drop for StageClock {
@@ -220,9 +247,8 @@ pub(crate) fn note_directives(
             .run(run_id)
             .turn(turn_id)
             .count(1);
-        if !surreal_selected() {
-            let _ = telemetry::record(db_path, &event);
-        }
+        // Routed to the repository under SurrealDB (`telemetry::record`).
+        let _ = telemetry::record(db_path, &event);
     }
     assessments
 }
@@ -329,9 +355,8 @@ pub(crate) fn note_run(
             "strategy": plan.strategy,
             "planning_mode": plan.planning_mode,
         }));
-    if !surreal_selected() {
-        let _ = telemetry::record(db_path, &event);
-    }
+    // Routed to the repository under SurrealDB (`telemetry::record`).
+    let _ = telemetry::record(db_path, &event);
 }
 
 /// Short machine label for a failure reason. Never the full error text.

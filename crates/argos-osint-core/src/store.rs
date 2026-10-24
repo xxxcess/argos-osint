@@ -1,15 +1,13 @@
 //! Persistent Brain memories and their conversation provenance.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::brain::{hybrid_recall, normalize_category, recall, Memory, MemorySource, ScoredMemory};
-use crate::brain_lance::{self, BrainIndex};
+use crate::brain::{normalize_category, recall, Memory, MemorySource, ScoredMemory};
 use crate::profile_stats;
 
 mod publication;
@@ -72,9 +70,6 @@ pub const SCHEMA_TELEMETRY_SQL: &str = include_str!("schema_telemetry.sql");
 
 pub struct Store {
     pub(crate) conn: Connection,
-    /// Lance vector index beside the database. None for in-memory stores and when
-    /// `ARGOS_EMBED=0`.
-    vectors: Option<Arc<BrainIndex>>,
 }
 
 /// Result of [`Store::commit_article_insight_replacement`].
@@ -249,10 +244,7 @@ impl Store {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("open profile reader {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_millis(250))?;
-        Ok(Self {
-            conn,
-            vectors: None,
-        })
+        Ok(Self { conn })
     }
 
     /// Lightweight connection for lease heartbeats: no migration or vector
@@ -260,10 +252,7 @@ impl Store {
     pub fn open_light(path: &Path) -> Result<Self> {
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(2))?;
-        Ok(Self {
-            conn,
-            vectors: None,
-        })
+        Ok(Self { conn })
     }
 
     /// Worker/cache connection with lazy first-use schema initialization.
@@ -287,23 +276,18 @@ impl Store {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
-        let vectors = (cfg!(feature = "lancedb") && crate::embed::enabled())
-            .then(|| BrainIndex::shared(&crate::paths::lancedb_dir_for(path)));
-        let store = Self { conn, vectors };
+        let store = Self { conn };
         store.ensure_schema()?;
         crate::job_cleanup::retire_article_reports(&store.conn)?;
-        store.restore_serving_vector_table();
         Ok(store)
     }
 
     /// Index-pool connection after the state root has been initialized. Polls
     /// attach the shared index without re-running schema/data migrations.
     pub fn open_index_worker(path: &Path) -> Result<Self> {
-        let mut store = Self::open_initialized_light(path)?;
-        store.vectors = (cfg!(feature = "lancedb") && crate::embed::enabled())
-            .then(|| BrainIndex::shared(&crate::paths::lancedb_dir_for(path)));
-        store.restore_serving_vector_table();
-        Ok(store)
+        // Vectors live in SurrealDB; the worker drains them through
+        // `storage::store_bridge`.
+        Self::open_initialized_light(path)
     }
 
     #[cfg(test)]
@@ -314,7 +298,6 @@ impl Store {
     pub fn memory() -> Result<Self> {
         let store = Self {
             conn: Connection::open_in_memory()?,
-            vectors: None,
         };
         // Under a SurrealDB storage config every frozen `Store` method
         // dispatches to `storage::{brain_store, store_bridge}`, so the SQLite
@@ -601,13 +584,11 @@ impl Store {
             if version < 18 {
                 crate::tasks::migrate_tables(&self.conn)?;
                 crate::scheduler::migrate_scheduler(&self.conn)?;
-                crate::brain_lance::migrate_generations(&self.conn)?;
                 self.conn.pragma_update(None, "user_version", 18)?;
             } else {
                 // Idempotent ensure for databases already at 18+.
                 crate::tasks::migrate_tables(&self.conn)?;
                 crate::scheduler::migrate_scheduler(&self.conn)?;
-                let _ = crate::brain_lance::migrate_generations(&self.conn);
             }
             // v19: additive job timing, pool routing, leased index outbox, events,
             // Atlas checkpoints/receipts, tombstones. `migrate_tables` above already
@@ -1199,7 +1180,7 @@ impl Store {
         }
     }
 
-    /// Hybrid recall: Lance vector search blended with Jaccard ([`hybrid_recall`]),
+    /// Recall: Jaccard on SQLite (SurrealDB serves vector recall),
     /// then passage-level [`crate::evidence::hybrid_passage_candidates`] for long
     /// memories so Brain/Recon share the same hybrid path (spec follow-up).
     /// Falls back to Jaccard alone when embedding is off or the index fails; an
@@ -1220,18 +1201,8 @@ impl Store {
         if query.trim().is_empty() || memories.is_empty() || top_k == 0 {
             return Ok(Vec::new());
         }
-        let mut ranked = if let Some(index) = self.vector_index() {
-            match index.search(query, (top_k * 3).max(16)) {
-                Ok(hits) => hybrid_recall(&memories, query, &hits, (top_k * 2).max(top_k)),
-                Err(err) => {
-                    brain_lance::note_error(&err);
-                    index.mark_stale();
-                    recall(&memories, query, (top_k * 2).max(top_k))
-                }
-            }
-        } else {
-            recall(&memories, query, (top_k * 2).max(top_k))
-        };
+        // SQLite keeps lexical recall only; vector recall is SurrealDB HNSW.
+        let mut ranked = recall(&memories, query, (top_k * 2).max(top_k));
         ranked = boost_with_passage_hybrid(query, &memories, ranked, top_k);
         Ok(ranked)
     }
@@ -1249,27 +1220,26 @@ impl Store {
 
     /// True when recall will use the vector index (embedding on, file-backed store).
     pub fn vectors_enabled(&self) -> bool {
-        self.vectors.is_some()
+        #[cfg(feature = "surreal")]
+        if crate::storage::store_bridge::on() {
+            return crate::embed::enabled();
+        }
+        false
     }
 
     /// The closest existing memory to `text` at or above `threshold` cosine
-    /// similarity (use [`brain_lance::DUPLICATE_THRESHOLD`] for near-duplicates).
+    /// similarity (see `storage::memories` for the duplicate threshold).
     /// None when embedding is off or the index is unavailable.
     pub fn find_similar_memory(&self, text: &str, threshold: f32) -> Option<(String, f32)> {
         #[cfg(feature = "surreal")]
         if crate::storage::brain_store::on() {
             return crate::storage::brain_store::find_similar_memory(text, threshold);
         }
-        let index = self.vector_index()?;
-        match index.find_similar(text, threshold) {
-            Ok(hit) => hit,
-            Err(err) => {
-                brain_lance::note_error(&err);
-                None
-            }
-        }
+        let _ = (text, threshold);
+        None
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn memory_texts(&self, ids: Option<&[String]>) -> Result<Vec<(String, String)>> {
         let mut out = Vec::new();
         match ids {
@@ -1291,21 +1261,6 @@ impl Store {
         Ok(out)
     }
 
-    /// The index when it is usable, checking it against SQLite once per process.
-    fn vector_index(&self) -> Option<&BrainIndex> {
-        let index = self.vectors.as_deref()?;
-        if index.is_ready() {
-            return Some(index);
-        }
-        match self.ensure_memory_vectors() {
-            Ok(()) => Some(index),
-            Err(err) => {
-                brain_lance::note_error(&err);
-                None
-            }
-        }
-    }
-
     /// Brings the Lance index in line with SQLite. Small missing/mismatched indexes
     /// rebuild inline; larger ones enqueue an automatic generation rebuild via
     /// `argos_index_changes` so foreground recall is never blocked on a 3,000-row
@@ -1316,70 +1271,7 @@ impl Store {
         if crate::storage::store_bridge::on() {
             return crate::storage::store_bridge::ensure_memory_vectors();
         }
-        let index = self.vectors.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("Brain vectors are off (ARGOS_EMBED=0 or in-memory store)")
-        })?;
-        crate::embed::warm_up()?;
-        let rows = self.memory_texts(None)?;
-        if !index.exists() || !brain_lance::fingerprint_matches(&self.conn)? {
-            if rows.len() <= AUTO_REBUILD_HINT {
-                brain_lance::clear_fingerprint(&self.conn)?;
-                index.rebuild(&rows)?;
-                brain_lance::write_fingerprint(&self.conn)?;
-                publication::record_index_states(&self.conn, &rows, &index.serving_table_name())?;
-            } else {
-                // Do not block recall. Queue a durable rebuild and keep Jaccard until ready.
-                let now = chrono::Utc::now().to_rfc3339();
-                let gen = crate::brain_lance::begin_generation(&self.conn, rows.len())
-                    .unwrap_or_default();
-                let _ = crate::tasks::enqueue_index_change(
-                    &self.conn,
-                    "memory_index",
-                    if gen.is_empty() { "generation" } else { &gen },
-                    &format!("count={}", rows.len()),
-                    "rebuild",
-                    &now,
-                );
-                return Ok(());
-            }
-        } else {
-            let have: HashSet<String> = index.ids()?.into_iter().collect();
-            let want: HashSet<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
-            // Re-embed rows that are absent, or whose recorded revision is stale.
-            // Rows present without any recorded revision (written before revision
-            // tracking) are adopted as-is rather than re-embedded on the recall path.
-            let mut adopt: Vec<(String, String)> = Vec::new();
-            let mut missing: Vec<(String, String)> = Vec::new();
-            for (id, text) in &rows {
-                if !have.contains(id) {
-                    missing.push((id.clone(), text.clone()));
-                    continue;
-                }
-                match publication::indexed_revision(&self.conn, id)? {
-                    None => adopt.push((id.clone(), text.clone())),
-                    Some(rev) if rev != memory_revision(text) => {
-                        missing.push((id.clone(), text.clone()))
-                    }
-                    Some(_) => {}
-                }
-            }
-            let stale: Vec<String> = have
-                .iter()
-                .filter(|id| !want.contains(id.as_str()))
-                .cloned()
-                .collect();
-            index.upsert_texts(&missing)?;
-            index.remove_many(&stale)?;
-            adopt.extend(missing);
-            if !adopt.is_empty() {
-                publication::record_index_states(&self.conn, &adopt, &index.serving_table_name())?;
-            }
-            for id in &stale {
-                publication::clear_index_state(&self.conn, id)?;
-            }
-        }
-        index.mark_ready();
-        Ok(())
+        anyhow::bail!("Brain vectors are off (no SurrealDB storage)")
     }
 
     /// Count user-edited insight memories linked to one Atlas article.
@@ -1612,35 +1504,7 @@ impl Store {
         if crate::storage::store_bridge::on() {
             return crate::storage::store_bridge::reindex_memory_vectors();
         }
-        let index = self.vectors.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("Brain vectors are off (ARGOS_EMBED=0); nothing to reindex")
-        })?;
-        crate::embed::warm_up()?;
-        index.mark_stale();
-        let rows = self.memory_texts(None)?;
-        brain_lance::clear_fingerprint(&self.conn)?;
-        let memories = index.rebuild(&rows)?;
-        brain_lance::write_fingerprint(&self.conn)?;
-        publication::record_index_states(&self.conn, &rows, &index.serving_table_name())?;
-        index.mark_ready();
-        Ok(ReindexReport {
-            memories,
-            lance_dir: index.uri().to_path_buf(),
-            fingerprint: brain_lance::current_fingerprint(),
-        })
-    }
-
-    /// Point BrainIndex at the active generation's shadow table after open.
-    fn restore_serving_vector_table(&self) {
-        let Some(index) = self.vectors.as_deref() else {
-            return;
-        };
-        match brain_lance::serving_table_name(&self.conn) {
-            Ok(Some(name)) if !name.is_empty() && index.serving_table_name() != name => {
-                index.set_serving_table(&name);
-            }
-            _ => {}
-        }
+        anyhow::bail!("Brain vectors are off (no SurrealDB storage); nothing to reindex")
     }
 
     /// Drain pending generation rebuild work in bounded batches (off the TUI path).
@@ -1649,36 +1513,8 @@ impl Store {
         if crate::storage::store_bridge::on() {
             return crate::storage::store_bridge::process_pending_vector_rebuild(max_batches);
         }
-        let index = self
-            .vectors
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("Brain vectors are off"))?;
-        crate::embed::warm_up()?;
-        let rows = self.memory_texts(None)?;
-        let mut done = 0usize;
-        for _ in 0..max_batches {
-            let pending: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT id FROM argos_index_generations WHERE state='building' ORDER BY created_at ASC LIMIT 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let Some(gen) = pending else {
-                break;
-            };
-            let progress = brain_lance::rebuild_generation_batched(&self.conn, index, &gen, &rows)?;
-            done += 1;
-            if progress.activated {
-                // Record what the activated generation holds: these rows' revisions.
-                // Rows whose text changed mid-rebuild are caught by verification.
-                publication::record_index_states(&self.conn, &rows, &index.serving_table_name())?;
-                index.mark_ready();
-                break;
-            }
-        }
-        Ok(done)
+        let _ = max_batches;
+        anyhow::bail!("Brain vectors are off")
     }
 
     /// Typed index upsert used by the reliable (outbox) path. Distinguishes
@@ -1690,20 +1526,10 @@ impl Store {
         if crate::storage::store_bridge::on() {
             return crate::storage::store_bridge::try_index_upsert(ids);
         }
-        use crate::tasks::IndexOutcome;
-        let mut last = IndexOutcome::Ready {
-            revision: String::new(),
-            fingerprint: brain_lance::current_fingerprint(),
-            generation: String::new(),
-        };
-        for id in ids {
-            let outcome = self.try_index_memory(id, "");
-            if !outcome.is_ready() {
-                return outcome;
-            }
-            last = outcome;
+        let _ = ids;
+        crate::tasks::IndexOutcome::Disabled {
+            reason: "semantic indexing disabled (no SurrealDB storage)".into(),
         }
-        last
     }
 
     /// Typed removal of vectors whose memories are gone from SQLite.
@@ -1712,44 +1538,9 @@ impl Store {
         if crate::storage::store_bridge::on() {
             return crate::storage::store_bridge::try_index_remove_missing(ids);
         }
-        use crate::tasks::IndexOutcome;
-        if let Some(outcome) = self.index_unavailable() {
-            return outcome;
-        }
-        let Some(index) = self.vector_index() else {
-            return IndexOutcome::RetryableFailure {
-                message: brain_lance::last_error()
-                    .unwrap_or_else(|| "vector index is not ready".into()),
-            };
-        };
-        let result = (|| -> Result<()> {
-            let present: HashSet<String> = self
-                .memory_texts(Some(ids))?
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect();
-            let gone: Vec<String> = ids
-                .iter()
-                .filter(|id| !present.contains(*id))
-                .cloned()
-                .collect();
-            index.remove_many(&gone)?;
-            self.reconcile_removed_vectors(&gone)?;
-            Ok(())
-        })();
-        match result {
-            Ok(()) => IndexOutcome::Ready {
-                revision: String::new(),
-                fingerprint: brain_lance::current_fingerprint(),
-                generation: index.serving_table_name(),
-            },
-            Err(err) => {
-                brain_lance::note_error(&err);
-                index.mark_stale();
-                IndexOutcome::RetryableFailure {
-                    message: format!("{err:#}"),
-                }
-            }
+        let _ = ids;
+        crate::tasks::IndexOutcome::Disabled {
+            reason: "semantic indexing disabled (no SurrealDB storage)".into(),
         }
     }
 
@@ -1760,60 +1551,10 @@ impl Store {
         if crate::storage::store_bridge::on() {
             return crate::storage::store_bridge::try_process_vector_rebuild(max_batches);
         }
-        use crate::tasks::IndexOutcome;
-        if let Some(outcome) = self.index_unavailable() {
-            return outcome;
+        let _ = max_batches;
+        crate::tasks::IndexOutcome::Disabled {
+            reason: "semantic indexing disabled (no SurrealDB storage)".into(),
         }
-        match self.process_pending_vector_rebuild(max_batches) {
-            Ok(batches) => match self.rebuild_in_progress() {
-                Some(_) => IndexOutcome::Pending {
-                    reason: format!("rebuild progress: {batches} batch(es) this pass"),
-                },
-                None => IndexOutcome::Ready {
-                    revision: String::new(),
-                    fingerprint: brain_lance::current_fingerprint(),
-                    generation: self
-                        .vectors
-                        .as_deref()
-                        .map(|i| i.serving_table_name())
-                        .unwrap_or_default(),
-                },
-            },
-            Err(err) => IndexOutcome::RetryableFailure {
-                message: format!("{err:#}"),
-            },
-        }
-    }
-
-    /// `Some(Disabled)` when this store has no vector index at all.
-    fn index_unavailable(&self) -> Option<crate::tasks::IndexOutcome> {
-        if self.vectors.is_some() {
-            return None;
-        }
-        let reason = if !cfg!(feature = "lancedb") {
-            "semantic indexing disabled (built without LanceDB)"
-        } else if crate::embed::enabled() {
-            "semantic indexing unavailable for this store (in-memory)"
-        } else {
-            "semantic indexing disabled (ARGOS_EMBED=0)"
-        };
-        Some(crate::tasks::IndexOutcome::Disabled {
-            reason: reason.into(),
-        })
-    }
-
-    /// Reason string when a shadow generation is still building.
-    fn rebuild_in_progress(&self) -> Option<String> {
-        self.conn
-            .query_row(
-                "SELECT id FROM argos_index_generations WHERE state='building' ORDER BY created_at ASC LIMIT 1",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .map(|gen| format!("generation rebuild {gen} in progress"))
     }
 
     pub fn update_memory(
@@ -3404,526 +3145,6 @@ mod tests {
             .connection()
             .prepare("SELECT * FROM forbidden")
             .is_err());
-    }
-
-    mod vectors {
-        use super::*;
-        use crate::embed::testing;
-
-        fn src() -> MemorySource {
-            MemorySource {
-                app: "test".into(),
-                conversation_id: "c".into(),
-                message_id: None,
-                reference: None,
-            }
-        }
-
-        fn version(conn: &Connection) -> i64 {
-            conn.pragma_query_value(None, "user_version", |row| row.get(0))
-                .unwrap()
-        }
-
-        fn has_table(conn: &Connection, name: &str) -> bool {
-            conn.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name=?1",
-                [name],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap()
-                > 0
-        }
-
-        #[test]
-        fn schema_17_has_embed_meta_and_no_memory_vec() {
-            let store = Store::memory().unwrap();
-            assert_eq!(version(&store.conn), SCHEMA_VERSION);
-            assert!(has_table(&store.conn, "memory_embed_meta"));
-            assert!(!has_table(&store.conn, "memory_vec"));
-        }
-
-        #[test]
-        fn schema_27_adds_telemetry_and_keeps_schema_26_columns() {
-            let store = Store::memory().unwrap();
-            assert_eq!(version(&store.conn), SCHEMA_VERSION);
-            for name in [
-                "telemetry_events",
-                "telemetry_hourly",
-                "telemetry_daily",
-                "telemetry_meta",
-                "recon_model_operations",
-                "recon_model_attempts",
-                "recon_coverage",
-            ] {
-                assert!(has_table(&store.conn, name), "{name}");
-            }
-            let columns = |table: &str| -> Vec<String> {
-                let mut stmt = store
-                    .conn
-                    .prepare(&format!("PRAGMA table_info({table})"))
-                    .unwrap();
-                stmt.query_map([], |row| row.get::<_, String>(1))
-                    .unwrap()
-                    .map(|row| row.unwrap())
-                    .collect()
-            };
-            let attempts = columns("recon_model_attempts");
-            for name in [
-                "outcome",
-                "wait_ms",
-                "queued_at",
-                "first_response_at",
-                "elapsed_ms",
-            ] {
-                assert!(attempts.iter().any(|column| column == name), "{name}");
-            }
-            let coverage = columns("recon_coverage");
-            for name in ["scope", "generation", "category", "payload_json"] {
-                assert!(coverage.iter().any(|column| column == name), "{name}");
-            }
-        }
-
-        /// x3cess's unreleased local build used user_version 17 for sqlite-vec. Opening
-        /// such a DB (vec0 table we cannot load, shadow tables, a differently shaped
-        /// meta table) must clean up and keep the memories.
-        #[test]
-        fn local_sqlite_vec_v17_database_is_repaired_on_open() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("argos.db");
-            Store::open(&path)
-                .unwrap()
-                .add_memory("keep me", "fact", false, src())
-                .unwrap();
-            {
-                let conn = Connection::open(&path).unwrap();
-                conn.execute_batch(
-                    "DROP TABLE memory_embed_meta;
-                     CREATE TABLE memory_embed_meta(id INTEGER PRIMARY KEY, model TEXT, dim INTEGER);
-                     CREATE TABLE memory_vec_info(key TEXT PRIMARY KEY, value ANY);
-                     CREATE TABLE memory_vec_chunks(chunk_id INTEGER PRIMARY KEY, size INTEGER);
-                     CREATE TABLE memory_vec_rowids(rowid INTEGER PRIMARY KEY, id TEXT);
-                     PRAGMA writable_schema=ON;
-                     INSERT INTO sqlite_master(type,name,tbl_name,rootpage,sql) VALUES ('table','memory_vec','memory_vec',0,'CREATE VIRTUAL TABLE memory_vec USING vec0(memory_id TEXT PRIMARY KEY, embedding float[384])');
-                     PRAGMA writable_schema=OFF;
-                     PRAGMA user_version=17;",
-                )
-                .unwrap();
-            }
-            {
-                let conn = Connection::open(&path).unwrap();
-                assert!(
-                    conn.execute_batch("DROP TABLE memory_vec").is_err(),
-                    "the planted vec0 table needs the missing module"
-                );
-            }
-            let store = Store::open(&path).unwrap();
-            assert_eq!(version(&store.conn), SCHEMA_VERSION);
-            assert!(!has_table(&store.conn, "memory_vec"));
-            assert!(has_table(&store.conn, "argos_tasks"));
-            for shadow in ["memory_vec_info", "memory_vec_chunks", "memory_vec_rowids"] {
-                assert!(!has_table(&store.conn, shadow), "{shadow} left behind");
-            }
-            brain_lance::write_fingerprint(&store.conn).unwrap();
-            assert!(brain_lance::fingerprint_matches(&store.conn).unwrap());
-            assert_eq!(store.list_memories().unwrap()[0].text, "keep me");
-            let ok: String = store
-                .conn
-                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-                .unwrap();
-            assert_eq!(ok, "ok");
-            drop(store);
-            // Idempotent: reopening a repaired DB keeps the fingerprint row.
-            let again = Store::open(&path).unwrap();
-            assert!(brain_lance::fingerprint_matches(&again.conn).unwrap());
-        }
-
-        /// Migration 41 upgrades a populated schema-40 DB in place: IDs,
-        /// history and unrelated rows survive, new counters are NULL (unknown,
-        /// not zero), reopening is a no-op and the result matches a fresh DB.
-        #[test]
-        fn schema_41_upgrades_a_populated_schema_40_db_and_matches_fresh() {
-            use crate::provider_execution_schema::columns;
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("argos.db");
-            let fresh = Store::memory().unwrap();
-            let tables = [
-                "recon_model_attempts",
-                "recon_model_operations",
-                "intel_brief_stage_timings",
-            ];
-            let fresh_cols: Vec<Vec<String>> =
-                tables.iter().map(|t| columns(&fresh.conn, t)).collect();
-            Store::open(&path)
-                .unwrap()
-                .add_memory("unrelated", "fact", false, src())
-                .unwrap();
-            {
-                let conn = Connection::open(&path).unwrap();
-                conn.execute_batch(
-                    "DROP INDEX recon_operations_task_epoch;
-                     ALTER TABLE recon_model_operations DROP COLUMN task_epoch;
-                     ALTER TABLE intel_brief_stage_timings DROP COLUMN task_epoch;
-                     ALTER TABLE recon_model_attempts DROP COLUMN reasoning_tokens;
-                     ALTER TABLE recon_model_attempts DROP COLUMN visible_tokens;
-                     ALTER TABLE recon_model_attempts DROP COLUMN reported_cost_usd;
-                     ALTER TABLE recon_model_attempts DROP COLUMN response_headers_ms;
-                     ALTER TABLE recon_model_attempts DROP COLUMN first_reasoning_ms;
-                     ALTER TABLE recon_model_attempts DROP COLUMN first_output_ms;
-                     ALTER TABLE recon_model_attempts DROP COLUMN stream_completion_ms;
-                     ALTER TABLE recon_model_attempts DROP COLUMN policy_diagnostics_json;
-                     INSERT INTO recon_model_operations (id, run_id, task_id, role, generation, status, draft, created_at, updated_at)
-                       VALUES ('op-40', 'run', 'task-40', 'summarization', 2, 'done', '', 't', 't');
-                     INSERT INTO recon_model_attempts (id, operation_id, generation, route_index, attempt, provider, account, model,
-                       transport, dispatched, outcome, queued_at, admitted_at, started_at, finished_at, prompt_tokens, ttfb_ms)
-                       VALUES ('att-40', 'op-40', 2, 0, 1, 'openrouter', 'a', 'm', 'chat', 1, 'ok', 't', 't', 't', 't', 17, 90);
-                     INSERT INTO intel_brief_stage_timings (task_id, job_id, operation, recorded_at)
-                       VALUES ('task-40', 'job', 'intel_brief.claims', 't');
-                     PRAGMA user_version=40;",
-                )
-                .unwrap();
-                assert!(!columns(&conn, "recon_model_attempts")
-                    .iter()
-                    .any(|c| c == "reasoning_tokens"));
-            }
-            for _ in 0..2 {
-                let store = Store::open(&path).unwrap();
-                assert_eq!(version(&store.conn), SCHEMA_VERSION);
-                for (table, expected) in tables.iter().zip(&fresh_cols) {
-                    let mut got = columns(&store.conn, table);
-                    let mut want = expected.clone();
-                    got.sort();
-                    want.sort();
-                    assert_eq!(got, want, "{table} matches a fresh store");
-                }
-                let row: (String, i64, Option<i64>, Option<i64>, Option<f64>, Option<i64>, String, i64, i64) = store
-                    .conn
-                    .query_row(
-                        "SELECT id, generation, reasoning_tokens, visible_tokens, reported_cost_usd,
-                                first_output_ms, policy_diagnostics_json, prompt_tokens, ttfb_ms
-                         FROM recon_model_attempts WHERE operation_id='op-40'",
-                        [],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
-                    )
-                    .unwrap();
-                assert_eq!(
-                    row,
-                    (
-                        "att-40".into(),
-                        2,
-                        None,
-                        None,
-                        None,
-                        None,
-                        "[]".into(),
-                        17,
-                        90
-                    )
-                );
-                let epochs: (Option<i64>, Option<i64>) = store
-                    .conn
-                    .query_row(
-                        "SELECT o.task_epoch, t.task_epoch FROM recon_model_operations o
-                         JOIN intel_brief_stage_timings t ON t.task_id=o.task_id WHERE o.id='op-40'",
-                        [],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .unwrap();
-                assert_eq!(epochs, (None, None), "old epochs stay unknown");
-                let indexed: i64 = store
-                    .conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM pragma_index_info('recon_operations_task_epoch')
-                         WHERE name IN ('task_id','task_epoch')",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .unwrap();
-                assert_eq!(indexed, 2);
-                assert_eq!(store.list_memories().unwrap()[0].text, "unrelated");
-            }
-        }
-
-        #[test]
-        fn newer_schema_is_refused() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("argos.db");
-            drop(Store::open(&path).unwrap());
-            Connection::open(&path)
-                .unwrap()
-                .execute_batch(&format!("PRAGMA user_version={}", SCHEMA_VERSION + 1))
-                .unwrap();
-            assert!(Store::open(&path).is_err());
-        }
-
-        #[test]
-        fn ui_store_keeps_indexing_in_outbox_and_bounds_lock_waits() {
-            let dir = tempfile::tempdir().unwrap();
-            Store::ui_store_contract_test(&dir.path().join("argos.db"));
-        }
-
-        #[test]
-        fn embedding_disabled_degrades_to_jaccard() {
-            // Unit tests run as if ARGOS_EMBED=0 unless ARGOS_EMBED=1 is set.
-            if crate::embed::enabled() {
-                eprintln!("skipped: ARGOS_EMBED is enabled");
-                return;
-            }
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("argos.db");
-            let store = Store::open(&path).unwrap();
-            assert!(!store.vectors_enabled());
-            store
-                .add_memory(
-                    "Prefers markdown documents with source urls",
-                    "fact",
-                    false,
-                    src(),
-                )
-                .unwrap();
-            store
-                .add_memory("The kettle is in the galley", "fact", false, src())
-                .unwrap();
-            let hits = store.recall("markdown source documents", 2).unwrap();
-            assert_eq!(
-                hits,
-                recall(
-                    &store.list_memories().unwrap(),
-                    "markdown source documents",
-                    2
-                )
-            );
-            assert!(
-                !dir.path().join("memory_lancedb").exists(),
-                "no Lance dir without embedding"
-            );
-            assert!(store.reindex_memory_vectors().is_err());
-        }
-
-        #[test]
-        fn embedding_failure_mid_session_degrades_to_jaccard() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("argos.db");
-            let store = {
-                let _fake = testing::fake();
-                let store = Store::open(&path).unwrap();
-                store
-                    .add_memory("Harbor tanker manifests", "fact", false, src())
-                    .unwrap();
-                store
-            };
-            // Embedder now unavailable: recall must still answer from SQLite.
-            let hits = store.recall("harbor manifests", 3).unwrap();
-            assert_eq!(hits.len(), 1);
-            if crate::embed::enabled() {
-                return;
-            }
-            assert_eq!(
-                hits[0].score,
-                recall(&store.list_memories().unwrap(), "harbor manifests", 3)[0].score
-            );
-        }
-
-        #[cfg(feature = "lancedb")]
-        #[test]
-        fn reindex_creates_lance_dir_and_hooks_track_writes() {
-            let _fake = testing::fake();
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("argos.db");
-            let store = Store::open(&path).unwrap();
-            let lance = dir.path().join("memory_lancedb");
-            assert!(!lance.exists(), "opening a store does not touch Lance");
-            let a = store
-                .add_memory("Harbor tanker manifests list cargo", "fact", false, src())
-                .unwrap();
-            let b = store
-                .add_memory("Night desk shift starts at nine", "fact", false, src())
-                .unwrap();
-            let report = store.reindex_memory_vectors().unwrap();
-            assert_eq!(report.memories, 2);
-            assert_eq!(report.lance_dir, lance);
-            assert!(lance.join(format!("{}.lance", brain_lance::TABLE)).is_dir());
-            assert!(brain_lance::fingerprint_matches(&store.conn).unwrap());
-            let index = BrainIndex::shared(&lance);
-            let mut ids = index.ids().unwrap();
-            ids.sort();
-            let mut want = vec![a.id.clone(), b.id.clone()];
-            want.sort();
-            assert_eq!(ids, want);
-
-            // Delete hook.
-            assert!(store.delete_memory(&b.id).unwrap());
-            assert_eq!(index.ids().unwrap(), vec![a.id.clone()]);
-            // Write hook through a reopened store (shared index handle).
-            let reopened = Store::open(&path).unwrap();
-            let c = reopened
-                .add_memory("Galley kettle inventory", "fact", false, src())
-                .unwrap();
-            assert_eq!(index.count().unwrap(), 2);
-            // Update hook re-embeds the new text.
-            reopened
-                .update_memory(&c.id, "Northwind ferry timetable", "fact", false)
-                .unwrap();
-            let hit = index.search("northwind ferry timetable", 1).unwrap();
-            assert_eq!(hit[0].0, c.id);
-            assert!(hit[0].1 > 0.99);
-            assert_eq!(
-                reopened
-                    .find_similar_memory(
-                        "Northwind ferry timetable",
-                        brain_lance::DUPLICATE_THRESHOLD
-                    )
-                    .map(|h| h.0),
-                Some(c.id.clone())
-            );
-            // Hybrid recall through the Store.
-            let hits = reopened.recall("ferry timetable", 3).unwrap();
-            assert_eq!(hits[0].memory.id, c.id);
-        }
-
-        #[cfg(feature = "lancedb")]
-        #[test]
-        fn fingerprint_mismatch_rebuilds_and_drift_is_reconciled() {
-            let _fake = testing::fake();
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("argos.db");
-            let store = Store::open(&path).unwrap();
-            let a = store
-                .add_memory("Harbor tanker manifests", "fact", false, src())
-                .unwrap();
-            let lance = dir.path().join("memory_lancedb");
-            let index = BrainIndex::shared(&lance);
-            assert_eq!(
-                index.ids().unwrap(),
-                vec![a.id.clone()],
-                "first write builds the index"
-            );
-            // Simulate a model change plus a stray vector.
-            index
-                .upsert_vectors(&[("ghost".into(), crate::embed::embed_one("ghost").unwrap())])
-                .unwrap();
-            store
-                .conn
-                .execute("UPDATE memory_embed_meta SET value='old-model'", [])
-                .unwrap();
-            index.mark_stale();
-            store.ensure_memory_vectors().unwrap();
-            assert_eq!(
-                index.ids().unwrap(),
-                vec![a.id.clone()],
-                "rebuilt from SQLite"
-            );
-            assert!(brain_lance::fingerprint_matches(&store.conn).unwrap());
-            // Drift with a matching fingerprint: a memory written behind the index's back.
-            store
-                .conn
-                .execute(
-                    "INSERT INTO memories(id,text,category,pinned,created_at,source_json) VALUES ('raw','Ferry timetable','fact',0,'now','{}')",
-                    [],
-                )
-                .unwrap();
-            index.mark_stale();
-            store.ensure_memory_vectors().unwrap();
-            assert_eq!(index.count().unwrap(), 2);
-        }
-
-        /// Recon calls the sync `Store::recall` from inside its async turn.
-        #[cfg(feature = "lancedb")]
-        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-        async fn recall_works_inside_a_multi_thread_runtime() {
-            let _fake = testing::fake();
-            let dir = tempfile::tempdir().unwrap();
-            let store = Store::open(&dir.path().join("argos.db")).unwrap();
-            let m = store
-                .add_memory("Harbor tanker manifests", "fact", false, src())
-                .unwrap();
-            let hits = store.recall("tanker manifests", 3).unwrap();
-            assert_eq!(hits[0].memory.id, m.id);
-            assert!(store.vectors.as_ref().unwrap().is_ready());
-        }
-
-        #[cfg(feature = "lancedb")]
-        #[tokio::test(flavor = "current_thread")]
-        async fn recall_works_inside_a_current_thread_runtime() {
-            let _fake = testing::fake();
-            let dir = tempfile::tempdir().unwrap();
-            let store = Store::open(&dir.path().join("argos.db")).unwrap();
-            let m = store
-                .add_memory("Harbor tanker manifests", "fact", false, src())
-                .unwrap();
-            assert_eq!(
-                store.recall("tanker manifests", 3).unwrap()[0].memory.id,
-                m.id
-            );
-            assert!(store.vectors.as_ref().unwrap().is_ready());
-        }
-
-        /// Real MiniLM + LanceDB. Downloads the model on first run:
-        /// `ARGOS_EMBED=1 cargo test -p argos-osint-core -- --ignored minilm`
-        #[cfg(feature = "lancedb")]
-        #[test]
-        #[ignore = "downloads all-MiniLM-L6-v2; set ARGOS_EMBED=1 and pass --ignored"]
-        fn minilm_lance_upsert_then_search_returns_same_id() {
-            if !crate::embed::enabled() {
-                eprintln!("skipped: ARGOS_EMBED is not enabled");
-                return;
-            }
-            let dir = tempfile::tempdir().unwrap();
-            let index = BrainIndex::new(&dir.path().join("memory_lancedb"));
-            index
-                .upsert("m-ship", "The vessel docked at the harbor at dawn")
-                .unwrap();
-            index
-                .upsert("m-tax", "Quarterly tax filings are due in April")
-                .unwrap();
-            let hits = index
-                .search("ship arrived in port this morning", 2)
-                .unwrap();
-            assert_eq!(hits[0].0, "m-ship", "{hits:?}");
-            assert!(hits[0].1 > hits[1].1);
-            assert_eq!(
-                index
-                    .find_similar(
-                        "The vessel docked at the harbor at dawn",
-                        brain_lance::DUPLICATE_THRESHOLD
-                    )
-                    .unwrap()
-                    .map(|h| h.0),
-                Some("m-ship".to_string())
-            );
-
-            // Through the Store: a paraphrase with no shared words is recalled.
-            let store = Store::open(&dir.path().join("store").join("argos.db")).unwrap();
-            let ship = store
-                .add_memory(
-                    "The vessel docked at the harbor at dawn",
-                    "fact",
-                    false,
-                    src(),
-                )
-                .unwrap();
-            store
-                .add_memory(
-                    "Quarterly tax filings are due in April",
-                    "fact",
-                    false,
-                    src(),
-                )
-                .unwrap();
-            let hits = store
-                .recall("ship arrived in port this morning", 3)
-                .unwrap();
-            assert_eq!(hits[0].memory.id, ship.id, "{hits:?}");
-            assert!(
-                recall(
-                    &store.list_memories().unwrap(),
-                    "ship arrived in port this morning",
-                    3
-                )
-                .iter()
-                .all(|hit| hit.memory.id != ship.id),
-                "Jaccard alone cannot find the paraphrase"
-            );
-        }
     }
 
     #[test]

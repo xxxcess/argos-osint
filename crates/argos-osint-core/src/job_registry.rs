@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -189,6 +189,9 @@ pub struct JobHandle {
     run_ref: String,
     span: Instant,
     prior_active_ms: i64,
+    /// Active time of earlier attempts read from the SurrealDB row on a
+    /// resume; filled by the ordered begin write, so `finish` sees it.
+    surreal_prior: Arc<AtomicI64>,
     cancel: Arc<AtomicBool>,
     finished: bool,
     /// The row lives in the repository's `job` table (SurrealDB selected);
@@ -310,6 +313,7 @@ impl JobHandle {
             run_ref: spec.run_ref,
             span: Instant::now(),
             prior_active_ms,
+            surreal_prior: Arc::new(AtomicI64::new(0)),
             cancel,
             finished: false,
             surreal: false,
@@ -334,13 +338,19 @@ impl JobHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.clone(), cancel.clone());
+        let surreal_prior = Arc::new(AtomicI64::new(0));
         #[cfg(feature = "surreal")]
         {
             let (spec, id, correlation) = (spec.clone(), id.clone(), correlation.clone());
+            let prior = surreal_prior.clone();
             crate::storage::runtime::spawn_ordered(async move {
                 let Ok(repo) = crate::storage::runtime::repository().await else {
                     return;
                 };
+                // A resume reuses the row: keep the active time it recorded.
+                if let Ok(Some(ms)) = surreal_prior_active_ms(&repo, &id).await {
+                    prior.store(ms, Ordering::Release);
+                }
                 let job = crate::storage::recon_jobs::AppJob {
                     id: &id,
                     operation: &spec.operation,
@@ -356,6 +366,7 @@ impl JobHandle {
                 {
                     return;
                 }
+                let _ = surreal_set_job_meta(&repo, &id, &spec).await;
                 let _ = crate::storage::event_log::record_event(
                     repo.db(),
                     &NewEvent {
@@ -381,6 +392,7 @@ impl JobHandle {
             run_ref: spec.run_ref,
             span: Instant::now(),
             prior_active_ms: 0,
+            surreal_prior,
             cancel,
             finished: false,
             surreal: true,
@@ -464,7 +476,9 @@ impl JobHandle {
 
     /// Accumulated active time including the current span (monotonic).
     pub fn active_ms(&self) -> i64 {
-        self.prior_active_ms + self.span.elapsed().as_millis() as i64
+        self.prior_active_ms
+            + self.surreal_prior.load(Ordering::Acquire)
+            + self.span.elapsed().as_millis() as i64
     }
 
     /// Record the terminal (or paused) state.
@@ -560,8 +574,12 @@ impl JobHandle {
                 self.run_ref.clone(),
                 self.correlation.clone(),
             );
-            let active_ms = self.active_ms();
+            // This attempt's span now; earlier attempts' time is added in
+            // the ordered write, after the begin write has read it.
+            let span_ms = self.prior_active_ms + self.span.elapsed().as_millis() as i64;
+            let prior = self.surreal_prior.clone();
             crate::storage::runtime::spawn_ordered(async move {
+                let active_ms = span_ms + prior.load(Ordering::Acquire);
                 let Ok(repo) = crate::storage::runtime::repository().await else {
                     return;
                 };
@@ -595,6 +613,45 @@ impl JobHandle {
         #[cfg(not(feature = "surreal"))]
         let _ = outcome;
     }
+}
+
+/// `active_ms` an existing SurrealDB job row recorded (a resumed job).
+#[cfg(feature = "surreal")]
+async fn surreal_prior_active_ms(
+    repo: &crate::storage::repo::Repository,
+    id: &str,
+) -> Result<Option<i64>> {
+    let mut r = repo
+        .db()
+        .query("SELECT VALUE active_ms FROM type::record('job', $id)")
+        .bind(("id", id.to_string()))
+        .await?
+        .check()?;
+    let ms: Vec<Option<i64>> = r.take(0usize)?;
+    Ok(ms.into_iter().next().flatten())
+}
+
+/// The spec fields `begin_app_job` does not write: provider, model, tool
+/// and whether Jobs → Cancel may stop the job.
+#[cfg(feature = "surreal")]
+async fn surreal_set_job_meta(
+    repo: &crate::storage::repo::Repository,
+    id: &str,
+    spec: &JobSpec,
+) -> Result<()> {
+    repo.db()
+        .query(
+            "UPDATE type::record('job', $id) SET provider = $provider, model = $model,
+               tool = $tool, cancellable = $cancellable RETURN NONE",
+        )
+        .bind(("id", id.to_string()))
+        .bind(("provider", spec.provider.clone()))
+        .bind(("model", spec.model.clone()))
+        .bind(("tool", spec.tool.clone()))
+        .bind(("cancellable", spec.cancellable))
+        .await?
+        .check()?;
+    Ok(())
 }
 
 /// Error category, summary and result reference recorded for an outcome.
@@ -852,9 +909,147 @@ fn ensure_beat(db: &Path) -> Result<Arc<AtomicBool>> {
 /// Write the first heartbeat, recover jobs left by exited processes, then
 /// keep beating on a thread until the returned guard is dropped.
 pub fn start_process_beat(db: &Path) -> Result<ProcessBeat> {
+    if crate::recon::backend::surreal_selected() {
+        return start_surreal_beat();
+    }
     let stop = ensure_beat(db)?;
     recover_orphans(&open(db)?, &crate::scheduler::process_owner())?;
     Ok(ProcessBeat { stop })
+}
+
+/// [`start_process_beat`] on the repository: `process:[owner]` beats
+/// (`storage::processes::beat`), cross-process cancels reach live jobs, and
+/// every minute jobs and tasks of gone processes are recovered.
+#[cfg(feature = "surreal")]
+fn start_surreal_beat() -> Result<ProcessBeat> {
+    let owner = crate::scheduler::process_owner();
+    let first = owner.clone();
+    crate::storage::runtime::blocking(move |repo| async move {
+        surreal_beat(&repo, &first).await?;
+        surreal_recover(&repo, &first).await
+    })?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    std::thread::Builder::new()
+        .name("argos-job-beat".into())
+        .spawn(move || {
+            let mut ticks = 0u32;
+            while !flag.load(Ordering::Relaxed) {
+                std::thread::sleep(BEAT_INTERVAL);
+                ticks += 1;
+                let recover = ticks.is_multiple_of(12);
+                let me = owner.clone();
+                // A beat that cannot reach the database writes nothing;
+                // the next tick tries again.
+                let _ = crate::storage::runtime::blocking(move |repo| async move {
+                    surreal_beat(&repo, &me).await?;
+                    if recover {
+                        surreal_recover(&repo, &me).await?;
+                    }
+                    Ok(())
+                });
+            }
+        })?;
+    Ok(ProcessBeat { stop })
+}
+
+#[cfg(not(feature = "surreal"))]
+fn start_surreal_beat() -> Result<ProcessBeat> {
+    anyhow::bail!("SurrealDB storage is off without the surreal feature")
+}
+
+/// One beat, then raise the stop flag of live jobs here that another
+/// process asked to cancel.
+#[cfg(feature = "surreal")]
+async fn surreal_beat(repo: &crate::storage::repo::Repository, owner: &str) -> Result<()> {
+    crate::storage::processes::beat(repo.db(), owner, std::process::id(), chrono::Utc::now())
+        .await
+        .map_err(|e| anyhow::anyhow!("process beat: {e}"))?;
+    let mut r = repo
+        .db()
+        .query(
+            "SELECT VALUE record::id(id) FROM job WHERE worker_owner = $owner
+               AND cancel_requested = true AND state IN ['running', 'queued']",
+        )
+        .bind(("owner", owner.to_string()))
+        .await?
+        .check()?;
+    let ids: Vec<String> = r.take(0usize)?;
+    let live = live().lock().unwrap_or_else(|e| e.into_inner());
+    for id in ids {
+        if let Some(flag) = live.get(&id) {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+    Ok(())
+}
+
+/// [`recover_orphans`] on the repository: registry jobs of processes with
+/// no fresh beat become interrupted failures whose active time ends at the
+/// job's last heartbeat, then `storage::processes::recover_orphans` requeues
+/// their tasks and drops their process rows. Nothing is recovered while
+/// this process's own beat is stale (a likely database outage).
+#[cfg(feature = "surreal")]
+async fn surreal_recover(repo: &crate::storage::repo::Repository, me: &str) -> Result<usize> {
+    let now = chrono::Utc::now();
+    let stale = now - chrono::Duration::seconds(PROCESS_STALE_SECS);
+    let mut r = repo
+        .db()
+        .query("SELECT VALUE record::id(id) FROM process WHERE heartbeat_at >= <datetime>$stale")
+        .bind(("stale", stale.to_rfc3339()))
+        .await?
+        .check()?;
+    let fresh: Vec<String> = r.take(0usize)?;
+    if !fresh.iter().any(|o| o == me) {
+        return Ok(0);
+    }
+    #[derive(surrealdb::types::SurrealValue)]
+    struct Orphan {
+        id: String,
+        app: String,
+        run_ref: String,
+    }
+    let mut r = repo
+        .db()
+        .query(
+            "UPDATE job SET state = 'failed', error_category = 'interrupted',
+               error_summary = 'Argos exited before this job finished',
+               active_ms = (active_ms ?? 0) + IF active_since != NONE AND heartbeat_at != NONE
+                 AND heartbeat_at > active_since
+                 { duration::millis(heartbeat_at - active_since) } ELSE { 0 },
+               active_since = NONE, finished_at = heartbeat_at ?? <datetime>$now,
+               updated_at = <datetime>$now
+             WHERE kind = $kind AND worker_owner != '' AND worker_owner != $me
+               AND state IN ['running', 'queued'] AND worker_owner NOTINSIDE $fresh
+             RETURN record::id(id) AS id, app, run_ref",
+        )
+        .bind(("kind", KIND))
+        .bind(("me", me.to_string()))
+        .bind(("fresh", fresh))
+        .bind(("now", now.to_rfc3339()))
+        .await?
+        .check()?;
+    let orphans: Vec<Orphan> = r.take(0usize)?;
+    for o in &orphans {
+        let _ = crate::storage::event_log::record_event(
+            repo.db(),
+            &NewEvent {
+                severity: Some(Severity::Warn),
+                app: o.app.clone(),
+                event_type: "job.interrupted".into(),
+                message: "Argos exited before this job finished".into(),
+                job_id: o.id.clone(),
+                run_id: o.run_ref.clone(),
+                correlation_id: o.id.clone(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+    crate::storage::processes::recover_orphans(repo.db(), me, now)
+        .await
+        .map_err(|e| anyhow::anyhow!("task recovery: {e}"))?;
+    Ok(orphans.len())
 }
 
 pub(crate) fn signal_retirement(id: &str) {

@@ -11380,11 +11380,9 @@ pub async fn run(mut app: App) -> Result<()> {
     let _workers = argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path());
     // Process liveness for the job registry: jobs left running by a process
     // that exited become interrupted; cross-process Cancel reaches this one.
-    // The SQLite job registry is not opened under a storage config (job
-    // leases and the sweeper run on the repository there).
-    let _beat = (!surreal_brain::on())
-        .then(|| argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok())
-        .flatten();
+    // Under a storage config the beat writes `process:[owner]` on the
+    // repository and no SQLite job registry is opened.
+    let _beat = argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok();
     // One-time retention cleanup is separate from the elected, resumable
     // backfill pool. Neither belongs to startup or the terminal event loop.
     // Under a storage config, job retention runs on the repository only.

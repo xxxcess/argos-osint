@@ -9,9 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
-use anyhow::Result;
 use regex::Regex;
-use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 /// Default event-detail retention (matches the previous in-session log pruning).
@@ -144,38 +142,6 @@ pub(crate) fn bound(text: &str, max: usize) -> String {
     s
 }
 
-/// Persist one redacted event, returning its stable id.
-pub fn record_event(conn: &Connection, event: &NewEvent) -> Result<String> {
-    let now = chrono::Utc::now();
-    let id = new_event_id(now.timestamp_millis());
-    let seq: i64 = conn
-        .query_row("SELECT IFNULL(MAX(seq),0)+1 FROM argos_events", [], |r| {
-            r.get(0)
-        })
-        .unwrap_or(1);
-    conn.execute(
-        "INSERT INTO argos_events(id,seq,ts,severity,app,event_type,message,details,job_id,task_id,attempt_id,run_id,resource_ref,correlation_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-        params![
-            id,
-            seq,
-            now.to_rfc3339(),
-            event.severity.unwrap_or(Severity::Info).as_str(),
-            event.app,
-            event.event_type,
-            bound(&redact(&event.message), MAX_MESSAGE_CHARS),
-            bound(&redact(&event.details), MAX_DETAIL_CHARS),
-            event.job_id,
-            event.task_id,
-            event.attempt_id,
-            event.run_id,
-            event.resource_ref,
-            event.correlation_id,
-        ],
-    )?;
-    Ok(id)
-}
-
 /// Filters for [`list_events`]. Empty fields do not filter.
 #[derive(Clone, Debug, Default)]
 pub struct EventFilter {
@@ -201,104 +167,5 @@ pub(crate) fn severity_rank(sev: Severity) -> i64 {
     }
 }
 
-/// Newest-first bounded page of events.
-pub fn list_events(conn: &Connection, filter: &EventFilter, limit: usize) -> Result<Vec<EventRow>> {
-    let mut sql = String::from(
-        "SELECT id,seq,ts,severity,app,event_type,message,details,job_id,task_id,attempt_id,run_id,resource_ref,correlation_id
-         FROM argos_events WHERE 1=1",
-    );
-    let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(sev) = filter.min_severity {
-        sql.push_str(&format!(" AND {} >= ?", severity_rank_sql()));
-        args.push(Box::new(severity_rank(sev)));
-    }
-    if !filter.app.is_empty() {
-        sql.push_str(" AND app = ?");
-        args.push(Box::new(filter.app.clone()));
-    }
-    if !filter.job_id.is_empty() {
-        sql.push_str(
-            " AND job_id IN (WITH RECURSIVE tree(id) AS (SELECT ? UNION SELECT j.id FROM argos_jobs j JOIN tree t ON j.parent_id = t.id) SELECT id FROM tree)",
-        );
-        args.push(Box::new(filter.job_id.clone()));
-    }
-    if !filter.text.is_empty() {
-        sql.push_str(" AND (message LIKE ? OR details LIKE ?)");
-        let needle = format!("%{}%", filter.text.replace('%', ""));
-        args.push(Box::new(needle.clone()));
-        args.push(Box::new(needle));
-    }
-    if !filter.since.is_empty() {
-        sql.push_str(" AND ts >= ?");
-        args.push(Box::new(filter.since.clone()));
-    }
-    if let Some(before) = filter.before_seq {
-        sql.push_str(" AND seq < ?");
-        args.push(Box::new(before));
-    }
-    sql.push_str(" ORDER BY seq DESC LIMIT ?");
-    args.push(Box::new(limit.max(1) as i64));
-    let mut stmt = conn.prepare(&sql)?;
-    let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
-    let rows = stmt
-        .query_map(refs.as_slice(), event_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
-    Ok(EventRow {
-        id: r.get(0)?,
-        seq: r.get(1)?,
-        ts: r.get(2)?,
-        severity: r.get(3)?,
-        app: r.get(4)?,
-        event_type: r.get(5)?,
-        message: r.get(6)?,
-        details: r.get(7)?,
-        job_id: r.get(8)?,
-        task_id: r.get(9)?,
-        attempt_id: r.get(10)?,
-        run_id: r.get(11)?,
-        resource_ref: r.get(12)?,
-        correlation_id: r.get(13)?,
-    })
-}
-
-/// Look up one event by id. `None` means it expired (or never existed): callers
-/// must say so instead of showing an empty page.
-pub fn get_event(conn: &Connection, id: &str) -> Result<Option<EventRow>> {
-    Ok(conn
-        .query_row(
-            "SELECT id,seq,ts,severity,app,event_type,message,details,job_id,task_id,attempt_id,run_id,resource_ref,correlation_id
-             FROM argos_events WHERE id=?1",
-            [id],
-            event_row,
-        )
-        .optional()?)
-}
-
-/// Delete events older than `hours`. Touches only `argos_events`.
-pub fn prune_events(conn: &Connection, hours: i64) -> Result<usize> {
-    let cutoff = (chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
-    Ok(conn.execute("DELETE FROM argos_events WHERE ts < ?1", [cutoff])?)
-}
-
-/// Clear all events (Logs "Clear log"). Touches only `argos_events`.
-pub fn clear_events(conn: &Connection) -> Result<usize> {
-    Ok(conn.execute("DELETE FROM argos_events", [])?)
-}
-
-/// Severity counts for the Logs header.
-pub fn severity_counts(conn: &Connection) -> Result<Vec<(String, i64)>> {
-    let mut stmt = conn.prepare("SELECT severity, COUNT(*) FROM argos_events GROUP BY severity")?;
-    let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-}
+mod tests {}

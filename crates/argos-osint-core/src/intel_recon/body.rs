@@ -213,8 +213,10 @@ pub async fn fetch_article_body(
     cancel: Arc<AtomicBool>,
     on_event: impl FnMut(BodyFetchEvent) + Send,
 ) -> Result<()> {
+    let _ = db_path;
+    let repo = crate::storage::runtime::repository().await?;
     fetch_article_body_with_runtime(
-        BodyDb::Sqlite(db_path),
+        BodyDb::Surreal(&repo),
         body_id,
         title,
         brief,

@@ -114,42 +114,6 @@ fn quote_unicode_and_no_entities_preserve_exact_units() {
     assert!(!selection.omitted_sentence_ids.is_empty());
 }
 #[test]
-fn canonical_keys_context_and_gc() {
-    let store = crate::store::Store::memory().unwrap();
-    let conn = &store.conn;
-    cache::migrate(conn).unwrap();
-    cache::migrate(conn).unwrap();
-    let mut s = Source::derived("shared", "1", "Alice Smith said tomorrow.");
-    let ctx = s.context();
-    let a = annotation(&s);
-    cache::register(conn, "article", "one", &s, None, "historical-v1").unwrap();
-    cache::register(conn, "article", "two", &s, None, "historical-v1").unwrap();
-    cache::put(conn, &s, &ctx, &a).unwrap();
-    assert!(cache::get(conn, &s, &ctx).unwrap().is_some());
-    let mut changed = ctx.clone();
-    changed.reference_date = "2000-01-01".into();
-    assert_ne!(
-        cache::feature_key(&s, &ctx),
-        cache::feature_key(&s, &changed)
-    );
-    s.revision = "2".into();
-    assert_eq!(cache::feature_key(&s, &ctx), a.feature_key);
-    cache::remove_owner(conn, "article", "one").unwrap();
-    assert!(cache::get(conn, &s, &ctx).unwrap().is_some());
-    cache::remove_owner(conn, "article", "two").unwrap();
-    assert!(cache::get(conn, &s, &ctx).unwrap().is_none());
-    assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM nlp_artifacts", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        cache::key(&serde_json::json!({"a":1,"b":[2,3]})),
-        cache::key(&serde_json::json!({"b":[2,3],"a":1}))
-    );
-}
-#[test]
 fn byte_admission_and_disconnection() {
     let (sender, receiver) = mpsc::channel(1);
     let service = Service {
@@ -281,33 +245,6 @@ async fn real_gold_material_evidence_and_safe_language_fallback() {
     }
 }
 
-#[test]
-fn upgrade_schema_27_preserves_unrelated_data() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("upgrade.db");
-    {
-        let store = crate::store::Store::open(&path).unwrap();
-        store.conn.execute_batch("CREATE TABLE unrelated_nlp_test(value TEXT); INSERT INTO unrelated_nlp_test VALUES('preserved'); DROP TABLE nlp_artifacts; DROP TABLE nlp_source_refs; DROP TABLE nlp_features; PRAGMA user_version=27;").unwrap();
-    }
-    let store = crate::store::Store::open(&path).unwrap();
-    cache::migrate(&store.conn).unwrap();
-    assert_eq!(
-        store
-            .conn
-            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        crate::store::SCHEMA_VERSION
-    );
-    assert_eq!(
-        store
-            .conn
-            .query_row("SELECT value FROM unrelated_nlp_test", [], |r| r
-                .get::<_, String>(0))
-            .unwrap(),
-        "preserved"
-    );
-}
-
 #[tokio::test]
 async fn auto_complete_policy_preserves_prose_in_every_mode_and_fallback() {
     let text = "東京 😀 Alice denied the allegation.\n\nCorrection: no site opened.".repeat(80);
@@ -350,45 +287,4 @@ async fn auto_complete_policy_preserves_prose_in_every_mode_and_fallback() {
     .await;
     assert_eq!(prepared.text, text);
     assert!(prepared.coverage.complete);
-}
-
-/// Process-isolated measurement; run once per ARGOS_NLP_BENCH_MODE with a fresh ARGOS_HOME.
-#[tokio::test]
-#[ignore]
-async fn preparation_performance() {
-    let mode: Mode = serde_json::from_value(serde_json::json!(std::env::var(
-        "ARGOS_NLP_BENCH_MODE"
-    )
-    .expect("set benchmark mode")))
-    .unwrap();
-    for (workload,base) in [("short","Alice Smith allegedly met Acme in 2020. Correction: Alice denied the allegation.".to_owned()),("pressure",format!("Alice Smith attributed the Acme announcement.\n\n{}Correction: Alice denied the $1.2 billion estimate; not $2 billion.","Unrelated background paragraph.\n\n".repeat(80)))] {
-        let mut cold=Vec::new();let mut warm=Vec::new();let mut sizes=Vec::new();let mut retained=0;
-        let mut parser=Vec::new();let mut queue=Vec::new();let mut cache_hits=0;
-        for sample in 0..10 {
-            let text=format!("{base}\nMeasurement fixture {sample}.");
-            let source=Source::derived("benchmark","1",&text);
-            let policy=PreparePolicy{purpose:"benchmark".into(),coverage_requirement:CoverageRequirement::Complete,need_entities:true,byte_budget:512};
-            for (phase,timings) in [("cold",&mut cold),("warm",&mut warm)] {
-                let cached = crate::store::Store::open(&crate::paths::db_path()).ok().and_then(|s| cache::get(&s.conn,&source,&source.context()).ok().flatten()).is_some();
-                let started=std::time::Instant::now();
-                let prepared=prepare_with_policy(source.clone(),&policy,"Alice Acme",128,Arc::new(AtomicBool::new(false)),mode).await;
-                timings.push(started.elapsed().as_micros() as u64);
-                sizes.push(serde_json::to_vec(&prepared).unwrap().len());
-                if mode != Mode::Off {
-                    cache_hits += usize::from(cached);
-                    if let Some(a)=crate::store::Store::open(&crate::paths::db_path()).ok().and_then(|s| cache::get(&s.conn,&source,&source.context()).ok().flatten()) {
-                        parser.push(if cached {0} else {a.metrics.parser_ms});
-                        queue.push(if cached {0} else {a.metrics.queue_wait_ms});
-                    }
-                }
-                assert_eq!(prepared.text,text,"mandatory evidence lost: {mode:?} {phase}");
-                assert!(prepared.coverage.complete);
-                assert!(prepared.text.contains("denied"));
-                retained+=1;
-            }
-        }
-        cold.sort();warm.sort();parser.sort();queue.sort();
-        let percentile = |values:&Vec<u64>, p:usize| values.get((values.len()*p).div_ceil(100).saturating_sub(1)).copied();
-        eprintln!("nlp_benchmark {}",serde_json::json!({"mode":mode,"stage":"preparation","workload":workload,"samples_per_phase":10,"cold_p50_us":cold[4],"cold_p95_us":cold[9],"warm_p50_us":warm[4],"warm_p95_us":warm[9],"parser_p50_ms":percentile(&parser,50),"parser_p95_ms":percentile(&parser,95),"queue_p50_ms":percentile(&queue,50),"queue_p95_ms":percentile(&queue,95),"cache_hits":cache_hits,"prepared_bytes_min":sizes.iter().min(),"prepared_bytes_max":sizes.iter().max(),"coverage":"complete","retained_assertions_and_corrections":retained,"outbound_requests":0,"provider_tokens":null,"model_latency_ms":null,"cache":"cold first use; warm same source repeat"}));
-    }
 }

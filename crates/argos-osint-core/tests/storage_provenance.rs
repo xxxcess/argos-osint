@@ -231,7 +231,7 @@ async fn record_edges_follow_sources_topics_and_mentions() {
         (topic.meaning, topic.from.as_str()),
         ("contains", mem.as_str())
     );
-    assert_eq!(edges.len(), 4, "{edges:#?}");
+    assert_eq!(edges.len(), 5, "{edges:#?}");
 
     // MentionedIn: retained article mentions only.
     db.query(

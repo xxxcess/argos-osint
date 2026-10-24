@@ -9,7 +9,6 @@ mod support;
 use argos_osint_core::atlas_store::AtlasStore;
 use argos_osint_core::atlas_work::UnitManifest;
 use argos_osint_core::storage::{atlas, atlas_metadata, atlas_work, pipeline_inputs};
-use argos_osint_core::store::Store;
 use support::*;
 
 fn unit(run: &str, unit_id: &str, stage: i32) -> UnitManifest {
@@ -95,37 +94,6 @@ async fn script(store: &AtlasStore) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn atlas_store_matches_sqlite() {
-    let Some(server) = Server::start() else {
-        return;
-    };
-    let surreal = surreal_store(&server, "atlas_store").await;
-    assert!(surreal.is_surreal());
-    let dir = tempfile::tempdir().unwrap();
-    let sqlite = AtlasStore::from_sqlite(Store::open(&dir.path().join("argos.db")).unwrap());
-
-    let s = script(&surreal).await;
-    let q = script(&sqlite).await;
-    assert_eq!(s, q);
-    assert_eq!(s["receipt"], "{\"ok\":1}");
-    assert_eq!(s["stage1"][0][1], "failed");
-    assert_eq!(s["all"].as_array().unwrap().len(), 2);
-}
-
-#[tokio::test]
-async fn atlas_store_surreal_refuses_sqlite_only_work() {
-    let Some(server) = Server::start() else {
-        return;
-    };
-    let store = surreal_store(&server, "atlas_store_sqlite_only").await;
-    let err = store
-        .sqlite("Atlas actor index", |_| Ok(()))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("Atlas actor index"), "{err}");
-}
-
-#[tokio::test]
 async fn work_units_reject_empty_ids() {
     let Some(server) = Server::start() else {
         return;
@@ -186,16 +154,10 @@ async fn global_rows(store: &AtlasStore) -> Vec<(String, Vec<String>, bool)> {
     use argos_osint_core::related_global::{related_articles_global_on, RelatedScope};
     let mut out = Vec::new();
     for scope in [RelatedScope::AllRetained, RelatedScope::ThisCycle] {
-        let page = match store.repository() {
-            Some(repo) => related_articles_global_on(repo, "run-r", "source", scope, None, 20)
-                .await
-                .unwrap(),
-            None => store
-                .sqlite("global", |s| {
-                    s.related_articles_global("run-r", "source", scope, None, 20)
-                })
-                .unwrap(),
-        };
+        let repo = store.repository().expect("SurrealDB store");
+        let page = related_articles_global_on(repo, "run-r", "source", scope, None, 20)
+            .await
+            .unwrap();
         out.extend(
             page.rows
                 .into_iter()
@@ -237,15 +199,24 @@ async fn related_setup(store: &AtlasStore) -> usize {
 }
 
 #[tokio::test]
-async fn related_articles_build_matches_sqlite() {
+async fn atlas_store_round_trips() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let surreal = surreal_store(&server, "atlas_store").await;
+    let s = script(&surreal).await;
+    assert_eq!(s["receipt"], "{\"ok\":1}");
+    assert_eq!(s["stage1"][0][1], "failed");
+    assert_eq!(s["all"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn related_articles_build_counts_pairs() {
     let Some(server) = Server::start() else {
         return;
     };
     let surreal = surreal_store(&server, "atlas_related").await;
-    let dir = tempfile::tempdir().unwrap();
-    let sqlite = AtlasStore::from_sqlite(Store::open(&dir.path().join("argos.db")).unwrap());
     let s = related_script(&surreal).await;
-    assert_eq!(s, related_script(&sqlite).await);
     assert_eq!(s, vec![1, 1, 0]);
     let repo = surreal.repository().unwrap();
     assert_eq!(
@@ -257,17 +228,13 @@ async fn related_articles_build_matches_sqlite() {
 }
 
 #[tokio::test]
-async fn related_articles_global_matches_sqlite() {
+async fn related_articles_global_rows() {
     let Some(server) = Server::start() else {
         return;
     };
     let surreal = surreal_store(&server, "atlas_related_global").await;
-    let dir = tempfile::tempdir().unwrap();
-    let sqlite = AtlasStore::from_sqlite(Store::open(&dir.path().join("argos.db")).unwrap());
     assert_eq!(related_setup(&surreal).await, 1);
-    assert_eq!(related_setup(&sqlite).await, 1);
     let s = global_rows(&surreal).await;
-    assert_eq!(s, global_rows(&sqlite).await);
     assert_eq!(s.len(), 2, "{s:?}");
     assert_eq!(s[0].0, "two");
 }

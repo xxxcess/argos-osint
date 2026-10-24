@@ -6,9 +6,8 @@
 mod support;
 
 use argos_osint_core::osint::ToolResult;
-use argos_osint_core::recon::backend::{surreal_selected, ReconStore};
+use argos_osint_core::recon::backend::ReconStore;
 use argos_osint_core::recon::RunLimits;
-use argos_osint_core::store::Store;
 use serde_json::json;
 use support::*;
 
@@ -160,39 +159,6 @@ async fn scenario(store: &ReconStore) -> Seen {
     }
 }
 
-#[tokio::test]
-async fn sqlite_and_surreal_dispatch_agree() {
-    // Core tests never initialize the storage runtime: SQLite stays selected.
-    assert!(!surreal_selected());
-    let Some(server) = Server::start() else {
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("argos-dispatch-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let sqlite = ReconStore::from_sqlite(Store::open(&dir.join("argos.db")).unwrap());
-    assert!(!sqlite.is_surreal());
-    let surreal = ReconStore::from_repository(server.repo("argos", "recon_dispatch").await);
-    assert!(surreal.is_surreal());
-    let a = scenario(&sqlite).await;
-    let b = scenario(&surreal).await;
-    assert_eq!(a, b);
-    let ua = ui_scenario(&sqlite).await;
-    let ub = ui_scenario(&surreal).await;
-    assert_eq!(ua, ub);
-    assert_eq!(ua.0.as_deref(), Some("true"));
-    assert_eq!((ua.1.as_str(), ua.2, ua.3), ("half typed", 7, 1));
-    assert!(ua.5 && ua.6);
-    // Deleting with insights is ported (18f6b74): a missing thread is false.
-    assert!(!surreal.delete_thread("missing", true).await.unwrap());
-    assert_eq!(a.roles, ["user", "assistant"]);
-    assert_eq!(a.statuses, ["completed", "interrupted"]);
-    assert!(a.evidence == ["call:<done>"], "{:?}", a.evidence);
-    assert!(sqlite.sqlite("probe", |_| Ok(())).is_ok());
-    let err = surreal.sqlite("probe", |_| Ok(())).unwrap_err();
-    assert_eq!(err.to_string(), "probe is not on SurrealDB yet");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// The TUI/CLI calls (Recon switch step 4): drafts, selection, run state,
 /// call listings and delete agree across backends.
 type UiSeen = (
@@ -236,4 +202,22 @@ async fn ui_scenario(store: &ReconStore) -> UiSeen {
     let gone = store.get_thread(&thread.id).await.unwrap().is_none()
         && store.last_thread().await.unwrap().is_none();
     (last, t.draft, t.scroll, calls, state, deleted, gone)
+}
+
+#[tokio::test]
+async fn surreal_dispatch_round_trips() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let surreal = ReconStore::from_repository(server.repo("argos", "recon_dispatch").await);
+    let a = scenario(&surreal).await;
+    let ua = ui_scenario(&surreal).await;
+    assert_eq!(ua.0.as_deref(), Some("true"));
+    assert_eq!((ua.1.as_str(), ua.2, ua.3), ("half typed", 7, 1));
+    assert!(ua.5 && ua.6);
+    // Deleting with insights is ported (18f6b74): a missing thread is false.
+    assert!(!surreal.delete_thread("missing", true).await.unwrap());
+    assert_eq!(a.roles, ["user", "assistant"]);
+    assert_eq!(a.statuses, ["completed", "interrupted"]);
+    assert!(a.evidence == ["call:<done>"], "{:?}", a.evidence);
 }

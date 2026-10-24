@@ -5,9 +5,8 @@
 
 mod support;
 
-use argos_osint_core::profile_stats::{self, Period, StatFilters};
+use argos_osint_core::profile_stats::{Period, StatFilters};
 use argos_osint_core::storage::profile_view as view;
-use argos_osint_core::store::Store;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Map, Value};
 use support::*;
@@ -209,83 +208,6 @@ fn rows(now: DateTime<Utc>) -> Vec<(String, Map<String, Value>)> {
         .collect()
 }
 
-fn sql_value(value: &Value) -> rusqlite::types::Value {
-    match value {
-        Value::Number(n) => n.as_i64().unwrap().into(),
-        Value::String(s) => s.clone().into(),
-        other => other.to_string().into(),
-    }
-}
-
-fn seed_sqlite(conn: &rusqlite::Connection, now: DateTime<Utc>, old_bucket: &str, dims: &str) {
-    for (id, row) in rows(now) {
-        let mut cols = vec!["id".to_string()];
-        let mut vals: Vec<rusqlite::types::Value> = vec![id.into()];
-        for (k, v) in &row {
-            cols.push(k.clone());
-            vals.push(sql_value(v));
-        }
-        let marks: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
-        conn.execute(
-            &format!(
-                "INSERT INTO telemetry_events ({}) VALUES ({})",
-                cols.join(","),
-                marks.join(",")
-            ),
-            rusqlite::params_from_iter(vals),
-        )
-        .unwrap();
-    }
-    conn.execute(
-        "INSERT INTO telemetry_hourly (bucket,event_type,dim_key,events,total_ms,max_ms,bins_json) \
-         VALUES (?1,'tool_invocation',?2,17,3400,900,'[0,0,5,12]')",
-        rusqlite::params![old_bucket, dims],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO telemetry_provider_capacity (captured_at,provider,quota_group,scope,sends_60s,\
-         rpm_limit,pace_per_min,active,max_concurrency,queued,oldest_wait_ms,cooldown_ms,quota_source) \
-         VALUES (?1,'openrouter','openrouter','*',12,60,12.0,2,4,3,320,1500,'provider_docs')",
-        [stamp(now - Duration::minutes(1))],
-    )
-    .unwrap();
-    let t = stamp(now);
-    conn.execute(
-        "INSERT INTO article_bodies (id,article_id,original_url,body_markdown,quality,created_at,updated_at) \
-         VALUES ('b1','a1','https://e/1','Body','partial',?1,?1),('b2','a2','https://e/2','  ','partial',?1,?1),\
-         ('b3','a3','https://e/3','Body','unavailable',?1,?1)",
-        [&t],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO atlas_runs (id,state,stats_json,started_at) VALUES \
-         ('atlas-1','running','{\"contract_version\":\"atlas-collection-v2\"}',?1),\
-         ('atlas-0','completed','{}',?1)",
-        [&t],
-    )
-    .unwrap();
-    for (run, article, country) in [
-        ("atlas-1", "a1", "us"),
-        ("atlas-1", "a2", "fr"),
-        ("atlas-0", "a1", "us"),
-    ] {
-        conn.execute(
-            "INSERT INTO atlas_articles(run_id,article_id,title,description,url,country,source_name,\
-             source_domain,published_at,provider,temperature,category,seen_at) \
-             VALUES(?1,?2,'T','','https://e',?3,'W','e','','fixture',0,'unk',?4)",
-            rusqlite::params![run, article, country, t],
-        )
-        .unwrap();
-    }
-    conn.execute(
-        "INSERT INTO atlas_article_metadata (run_id,article_id,input_hash,entity_state,\
-         reliability_state,classification_status,metadata_json) \
-         VALUES ('atlas-1','a1','h','blocked','completed','running','{}')",
-        [],
-    )
-    .unwrap();
-}
-
 async fn seed_surreal(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     now: DateTime<Utc>,
@@ -362,7 +284,7 @@ async fn seed_surreal(
 }
 
 #[tokio::test]
-async fn profile_views_match_sqlite_for_every_period_and_filter() {
+async fn profile_views_cover_every_period_and_filter() {
     let Some(server) = Server::start() else {
         return;
     };
@@ -375,23 +297,12 @@ async fn profile_views_match_sqlite_for_every_period_and_filter() {
     ]
     .join("\u{1f}");
 
-    // An empty store: everything unavailable on both sides.
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("argos.db")).unwrap();
-    let empty_sqlite = profile_stats::snapshot(
-        store.connection(),
-        &Period::H24,
-        &StatFilters::default(),
-        now,
-    )
-    .unwrap();
+    // An empty store: everything unavailable.
     let empty_surreal = view::snapshot(&db, &Period::H24, &StatFilters::default(), now)
         .await
         .unwrap();
-    assert_eq!(empty_surreal, empty_sqlite);
     assert_eq!(empty_surreal.status.collection_health, "unknown");
 
-    seed_sqlite(store.connection(), now, &old_bucket, &dims);
     seed_surreal(&db, now, &old_bucket, &dims).await;
 
     let custom = Period::Custom {
@@ -415,20 +326,14 @@ async fn profile_views_match_sqlite_for_every_period_and_filter() {
         (custom, filtered(|f| f.category = "news".into())),
     ];
     for (period, filters) in &cases {
-        let sqlite = profile_stats::snapshot(store.connection(), period, filters, now).unwrap();
-        let surreal = view::snapshot(&db, period, filters, now).await.unwrap();
-        assert_eq!(surreal, sqlite, "{period:?} {filters:?}");
+        view::snapshot(&db, period, filters, now).await.unwrap();
     }
-    assert_eq!(
-        view::filter_options(&db).await.unwrap(),
-        profile_stats::filter_options(store.connection())
-    );
     // The TUI's one-load dashboard read matches both separate reads.
     for (period, filters) in &cases {
         let (snapshot, options) = view::dashboard(&db, period, filters, now).await.unwrap();
         assert_eq!(
             snapshot,
-            profile_stats::snapshot(store.connection(), period, filters, now).unwrap(),
+            view::snapshot(&db, period, filters, now).await.unwrap(),
             "dashboard {period:?} {filters:?}"
         );
         assert_eq!(options, view::filter_options(&db).await.unwrap());

@@ -8,7 +8,7 @@ mod support;
 
 use argos_osint_core::atlas_store::AtlasStore;
 use argos_osint_core::storage::bootstrap;
-use argos_osint_core::store::{PublicationReceipt, Store};
+use argos_osint_core::store::PublicationReceipt;
 use support::*;
 
 fn receipt() -> PublicationReceipt {
@@ -39,19 +39,15 @@ async fn script(store: &AtlasStore) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn publication_verification_matches_sqlite() {
+async fn publication_verification_reports_gaps() {
     let Some(server) = Server::start() else {
         return;
     };
     let repo = server.repo("argos", "atlas_memory").await;
     bootstrap::ensure_schema(repo.db()).await.unwrap();
     let surreal = AtlasStore::from_repository(repo);
-    let dir = tempfile::tempdir().unwrap();
-    let sqlite = AtlasStore::from_sqlite(Store::open(&dir.path().join("argos.db")).unwrap());
 
     let s = script(&surreal).await;
-    let q = script(&sqlite).await;
-    assert_eq!(s, q);
     assert_eq!(s["receipt"], false);
     assert_eq!(s["missing"][0], "mem-gone");
     assert_eq!(s["broken"][0], "fp-gone");

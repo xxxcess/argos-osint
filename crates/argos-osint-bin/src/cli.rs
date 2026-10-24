@@ -6,6 +6,7 @@ use argos_osint_core::brain::MemorySource;
 use argos_osint_core::hardware;
 use argos_osint_core::paths;
 use argos_osint_core::provider::{self, SettingsFile};
+use argos_osint_core::recon::backend::ReconStore;
 use argos_osint_core::secrets::{AuthFile, ProviderSecret};
 use argos_osint_core::store::Store;
 use argos_osint_core::{osint, recon};
@@ -493,6 +494,14 @@ async fn surreal_brain(command: Option<Command>) -> Result<Option<Option<Command
     Ok(None)
 }
 
+/// The Recon store for this command: the repository under a storage
+/// config, otherwise SQLite (never both).
+async fn recon_store() -> Result<ReconStore> {
+    paths::ensure_home()?;
+    let _ = argos_osint_core::config_commit::recover_at_startup();
+    ReconStore::open(&paths::db_path()).await
+}
+
 fn open_store() -> Result<Store> {
     paths::ensure_home()?;
     // Finish any configuration commit a previous process left half applied.
@@ -688,16 +697,22 @@ async fn osint_command(command: OsintCommand) -> Result<()> {
                 &serde_json::json!({"tool":tool,"input_schema":tool.schema(),"example_input":tool.example_input()}),
             )
         }
-        OsintCommand::History => print_json(&open_store()?.manual_calls()?),
+        OsintCommand::History => print_json(&recon_store().await?.manual_calls().await?),
         OsintCommand::Attach { call_id, thread_id } => print_json(
-            &serde_json::json!({"attached":open_store()?.attach_call(&call_id,&thread_id)?}),
+            &serde_json::json!({"attached":recon_store().await?.attach_call(&call_id,&thread_id).await?}),
         ),
         OsintCommand::Enable { tool_id } => {
-            open_store()?.set_tool_enabled(&tool_id, true)?;
+            recon_store()
+                .await?
+                .set_tool_enabled(&tool_id, true)
+                .await?;
             print_json(&serde_json::json!({"tool_id":tool_id,"enabled":true}))
         }
         OsintCommand::Disable { tool_id } => {
-            open_store()?.set_tool_enabled(&tool_id, false)?;
+            recon_store()
+                .await?
+                .set_tool_enabled(&tool_id, false)
+                .await?;
             print_json(&serde_json::json!({"tool_id":tool_id,"enabled":false}))
         }
         OsintCommand::UserAgent { value } => {
@@ -767,17 +782,21 @@ async fn osint_command(command: OsintCommand) -> Result<()> {
 
 async fn recon_command(command: ReconCommand) -> Result<()> {
     match command {
-        ReconCommand::List { search } => print_json(&open_store()?.list_threads(&search)?),
-        ReconCommand::New { title } => print_json(&open_store()?.new_thread(&title)?),
+        ReconCommand::List { search } => {
+            print_json(&recon_store().await?.list_threads(&search).await?)
+        }
+        ReconCommand::New { title } => print_json(&recon_store().await?.new_thread(&title).await?),
         ReconCommand::Show { thread_id } => {
-            let store = open_store()?;
+            let store = recon_store().await?;
             let thread = store
-                .get_thread(&thread_id)?
+                .get_thread(&thread_id)
+                .await?
                 .ok_or_else(|| anyhow!("thread not found"))?;
-            let messages = store.list_messages(&thread_id)?;
+            let messages = store.list_messages(&thread_id).await?;
             // Runs carry the plan, including tool-picker picks and their probabilities.
             let runs: Vec<serde_json::Value> = store
-                .runs_for_thread(&thread_id)?
+                .runs_for_thread(&thread_id)
+                .await?
                 .into_iter()
                 .map(|run| {
                     let plan = run
@@ -797,23 +816,27 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             print_json(&serde_json::json!({"thread":thread,"messages":messages,"runs":runs}))
         }
         ReconCommand::Rename { thread_id, title } => print_json(
-            &serde_json::json!({"renamed":open_store()?.rename_thread(&thread_id,&title)?}),
+            &serde_json::json!({"renamed":recon_store().await?.rename_thread(&thread_id,&title).await?}),
         ),
         ReconCommand::Delete {
             thread_id,
             with_insights,
         } => {
-            let mut store = open_store()?;
+            let store = recon_store().await?;
+            // `--with-insights` is SQLite-only: on SurrealDB the delete
+            // fails with "not on SurrealDB yet" before touching anything.
             let removed = if with_insights {
-                store.deletion_consequences(&thread_id)?
+                store.sqlite("deleting a thread with its insights", |s| {
+                    s.deletion_consequences(&thread_id)
+                })?
             } else {
                 Vec::new()
             };
-            let deleted = store.delete_thread(&thread_id, with_insights)?;
+            let deleted = store.delete_thread(&thread_id, with_insights).await?;
             print_json(&serde_json::json!({"deleted":deleted,"memories_removed":removed}))
         }
         ReconCommand::AskNew { question, title } => {
-            let thread = open_store()?.new_thread(&title)?;
+            let thread = recon_store().await?.new_thread(&title).await?;
             ask_thread(&thread.id, &question).await
         }
         ReconCommand::Ask {
@@ -821,12 +844,14 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             question,
         } => ask_thread(&thread_id, &question).await,
         ReconCommand::Retry { run_id } => {
-            let store = open_store()?;
+            let store = recon_store().await?;
             let run = store
-                .get_run(&run_id)?
+                .get_run(&run_id)
+                .await?
                 .ok_or_else(|| anyhow!("run not found"))?;
             let question = store
-                .list_messages(&run.thread_id)?
+                .list_messages(&run.thread_id)
+                .await?
                 .into_iter()
                 .find(|m| m.id == run.turn_id)
                 .ok_or_else(|| anyhow!("original turn unavailable"))?
@@ -835,7 +860,7 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             ask_thread(&run.thread_id, &question).await
         }
         ReconCommand::Resume { run_id } => {
-            open_store()?.recover_runs()?;
+            recon_store().await?.recover_runs().await?;
             let service =
                 recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
             let run = service
@@ -843,9 +868,9 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
                     write_turn_event(&event, &mut std::io::stderr());
                 })
                 .await?;
-            let store = open_store()?;
+            let store = recon_store().await?;
             print_json(
-                &serde_json::json!({"run":run,"messages":store.list_messages(&run.thread_id)?,"calls":store.calls_for_run(&run.id)?}),
+                &serde_json::json!({"run":run,"messages":store.list_messages(&run.thread_id).await?,"calls":store.calls_for_run(&run.id).await?}),
             )
         }
         ReconCommand::RetryInsights { answer_id } => {
@@ -1177,9 +1202,9 @@ async fn ask_thread(thread_id: &str, question: &str) -> Result<()> {
             },
         )
         .await?;
-    let store = open_store()?;
+    let store = recon_store().await?;
     print_json(
-        &serde_json::json!({"run":run,"messages":store.list_messages(thread_id)?,"calls":store.calls_for_run(&run.id)?}),
+        &serde_json::json!({"run":run,"messages":store.list_messages(thread_id).await?,"calls":store.calls_for_run(&run.id).await?}),
     )
 }
 

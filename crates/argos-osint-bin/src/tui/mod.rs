@@ -20,6 +20,7 @@ pub mod profile_layout;
 mod recon_parts;
 mod related_articles;
 mod surreal_brain;
+mod surreal_recon;
 mod theme;
 mod tool_catalog;
 pub mod topology;

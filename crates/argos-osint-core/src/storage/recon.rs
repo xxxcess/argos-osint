@@ -131,9 +131,13 @@ pub async fn put_thread(repo: &Repository, t: &Thread) -> Result<()> {
 
 /// A live (not deleted) thread.
 pub async fn get_thread(repo: &Repository, id: &str) -> Result<Option<Thread>> {
-    let mut r = repo
-        .db()
-        .query(
+    get_thread_on(repo.db(), id).await
+}
+
+/// [`get_thread`] on the client or inside a caller's transaction.
+pub(crate) async fn get_thread_on(db: &impl super::tx::Reads, id: &str) -> Result<Option<Thread>> {
+    let mut r = db
+        .read(
             "SELECT meta::id(id) AS id, title, created_at, updated_at, draft, scroll, \
              recall_insights FROM ONLY $t WHERE deleted = false",
         )

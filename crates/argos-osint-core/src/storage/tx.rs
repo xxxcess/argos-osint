@@ -197,3 +197,30 @@ mod tests {
         assert!(backoff(p, 1) <= p.base);
     }
 }
+
+/// Read helpers that run on the client or inside a caller's transaction
+/// (one consistent snapshot), e.g. the topology snapshot.
+pub trait Reads: Sync {
+    fn read<'c>(
+        &'c self,
+        sql: impl Into<std::borrow::Cow<'c, str>>,
+    ) -> surrealdb::method::Query<'c, Any>;
+}
+
+impl Reads for Surreal<Any> {
+    fn read<'c>(
+        &'c self,
+        sql: impl Into<std::borrow::Cow<'c, str>>,
+    ) -> surrealdb::method::Query<'c, Any> {
+        self.query(sql)
+    }
+}
+
+impl Reads for Transaction<Any> {
+    fn read<'c>(
+        &'c self,
+        sql: impl Into<std::borrow::Cow<'c, str>>,
+    ) -> surrealdb::method::Query<'c, Any> {
+        self.query(sql)
+    }
+}

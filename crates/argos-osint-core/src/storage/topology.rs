@@ -25,7 +25,8 @@ use surrealdb::types::SurrealValue;
 use super::provenance::ACTOR_MENTIONS_SURQL;
 use super::publisher::CHANGED_COUNTER;
 use super::repo::Repository;
-use super::{atlas, counters, recon};
+use super::tx::{run_tx, RetryPolicy, Tx, TxError};
+use super::{atlas, recon};
 use crate::brain::{Memory, MemorySource};
 use crate::brain_neighborhood_brief::{self as brief, BriefInput, MAX_PAYLOAD_READS};
 use crate::brain_topology::{
@@ -202,6 +203,7 @@ struct ArticleKeyRow {
 
 struct Query<'a> {
     repo: &'a Repository,
+    tx: Tx,
     limit: usize,
     scope: &'a CycleScope,
     exhausted: bool,
@@ -239,8 +241,7 @@ impl Query<'_> {
             return Ok(row.clone());
         }
         let mut r = self
-            .repo
-            .db()
+            .tx
             .query(
                 "SELECT text, category, pinned, lifecycle, memory_kind, payload_json, source_json,
                         time::format(created_at, '%+') AS created_at
@@ -267,8 +268,7 @@ impl Query<'_> {
         let mut id = actor_id.to_string();
         for _ in 0..64 {
             let mut r = self
-                .repo
-                .db()
+                .tx
                 .query("SELECT VALUE to_actor FROM ONLY type::record('brain_actor_redirect', $id)")
                 .bind(("id", id.clone()))
                 .await?
@@ -293,8 +293,7 @@ impl Query<'_> {
             Some(MemoryKind::Actor) => {
                 let canonical = self.resolve(id).await?;
                 let mut r = self
-                    .repo
-                    .db()
+                    .tx
                     .query(
                         "SELECT subtype, display_name, identity_state, revision
                          FROM ONLY type::record('brain_actor', $id)",
@@ -316,8 +315,7 @@ impl Query<'_> {
                 let mut aliases = VecDeque::from([canonical.clone()]);
                 while let Some(survivor) = aliases.pop_front() {
                     let mut r = self
-                        .repo
-                        .db()
+                        .tx
                         .query(
                             "SELECT VALUE record::id(id) FROM brain_actor_redirect
                              WHERE to_actor = $a",
@@ -386,8 +384,7 @@ impl Query<'_> {
         }
         if kind == TopologyNodeKind::Inference {
             let mut r = self
-                .repo
-                .db()
+                .tx
                 .query(
                     "SELECT record::id(id) AS id, item_json FROM insight_derivation
                      WHERE memory_id = $m AND status NOTINSIDE $dead",
@@ -419,7 +416,7 @@ impl Query<'_> {
         id: &str,
         expected: &str,
     ) -> Result<Option<TopologyNode>> {
-        let Some(article) = atlas::article(self.repo.db(), run, id).await? else {
+        let Some(article) = atlas::article_in(&self.tx, run, id).await? else {
             return Ok(None);
         };
         let revision = crate::atlas_metadata::input_hash(&article);
@@ -488,8 +485,7 @@ impl Query<'_> {
             return Ok(true);
         }
         let mut r = self
-            .repo
-            .db()
+            .tx
             .query(
                 "SELECT VALUE count() FROM brain_actor_mention
                    WHERE actor_id = $m AND origin_kind = 'article' AND origin_scope = $c GROUP ALL;
@@ -513,9 +509,7 @@ impl Query<'_> {
     }
 
     async fn claimed_in_cycle(&mut self, memory: &str, cycle: &str) -> Result<bool> {
-        let mut r = self
-            .repo
-            .db()
+        let mut r = self.tx
             .query(format!(
                 "SELECT {CITED} FROM insight_derivation WHERE memory_id = $m AND status NOTINSIDE $dead;
                  LET $fps = (SELECT VALUE record::id(id) FROM insight_claim WHERE memory_id = $m);
@@ -536,7 +530,7 @@ impl Query<'_> {
     /// Whether one of `cited` is owned by an article retained in `cycle`
     /// whose metadata its retained refs still match (`current_metadata_sql`).
     async fn current_in_cycle(&self, cited: Vec<Cited>, cycle: &str) -> Result<bool> {
-        let db = self.repo.db();
+        let db = &*self.tx;
         for c in cited {
             let Some(owner) = c.owner_id else { continue };
             let refs = super::provenance::retained_refs(
@@ -565,7 +559,7 @@ impl Query<'_> {
         kind: &str,
         local_id: &str,
     ) -> Result<Option<Option<String>>> {
-        let db = self.repo.db();
+        let db = &*self.tx;
         let mut r = db
             .query(
                 "SELECT owner_id, owner_kind, inputs_json, readiness_json
@@ -609,8 +603,7 @@ impl Query<'_> {
         cycle: &str,
     ) -> Result<bool> {
         let mut r = self
-            .repo
-            .db()
+            .tx
             .query(format!(
                 "LET $ds = (SELECT VALUE derivation_id FROM insight_derivation_evidence
                    WHERE source_id = $s AND source_revision = $rev);
@@ -701,9 +694,7 @@ impl Query<'_> {
     /// `ScopedRows::Link`: under a cycle, a Link/Related record needs another
     /// endpoint (not the node itself) in that cycle.
     async fn link_in_cycle(&mut self, link: &str, n: &TopologyNode, cycle: &str) -> Result<bool> {
-        let mut r = self
-            .repo
-            .db()
+        let mut r = self.tx
             .query("SELECT endpoint_kind, ref_id, origin FROM brain_memory_endpoint WHERE memory_id = $m")
             .bind(("m", link.to_string()))
             .await?
@@ -758,8 +749,7 @@ impl Query<'_> {
         };
         for reference in references {
             let mut r = self
-                .repo
-                .db()
+                .tx
                 .query(
                     "SELECT memory_id, origin FROM brain_memory_endpoint
                      WHERE endpoint_kind = $k AND ref_id = $r",
@@ -834,7 +824,7 @@ impl Query<'_> {
         sql: &str,
         binds: Vec<(&'static str, Value)>,
     ) -> Result<Vec<DerivationFull>> {
-        let mut q = self.repo.db().query(sql).bind(("dead", dead()));
+        let mut q = self.tx.query(sql).bind(("dead", dead()));
         for (k, v) in binds {
             q = q.bind((k, v));
         }
@@ -848,9 +838,7 @@ impl Query<'_> {
         if derivations.is_empty() {
             return Ok(Vec::new());
         }
-        let mut r = self
-            .repo
-            .db()
+        let mut r = self.tx
             .query(
                 "SELECT derivation_id, source_id, source_revision, memory_id, premise_id, evidence_json
                  FROM insight_derivation_evidence WHERE derivation_id INSIDE $d",
@@ -862,9 +850,7 @@ impl Query<'_> {
     }
 
     async fn snapshot_owner(&self, id: &str) -> Result<Option<SnapshotRow>> {
-        let mut r = self
-            .repo
-            .db()
+        let mut r = self.tx
             .query("SELECT owner_kind, owner_id, readiness_json FROM ONLY type::record('insight_snapshot', $id)")
             .bind(("id", id.to_string()))
             .await?
@@ -894,8 +880,7 @@ impl Query<'_> {
 
     async fn article_runs(&self, article: &str) -> Result<Vec<String>> {
         let mut r = self
-            .repo
-            .db()
+            .tx
             .query("SELECT VALUE run_id FROM atlas_article WHERE article_id = $a")
             .bind(("a", article.to_string()))
             .await?
@@ -907,7 +892,7 @@ impl Query<'_> {
     }
 
     async fn claim_rows(&self, sql: &str, bind: Value) -> Result<Vec<ClaimRow>> {
-        let mut r = self.repo.db().query(sql).bind(("v", bind)).await?.check()?;
+        let mut r = self.tx.query(sql).bind(("v", bind)).await?.check()?;
         Ok(r.take(0)?)
     }
 
@@ -916,8 +901,7 @@ impl Query<'_> {
             return Ok(Vec::new());
         }
         let mut r = self
-            .repo
-            .db()
+            .tx
             .query(
                 "SELECT fingerprint, thread_id, run_id, answer_id, call_id FROM insight_source
                  WHERE fingerprint INSIDE $f AND deleted_origin = false",
@@ -931,8 +915,7 @@ impl Query<'_> {
     async fn actor_neighbours(&mut self, n: &TopologyNode, out: &mut Vec<Adjacency>) -> Result<()> {
         for actor_id in n.member_ids.clone() {
             let mut r = self
-                .repo
-                .db()
+                .tx
                 .query(
                     "SELECT memory_id, role, binding_state, provenance_json
                      FROM brain_memory_actor_ref WHERE actor_id = $a",
@@ -972,8 +955,7 @@ impl Query<'_> {
             }
             // Typed payload actors stay authoritative without a ref row.
             let mut r = self
-                .repo
-                .db()
+                .tx
                 .query(
                     "SELECT record::id(id) AS id, payload_json FROM memory
                      WHERE lifecycle = 'active'
@@ -1022,8 +1004,7 @@ impl Query<'_> {
                 }
             }
             let mut r = self
-                .repo
-                .db()
+                .tx
                 .query(ACTOR_MENTIONS_SURQL)
                 .bind(("a", actor_id.clone()))
                 .await?
@@ -1042,7 +1023,7 @@ impl Query<'_> {
                 let neighbour = if kind == "article" {
                     self.article_node(scope, id, revision).await?
                 } else if kind == "thread" {
-                    recon::get_thread(self.repo, id).await?.map(|t| {
+                    recon::get_thread_on(&*self.tx, id).await?.map(|t| {
                         let mut s = source_node("thread", id, revision);
                         s.label = t.title;
                         s
@@ -1078,8 +1059,7 @@ impl Query<'_> {
         out: &mut Vec<Adjacency>,
     ) -> Result<()> {
         let mut r = self
-            .repo
-            .db()
+            .tx
             .query(
                 "SELECT actor_id, role, binding_state, provenance_json
                  FROM brain_memory_actor_ref WHERE memory_id = $m",
@@ -1249,7 +1229,7 @@ impl Query<'_> {
             let threads: BTreeSet<String> =
                 sources.iter().filter_map(|s| s.thread_id.clone()).collect();
             for thread in self.bound(threads.into_iter().collect()) {
-                if let Some(t) = recon::get_thread(self.repo, &thread).await? {
+                if let Some(t) = recon::get_thread_on(&*self.tx, &thread).await? {
                     let mut s = source_node("thread", &thread, "");
                     s.label = t.title;
                     out.push((
@@ -1383,9 +1363,7 @@ impl Query<'_> {
                     .filter_map(|e| e.memory_id.clone())
                     .min();
                 if id.is_none() {
-                    let mut r = self
-                        .repo
-                        .db()
+                    let mut r = self.tx
                         .query(
                             "SELECT VALUE memory_id FROM ONLY type::record('insight_derivation', $id)
                              WHERE snapshot_id = $s AND insight_kind = 'claim'
@@ -1427,9 +1405,7 @@ impl Query<'_> {
     /// The Inferences a Claim is a premise of: canonical evidence receipts,
     /// payload premises without one, and legacy snapshot-local premises.
     async fn concluded(&mut self, n: &TopologyNode, out: &mut Vec<Adjacency>) -> Result<()> {
-        let mut r = self
-            .repo
-            .db()
+        let mut r = self.tx
             .query(
                 "SELECT derivation_id, source_id, source_revision, memory_id, premise_id, evidence_json
                  FROM insight_derivation_evidence
@@ -1482,9 +1458,7 @@ impl Query<'_> {
                 ));
             }
         }
-        let mut r = self
-            .repo
-            .db()
+        let mut r = self.tx
             .query(
                 "SELECT record::id(id) AS id, payload_json FROM memory
                  WHERE memory_kind = 'inference' AND lifecycle = 'active' AND payload_json CONTAINS $m",
@@ -1599,8 +1573,7 @@ impl Query<'_> {
         out: &mut Vec<Adjacency>,
     ) -> Result<()> {
         let mut r = self
-            .repo
-            .db()
+            .tx
             .query(
                 "SELECT actor_id, origin_revision, spans_json FROM brain_actor_mention
                  WHERE origin_kind = 'article' AND origin_scope = $r AND origin_id = $a",
@@ -1639,8 +1612,7 @@ impl Query<'_> {
             }
         }
         let mut r = self
-            .repo
-            .db()
+            .tx
             .query(
                 "SELECT VALUE record::id(id) FROM insight_snapshot
                    WHERE owner_id = $a AND owner_kind INSIDE ['article', 'atlas'];
@@ -1671,8 +1643,7 @@ impl Query<'_> {
             }
         }
         let mut r = self
-            .repo
-            .db()
+            .tx
             .query(
                 "SELECT fingerprint, thread_id, run_id, answer_id, call_id FROM insight_source
                  WHERE deleted_origin = false AND call_id INSIDE [$a, $s]
@@ -1732,8 +1703,7 @@ impl Query<'_> {
             ));
         }
         let mut r = self
-            .repo
-            .db()
+            .tx
             .query(
                 "SELECT left_id, right_id, left_revision, right_revision, shared_json
                  FROM atlas_related_article WHERE run_id = $r AND (left_id = $a OR right_id = $a)",
@@ -1746,8 +1716,8 @@ impl Query<'_> {
         pairs.sort_by(|a, b| (&a.left_id, &a.right_id).cmp(&(&b.left_id, &b.right_id)));
         for p in self.bound(pairs) {
             let (Some(la), Some(ra)) = (
-                atlas::article(self.repo.db(), &n.run_id, &p.left_id).await?,
-                atlas::article(self.repo.db(), &n.run_id, &p.right_id).await?,
+                atlas::article_in(&self.tx, &n.run_id, &p.left_id).await?,
+                atlas::article_in(&self.tx, &n.run_id, &p.right_id).await?,
             ) else {
                 continue;
             };
@@ -1823,8 +1793,7 @@ impl Query<'_> {
             }
         }
         let mut r = self
-            .repo
-            .db()
+            .tx
             .query(
                 "SELECT run_id, article_id, category FROM atlas_article
                  WHERE string::lowercase(string::trim(category)) = $k",
@@ -1867,9 +1836,7 @@ impl Query<'_> {
             return Ok(());
         };
         if origin == "evidence" {
-            let mut r = self
-                .repo
-                .db()
+            let mut r = self.tx
                 .query(
                     "SELECT derivation_id, source_id, source_revision, memory_id, premise_id, evidence_json
                      FROM insight_derivation_evidence WHERE source_id = $s AND source_revision = $rev",
@@ -1918,10 +1885,10 @@ impl Query<'_> {
                     ));
                 }
             }
-        } else if origin == "thread" && recon::get_thread(self.repo, &source_id).await?.is_some() {
+        } else if origin == "thread" && recon::get_thread_on(&*self.tx, &source_id).await?.is_some()
+        {
             let mut r = self
-                .repo
-                .db()
+                .tx
                 .query(
                     "SELECT VALUE fingerprint FROM insight_source
                      WHERE thread_id = $t AND deleted_origin = false",
@@ -2086,6 +2053,35 @@ pub async fn topology_snapshot(
         options.continuation_token.is_none(),
         "Topology continuation is unavailable; refresh with a larger bounded limit"
     );
+    // Every read of one snapshot runs in one transaction, so a concurrent
+    // publish never shows half its writes. Errors keep their text.
+    let out = run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+        snapshot_in(repo, tx, seed, options)
+            .await
+            .map_err(|e| TxError::Abort(format!("{e:#}")))
+    })
+    .await;
+    match out {
+        Ok(c) => Ok(c.value),
+        Err(TxError::Abort(message)) => Err(anyhow::anyhow!(message)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn snapshot_in(
+    repo: &Repository,
+    tx: Tx,
+    seed: &TopologySeed,
+    options: &TopologyOptions,
+) -> Result<TopologySnapshot> {
+    let changed: Option<i64> = {
+        let mut r = tx
+            .query("RETURN (SELECT VALUE n FROM ONLY $c) ?? 0")
+            .bind(("c", super::jobs::rid("counter", CHANGED_COUNTER)))
+            .await?
+            .check()?;
+        r.take(0usize)?
+    };
     let depth = options.depth.clamp(1, 3);
     let mut q = Query {
         repo,
@@ -2095,10 +2091,11 @@ pub async fn topology_snapshot(
         gaps: BTreeSet::new(),
         remaining_rows: options.max_nodes.saturating_mul(64).clamp(4096, 32768),
         memories: HashMap::new(),
+        tx,
     };
     let mut snapshot = TopologySnapshot {
         seed: Some(seed.clone()),
-        memory_changed_seq: counters::current(repo.db(), CHANGED_COUNTER).await?.max(0) as u64,
+        memory_changed_seq: changed.unwrap_or(0).max(0) as u64,
         ..Default::default()
     };
     let mut roots = Vec::new();
@@ -2404,7 +2401,7 @@ pub async fn topology_snapshot(
                 }
             }
             TopologyNodeKind::Article => {
-                if let Some(article) = atlas::article(repo.db(), &n.run_id, &n.article_id).await? {
+                if let Some(article) = atlas::article_in(&q.tx, &n.run_id, &n.article_id).await? {
                     snapshot
                         .associations
                         .articles

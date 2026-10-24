@@ -266,11 +266,11 @@ pub(crate) struct ArticleRef {
 }
 
 pub(crate) async fn articles(
-    db: &Surreal<Any>,
+    db: &impl super::tx::Reads,
     article_id: &str,
 ) -> Result<Vec<ArticleRef>, TxError> {
     let mut r = db
-        .query(
+        .read(
             "SELECT run_id, article_id, title, description, url, published_at FROM atlas_article
              WHERE article_id = $a ORDER BY run_id",
         )
@@ -316,7 +316,7 @@ pub(crate) fn retained_refs(
 }
 
 pub(crate) async fn current_metadata(
-    db: &Surreal<Any>,
+    db: &impl super::tx::Reads,
     refs: &serde_json::Value,
     a: &ArticleRef,
 ) -> Result<bool, TxError> {
@@ -337,7 +337,7 @@ pub(crate) async fn current_metadata(
     }
     let text = format!("{}\n{}", a.title, a.description);
     let mut r = db
-        .query(
+        .read(
             "RETURN array::len(array::filter($hashes,
                |$h| (SELECT VALUE text FROM ONLY type::record('nlp_artifact', $h)) == $text)) > 0",
         )

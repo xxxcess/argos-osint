@@ -4,8 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Result;
 
 use crate::brain::{Memory, MemorySource};
-use crate::brain_actors as actors;
-use crate::memory_metadata::{MemoryKind, MemoryPayload};
+use crate::memory_metadata::MemoryKind;
 use crate::related_articles::canonical_url;
 use crate::store::{AtlasArticleRow, Store};
 
@@ -29,10 +28,6 @@ pub struct ActorGroup {
     pub display_name: String,
     pub actor_ids: Vec<String>,
 }
-
-#[cfg(test)]
-#[path = "brain_browse_tests.rs"]
-mod tests;
 
 #[derive(Clone, Debug)]
 pub enum BrowseRow {
@@ -136,50 +131,6 @@ impl Store {
         crate::storage::brain_store::actor_group_associations(group)
     }
 
-    pub(crate) fn browse_context(&self) -> Result<BrowseContext> {
-        let claims: Vec<_> = self
-            .brain_browse(Some(MemoryKind::Claim), "")?
-            .into_iter()
-            .filter_map(|r| match r {
-                BrowseRow::Claim(m) => Some(m),
-                _ => None,
-            })
-            .collect();
-        let mut typed_actors = BTreeMap::new();
-        let mut claim_origins = BTreeMap::new();
-        for m in &claims {
-            if let Some(MemoryPayload::Claim(p)) = self.memory_payload(&m.id)? {
-                let mut ids = BTreeSet::new();
-                for a in p.actors {
-                    ids.insert(actors::resolve(&self.conn, &a.actor_id)?);
-                }
-                typed_actors.insert(m.id.clone(), ids);
-            }
-            let mut stmt = self.conn.prepare("SELECT DISTINCT t.id,t.title FROM insight_sources s JOIN insight_claims c ON c.fingerprint=s.fingerprint JOIN recon_threads t ON t.id=s.thread_id WHERE c.memory_id=?1 AND s.deleted_origin=0 AND t.deleted=0 ORDER BY t.title,t.id")?;
-            let threads = stmt
-                .query_map([&m.id], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            let origins = self
-                .article_origins_for_memory(&m.id)?
-                .into_iter()
-                .map(|o| (o.run_id, o.article_id, String::new()))
-                .collect();
-            claim_origins.insert(
-                m.id.clone(),
-                Associations {
-                    threads,
-                    articles: self.association_articles(origins)?,
-                    ..Default::default()
-                },
-            );
-        }
-        Ok(BrowseContext {
-            claims,
-            typed_actors,
-            claim_origins,
-        })
-    }
-
     /// Read actor groups scoped to an optional cycle run ID.
     pub fn actor_groups_scoped(&self, cycle: Option<&str>) -> Result<Vec<ActorGroup>> {
         crate::storage::brain_store::actor_groups_scoped(cycle)
@@ -192,66 +143,6 @@ impl Store {
         cycle: Option<&str>,
     ) -> Result<Associations> {
         crate::storage::brain_store::actor_group_associations_scoped(group, cycle)
-    }
-
-    pub(crate) fn actor_group_associations_in(
-        &self,
-        group: &ActorGroup,
-        context: &BrowseContext,
-    ) -> Result<Associations> {
-        let mut out = Associations::default();
-        let mut claims = BTreeSet::new();
-        let mut threads = BTreeMap::new();
-        let mut origins = BTreeSet::new();
-        for id in &group.actor_ids {
-            let mut links=self.conn.prepare("SELECT e.origin,e.ref_id,e.revision FROM brain_memory_endpoints a JOIN brain_memory_endpoints e ON e.memory_id=a.memory_id JOIN memory_metadata m ON m.memory_id=e.memory_id WHERE a.endpoint_kind='memory' AND a.ref_id=?1 AND e.endpoint_kind='article' AND m.memory_kind='link' AND m.lifecycle='active'")?;
-            for origin in links.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
-                origins.insert(origin?);
-            }
-            let mut stmt = self
-                .conn
-                .prepare("SELECT memory_id FROM brain_memory_actor_refs WHERE actor_id=?1")?;
-            for memory in stmt.query_map([id], |r| r.get::<_, String>(0))? {
-                let memory = memory?;
-                if context.claim_origins.contains_key(&memory) {
-                    claims.insert(memory);
-                }
-            }
-            // ActorGroup already contains every redirected member. Expanding
-            // each family again makes large merged groups quadratic.
-            for (kind, scope, origin, revision) in actors::direct_mentions(&self.conn, id)? {
-                if kind == "article" {
-                    origins.insert((scope, origin, revision));
-                } else if kind == "thread" {
-                    if let Some(t) = self.get_thread(&origin)? {
-                        threads.insert(t.id, t.title);
-                    }
-                }
-            }
-        }
-        // Typed references are authoritative even before a legacy index repair.
-        for (id, actors) in &context.typed_actors {
-            if group.actor_ids.iter().any(|id| actors.contains(id)) {
-                claims.insert(id.clone());
-            }
-        }
-        for id in claims {
-            let a = &context.claim_origins[&id];
-            for (id, title) in &a.threads {
-                threads.insert(id.clone(), title.clone());
-            }
-            for a in &a.articles {
-                origins.extend(a.occurrences.clone());
-            }
-            if let Some(m) = context.claims.iter().find(|m| m.id == id) {
-                out.claims.push(m.clone());
-            }
-        }
-        out.threads = threads.into_iter().collect();
-        // A direct mention is sufficient. Related's two-entity overlap rule
-        // applies to article suggestions, never to an actor's own sources.
-        out.articles = self.association_articles(origins)?;
-        Ok(out)
     }
 
     /// Opt-in detection receipts survive switching Recall off; deletion removes

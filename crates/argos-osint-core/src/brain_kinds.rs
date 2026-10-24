@@ -1,15 +1,14 @@
 //! Typed Brain browsing: kind filters over the five core kinds, per-kind
 //! counts, and typed detail lines for a memory's discriminated payload.
 use anyhow::Result;
-use rusqlite::params;
 
 use crate::brain::Memory;
-use crate::memory_metadata::{EndpointRef, MemoryKind, MemoryPayload};
+use crate::memory_metadata::{EndpointRef, MemoryKind};
 use crate::store::Store;
 
 /// Kind of a stored memory. Memories without typed metadata are legacy
 /// evidence and browse as [`MemoryKind::Claim`].
-pub fn memory_kind(store: &Store, memory_id: &str) -> Result<MemoryKind> {
+pub fn memory_kind(_store: &Store, memory_id: &str) -> Result<MemoryKind> {
     crate::storage::store_bridge::memory_kind(memory_id)
 }
 
@@ -90,18 +89,18 @@ fn endpoint_label(store: &Store, e: &EndpointRef) -> String {
     }
 }
 
-fn actor_display_name(store: &Store, id: &str) -> Option<String> {
+fn actor_display_name(_store: &Store, id: &str) -> Option<String> {
     crate::storage::store_bridge::actor_display_name(id)
         .ok()
         .flatten()
 }
 
-pub(crate) fn actor_resolve(store: &Store, id: &str) -> Result<String> {
+pub(crate) fn actor_resolve(_store: &Store, id: &str) -> Result<String> {
     crate::storage::store_bridge::actor_resolve(id)
 }
 
 pub(crate) fn actor_mentions(
-    store: &Store,
+    _store: &Store,
     id: &str,
 ) -> Result<Vec<(String, String, String, String)>> {
     crate::storage::store_bridge::actor_mentions(id)
@@ -118,69 +117,6 @@ fn push(lines: &mut Vec<String>, label: &str, value: &str) {
     if !value.trim().is_empty() {
         lines.push(format!("{label}: {value}"));
     }
-}
-
-/// Typed detail lines for a memory (kind header first).
-pub fn typed_detail(store: &Store, memory_id: &str) -> Result<Vec<String>> {
-    let kind = memory_kind(store, memory_id)?;
-    let mut lines = vec![format!("Kind: {}", kind_title(kind))];
-    match store.memory_payload(memory_id)? {
-        Some(MemoryPayload::Actor(p)) => {
-            let canonical = actor_resolve(store, memory_id)?;
-            push(&mut lines, "Subtype", &snake(&p.subtype));
-            push(&mut lines, "Identity", &snake(&p.identity_state));
-            push(&mut lines, "Aliases", &p.aliases.join(", "));
-            push(&mut lines, "Identifiers", &p.identifiers.join(", "));
-            if canonical != memory_id {
-                push(&mut lines, "Merged into", &canonical);
-            }
-            let mentions = actor_mentions(store, memory_id)?;
-            let articles = mentions.iter().filter(|m| m.0 == "article").count();
-            lines.push(format!(
-                "Mentions: {} ({articles} article occurrence{})",
-                mentions.len(),
-                if articles == 1 { "" } else { "s" }
-            ));
-        }
-        Some(MemoryPayload::Claim(p)) => {
-            push(&mut lines, "Predicate", &p.predicate);
-            push(&mut lines, "Object", &p.object);
-            push(&mut lines, "Modality", &p.modality);
-            push(&mut lines, "Assessment", &p.assessment);
-            lines.push(format!(
-                "Actors: {} · passages {}",
-                p.actors.len(),
-                p.passages.len()
-            ));
-        }
-        Some(MemoryPayload::Inference(p)) => {
-            push(&mut lines, "Reasoning", &p.reasoning);
-            push(&mut lines, "Limitations", &p.limitations);
-            push(&mut lines, "Support", &p.support_state);
-            lines.push(format!("Premise claims: {}", p.premise_claims.len()));
-        }
-        Some(MemoryPayload::Link(p)) => {
-            push(&mut lines, "Relation", &p.relation);
-            lines.push(format!("From: {}", endpoint_label(store, &p.source)));
-            lines.push(format!("To: {}", endpoint_label(store, &p.target)));
-            push(&mut lines, "Rationale", &p.rationale);
-            lines.push(format!("Receipts: {} · observed (Link)", p.receipts.len()));
-        }
-        Some(MemoryPayload::Related(p)) => {
-            lines.push(format!("From: {}", endpoint_label(store, &p.source)));
-            lines.push(format!("To: {}", endpoint_label(store, &p.target)));
-            push(&mut lines, "Basis", &p.basis);
-            push(&mut lines, "Interpretation", &p.interpretation);
-            push(&mut lines, "Verification gap", &p.verification_gap);
-            lines.push(if p.shared_actors.is_empty() {
-                "Status: tentative · not evidence".into()
-            } else {
-                format!("Status: shared actor ({})", p.shared_actors.len())
-            });
-        }
-        None => lines.push("Payload: legacy (untyped)".into()),
-    }
-    Ok(lines)
 }
 
 pub fn kind_title(kind: MemoryKind) -> &'static str {

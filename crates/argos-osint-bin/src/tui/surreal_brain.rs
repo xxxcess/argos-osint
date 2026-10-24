@@ -12,6 +12,10 @@ pub(crate) fn on() -> bool {
     use argos_osint_core::storage::home;
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
+        // The TUI unit tests drive the SQLite store directly.
+        if cfg!(test) {
+            return false;
+        }
         // An unreadable config is configured: its errors surface on the
         // SurrealDB path rather than silently falling back to SQLite.
         argos_osint_core::paths::ensure_home()

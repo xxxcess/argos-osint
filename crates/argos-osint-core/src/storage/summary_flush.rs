@@ -8,8 +8,8 @@
 //! [`complete_summary`] and upgrades the cached result. A model result never
 //! gets replaced by a fallback.
 //!
-//! Topology-neighbourhood requests need the whole role chain and are
-//! dispatched by the neighbourhood brief port; this pool leaves them queued.
+//! Topology-neighbourhood requests run the whole role chain through
+//! `storage::neighborhood_brief::run_claimed`.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -294,6 +294,7 @@ pub async fn drain(
     let mut out = Vec::new();
     let mut load = Some(secret);
     let mut secret: Option<ProviderSecret> = None;
+    let mut topology_runtime: Option<crate::recon::model_exec::RoleRuntime> = None;
     for n in 0..8 {
         let now = Utc::now();
         let op_key = format!(
@@ -321,9 +322,22 @@ pub async fn drain(
             }
         };
         if req.mode == SummarizationMode::TopologyNeighborhood {
-            end(repo, &claimed, "queued", "").await?;
-            out.push(outcome("role_dispatch_required", false));
-            break;
+            let runtime = topology_runtime.get_or_insert_with(|| {
+                crate::recon::model_exec::RoleRuntime::new(
+                    crate::secrets::AuthFile::load().unwrap_or_default(),
+                    crate::provider::SettingsFile::load().unwrap_or_default(),
+                )
+            });
+            let o = super::neighborhood_brief::run_claimed(
+                repo,
+                &claimed,
+                &req,
+                Some(runtime),
+                lease_secs,
+            )
+            .await?;
+            out.push(outcome(&o.tag, o.generated));
+            continue;
         }
         if let Some(load) = load.take() {
             secret = load();

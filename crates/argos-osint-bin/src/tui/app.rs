@@ -7353,13 +7353,7 @@ impl App {
         let Some(seed) = self.topology_state.seed.clone() else {
             return;
         };
-        if surreal_topology(super::surreal_brain::on(), &seed) {
-            // The generated summary's cache and tasks are still SQLite-only;
-            // the deterministic brief in the snapshot stays visible.
-            self.topology_state.summary.detach();
-            self.topology_state.summary.gen = SummaryGen::Idle;
-            return;
-        }
+        let surreal = surreal_topology(super::surreal_brain::on(), &seed);
         let options = argos_osint_core::brain_topology::TopologyOptions {
             depth: self.topology_state.depth,
             cycle_scope: self.topology_state.cycle_scope.clone(),
@@ -7412,7 +7406,17 @@ impl App {
             stop,
             limits: argos_osint_core::brain_neighborhood_brief_exec::WatchLimits::standard(),
         };
-        if let Some(db) = self.background_db.clone() {
+        if surreal {
+            // Under a storage config the summary cache and its task live in
+            // the repository; nothing opens SQLite.
+            std::thread::spawn(move || {
+                let send = |event| {
+                    let _ = tx.send(event);
+                };
+                let runtime = load_summary_runtime();
+                job.run_surreal(&runtime, &send);
+            });
+        } else if let Some(db) = self.background_db.clone() {
             // Auth/settings loading, the role runtime and the database open all
             // happen on the worker thread, never on the UI thread.
             std::thread::spawn(move || {
@@ -11711,6 +11715,89 @@ impl TopologySummaryJob {
             ),
             // Detached on purpose (obsolete request): nothing to report.
             Some(exec::Delivery::Pending) | None => {}
+        }
+    }
+}
+
+impl TopologySummaryJob {
+    /// [`Self::run`] on the repository (`storage::neighborhood_brief`).
+    fn run_surreal(
+        &self,
+        runtime: &argos_osint_core::recon::model_exec::RoleRuntime,
+        send: &dyn Fn(WorkEvent),
+    ) {
+        use argos_osint_core::brain_neighborhood_brief_exec as exec;
+        use argos_osint_core::storage::{neighborhood_brief as nb, runtime as storage};
+        let fingerprint = exec::route_fingerprint(runtime);
+        let (input, brief, retry) = (self.input.clone(), self.brief.clone(), self.retry);
+        let request = self.request.as_deref().cloned();
+        let published = storage::blocking(move |repo| async move {
+            if retry {
+                let req = request.unwrap_or_else(|| exec::build_request(&input, &fingerprint));
+                let _ = nb::retry(&repo, &req).await;
+                let delivery = nb::poll(&repo, &req).await?;
+                Ok((req, delivery))
+            } else {
+                nb::publish(&repo, &input, &brief, &fingerprint).await
+            }
+        });
+        let (req, mut delivery) = match published {
+            Ok(pair) => pair,
+            Err(error) => {
+                self.fail(exec::FailureKind::Storage, error.to_string(), send);
+                return;
+            }
+        };
+        send(WorkEvent::TopologySummaryStarted {
+            generation: self.generation,
+            seed: self.seed.clone(),
+            options: self.options.clone(),
+            basis_key: self.basis_key.clone(),
+            request: Box::new(req.clone()),
+        });
+        let begun = std::time::Instant::now();
+        let mut errors = 0u32;
+        while matches!(delivery, exec::Delivery::Pending) {
+            if self.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            if begun.elapsed() >= self.limits.deadline {
+                self.fail(
+                    exec::FailureKind::Timeout,
+                    "waiting for a worker: no summary result before the deadline".into(),
+                    send,
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(750));
+            let r = req.clone();
+            match storage::blocking(move |repo| async move { nb::poll(&repo, &r).await }) {
+                Ok(d) => {
+                    errors = 0;
+                    delivery = d;
+                }
+                Err(error) => {
+                    errors += 1;
+                    if errors >= self.limits.max_poll_errors {
+                        self.fail(
+                            exec::FailureKind::Storage,
+                            format!("could not read the summary state: {error:#}"),
+                            send,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        match delivery {
+            exec::Delivery::Generated(g) => send(self.event(Ok(g))),
+            exec::Delivery::Failed(f) => send(self.event(Err(f))),
+            exec::Delivery::Idle => self.fail(
+                exec::FailureKind::Storage,
+                "the summary request is no longer queued".into(),
+                send,
+            ),
+            exec::Delivery::Pending => {}
         }
     }
 }

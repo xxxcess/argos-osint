@@ -93,7 +93,7 @@ pub struct GenerationFailure {
 }
 
 impl GenerationFailure {
-    fn new(kind: FailureKind, message: impl Into<String>) -> Self {
+    pub(crate) fn new(kind: FailureKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into().chars().take(300).collect(),
@@ -198,7 +198,7 @@ pub fn route_fingerprint(runtime: &RoleRuntime) -> String {
     sha_hex(&rows.join("\n"))[..16].to_string()
 }
 
-fn fallback_result(req: &SummaryRequest, fallback: &NeighborhoodBrief) -> SummaryResult {
+pub(crate) fn fallback_result(req: &SummaryRequest, fallback: &NeighborhoodBrief) -> SummaryResult {
     SummaryResult {
         content: serde_json::to_string(fallback).unwrap_or_default(),
         source_refs: vec![req.focus.clone()],
@@ -217,7 +217,7 @@ fn fallback_result(req: &SummaryRequest, fallback: &NeighborhoodBrief) -> Summar
     }
 }
 
-fn delivered(result: &SummaryResult) -> Option<Generated> {
+pub(crate) fn delivered(result: &SummaryResult) -> Option<Generated> {
     if result.fallback {
         return None;
     }
@@ -445,7 +445,12 @@ pub async fn generate(
 
 /// Atomically publish a validated result under the request identity.
 pub fn store_generated(conn: &Connection, req: &SummaryRequest, g: &Generated) -> Result<()> {
-    let result = SummaryResult {
+    cache_put(conn, req, &generated_result(req, g)?)
+}
+
+/// The cached form of a validated generated brief.
+pub(crate) fn generated_result(req: &SummaryRequest, g: &Generated) -> Result<SummaryResult> {
+    Ok(SummaryResult {
         content: serde_json::to_string(&g.brief)?,
         source_refs: g
             .brief
@@ -469,8 +474,7 @@ pub fn store_generated(conn: &Connection, req: &SummaryRequest, g: &Generated) -
             "requests": g.requests,
             "host_notes": g.host_notes,
         }),
-    };
-    cache_put(conn, req, &result)
+    })
 }
 
 /// Terminal result of one claimed topology task.

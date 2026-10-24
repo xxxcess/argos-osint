@@ -222,6 +222,30 @@ mod imp {
     pub(crate) fn delete_thread(id: &str, with_insights: bool) -> Result<bool> {
         with(|s| Box::pin(async move { s.delete_thread(id, with_insights).await }))
     }
+
+    /// UI session state (`app_state`) on the repository. Runs on a
+    /// short-lived thread so the UI thread may call it.
+    pub(crate) fn ui_state_get(key: &str) -> Result<Option<String>> {
+        let key = key.to_string();
+        std::thread::spawn(move || {
+            runtime::blocking(|repo| async move {
+                argos_osint_core::storage::pipeline_inputs::app_state_get(&repo, &key).await
+            })
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("UI state worker panicked"))?
+    }
+
+    pub(crate) fn ui_state_set(key: &str, value: &str) -> Result<()> {
+        let (key, value) = (key.to_string(), value.to_string());
+        std::thread::spawn(move || {
+            runtime::blocking(|repo| async move {
+                argos_osint_core::storage::pipeline_inputs::app_state_set(&repo, &key, &value).await
+            })
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("UI state worker panicked"))?
+    }
 }
 
 #[cfg(not(feature = "surreal"))]
@@ -272,6 +296,12 @@ mod imp {
         off()
     }
     pub(crate) fn delete_thread(_: &str, _: bool) -> Result<bool> {
+        off()
+    }
+    pub(crate) fn ui_state_get(_: &str) -> Result<Option<String>> {
+        off()
+    }
+    pub(crate) fn ui_state_set(_: &str, _: &str) -> Result<()> {
         off()
     }
 }

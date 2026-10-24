@@ -529,3 +529,46 @@ pub async fn repair_status(db: &Surreal<Any>, run_id: &str) -> Result<Option<Str
         .check()?;
     Ok(r.take::<Option<String>>(0)?)
 }
+
+/// `atlas_articles_for_intel`: one category's articles from runs started on
+/// `day` (`YYYY-MM-DD`), optionally filtered by a case-insensitive `query`
+/// over title, description, source and URL; newest published first, one row
+/// per article id (the newest run's).
+pub async fn articles_for_intel(
+    db: &Surreal<Any>,
+    category: &str,
+    day: &str,
+    query: &str,
+) -> Result<Vec<AtlasArticleRow>, TxError> {
+    let q = query.trim().to_ascii_lowercase();
+    let mut rows = Vec::new();
+    for run in list_runs(db).await? {
+        if run.started_at.get(..10) != Some(day) {
+            continue;
+        }
+        for a in list_articles(db, &run.id).await? {
+            let hit = q.is_empty()
+                || [
+                    &a.title,
+                    &a.description,
+                    &a.source_name,
+                    &a.source_domain,
+                    &a.url,
+                ]
+                .iter()
+                .any(|f| f.to_ascii_lowercase().contains(&q));
+            if a.category == category && hit {
+                rows.push(a);
+            }
+        }
+    }
+    rows.sort_by(|a, b| {
+        b.published_at
+            .cmp(&a.published_at)
+            .then_with(|| b.seen_at.cmp(&a.seen_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|r| seen.insert(r.id.clone()));
+    Ok(rows)
+}

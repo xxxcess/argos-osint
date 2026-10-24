@@ -887,10 +887,7 @@ fn short(reason: &str) -> String {
 /// rows: a queued node names whichever prerequisites are still pending, or
 /// the failed prerequisite (transitively) that blocks it.
 pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
-    let mut out: Vec<StageView> = Vec::new();
-    let mut failed_by: std::collections::HashMap<String, (&'static str, String)> =
-        Default::default();
-    for (operation, label) in STAGES {
+    stage_views_from(|operation| {
         let id = task_id(job_id, operation);
         let row: Option<(String, String, String)> = conn
             .query_row(
@@ -900,7 +897,7 @@ pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
             )
             .optional()?;
         let Some((state, error, _eligible)) = row else {
-            continue;
+            return Ok(None);
         };
         let deps: Vec<(String, String)> = {
             let mut stmt = conn.prepare(
@@ -919,6 +916,58 @@ pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
+        let activity = if state == "running" {
+            conn.query_row(
+                "SELECT value FROM app_state WHERE key=?1",
+                [format!("intel-brief-activity:{id}")],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap_or(None)
+        } else {
+            None
+        };
+        Ok(Some(StageRow {
+            state,
+            error,
+            deps,
+            output,
+            activity,
+        }))
+    })
+}
+
+/// One stage task as the views need it, from either store.
+#[derive(Debug, Clone, Default)]
+pub struct StageRow {
+    pub state: String,
+    pub error: String,
+    /// Prerequisites `(operation, state)` in priority order.
+    pub deps: Vec<(String, String)>,
+    /// Committed `(item_count, empty_reason)`.
+    pub output: Option<(i64, String)>,
+    /// Live activity label of a running stage.
+    pub activity: Option<String>,
+}
+
+/// [`stage_views`] over rows from `fetch` (by operation; `None` skips it).
+pub fn stage_views_from(
+    mut fetch: impl FnMut(&str) -> Result<Option<StageRow>>,
+) -> Result<Vec<StageView>> {
+    let mut out: Vec<StageView> = Vec::new();
+    let mut failed_by: std::collections::HashMap<String, (&'static str, String)> =
+        Default::default();
+    for (operation, label) in STAGES {
+        let Some(StageRow {
+            state,
+            error,
+            deps,
+            output,
+            activity,
+        }) = fetch(operation)?
+        else {
+            continue;
+        };
         // A failed prerequisite registers itself in `failed_by` below, so one
         // lookup covers direct and transitive blockers.
         let blocker_full = deps.iter().find_map(|(op, _)| failed_by.get(op).cloned());
@@ -935,20 +984,10 @@ pub fn stage_views(conn: &Connection, job_id: &str) -> Result<Vec<StageView>> {
                 Some((n, _)) => format!("Completed · {n} item{}", if n == 1 { "" } else { "s" }),
                 None => "Completed".into(),
             },
-            "running" => {
-                let activity: Option<String> = conn
-                    .query_row(
-                        "SELECT value FROM app_state WHERE key=?1",
-                        [format!("intel-brief-activity:{id}")],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .unwrap_or(None);
-                match activity.filter(|a| !a.is_empty()) {
-                    Some(a) => format!("Running · {a}"),
-                    None => "Running".into(),
-                }
-            }
+            "running" => match activity.filter(|a| !a.is_empty()) {
+                Some(a) => format!("Running · {a}"),
+                None => "Running".into(),
+            },
             "retry_scheduled" => "Running · retry scheduled".into(),
             "failed" => format!("Failed · {}", short(&error)),
             "cancelled" => "Cancelled".into(),

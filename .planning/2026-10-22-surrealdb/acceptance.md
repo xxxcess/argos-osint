@@ -11,6 +11,12 @@ conflict. Revision fence for cycle evidence and derivation membership
 job registry, stage/activity events, `insight.superseded` and recall
 telemetry are wired (see "Combined tree" at the end).
 
+- [x] TUI under a storage config opens no `argos.db` (strace-checked at
+  startup): UI state, the Intel list, brief stage views/outputs and Atlas
+  runs/articles read SurrealDB on worker threads; the bin `embedded`/`server`
+  features now enable its `surreal` code. Gaps: Atlas expiry pruning is not
+  run from the TUI; brief retry/reload and Brain publication of briefs are
+  not on SurrealDB; legacy-only views are empty.
 - [x] Brief chain engine on SurrealDB (`storage::brief_stages`): chains are
   ensured with their inputs, stages are claimed under leases with heartbeat
   renewal, executed through the shared `execute` over a `StageStore`, and

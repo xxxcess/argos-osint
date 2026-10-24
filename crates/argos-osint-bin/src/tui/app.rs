@@ -1437,11 +1437,36 @@ impl App {
         true
     }
 
+    /// UI session state: the repository under a storage config, else the
+    /// SQLite `app_state` table.
+    fn ui_state_get(&self, key: &str) -> Result<Option<String>> {
+        if surreal_recon::on() {
+            surreal_recon::ui_state_get(key)
+        } else {
+            self.store.app_state_get(key)
+        }
+    }
+
+    fn ui_state_set(&self, key: &str, value: &str) -> Result<()> {
+        if surreal_recon::on() {
+            surreal_recon::ui_state_set(key, value)
+        } else {
+            self.store.app_state_set(key, value)
+        }
+    }
+
     pub fn boot() -> Result<Self> {
         paths::ensure_home()?;
         // Finish any configuration commit a previous process left half applied.
         let _ = argos_osint_core::config_commit::recover_at_startup();
-        let store = Store::open_ui(&paths::db_path())?;
+        // Under a storage config the TUI never opens the SQLite file: the
+        // legacy store is an empty in-memory one that only SQLite-only
+        // views (not reachable on SurrealDB) would read.
+        let store = if surreal_recon::on() {
+            Store::memory()?
+        } else {
+            Store::open_ui(&paths::db_path())?
+        };
         // Under a storage config Recon reads only the repository (once,
         // before the event loop); the SQLite Recon tables are not touched.
         let surreal_boot = if surreal_recon::on() {
@@ -1759,7 +1784,9 @@ impl App {
             memory_total,
             memory_error: None,
             memories_loaded: false,
-            background_db: Some(paths::db_path()),
+            // Under a storage config no worker opens the SQLite file; the
+            // legacy-only paths fall back to the empty in-memory store.
+            background_db: (!surreal_recon::on()).then(paths::db_path),
             atlas_deleting: None,
             atlas_reading: false,
             atlas_generation: 0,
@@ -2204,8 +2231,7 @@ impl App {
     }
 
     fn load_last_view_session(&self) -> Option<LastViewSession> {
-        self.store
-            .app_state_get("last_view_session")
+        self.ui_state_get("last_view_session")
             .ok()
             .flatten()
             .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -2284,7 +2310,7 @@ impl App {
     pub(crate) fn persist_view_session(&mut self) {
         if let Some(session) = self.capture_view_session() {
             if let Ok(json) = serde_json::to_string(&session) {
-                let _ = self.store.app_state_set("last_view_session", &json);
+                let _ = self.ui_state_set("last_view_session", &json);
             }
         }
     }
@@ -2505,7 +2531,7 @@ impl App {
 
     /// Loads session tabs from SQLite app_state
     pub fn load_session_tabs(&mut self) {
-        if let Ok(Some(json)) = self.store.app_state_get("recon_session_tabs") {
+        if let Ok(Some(json)) = self.ui_state_get("recon_session_tabs") {
             if !json.is_empty() {
                 if let Ok(state) = serde_json::from_str::<SessionTabsState>(&json) {
                     let valid_tabs: Vec<String> = state
@@ -2537,13 +2563,13 @@ impl App {
             recently_closed: self.tab_recently_closed.clone(),
         };
         if let Ok(json) = serde_json::to_string(&state) {
-            let _ = self.store.app_state_set("recon_session_tabs", &json);
+            let _ = self.ui_state_set("recon_session_tabs", &json);
         }
     }
 
     /// Loads Home draft from SQLite app_state
     pub fn load_home_draft(&mut self) {
-        if let Ok(Some(json)) = self.store.app_state_get("home_recon_draft") {
+        if let Ok(Some(json)) = self.ui_state_get("home_recon_draft") {
             if !json.is_empty() {
                 if let Ok(state) = serde_json::from_str::<HomeDraftState>(&json) {
                     self.home_draft = state.prompt;
@@ -2569,7 +2595,7 @@ impl App {
             self.input.clear();
             self.cursor = 0;
         }
-        let _ = self.store.app_state_set("home_recon_draft", "");
+        let _ = self.ui_state_set("home_recon_draft", "");
     }
 
     /// Opens the investigation switcher overlay
@@ -3326,7 +3352,7 @@ impl App {
             self.dashboards_at = Some(Instant::now());
         }
         if self.module == Some(ModuleId::Jobs) {
-            if self.background_db.is_some() {
+            if self.background_db.is_some() || surreal_brain::on() {
                 self.load_atlas();
             } else {
                 self.atlas_runs = self.store.atlas_list_runs().unwrap_or_default();
@@ -4278,7 +4304,8 @@ impl App {
 
     /// Load Intel bulletin articles for the active category, run day, and search.
     pub fn load_intel(&mut self) {
-        if let Some(db) = self.background_db.clone() {
+        if self.background_db.is_some() || surreal_brain::on() {
+            let db = self.background_db.clone();
             if self.intel_list_reading {
                 self.intel_list_pending = true;
                 return;
@@ -4294,6 +4321,12 @@ impl App {
             );
             let tx = self.work_tx.clone();
             std::thread::spawn(move || {
+                let Some(db) = db else {
+                    let outcome = super::surreal_intel::intel_list(&key.0, &key.1, &key.2)
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(WorkEvent::IntelListLoaded { key, outcome });
+                    return;
+                };
                 let outcome = Store::open_profile_reader(&db)
                     .and_then(|store| {
                         store.connection().execute_batch("BEGIN")?;
@@ -4431,11 +4464,16 @@ impl App {
         // One idempotent preparation chain owns retrieval, cleanup, Claims,
         // Inferences and Links; the background brief runner executes it.
         // Mode classification is lazy (Recon configuration).
-        match intel_recon::brief_stages::ensure_intel_brief_pipeline(
-            &self.store,
-            &article,
-            &self.settings,
-        ) {
+        let ensured = if surreal_brain::on() {
+            super::surreal_intel::ensure_brief(&article, &self.settings)
+        } else {
+            intel_recon::brief_stages::ensure_intel_brief_pipeline(
+                &self.store,
+                &article,
+                &self.settings,
+            )
+        };
+        match ensured {
             Ok(job) => self.intel_brief_job = Some(job),
             Err(error) => {
                 self.intel_brief_job = None;
@@ -4501,7 +4539,7 @@ impl App {
     /// Reload the shared stage views of the current brief chain; when a
     /// stage committed since the last poll, reload the briefing content.
     pub(crate) fn refresh_intel_brief_stages(&mut self) -> bool {
-        if self.background_db.is_some() {
+        if self.background_db.is_some() || surreal_brain::on() {
             self.refresh_intel_briefing();
             return false;
         }
@@ -4511,7 +4549,8 @@ impl App {
     }
 
     fn refresh_intel_briefing(&mut self) {
-        if let Some(db) = self.background_db.clone() {
+        if self.background_db.is_some() || surreal_brain::on() {
+            let db = self.background_db.clone();
             if self.intel_reading
                 || self.module != Some(ModuleId::Intel)
                 || self.intel_page != IntelPage::Briefing
@@ -4534,7 +4573,13 @@ impl App {
             );
             let tx = self.work_tx.clone();
             std::thread::spawn(move || {
-                let outcome = Store::open_profile_reader(&db)
+                // Under a storage config the snapshot reads the repository;
+                // the empty in-memory store stands in for the SQLite reader.
+                let opened = match &db {
+                    Some(db) => Store::open_profile_reader(db),
+                    None => Store::memory(),
+                };
+                let outcome = opened
                     .and_then(|store| {
                         store.connection().execute_batch("BEGIN")?;
                         super::db_reads::IntelBriefSnapshot::read(
@@ -4722,10 +4767,10 @@ impl App {
     }
 
     fn load_atlas(&mut self) {
-        if let Some(db) = self.background_db.clone() {
+        if self.background_db.is_some() || surreal_brain::on() {
             self.atlas_generation = self.atlas_generation.wrapping_add(1);
             if !self.atlas_reading {
-                self.request_atlas_snapshot(db);
+                self.request_atlas_snapshot(self.background_db.clone());
             }
             return;
         }
@@ -4751,11 +4796,23 @@ impl App {
         self.dismiss_pruned_atlas(&removed, selected.as_deref(), &news_run);
     }
 
-    fn request_atlas_snapshot(&mut self, db: PathBuf) {
+    fn request_atlas_snapshot(&mut self, db: Option<PathBuf>) {
         self.atlas_reading = true;
         let generation = self.atlas_generation;
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
+            let Some(db) = db else {
+                // Repository runs; expiry pruning stays with the Atlas
+                // runner on SurrealDB.
+                let outcome = super::surreal_intel::atlas_runs()
+                    .map(|runs| (runs, Vec::new()))
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(WorkEvent::AtlasLoaded {
+                    generation,
+                    outcome,
+                });
+                return;
+            };
             let outcome = Store::open_light(&db)
                 .and_then(|store| {
                     let removed = store.atlas_prune_expired()?;
@@ -4773,16 +4830,20 @@ impl App {
         if self.atlas_articles_reading {
             return;
         }
-        let Some(db) = self.background_db.clone() else {
+        if self.background_db.is_none() && !surreal_brain::on() {
             return;
-        };
+        }
+        let db = self.background_db.clone();
         self.atlas_articles_reading = true;
         let run_id = self.atlas_news_run.clone();
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_profile_reader(&db)
-                .and_then(|store| store.atlas_list_articles(&run_id))
-                .map_err(|e| e.to_string());
+            let outcome = match db {
+                Some(db) => Store::open_profile_reader(&db)
+                    .and_then(|store| store.atlas_list_articles(&run_id)),
+                None => super::surreal_intel::atlas_articles(&run_id),
+            }
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::AtlasArticlesLoaded { run_id, outcome });
         });
     }
@@ -5013,7 +5074,7 @@ impl App {
             return;
         };
         let id = run.id.clone();
-        if self.background_db.is_none() {
+        if self.background_db.is_none() && !surreal_brain::on() {
             self.atlas_articles = self.store.atlas_list_articles(&id).unwrap_or_default();
         } else {
             self.atlas_articles.clear();
@@ -5831,7 +5892,7 @@ impl App {
                 self.atlas_reading = false;
                 if generation != self.atlas_generation {
                     if let Some(db) = self.background_db.clone() {
-                        self.request_atlas_snapshot(db);
+                        self.request_atlas_snapshot(Some(db));
                     }
                     return true;
                 }
@@ -11069,7 +11130,7 @@ impl App {
             report_mode: self.home_draft_report_mode,
         };
         let json = serde_json::to_string(&state)?;
-        self.store.app_state_set("home_recon_draft", &json)?;
+        self.ui_state_set("home_recon_draft", &json)?;
         self.home_draft_dirty = false;
         Ok(())
     }
@@ -11303,7 +11364,11 @@ pub async fn run(mut app: App) -> Result<()> {
     let _workers = argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path());
     // Process liveness for the job registry: jobs left running by a process
     // that exited become interrupted; cross-process Cancel reaches this one.
-    let _beat = argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok();
+    // The SQLite job registry is not opened under a storage config (job
+    // leases and the sweeper run on the repository there).
+    let _beat = (!surreal_brain::on())
+        .then(|| argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok())
+        .flatten();
     // One-time retention cleanup is separate from the elected, resumable
     // backfill pool. Neither belongs to startup or the terminal event loop.
     // Under a storage config, job retention runs on the repository only.

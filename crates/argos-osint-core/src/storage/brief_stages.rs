@@ -973,3 +973,98 @@ pub async fn drain_parallel(
         }
     }
 }
+
+/// `ensure_intel_brief_pipeline` on the repository: the article's chain job
+/// for its current inputs (attached or newly admitted).
+pub async fn ensure_for_article(
+    repo: &Repository,
+    article: &AtlasArticleRow,
+    settings: &crate::provider::SettingsFile,
+) -> Result<String> {
+    use crate::intel_recon::brief_stages as bs;
+    let inputs = BriefInputs {
+        article_id: article.id.clone(),
+        input_revision: bs::input_revision(article, settings),
+        role_snapshot: serde_json::to_string(&settings.defaults).unwrap_or_default(),
+        title: article.title.clone(),
+        stage_revisions: bs::stage_revisions(article, settings),
+        metadata: bs::metadata_snapshot(article),
+    };
+    Ok(ensure(repo, &inputs).await?.job_id)
+}
+
+/// `brief_pipeline::stage_views` for a repository chain.
+pub async fn stage_views(
+    repo: &Repository,
+    job_id: &str,
+) -> Result<Vec<brief_pipeline::StageView>> {
+    #[derive(SurrealValue)]
+    struct TaskRow {
+        operation: String,
+        state: String,
+        error_message: String,
+    }
+    let mut r = repo
+        .db()
+        .query("SELECT operation, state, error_message FROM task WHERE job = $j")
+        .bind(("j", rid("job", job_id)))
+        .await?
+        .check()?;
+    let tasks: Vec<TaskRow> = r.take(0)?;
+    let by_op: std::collections::HashMap<String, (String, String)> = tasks
+        .into_iter()
+        .map(|t| (t.operation, (t.state, t.error_message)))
+        .collect();
+    let mut rows = std::collections::HashMap::new();
+    for (op, (state, error)) in &by_op {
+        let id = task_id(job_id, op);
+        let deps = brief_pipeline::prerequisites(op)
+            .iter()
+            .filter_map(|d| by_op.get(*d).map(|(s, _)| (d.to_string(), s.clone())))
+            .collect();
+        let output = if state == "completed" {
+            stage_meta(repo, &id).await?
+        } else {
+            None
+        };
+        let activity = if state == "running" {
+            activity(repo, &id).await?
+        } else {
+            None
+        };
+        rows.insert(
+            op.clone(),
+            brief_pipeline::StageRow {
+                state: state.clone(),
+                error: error.clone(),
+                deps,
+                output,
+                activity,
+            },
+        );
+    }
+    brief_pipeline::stage_views_from(|op| Ok(rows.remove(op)))
+}
+
+/// `brief_pipeline::stage_outputs` for a repository chain.
+pub async fn stage_outputs(
+    repo: &Repository,
+    job_id: &str,
+) -> Result<std::collections::HashMap<String, Value>> {
+    #[derive(SurrealValue)]
+    struct Out {
+        stage: String,
+        output_json: String,
+    }
+    let mut r = repo
+        .db()
+        .query("SELECT stage, output_json FROM stage_output WHERE task.job = $j")
+        .bind(("j", rid("job", job_id)))
+        .await?
+        .check()?;
+    let rows: Vec<Out> = r.take(0)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|o| Some((o.stage, serde_json::from_str(&o.output_json).ok()?)))
+        .collect())
+}

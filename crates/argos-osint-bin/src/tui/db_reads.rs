@@ -316,8 +316,17 @@ impl IntelBriefSnapshot {
                     .push((left.clone(), right.clone(), "assessed".into()));
             }
         }
-        if job.is_some() {
-            out.publication = "Brief job unavailable on SurrealDB yet · Reload".into();
+        if let Some(job) = job {
+            let (stages, outputs, titles) = super::surreal_intel::brief_chain(job)?;
+            out.stages = stages;
+            out.outputs = outputs;
+            out.lead_titles = titles;
+            // Canonical Brain publication is not on SurrealDB yet.
+            out.publication = if out.stages.iter().any(|s| s.state == "failed") {
+                "Brief stage failed · Retry".into()
+            } else {
+                "Brief kept in SurrealDB · Brain publication pending".into()
+            };
         }
         Ok(out)
     }

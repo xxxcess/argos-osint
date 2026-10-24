@@ -31,6 +31,8 @@ const ROW: &str = "SELECT record::id(id) AS key,
     IF heartbeat_at != NONE { <string>heartbeat_at } ELSE { '' } AS heartbeat_at,
     IF active_since != NONE { <string>active_since } ELSE { '' } AS active_since,
     count((SELECT VALUE id FROM job_event WHERE job_id = record::id($parent.id)
+      OR job_id IN (SELECT VALUE record::id(id) FROM job WHERE parent = $parent.id)))
+    + count((SELECT VALUE id FROM argos_event WHERE job_id = record::id($parent.id)
       OR job_id IN (SELECT VALUE record::id(id) FROM job WHERE parent = $parent.id))) AS events,
     <string>created_at AS created_at,
     IF finished_at != NONE { <string>finished_at } ELSE { '' } AS finished_at,

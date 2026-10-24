@@ -455,6 +455,28 @@ pub async fn job_report_details(
     Ok(rows.into_iter().next())
 }
 
+/// The Report surface's result bundle for one source hash (the
+/// `acquisition_id` of a report claim's evidence), newest completion first.
+/// `None` when no retained result has that hash.
+pub async fn report_details_by_hash(
+    db: &Surreal<Any>,
+    source_hash: &str,
+) -> Result<Option<String>, TxError> {
+    if source_hash.is_empty() {
+        return Ok(None);
+    }
+    let mut r = db
+        .query(
+            "SELECT VALUE details_json FROM intel_report_result WHERE source_hash = $hash \
+             ORDER BY completion_sequence DESC LIMIT 1",
+        )
+        .bind(("hash", source_hash.to_string()))
+        .await?
+        .check()?;
+    let rows: Vec<String> = r.take(0)?;
+    Ok(rows.into_iter().next())
+}
+
 /// `INSERT OR IGNORE` an article refresh intent; true when new.
 pub async fn add_refresh_intent(db: &Surreal<Any>, article_id: &str) -> Result<bool, TxError> {
     let mut r = db

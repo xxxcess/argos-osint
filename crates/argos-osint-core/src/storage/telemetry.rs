@@ -8,6 +8,13 @@
 //!
 //! Under a storage config, `crate::telemetry::record` routes here (through
 //! [`crate::storage::runtime::spawn`]) and never opens SQLite.
+//!
+//! [`SCHEMA`] adds `telemetry_meta` (keyed by the meta key, like SQLite's
+//! primary key): the `observed_since` marker and the prune marker
+//! `raw_pruned_at`. [`prune`] is `crate::telemetry::prune`: raw events past
+//! 90 days and rollups past 365 days, at most once per 15 minutes.
+//! There is no telemetry backfill to port: the SQLite store has no
+//! backfill of telemetry rows, and SurrealDB starts empty (clean reset).
 
 use anyhow::Result;
 use surrealdb::engine::any::Any;
@@ -16,7 +23,16 @@ use surrealdb::Surreal;
 
 use super::jobs::{rid, run, take};
 use super::tx::{run_tx, RetryPolicy};
-use crate::telemetry::{event_bins, next_id, TelemetryEvent};
+use crate::telemetry::{
+    event_bins, next_id, Coverage, TelemetryEvent, PRUNE_INTERVAL_SECS, RAW_RETENTION_DAYS,
+    ROLLUP_RETENTION_DAYS,
+};
+
+/// `telemetry_meta` (idempotent). Register as `("telemetry", SCHEMA)`
+/// after `profile_view`, which defines the event and rollup tables.
+pub const SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS telemetry_meta SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS value ON telemetry_meta TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS updated_at ON telemetry_meta TYPE string DEFAULT '';";
 
 #[derive(SurrealValue, Clone)]
 struct Row {
@@ -230,4 +246,104 @@ pub async fn events_of_type(db: &Surreal<Any>, event_type: &str) -> Result<Vec<T
             payload_json: s.payload_json,
         })
         .collect())
+}
+
+#[derive(SurrealValue)]
+struct MetaRow {
+    value: String,
+}
+
+/// `telemetry::get_meta` on SurrealDB.
+pub async fn get_meta(db: &Surreal<Any>, key: &str) -> Result<Option<String>> {
+    if key.is_empty() {
+        return Ok(None);
+    }
+    let mut r = db
+        .query("SELECT value FROM ONLY $m")
+        .bind(("m", rid("telemetry_meta", key)))
+        .await?
+        .check()?;
+    let row: Option<MetaRow> = r.take(0)?;
+    Ok(row.map(|m| m.value))
+}
+
+/// `telemetry::set_meta` on SurrealDB (insert or replace).
+pub async fn set_meta(db: &Surreal<Any>, key: &str, value: &str) -> Result<()> {
+    anyhow::ensure!(!key.is_empty(), "telemetry meta key is empty");
+    db.query("UPSERT $m SET value = $v, updated_at = $ts RETURN NONE")
+        .bind(("m", rid("telemetry_meta", key)))
+        .bind(("v", value.to_string()))
+        .bind(("ts", chrono::Utc::now().to_rfc3339()))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+/// `telemetry::ensure_observed_since` on SurrealDB: the first moment this
+/// installation recorded telemetry, set once.
+pub async fn ensure_observed_since(db: &Surreal<Any>) -> Result<String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut r = db
+        .query(
+            "LET $m = type::record('telemetry_meta', 'observed_since');
+             IF !record::exists($m) {
+               CREATE $m SET value = $now, updated_at = $now RETURN NONE;
+             };
+             RETURN (SELECT VALUE value FROM ONLY $m);",
+        )
+        .bind(("now", now.clone()))
+        .await?
+        .check()?;
+    let value: Option<String> = r.take(2)?;
+    Ok(value.unwrap_or(now))
+}
+
+/// `telemetry::coverage` on SurrealDB.
+pub async fn coverage(db: &Surreal<Any>) -> Result<Coverage> {
+    let mut r = db
+        .query(
+            "RETURN count((SELECT VALUE id FROM telemetry_event));
+             RETURN math::sum((SELECT VALUE events FROM telemetry_hourly)) ?? 0;",
+        )
+        .await?
+        .check()?;
+    let raw_events: Option<i64> = r.take(0)?;
+    let rollup_events: Option<i64> = r.take(1)?;
+    Ok(Coverage {
+        raw_events: raw_events.unwrap_or(0),
+        rollup_events: rollup_events.unwrap_or(0),
+        observed_since: get_meta(db, "observed_since").await?.unwrap_or_default(),
+    })
+}
+
+/// `telemetry::prune` on SurrealDB: deletes raw events past
+/// [`RAW_RETENTION_DAYS`], hourly rollups past the same boundary and daily
+/// rollups past [`ROLLUP_RETENTION_DAYS`], at most once per
+/// [`PRUNE_INTERVAL_SECS`], and records `raw_pruned_at`. True when it ran.
+pub async fn prune(db: &Surreal<Any>, now: chrono::DateTime<chrono::Utc>) -> Result<bool> {
+    if let Some(last) = get_meta(db, "raw_pruned_at").await? {
+        let parsed = chrono::DateTime::parse_from_rfc3339(&last)
+            .map(|ts| ts.with_timezone(&chrono::Utc))
+            .unwrap_or(now);
+        if (now - parsed).num_seconds() < PRUNE_INTERVAL_SECS {
+            return Ok(false);
+        }
+    }
+    let raw_cutoff = (now - chrono::Duration::days(RAW_RETENTION_DAYS)).to_rfc3339();
+    let hourly_cutoff: String = raw_cutoff.chars().take(13).collect();
+    let daily_cutoff = (now - chrono::Duration::days(ROLLUP_RETENTION_DAYS))
+        .format("%Y-%m-%d")
+        .to_string();
+    db.query(
+        "DELETE telemetry_event WHERE occurred_at < $raw RETURN NONE;
+         DELETE telemetry_hourly WHERE bucket < $hourly RETURN NONE;
+         DELETE telemetry_daily WHERE bucket < $daily RETURN NONE;",
+    )
+    .bind(("raw", raw_cutoff))
+    .bind(("hourly", hourly_cutoff))
+    .bind(("daily", daily_cutoff))
+    .await?
+    .check()?;
+    set_meta(db, "raw_pruned_at", &now.to_rfc3339()).await?;
+    Ok(true)
 }

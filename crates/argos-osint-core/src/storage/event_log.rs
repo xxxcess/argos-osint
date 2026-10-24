@@ -9,6 +9,13 @@
 //! before they are stored, as in SQLite. `investigation_event` is keyed by
 //! the event id; a rewrite of an existing id only updates its status, summary
 //! and payload, like SQLite's `ON CONFLICT(id) DO UPDATE`.
+//!
+//! The Logs pane reads only this table under a storage config: the page
+//! ([`list_events`], whose job filter covers the job and its descendant
+//! jobs like SQLite's recursive `argos_jobs.parent_id` walk), one event
+//! ([`get_event`]), the header counts ([`event_counts`]), the app filter
+//! ([`event_apps`]), the retention prune ([`prune_events`]) and Clear log
+//! ([`clear_events`]). Prune and clear touch only `argos_event`.
 
 use anyhow::Result;
 use surrealdb::engine::any::Any;
@@ -22,6 +29,11 @@ use crate::events::{
     MAX_DETAIL_CHARS, MAX_MESSAGE_CHARS,
 };
 use crate::investigation::{InvestigationEvent, InvestigationSurface};
+use crate::jobs_view::EventCounts;
+
+/// Deepest job nesting the Logs job filter follows (SQLite's recursive CTE
+/// has no bound; real trees are two or three levels).
+const MAX_JOB_DEPTH: usize = 16;
 
 /// Event log schema (idempotent).
 pub const SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS argos_event SCHEMAFULL;
@@ -172,7 +184,7 @@ pub async fn record_event(db: &Surreal<Any>, event: &NewEvent) -> Result<String>
 }
 
 /// `events::list_events` on SurrealDB: newest-first bounded page. The job
-/// filter matches the job id itself (child jobs are not expanded yet).
+/// filter matches the job and its descendant jobs.
 pub async fn list_events(
     db: &Surreal<Any>,
     filter: &EventFilter,
@@ -185,8 +197,13 @@ pub async fn list_events(
     if !filter.app.is_empty() {
         sql.push_str(" AND app = $app");
     }
+    let jobs = if filter.job_id.is_empty() {
+        Vec::new()
+    } else {
+        job_tree(db, &filter.job_id).await?
+    };
     if !filter.job_id.is_empty() {
-        sql.push_str(" AND job_id = $job");
+        sql.push_str(" AND job_id IN $jobs");
     }
     if !filter.text.is_empty() {
         sql.push_str(" AND (string::contains(message, $text) OR string::contains(details, $text))");
@@ -202,7 +219,7 @@ pub async fn list_events(
         .query(sql)
         .bind(("rank", filter.min_severity.map(severity_rank).unwrap_or(0)))
         .bind(("app", filter.app.clone()))
-        .bind(("job", filter.job_id.clone()))
+        .bind(("jobs", jobs))
         .bind(("text", filter.text.replace('%', "")))
         .bind(("since", filter.since.clone()))
         .bind(("before", filter.before_seq.unwrap_or(0)))
@@ -211,6 +228,126 @@ pub async fn list_events(
         .check()?;
     let rows: Vec<StoredEvent> = r.take(0)?;
     Ok(rows.into_iter().map(EventRow::from).collect())
+}
+
+/// The job id and every descendant job id (breadth-first over
+/// `job.parent`). An unknown job is just itself, so events recorded for a
+/// job that was already cleared still match, as in SQLite.
+pub async fn job_tree(db: &Surreal<Any>, root: &str) -> Result<Vec<String>> {
+    let mut all = vec![root.to_string()];
+    let mut frontier = vec![root.to_string()];
+    for _ in 0..MAX_JOB_DEPTH {
+        frontier.retain(|id| !id.is_empty());
+        if frontier.is_empty() {
+            break;
+        }
+        let parents: Vec<_> = frontier.iter().map(|id| rid("job", id)).collect();
+        let mut r = db
+            .query("SELECT VALUE record::id(id) FROM job WHERE parent IN $parents")
+            .bind(("parents", parents))
+            .await?
+            .check()?;
+        let children: Vec<String> = r.take(0)?;
+        frontier = children
+            .into_iter()
+            .filter(|id| !all.contains(id))
+            .collect();
+        all.extend(frontier.iter().cloned());
+    }
+    Ok(all)
+}
+
+/// `events::get_event` on SurrealDB. `None` means it expired or never
+/// existed.
+pub async fn get_event(db: &Surreal<Any>, id: &str) -> Result<Option<EventRow>> {
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let mut r = db
+        .query(format!("SELECT {EVENT_COLS} FROM ONLY $e"))
+        .bind(("e", rid("argos_event", id)))
+        .await?
+        .check()?;
+    let row: Option<StoredEvent> = r.take(0)?;
+    Ok(row.map(EventRow::from))
+}
+
+/// `events::prune_events` on SurrealDB: delete events older than `hours`.
+/// Touches only `argos_event`.
+pub async fn prune_events(db: &Surreal<Any>, hours: i64) -> Result<usize> {
+    let cutoff = (chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+    let mut r = db
+        .query(
+            "LET $gone = (DELETE argos_event WHERE ts < $cutoff RETURN BEFORE);
+             RETURN array::len($gone);",
+        )
+        .bind(("cutoff", cutoff))
+        .await?
+        .check()?;
+    let n: Option<i64> = r.take(1)?;
+    Ok(n.unwrap_or(0).max(0) as usize)
+}
+
+/// `events::clear_events` on SurrealDB (Logs "Clear log"). Touches only
+/// `argos_event`: jobs, task results and memories are kept.
+pub async fn clear_events(db: &Surreal<Any>) -> Result<usize> {
+    let mut r = db
+        .query(
+            "LET $gone = (DELETE argos_event RETURN BEFORE);
+             RETURN array::len($gone);",
+        )
+        .await?
+        .check()?;
+    let n: Option<i64> = r.take(1)?;
+    Ok(n.unwrap_or(0).max(0) as usize)
+}
+
+#[derive(SurrealValue)]
+struct SeverityCount {
+    severity: String,
+    n: i64,
+}
+
+/// `jobs_view::event_counts` on SurrealDB: severity counts for the Logs
+/// header (unknown severities count as info) and errors in the last hour.
+pub async fn event_counts(db: &Surreal<Any>) -> Result<EventCounts> {
+    let hour = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let mut r = db
+        .query(
+            "SELECT severity, count() AS n FROM argos_event GROUP BY severity;
+             RETURN count((SELECT VALUE id FROM argos_event
+               WHERE severity = 'error' AND ts >= $hour));",
+        )
+        .bind(("hour", hour))
+        .await?
+        .check()?;
+    let rows: Vec<SeverityCount> = r.take(0)?;
+    let recent: Option<i64> = r.take(1)?;
+    let mut counts = EventCounts::default();
+    for row in rows {
+        match row.severity.as_str() {
+            "error" => counts.error += row.n,
+            "warn" => counts.warn += row.n,
+            "debug" => counts.debug += row.n,
+            _ => counts.info += row.n,
+        }
+    }
+    counts.recent_failures = recent.unwrap_or(0);
+    Ok(counts)
+}
+
+/// `jobs_view::event_apps` on SurrealDB: distinct non-empty apps, sorted,
+/// at most 32.
+pub async fn event_apps(db: &Surreal<Any>) -> Result<Vec<String>> {
+    let mut r = db
+        .query(
+            "RETURN array::slice(array::sort(array::distinct(
+               (SELECT VALUE app FROM argos_event WHERE app != ''))), 0, 32);",
+        )
+        .await?
+        .check()?;
+    let apps: Option<Vec<String>> = r.take(0)?;
+    Ok(apps.unwrap_or_default())
 }
 
 #[derive(SurrealValue, Clone)]

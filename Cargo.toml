@@ -38,7 +38,9 @@ sha2 = "0.10"
 strsim = "0.11"
 # Remote-only SurrealDB client pinned to server 3.3.4. Loopback WebSocket only:
 # no embedded kv engines, no TLS (the server binds 127.0.0.1).
-surrealdb = { version = "=3.3.4", default-features = false, features = ["protocol-ws"] }
+# Engines/protocols come from the crates' `embedded` (RocksDB, default) and
+# `server` (WebSocket client) features.
+surrealdb = { version = "=3.3.4", default-features = false }
 sysinfo = "0.33"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-util", "fs", "sync", "net", "signal", "test-util"] }

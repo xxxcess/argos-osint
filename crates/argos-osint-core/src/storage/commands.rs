@@ -156,7 +156,7 @@ pub async fn status(layout: &Layout) -> Result<Status> {
 
 /// Record the mode and bring the store up with its schema.
 pub async fn init(layout: &Layout, mode: Mode, port: Option<u16>) -> Result<Status> {
-    if let Some(existing) = home::load_config(layout)? {
+    if let Some(existing) = home::load_config_file(layout)? {
         if existing.mode != mode {
             bail!(
                 "storage is already initialized in {:?} mode; run `argos storage reset --yes` before switching",

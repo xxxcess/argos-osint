@@ -154,7 +154,36 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
     }
 }
 
+/// Environment override for the storage mode (`server` or `embedded`).
+pub const MODE_ENV: &str = "ARGOS_STORAGE_MODE";
+
+/// The storage config this process runs with: `ARGOS_STORAGE_MODE` first,
+/// then `storage/config.json` (written by `argos storage init`), and
+/// otherwise the embedded RocksDB store under `<home>/storage/surreal` when
+/// this build has the engine (the default build does), with no network.
+/// Server mode is only ever chosen explicitly. `None` only in a build
+/// without the embedded engine and with nothing configured.
 pub fn load_config(layout: &Layout) -> io::Result<Option<StorageConfig>> {
+    if let Some(mode) = std::env::var_os(MODE_ENV) {
+        let mode = mode
+            .to_str()
+            .unwrap_or_default()
+            .parse::<Mode>()
+            .map_err(|e| io::Error::other(format!("{MODE_ENV}: {e}")))?;
+        let port = load_config_file(layout)?.and_then(|c| c.port);
+        return Ok(Some(StorageConfig { mode, port }));
+    }
+    if let Some(config) = load_config_file(layout)? {
+        return Ok(Some(config));
+    }
+    Ok(cfg!(feature = "embedded").then_some(StorageConfig {
+        mode: Mode::Embedded,
+        port: None,
+    }))
+}
+
+/// Only what `argos storage init` recorded in `storage/config.json`.
+pub fn load_config_file(layout: &Layout) -> io::Result<Option<StorageConfig>> {
     read_json(&layout.config())
 }
 

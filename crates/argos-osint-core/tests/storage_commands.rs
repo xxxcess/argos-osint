@@ -78,11 +78,16 @@ async fn init_status_and_resumable_reset() {
     let layout = Layout::new(dir.path());
 
     let st = commands::status(&layout).await.unwrap();
-    assert!(st.mode.is_none() && !st.ready);
-    assert!(
-        commands::reset(&layout, true).await.is_err(),
-        "reset needs init"
-    );
+    if cfg!(feature = "embedded") {
+        // Nothing recorded: the default build runs the embedded store.
+        assert_eq!(st.mode, Some(Mode::Embedded), "{st:?}");
+    } else {
+        assert!(st.mode.is_none() && !st.ready);
+        assert!(
+            commands::reset(&layout, true).await.is_err(),
+            "reset needs init"
+        );
+    }
 
     let st = commands::init(&layout, mode, None).await.unwrap();
     assert_eq!(st.mode, Some(mode));
@@ -157,12 +162,19 @@ async fn open_home_needs_init_and_returns_a_bootstrapped_store() {
     };
     let dir = tempfile::tempdir().unwrap();
     let layout = Layout::new(dir.path());
-    let err = home::open_home(&layout)
-        .await
-        .err()
-        .expect("uninitialized")
-        .to_string();
-    assert!(err.contains("argos storage init"), "{err}");
+    if cfg!(feature = "embedded") {
+        // An uninitialized home opens the default embedded store.
+        let store = home::open_home(&layout).await.unwrap();
+        assert_eq!(store.mode, Mode::Embedded);
+        drop(store);
+    } else {
+        let err = home::open_home(&layout)
+            .await
+            .err()
+            .expect("uninitialized")
+            .to_string();
+        assert!(err.contains("argos storage init"), "{err}");
+    }
     assert!(!layout.home.join("argos.db").exists(), "no SQLite fallback");
     home::save_config(&layout, &home::StorageConfig { mode, port: None }).unwrap();
     let store = home::open_home(&layout).await.unwrap();

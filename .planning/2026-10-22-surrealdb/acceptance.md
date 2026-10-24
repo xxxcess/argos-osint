@@ -319,3 +319,11 @@ Bootstrap registers 21 schemas after the topology, Profile and Recon tracks merg
   record ids in pipeline lookups.
 - Gate at 4760a9e: fmt, clippy (core, workspace, bin), bin tests and
   `test_surreal.py` in server and embedded modes, all green.
+
+## Embedded SurrealDB is the default build (2026-10-24)
+
+- [x] Before: default features were `lancedb` + `nlp`; SurrealDB was only in non-default `surreal` (WebSocket client, `protocol-ws` on the workspace dependency) and `embedded`, and a home without `storage/config.json` ran on SQLite.
+- [x] Now: `default = ["embedded", "nlp"]` in core and bin; the workspace `surrealdb` dependency enables no protocol; `server = ["surreal", "surrealdb/protocol-ws"]` is opt-in; `lancedb` is opt-in.
+- [x] `home::load_config` is the effective config: `ARGOS_STORAGE_MODE` (`server|embedded`), then `storage/config.json`, then embedded RocksDB at `<home>/storage/surreal` when the engine is compiled (no network). `home::load_config_file` is only the recorded file (`argos storage init` compares against it). Server mode is chosen only explicitly.
+- [x] `tests/storage_commands.rs` checks that an uninitialized home opens the embedded store in an embedded build and still needs `init` in a server-only build.
+- [x] `scripts/local_matrix.sh --storage embedded|server [--surreal-bin PATH]` runs the two CI legs; `test_surreal.py` uses the same feature sets (embedded = default build, server = `--no-default-features --features server,nlp`).

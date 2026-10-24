@@ -7,13 +7,13 @@ use argos_osint_core::storage::home::*;
 fn config_and_credentials_round_trip_privately() {
     let dir = tempfile::tempdir().unwrap();
     let layout = Layout::new(dir.path());
-    assert_eq!(load_config(&layout).unwrap(), None);
+    assert_eq!(load_config_file(&layout).unwrap(), None);
     let cfg = StorageConfig {
         mode: Mode::Embedded,
         port: None,
     };
     save_config(&layout, &cfg).unwrap();
-    assert_eq!(load_config(&layout).unwrap(), Some(cfg));
+    assert_eq!(load_config_file(&layout).unwrap(), Some(cfg.clone()));
     assert_eq!("server".parse::<Mode>().unwrap(), Mode::Server);
     assert!("sqlite".parse::<Mode>().is_err());
 

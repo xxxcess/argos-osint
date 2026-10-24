@@ -18,20 +18,29 @@ cargo test --workspace                 # offline; ARGOS_EMBED unset
 ARGOS_EMBED=1 cargo test -p argos-osint-core -- --ignored minilm
 ```
 
-Check order is fmt → clippy → test. MiniLM tests download a ~23 MB model. Rust 1.95.0 is pinned (minimum 1.95, required by the SurrealDB 3.3.4 SDK); `.cargo/config.toml` uses the vendored `tools/protoc` shim. First default build is slow and needs a C toolchain; local default builds include LanceDB.
+Check order is fmt → clippy → test. MiniLM tests download a ~23 MB model. Rust 1.95.0 is pinned (minimum 1.95, required by the SurrealDB 3.3.4 SDK); `.cargo/config.toml` uses the vendored `tools/protoc` shim. First default build is slow and needs a C toolchain; default builds include the embedded SurrealDB engine (RocksDB) and no longer LanceDB (`--features lancedb` opts in).
 
-SurrealDB migration (in progress, `.planning/2026-10-22-surrealdb/` design.md + acceptance.md): the remote-only SDK is behind the non-default `surreal` feature. `python3 scripts/test_surreal.py` downloads the pinned, SHA-256-checked SurrealDB 3.3.4 server and runs `crates/argos-osint-core/tests/storage_contracts.rs` against real RocksDB disk servers it starts and stops in temp dirs. Without `ARGOS_SURREAL_BIN` the suite skips; `ARGOS_SURREAL_REQUIRED=1` (set by the script; CI will set it once the pending `ci.yml` change is pushed) makes a missing server fail. It never touches an Argos home, `argos.db` or `memory_lancedb/`.
+SurrealDB storage (`.planning/2026-10-22-surrealdb/` design.md + acceptance.md): the default features are `embedded` + `nlp`, so a plain `cargo build`/`cargo run` keeps all data in embedded SurrealDB (RocksDB on disk under `<ARGOS_HOME>/storage/surreal`, in-process, no network). Server mode is opt-in: the `server` feature (`--no-default-features --features server,nlp`) adds the WebSocket client, and `argos storage init --mode server` or `ARGOS_STORAGE_MODE=server|embedded` selects the mode (env, then `storage/config.json`, then embedded).
+
+Local matrix, the same two legs CI runs (`scripts/local_matrix.sh`, nonzero exit on any failure):
+
+```sh
+scripts/local_matrix.sh --storage embedded   # fmt, default clippy -D warnings, cargo test --workspace, test_surreal.py --mode embedded
+scripts/local_matrix.sh --storage server [--surreal-bin PATH]   # server,nlp clippy (core+bin), test_surreal.py --mode server
+```
+
+Unit tests run once (embedded leg); the `storage_*` contract tests run in both legs. `python3 scripts/test_surreal.py --mode server|embedded|both` downloads the pinned, SHA-256-checked SurrealDB 3.3.4 server (or uses `--bin`) and runs every `storage_*` test with the leg's features; `ARGOS_SURREAL_REQUIRED=1` (set by the script) makes a missing server fail, and without `ARGOS_SURREAL_BIN` server tests skip. It never touches an Argos home.
 
 ## OpenCode and Cargo
 
-OpenCode agents build/test without LanceDB: every `build`, `test`, or `clippy` uses `python3 scripts/agent_cargo.py`, `--locked --no-default-features`, and unset `ARGOS_EMBED`; never add `--features lancedb`. The wrapper isolates artifacts in `target/agents`; reserve `target/debug` for the user's `cargo run`. Serialize jobs sharing that cache, keep it, and never delete locks or kill unrelated Cargo processes. For artifact-lock issues, identify the owner with `lsof -nP target/debug/.cargo-lock`; registry locks are separate. `cargo fmt` can run directly.
+OpenCode agents build/test without LanceDB: every `build`, `test`, or `clippy` uses `python3 scripts/agent_cargo.py`, `--locked` (default features, i.e. embedded SurrealDB; `--no-default-features --features server,nlp` for the server leg), and unset `ARGOS_EMBED`; never add `--features lancedb`. The wrapper isolates artifacts in `target/agents`; reserve `target/debug` for the user's `cargo run`. Serialize jobs sharing that cache, keep it, and never delete locks or kill unrelated Cargo processes. For artifact-lock issues, identify the owner with `lsof -nP target/debug/.cargo-lock`; registry locks are separate. `cargo fmt` can run directly.
 
 OpenCode check sequence (shell timeout 600000):
 
 ```sh
 cargo fmt --all --check
-python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked --no-default-features -- -D warnings
-python3 scripts/agent_cargo.py test --workspace --locked --no-default-features
+python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked -- -D warnings
+python3 scripts/agent_cargo.py test --workspace --locked
 ```
 
 After a successful trio, run `graphify update .`. On `build`, load `argos-implement` and delegate each disjoint file unit for the current phase to `ecc-edit` (same turn in background if multiple); do not edit those files or poll while children run. Editors format changed Rust files and do not test. On failure, route relevant output back to the owning editor, rerun the failed command, then the trio. `plan` does not launch editors. OpenCode V2 tool rules: use the provider schema; never call `execute` or invent namespaces. The primary allowlist is `.opencode/opencode.json`; tools are read, grep, glob, edit, write, shell, skill, webfetch, websearch, question, and subagent. `build` may use explore/planner/reviewer/edit; `plan` may use explore/planner/reviewer. Repo questions start with `graphify query` when `graphify-out/graph.json` exists; expand vocabulary from `graphify-out/.vocab.txt`, then use `path`/`explain` and read source locations. Prefer `graphify-out/wiki/index.md` when present; use `graphify-out/GRAPH_REPORT.md` for architecture review or when graph queries are thin. Dirty graph output after hooks is expected; skip graphify only if the graph itself is the bug or the user asks.

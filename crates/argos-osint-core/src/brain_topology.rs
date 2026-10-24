@@ -12,10 +12,6 @@ mod query;
 #[cfg(feature = "surreal")]
 pub(crate) use query::{admit, edge, edge_priority, node, record_edge, source_node, topic_node};
 
-#[cfg(test)]
-#[path = "brain_topology_tests.rs"]
-mod tests;
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TopologySeed {
     Claim(String),

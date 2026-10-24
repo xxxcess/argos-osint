@@ -407,6 +407,203 @@ async fn build_surreal(
     Ok(count)
 }
 
+/// `Store::related_articles` on the selected Atlas store: under SurrealDB
+/// the pairs come from `storage::atlas_metadata::related_pairs` and the
+/// articles and metadata from the repository; otherwise SQLite.
+pub async fn related_articles_on(
+    store: &crate::atlas_store::AtlasStore,
+    run_id: &str,
+    article_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<RelatedArticlePage> {
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        return related_surreal(store, repo, run_id, article_id, offset, limit).await;
+    }
+    store.sqlite("related articles", |s| {
+        s.related_articles(run_id, article_id, offset, limit)
+    })
+}
+
+#[cfg(feature = "surreal")]
+async fn related_surreal(
+    store: &crate::atlas_store::AtlasStore,
+    repo: &crate::storage::repo::Repository,
+    run_id: &str,
+    article_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<RelatedArticlePage> {
+    let limit = limit.clamp(1, 100);
+    let articles = store.list_articles(run_id).await?;
+    let lookup: HashMap<_, _> = articles.iter().map(|a| (a.id.as_str(), a)).collect();
+    let mut pairs = crate::storage::atlas_metadata::related_pairs(repo.db(), run_id, article_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("atlas related pairs: {e}"))?;
+    // SQLite joins the counterpart article; pairs whose counterpart is gone drop out.
+    let other = |p: &crate::storage::atlas_metadata::RelatedPairRow| {
+        if p.left_id == article_id {
+            p.right_id.clone()
+        } else {
+            p.left_id.clone()
+        }
+    };
+    pairs.retain(|p| lookup.contains_key(other(p).as_str()));
+    pairs.sort_by(|a, b| {
+        let (oa, ob) = (lookup[other(a).as_str()], lookup[other(b).as_str()]);
+        (a.named_count == 0)
+            .cmp(&(b.named_count == 0))
+            .then_with(|| b.shared_count.cmp(&a.shared_count))
+            .then_with(|| b.rarity.total_cmp(&a.rarity))
+            .then_with(|| ob.published_at.cmp(&oa.published_at))
+            .then_with(|| oa.id.cmp(&ob.id))
+    });
+    let mut metadata: HashMap<String, Option<crate::atlas_metadata::ArticleMetadata>> =
+        HashMap::new();
+    let mut rows = vec![];
+    for p in pairs {
+        let (Some(a), Some(b)) = (
+            lookup.get(p.left_id.as_str()),
+            lookup.get(p.right_id.as_str()),
+        ) else {
+            continue;
+        };
+        if revision(a) != p.left_revision || revision(b) != p.right_revision {
+            continue;
+        }
+        for id in [&a.id, &b.id] {
+            if !metadata.contains_key(id) {
+                metadata.insert(id.clone(), store.metadata(run_id, id).await?);
+            }
+        }
+        let shared: Vec<SharedMention> = serde_json::from_str(&p.shared_json)?;
+        if shared_entity_mentions_with(a, metadata[&a.id].as_ref(), b, metadata[&b.id].as_ref())
+            .len()
+            < MIN_SHARED_ENTITIES
+        {
+            continue;
+        }
+        let target = if p.left_id == article_id { b } else { a };
+        rows.push(RelatedArticle {
+            article: (*target).clone(),
+            shared_mentions: shared.into_iter().map(|m| m.original_text).collect(),
+            originating_run_ids: vec![run_id.into()],
+            place_only: p.named_count == 0,
+            ..RelatedArticle::default()
+        });
+    }
+    let total = rows.len();
+    let rows = rows.into_iter().skip(offset).take(limit).collect();
+    let coverage = match store.metadata(run_id, article_id).await? {
+        Some(m) if m.entity_state == MetadataState::Complete => "available",
+        Some(m) if m.entity_state == MetadataState::Pending => "loading",
+        _ => "unavailable",
+    }
+    .into();
+    Ok(RelatedArticlePage {
+        rows,
+        total,
+        offset,
+        has_more: offset.saturating_add(limit) < total,
+        coverage,
+    })
+}
+
+/// `Store::related_articles_for_memory` on the selected Atlas store: the
+/// memory's origins (`storage::browse_assoc::article_origins_for_memory`
+/// under SurrealDB) and the union of their Related pages.
+pub async fn related_articles_for_memory_on(
+    store: &crate::atlas_store::AtlasStore,
+    memory_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<RelatedArticlePage> {
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        let origins =
+            crate::storage::browse_assoc::article_origins_for_memory(repo, memory_id).await?;
+        let mut pages = Vec::new();
+        for origin in &origins {
+            let mut start = 0;
+            loop {
+                let page =
+                    related_articles_on(store, &origin.run_id, &origin.article_id, start, 100)
+                        .await?;
+                let more = page.has_more;
+                pages.push(page);
+                if !more {
+                    break;
+                }
+                start += 100;
+            }
+        }
+        return Ok(union_pages(&origins, pages, offset, limit));
+    }
+    store.sqlite("related articles for memory", |s| {
+        s.related_articles_for_memory(memory_id, offset, limit)
+    })
+}
+
+/// Merge the Related pages of a memory's origins (shared by both stores).
+pub(crate) fn union_pages(
+    origins: &[ArticleOrigin],
+    pages: Vec<RelatedArticlePage>,
+    offset: usize,
+    limit: usize,
+) -> RelatedArticlePage {
+    let excluded: BTreeSet<_> = origins.iter().map(|o| o.article_id.as_str()).collect();
+    let mut union: BTreeMap<String, RelatedArticle> = BTreeMap::new();
+    let mut available = false;
+    for page in pages {
+        available |= page.coverage == "available";
+        for row in page.rows {
+            if excluded.contains(row.article.id.as_str()) {
+                continue;
+            }
+            union
+                .entry(row.article.id.clone())
+                .and_modify(|r| {
+                    for mention in &row.shared_mentions {
+                        if !r.shared_mentions.contains(mention) {
+                            r.shared_mentions.push(mention.clone());
+                        }
+                    }
+                    for run in &row.originating_run_ids {
+                        if !r.originating_run_ids.contains(run) {
+                            r.originating_run_ids.push(run.clone());
+                        }
+                    }
+                    r.place_only &= row.place_only;
+                })
+                .or_insert(row);
+        }
+    }
+    let mut rows: Vec<_> = union.into_values().collect();
+    rows.sort_by(|a, b| {
+        a.place_only
+            .cmp(&b.place_only)
+            .then_with(|| b.shared_mentions.len().cmp(&a.shared_mentions.len()))
+            .then_with(|| b.article.published_at.cmp(&a.article.published_at))
+            .then_with(|| a.article.id.cmp(&b.article.id))
+    });
+    let total = rows.len();
+    let limit = limit.clamp(1, 100);
+    let rows = rows.into_iter().skip(offset).take(limit).collect();
+    RelatedArticlePage {
+        rows,
+        total,
+        offset,
+        has_more: offset.saturating_add(limit) < total,
+        coverage: if available {
+            "available"
+        } else {
+            "unavailable"
+        }
+        .into(),
+    }
+}
+
 /// The Related pairs of one run's articles and metadata (pure; both stores
 /// publish its output).
 pub fn plan(
@@ -784,64 +981,20 @@ impl Store {
         limit: usize,
     ) -> Result<RelatedArticlePage> {
         let origins = self.article_origins_for_memory(memory_id)?;
-        let excluded: BTreeSet<_> = origins.iter().map(|o| o.article_id.as_str()).collect();
-        let mut union: BTreeMap<String, RelatedArticle> = BTreeMap::new();
-        let mut available = false;
+        let mut pages = Vec::new();
         for origin in origins.iter() {
             let mut start = 0;
             loop {
                 let page = self.related_articles(&origin.run_id, &origin.article_id, start, 100)?;
-                available |= page.coverage == "available";
-                for row in page.rows {
-                    if excluded.contains(row.article.id.as_str()) {
-                        continue;
-                    }
-                    union
-                        .entry(row.article.id.clone())
-                        .and_modify(|r| {
-                            for mention in &row.shared_mentions {
-                                if !r.shared_mentions.contains(mention) {
-                                    r.shared_mentions.push(mention.clone());
-                                }
-                            }
-                            for run in &row.originating_run_ids {
-                                if !r.originating_run_ids.contains(run) {
-                                    r.originating_run_ids.push(run.clone());
-                                }
-                            }
-                            r.place_only &= row.place_only;
-                        })
-                        .or_insert(row);
-                }
-                if !page.has_more {
+                let more = page.has_more;
+                pages.push(page);
+                if !more {
                     break;
                 }
                 start += 100;
             }
         }
-        let mut rows: Vec<_> = union.into_values().collect();
-        rows.sort_by(|a, b| {
-            a.place_only
-                .cmp(&b.place_only)
-                .then_with(|| b.shared_mentions.len().cmp(&a.shared_mentions.len()))
-                .then_with(|| b.article.published_at.cmp(&a.article.published_at))
-                .then_with(|| a.article.id.cmp(&b.article.id))
-        });
-        let total = rows.len();
-        let limit = limit.clamp(1, 100);
-        let rows = rows.into_iter().skip(offset).take(limit).collect();
-        Ok(RelatedArticlePage {
-            rows,
-            total,
-            offset,
-            has_more: offset.saturating_add(limit) < total,
-            coverage: if available {
-                "available"
-            } else {
-                "unavailable"
-            }
-            .into(),
-        })
+        Ok(union_pages(&origins, pages, offset, limit))
     }
 }
 

@@ -201,6 +201,40 @@ pub async fn related_count(db: &Surreal<Any>, run_id: &str) -> Result<usize, TxE
     Ok(r.take::<Option<i64>>(0)?.unwrap_or(0) as usize)
 }
 
+/// One stored Related pair (`atlas_related_article`).
+#[derive(Debug, Clone, SurrealValue)]
+pub struct RelatedPairRow {
+    pub left_id: String,
+    pub right_id: String,
+    pub left_revision: String,
+    pub right_revision: String,
+    pub shared_json: String,
+    pub named_count: i64,
+    pub shared_count: i64,
+    pub rarity: f64,
+}
+
+/// The stored Related pairs of one run that include `article_id` on either
+/// side (`Store::related_articles`' pair read; the caller orders them).
+pub async fn related_pairs(
+    db: &Surreal<Any>,
+    run_id: &str,
+    article_id: &str,
+) -> Result<Vec<RelatedPairRow>, TxError> {
+    let mut r = db
+        .query(
+            "SELECT left_id, right_id, left_revision, right_revision, shared_json,
+                    named_count, shared_count, rarity
+             FROM atlas_related_article
+             WHERE run_id = $run AND (left_id = $article OR right_id = $article)",
+        )
+        .bind(("run", run_id.to_string()))
+        .bind(("article", article_id.to_string()))
+        .await?
+        .check()?;
+    Ok(r.take(0)?)
+}
+
 /// `atlas_save_metadata`: false when the article is gone or changed since
 /// `metadata` was captured. A same-input save keeps the stored
 /// classification; the article's mentions and related pairs are replaced,

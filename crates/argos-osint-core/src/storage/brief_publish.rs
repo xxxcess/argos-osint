@@ -296,8 +296,19 @@ async fn publish_links(repo: &Repository, article_id: &str, job_id: &str) -> Res
     };
     let (article, job) = (article_id.to_string(), job_id.to_string());
     let snapshot = inference.snapshot_id.clone();
+    // Unique per publication, fixed across transaction retries: a later
+    // Links publication of the same job must not reuse an op_key.
+    let nonce = format!(
+        "brief-leads:{job_id}:{}",
+        chrono::Utc::now().timestamp_micros()
+    );
     let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
-        let (article, job, snapshot) = (article.clone(), job.clone(), snapshot.clone());
+        let (article, job, snapshot, nonce) = (
+            article.clone(),
+            job.clone(),
+            snapshot.clone(),
+            nonce.clone(),
+        );
         async move {
             let now = chrono::Utc::now();
             let mut r = run(
@@ -413,7 +424,7 @@ async fn publish_links(repo: &Repository, article_id: &str, job_id: &str) -> Res
             .await?;
             let mut touched = current.clone();
             touched.extend(retired);
-            enqueue_index(&tx, &touched, &format!("brief-leads:{job}"), now).await?;
+            enqueue_index(&tx, &touched, &nonce, now).await?;
             let required = required_receipts(&tx, &snapshot, &article).await?;
             Ok(Some((snapshot, required)))
         }

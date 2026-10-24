@@ -191,6 +191,9 @@ pub struct JobHandle {
     prior_active_ms: i64,
     cancel: Arc<AtomicBool>,
     finished: bool,
+    /// The row lives in the repository's `job` table (SurrealDB selected);
+    /// no SQLite connection is opened for it.
+    surreal: bool,
 }
 
 impl std::fmt::Debug for JobHandle {
@@ -210,6 +213,9 @@ impl JobHandle {
     /// Like [`begin`](Self::begin) but adopts an existing cancel flag, so the
     /// operation's own stop flag and Jobs → Cancel are the same switch.
     pub fn begin_with(db: &Path, spec: JobSpec, cancel: Arc<AtomicBool>) -> Result<Self> {
+        if crate::recon::backend::surreal_selected() {
+            return Ok(Self::begin_surreal(db, spec, cancel));
+        }
         let conn = open(db)?;
         let _ = ensure_beat(db);
         let ts = now();
@@ -306,7 +312,79 @@ impl JobHandle {
             prior_active_ms,
             cancel,
             finished: false,
+            surreal: false,
         })
+    }
+
+    /// [`begin_with`](Self::begin_with) on the repository: the `job` row and
+    /// its `job.started` event are written in order on the storage runtime
+    /// (`storage::recon_jobs::begin_app_job`, `storage::event_log`).
+    fn begin_surreal(db: &Path, spec: JobSpec, cancel: Arc<AtomicBool>) -> Self {
+        let id = if spec.id.is_empty() {
+            new_job_id(&spec.operation)
+        } else {
+            spec.id.clone()
+        };
+        let correlation = if spec.correlation_id.is_empty() {
+            id.clone()
+        } else {
+            spec.correlation_id.clone()
+        };
+        live()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone(), cancel.clone());
+        #[cfg(feature = "surreal")]
+        {
+            let (spec, id, correlation) = (spec.clone(), id.clone(), correlation.clone());
+            crate::storage::runtime::spawn_ordered(async move {
+                let Ok(repo) = crate::storage::runtime::repository().await else {
+                    return;
+                };
+                let job = crate::storage::recon_jobs::AppJob {
+                    id: &id,
+                    operation: &spec.operation,
+                    app: &spec.app,
+                    title: &spec.title,
+                    run_ref: &spec.run_ref,
+                    resource_ref: &spec.resource_ref,
+                    parent: Some(spec.parent_id.as_str()),
+                };
+                if crate::storage::recon_jobs::begin_app_job(&repo, &job)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let _ = crate::storage::event_log::record_event(
+                    repo.db(),
+                    &NewEvent {
+                        severity: Some(Severity::Info),
+                        app: spec.app.clone(),
+                        event_type: "job.started".into(),
+                        message: format!("Started: {}", spec.title),
+                        job_id: id.clone(),
+                        run_id: spec.run_ref.clone(),
+                        resource_ref: spec.resource_ref.clone(),
+                        correlation_id: correlation,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            });
+        }
+        Self {
+            db: db.to_path_buf(),
+            id,
+            app: spec.app,
+            correlation,
+            run_ref: spec.run_ref,
+            span: Instant::now(),
+            prior_active_ms: 0,
+            cancel,
+            finished: false,
+            surreal: true,
+        }
     }
 
     pub fn id(&self) -> &str {
@@ -341,6 +419,10 @@ impl JobHandle {
     /// Link a run reference learned after launch (e.g. a new Atlas run id).
     pub fn link_run(&mut self, run_ref: &str) {
         self.run_ref = run_ref.into();
+        if self.surreal {
+            // Carried to the row by `finish` (`finish_recon_job` run_ref).
+            return;
+        }
         if let Ok(conn) = open(&self.db) {
             let _ = conn.execute(
                 "UPDATE argos_jobs SET run_ref=?2 WHERE id=?1",
@@ -351,6 +433,25 @@ impl JobHandle {
 
     /// Current phase and progress; doubles as a heartbeat.
     pub fn phase(&self, phase: &str, done: Option<i64>, total: Option<i64>) {
+        if self.surreal {
+            #[cfg(feature = "surreal")]
+            {
+                let (id, phase, cancel) = (self.id.clone(), phase.to_string(), self.cancel.clone());
+                crate::storage::runtime::spawn_ordered(async move {
+                    let Ok(repo) = crate::storage::runtime::repository().await else {
+                        return;
+                    };
+                    if let Ok(true) = crate::storage::recon_jobs::set_job_progress(
+                        &repo, &id, &phase, done, total,
+                    )
+                    .await
+                    {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                });
+            }
+            return;
+        }
         if let Ok(conn) = open(&self.db) {
             let _ = conn.execute(
                 "UPDATE argos_jobs SET phase=?2, progress_done=?3, progress_total=?4,
@@ -380,6 +481,10 @@ impl JobHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.id);
+        if self.surreal {
+            self.write_finish_surreal(outcome);
+            return;
+        }
         let Ok(conn) = open(&self.db) else {
             return;
         };
@@ -437,6 +542,87 @@ impl JobHandle {
                 ..Default::default()
             },
         );
+    }
+}
+
+impl JobHandle {
+    /// `write_finish` on the repository, queued behind the phase writes so
+    /// the terminal state lands last.
+    fn write_finish_surreal(&mut self, outcome: &Finish) {
+        #[cfg(feature = "surreal")]
+        {
+            let (category, summary, result_ref) = finish_fields(outcome);
+            let (severity, message) = finish_event(outcome);
+            let state = outcome.state();
+            let (id, app, run, corr) = (
+                self.id.clone(),
+                self.app.clone(),
+                self.run_ref.clone(),
+                self.correlation.clone(),
+            );
+            let active_ms = self.active_ms();
+            crate::storage::runtime::spawn_ordered(async move {
+                let Ok(repo) = crate::storage::runtime::repository().await else {
+                    return;
+                };
+                let _ = crate::storage::recon_jobs::finish_recon_job(
+                    &repo,
+                    &id,
+                    state,
+                    Some(run.as_str()),
+                    &category,
+                    &summary,
+                    &result_ref,
+                    active_ms,
+                )
+                .await;
+                let _ = crate::storage::event_log::record_event(
+                    repo.db(),
+                    &NewEvent {
+                        severity: Some(severity),
+                        app,
+                        event_type: format!("job.{state}"),
+                        message,
+                        job_id: id,
+                        run_id: run,
+                        correlation_id: corr,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            });
+        }
+        #[cfg(not(feature = "surreal"))]
+        let _ = outcome;
+    }
+}
+
+/// Error category, summary and result reference recorded for an outcome.
+#[cfg_attr(not(feature = "surreal"), allow(dead_code))]
+fn finish_fields(outcome: &Finish) -> (String, String, String) {
+    match outcome {
+        Finish::Completed { result_ref } => (String::new(), String::new(), result_ref.clone()),
+        Finish::Partial { summary } => ("partial".into(), summary.clone(), String::new()),
+        Finish::Failed { category, summary } => (category.clone(), summary.clone(), String::new()),
+        Finish::Paused { summary } | Finish::Waiting { summary } => {
+            (String::new(), summary.clone(), String::new())
+        }
+        Finish::Blocked { summary } => ("blocked".into(), summary.clone(), String::new()),
+        Finish::Cancelled { summary } => ("cancelled".into(), summary.clone(), String::new()),
+    }
+}
+
+/// Severity and message of the terminal `job.<state>` event.
+#[cfg_attr(not(feature = "surreal"), allow(dead_code))]
+fn finish_event(outcome: &Finish) -> (Severity, String) {
+    match outcome {
+        Finish::Completed { .. } => (Severity::Info, "Completed".to_string()),
+        Finish::Partial { summary } => (Severity::Warn, format!("Partial: {summary}")),
+        Finish::Failed { summary, .. } => (Severity::Error, format!("Failed: {summary}")),
+        Finish::Paused { .. } => (Severity::Info, "Paused".to_string()),
+        Finish::Waiting { summary } => (Severity::Info, format!("Waiting: {summary}")),
+        Finish::Blocked { summary } => (Severity::Warn, format!("Blocked: {summary}")),
+        Finish::Cancelled { .. } => (Severity::Warn, "Cancelled".to_string()),
     }
 }
 

@@ -232,3 +232,57 @@ pub(crate) fn spawn_job_sweeper() {
 pub(crate) fn spawn_job_sweeper() {
     unreachable!("SurrealDB Jobs is off without the surreal feature")
 }
+
+/// Intel "Retry extraction" on the repository: the article's shared refresh
+/// is retried by `refresh_driver::retry_owner` (queued task runs, ended task
+/// re-enqueued at a new generation) on a plain worker thread, so the draw
+/// loop never waits on the model run. Errors go to the event log.
+#[cfg(feature = "surreal")]
+pub(crate) fn retry_article_extraction(
+    article_id: String,
+    auth: argos_osint_core::secrets::AuthFile,
+    settings: argos_osint_core::provider::SettingsFile,
+) {
+    use argos_osint_core::storage::{refresh_driver, runtime};
+    let _ = std::thread::Builder::new()
+        .name("argos-intel-retry".into())
+        .spawn(move || {
+            let result = runtime::blocking(move |repo| async move {
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let execute =
+                    refresh_driver::pipeline(&auth, &settings, &cancel, std::path::PathBuf::new());
+                refresh_driver::retry_owner(
+                    &repo,
+                    "article",
+                    &article_id,
+                    &settings,
+                    &cancel,
+                    None,
+                    execute,
+                )
+                .await
+            });
+            if let Err(error) = result {
+                let event = argos_osint_core::events::NewEvent {
+                    severity: Some(argos_osint_core::events::Severity::Error),
+                    app: "intel".into(),
+                    event_type: "insight.retry_error".into(),
+                    message: format!("{error:#}"),
+                    ..Default::default()
+                };
+                let _ = runtime::blocking(move |repo| async move {
+                    argos_osint_core::storage::event_log::record_event(repo.db(), &event)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))
+                });
+            }
+        });
+}
+
+#[cfg(not(feature = "surreal"))]
+pub(crate) fn retry_article_extraction(
+    _article_id: String,
+    _auth: argos_osint_core::secrets::AuthFile,
+    _settings: argos_osint_core::provider::SettingsFile,
+) {
+}

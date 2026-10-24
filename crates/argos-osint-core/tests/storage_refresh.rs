@@ -182,3 +182,51 @@ async fn running_refresh_is_recorded_but_left_to_its_fence() {
     assert_eq!(task_state(&db, &t1).await, "running");
     assert!(refresh::supersession(&db, &t1).await.unwrap().is_some());
 }
+
+/// `retire_atlas_insight_work` cancels only Atlas-scoped live refresh work,
+/// fences its lease and is idempotent.
+#[tokio::test]
+async fn atlas_insight_work_is_retired_and_articles_are_kept() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "refresh_retire_atlas").await;
+    let s = SettingsFile::default();
+    intel::add_refresh_intent(&db, "a3").await.unwrap();
+    intel::add_refresh_intent(&db, "a4").await.unwrap();
+    let atlas =
+        refresh::schedule_article_refresh(&db, "a3", Some(&input("a3", "x", true)), &s, false)
+            .await
+            .unwrap()
+            .unwrap();
+    let kept =
+        refresh::schedule_article_refresh(&db, "a4", Some(&input("a4", "x", true)), &s, false)
+            .await
+            .unwrap()
+            .unwrap();
+    db.query("UPDATE type::record('insight_refresh_task', $t) SET owner_scope = 'atlas:a3'")
+        .bind(("t", atlas.clone()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let epoch = |t: String| {
+        let db = db.clone();
+        async move {
+            let mut r = db
+                .query("SELECT VALUE lease_epoch FROM ONLY type::record('task', $t)")
+                .bind(("t", t))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+            r.take::<Option<i64>>(0usize).unwrap().unwrap_or(-1)
+        }
+    };
+    let before = epoch(atlas.clone()).await;
+    assert_eq!(refresh::retire_atlas_insight_work(&db).await.unwrap(), 1);
+    assert_eq!(task_state(&db, &atlas).await, "cancelled");
+    assert_eq!(epoch(atlas.clone()).await, before + 1);
+    assert_eq!(task_state(&db, &kept).await, "queued");
+    assert_eq!(refresh::retire_atlas_insight_work(&db).await.unwrap(), 0);
+}

@@ -4415,6 +4415,14 @@ impl App {
         let Some(article) = self.intel_articles.get(self.intel_sel) else {
             return Ok("No article selected".into());
         };
+        if super::surreal_brain::on() {
+            super::surreal_brain::retry_article_extraction(
+                article.id.clone(),
+                self.auth.clone(),
+                self.settings.clone(),
+            );
+            return Ok("Retry extraction started; completed work retained".into());
+        }
         let Some(progress) = argos_osint_core::investigation::insight_execution::owner_progress(
             self.store.connection(),
             "article",

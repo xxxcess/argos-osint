@@ -11,10 +11,9 @@
 //! comparison, generation advance, job/task creation, the owner's
 //! `refresh_job_id` and the supersession of older live tasks commit together.
 //!
-//! Still on the caller: the retained-evidence `PipelineInput`
-//! (`insight_persist::article_input` reads SQLite evidence tables). The
-//! caller builds the input before admission, so it is built even when no
-//! intent exists. Each retired task's `insight.superseded` event goes to
+//! The caller builds the retained-evidence `PipelineInput` before admission
+//! with `storage::pipeline_inputs::article_input` (repository evidence
+//! tables), so it is built even when no intent exists. Each retired task's `insight.superseded` event goes to
 //! the event log (`argos_event`) once the admission commits.
 
 use surrealdb::engine::any::Any;
@@ -413,4 +412,32 @@ pub async fn schedule_article_refresh(
         let _ = super::event_log::record_event(db, &event).await;
     }
     Ok(Some(task))
+}
+
+const RETIRE_ATLAS_SURQL: &str = "
+LET $live = ['queued', 'running', 'retry_scheduled', 'paused'];
+LET $scopes = (SELECT VALUE record::id(id) FROM insight_refresh_task
+  WHERE owner_scope = 'atlas' OR string::starts_with(owner_scope, 'atlas:'));
+LET $done = (UPDATE task SET state = 'cancelled', lease_epoch += 1, lease_owner = '',
+    lease_until = NONE, error_category = 'cancelled_or_stale',
+    error_message = 'Atlas collection contract retired insight work',
+    finished_at = time::now(), updated_at = time::now()
+  WHERE operation = 'insight_refresh' AND state IN $live
+    AND (record::id(id) IN $scopes OR job.app = 'atlas')
+  RETURN VALUE job);
+UPDATE job SET state = 'cancelled', cancel_requested = true,
+    phase = 'Atlas collection contract retired insight work',
+    finished_at = time::now(), updated_at = time::now()
+  WHERE operation = 'insight_refresh' AND state IN array::append($live, 'waiting')
+    AND (app = 'atlas' OR id IN $done) RETURN NONE;
+RETURN array::len($done);";
+
+/// `tasks::retire_atlas_insight_work` on the repository: cancels queued,
+/// running, retrying or paused Atlas insight refresh tasks (owner scope
+/// `atlas` / `atlas:…`, or an Atlas job) and their jobs, advancing the lease
+/// epoch so a claimed worker cannot publish. Returns the tasks cancelled.
+pub async fn retire_atlas_insight_work(db: &Surreal<Any>) -> anyhow::Result<usize> {
+    let mut r = db.query(RETIRE_ATLAS_SURQL).await?.check()?;
+    let n: Option<i64> = r.take(4usize)?;
+    Ok(n.unwrap_or(0).max(0) as usize)
 }

@@ -97,18 +97,25 @@ fn report_drainer<T>(db_path: &std::path::Path, name: &str, result: Result<T>) {
     if !fresh {
         return;
     }
+    let event = crate::events::NewEvent {
+        severity: Some(crate::events::Severity::Error),
+        app: "system".into(),
+        event_type: "drainer.error".into(),
+        message: format!("{name} worker error: {message}"),
+        ..Default::default()
+    };
+    #[cfg(feature = "surreal")]
+    if crate::recon::backend::surreal_selected() {
+        crate::storage::runtime::spawn_ordered(async move {
+            if let Ok(repo) = crate::storage::runtime::repository().await {
+                let _ = crate::storage::event_log::record_event(repo.db(), &event).await;
+            }
+        });
+        return;
+    }
     if let Ok(conn) = Connection::open(db_path) {
         let _ = conn.busy_timeout(Duration::from_secs(2));
-        let _ = crate::events::record_event(
-            &conn,
-            &crate::events::NewEvent {
-                severity: Some(crate::events::Severity::Error),
-                app: "system".into(),
-                event_type: "drainer.error".into(),
-                message: format!("{name} worker error: {message}"),
-                ..Default::default()
-            },
-        );
+        let _ = crate::events::record_event(&conn, &event);
     }
 }
 
@@ -789,6 +796,10 @@ impl WorkerPool {
                                 if !elected {
                                     return Ok(());
                                 }
+                                // Same fence as the SQLite pools' sweep.
+                                let _ =
+                                    crate::storage::refresh::retire_atlas_insight_work(repo.db())
+                                        .await;
                                 let auth = crate::secrets::AuthFile::load().unwrap_or_default();
                                 let settings =
                                     crate::provider::SettingsFile::load().unwrap_or_default();

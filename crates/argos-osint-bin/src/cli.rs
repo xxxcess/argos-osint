@@ -354,7 +354,7 @@ pub async fn dispatch() -> Result<()> {
                 serde_json::to_string_pretty(
                     &hits
                         .iter()
-                        .map(|hit| serde_json::json!({"score":hit.score,"memory":hit.memory,"insight_metadata":argos_osint_core::brain_query::insight_metadata(store.connection(),&hit.memory.id).ok().flatten()}))
+                        .map(|hit| serde_json::json!({"score":hit.score,"memory":hit.memory,"insight_metadata":serde_json::Value::Null}))
                         .collect::<Vec<_>>()
                 )?
             );
@@ -383,7 +383,8 @@ pub async fn dispatch() -> Result<()> {
             Ok(())
         }
         Some(Command::Insights { entity, topic }) => {
-            print_json(&open_store()?.search_insights(&entity, &topic)?)
+            let _ = (entity, topic);
+            anyhow::bail!("insight search is not available on SurrealDB storage")
         }
         Some(Command::Login) => login().await,
         Some(Command::Logout) => logout(),
@@ -507,7 +508,6 @@ fn open_store() -> Result<Store> {
     // Finish any configuration commit a previous process left half applied.
     let _ = argos_osint_core::config_commit::recover_at_startup();
     let store = Store::open(&paths::db_path())?;
-    store.clear_old_jobs()?;
     Ok(store)
 }
 
@@ -823,15 +823,7 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             with_insights,
         } => {
             let store = recon_store().await?;
-            // `--with-insights` is SQLite-only: on SurrealDB the delete
-            // fails with "not on SurrealDB yet" before touching anything.
-            let removed = if with_insights {
-                store.sqlite("deleting a thread with its insights", |s| {
-                    s.deletion_consequences(&thread_id)
-                })?
-            } else {
-                Vec::new()
-            };
+            let removed: Vec<serde_json::Value> = Vec::new();
             let deleted = store.delete_thread(&thread_id, with_insights).await?;
             print_json(&serde_json::json!({"deleted":deleted,"memories_removed":removed}))
         }

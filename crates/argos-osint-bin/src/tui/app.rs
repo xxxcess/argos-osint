@@ -10043,7 +10043,9 @@ impl App {
             });
             return Ok("Deleting investigation (insights are kept on SurrealDB)…".into());
         }
-        let db = self.background_db.clone().expect("production database");
+        let Some(db) = self.background_db.clone() else {
+            anyhow::bail!("no investigation store is configured");
+        };
         std::thread::spawn(move || {
             let outcome = Store::open_light(&db)
                 .and_then(|mut store| {
@@ -10065,13 +10067,17 @@ impl App {
             self.memories_deleting.insert(id.clone()),
             "This memory is already being deleted"
         );
-        let db = self.background_db.clone().expect("production database");
+        // Only the SQLite branch needs the database path; under SurrealDB
+        // there may be none, so it must not be required up front.
+        let db = self.background_db.clone();
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
             let outcome = if surreal_brain::on() {
                 surreal_brain::delete(&id)
-            } else {
+            } else if let Some(db) = db {
                 Store::open_light(&db).and_then(|store| store.delete_memory(&id))
+            } else {
+                Err(anyhow::anyhow!("no memory store is configured"))
             }
             .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::MemoryDeleted {

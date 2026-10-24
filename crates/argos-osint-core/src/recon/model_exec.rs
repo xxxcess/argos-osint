@@ -1154,6 +1154,27 @@ pub fn ensure_operation(
     let Some(db_path) = db_path else {
         return Ok(());
     };
+    #[cfg(feature = "surreal")]
+    if crate::storage::runtime::configured() {
+        let (id, run, task, role) = (
+            scope.operation_id.to_string(),
+            scope.run_id.unwrap_or("").to_string(),
+            scope.task_id.unwrap_or("").to_string(),
+            scope.role.to_string(),
+        );
+        let (generation, draft, epoch) = (
+            i64::from(scope.generation),
+            draft.to_string(),
+            scope.task_epoch,
+        );
+        on_repository(move |repo| async move {
+            crate::storage::recon_jobs::ensure_operation(
+                &repo, &id, &run, &task, &role, generation, &draft, epoch,
+            )
+            .await
+        });
+        return Ok(());
+    }
     let store = Store::open(db_path)?;
     let now = now_rfc3339();
     store.conn.execute(
@@ -1184,6 +1205,14 @@ pub fn save_operation_draft(db_path: Option<&Path>, operation_id: &str, draft: &
     let Some(db_path) = db_path else {
         return Ok(());
     };
+    #[cfg(feature = "surreal")]
+    if crate::storage::runtime::configured() {
+        let (id, draft) = (operation_id.to_string(), draft.to_string());
+        on_repository(move |repo| async move {
+            crate::storage::recon_exec::set_operation_draft(&repo, &id, &draft).await
+        });
+        return Ok(());
+    }
     let store = Store::open(db_path)?;
     store.conn.execute(
         "UPDATE recon_model_operations SET draft = ?1, updated_at = ?2 WHERE id = ?3",
@@ -1202,6 +1231,16 @@ pub fn update_operation_status(
     let Some(db_path) = db_path else {
         return Ok(());
     };
+    #[cfg(feature = "surreal")]
+    if crate::storage::runtime::configured() {
+        let (id, status) = (operation_id.to_string(), status.to_string());
+        let final_id = final_message_id.map(str::to_string);
+        on_repository(move |repo| async move {
+            crate::storage::recon_exec::finish_operation(&repo, &id, &status, final_id.as_deref())
+                .await
+        });
+        return Ok(());
+    }
     let store = Store::open(db_path)?;
     store.conn.execute(
         "UPDATE recon_model_operations SET status = ?1, final_message_id = COALESCE(?2, final_message_id), updated_at = ?3 WHERE id = ?4",
@@ -1226,6 +1265,37 @@ fn record_attempt_start(
     let Some(db_path) = db_path else {
         return Ok(attempt_id);
     };
+    #[cfg(feature = "surreal")]
+    if crate::storage::runtime::configured() {
+        let owned = [
+            attempt_id.clone(),
+            operation_id.to_string(),
+            route.provider.to_string(),
+            route.account.to_string(),
+            route.model.to_string(),
+            transport.to_string(),
+            queued_at.to_string(),
+            declaration.to_string(),
+        ];
+        on_repository(move |repo| async move {
+            let [id, op, provider, account, model, transport, queued, decl] = &owned;
+            let start = crate::storage::recon_jobs::AttemptStart {
+                id,
+                operation_id: op,
+                generation,
+                route_index,
+                attempt,
+                provider,
+                account,
+                model,
+                transport,
+                queued_at: queued,
+                declaration_json: decl,
+            };
+            crate::storage::recon_jobs::record_attempt_start(&repo, &start).await
+        });
+        return Ok(attempt_id);
+    }
     let store = Store::open(db_path)?;
     let now = now_rfc3339();
     store.conn.execute(
@@ -1266,6 +1336,15 @@ fn record_attempt_finish(
     let Some(db_path) = db_path else {
         return Ok(());
     };
+    #[cfg(feature = "surreal")]
+    if crate::storage::runtime::configured() {
+        let id = attempt_id.to_string();
+        let finish = attempt_finish(outcome, timings);
+        on_repository(move |repo| async move {
+            crate::storage::recon_jobs::record_attempt_finish(&repo, &id, &finish).await
+        });
+        return Ok(());
+    }
     let store = Store::open(db_path)?;
     let now = now_rfc3339();
     store.conn.execute(
@@ -1330,6 +1409,58 @@ fn record_attempt_finish(
         ],
     )?;
     Ok(())
+}
+
+/// Run one ledger write on the repository, in start order (an attempt's
+/// finish never lands before its start). Best-effort, like telemetry.
+#[cfg(feature = "surreal")]
+fn on_repository<F, Fut>(write: F)
+where
+    F: FnOnce(crate::storage::repo::Repository) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<()>> + Send,
+{
+    crate::storage::runtime::spawn_ordered(async move {
+        if let Ok(repo) = crate::storage::runtime::repository().await {
+            let _ = write(repo).await;
+        }
+    });
+}
+
+/// The repository form of an attempt's finish (`record_attempt_finish`).
+#[cfg(feature = "surreal")]
+fn attempt_finish(
+    outcome: &AttemptOutcome,
+    timings: &AttemptTimings,
+) -> crate::storage::recon_jobs::AttemptFinish {
+    crate::storage::recon_jobs::AttemptFinish {
+        outcome: outcome.outcome.clone(),
+        failure_category: outcome.category.clone().unwrap_or_default(),
+        http_status: outcome.http_status.map(i64::from),
+        request_id: outcome.request_id.clone().unwrap_or_default(),
+        finish_reason: outcome.finish_reason.clone().unwrap_or_default(),
+        char_count: outcome.char_count as i64,
+        wait_ms: outcome.wait_ms as i64,
+        error_message: outcome.error_message.clone().unwrap_or_default(),
+        queued_at: timings.queued_at.clone(),
+        admitted_at: timings.admitted_at.clone(),
+        sent_at: timings.sent_at.clone(),
+        first_response_at: timings.first_response_at.clone(),
+        elapsed_ms: timings.elapsed_ms,
+        queue_ms: timings.queue_ms,
+        ttfb_ms: timings.ttfb_ms,
+        prompt_tokens: timings.prompt_tokens,
+        completion_tokens: timings.completion_tokens,
+        reasoning_tokens: timings.reasoning_tokens,
+        visible_tokens: timings.visible_tokens,
+        reported_cost_usd: timings.reported_cost_usd,
+        response_headers_ms: timings.response_headers_ms,
+        first_reasoning_ms: timings.first_reasoning_ms,
+        first_output_ms: timings.first_output_ms,
+        stream_completion_ms: timings.stream_completion_ms,
+        stream_completed: timings.stream_completed != 0,
+        policy_diagnostics_json: serde_json::to_string(&timings.policy_diagnostics)
+            .unwrap_or_else(|_| "[]".into()),
+    }
 }
 
 /// Operation label for the all-Jev generative-chain configuration error.
@@ -1399,7 +1530,11 @@ where
     let admitted: Arc<Vec<crate::provider_capabilities::ResolvedCapabilities>> = Arc::new(
         secrets
             .iter()
-            .map(|secret| crate::provider_capabilities::admit(secret, db_path))
+            .map(|secret| {
+                // The capability cache is SQLite-only: never open it under SurrealDB.
+                let cache = db_path.and_then(super::backend::sqlite_path);
+                crate::provider_capabilities::admit(secret, cache)
+            })
             .collect(),
     );
     let contract = scope.contract.clone();
@@ -1930,7 +2065,11 @@ where
     let admitted: Arc<Vec<crate::provider_capabilities::ResolvedCapabilities>> = Arc::new(
         secrets
             .iter()
-            .map(|secret| crate::provider_capabilities::admit(secret, db_path))
+            .map(|secret| {
+                // The capability cache is SQLite-only: never open it under SurrealDB.
+                let cache = db_path.and_then(super::backend::sqlite_path);
+                crate::provider_capabilities::admit(secret, cache)
+            })
             .collect(),
     );
     let declaration = {

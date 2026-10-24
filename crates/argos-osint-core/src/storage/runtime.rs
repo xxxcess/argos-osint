@@ -110,6 +110,42 @@ where
     true
 }
 
+type Queued = (
+    std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+    tokio::sync::oneshot::Sender<()>,
+);
+
+/// Like [`spawn`], but writes started here run one at a time in the order
+/// they were started, so a later write (an attempt's finish, a job's
+/// phase) never lands before an earlier one (its start). [`drain`] waits
+/// for them too. `false` without [`init`].
+pub fn spawn_ordered<F>(work: F) -> bool
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    static QUEUE: OnceLock<tokio::sync::mpsc::UnboundedSender<Queued>> = OnceLock::new();
+    let Some(entry) = ENTRY.get() else {
+        return false;
+    };
+    let queue = QUEUE.get_or_init(|| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Queued>();
+        entry.handle.spawn(async move {
+            while let Some((work, done)) = rx.recv().await {
+                work.await;
+                let _ = done.send(());
+            }
+        });
+        tx
+    });
+    let (done, finished) = tokio::sync::oneshot::channel();
+    if queue.send((Box::pin(work), done)).is_err() {
+        return false;
+    }
+    spawn(async move {
+        let _ = finished.await;
+    })
+}
+
 /// Wait for every write started by [`spawn`] (call before the process exits).
 pub async fn drain() {
     loop {

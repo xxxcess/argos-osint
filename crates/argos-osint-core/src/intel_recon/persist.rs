@@ -1,24 +1,17 @@
-//! Store CRUD for Intel article bodies and report jobs.
+//! Store reads and writes for Intel article bodies, plus the one report-job
+//! read the TUI still uses.
 //!
-//! SQLite-only and retired: report jobs are gated off by
-//! `jobs::report_execution_enabled()`, and every live caller of these
-//! methods is the disabled worker, job cleanup, or the TUI. No SurrealDB
-//! path reaches this file; Intel article bodies use `body_db` over
-//! `storage::article_body`. Delete with the SQLite removal commit.
+//! Each method runs on SurrealDB (`storage::article_body`,
+//! `storage::recon_jobs`) when the process selected it, and on the legacy
+//! SQLite connection otherwise. The retired report-job worker paths
+//! (`report_execution_enabled()` was hard-coded false) are gone.
 
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
-use serde_json::json;
 
-use crate::investigation::evidence::{evidence_item_event, EvidenceAttribution};
+#[cfg(feature = "surreal")]
+use crate::storage::article_body as sb;
 use crate::store::Store;
-use crate::telemetry::{EventKind, TelemetryEvent, Trigger};
-
-/// Terminal states of one Intel report revision. Waiting and blocked are not
-/// terminal: they are current state, not a completion.
-fn is_terminal_report_state(state: &str) -> bool {
-    matches!(state, "completed" | "partial" | "failed" | "cancelled")
-}
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -213,6 +206,13 @@ pub struct IntelAssessmentRow {
 
 impl Store {
     pub fn article_body_for_article(&self, article_id: &str) -> Result<Option<ArticleBodyRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            let a = article_id.to_string();
+            return crate::storage::runtime::blocking(|repo| async move {
+                crate::storage::pipeline_inputs::article_body_for_article(&repo, &a).await
+            });
+        }
         let mut stmt = self.conn.prepare(
             "SELECT id, article_id, run_id, original_url, resolved_url, source_domain, source_name,
                     body_markdown, content_hash, quality, quality_rationale, body_version,
@@ -226,6 +226,13 @@ impl Store {
     }
 
     pub fn article_body_by_id(&self, id: &str) -> Result<Option<ArticleBodyRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            let id = id.to_string();
+            return crate::storage::runtime::blocking(
+                |repo| async move { sb::by_id(&repo, &id).await },
+            );
+        }
         let mut stmt = self.conn.prepare(
             "SELECT id, article_id, run_id, original_url, resolved_url, source_domain, source_name,
                     body_markdown, content_hash, quality, quality_rationale, body_version,
@@ -243,6 +250,19 @@ impl Store {
         source_domain: &str,
         source_name: &str,
     ) -> Result<ArticleBodyRow> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            let (a, r, u, d, n) = (
+                article_id.to_string(),
+                run_id.to_string(),
+                url.to_string(),
+                source_domain.to_string(),
+                source_name.to_string(),
+            );
+            return crate::storage::runtime::blocking(|repo| async move {
+                sb::ensure(&repo, &a, &r, &u, &d, &n).await
+            });
+        }
         if let Some(existing) = self.article_body_for_article(article_id)? {
             return Ok(existing);
         }
@@ -260,6 +280,13 @@ impl Store {
     }
 
     pub fn update_article_body_state(&self, id: &str, state: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            let (id, st) = (id.to_string(), state.to_string());
+            return crate::storage::runtime::blocking(|repo| async move {
+                sb::set_state(&repo, &id, &st).await
+            });
+        }
         self.conn.execute(
             "UPDATE article_bodies SET state=?2, updated_at=?3 WHERE id=?1",
             params![id, state, now()],
@@ -270,6 +297,13 @@ impl Store {
     /// Clear stored article prose before a Reload / forced re-fetch so the UI does not
     /// keep showing the previous body while retrieval and synthesis run.
     pub fn clear_article_body_content(&self, id: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            let id = id.to_string();
+            return crate::storage::runtime::blocking(|repo| async move {
+                sb::clear_content(&repo, &id).await
+            });
+        }
         self.conn.execute(
             "UPDATE article_bodies SET
                 body_markdown='', content_hash='', quality='unavailable',
@@ -291,6 +325,21 @@ impl Store {
         fetch_tool: &str,
         bump_version: bool,
     ) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            let (id, md, h, q, ra, u, t) = (
+                id.to_string(),
+                markdown.to_string(),
+                content_hash.to_string(),
+                quality.to_string(),
+                rationale.to_string(),
+                resolved_url.to_string(),
+                fetch_tool.to_string(),
+            );
+            return crate::storage::runtime::blocking(|repo| async move {
+                sb::commit(&repo, &id, &md, &h, &q, &ra, &u, &t, bump_version).await
+            });
+        }
         let ts = now();
         if bump_version {
             self.conn.execute(
@@ -351,6 +400,19 @@ impl Store {
         partial_markdown: &str,
         quality: &str,
     ) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            let (id, ra, ry, md, q) = (
+                id.to_string(),
+                rationale.to_string(),
+                retry_after.to_string(),
+                partial_markdown.to_string(),
+                quality.to_string(),
+            );
+            return crate::storage::runtime::blocking(|repo| async move {
+                sb::mark_failed(&repo, &id, &ra, &ry, &md, &q).await
+            });
+        }
         let ts = now();
         self.conn.execute(
             "UPDATE article_bodies SET
@@ -373,6 +435,20 @@ impl Store {
         remote_job_id: &str,
         body_version: i64,
     ) -> Result<String> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            let _ = remote_job_id;
+            let (b, t, i, st, r) = (
+                body_id.to_string(),
+                tool_id.to_string(),
+                input_identity.to_string(),
+                state.to_string(),
+                reason.to_string(),
+            );
+            return crate::storage::runtime::blocking(|repo| async move {
+                sb::insert_attempt(&repo, &b, &t, &i, &st, &r, body_version).await
+            });
+        }
         let id = new_row_id("attempt");
         let ts = now();
         let finished = if state == "running" {
@@ -408,6 +484,14 @@ impl Store {
         reason: &str,
         remote_job_id: &str,
     ) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            let _ = remote_job_id;
+            let (id, st, r) = (id.to_string(), state.to_string(), reason.to_string());
+            return crate::storage::runtime::blocking(|repo| async move {
+                sb::finish_attempt(&repo, &id, &st, &r).await
+            });
+        }
         self.conn.execute(
             "UPDATE article_retrieval_attempts SET state=?2, finished_at=?3, reason=?4, remote_job_id=?5
              WHERE id=?1",
@@ -416,146 +500,14 @@ impl Store {
         Ok(())
     }
 
-    pub fn list_retrieval_attempts(&self, body_id: &str) -> Result<Vec<RetrievalAttemptRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, body_id, tool_id, input_identity, state, started_at, finished_at,
-                    reason, remote_job_id, body_version
-             FROM article_retrieval_attempts WHERE body_id=?1 ORDER BY started_at",
-        )?;
-        let rows = stmt.query_map([body_id], |row| {
-            Ok(RetrievalAttemptRow {
-                id: row.get(0)?,
-                body_id: row.get(1)?,
-                tool_id: row.get(2)?,
-                input_identity: row.get(3)?,
-                state: row.get(4)?,
-                started_at: row.get(5)?,
-                finished_at: row.get(6)?,
-                reason: row.get(7)?,
-                remote_job_id: row.get(8)?,
-                body_version: row.get(9)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn ensure_intel_investigation(
-        &self,
-        article_id: &str,
-        run_id: &str,
-        article_url: &str,
-        scope_json: &str,
-    ) -> Result<IntelInvestigationRow> {
-        if let Some(existing) = self.intel_investigation_for_article(article_id)? {
-            return Ok(existing);
-        }
-        let id = new_row_id("iinv");
-        let ts = now();
-        self.conn.execute(
-            "INSERT INTO intel_investigations(
-                id, article_id, run_id, article_url, thread_id, scope_json,
-                shared_assessment_json, shared_assessment_version, created_at, updated_at
-             ) VALUES (?1,?2,?3,?4,NULL,?5,'{}',0,?6,?6)",
-            params![id, article_id, run_id, article_url, scope_json, ts],
-        )?;
-        Ok(self.intel_investigation_by_id(&id)?.expect("just inserted"))
-    }
-
-    pub fn intel_investigation_for_article(
-        &self,
-        article_id: &str,
-    ) -> Result<Option<IntelInvestigationRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, article_id, run_id, article_url, thread_id, scope_json,
-                    shared_assessment_json, shared_assessment_version, created_at, updated_at
-             FROM intel_investigations WHERE article_id=?1",
-        )?;
-        Ok(stmt
-            .query_row([article_id], investigation_from_row)
-            .optional()?)
-    }
-
-    pub fn intel_investigation_by_id(&self, id: &str) -> Result<Option<IntelInvestigationRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, article_id, run_id, article_url, thread_id, scope_json,
-                    shared_assessment_json, shared_assessment_version, created_at, updated_at
-             FROM intel_investigations WHERE id=?1",
-        )?;
-        Ok(stmt.query_row([id], investigation_from_row).optional()?)
-    }
-
-    pub fn set_investigation_thread(&self, investigation_id: &str, thread_id: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE intel_investigations SET thread_id=?2, updated_at=?3 WHERE id=?1",
-            params![investigation_id, thread_id, now()],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_shared_assessment(
-        &self,
-        investigation_id: &str,
-        assessment_json: &str,
-    ) -> Result<i64> {
-        let ts = now();
-        self.conn.execute(
-            "UPDATE intel_investigations SET
-                shared_assessment_json=?2,
-                shared_assessment_version=shared_assessment_version+1,
-                updated_at=?3
-             WHERE id=?1",
-            params![investigation_id, assessment_json, ts],
-        )?;
-        let version: i64 = self.conn.query_row(
-            "SELECT shared_assessment_version FROM intel_investigations WHERE id=?1",
-            [investigation_id],
-            |row| row.get(0),
-        )?;
-        Ok(version)
-    }
-
-    pub fn insert_report_job(
-        &self,
-        investigation_id: &str,
-        article_id: &str,
-        mode: &str,
-        revision: i64,
-        settings_json: &str,
-        budget_json: &str,
-        sections_total: i64,
-        elements_total: i64,
-        tool_calls_allowance: i64,
-        parent_job_id: Option<&str>,
-    ) -> Result<IntelReportJobRow> {
-        let id = new_row_id("ijob");
-        let ts = now();
-        self.conn.execute(
-            "INSERT INTO intel_report_jobs(
-                id, investigation_id, article_id, mode, revision, state, stage,
-                settings_json, budget_json, parent_job_id,
-                sections_done, sections_total, elements_done, elements_total,
-                tool_calls_done, tool_calls_allowance, current_tool, warning, error,
-                generation, started_at, updated_at, finished_at
-             ) VALUES (?1,?2,?3,?4,?5,'queued','planning',?6,?7,?8,0,?9,0,?10,0,?11,'','','',1,?12,?12,'')",
-            params![
-                id,
-                investigation_id,
-                article_id,
-                mode,
-                revision,
-                settings_json,
-                budget_json,
-                parent_job_id,
-                sections_total,
-                elements_total,
-                tool_calls_allowance,
-                ts
-            ],
-        )?;
-        Ok(self.intel_report_job(&id)?.expect("just inserted"))
-    }
-
     pub fn intel_report_job(&self, id: &str) -> Result<Option<IntelReportJobRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            let id = id.to_string();
+            return crate::storage::runtime::blocking(|repo| async move {
+                crate::storage::recon_jobs::report_job(&repo, &id).await
+            });
+        }
         let mut stmt = self.conn.prepare(
             "SELECT id, investigation_id, article_id, mode, revision, state, stage,
                     settings_json, budget_json, parent_job_id,
@@ -565,891 +517,6 @@ impl Store {
              FROM intel_report_jobs WHERE id=?1",
         )?;
         Ok(stmt.query_row([id], job_from_row).optional()?)
-    }
-
-    pub fn intel_jobs_for_article(&self, article_id: &str) -> Result<Vec<IntelReportJobRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, investigation_id, article_id, mode, revision, state, stage,
-                    settings_json, budget_json, parent_job_id,
-                    sections_done, sections_total, elements_done, elements_total,
-                    tool_calls_done, tool_calls_allowance, current_tool, warning, error,
-                    generation, started_at, updated_at, finished_at
-             FROM intel_report_jobs WHERE article_id=?1
-             ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt.query_map([article_id], job_from_row)?;
-        let mut jobs = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        let retained = self.conn.prepare("SELECT details_json FROM intel_report_results WHERE article_id=?1 AND job_id NOT IN (SELECT id FROM intel_report_jobs) ORDER BY completion_sequence DESC")?.query_map([article_id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        for json in retained {
-            let bundle: serde_json::Value = serde_json::from_str(&json)?;
-            if let Ok(mut job) = serde_json::from_value::<IntelReportJobRow>(bundle["job"].clone())
-            {
-                job.state = "completed".into();
-                job.stage = "Job history expired · retained result".into();
-                jobs.push(job);
-            }
-        }
-        jobs.retain(|j| {
-            j.stage.starts_with("Job history expired")
-                || chrono::DateTime::parse_from_rfc3339(&j.started_at).is_ok_and(|t| {
-                    t.with_timezone(&chrono::Utc)
-                        >= chrono::Utc::now() - chrono::Duration::hours(72)
-                })
-        });
-        Ok(jobs)
-    }
-
-    pub fn active_intel_job(
-        &self,
-        article_id: &str,
-        mode: &str,
-    ) -> Result<Option<IntelReportJobRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, investigation_id, article_id, mode, revision, state, stage,
-                    settings_json, budget_json, parent_job_id,
-                    sections_done, sections_total, elements_done, elements_total,
-                    tool_calls_done, tool_calls_allowance, current_tool, warning, error,
-                    generation, started_at, updated_at, finished_at
-             FROM intel_report_jobs
-             WHERE article_id=?1 AND mode=?2
-               AND state IN ('queued','running','paused','waiting')
-             ORDER BY revision DESC LIMIT 1",
-        )?;
-        Ok(stmt
-            .query_row(params![article_id, mode], job_from_row)
-            .optional()?)
-    }
-
-    pub fn next_job_revision(&self, article_id: &str, mode: &str) -> Result<i64> {
-        let max: Option<i64> = self.conn.query_row(
-            "SELECT MAX(revision) FROM intel_report_jobs WHERE article_id=?1 AND mode=?2",
-            params![article_id, mode],
-            |row| row.get(0),
-        )?;
-        Ok(max.unwrap_or(0) + 1)
-    }
-
-    pub fn insert_report_attempt(
-        &self,
-        job_id: &str,
-        generation: i64,
-        task_id: &str,
-        tool_id: &str,
-    ) -> Result<String> {
-        let id = new_row_id("atmpt");
-        let tx = self.conn.unchecked_transaction()?;
-        let reserved = tx.execute(
-            "UPDATE intel_report_jobs
-             SET tool_calls_done = tool_calls_done + 1, current_tool = ?3, updated_at = ?4
-             WHERE id = ?1 AND generation = ?2
-               AND state IN ('queued', 'running', 'waiting')
-               AND tool_calls_done >= 0
-               AND tool_calls_done < tool_calls_allowance",
-            rusqlite::params![job_id, generation, tool_id, now()],
-        )?;
-        anyhow::ensure!(
-            reserved == 1,
-            "Report tool budget exhausted or job is no longer active"
-        );
-        tx.execute(
-            "INSERT INTO intel_report_attempts (id, job_id, generation, task_id, tool_id, state, started_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
-            rusqlite::params![id, job_id, generation, task_id, tool_id, now()],
-        )?;
-        tx.commit()?;
-        Ok(id)
-    }
-
-    pub fn finish_report_attempt(&self, job_id: &str, id: &str, state: &str) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        let finished = tx.execute(
-            "UPDATE intel_report_attempts SET state=?3, finished_at=?4
-             WHERE id=?1 AND job_id=?2 AND state='running'",
-            rusqlite::params![id, job_id, state, now()],
-        )?;
-        if finished == 1 {
-            tx.execute(
-                "UPDATE intel_report_jobs SET current_tool = '' WHERE id = ?1
-                 AND generation = (SELECT generation FROM intel_report_attempts WHERE id=?2)
-                 AND NOT EXISTS (SELECT 1 FROM intel_report_attempts
-                                 WHERE job_id=?1 AND generation=intel_report_jobs.generation AND state='running')",
-                rusqlite::params![job_id, id],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn update_report_job(
-        &self,
-        id: &str,
-        state: &str,
-        stage: &str,
-        sections_done: i64,
-        elements_done: i64,
-        warning: &str,
-        error: &str,
-    ) -> Result<()> {
-        if crate::job_cleanup::retired(&self.conn, id)? {
-            return Ok(());
-        }
-
-        let finished = if is_terminal_report_state(state) {
-            now()
-        } else {
-            String::new()
-        };
-        self.conn.execute(
-            "UPDATE intel_report_jobs SET
-                state=?2, stage=?3, sections_done=?4, elements_done=?5,
-                warning=?6, error=?7,
-                updated_at=?8,
-                finished_at=CASE WHEN length(?9)>0 THEN ?9 ELSE finished_at END
-             WHERE id=?1",
-            params![
-                id,
-                state,
-                stage,
-                sections_done,
-                elements_done,
-                warning,
-                error,
-                now(),
-                finished
-            ],
-        )?;
-        if is_terminal_report_state(state) {
-            record_report_telemetry(self, id, state, error);
-        }
-        Ok(())
-    }
-
-    pub fn insert_report_section(
-        &self,
-        job_id: &str,
-        section_key: &str,
-        title: &str,
-        ordinal: i64,
-        status: &str,
-        waiting_on: &str,
-    ) -> Result<IntelReportSectionRow> {
-        let id = new_row_id("isec");
-        let ts = now();
-        self.conn.execute(
-            "INSERT INTO intel_report_sections(
-                id, job_id, section_key, title, ordinal, markdown, status, revision,
-                evidence_ids_json, judgment_json, assessment_version, waiting_on,
-                created_at, updated_at
-             ) VALUES (?1,?2,?3,?4,?5,'',?6,1,'[]','{}',0,?7,?8,?8)",
-            params![
-                id,
-                job_id,
-                section_key,
-                title,
-                ordinal,
-                status,
-                waiting_on,
-                ts
-            ],
-        )?;
-        Ok(self
-            .intel_report_section(job_id, section_key)?
-            .expect("just inserted"))
-    }
-
-    pub fn intel_report_section(
-        &self,
-        job_id: &str,
-        section_key: &str,
-    ) -> Result<Option<IntelReportSectionRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, job_id, section_key, title, ordinal, markdown, status, revision,
-                    evidence_ids_json, judgment_json, assessment_version, waiting_on,
-                    created_at, updated_at
-             FROM intel_report_sections WHERE job_id=?1 AND section_key=?2",
-        )?;
-        Ok(stmt
-            .query_row(params![job_id, section_key], section_from_row)
-            .optional()?)
-    }
-
-    pub fn intel_report_sections(&self, job_id: &str) -> Result<Vec<IntelReportSectionRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, job_id, section_key, title, ordinal, markdown, status, revision,
-                    evidence_ids_json, judgment_json, assessment_version, waiting_on,
-                    created_at, updated_at
-             FROM intel_report_sections WHERE job_id=?1 ORDER BY ordinal",
-        )?;
-        let rows = stmt.query_map([job_id], section_from_row)?;
-        let sections = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        if !sections.is_empty() {
-            return Ok(sections);
-        }
-        let retained:Option<String> = self.conn.query_row("SELECT details_json FROM intel_report_results WHERE job_id=?1 ORDER BY generation DESC LIMIT 1",[job_id],|r|r.get(0)).optional()?;
-        if let Some(json) = retained {
-            let bundle: serde_json::Value = serde_json::from_str(&json)?;
-            return Ok(serde_json::from_value(bundle["sections"].clone()).unwrap_or_default());
-        }
-        Ok(sections)
-    }
-
-    pub fn upsert_report_section_markdown(
-        &self,
-        job_id: &str,
-        section_key: &str,
-        markdown: &str,
-        status: &str,
-        evidence_ids_json: &str,
-        judgment_json: &str,
-        assessment_version: i64,
-        waiting_on: &str,
-    ) -> Result<()> {
-        let eligible: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM intel_report_jobs WHERE id=?1 AND state NOT IN ('cancelled','failed') AND julianday(started_at)>=julianday('now')-3 AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=intel_report_jobs.id))",[job_id],|r|r.get(0))?;
-        anyhow::ensure!(eligible, "report retired before section commit");
-        self.conn.execute(
-            "UPDATE intel_report_sections SET
-                markdown=?3, status=?4, evidence_ids_json=?5, judgment_json=?6,
-                assessment_version=?7, waiting_on=?8, revision=revision+1, updated_at=?9
-             WHERE job_id=?1 AND section_key=?2",
-            params![
-                job_id,
-                section_key,
-                markdown,
-                status,
-                evidence_ids_json,
-                judgment_json,
-                assessment_version,
-                waiting_on,
-                now()
-            ],
-        )?;
-        if let Ok(ids) = serde_json::from_str::<Vec<String>>(evidence_ids_json) {
-            record_cited_evidence(self, job_id, &ids);
-        }
-        Ok(())
-    }
-
-    pub fn mark_sections_stale(
-        &self,
-        job_id: &str,
-        keys: &[String],
-        waiting_on: &str,
-    ) -> Result<()> {
-        for key in keys {
-            self.conn.execute(
-                "UPDATE intel_report_sections SET status='stale', waiting_on=?3, updated_at=?4
-                 WHERE job_id=?1 AND section_key=?2 AND status='complete'",
-                params![job_id, key, waiting_on, now()],
-            )?;
-        }
-        Ok(())
-    }
-
-    pub fn insert_report_task(
-        &self,
-        job_id: &str,
-        task_type: &str,
-        section_key: &str,
-        depends_on_json: &str,
-        status: &str,
-    ) -> Result<String> {
-        let id = new_row_id("itask");
-        let ts = now();
-        self.conn.execute(
-            "INSERT INTO intel_report_tasks(
-                id, job_id, task_type, section_key, depends_on_json, input_hash,
-                status, attempts, max_attempts, output_ref, lease_owner, lease_until,
-                error, created_at, updated_at, lease_epoch
-             ) VALUES (?1,?2,?3,?4,?5,'',?6,0,3,'','','','',?7,?7,0)",
-            params![
-                id,
-                job_id,
-                task_type,
-                section_key,
-                depends_on_json,
-                status,
-                ts
-            ],
-        )?;
-        Ok(id)
-    }
-
-    pub fn intel_report_tasks(&self, job_id: &str) -> Result<Vec<IntelReportTaskRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, job_id, task_type, section_key, depends_on_json, input_hash,
-                    status, attempts, max_attempts, output_ref, lease_owner, lease_until,
-                    error, created_at, updated_at, lease_epoch
-             FROM intel_report_tasks WHERE job_id=?1 ORDER BY created_at",
-        )?;
-        let rows = stmt.query_map([job_id], task_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn claim_report_task(
-        &self,
-        job_id: &str,
-        owner: &str,
-        lease_secs: i64,
-    ) -> Result<Option<IntelReportTaskRow>> {
-        let eligible:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM intel_report_jobs WHERE id=?1 AND state NOT IN ('cancelled','paused','failed','completed') AND julianday(started_at)>=julianday('now')-3 AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=?1))",[job_id],|r|r.get(0))?;
-        if !eligible {
-            return Ok(None);
-        }
-        let tasks = self.intel_report_tasks(job_id)?;
-        let completed: std::collections::HashSet<String> = tasks
-            .iter()
-            .filter(|t| t.status == "completed")
-            .map(|t| t.id.clone())
-            .collect();
-        let now_ts = chrono::Utc::now();
-        let lease_until = (now_ts + chrono::Duration::seconds(lease_secs)).to_rfc3339();
-        for task in &tasks {
-            if task.status != "pending" && task.status != "interrupted" {
-                if task.status == "running" {
-                    if !task.lease_until.is_empty() {
-                        if let Ok(until) = chrono::DateTime::parse_from_rfc3339(&task.lease_until) {
-                            if until > now_ts {
-                                continue;
-                            }
-                        }
-                    } else {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
-            let deps: Vec<String> = serde_json::from_str(&task.depends_on_json).unwrap_or_default();
-            if !deps.iter().all(|d| completed.contains(d)) {
-                continue;
-            }
-            let updated = self.conn.execute(
-                "UPDATE intel_report_tasks SET
-                    status='running', lease_owner=?2, lease_until=?3, lease_epoch=lease_epoch+1,
-                    attempts=attempts+1, updated_at=?4
-                 WHERE id=?1 AND status IN ('pending','interrupted','running')
-                   AND (lease_until='' OR lease_until IS NULL OR lease_until < ?5)",
-                params![task.id, owner, lease_until, now(), now_ts.to_rfc3339()],
-            )?;
-            if updated == 1 {
-                return self.intel_report_task(&task.id);
-            }
-        }
-        Ok(None)
-    }
-
-    pub fn intel_report_task(&self, id: &str) -> Result<Option<IntelReportTaskRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, job_id, task_type, section_key, depends_on_json, input_hash,
-                    status, attempts, max_attempts, output_ref, lease_owner, lease_until,
-                    error, created_at, updated_at, lease_epoch
-             FROM intel_report_tasks WHERE id=?1",
-        )?;
-        Ok(stmt.query_row([id], task_from_row).optional()?)
-    }
-
-    pub fn complete_report_task(&self, id: &str, output_ref: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE intel_report_tasks SET
-                status='completed', output_ref=?2, lease_owner='', lease_until='',
-                error='', updated_at=?3
-             WHERE id=?1",
-            params![id, output_ref, now()],
-        )?;
-        Ok(())
-    }
-
-    pub fn complete_report_task_fenced(
-        &self,
-        id: &str,
-        output_ref: &str,
-        lease_epoch: i64,
-    ) -> Result<bool> {
-        let updated = self.conn.execute(
-            "UPDATE intel_report_tasks SET
-                status='completed', output_ref=?2, lease_owner='', lease_until='',
-                error='', updated_at=?3
-             WHERE id=?1 AND lease_epoch=?4
-               AND EXISTS(SELECT 1 FROM intel_report_jobs j WHERE j.id=intel_report_tasks.job_id AND j.state<>'cancelled' AND julianday(j.started_at)>=julianday('now')-3 AND NOT EXISTS(SELECT 1 FROM argos_job_retirements r WHERE r.job_id=j.id))",
-            params![id, output_ref, now(), lease_epoch],
-        )?;
-        Ok(updated == 1)
-    }
-
-    pub fn renew_report_task_lease(
-        &self,
-        id: &str,
-        lease_epoch: i64,
-        lease_secs: i64,
-    ) -> Result<bool> {
-        let now_ts = chrono::Utc::now();
-        let lease_until = (now_ts + chrono::Duration::seconds(lease_secs)).to_rfc3339();
-        let updated = self.conn.execute(
-            "UPDATE intel_report_tasks SET lease_until=?1, updated_at=?2
-             WHERE id=?3 AND lease_epoch=?4 AND status='running'",
-            params![lease_until, now(), id, lease_epoch],
-        )?;
-        Ok(updated == 1)
-    }
-
-    pub fn fail_report_task(&self, id: &str, error: &str, retryable: bool) -> Result<()> {
-        let status = if retryable { "pending" } else { "failed" };
-        self.conn.execute(
-            "UPDATE intel_report_tasks SET
-                status=?2, error=?3, lease_owner='', lease_until='', updated_at=?4
-             WHERE id=?1",
-            params![id, status, error, now()],
-        )?;
-        Ok(())
-    }
-
-    pub fn fail_report_task_fenced(
-        &self,
-        id: &str,
-        error: &str,
-        retryable: bool,
-        lease_epoch: i64,
-    ) -> Result<bool> {
-        let status = if retryable { "pending" } else { "failed" };
-        let updated = self.conn.execute(
-            "UPDATE intel_report_tasks SET
-                status=?2, error=?3, lease_owner='', lease_until='', updated_at=?4
-             WHERE id=?1 AND lease_epoch=?5",
-            params![id, status, error, now(), lease_epoch],
-        )?;
-        Ok(updated == 1)
-    }
-
-    pub fn interrupt_expired_leases(&self) -> Result<usize> {
-        let ts = now();
-        let n = self.conn.execute(
-            "UPDATE intel_report_tasks SET status='interrupted', lease_owner='', updated_at=?1
-             WHERE status='running' AND lease_until<>'' AND lease_until<?1",
-            params![ts],
-        )?;
-        Ok(n)
-    }
-
-    pub fn upsert_element(
-        &self,
-        investigation_id: &str,
-        element_key: &str,
-        fingerprint: &str,
-        element_type: &str,
-        original_text: &str,
-        provenance: &str,
-        status: &str,
-    ) -> Result<IntelElementRow> {
-        let existing: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT id FROM intel_element_ledger
-                 WHERE investigation_id=?1 AND element_key=?2",
-                params![investigation_id, element_key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let ts = now();
-        if let Some(id) = existing {
-            self.conn.execute(
-                "UPDATE intel_element_ledger SET
-                    fingerprint=?2, element_type=?3, original_text=?4, provenance=?5,
-                    status=?6, updated_at=?7
-                 WHERE id=?1",
-                params![
-                    id,
-                    fingerprint,
-                    element_type,
-                    original_text,
-                    provenance,
-                    status,
-                    ts
-                ],
-            )?;
-            return Ok(self.intel_element(&id)?.expect("exists"));
-        }
-        let id = new_row_id("iel");
-        self.conn.execute(
-            "INSERT INTO intel_element_ledger(
-                id, investigation_id, element_key, fingerprint, element_type, original_text,
-                provenance, status, stance, assessment, uncertainty, evidence_ids_json,
-                directive_ids_json, section_keys_json, excluded_reason, created_at, updated_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'','','','[]','[]','[]','',?9,?9)",
-            params![
-                id,
-                investigation_id,
-                element_key,
-                fingerprint,
-                element_type,
-                original_text,
-                provenance,
-                status,
-                ts
-            ],
-        )?;
-        Ok(self.intel_element(&id)?.expect("just inserted"))
-    }
-
-    pub fn intel_element(&self, id: &str) -> Result<Option<IntelElementRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, investigation_id, element_key, fingerprint, element_type, original_text,
-                    provenance, status, stance, assessment, uncertainty, evidence_ids_json,
-                    directive_ids_json, section_keys_json, excluded_reason, created_at, updated_at
-             FROM intel_element_ledger WHERE id=?1",
-        )?;
-        Ok(stmt.query_row([id], element_from_row).optional()?)
-    }
-
-    pub fn intel_elements(&self, investigation_id: &str) -> Result<Vec<IntelElementRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, investigation_id, element_key, fingerprint, element_type, original_text,
-                    provenance, status, stance, assessment, uncertainty, evidence_ids_json,
-                    directive_ids_json, section_keys_json, excluded_reason, created_at, updated_at
-             FROM intel_element_ledger WHERE investigation_id=?1 ORDER BY created_at",
-        )?;
-        let rows = stmt.query_map([investigation_id], element_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn update_element_assessment(
-        &self,
-        id: &str,
-        status: &str,
-        stance: &str,
-        assessment: &str,
-        uncertainty: &str,
-        evidence_ids_json: &str,
-    ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE intel_element_ledger SET
-                status=?2, stance=?3, assessment=?4, uncertainty=?5,
-                evidence_ids_json=?6, updated_at=?7
-             WHERE id=?1",
-            params![
-                id,
-                status,
-                stance,
-                assessment,
-                uncertainty,
-                evidence_ids_json,
-                now()
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn insert_evidence(
-        &self,
-        investigation_id: &str,
-        source_url: &str,
-        source_domain: &str,
-        excerpt: &str,
-        location: &str,
-        claim_ids_json: &str,
-        source_date: &str,
-        event_date: &str,
-        stance: &str,
-        origin: &str,
-        tool_id: &str,
-        call_id: &str,
-        limitations: &str,
-    ) -> Result<String> {
-        let id = new_row_id("iev");
-        let ts = now();
-        self.conn.execute(
-            "INSERT INTO intel_evidence(
-                id, investigation_id, source_url, source_domain, excerpt, location,
-                claim_ids_json, source_date, event_date, retrieved_at, stance, origin,
-                independence, limitations, tool_id, call_id, created_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'',?13,?14,?15,?10)",
-            params![
-                id,
-                investigation_id,
-                source_url,
-                source_domain,
-                excerpt,
-                location,
-                claim_ids_json,
-                source_date,
-                event_date,
-                ts,
-                stance,
-                origin,
-                limitations,
-                tool_id,
-                call_id
-            ],
-        )?;
-        Ok(id)
-    }
-
-    pub fn intel_evidence_list(&self, investigation_id: &str) -> Result<Vec<IntelEvidenceRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, investigation_id, source_url, source_domain, excerpt, location,
-                    claim_ids_json, source_date, event_date, retrieved_at, stance, origin,
-                    independence, limitations, tool_id, call_id, created_at
-             FROM intel_evidence WHERE investigation_id=?1 ORDER BY created_at",
-        )?;
-        let rows = stmt.query_map([investigation_id], |row| {
-            Ok(IntelEvidenceRow {
-                id: row.get(0)?,
-                investigation_id: row.get(1)?,
-                source_url: row.get(2)?,
-                source_domain: row.get(3)?,
-                excerpt: row.get(4)?,
-                location: row.get(5)?,
-                claim_ids_json: row.get(6)?,
-                source_date: row.get(7)?,
-                event_date: row.get(8)?,
-                retrieved_at: row.get(9)?,
-                stance: row.get(10)?,
-                origin: row.get(11)?,
-                independence: row.get(12)?,
-                limitations: row.get(13)?,
-                tool_id: row.get(14)?,
-                call_id: row.get(15)?,
-                created_at: row.get(16)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn insert_assessment(
-        &self,
-        investigation_id: &str,
-        element_id: &str,
-        origin: &str,
-        stance: &str,
-        rationale: &str,
-        confidence: f64,
-        sources_json: &str,
-        original_value_json: &str,
-        revised_value_json: &str,
-    ) -> Result<String> {
-        let id = new_row_id("iass");
-        let ts = now();
-        self.conn.execute(
-            "INSERT INTO intel_assessments(
-                id, investigation_id, element_id, origin, stance, rationale, confidence,
-                sources_json, original_value_json, revised_value_json, created_at, updated_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?11)",
-            params![
-                id,
-                investigation_id,
-                element_id,
-                origin,
-                stance,
-                rationale,
-                confidence,
-                sources_json,
-                original_value_json,
-                revised_value_json,
-                ts
-            ],
-        )?;
-        Ok(id)
-    }
-
-    /// Articles with retained Intel investigations are not dropped by Atlas prune.
-    pub fn article_ids_with_intel_reports(&self) -> Result<std::collections::HashSet<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT DISTINCT article_id FROM intel_investigations")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-}
-
-/// The report outcome vocabulary. Completed/partial/failed are completions;
-/// waiting/blocked/cancelled stay separate so they are never counted as either.
-fn report_outcome_label(state: &str) -> &'static str {
-    match state {
-        "completed" => "completed",
-        "partial" => "partial",
-        "failed" => "failed",
-        "waiting" => "waiting",
-        "blocked" => "blocked",
-        "cancelled" => "cancelled",
-        _ => "unknown",
-    }
-}
-
-/// Coarse terminal cause for a non-successful report. Only the class is
-/// recorded: provider or model prose never reaches telemetry.
-fn report_error_class(error: &str) -> &'static str {
-    let lower = error.trim().to_ascii_lowercase();
-    if lower.is_empty() {
-        return "none";
-    }
-    if lower.contains("cancel") {
-        return "cancelled";
-    }
-    if lower.contains("quota") || lower.contains("rate limit") || lower.contains("429") {
-        return "quota";
-    }
-    if lower.contains("timeout") || lower.contains("timed out") {
-        return "timeout";
-    }
-    if lower.contains("auth") || lower.contains("api key") || lower.contains("401") {
-        return "auth";
-    }
-    if lower.contains("budget") || lower.contains("exhaust") {
-        return "budget";
-    }
-    if lower.contains("parser") || lower.contains("malformed") || lower.contains("json") {
-        return "invalid_output";
-    }
-    "unknown"
-}
-
-/// Milliseconds between two RFC 3339 stamps, or `None` when either is missing.
-fn rfc_span_ms(from: &str, to: &str) -> Option<i64> {
-    let parse = |raw: &str| {
-        chrono::DateTime::parse_from_rfc3339(raw.trim())
-            .ok()
-            .map(|stamp| stamp.with_timezone(&chrono::Utc))
-    };
-    Some((parse(to)? - parse(from)?).num_milliseconds())
-}
-
-/// One terminal `IntelReport` row per report job, keyed to
-/// `(article_id, report_mode)` and carrying the latest-revision marker, so a
-/// dashboard counts each article/mode pair once by default and keeps revision
-/// history in the attempt view. Full-assessment parents are flagged and stay out
-/// of child-report totals. Wall duration is completion minus start; active
-/// duration is the sum of the job's own attempts and never includes queue wait.
-///
-/// The event id is the job id, so a job that reaches another terminal state
-/// replaces its row exactly once. Best-effort: never fails the report.
-fn record_report_telemetry(store: &Store, job_id: &str, state: &str, error: &str) {
-    let Ok(Some(job)) = store.intel_report_job(job_id) else {
-        return;
-    };
-    let attempts: i64 = store
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM intel_report_attempts WHERE job_id=?1",
-            [job_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    let active_ms: i64 = store
-        .conn
-        .query_row(
-            "SELECT COALESCE(SUM(MAX(0, CAST((julianday(IFNULL(NULLIF(finished_at,''),started_at))
-                     - julianday(started_at)) * 86400000 AS INTEGER))), 0)
-             FROM intel_report_attempts WHERE job_id=?1",
-            [job_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    let latest_revision: i64 = store
-        .conn
-        .query_row(
-            "SELECT COALESCE(MAX(revision), 0) FROM intel_report_jobs
-             WHERE article_id=?1 AND mode=?2",
-            params![job.article_id.as_str(), job.mode.as_str()],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    let finished_at = if job.finished_at.trim().is_empty() {
-        now()
-    } else {
-        job.finished_at.clone()
-    };
-    let wall_ms = rfc_span_ms(&job.started_at, &finished_at);
-    let event = TelemetryEvent::new(EventKind::IntelReport)
-        .at(finished_at.clone())
-        .trigger(Trigger::IntelBrief)
-        .app("intel")
-        .job(&job.id)
-        .article(&job.article_id)
-        .mode(&job.mode)
-        .outcome(report_outcome_label(state))
-        .reason(report_error_class(error))
-        .duration_ms(wall_ms)
-        .count(1)
-        // Payload markers: `latest_revision` counts each
-        // (article_id, report_mode) pair once by default, and
-        // `is_parent`/`parent_job` mark a row that belongs under a parent —
-        // a full-assessment parent stays counted in its own mode and is never
-        // added into child-report totals.
-        .payload(json!({
-            "revision": job.revision,
-            "mode": job.mode.clone(),
-            "attempt": attempts,
-            "generation": job.generation,
-            "latest_revision": job.revision >= latest_revision,
-            "wall_ms": wall_ms,
-            "active_ms": active_ms,
-            "error_class": report_error_class(error),
-            "is_parent": job.parent_job_id.is_some(),
-            "parent_job": job.parent_job_id.clone().unwrap_or_default(),
-            "stage": job.stage,
-            "sections_done": job.sections_done,
-            "sections_total": job.sections_total,
-            "tool_calls_done": job.tool_calls_done,
-            "tool_calls_allowance": job.tool_calls_allowance,
-        }))
-        .with_id(format!("intel-report-{}", job.id));
-    let _ = crate::telemetry::insert(&store.conn, &event);
-}
-
-/// One `EvidenceItem` row per evidence id a report revision cites.
-///
-/// Provenance (tool, call) comes from the stored evidence row, so a fetched
-/// result is never equated with accepted evidence, and the report revision
-/// identity travels on `canonical_ref` for the join. Multi-source citations stay
-/// nonadditive: every item is credited once and records how many the citation
-/// credited. Best-effort: never fails the report.
-fn record_cited_evidence(store: &Store, job_id: &str, evidence_ids: &[String]) {
-    if evidence_ids.is_empty() {
-        return;
-    }
-    let Ok(Some(job)) = store.intel_report_job(job_id) else {
-        return;
-    };
-    let revision = format!("{}:{}", job.id, job.revision);
-    for item_id in evidence_ids {
-        let item_id = item_id.trim();
-        if item_id.is_empty() {
-            continue;
-        }
-        let row = store.conn.query_row(
-            "SELECT source_domain, stance, tool_id, call_id FROM intel_evidence
-             WHERE id=?1 AND investigation_id=?2",
-            params![item_id, job.investigation_id.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        );
-        let Ok((source_domain, stance, tool_id, call_id)) = row else {
-            continue;
-        };
-        let attribution = EvidenceAttribution {
-            tool_id,
-            call_id,
-            report_revision: revision.clone(),
-            report_mode: job.mode.clone(),
-            article_id: job.article_id.clone(),
-            job_id: job.id.clone(),
-            citations: evidence_ids.len(),
-        };
-        let stance = crate::investigation::ClaimStance::parse(&stance);
-        let built = evidence_item_event(
-            item_id,
-            &job.investigation_id,
-            &source_domain,
-            stance,
-            &attribution,
-        );
-        let event = crate::investigation::evidence::stamped(built);
-        let _ = crate::telemetry::insert(&store.conn, &event);
     }
 }
 
@@ -1473,21 +540,6 @@ fn article_body_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleBod
         state: row.get(15)?,
         created_at: row.get(16)?,
         updated_at: row.get(17)?,
-    })
-}
-
-fn investigation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IntelInvestigationRow> {
-    Ok(IntelInvestigationRow {
-        id: row.get(0)?,
-        article_id: row.get(1)?,
-        run_id: row.get(2)?,
-        article_url: row.get(3)?,
-        thread_id: row.get(4)?,
-        scope_json: row.get(5)?,
-        shared_assessment_json: row.get(6)?,
-        shared_assessment_version: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
     })
 }
 
@@ -1517,312 +569,4 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IntelReportJobRow> 
         updated_at: row.get(21)?,
         finished_at: row.get(22)?,
     })
-}
-
-fn section_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IntelReportSectionRow> {
-    Ok(IntelReportSectionRow {
-        id: row.get(0)?,
-        job_id: row.get(1)?,
-        section_key: row.get(2)?,
-        title: row.get(3)?,
-        ordinal: row.get(4)?,
-        markdown: row.get(5)?,
-        status: row.get(6)?,
-        revision: row.get(7)?,
-        evidence_ids_json: row.get(8)?,
-        judgment_json: row.get(9)?,
-        assessment_version: row.get(10)?,
-        waiting_on: row.get(11)?,
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
-    })
-}
-
-fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IntelReportTaskRow> {
-    Ok(IntelReportTaskRow {
-        id: row.get(0)?,
-        job_id: row.get(1)?,
-        task_type: row.get(2)?,
-        section_key: row.get(3)?,
-        depends_on_json: row.get(4)?,
-        input_hash: row.get(5)?,
-        status: row.get(6)?,
-        attempts: row.get(7)?,
-        max_attempts: row.get(8)?,
-        output_ref: row.get(9)?,
-        lease_owner: row.get(10)?,
-        lease_until: row.get(11)?,
-        error: row.get(12)?,
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
-        lease_epoch: row.get(15).unwrap_or(0),
-    })
-}
-
-fn element_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IntelElementRow> {
-    Ok(IntelElementRow {
-        id: row.get(0)?,
-        investigation_id: row.get(1)?,
-        element_key: row.get(2)?,
-        fingerprint: row.get(3)?,
-        element_type: row.get(4)?,
-        original_text: row.get(5)?,
-        provenance: row.get(6)?,
-        status: row.get(7)?,
-        stance: row.get(8)?,
-        assessment: row.get(9)?,
-        uncertainty: row.get(10)?,
-        evidence_ids_json: row.get(11)?,
-        directive_ids_json: row.get(12)?,
-        section_keys_json: row.get(13)?,
-        excluded_reason: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn migration_creates_intel_tables_and_body_round_trip() {
-        let store = Store::memory().unwrap();
-        let body = store
-            .ensure_article_body(
-                "art-1",
-                "run-1",
-                "https://example.com/a",
-                "example.com",
-                "Ex",
-            )
-            .unwrap();
-        assert_eq!(body.article_id, "art-1");
-        store
-            .commit_article_body(
-                &body.id,
-                "# Hello\n\nWorld",
-                "hash1",
-                "complete",
-                "ok",
-                "https://example.com/a",
-                "firecrawl_scrape",
-                false,
-            )
-            .unwrap();
-        let loaded = store.article_body_for_article("art-1").unwrap().unwrap();
-        assert_eq!(loaded.quality, "complete");
-        assert!(loaded.body_markdown.contains("Hello"));
-        let inv = store
-            .ensure_intel_investigation("art-1", "run-1", "https://example.com/a", "{}")
-            .unwrap();
-        let job = store
-            .insert_report_job(&inv.id, "art-1", "verify", 1, "{}", "{}", 6, 0, 12, None)
-            .unwrap();
-        store
-            .insert_report_section(
-                &job.id,
-                "bluf",
-                "Key Judgments / BLUF",
-                0,
-                "waiting",
-                "evidence",
-            )
-            .unwrap();
-        let sections = store.intel_report_sections(&job.id).unwrap();
-        assert_eq!(sections.len(), 1);
-        assert_eq!(sections[0].section_key, "bluf");
-    }
-
-    #[test]
-    fn terminal_report_revisions_are_keyed_to_article_and_mode() {
-        let store = Store::memory().unwrap();
-        let inv = store
-            .ensure_intel_investigation("art-1", "run-1", "https://example.com/a", "{}")
-            .unwrap();
-        let job = store
-            .insert_report_job(&inv.id, "art-1", "verify", 1, "{}", "{}", 6, 0, 12, None)
-            .unwrap();
-        store
-            .update_report_job(&job.id, "running", "planning", 0, 0, "", "")
-            .unwrap();
-        // A non-terminal state is not a completion and must not be recorded.
-        let rows = store
-            .conn
-            .prepare("SELECT COUNT(*) FROM telemetry_events WHERE event_type='intel_report'")
-            .unwrap()
-            .query_row([], |r| r.get::<_, i64>(0))
-            .unwrap();
-        assert_eq!(rows, 0);
-        store
-            .update_report_job(&job.id, "completed", "done", 6, 3, "", "")
-            .unwrap();
-        let conn = &store.conn;
-        let (id, outcome, wall_ms, count): (String, String, Option<i64>, i64) = conn
-            .query_row(
-                "SELECT id, outcome, metric_ms, count FROM telemetry_events
-                 WHERE event_type='intel_report'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(id, format!("intel-report-{}", job.id));
-        assert_eq!(outcome, "completed");
-        assert!(wall_ms.unwrap_or(0) >= 0);
-        assert_eq!(count, 1);
-        // A second terminal write for the same job replaces its row.
-        store
-            .update_report_job(&job.id, "partial", "done", 4, 2, "", "")
-            .unwrap();
-        let rows = conn
-            .prepare("SELECT COUNT(*) FROM telemetry_events WHERE event_type='intel_report'")
-            .unwrap()
-            .query_row([], |r| r.get::<_, i64>(0))
-            .unwrap();
-        assert_eq!(rows, 1);
-    }
-
-    #[test]
-    fn full_assessment_parents_are_flagged_for_child_report_totals() {
-        let store = Store::memory().unwrap();
-        let inv = store
-            .ensure_intel_investigation("art-2", "run-1", "https://example.com/b", "{}")
-            .unwrap();
-        let parent = store
-            .insert_report_job(
-                &inv.id,
-                "art-2",
-                "full_assessment",
-                1,
-                "{}",
-                "{}",
-                9,
-                0,
-                20,
-                None,
-            )
-            .unwrap();
-        store
-            .insert_report_job(
-                &inv.id,
-                "art-2",
-                "verify",
-                1,
-                "{}",
-                "{}",
-                6,
-                0,
-                12,
-                Some(&parent.id),
-            )
-            .unwrap();
-        store
-            .update_report_job(&parent.id, "completed", "done", 9, 0, "", "")
-            .unwrap();
-        let payload: String = store
-            .conn
-            .query_row(
-                "SELECT payload_json FROM telemetry_events WHERE id=?1",
-                [format!("intel-report-{}", parent.id)],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        assert_eq!(payload["is_parent"], false);
-        assert_eq!(payload["mode"], "full_assessment");
-    }
-
-    #[test]
-    fn cited_evidence_keeps_provenance_and_revision_identity() {
-        let store = Store::memory().unwrap();
-        let inv = store
-            .ensure_intel_investigation("art-3", "run-1", "https://example.com/c", "{}")
-            .unwrap();
-        let job = store
-            .insert_report_job(&inv.id, "art-3", "verify", 2, "{}", "{}", 6, 0, 12, None)
-            .unwrap();
-        let one = store
-            .insert_evidence(
-                &inv.id,
-                "https://a.example/story",
-                "a.example",
-                "Acme expanded into robotics.",
-                "search",
-                "[]",
-                "",
-                "",
-                "support",
-                "search",
-                "firecrawl_search",
-                "call-1",
-                "",
-            )
-            .unwrap();
-        let two = store
-            .insert_evidence(
-                &inv.id,
-                "https://b.example/story",
-                "b.example",
-                "Acme announced a robotics line.",
-                "search",
-                "[]",
-                "",
-                "",
-                "support",
-                "search",
-                "firecrawl_search",
-                "call-2",
-                "",
-            )
-            .unwrap();
-        let ids = serde_json::to_string(&vec![one.clone(), two.clone()]).unwrap();
-        store
-            .upsert_report_section_markdown(
-                &job.id, "bluf", "## BLUF", "complete", &ids, "{}", 1, "",
-            )
-            .unwrap();
-        let rows: Vec<(String, String, String, String)> = store
-            .conn
-            .prepare(
-                "SELECT id, tool_id, call_id, canonical_ref FROM telemetry_events
-                 WHERE event_type='evidence_item' ORDER BY id",
-            )
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(rows.len(), 2);
-        // One row per cited item, each credited exactly once, both pointing at
-        // the same report revision.
-        for (index, (id, tool, call, canonical)) in rows.iter().enumerate() {
-            assert_eq!(
-                id,
-                &format!("intel-evidence-{}", [one.clone(), two.clone()][index])
-            );
-            assert_eq!(tool, "firecrawl_search");
-            assert_eq!(call, &format!("call-{}", index + 1));
-            assert_eq!(canonical, &format!("{}:{}", job.id, job.revision));
-        }
-        // Re-citing the same items replaces the rows; nothing is double counted.
-        store
-            .upsert_report_section_markdown(
-                &job.id,
-                "bluf",
-                "## BLUF v2",
-                "complete",
-                &ids,
-                "{}",
-                2,
-                "",
-            )
-            .unwrap();
-        let count: i64 = store
-            .conn
-            .prepare("SELECT COUNT(*) FROM telemetry_events WHERE event_type='evidence_item'")
-            .unwrap()
-            .query_row([], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 2);
-    }
 }

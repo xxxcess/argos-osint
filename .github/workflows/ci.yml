@@ -59,11 +59,6 @@ jobs:
               echo "::error::$c is still in the dependency graph"; exit 1
             fi
           done
-      - name: Show which protoc the build will use
-        run: |
-          uname -sm
-          cargo fetch --locked
-          tools/protoc --version
 
       # ---- Embedded legs: exactly what a local `cargo` build runs (default features = embedded RocksDB).
       - name: Install libclang (RocksDB bindgen)

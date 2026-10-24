@@ -26,10 +26,6 @@ Cache: `Swatinem/rust-cache` keyed per OS × storage, covering `target/agents` (
 
 **Local rule:** agents run only `scripts/local_matrix.sh --storage embedded`. Server mode is CI-only.
 
-## `sqlite-scan.yml` (temporary)
-
-On every PR push: a check-only `cargo check` with `rusqlite` and `lancedb` removed (`scripts/sqlite_scan.py`). The run summary lists the remaining errors by module. It never fails the PR. Run it locally with `python3 scripts/sqlite_scan.py`. Both files are deleted once the SQLite removal commit lands.
-
 ## `commit-policy.yml`
 
 On PRs (including title/body edits) and pushes to `main`: `node scripts/release_check.mjs event` enforces Conventional Commits on the PR title/body or new `main` commits, `release_check.mjs versions` checks workspace/lockfile/manifest versions agree, and the `.opencode/tests` release/tool/planning tests run.

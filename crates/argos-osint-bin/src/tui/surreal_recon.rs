@@ -26,6 +26,14 @@ pub(crate) struct Boot {
     pub tool_enabled: Vec<bool>,
 }
 
+/// Investigation trace sizes for the Recon slash commands.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct InvestigationCounts {
+    pub events: usize,
+    pub tasks: usize,
+    pub passages: usize,
+}
+
 /// After a new thread is created on the worker.
 #[derive(Debug, Clone)]
 pub(crate) enum Then {
@@ -73,6 +81,20 @@ mod imp {
         })
         .join()
         .map_err(|_| anyhow::anyhow!("Recon boot worker panicked"))?
+    }
+
+    /// `/trace`, `/directives`, `/evidence`: counts of the thread's
+    /// investigation events, tasks and evidence passages.
+    pub(crate) fn investigation_counts(id: &str) -> Result<InvestigationCounts> {
+        with(|s| {
+            Box::pin(async move {
+                Ok(InvestigationCounts {
+                    events: s.list_investigation_events(id).await?.len(),
+                    tasks: s.list_investigation_tasks(id).await?.len(),
+                    passages: s.list_evidence_passages(id).await?.len(),
+                })
+            })
+        })
     }
 
     pub(crate) fn threads(query: &str) -> Result<(Vec<Thread>, HashMap<String, String>)> {
@@ -214,6 +236,9 @@ mod imp {
         off()
     }
     pub(crate) fn threads(_: &str) -> Result<(Vec<Thread>, HashMap<String, String>)> {
+        off()
+    }
+    pub(crate) fn investigation_counts(_: &str) -> Result<InvestigationCounts> {
         off()
     }
     pub(crate) fn snapshot(

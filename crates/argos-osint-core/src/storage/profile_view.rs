@@ -256,6 +256,7 @@ pub async fn load_tables(db: &Surreal<Any>) -> Result<ProfileTables> {
         })
         .collect();
 
+    let recon = super::recon_jobs::profile_rows(db).await?;
     Ok(ProfileTables {
         telemetry_events: Some(
             events
@@ -337,13 +338,12 @@ pub async fn load_tables(db: &Surreal<Any>) -> Result<ProfileTables> {
                 })
                 .collect(),
         ),
-        // Not on SurrealDB yet: rendered as unavailable, like a missing table.
-        recon_run_states: None,
-        report_jobs: None,
-        report_tasks: None,
-        recon_coverage: None,
-        model_operations: None,
-        model_attempts: None,
+        recon_run_states: Some(recon.recon_run_states),
+        report_jobs: Some(recon.report_jobs),
+        report_tasks: Some(recon.report_tasks),
+        recon_coverage: Some(recon.recon_coverage),
+        model_operations: Some(recon.model_operations),
+        model_attempts: Some(recon.model_attempts),
     })
 }
 

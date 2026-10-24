@@ -8,6 +8,9 @@
 use anyhow::Result;
 use argos_osint_core::profile_stats::{ProfileSnapshot, StatFilters};
 
+/// A dashboard snapshot with the filter options for every dimension.
+type Dashboard = (ProfileSnapshot, Vec<(String, Vec<String>)>);
+
 pub(crate) fn on() -> bool {
     super::surreal_brain::on()
 }
@@ -15,9 +18,7 @@ pub(crate) fn on() -> bool {
 /// One dashboard snapshot for `filters` and the filter options, read from
 /// one load of the Profile source tables.
 #[cfg(feature = "surreal")]
-pub(crate) fn dashboard(
-    filters: &StatFilters,
-) -> Result<(ProfileSnapshot, Vec<(String, Vec<String>)>)> {
+pub(crate) fn dashboard(filters: &StatFilters) -> Result<Dashboard> {
     use argos_osint_core::storage::{profile_view, runtime};
     let filters = filters.clone();
     runtime::blocking(|repo| async move {
@@ -26,9 +27,7 @@ pub(crate) fn dashboard(
 }
 
 #[cfg(not(feature = "surreal"))]
-pub(crate) fn dashboard(
-    _filters: &StatFilters,
-) -> Result<(ProfileSnapshot, Vec<(String, Vec<String>)>)> {
+pub(crate) fn dashboard(_filters: &StatFilters) -> Result<Dashboard> {
     unreachable!("SurrealDB Profile is off without the surreal feature")
 }
 

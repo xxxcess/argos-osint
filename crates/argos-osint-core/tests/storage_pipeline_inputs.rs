@@ -179,3 +179,90 @@ async fn recon_input_follows_thread_opt_in_and_advances_generation() {
     assert!(on.save_insights && on.recall_enabled && !on.required_tasks_complete);
     assert_eq!(on.surface, "recon");
 }
+
+#[tokio::test]
+async fn article_body_lifecycle_and_attempts() {
+    use argos_osint_core::storage::article_body as ab;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "article_body_lifecycle").await;
+    let a = article();
+    let row = ab::ensure(
+        &repo,
+        &a.id,
+        &a.run_id,
+        &a.url,
+        &a.source_domain,
+        &a.source_name,
+    )
+    .await
+    .unwrap();
+    assert_eq!((row.state.as_str(), row.body_version), ("idle", 1));
+    let again = ab::ensure(&repo, &a.id, &a.run_id, &a.url, "", "")
+        .await
+        .unwrap();
+    assert_eq!(again.id, row.id, "ensure reuses the article's body");
+
+    ab::set_state(&repo, &row.id, "running").await.unwrap();
+    let attempt = ab::insert_attempt(&repo, &row.id, "firecrawl_scrape", &a.url, "running", "", 1)
+        .await
+        .unwrap();
+    ab::insert_attempt(
+        &repo,
+        &row.id,
+        "sociavault",
+        &a.url,
+        "skipped",
+        "excluded",
+        1,
+    )
+    .await
+    .unwrap();
+    ab::finish_attempt(&repo, &attempt, "succeeded", "complete")
+        .await
+        .unwrap();
+    let attempts = ab::attempts(&repo, &row.id).await.unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts
+        .iter()
+        .any(|t| t.tool_id == "firecrawl_scrape" && t.state == "succeeded"));
+
+    ab::commit(
+        &repo,
+        &row.id,
+        "Body text.",
+        "h",
+        "complete",
+        "ok",
+        "https://r",
+        "fc",
+        true,
+    )
+    .await
+    .unwrap();
+    let ready = ab::by_id(&repo, &row.id).await.unwrap().unwrap();
+    assert_eq!((ready.state.as_str(), ready.body_version), ("ready", 2));
+    assert_eq!(ready.body_markdown, "Body text.");
+
+    ab::mark_failed(
+        &repo,
+        &row.id,
+        "gone",
+        "2099-01-01T00:00:00Z",
+        "",
+        "unavailable",
+    )
+    .await
+    .unwrap();
+    let failed = ab::by_id(&repo, &row.id).await.unwrap().unwrap();
+    assert_eq!(failed.state, "failed");
+    assert_eq!(
+        failed.body_markdown, "Body text.",
+        "empty partial keeps prose"
+    );
+
+    ab::clear_content(&repo, &row.id).await.unwrap();
+    let cleared = ab::by_id(&repo, &row.id).await.unwrap().unwrap();
+    assert!(cleared.body_markdown.is_empty() && cleared.state == "running");
+}

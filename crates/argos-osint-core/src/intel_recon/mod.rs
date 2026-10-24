@@ -2,6 +2,7 @@
 
 mod actor_review;
 mod body;
+pub mod body_db;
 pub(crate) mod body_filter;
 mod brain;
 pub mod brief_canonical;

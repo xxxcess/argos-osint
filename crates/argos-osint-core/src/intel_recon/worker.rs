@@ -239,7 +239,7 @@ async fn run_acquire_body(runtime: &JobRuntime, article_id: &str) -> Result<Stri
         } => {
             let ua = runtime.settings.osint_user_agent.clone();
             fetch_article_body_with_runtime(
-                &runtime.db_path,
+                super::body_db::BodyDb::Sqlite(&runtime.db_path),
                 &body_id,
                 &article.title,
                 &article.description,

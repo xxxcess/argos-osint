@@ -19,9 +19,11 @@ telemetry are wired (see "Combined tree" at the end).
   starts the Intel brief drainer on the repository (`drain_parallel`,
   `SurrealRuntimeBackend`). Contention plus a delayed publication commits each
   stage once (`surreal_contention_and_publication_delay_keep_leases_and_commit_once`).
-  Gaps: article body acquisition is not ported (a body stage reuses a clean
-  artifact stored in the repository and otherwise fails visibly, so
-  body-dependent stages wait); Related candidates are the run's stored Related
+  Article body acquisition runs on the repository too (`storage::article_body`,
+  `intel_recon::body_db::BodyDb`): the fallback chain, retrieval attempts,
+  acquisition state and the clean artifact are kept in SurrealDB
+  (`article_body_lifecycle_and_attempts`). Gaps: NLP annotations are not
+  cached on SurrealDB (each body is re-annotated); Related candidates are the run's stored Related
   pairs, not the global all-cycles scope; the canonical Brain publication is
   not ported (stage index state is `not_indexed`); publication runs after the
   commit transaction, not inside it; the SurrealDB backend writes no provider

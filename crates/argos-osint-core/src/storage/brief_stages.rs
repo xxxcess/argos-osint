@@ -867,19 +867,21 @@ pub async fn related(repo: &Repository, article: &AtlasArticleRow) -> Result<Vec
 impl StageBackend for SurrealRuntimeBackend {
     fn prepare_body<'a>(
         &'a mut self,
-        _ctx: &'a StageContext,
+        ctx: &'a StageContext,
         article: &'a AtlasArticleRow,
-        _force: bool,
-        _cancel: &'a Arc<AtomicBool>,
+        force: bool,
+        cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<crate::intel_recon::clean_body::CleanArtifact>> {
         Box::pin(async move {
-            clean_artifact(&self.repo, &article.id)
-                .await?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "story missing: article body acquisition is not available on SurrealDB yet"
-                    )
-                })
+            self.inner
+                .prepare_body_on(
+                    crate::intel_recon::body_db::BodyDb::Surreal(&self.repo),
+                    ctx,
+                    article,
+                    force,
+                    cancel,
+                )
+                .await
         })
     }
 

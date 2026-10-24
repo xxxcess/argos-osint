@@ -2462,6 +2462,71 @@ impl RuntimeBackend {
             .map(|db| super::brief_timing::activity_sink(db, task_id, substep, role))
     }
 
+    /// Acquire (or reuse) the article's clean body artifact through `db`.
+    pub(crate) async fn prepare_body_on(
+        &self,
+        db: super::body_db::BodyDb<'_>,
+        ctx: &StageContext,
+        article: &AtlasArticleRow,
+        force_reload: bool,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<CleanArtifact> {
+        let clean = |generation: i64| async move {
+            Ok::<_, anyhow::Error>(
+                db.app_state_get(&format!("intel-clean-body:{}:{generation}", article.id))
+                    .await?
+                    .and_then(|json| serde_json::from_str::<CleanArtifact>(&json).ok()),
+            )
+        };
+        let outcome = super::body::enqueue_on(db, article, force_reload).await?;
+        let (body_id, generation, force) = match outcome {
+            super::body::EnqueueOutcome::Cached(body_id) => {
+                let body = db
+                    .body(&body_id)
+                    .await?
+                    .ok_or_else(|| anyhow!("body missing"))?;
+                if let Some(artifact) = clean(body.body_version).await? {
+                    return Ok(artifact);
+                }
+                // Legacy display body without a clean artifact: re-derive.
+                (body_id, body.body_version + 1, true)
+            }
+            super::body::EnqueueOutcome::Start {
+                body_id,
+                generation,
+                force_refresh,
+            } => (body_id, generation, force_refresh),
+            super::body::EnqueueOutcome::AlreadyRunning { .. } => {
+                bail!("article retrieval already running")
+            }
+            super::body::EnqueueOutcome::Cooldown { reason, .. } => {
+                bail!("story unavailable: {reason}")
+            }
+        };
+        if force {
+            db.clear(&body_id).await?;
+        }
+        let runtime = self.job_runtime(ctx, article, cancel);
+        super::body::fetch_article_body_with_runtime(
+            db,
+            &body_id,
+            &article.title,
+            &article.description,
+            self.keys.clone(),
+            None,
+            runtime.classifier_secret.clone(),
+            self.user_agent.clone(),
+            force,
+            cancel.clone(),
+            |_| {},
+            Some(&runtime),
+        )
+        .await?;
+        clean(generation)
+            .await?
+            .ok_or_else(|| anyhow!("story missing: retrieval produced no validated body"))
+    }
+
     fn job_runtime(
         &self,
         ctx: &StageContext,
@@ -2509,59 +2574,15 @@ impl StageBackend for RuntimeBackend {
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<CleanArtifact>> {
         Box::pin(async move {
-            let outcome = {
-                let store = Store::open(&self.db_path)?;
-                super::body::enqueue_article_body(&store, article, force_reload)?
-            };
-            let (body_id, generation, force) = match outcome {
-                super::body::EnqueueOutcome::Cached(body_id) => {
-                    let store = Store::open(&self.db_path)?;
-                    let body = store
-                        .article_body_by_id(&body_id)?
-                        .ok_or_else(|| anyhow!("body missing"))?;
-                    if let Some(artifact) =
-                        load_clean_artifact(&store, &article.id, body.body_version)?
-                    {
-                        return Ok(artifact);
-                    }
-                    // Legacy display body without a clean artifact: re-derive.
-                    (body_id, body.body_version + 1, true)
-                }
-                super::body::EnqueueOutcome::Start {
-                    body_id,
-                    generation,
-                    force_refresh,
-                } => (body_id, generation, force_refresh),
-                super::body::EnqueueOutcome::AlreadyRunning { .. } => {
-                    bail!("article retrieval already running")
-                }
-                super::body::EnqueueOutcome::Cooldown { reason, .. } => {
-                    bail!("story unavailable: {reason}")
-                }
-            };
-            if force {
-                let store = Store::open(&self.db_path)?;
-                store.clear_article_body_content(&body_id)?;
-            }
-            let runtime = self.job_runtime(ctx, article, cancel);
-            super::body::fetch_article_body_with_runtime(
-                &self.db_path,
-                &body_id,
-                &article.title,
-                &article.description,
-                self.keys.clone(),
-                None,
-                runtime.classifier_secret.clone(),
-                self.user_agent.clone(),
-                force,
-                cancel.clone(),
-                |_| {},
-                Some(&runtime),
+            let db_path = self.db_path.clone();
+            self.prepare_body_on(
+                super::body_db::BodyDb::Sqlite(&db_path),
+                ctx,
+                article,
+                force_reload,
+                cancel,
             )
-            .await?;
-            let store = Store::open(&self.db_path)?;
-            load_clean_artifact(&store, &article.id, generation)?
-                .ok_or_else(|| anyhow!("story missing: retrieval produced no validated body"))
+            .await
         })
     }
 

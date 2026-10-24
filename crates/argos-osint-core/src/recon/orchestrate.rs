@@ -10,7 +10,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
-use super::backend::{sqlite_path, surreal_selected, ReconStore};
+use super::backend::{sqlite_path, ReconStore};
 use super::{
     brain_resources::{self, BrainResourceSummary},
     investigation, picker, AnswerContext, CreditHold, EntityView, HypothesisView, Plan, PlanCall,
@@ -69,7 +69,7 @@ impl StageClock {
         self.recorded = true;
         let elapsed = self.started.elapsed_ms();
         #[cfg(feature = "surreal")]
-        if surreal_selected() {
+        if super::backend::surreal_selected() {
             // The attempt ordinal is read from the repository, so the whole
             // write runs there; SQLite is never opened.
             let (run_id, mode, stage) =

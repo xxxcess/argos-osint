@@ -30,8 +30,8 @@ jobs:
           - { name: macOS arm64, os: macos-14 }
           - { name: macOS Intel, os: macos-15-intel }
         storage: [embedded, server]
-        # macOS Intel embedded (~45 min) runs only on pushes to main, not on PR events.
-        exclude: ${{ github.event_name == 'pull_request' && fromJSON('[{"platform":{"name":"macOS Intel","os":"macos-15-intel"},"storage":"embedded"}]') || fromJSON('[]') }}
+        # macOS embedded legs (~30-45 min) run only on pushes to main, not on PR events.
+        exclude: ${{ github.event_name == 'pull_request' && fromJSON('[{"platform":{"name":"macOS Intel","os":"macos-15-intel"},"storage":"embedded"},{"platform":{"name":"macOS arm64","os":"macos-14"},"storage":"embedded"}]') || fromJSON('[]') }}
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 90
     steps:

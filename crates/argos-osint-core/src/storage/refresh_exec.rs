@@ -103,7 +103,7 @@ pub async fn end_claimed(
                 tx.query(
                     "UPDATE $t SET state = $state, lease_owner = '', process_owner = '',
                        lease_until = NONE, next_eligible_at = <datetime>$now,
-                       attempts = IF $refund THEN math::max([attempts - 1, 0]) ELSE attempts END,
+                       attempts = IF $refund THEN array::max([attempts - 1, 0]) ELSE attempts END,
                        finished_at = IF $terminal THEN <datetime>$now ELSE NONE END,
                        updated_at = <datetime>$now RETURN NONE;
                      LET $open = SELECT VALUE id FROM attempt WHERE task = $t AND epoch = $e

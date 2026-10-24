@@ -259,8 +259,8 @@ pub async fn add_message(
                     "IF (SELECT VALUE deleted FROM ONLY type::record('recon_thread', $t)) != false {
                        THROW 'thread not found';
                      };
-                     LET $top = math::max(SELECT VALUE sequence FROM recon_message WHERE thread_id = $t) ?? 0;
-                     LET $n = (UPSERT $c SET n = math::max([n ?? 0, $top]) + 1 RETURN VALUE n)[0];
+                     LET $top = array::max((SELECT VALUE sequence FROM recon_message WHERE thread_id = $t)) ?? 0;
+                     LET $n = (UPSERT $c SET n = array::max([n ?? 0, $top]) + 1 RETURN VALUE n)[0];
                      CREATE $m SET thread_id = $t, sequence = $n, role = $role, content = $body,
                        run_id = $run, created_at = $at RETURN NONE;
                      UPDATE type::record('recon_thread', $t) SET updated_at = $at RETURN NONE;

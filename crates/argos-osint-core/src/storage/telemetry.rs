@@ -110,10 +110,10 @@ pub async fn record(db: &Surreal<Any>, event: &TelemetryEvent) -> Result<()> {
                      IF !$seen {
                        UPSERT $h SET bucket = $hour, event_type = $type, dim_key = $dim,
                          events = (events ?? 0) + $n, total_ms = (total_ms ?? 0) + $ms,
-                         max_ms = math::max([max_ms ?? 0, $ms]), bins_json = $bins RETURN NONE;
+                         max_ms = array::max([max_ms ?? 0, $ms]), bins_json = $bins RETURN NONE;
                        UPSERT $d SET bucket = $day, event_type = $type, dim_key = $dim,
                          events = (events ?? 0) + $n, total_ms = (total_ms ?? 0) + $ms,
-                         max_ms = math::max([max_ms ?? 0, $ms]), bins_json = $bins RETURN NONE;
+                         max_ms = array::max([max_ms ?? 0, $ms]), bins_json = $bins RETURN NONE;
                      };
                      RETURN $seen;",
                 )

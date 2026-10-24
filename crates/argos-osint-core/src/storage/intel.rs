@@ -370,8 +370,8 @@ pub async fn record_report_result(
 ) -> Result<Option<i64>, TxError> {
     let hash = crate::nlp::cache::hash(details_json);
     let pick = match sequence {
-        Sequence::Next => "math::max(array::append($seqs, 0)) + 1",
-        Sequence::Retained => "math::min(array::append($seqs, 0)) - 1",
+        Sequence::Next => "array::max(array::append($seqs, 0)) + 1",
+        Sequence::Retained => "array::min(array::append($seqs, 0)) - 1",
     };
     let sql = format!(
         "LET $r = type::record('intel_report_result', [$job, $gen]);

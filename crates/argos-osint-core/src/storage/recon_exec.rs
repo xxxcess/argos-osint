@@ -86,8 +86,8 @@ pub async fn add_answer(
                         OR (SELECT VALUE deleted FROM ONLY type::record('recon_thread', $t)) != false {
                        THROW 'run no longer active';
                      };
-                     LET $top = math::max(SELECT VALUE sequence FROM recon_message WHERE thread_id = $t) ?? 0;
-                     LET $n = (UPSERT $c SET n = math::max([n ?? 0, $top]) + 1 RETURN VALUE n)[0];
+                     LET $top = array::max((SELECT VALUE sequence FROM recon_message WHERE thread_id = $t)) ?? 0;
+                     LET $n = (UPSERT $c SET n = array::max([n ?? 0, $top]) + 1 RETURN VALUE n)[0];
                      CREATE $m SET thread_id = $t, sequence = $n, role = 'assistant', content = $body,
                        run_id = $rid, created_at = $at RETURN NONE;
                      RETURN $n;",

@@ -188,6 +188,23 @@ pub async fn enqueue_refresh_in(
         .bind(("job", job_id)),
     )
     .await?;
+    // Explicit enqueue on resume may restart cancellation, but never an
+    // exhausted provider chain (`insight_persist::enqueue_refresh`). Startup
+    // recovery does not claim paused work.
+    run(
+        tx,
+        tx.query(
+            "LET $side = type::record('insight_refresh_task', $t);
+             IF (SELECT VALUE blocked_reason FROM ONLY $side) = 'cancelled; evidence dirty' {
+               UPDATE type::record('task', $t) SET state = 'queued', updated_at = <datetime>$now,
+                 next_eligible_at = <datetime>$now WHERE state = 'paused' RETURN NONE;
+               UPDATE $side SET blocked_reason = '' RETURN NONE;
+             };",
+        )
+        .bind(("t", task_id.clone()))
+        .bind(("now", now.to_rfc3339())),
+    )
+    .await?;
     Ok(task_id)
 }
 

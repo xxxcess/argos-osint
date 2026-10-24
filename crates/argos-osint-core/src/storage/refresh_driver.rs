@@ -143,6 +143,9 @@ struct OwnerTask {
 pub enum Retried {
     /// The owner has no refresh task to retry.
     Nothing,
+    /// The newest refresh already completed: nothing to retry, and the
+    /// saved answer must not be mined instead.
+    Completed { task_id: String },
     /// The task ran (it published when `published`).
     Ran { task_id: String, published: bool },
 }
@@ -172,18 +175,49 @@ pub async fn retry_owner(
     let task_id = match newest.state.as_str() {
         "queued" | "retry_scheduled" => newest.id,
         "running" => anyhow::bail!("the insight refresh is already running"),
-        "completed" => return Ok(Retried::Nothing),
-        _ => {
+        "completed" => return Ok(Retried::Completed { task_id: newest.id }),
+        "paused" => {
+            // `enqueue_refresh` requeues a task paused with evidence dirty;
+            // any other pause gets a new generation below.
             let captured = captured_settings(repo, &newest.id, settings).await?;
             let mut input: PipelineInput = serde_json::from_str(&newest.input_ref)?;
-            let now = chrono::Utc::now().to_rfc3339();
-            input.snapshot.generation =
-                super::insight_owner::advance_generation(repo, kind, owner, &now).await?;
-            super::insight_owner::enqueue_refresh(repo, &mut input, &captured).await?
+            let id = super::insight_owner::enqueue_refresh(repo, &mut input, &captured).await?;
+            if state_of(repo, &id).await? == "queued" {
+                id
+            } else {
+                reenqueue(repo, kind, owner, &newest, settings).await?
+            }
         }
+        _ => reenqueue(repo, kind, owner, &newest, settings).await?,
     };
     let published = run_one(repo, &task_id, settings, cancel, validate, execute)
         .await?
         .is_some();
     Ok(Retried::Ran { task_id, published })
+}
+
+async fn state_of(repo: &Repository, task_id: &str) -> Result<String> {
+    let mut r = repo
+        .db()
+        .query("SELECT VALUE state FROM ONLY type::record('task', $t)")
+        .bind(("t", task_id.to_string()))
+        .await?
+        .check()?;
+    Ok(r.take::<Option<String>>(0usize)?.unwrap_or_default())
+}
+
+/// Re-enqueue `task`'s captured input at the owner's next generation.
+async fn reenqueue(
+    repo: &Repository,
+    kind: &str,
+    owner: &str,
+    task: &OwnerTask,
+    settings: &SettingsFile,
+) -> Result<String> {
+    let captured = captured_settings(repo, &task.id, settings).await?;
+    let mut input: PipelineInput = serde_json::from_str(&task.input_ref)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    input.snapshot.generation =
+        super::insight_owner::advance_generation(repo, kind, owner, &now).await?;
+    super::insight_owner::enqueue_refresh(repo, &mut input, &captured).await
 }

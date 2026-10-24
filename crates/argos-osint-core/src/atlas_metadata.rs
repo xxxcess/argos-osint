@@ -481,7 +481,7 @@ pub async fn process_run(
         None
     } else {
         let lookup = tokio::select! {
-            result=rsp::warm_with_store_json_for_db(stored.as_deref(),user_agent,sqlite_db.clone())=>Some(result),
+            result=rsp::warm_with_store_json_for_db(stored.as_deref(),user_agent,sqlite_db.map(std::path::Path::to_path_buf))=>Some(result),
             _=wait_cancelled(cancel.clone())=>None,
         };
         match lookup {
@@ -1074,7 +1074,7 @@ async fn inventory_index(
         match rsp::warm_with_store_json_for_db(
             stored.as_deref(),
             user_agent,
-            crate::recon::backend::sqlite_path(db),
+            crate::recon::backend::sqlite_path(db).map(std::path::Path::to_path_buf),
         )
         .await
         {

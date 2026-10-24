@@ -223,7 +223,7 @@ pub async fn execute(
     let sqlite_db = crate::recon::backend::sqlite_path(db);
     // The per-batch cache write in `accept` is synchronous and SQLite-only;
     // under SurrealDB only the start/end cache reads and writes below run.
-    adapter.cache = sqlite_db.clone().map(|db| (db, cache_key.clone()));
+    adapter.cache = sqlite_db.map(|db| (db.to_path_buf(), cache_key.clone()));
     let store = crate::atlas_store::AtlasStore::open(db).await.ok();
     if let Some(store) = &store {
         if let Ok(Some(raw)) = store.app_state_get(&cache_key).await {

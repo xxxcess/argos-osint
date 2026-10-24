@@ -137,3 +137,153 @@ pub async fn verify_publication(
     out.coverage = verify_memory_coverage(db, &receipt.affected_memory_ids).await?;
     Ok(out)
 }
+
+// ---------------------------------------------------------------------------
+// Checkpoints, repair status and the repair job's reads/writes
+// (`argos_atlas_checkpoints`, `argos_atlas_repairs`).
+
+/// `atlas_memory::save_checkpoint`: insert or replace the payload of one
+/// `(run, revision)`, as SQLite's `ON CONFLICT DO UPDATE` does.
+pub async fn put_checkpoint(
+    db: &Surreal<Any>,
+    run_id: &str,
+    revision: &str,
+    payload_json: &str,
+    accepted: i64,
+) -> Result<()> {
+    db.query(
+        "UPSERT type::record('atlas_checkpoint', $key) SET run_id = $run, revision = $rev,
+           payload_json = $payload, accepted = $acc, rejected = rejected ?? 0,
+           created_at = $now RETURN NONE;",
+    )
+    .bind(("key", super::codec::encode(&[run_id, revision])))
+    .bind(("run", run_id.to_string()))
+    .bind(("rev", revision.to_string()))
+    .bind(("payload", payload_json.to_string()))
+    .bind(("acc", accepted))
+    .bind(("now", chrono::Utc::now().to_rfc3339()))
+    .await?
+    .check()?;
+    Ok(())
+}
+
+/// Latest checkpoint payload of a run (`load_checkpoint`).
+pub async fn latest_checkpoint(db: &Surreal<Any>, run_id: &str) -> Result<Option<String>> {
+    let mut r = db
+        .query(
+            "SELECT VALUE payload_json FROM atlas_checkpoint WHERE run_id = $run
+               ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(("run", run_id.to_string()))
+        .await?
+        .check()?;
+    let rows: Vec<String> = r.take(0usize)?;
+    Ok(rows.into_iter().next())
+}
+
+/// Drop a run's checkpoints (`prepare_reextraction`).
+pub async fn delete_checkpoints(db: &Surreal<Any>, run_id: &str) -> Result<()> {
+    db.query("DELETE atlas_checkpoint WHERE run_id = $run RETURN NONE")
+        .bind(("run", run_id.to_string()))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+/// Stored repair detail JSON of a run (`repair_status`).
+pub async fn repair_detail(db: &Surreal<Any>, run_id: &str) -> Result<Option<String>> {
+    let mut r = db
+        .query("SELECT VALUE detail_json FROM type::record('atlas_repair', $run)")
+        .bind(("run", run_id.to_string()))
+        .await?
+        .check()?;
+    let rows: Vec<String> = r.take(0usize)?;
+    Ok(rows.into_iter().next())
+}
+
+/// `Store::atlas_has_insights`: the run has Atlas source links.
+pub async fn has_insights(db: &Surreal<Any>, run_id: &str) -> Result<bool> {
+    let mut r = db
+        .query(
+            "RETURN count(SELECT VALUE id FROM insight_source
+               WHERE run_id = $run AND answer_id = $answer LIMIT 1);",
+        )
+        .bind(("run", run_id.to_string()))
+        .bind(("answer", atlas_answer_id(run_id)))
+        .await?
+        .check()?;
+    let n: Option<i64> = r.take(0usize)?;
+    Ok(n.unwrap_or(0) > 0)
+}
+
+/// `Store::is_tombstoned`.
+pub async fn is_tombstoned(db: &Surreal<Any>, memory_id: &str) -> Result<bool> {
+    let mut r = db
+        .query("RETURN count(SELECT VALUE id FROM memory_tombstone WHERE memory_id = $m LIMIT 1);")
+        .bind(("m", memory_id.to_string()))
+        .await?
+        .check()?;
+    let n: Option<i64> = r.take(0usize)?;
+    Ok(n.unwrap_or(0) > 0)
+}
+
+/// Article ids with a first-sighting telemetry row (`intel_article`).
+pub async fn seen_article_ids(db: &Surreal<Any>) -> Result<std::collections::HashSet<String>> {
+    let mut r = db
+        .query("SELECT VALUE article_id FROM telemetry_event WHERE event_type = 'intel_article'")
+        .await?
+        .check()?;
+    let rows: Vec<String> = r.take(0usize)?;
+    Ok(rows.into_iter().filter(|id| !id.is_empty()).collect())
+}
+
+/// `Store::requeue_uncovered`: queue index work for every coverage gap
+/// (missing or stale revision). Returns the number of queued changes.
+/// Nothing a user sees changes, so `memories_changed` is not bumped.
+pub async fn requeue_uncovered(
+    publisher: &super::publisher::Publisher,
+    coverage: &CoverageReport,
+) -> Result<usize> {
+    let ids: Vec<String> = coverage.pending.iter().map(|(id, _)| id.clone()).collect();
+    if ids.is_empty() || coverage.disabled {
+        return Ok(0);
+    }
+    let count = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let out = count.clone();
+    let ids = std::sync::Arc::new(ids);
+    let nonce = format!("requeue-{}", chrono::Utc::now().timestamp_micros());
+    let w: super::publisher::Write = std::sync::Arc::new(move |tx| {
+        let (ids, out, nonce) = (ids.clone(), out.clone(), nonce.clone());
+        Box::pin(async move {
+            let changes = super::memory::index_changes_in(&tx, &ids, &nonce).await?;
+            *out.lock().expect("requeue count") = changes.len();
+            Ok(super::publisher::Wrote {
+                changes,
+                changed: false,
+            })
+        })
+    });
+    publisher
+        .publish(w)
+        .await
+        .map_err(|e| anyhow::anyhow!("atlas requeue: {e}"))?;
+    let n = *count.lock().expect("requeue count");
+    Ok(n)
+}
+
+/// Bump `memories_changed` after a repair restored memories.
+pub async fn bump_memories_changed(publisher: &super::publisher::Publisher) -> Result<()> {
+    let w: super::publisher::Write = std::sync::Arc::new(|_tx| {
+        Box::pin(async move {
+            Ok(super::publisher::Wrote {
+                changes: Vec::new(),
+                changed: true,
+            })
+        })
+    });
+    publisher
+        .publish(w)
+        .await
+        .map_err(|e| anyhow::anyhow!("atlas memories_changed: {e}"))?;
+    Ok(())
+}

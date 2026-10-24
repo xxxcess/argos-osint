@@ -6,9 +6,10 @@
 //! (`brain_topology::admit`, `brain_neighborhood_brief::build`).
 //!
 //! The retained Intel display seeds read the repository's brief
-//! publications (`storage::brief`); a matching item is shown as a retained
-//! source node (its canonical binding needs the brief stage receipts, not
-//! ported), and `RetainedActor` is always provisional.
+//! publications and stage receipts (`storage::brief`): a matching item binds
+//! its canonical memory when the receipt snapshot still matches the article,
+//! else it is shown as a retained source node; `RetainedActor` is always
+//! provisional.
 //!
 //! The `current_metadata_sql` article-revision fence (with sibling-kind
 //! carried refs) applies to derivation provenance and to cycle-scoped
@@ -35,6 +36,15 @@ use crate::brain_topology::{
 use crate::memory_metadata::{EndpointRef, MemoryKind, MemoryPayload};
 
 type Adjacency = (TopologyNode, TopologyEdge);
+
+/// The receipt snapshot fields `retained_canonical` fences on.
+#[derive(SurrealValue)]
+struct RetainedSnapshot {
+    owner_id: String,
+    owner_kind: String,
+    inputs_json: Option<String>,
+    readiness_json: Option<String>,
+}
 
 /// A live derivation's kind and snapshot owner, inputs and readiness, for
 /// the article-revision fence.
@@ -541,6 +551,51 @@ impl Query<'_> {
             }
         }
         Ok(false)
+    }
+
+    /// The brief stage receipt's canonical memory for `local_id`: `None`
+    /// when the receipt snapshot no longer matches the retained article
+    /// (`snapshot_matches_article`), `Some(None)` when no assessed
+    /// derivation exists for the item.
+    async fn retained_canonical(
+        &self,
+        snapshot: &str,
+        run: &str,
+        article: &str,
+        kind: &str,
+        local_id: &str,
+    ) -> Result<Option<Option<String>>> {
+        let db = self.repo.db();
+        let mut r = db
+            .query(
+                "SELECT owner_id, owner_kind, inputs_json, readiness_json
+                   FROM ONLY type::record('insight_snapshot', $s);
+                 RETURN (SELECT VALUE memory_id FROM type::record('insight_derivation', $d)
+                   WHERE snapshot_id = $s AND insight_kind = $k AND status = 'assessed')[0];",
+            )
+            .bind(("s", snapshot.to_string()))
+            .bind(("d", format!("{snapshot}:{local_id}")))
+            .bind(("k", kind.to_string()))
+            .await?
+            .check()?;
+        let snap: Option<RetainedSnapshot> = r.take(0)?;
+        let memory: Option<String> = r.take(1)?;
+        let Some(snap) = snap.filter(|s| {
+            s.owner_id == article && matches!(s.owner_kind.as_str(), "article" | "atlas")
+        }) else {
+            return Ok(None);
+        };
+        let refs = super::provenance::retained_refs(
+            snap.inputs_json.as_deref().unwrap_or(""),
+            snap.readiness_json.as_deref().unwrap_or(""),
+            kind,
+        );
+        for a in super::provenance::articles(db, article).await? {
+            if a.run_id == run && super::provenance::current_metadata(db, &refs, &a).await? {
+                return Ok(Some(memory));
+            }
+        }
+        Ok(None)
     }
 
     /// `ScopedRows::Evidence`: a live derivation cites this source revision,
@@ -2123,32 +2178,63 @@ pub async fn topology_snapshot(
                         TopologyNodeKind::Claim,
                     )
                 };
-                // Fence the exact current job, generation and item identity;
-                // the canonical binding (brief stage receipts) is not on
-                // SurrealDB yet, so a match is shown as a retained source.
+                // Fence the exact current job, generation and item identity,
+                // then bind the canonical memory through the brief stage
+                // receipts when its snapshot still matches the article.
                 let matches =
                     super::brief::retained_item(repo, article_id, job_id, retained, local_id, text)
                         .await?;
-                let mut n = node(seed.key(), node_kind, text.clone());
-                n.status = if matches {
-                    "retained source · not indexed".into()
+                let mut canonical = None;
+                let mut status = "retained source · not indexed";
+                if matches {
+                    if let Some(state) =
+                        super::brief::retained_canonical_state(repo, article_id, job_id, kind)
+                            .await?
+                    {
+                        match q
+                            .retained_canonical(
+                                &state.snapshot_id,
+                                run_id,
+                                article_id,
+                                kind,
+                                local_id,
+                            )
+                            .await?
+                        {
+                            Some(Some(id)) => {
+                                canonical =
+                                    q.memory_node(&id).await?.filter(|n| n.kind == node_kind);
+                            }
+                            Some(None) => {}
+                            None => {
+                                status = "retained source · canonical revision unavailable";
+                                q.gaps.insert(format!("{job_id}:{local_id}: canonical publication metadata does not match the current retained article or is unavailable"));
+                            }
+                        }
+                    }
                 } else {
+                    status = "retained source · canonical revision unavailable";
                     q.gaps.insert(format!(
                         "{job_id}:{local_id}: the retained Intel publication changed or is unavailable"
                     ));
-                    "retained source · canonical revision unavailable".into()
-                };
-                n.subtype = format!("retained_{kind}");
-                n.article_id = article_id.clone();
-                n.run_id = run_id.clone();
-                n.cycle = Some(run_id.clone());
-                n.revision = revision.clone();
-                n.topology_seed = Some(seed.clone());
-                n.passages.push(format!(
-                    "Intel {job_id}:{local_id} · {run_id}/{article_id}@{revision}"
-                ));
-                retained_article = Some(article);
-                roots.push(n);
+                }
+                if let Some(n) = canonical {
+                    roots.push(n);
+                } else {
+                    let mut n = node(seed.key(), node_kind, text.clone());
+                    n.status = status.into();
+                    n.subtype = format!("retained_{kind}");
+                    n.article_id = article_id.clone();
+                    n.run_id = run_id.clone();
+                    n.cycle = Some(run_id.clone());
+                    n.revision = revision.clone();
+                    n.topology_seed = Some(seed.clone());
+                    n.passages.push(format!(
+                        "Intel {job_id}:{local_id} · {run_id}/{article_id}@{revision}"
+                    ));
+                    retained_article = Some(article);
+                    roots.push(n);
+                }
             }
         }
         TopologySeed::RetainedActor {

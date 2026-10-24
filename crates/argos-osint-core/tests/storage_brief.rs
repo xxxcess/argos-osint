@@ -174,3 +174,94 @@ async fn retained_seeds_are_fenced_by_job_run_and_item() {
     assert_eq!(root.kind, TopologyNodeKind::Entity);
     assert_eq!(root.status, "retained source · provisional");
 }
+
+fn indexed(
+    job: &str,
+    snapshot: &str,
+) -> argos_osint_core::intel_recon::brief_canonical::IndexState {
+    argos_osint_core::intel_recon::brief_canonical::IndexState {
+        state: "indexed".into(),
+        snapshot_id: snapshot.into(),
+        job_id: job.into(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn canonical_state_prefers_article_then_stage_receipt() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "brief_receipts").await;
+    brief::apply_schema(&repo).await.unwrap();
+
+    assert!(brief::retained_canonical_state(&repo, "a1", "j1", "claim")
+        .await
+        .unwrap()
+        .is_none());
+    // A stage receipt of the exact job binds while the article state does not.
+    brief::put_stage_receipt(
+        &repo,
+        "j1",
+        "intel_brief_claims",
+        &indexed("j1", "s-claims"),
+    )
+    .await
+    .unwrap();
+    let got = brief::retained_canonical_state(&repo, "a1", "j1", "claim")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.snapshot_id, "s-claims");
+    assert!(
+        brief::retained_canonical_state(&repo, "a1", "j1", "inference")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(brief::retained_canonical_state(&repo, "a1", "j2", "claim")
+        .await
+        .unwrap()
+        .is_none());
+    // The article's indexed state for the job wins.
+    brief::put_index_state(&repo, "a1", &indexed("j1", "s-all"))
+        .await
+        .unwrap();
+    let got = brief::retained_canonical_state(&repo, "a1", "j1", "inference")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.snapshot_id, "s-all");
+}
+
+#[tokio::test]
+async fn leads_are_replaced_per_article() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "brief_leads").await;
+    brief::apply_schema(&repo).await.unwrap();
+    let lead = |id: &str| brief::Lead {
+        id: id.into(),
+        inference_id: "i1".into(),
+        inference_text: "text".into(),
+        candidate_article_id: "a9".into(),
+        candidate_run_id: "r9".into(),
+        candidate_metadata_revision: "rev".into(),
+        interpretation: "related".into(),
+        verification_needed: String::new(),
+        citations_json: "[]".into(),
+    };
+    brief::replace_leads(&repo, "a1", "j1", 1, &[lead("l1"), lead("l2")])
+        .await
+        .unwrap();
+    brief::replace_leads(&repo, "a2", "j9", 1, &[lead("l9")])
+        .await
+        .unwrap();
+    assert_eq!(brief::leads(&repo, "a1").await.unwrap().len(), 2);
+    brief::replace_leads(&repo, "a1", "j2", 2, &[lead("l3")])
+        .await
+        .unwrap();
+    assert_eq!(brief::leads(&repo, "a1").await.unwrap(), vec![lead("l3")]);
+    assert_eq!(brief::leads(&repo, "a2").await.unwrap(), vec![lead("l9")]);
+}

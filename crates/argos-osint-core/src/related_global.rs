@@ -146,20 +146,7 @@ impl Collector<'_> {
         let Some(article) = self.store.atlas_article(run, id)? else {
             return Ok(());
         };
-        let key = url_key(&article);
-        if self.exclude.contains(&key) {
-            return Ok(());
-        }
-        let acc = self.rows.entry(key).or_default();
-        acc.basis.insert(basis);
-        acc.established |= established;
-        acc.occurrences.insert(
-            ArticleOrigin {
-                run_id: run.into(),
-                article_id: id.into(),
-            },
-            article,
-        );
+        insert(&self.exclude, &mut self.rows, article, basis, established);
         Ok(())
     }
 
@@ -169,8 +156,45 @@ impl Collector<'_> {
         limit: usize,
         scope: RelatedScope,
     ) -> Result<GlobalRelatedPage> {
+        Ok(finish(self.rows, cursor, limit, scope))
+    }
+}
+
+/// Group one occurrence under its URL key unless the key is excluded.
+fn insert(
+    exclude: &BTreeSet<String>,
+    rows: &mut BTreeMap<String, Acc>,
+    article: AtlasArticleRow,
+    basis: String,
+    established: bool,
+) {
+    let key = url_key(&article);
+    if exclude.contains(&key) {
+        return;
+    }
+    let acc = rows.entry(key).or_default();
+    acc.basis.insert(basis);
+    acc.established |= established;
+    acc.occurrences.insert(
+        ArticleOrigin {
+            run_id: article.run_id.clone(),
+            article_id: article.id.clone(),
+        },
+        article,
+    );
+}
+
+/// Rank grouped rows (established first, then basis count, recency, URL) and
+/// cut one page at the numeric `cursor`.
+fn finish(
+    grouped: BTreeMap<String, Acc>,
+    cursor: Option<&str>,
+    limit: usize,
+    scope: RelatedScope,
+) -> GlobalRelatedPage {
+    {
         let mut rows = Vec::new();
-        for (key, acc) in self.rows {
+        for (key, acc) in grouped {
             let newest = acc
                 .occurrences
                 .values()
@@ -202,12 +226,12 @@ impl Collector<'_> {
         let offset: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
         let limit = limit.clamp(1, 100);
         let end = offset.saturating_add(limit);
-        Ok(GlobalRelatedPage {
+        GlobalRelatedPage {
             rows: rows.into_iter().skip(offset).take(limit).collect(),
             total,
             next_cursor: (end < total).then(|| end.to_string()),
             scope,
-        })
+        }
     }
 }
 
@@ -415,6 +439,114 @@ impl Store {
         }
         c.finish(cursor, limit, RelatedScope::AllRetained)
     }
+}
+
+/// `Store::related_articles_global` on SurrealDB: URL occurrences across
+/// retained cycles plus each occurrence's current shared-mention leads.
+/// Brain Related records and canonical-actor leads are not stored on
+/// SurrealDB yet, so every row stays tentative.
+#[cfg(feature = "surreal")]
+pub async fn related_articles_global_on(
+    repo: &crate::storage::repo::Repository,
+    source_run: &str,
+    source_article: &str,
+    scope: RelatedScope,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<GlobalRelatedPage> {
+    use crate::storage::{atlas, atlas_metadata};
+    use surrealdb::types::SurrealValue;
+    #[derive(SurrealValue)]
+    struct Pair {
+        left_id: String,
+        right_id: String,
+        left_revision: String,
+        right_revision: String,
+        shared_json: String,
+    }
+    let db = repo.db();
+    let Some(source) = atlas::article(db, source_run, source_article).await? else {
+        return Ok(GlobalRelatedPage {
+            scope,
+            ..GlobalRelatedPage::default()
+        });
+    };
+    let key = url_key(&source);
+    let sources = if scope == RelatedScope::AllRetained && !key.starts_with("occurrence:") {
+        let mut r = db
+            .query("SELECT VALUE [run_id, article_id, url] FROM atlas_article WHERE url != ''")
+            .await?
+            .check()?;
+        let hits: Vec<Vec<String>> = r.take(0usize)?;
+        let mut out = Vec::new();
+        for hit in hits
+            .iter()
+            .filter(|h| h.len() == 3 && canonical_url(&h[2]) == key)
+        {
+            if let Some(a) = atlas::article(db, &hit[0], &hit[1]).await? {
+                out.push(a);
+            }
+        }
+        out
+    } else {
+        vec![source.clone()]
+    };
+    let exclude = BTreeSet::from([key]);
+    let mut grouped = BTreeMap::new();
+    for s in &sources {
+        let mut r = db
+            .query(
+                "SELECT left_id, right_id, left_revision, right_revision, shared_json
+                   FROM atlas_related_article WHERE run_id = $r AND left_id = $a;
+                 SELECT left_id, right_id, left_revision, right_revision, shared_json
+                   FROM atlas_related_article WHERE run_id = $r AND right_id = $a;",
+            )
+            .bind(("r", s.run_id.clone()))
+            .bind(("a", s.id.clone()))
+            .await?
+            .check()?;
+        let mut pairs: Vec<Pair> = r.take(0usize)?;
+        pairs.extend(r.take::<Vec<Pair>>(1usize)?);
+        for p in pairs {
+            let (Some(a), Some(b)) = (
+                atlas::article(db, &s.run_id, &p.left_id).await?,
+                atlas::article(db, &s.run_id, &p.right_id).await?,
+            ) else {
+                continue;
+            };
+            if crate::related_articles::revision(&a) != p.left_revision
+                || crate::related_articles::revision(&b) != p.right_revision
+            {
+                continue;
+            }
+            let am = atlas_metadata::metadata(db, &a.run_id, &a.id).await?;
+            let bm = atlas_metadata::metadata(db, &b.run_id, &b.id).await?;
+            if crate::related_articles::shared_entity_mentions_with(
+                &a,
+                am.as_ref(),
+                &b,
+                bm.as_ref(),
+            )
+            .len()
+                < crate::related_articles::MIN_SHARED_ENTITIES
+            {
+                continue;
+            }
+            let shared: Vec<crate::related_articles::SharedMention> =
+                serde_json::from_str(&p.shared_json)?;
+            let basis = format!(
+                "Shared mentions: {}",
+                shared
+                    .into_iter()
+                    .map(|m| m.original_text)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let target = if p.left_id == s.id { b } else { a };
+            insert(&exclude, &mut grouped, target, basis, false);
+        }
+    }
+    Ok(finish(grouped, cursor, limit, scope))
 }
 
 #[cfg(test)]

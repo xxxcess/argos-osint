@@ -40,10 +40,10 @@ pub struct ArticleOrigin {
     pub article_id: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct SharedMention {
+pub(crate) struct SharedMention {
     key: String,
     type_hint: String,
-    original_text: String,
+    pub(crate) original_text: String,
     left: ArticleMention,
     right: ArticleMention,
 }
@@ -571,7 +571,7 @@ pub fn plan(
     }
     Ok(out)
 }
-fn revision(a: &AtlasArticleRow) -> String {
+pub(crate) fn revision(a: &AtlasArticleRow) -> String {
     crate::nlp::cache::hash(&format!("{}:{}", atlas_metadata::input_hash(a), a.category))
 }
 pub(crate) fn canonical_url(raw: &str) -> String {

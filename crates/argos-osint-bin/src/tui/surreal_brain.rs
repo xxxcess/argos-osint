@@ -384,3 +384,30 @@ pub(crate) fn clear_logs() -> Result<usize> {
 pub(crate) fn clear_logs() -> Result<usize> {
     unreachable!("SurrealDB Logs is off without the surreal feature")
 }
+
+/// Intel Related leads on the repository (`related_articles_global`).
+#[cfg(feature = "surreal")]
+pub(crate) fn related_global(
+    run_id: &str,
+    article_id: &str,
+    scope: argos_osint_core::related_global::RelatedScope,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<argos_osint_core::related_global::GlobalRelatedPage> {
+    use argos_osint_core::related_global::related_articles_global_on;
+    use argos_osint_core::storage::runtime;
+    runtime::blocking(|repo| async move {
+        related_articles_global_on(&repo, run_id, article_id, scope, cursor, limit).await
+    })
+}
+
+#[cfg(not(feature = "surreal"))]
+pub(crate) fn related_global(
+    _run_id: &str,
+    _article_id: &str,
+    _scope: argos_osint_core::related_global::RelatedScope,
+    _cursor: Option<&str>,
+    _limit: usize,
+) -> Result<argos_osint_core::related_global::GlobalRelatedPage> {
+    unreachable!("SurrealDB Related is off without the surreal feature")
+}

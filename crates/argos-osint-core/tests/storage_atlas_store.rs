@@ -181,7 +181,42 @@ fn mention(
 
 /// `related_articles::build_on`: the same pairs on both stores, a cached
 /// rebuild, and a pair dropped once one of its articles goes.
+/// `related_articles_global` rows as (article id, basis) for both scopes.
+async fn global_rows(store: &AtlasStore) -> Vec<(String, Vec<String>, bool)> {
+    use argos_osint_core::related_global::{related_articles_global_on, RelatedScope};
+    let mut out = Vec::new();
+    for scope in [RelatedScope::AllRetained, RelatedScope::ThisCycle] {
+        let page = match store.repository() {
+            Some(repo) => related_articles_global_on(repo, "run-r", "source", scope, None, 20)
+                .await
+                .unwrap(),
+            None => store
+                .sqlite("global", |s| {
+                    s.related_articles_global("run-r", "source", scope, None, 20)
+                })
+                .unwrap(),
+        };
+        out.extend(
+            page.rows
+                .into_iter()
+                .map(|r| (r.article.id, r.basis, r.tentative)),
+        );
+    }
+    out
+}
+
 async fn related_script(store: &AtlasStore) -> Vec<usize> {
+    let first = related_setup(store).await;
+    let build = || argos_osint_core::related_articles::build_on(store, "run-r");
+    let cached = build().await.unwrap();
+    store.delete_article("run-r", "two").await.unwrap();
+    let after_delete = build().await.unwrap();
+    vec![first, cached, after_delete]
+}
+
+/// Three articles in one run with complete metadata on the source; returns
+/// the first build's pair count.
+async fn related_setup(store: &AtlasStore) -> usize {
     use argos_osint_core::atlas_metadata::{ArticleMetadata, MetadataState};
     store.insert_run("run-r", "{}", "{}").await.unwrap();
     let source = related_article("source", "Ada and Ada meet Acme", "economic");
@@ -196,12 +231,9 @@ async fn related_script(store: &AtlasStore) -> Vec<usize> {
     m.mentions
         .push(mention(&source.title, "Acme", "organization"));
     assert!(store.save_metadata(&m).await.unwrap());
-    let build = || argos_osint_core::related_articles::build_on(store, "run-r");
-    let first = build().await.unwrap();
-    let cached = build().await.unwrap();
-    store.delete_article("run-r", "two").await.unwrap();
-    let after_delete = build().await.unwrap();
-    vec![first, cached, after_delete]
+    argos_osint_core::related_articles::build_on(store, "run-r")
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -222,4 +254,20 @@ async fn related_articles_build_matches_sqlite() {
             .unwrap(),
         0
     );
+}
+
+#[tokio::test]
+async fn related_articles_global_matches_sqlite() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let surreal = surreal_store(&server, "atlas_related_global").await;
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = AtlasStore::from_sqlite(Store::open(&dir.path().join("argos.db")).unwrap());
+    assert_eq!(related_setup(&surreal).await, 1);
+    assert_eq!(related_setup(&sqlite).await, 1);
+    let s = global_rows(&surreal).await;
+    assert_eq!(s, global_rows(&sqlite).await);
+    assert_eq!(s.len(), 2, "{s:?}");
+    assert_eq!(s[0].0, "two");
 }

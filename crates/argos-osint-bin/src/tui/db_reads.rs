@@ -120,9 +120,7 @@ impl IntelBriefSnapshot {
             metadata_present: metadata.is_some(),
             publisher_prior: metadata.and_then(|m| m.publisher_prior),
             related: super::related_articles::ArticleRelatedView {
-                page: store
-                    .related_articles_global(&article.run_id, &article.id, scope, None, 20)?
-                    .into_page(0),
+                page: related_page(store, article, scope, None, 20)?.into_page(0),
                 ..Default::default()
             },
             progress: investigation::insight_execution::owner_progress(
@@ -139,15 +137,14 @@ impl IntelBriefSnapshot {
         };
         while out.related.page.rows.len() < related_limit && out.related.page.has_more {
             let offset = out.related.page.rows.len();
-            let page = store
-                .related_articles_global(
-                    &article.run_id,
-                    &article.id,
-                    scope,
-                    Some(&offset.to_string()),
-                    (related_limit - offset).min(100),
-                )?
-                .into_page(offset);
+            let page = related_page(
+                store,
+                article,
+                scope,
+                Some(&offset.to_string()),
+                (related_limit - offset).min(100),
+            )?
+            .into_page(offset);
             if page.rows.is_empty() {
                 break;
             }
@@ -238,4 +235,24 @@ impl IntelBriefSnapshot {
         }
         Ok(out)
     }
+}
+
+/// Related leads from the repository under a storage config, else SQLite.
+fn related_page(
+    store: &Store,
+    article: &AtlasArticleRow,
+    scope: RelatedScope,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<argos_osint_core::related_global::GlobalRelatedPage> {
+    if super::surreal_brain::on() {
+        return super::surreal_brain::related_global(
+            &article.run_id,
+            &article.id,
+            scope,
+            cursor,
+            limit,
+        );
+    }
+    store.related_articles_global(&article.run_id, &article.id, scope, cursor, limit)
 }

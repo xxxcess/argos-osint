@@ -184,20 +184,6 @@ fn jitter() -> u64 {
     h.finish()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn backoff_is_bounded_by_the_cap() {
-        let p = RetryPolicy::default();
-        for n in 1..40 {
-            assert!(backoff(p, n) <= p.cap);
-        }
-        assert!(backoff(p, 1) <= p.base);
-    }
-}
-
 /// Read helpers that run on the client or inside a caller's transaction
 /// (one consistent snapshot), e.g. the topology snapshot.
 pub trait Reads: Sync {
@@ -222,5 +208,19 @@ impl Reads for Transaction<Any> {
         sql: impl Into<std::borrow::Cow<'c, str>>,
     ) -> surrealdb::method::Query<'c, Any> {
         self.query(sql)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_is_bounded_by_the_cap() {
+        let p = RetryPolicy::default();
+        for n in 1..40 {
+            assert!(backoff(p, n) <= p.cap);
+        }
+        assert!(backoff(p, 1) <= p.base);
     }
 }

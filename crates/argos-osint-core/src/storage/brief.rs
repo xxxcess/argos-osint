@@ -283,7 +283,7 @@ RETURN {
   run_article: $run.article_id,
   run_state: $run.state,
   run_generation: $run.generation,
-  newest: math::max((SELECT VALUE generation FROM intel_brief_run WHERE article_id = $a))
+  newest: (SELECT VALUE generation FROM intel_brief_run WHERE article_id = $a ORDER BY generation DESC LIMIT 1)[0]
 };";
 
 /// The retained-seed fence: true when `job_id` is the article's current

@@ -353,6 +353,18 @@ pub async fn delete_thread_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
              LET $found = record::exists($th) AND (SELECT VALUE deleted FROM ONLY $th) != true;
              IF $found {
                LET $runs = SELECT VALUE meta::id(id) FROM recon_run WHERE thread_id = $id;
+               FOR $run IN $runs {
+                 UPDATE type::record('insight_owner_state', ['recon', $run])
+                   SET desired_generation = desired_generation + 1, lifecycle = 'previous',
+                     last_error = 'origin investigation deleted', updated_at = $now RETURN NONE;
+               };
+               LET $snaps = SELECT VALUE active_snapshot_id FROM insight_owner_state
+                 WHERE owner_kind = 'recon' AND last_error = 'origin investigation deleted'
+                   AND active_snapshot_id != '';
+               FOR $s IN $snaps {
+                 UPDATE insight_derivation_link SET status = 'origin_deleted'
+                   WHERE snapshot_id = $s RETURN NONE;
+               };
                DELETE brain_actor_mention WHERE origin_kind = 'thread' AND origin_id = $id RETURN NONE;
                UPDATE insight_source SET deleted_origin = true, thread_id = NONE, run_id = NONE,
                  answer_id = 'deleted-origin' WHERE thread_id = $id RETURN NONE;
@@ -383,11 +395,16 @@ pub async fn delete_thread_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
              RETURN $found;",
         )
         .bind(("id", id.to_string()))
-        .bind(("counter", super::recon_threads::sequence_counter(id))),
+        .bind(("counter", super::recon_threads::sequence_counter(id)))
+        .bind(("now", chrono::Utc::now().to_rfc3339())),
     )
     .await?;
     let last = r.num_statements() - 1;
-    Ok(super::jobs::take::<Option<bool>>(&mut r, last)? == Some(true))
+    let found = super::jobs::take::<Option<bool>>(&mut r, last)? == Some(true);
+    if found {
+        super::insight::remove_nlp_owner_in(tx, "thread", id).await?;
+    }
+    Ok(found)
 }
 
 /// The memories a thread's deletion with insights removes
@@ -442,7 +459,7 @@ pub async fn delete_thread_with_insights(repo: &Repository, id: &str) -> Result<
             let doomed: Vec<String> = super::jobs::take(&mut r, last)?;
             let mut removed = Vec::new();
             for memory in doomed {
-                if super::insight::delete_memory_in(&tx, &memory).await? {
+                if super::insight::hard_delete_memory_in(&tx, &memory).await? {
                     removed.push(memory);
                 }
             }

@@ -107,3 +107,107 @@ async fn delete_thread_with_insights_removes_what_it_alone_sourced() {
         .await
         .unwrap());
 }
+
+/// Deleting the origin investigation, with or without insights, retires its
+/// runs' insight owners (generation bump, `origin investigation deleted`),
+/// marks their active links `origin_deleted`, drops the thread's NLP source
+/// refs, and hard-deletes doomed memories without a tombstone.
+#[tokio::test]
+async fn delete_thread_retires_recon_owners_and_nlp_cache() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "recon_delete_owners").await;
+    for insights in [false, true] {
+        let t = rt::new_thread(&repo, "doomed").await.unwrap();
+        let run = format!("run-{insights}");
+        repo.db()
+            .query(
+                "CREATE type::record('recon_run', $run) SET thread_id = $t, turn_id = 'turn',
+                   state = 'completed', stage = 'done', recon_model = 'm', synthesis_model = 'm',
+                   max_rounds = 1, max_calls = 1, turn_seconds = 1,
+                   created_at = '2026-10-24', updated_at = '2026-10-24';
+                 CREATE type::record('insight_owner_state', ['recon', $run]) SET owner_kind = 'recon',
+                   owner_id = $run, desired_generation = 3, active_snapshot_id = $snap,
+                   lifecycle = 'current', updated_at = '2026-10-24';
+                 CREATE insight_derivation_link SET snapshot_id = $snap, left_kind = 'claim',
+                   left_id = 'a', right_kind = 'claim', right_id = 'b', relation = 'supports',
+                   rationale = '', assessment_json = '{}', evidence_json = '[]',
+                   status = 'active', revision = 'r';
+                 CREATE nlp_source_ref SET owner_kind = 'thread', owner_id = $t, source_id = 's',
+                   revision = 'r', attempt_id = 'a', prose_hash = 'h', metadata_json = '{}',
+                   transform_version = 'v';",
+            )
+            .bind(("run", run.clone()))
+            .bind(("t", t.id.clone()))
+            .bind(("snap", format!("snap-{insights}")))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let doomed = memories::add_memory(&repo, "from here", "fact", false, source(&t.id), None)
+            .await
+            .unwrap()
+            .id;
+        let gone = if insights {
+            recon::delete_thread_with_insights(&repo, &t.id).await
+        } else {
+            recon::delete_thread(&repo, &t.id).await
+        };
+        assert!(gone.unwrap());
+        let owner = format!("type::record('insight_owner_state', ['recon', '{run}'])");
+        assert_eq!(
+            n(&repo, &format!("RETURN {owner}.desired_generation")).await,
+            4
+        );
+        assert_eq!(
+            n(
+                &repo,
+                &format!(
+                    "RETURN <int>({owner}.lifecycle = 'previous'
+                       AND {owner}.last_error = 'origin investigation deleted')"
+                )
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            n(
+                &repo,
+                &format!(
+                    "RETURN count(SELECT id FROM insight_derivation_link
+                       WHERE snapshot_id = 'snap-{insights}' AND status = 'origin_deleted')"
+                )
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            n(
+                &repo,
+                &format!(
+                    "RETURN count(SELECT id FROM nlp_source_ref
+                       WHERE owner_kind = 'thread' AND owner_id = '{}')",
+                    t.id
+                )
+            )
+            .await,
+            0
+        );
+        let exists = n(
+            &repo,
+            &format!("RETURN <int>record::exists(type::record('memory', '{doomed}'))"),
+        )
+        .await;
+        let tombstones = n(
+            &repo,
+            &format!("RETURN count(SELECT id FROM memory_tombstone WHERE memory_id = '{doomed}')"),
+        )
+        .await;
+        if insights {
+            assert_eq!((exists, tombstones), (0, 0), "hard delete, no tombstone");
+        } else {
+            assert_eq!(exists, 1, "plain delete keeps memories");
+        }
+    }
+}

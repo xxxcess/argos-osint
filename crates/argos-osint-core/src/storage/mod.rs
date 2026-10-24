@@ -58,6 +58,7 @@ pub mod refresh_exec;
 pub mod repo;
 pub mod runtime;
 pub mod server;
+pub mod summaries;
 pub mod topology;
 pub mod tx;
 pub mod vectors;

@@ -20,7 +20,7 @@ use crate::osint::{self, ProviderKeys, ToolDefinition, ToolResult};
 use crate::provider::SettingsFile;
 use crate::recon::backend::{sqlite_path, ReconStore};
 use crate::recon::orchestrate::BudgetedOutcome;
-use crate::recon::{CreditHold, PlanCall, Run, Store};
+use crate::recon::{CreditHold, PlanCall, Run};
 use crate::telemetry::{self, EventKind, TelemetryEvent, ToolOutcome, Trigger};
 
 /// Who asked for a tool run. Attribution is passed down by the caller and is
@@ -462,7 +462,8 @@ impl ToolRunner {
 
         // 8. NewsAPI quota charge
         if !result.cached && canonical.starts_with("newsapi_") {
-            if let Some(store) = sqlite_path(&self.db_path).and_then(|p| Store::open(p).ok()) {
+            // One store: the SQLite `Store` or the repository, never both.
+            if let Ok(store) = ReconStore::open(&self.db_path).await {
                 let bucket = if osint::key_exhausted(&self.keys.newsapi)
                     && !self.keys.newsapi_fallback.trim().is_empty()
                 {
@@ -470,7 +471,7 @@ impl ToolRunner {
                 } else {
                     "newsapi"
                 };
-                crate::atlas::charge_quota(&store, bucket);
+                let _ = store.charge_quota(bucket).await;
             }
         }
 
@@ -1098,6 +1099,7 @@ fn osint_cacheable(result: &ToolResult) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recon::Store;
     use serde_json::Value as JsonValue;
 
     fn result(

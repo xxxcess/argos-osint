@@ -461,6 +461,16 @@ impl ReconStore {
             }
         }
     }
+    /// Charge one NewsAPI request to today's quota bucket (`atlas::charge_quota`
+    /// on SQLite, `storage::atlas::quota_bump` on SurrealDB). Returns the new
+    /// count for the day.
+    pub async fn charge_quota(&self, bucket: &str) -> Result<u32> {
+        let day = crate::atlas::utc_day();
+        dispatch!(self, s => s.atlas_quota_bump(bucket, &day),
+            r => crate::storage::atlas::quota_bump(r.db(), bucket, &day)
+                .await
+                .map_err(|e| anyhow!("quota bump: {e}")))
+    }
     /// Start (or restart at `generation`) the run's synthesis operation
     /// `{run}-synthesis`; an existing draft is kept.
     pub async fn begin_synthesis(&self, run_id: &str, generation: i64, draft: &str) -> Result<()> {

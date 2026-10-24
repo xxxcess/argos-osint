@@ -533,6 +533,8 @@ pub async fn delete_article(
             let mut ids = reconcile_deleted_articles_in(&tx).await?;
             ids.extend(reconcile_lifecycle_in(&tx).await?);
             drop_orphan_nodes_in(&tx, &run_id, Some(&article_id), &[]).await?;
+            // `nlp::cache::remove_owner(conn, "article", id)` of the SQLite path.
+            super::insight::remove_nlp_owner_in(&tx, "article", &article_id).await?;
             Ok((ids, ()))
         })
     })

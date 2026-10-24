@@ -714,9 +714,8 @@ async fn record_unit(
         receipt_json: serde_json::to_string(m)?,
     };
     store.save_unit_manifest(&manifest).await?;
-    if crate::recon::backend::sqlite_path(db).is_some() {
-        crate::atlas_work::record_unit_stage_telemetry(db, &manifest);
-    }
+    // `telemetry::record` routes to the selected store.
+    crate::atlas_work::record_unit_stage_telemetry(db, &manifest);
     Ok(())
 }
 impl Store {

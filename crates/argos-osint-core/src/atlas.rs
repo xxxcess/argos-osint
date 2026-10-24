@@ -467,6 +467,10 @@ struct CycleTelemetry {
     clock: telemetry::Measured,
     candidates: i64,
     stage: Option<OpenStage>,
+    /// Under SurrealDB: rows already written per stage, loaded once by
+    /// [`CycleTelemetry::open`] and advanced locally (records are written
+    /// asynchronously, so re-counting per stage would race them).
+    stage_seqs: Option<std::collections::HashMap<String, i64>>,
 }
 
 impl CycleTelemetry {
@@ -494,7 +498,41 @@ impl CycleTelemetry {
             clock: telemetry::Measured::start(),
             candidates,
             stage: None,
+            stage_seqs: None,
         }
+    }
+
+    /// [`CycleTelemetry::new`] on the selected store: under SurrealDB the
+    /// candidate and stage numbering continue from the repository, so a
+    /// resumed cycle appends instead of overwriting earlier ids.
+    async fn open(db: &Path, run_id: &str, mode: &str, started_at: String) -> Self {
+        let mut tel = Self::new(db, run_id, mode, started_at);
+        #[cfg(feature = "surreal")]
+        if crate::recon::backend::sqlite_path(db).is_none() && !run_id.is_empty() {
+            let mut seqs = std::collections::HashMap::new();
+            if let Ok(repo) = crate::storage::runtime::repository().await {
+                tel.candidates = crate::storage::telemetry::count_ids_with_prefix(
+                    repo.db(),
+                    &format!("atlas-cand-{run_id}-"),
+                )
+                .await
+                .unwrap_or(0);
+                let prefix = format!("atlas-stage-{run_id}-");
+                for id in crate::storage::telemetry::ids_with_prefix(repo.db(), &prefix)
+                    .await
+                    .unwrap_or_default()
+                {
+                    if let Some((stage, _)) = id
+                        .strip_prefix(&prefix)
+                        .and_then(|rest| rest.rsplit_once('-'))
+                    {
+                        *seqs.entry(stage.to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+            tel.stage_seqs = Some(seqs);
+        }
+        tel
     }
 
     /// Opens a stage, closing the previous interval with the counts known now.
@@ -505,7 +543,15 @@ impl CycleTelemetry {
             return;
         }
         self.close_stage("completed", stats);
-        let seq = crate::atlas_work::next_stage_seq(&self.db, &self.run_id, name);
+        let seq = match self.stage_seqs.as_mut() {
+            Some(seqs) => {
+                let n = seqs.entry(name.to_string()).or_insert(0);
+                let seq = *n;
+                *n += 1;
+                seq
+            }
+            None => crate::atlas_work::next_stage_seq(&self.db, &self.run_id, name),
+        };
         self.stage = Some(OpenStage {
             name,
             unit,
@@ -1688,6 +1734,170 @@ pub struct AtlasJob {
     run_id: String,
     job: Option<crate::job_registry::JobHandle>,
     phase: Option<(u8, crate::job_registry::JobHandle)>,
+    /// The same registry rows under SurrealDB.
+    surreal: Option<SurrealCycleJob>,
+}
+
+/// Registry rows of one Atlas cycle under SurrealDB. Writes go through the
+/// ordered runtime queue so a phase never lands before its job's start; the
+/// cancel flag is refreshed from each phase / progress write.
+#[derive(Debug)]
+#[cfg_attr(not(feature = "surreal"), allow(dead_code))]
+struct SurrealCycleJob {
+    id: String,
+    started: std::time::Instant,
+    cancel: Arc<AtomicBool>,
+    phase: Option<(u8, String, std::time::Instant)>,
+}
+
+/// State, error category, summary and result ref of a [`Finish`].
+#[cfg_attr(not(feature = "surreal"), allow(dead_code))]
+fn finish_fields(outcome: &crate::job_registry::Finish) -> (&'static str, String, String, String) {
+    use crate::job_registry::Finish;
+    let state = outcome.state();
+    match outcome {
+        Finish::Completed { result_ref } => {
+            (state, String::new(), String::new(), result_ref.clone())
+        }
+        Finish::Failed { category, summary } => {
+            (state, category.clone(), summary.clone(), String::new())
+        }
+        Finish::Partial { summary }
+        | Finish::Paused { summary }
+        | Finish::Waiting { summary }
+        | Finish::Blocked { summary }
+        | Finish::Cancelled { summary } => (state, String::new(), summary.clone(), String::new()),
+    }
+}
+
+#[cfg(feature = "surreal")]
+impl SurrealCycleJob {
+    fn begin(run_id: &str) -> Self {
+        let id = format!("atlas_cycle-{run_id}");
+        let (job, run) = (id.clone(), run_id.to_string());
+        crate::storage::runtime::spawn_ordered(async move {
+            let Ok(repo) = crate::storage::runtime::repository().await else {
+                return;
+            };
+            let title = format!("Atlas news cycle · {run}");
+            let resource = format!("atlas:{run}");
+            let spec = crate::storage::recon_jobs::AppJob {
+                id: &job,
+                operation: "atlas_cycle",
+                app: "atlas",
+                title: &title,
+                run_ref: &run,
+                resource_ref: &resource,
+                parent: None,
+            };
+            if let Err(e) = crate::storage::recon_jobs::begin_app_job(&repo, &spec).await {
+                tracing::warn!(job = %job, "atlas job start not recorded: {e:#}");
+            }
+        });
+        Self {
+            id,
+            started: std::time::Instant::now(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            phase: None,
+        }
+    }
+
+    fn progress(&self, id: String, phase: &'static str, done: Option<i64>, total: Option<i64>) {
+        let cancel = self.cancel.clone();
+        let parent = self.id.clone();
+        crate::storage::runtime::spawn_ordered(async move {
+            let Ok(repo) = crate::storage::runtime::repository().await else {
+                return;
+            };
+            let mut stop = false;
+            for (job, done, total) in [(id, done, total), (parent, None, None)] {
+                match crate::storage::recon_jobs::set_job_progress(&repo, &job, phase, done, total)
+                    .await
+                {
+                    Ok(flag) => stop |= flag,
+                    Err(e) => tracing::warn!(job = %job, "atlas job progress not recorded: {e:#}"),
+                }
+            }
+            if stop {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+    }
+
+    fn enter(&mut self, phase: u8) {
+        self.close_phase(&crate::job_registry::Finish::completed());
+        let child = format!("{}-p{phase}", self.id);
+        let (job, parent) = (child.clone(), self.id.clone());
+        crate::storage::runtime::spawn_ordered(async move {
+            let Ok(repo) = crate::storage::runtime::repository().await else {
+                return;
+            };
+            let spec = crate::storage::recon_jobs::AppJob {
+                id: &job,
+                operation: match phase {
+                    3 => "atlas_classification",
+                    4 => "atlas_metadata",
+                    5 => "atlas_related",
+                    _ => "atlas_collection",
+                },
+                app: "atlas",
+                title: phase_title(phase),
+                run_ref: "",
+                resource_ref: "",
+                parent: Some(&parent),
+            };
+            if let Err(e) = crate::storage::recon_jobs::begin_app_job(&repo, &spec).await {
+                tracing::warn!(job = %job, "atlas phase job not recorded: {e:#}");
+            }
+        });
+        self.progress(child.clone(), phase_title(phase), None, None);
+        self.phase = Some((phase, child, std::time::Instant::now()));
+    }
+
+    fn finish(
+        id: String,
+        outcome: &crate::job_registry::Finish,
+        run: Option<String>,
+        active_ms: i64,
+    ) {
+        let (state, category, summary, result_ref) = finish_fields(outcome);
+        crate::storage::runtime::spawn_ordered(async move {
+            let Ok(repo) = crate::storage::runtime::repository().await else {
+                return;
+            };
+            if let Err(e) = crate::storage::recon_jobs::finish_recon_job(
+                &repo,
+                &id,
+                state,
+                run.as_deref(),
+                &category,
+                &summary,
+                &result_ref,
+                active_ms,
+            )
+            .await
+            {
+                tracing::warn!(job = %id, "atlas job finish not recorded: {e:#}");
+            }
+        });
+    }
+
+    fn close_phase(&mut self, outcome: &crate::job_registry::Finish) {
+        if let Some((_, child, started)) = self.phase.take() {
+            Self::finish(child, outcome, None, started.elapsed().as_millis() as i64);
+        }
+    }
+
+    fn close(mut self, outcome: crate::job_registry::Finish, run: &str) {
+        use crate::job_registry::Finish;
+        let phase_outcome = match &outcome {
+            Finish::Completed { .. } => Finish::completed(),
+            other => other.clone(),
+        };
+        self.close_phase(&phase_outcome);
+        let active = self.started.elapsed().as_millis() as i64;
+        Self::finish(self.id, &outcome, Some(run.to_string()), active);
+    }
 }
 
 impl AtlasJob {
@@ -1697,15 +1907,20 @@ impl AtlasJob {
             run_id: String::new(),
             job: None,
             phase: None,
+            surreal: None,
         }
     }
 
     fn start(&mut self, run_id: &str) {
         use crate::job_registry::{begin_optional, job_for_run, JobSpec};
         self.run_id = run_id.to_string();
-        // The registry is SQLite; under SurrealDB the cycle runs untracked
-        // rather than reopening SQLite.
+        // Under SurrealDB the registry rows live in the repository; never
+        // reopen SQLite there.
         if crate::recon::backend::sqlite_path(&self.db).is_none() {
+            #[cfg(feature = "surreal")]
+            {
+                self.surreal = Some(SurrealCycleJob::begin(run_id));
+            }
             return;
         }
         let existing = rusqlite::Connection::open(&self.db)
@@ -1726,6 +1941,13 @@ impl AtlasJob {
 
     fn enter(&mut self, phase: u8) {
         if self.phase.as_ref().map(|(n, _)| *n) == Some(phase) {
+            return;
+        }
+        #[cfg(feature = "surreal")]
+        if let Some(job) = self.surreal.as_mut() {
+            if job.phase.as_ref().map(|(n, _, _)| *n) != Some(phase) {
+                job.enter(phase);
+            }
             return;
         }
         if let Some((_, done)) = self.phase.take() {
@@ -1750,6 +1972,18 @@ impl AtlasJob {
     }
 
     fn progress(&self, done: u32, total: u32) {
+        #[cfg(feature = "surreal")]
+        if let Some(job) = &self.surreal {
+            if let Some((phase, child, _)) = &job.phase {
+                job.progress(
+                    child.clone(),
+                    phase_title(*phase),
+                    Some(done as i64),
+                    Some(total as i64),
+                );
+            }
+            return;
+        }
         if let Some((phase, child)) = &self.phase {
             child.phase(phase_title(*phase), Some(done as i64), Some(total as i64));
         }
@@ -1757,11 +1991,28 @@ impl AtlasJob {
 
     /// Canonical job id once the run is known.
     pub fn job_id(&self) -> Option<String> {
-        self.job.as_ref().map(|job| job.id().to_string())
+        self.job
+            .as_ref()
+            .map(|job| job.id().to_string())
+            .or_else(|| self.surreal.as_ref().map(|job| job.id.clone()))
+    }
+
+    /// Jobs → Cancel was requested for this cycle (either registry).
+    fn is_cancelled(&self) -> bool {
+        self.job.as_ref().is_some_and(|job| job.is_cancelled())
+            || self
+                .surreal
+                .as_ref()
+                .is_some_and(|job| job.cancel.load(Ordering::Relaxed))
     }
 
     fn close(&mut self, outcome: crate::job_registry::Finish) {
         use crate::job_registry::Finish;
+        #[cfg(feature = "surreal")]
+        if let Some(job) = self.surreal.take() {
+            job.close(outcome, &self.run_id);
+            return;
+        }
         if let Some((_, child)) = self.phase.take() {
             child.finish(match &outcome {
                 Finish::Completed { .. } => Finish::completed(),
@@ -1878,7 +2129,7 @@ fn cycle_paused(job: &std::sync::Mutex<AtlasJob>, pause: &AtomicBool) -> bool {
     if job
         .lock()
         .ok()
-        .and_then(|job| job.job.as_ref().map(|handle| handle.is_cancelled()))
+        .map(|job| job.is_cancelled())
         .unwrap_or(false)
     {
         pause.store(true, Ordering::Relaxed);
@@ -2010,7 +2261,7 @@ where
         .map(|run| run.started_at)
         .unwrap_or_default();
     let cycle_mode = if resume { "resumed" } else { "fresh" };
-    let mut tel = CycleTelemetry::new(db_path, &run_id, cycle_mode, cycle_started_at);
+    let mut tel = CycleTelemetry::open(db_path, &run_id, cycle_mode, cycle_started_at).await;
     if cursor.phase <= 1 {
         require_either(&keys.gnews, &keys.gnews_fallback, "GNews API key")?;
         require_either(&keys.newsdata, &keys.newsdata_fallback, "NewsData API key")?;

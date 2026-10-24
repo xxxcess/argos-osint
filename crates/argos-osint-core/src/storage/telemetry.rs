@@ -145,6 +145,41 @@ pub async fn record(db: &Surreal<Any>, event: &TelemetryEvent) -> Result<()> {
     Ok(())
 }
 
+/// Ids of stored events starting with `prefix` (Atlas stage numbering of a
+/// resumed cycle).
+pub async fn ids_with_prefix(db: &Surreal<Any>, prefix: &str) -> Result<Vec<String>> {
+    if prefix.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut r = db
+        .query(
+            "SELECT VALUE record::id(id) FROM telemetry_event
+               WHERE string::starts_with(record::id(id), $p);",
+        )
+        .bind(("p", prefix.to_string()))
+        .await?
+        .check()?;
+    Ok(r.take(0)?)
+}
+
+/// Number of stored events whose id starts with `prefix` (Atlas candidate
+/// and stage numbering: `telemetry_events WHERE id GLOB 'prefix*'`).
+pub async fn count_ids_with_prefix(db: &Surreal<Any>, prefix: &str) -> Result<i64> {
+    if prefix.is_empty() {
+        return Ok(0);
+    }
+    let mut r = db
+        .query(
+            "RETURN count(SELECT VALUE id FROM telemetry_event
+               WHERE string::starts_with(record::id(id), $p));",
+        )
+        .bind(("p", prefix.to_string()))
+        .await?
+        .check()?;
+    let n: Option<i64> = r.take(0)?;
+    Ok(n.unwrap_or(0).max(0))
+}
+
 /// The next `recon_stage` attempt ordinal for a run and stage: the number of
 /// distinct stage rows already written (ids `run:stage:n`) plus one.
 pub async fn stage_attempt(db: &Surreal<Any>, run_id: &str, stage: &str) -> Result<i64> {

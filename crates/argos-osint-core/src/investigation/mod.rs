@@ -4,6 +4,7 @@ pub mod contracts;
 pub mod decisions;
 pub mod engine;
 pub mod evidence;
+mod exec_store;
 pub mod gates;
 mod insight_assessment;
 pub mod insight_execution;

@@ -293,12 +293,12 @@ pub(super) async fn assess(
             policy,
             settings.defaults.resolve_role(role).0
         ]));
-        let store = crate::store::Store::open(db_path)?;
-        super::insight_persist::validate_dispatch(&store.conn, input)?;
-        let saved: Option<(String,String,String)> = store.conn.query_row("SELECT state,output_json,error FROM insight_stage_checkpoints WHERE operation_key=?1",[&key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        let store = super::exec_store::ExecStore::open(db_path).await?;
+        store.validate_dispatch(input).await?;
+        let saved = store.checkpoint(&key).await?;
         if let Some((status, json, error)) = saved {
             if status == "completed" {
-                super::insight_execution::record_reuse(&store.conn, &key, input)?;
+                store.record_reuse(&key, input).await?;
                 output.extend(serde_json::from_str::<BTreeMap<String, Assessment>>(&json)?);
                 offset = end;
                 continue;
@@ -317,16 +317,19 @@ pub(super) async fn assess(
                 continue;
             }
         }
-        let task_id = task_id(&store.conn, input)?;
-        let execution_id = super::insight_execution::operation_id(&store.conn, &task_id, &key)?;
+        let task_id = store.task_id(input).await?;
+        let execution_id = store.operation_id(&task_id, &key).await?;
         super::insight_execution::consume()?;
-        super::insight_execution::progress(&store.conn, input, "assessment", None, None)?;
+        store.progress(input, "assessment", None, None).await?;
         let window_id = items[offset..end]
             .iter()
             .map(|i| i.id.as_str())
             .collect::<Vec<_>>()
             .join(",");
-        store.conn.execute("INSERT INTO insight_stage_checkpoints(operation_key,owner_kind,owner_id,generation,stage,window_id,state,updated_at) VALUES(?1,?2,?3,?4,'assessment',?5,'running',?6) ON CONFLICT(operation_key) DO UPDATE SET state='running',error='',updated_at=excluded.updated_at",params![key,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation,window_id,chrono::Utc::now().to_rfc3339()])?;
+        store
+            .begin(&key, input, "assessment", &window_id, true)
+            .await?;
+        let telemetry = store.telemetry_path(db_path);
         drop(store);
         let mut scope = operation_scope(&execution_id, role, input, &task_id);
         if input.snapshot.owner_kind == "recon" {
@@ -334,14 +337,7 @@ pub(super) async fn assess(
         }
         let evaluated = DecisionService::new()
             .evaluate_shared(
-                auth,
-                settings,
-                &scope,
-                &contract,
-                &state,
-                &policy,
-                cancel,
-                Some(db_path),
+                auth, settings, &scope, &contract, &state, &policy, cancel, telemetry,
             )
             .await;
         let mut assessments = BTreeMap::new();
@@ -421,11 +417,18 @@ pub(super) async fn assess(
                 ("exhausted", error, "{}".into())
             }
         };
-        let store = crate::store::Store::open(db_path)?;
-        super::insight_persist::validate_dispatch(&store.conn, input)?;
-        store.conn.execute("UPDATE insight_stage_checkpoints SET state=?2,output_json=?3,error=?4,route_json=?5,updated_at=?6 WHERE operation_key=?1",params![key,status,serde_json::to_string(&assessments)?,error,route,chrono::Utc::now().to_rfc3339()])?;
-        super::insight_execution::stage_event(
-            &store.conn,
+        let store = super::exec_store::ExecStore::open(db_path).await?;
+        store.validate_dispatch(input).await?;
+        store
+            .finish(
+                &key,
+                status,
+                Some(serde_json::to_string(&assessments)?),
+                Some(route.to_string()),
+                &error,
+            )
+            .await?;
+        store.stage_event(
             input,
             &task_id,
             "assessment",

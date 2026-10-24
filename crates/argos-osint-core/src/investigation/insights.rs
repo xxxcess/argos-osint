@@ -334,7 +334,6 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
     validate: impl Fn(&T) -> Result<()> + Send + Sync,
 ) -> Result<T> {
     use crate::recon::model_exec::execute_chat;
-    use rusqlite::{params, OptionalExtension};
     let mut dictionary = std::collections::BTreeMap::new();
     super::insight_wire::compact(&mut user, &mut dictionary)?;
     if let Some(contract) = user.get_mut("output_contract") {
@@ -373,21 +372,14 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
         CONTRACT
     ]));
     {
-        let store = crate::store::Store::open(db_path)?;
-        super::insight_persist::validate_dispatch(&store.conn, input)?;
-        let saved: Option<(String, String)> = store
-            .conn
-            .query_row(
-                "SELECT state,output_json FROM insight_stage_checkpoints WHERE operation_key=?1",
-                [&op_key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((state, output)) = saved {
+        let store = super::exec_store::ExecStore::open(db_path).await?;
+        store.validate_dispatch(input).await?;
+        let saved = store.checkpoint(&op_key).await?;
+        if let Some((state, output, _)) = saved {
             if state == "completed" {
                 let value = serde_json::from_str(&output)?;
                 validate(&value)?;
-                super::insight_execution::record_reuse(&store.conn, &op_key, input)?;
+                store.record_reuse(&op_key, input).await?;
                 return Ok(value);
             }
             ensure!(
@@ -396,8 +388,8 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
             );
         }
         super::insight_execution::consume()?;
-        super::insight_execution::progress(&store.conn, input, stage, None, None)?;
-        store.conn.execute("INSERT INTO insight_stage_checkpoints(operation_key,owner_kind,owner_id,generation,stage,window_id,state,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'running',?7) ON CONFLICT(operation_key) DO UPDATE SET state='running',updated_at=excluded.updated_at", params![op_key,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation,stage,window_id,chrono::Utc::now().to_rfc3339()])?;
+        store.progress(input, stage, None, None).await?;
+        store.begin(&op_key, input, stage, window_id, false).await?;
     }
     let messages = [
         crate::provider::ChatMessage {
@@ -417,9 +409,10 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
         crate::nlp::message_bytes(&messages, &Value::Null) + 4096 <= REQUEST_BYTES,
         "mandatory fields exceed request budget"
     );
-    let store = crate::store::Store::open(db_path)?;
-    let task_id = super::insight_assessment::task_id(&store.conn, input)?;
-    let execution_id = super::insight_execution::operation_id(&store.conn, &task_id, &op_key)?;
+    let store = super::exec_store::ExecStore::open(db_path).await?;
+    let task_id = store.task_id(input).await?;
+    let execution_id = store.operation_id(&task_id, &op_key).await?;
+    let telemetry = store.telemetry_path(db_path);
     drop(store);
     let mut scope =
         super::insight_assessment::operation_scope(&execution_id, role, input, &task_id);
@@ -443,13 +436,13 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
         cancel,
         Some(activity_sink(db_path, &task_id)),
         None,
-        Some(db_path),
+        telemetry,
         // Stream generated-JSON stages where supported; the executor falls
         // back to non-streaming for transports that cannot stream.
         true,
     )
     .await;
-    let store = crate::store::Store::open(db_path)?;
+    let store = super::exec_store::ExecStore::open(db_path).await?;
     match result {
         Ok((raw, report)) => {
             let value: T = serde_json::from_value(super::insight_wire::hydrate(
@@ -458,9 +451,16 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
                 input,
             )?)?;
             let route = serde_json::json!({"route":report.effective_route,"model":report.effective_model,"requests":report.requests,"compiled_bytes":compiled_bytes,"elapsed_ms":started.elapsed().as_millis() as u64});
-            store.conn.execute("UPDATE insight_stage_checkpoints SET state='completed',output_json=?2,route_json=?3,updated_at=?4 WHERE operation_key=?1",params![op_key,serde_json::to_string(&value)?,route.to_string(),chrono::Utc::now().to_rfc3339()])?;
-            super::insight_execution::stage_event(
-                &store.conn,
+            store
+                .finish(
+                    &op_key,
+                    "completed",
+                    Some(serde_json::to_string(&value)?),
+                    Some(route.to_string()),
+                    "",
+                )
+                .await?;
+            store.stage_event(
                 input,
                 &task_id,
                 stage,
@@ -481,9 +481,16 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
             } else {
                 "terminal"
             };
-            store.conn.execute("UPDATE insight_stage_checkpoints SET state=?2,error=?3,updated_at=?4 WHERE operation_key=?1",params![op_key,state,format!("{stage}/{window_id}: {error}"),chrono::Utc::now().to_rfc3339()])?;
-            super::insight_execution::stage_event(
-                &store.conn,
+            store
+                .finish(
+                    &op_key,
+                    state,
+                    None,
+                    None,
+                    &format!("{stage}/{window_id}: {error}"),
+                )
+                .await?;
+            store.stage_event(
                 input,
                 &task_id,
                 stage,
@@ -571,14 +578,10 @@ pub async fn run_pipeline(
             }
         }
     }
-    let store = crate::store::Store::open(db_path)?;
-    super::insight_execution::progress(
-        &store.conn,
-        input,
-        "extraction",
-        Some(windows.len()),
-        None,
-    )?;
+    let store = super::exec_store::ExecStore::open(db_path).await?;
+    store
+        .progress(input, "extraction", Some(windows.len()), None)
+        .await?;
     drop(store);
     for (index, (evidence, span)) in windows.iter().enumerate() {
         ensure!(
@@ -691,7 +694,10 @@ pub async fn run_pipeline(
             .remove(&claim.id)
             .expect("claim assessment");
         if claim.assessment.faithful() && surface == Surface::Report {
-            let store = crate::store::Store::open(db_path)?;
+            let store = super::exec_store::ExecStore::open(db_path).await?;
+            let Some(store) = store.sqlite() else {
+                anyhow::bail!("the Report surface is retired on SurrealDB");
+            };
             let details: String = store.conn.query_row(
                 "SELECT details_json FROM intel_report_results WHERE source_hash=?1",
                 [&claim.evidence_refs[0].acquisition_id],
@@ -1086,14 +1092,10 @@ pub async fn run_pipeline(
             "all candidates withheld by unavailable model work; previous snapshot retained".into(),
         );
     }
-    let store = crate::store::Store::open(db_path)?;
-    super::insight_execution::progress(
-        &store.conn,
-        input,
-        "settled",
-        None,
-        Some(output.withheld_count),
-    )?;
+    let store = super::exec_store::ExecStore::open(db_path).await?;
+    store
+        .progress(input, "settled", None, Some(output.withheld_count))
+        .await?;
     Ok(output)
 }
 
@@ -1265,32 +1267,15 @@ async fn admit_brain_evidence(
             .collect::<Vec<_>>()
             .join(" ")
     );
-    let candidates = {
-        let store = crate::store::Store::open(db_path)?;
-        let mut hits = crate::brain_query::recall_candidates_with_limit(
-            &store,
-            &input.snapshot.owner_kind,
-            &input.snapshot.owner_id,
+    let candidates = super::exec_store::ExecStore::open(db_path)
+        .await?
+        .recall_evidence(
+            input,
             &query,
             settings.insight_recall_limit.unwrap_or(20),
-        )?;
-        hits.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| a.memory.id.cmp(&b.memory.id))
-        });
-        let mut seen = BTreeSet::new();
-        hits.into_iter()
-            .filter(|h| seen.insert(h.memory.id.clone()))
-            .take(20)
-            .filter_map(|hit| {
-                crate::brain_query::load_memory_evidence(&store.conn, &hit.memory.id)
-                    .ok()
-                    .flatten()
-                    .map(|e| (hit, e))
-            })
-            .collect::<Vec<_>>()
-    };
+            20,
+        )
+        .await?;
     let mut used = 0;
     let mut roots: BTreeSet<String> = input
         .evidence
@@ -1346,21 +1331,22 @@ async fn admit_brain_evidence(
             state,
             settings.defaults
         ]));
-        use rusqlite::OptionalExtension;
-        let cached = {
-            let store = crate::store::Store::open(db_path)?;
-            store.conn.query_row("SELECT state,output_json FROM insight_stage_checkpoints WHERE operation_key=?1",[&id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?
-        };
+        let cached = super::exec_store::ExecStore::open(db_path)
+            .await?
+            .checkpoint(&id)
+            .await?
+            .map(|(state, output, _)| (state, output));
         let admitted = if let Some((status, json)) =
             cached.filter(|(status, _)| status == "completed" || status == "exhausted")
         {
             status == "completed" && serde_json::from_str::<bool>(&json).unwrap_or(false)
         } else {
-            let store = crate::store::Store::open(db_path)?;
-            super::insight_persist::validate_dispatch(&store.conn, input)?;
+            let store = super::exec_store::ExecStore::open(db_path).await?;
+            store.validate_dispatch(input).await?;
             super::insight_execution::consume()?;
-            let task_id = super::insight_assessment::task_id(&store.conn, input)?;
-            let execution_id = super::insight_execution::operation_id(&store.conn, &task_id, &id)?;
+            let task_id = store.task_id(input).await?;
+            let execution_id = store.operation_id(&task_id, &id).await?;
+            let telemetry = store.telemetry_path(db_path);
             drop(store);
             let mut scope = super::insight_assessment::operation_scope(
                 &execution_id,
@@ -1380,7 +1366,7 @@ async fn admit_brain_evidence(
                     &state,
                     &DecisionPolicy::default(),
                     cancel,
-                    Some(db_path),
+                    telemetry,
                 )
                 .await;
             if let Err(error) = &result {
@@ -1408,7 +1394,7 @@ async fn admit_brain_evidence(
             } else {
                 "exhausted"
             };
-            let store = crate::store::Store::open(db_path)?;
+            let store = super::exec_store::ExecStore::open(db_path).await?;
             let route = result
                 .as_ref()
                 .ok()
@@ -1420,7 +1406,18 @@ async fn admit_brain_evidence(
                 .err()
                 .map(ToString::to_string)
                 .unwrap_or_default();
-            store.conn.execute("INSERT INTO insight_stage_checkpoints(operation_key,owner_kind,owner_id,generation,stage,window_id,state,output_json,route_json,error,updated_at) VALUES(?1,?2,?3,?4,'memory_identity',?5,?6,?7,?8,?9,?10) ON CONFLICT(operation_key) DO UPDATE SET state=excluded.state,output_json=excluded.output_json,route_json=excluded.route_json,error=excluded.error,updated_at=excluded.updated_at",rusqlite::params![id,input.snapshot.owner_kind,input.snapshot.owner_id,input.snapshot.generation,metadata.memory_id,status,admitted.to_string(),route.to_string(),error,chrono::Utc::now().to_rfc3339()])?;
+            store
+                .put(
+                    &id,
+                    input,
+                    "memory_identity",
+                    &metadata.memory_id,
+                    status,
+                    &admitted.to_string(),
+                    &route.to_string(),
+                    &error,
+                )
+                .await?;
             admitted
         };
         if !admitted {
@@ -2106,12 +2103,12 @@ pub(super) fn activity_sink(
             }
             *slot = (label.clone(), Some(now));
         }
-        if let Ok(store) = crate::store::Store::open(&db_path) {
-            let _ = super::insight_execution::record_activity(&store.conn, &task_id, &label);
-            if let Some(message) = super::insight_execution::activity_log_message(&event) {
-                let _ = super::insight_execution::activity_event(&store.conn, &task_id, &message);
-            }
-        }
+        super::exec_store::record_activity(
+            &db_path,
+            &task_id,
+            &label,
+            super::insight_execution::activity_log_message(&event),
+        );
     })
 }
 

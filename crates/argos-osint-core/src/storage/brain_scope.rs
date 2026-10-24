@@ -117,7 +117,7 @@ async fn kind(repo: &Repository, id: &str) -> Result<Option<(String, String)>> {
 }
 
 /// `Store::is_browse_claim`: an active claim or atomic claim.
-async fn is_claim(repo: &Repository, id: &str) -> Result<bool> {
+pub(crate) async fn is_claim(repo: &Repository, id: &str) -> Result<bool> {
     Ok(matches!(kind(repo, id).await?, Some((k, l))
         if l == "active" && (k == "claim" || k == "atomic_claim")))
 }

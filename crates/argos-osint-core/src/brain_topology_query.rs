@@ -950,6 +950,10 @@ impl Store {
         seed: &TopologySeed,
         options: &TopologyOptions,
     ) -> Result<TopologySnapshot> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::brain_store::topology_snapshot(seed, options);
+        }
         ensure!(
             options.continuation_token.is_none(),
             "Topology continuation is unavailable; refresh with a larger bounded limit"

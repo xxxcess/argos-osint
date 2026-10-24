@@ -221,6 +221,7 @@ pub fn meaningful_topic(label: &str) -> bool {
 struct Derivation {
     id: String,
     snapshot_id: String,
+    insight_kind: String,
 }
 
 #[derive(Debug, Clone, SurrealValue)]
@@ -228,6 +229,7 @@ struct Owner {
     owner_kind: String,
     owner_id: String,
     inputs_json: String,
+    readiness_json: String,
 }
 
 #[derive(Debug, Clone, SurrealValue)]
@@ -254,16 +256,19 @@ struct SourceRow {
 }
 
 #[derive(Debug, Clone, SurrealValue)]
-struct ArticleRef {
-    run_id: String,
-    article_id: String,
-    title: String,
-    description: String,
-    url: String,
-    published_at: String,
+pub(crate) struct ArticleRef {
+    pub(crate) run_id: String,
+    pub(crate) article_id: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) url: String,
+    pub(crate) published_at: String,
 }
 
-async fn articles(db: &Surreal<Any>, article_id: &str) -> Result<Vec<ArticleRef>, TxError> {
+pub(crate) async fn articles(
+    db: &Surreal<Any>,
+    article_id: &str,
+) -> Result<Vec<ArticleRef>, TxError> {
     let mut r = db
         .query(
             "SELECT run_id, article_id, title, description, url, published_at FROM atlas_article
@@ -279,22 +284,47 @@ async fn articles(db: &Surreal<Any>, article_id: &str) -> Result<Vec<ArticleRef>
 /// source refs (`inputs_json.source_refs`) still describe the article as
 /// stored: a ref for `article:<id>` with the same URL and published time
 /// whose artifact text is the current title and description. An article
-/// edge that fails it is shown as a historical origin. The sibling-kind
-/// carried refs of a scoped publication are not consulted.
-async fn current_metadata(
-    db: &Surreal<Any>,
+/// edge that fails it is shown as a historical origin. `refs` comes from
+/// [`retained_refs`].
+/// The source refs a derivation of `kind` was made from: a scoped
+/// publication carries the sibling kind's original refs in its readiness
+/// receipt (`carried_kinds[].inputs.source_refs`), which win over the
+/// snapshot's own `inputs_json.source_refs`, so the new kind's revision is
+/// never assigned to the sibling (`current_metadata_sql`).
+pub(crate) fn retained_refs(
     inputs_json: &str,
+    readiness_json: &str,
+    kind: &str,
+) -> serde_json::Value {
+    let carried = serde_json::from_str::<serde_json::Value>(readiness_json)
+        .ok()
+        .and_then(|r| {
+            r["carried_kinds"].as_array().and_then(|kinds| {
+                kinds
+                    .iter()
+                    .find(|c| c["kind"].as_str() == Some(kind))
+                    .map(|c| c["inputs"]["source_refs"].clone())
+            })
+        })
+        .filter(|refs| !refs.is_null());
+    carried.unwrap_or_else(|| {
+        serde_json::from_str::<serde_json::Value>(inputs_json)
+            .ok()
+            .map(|i| i["source_refs"].clone())
+            .unwrap_or(serde_json::Value::Null)
+    })
+}
+
+pub(crate) async fn current_metadata(
+    db: &Surreal<Any>,
+    refs: &serde_json::Value,
     a: &ArticleRef,
 ) -> Result<bool, TxError> {
-    let Ok(inputs) = serde_json::from_str::<serde_json::Value>(inputs_json) else {
-        return Ok(false);
-    };
     let source = format!("article:{}", a.article_id);
     let field =
         |r: &serde_json::Value, k: &str| r.get(k).and_then(|v| v.as_str()).map(str::to_string);
-    let hashes: Vec<String> = inputs
-        .get("source_refs")
-        .and_then(|v| v.as_array())
+    let hashes: Vec<String> = refs
+        .as_array()
         .into_iter()
         .flatten()
         .filter(|r| field(r, "source_id").as_deref() == Some(source.as_str()))
@@ -327,7 +357,7 @@ pub async fn memory_record_edges(
 ) -> Result<Vec<RecordEdge>, TxError> {
     let mut r = db
         .query(
-            "SELECT record::id(id) AS id, snapshot_id FROM insight_derivation
+            "SELECT record::id(id) AS id, snapshot_id, insight_kind FROM insight_derivation
                WHERE memory_id = $m AND status NOTINSIDE $dead ORDER BY id;
              SELECT derivation_id, source_id, source_revision, evidence_json
                FROM insight_derivation_evidence WHERE memory_id = $m;
@@ -364,16 +394,18 @@ pub async fn memory_record_edges(
     // `article:<id>` evidence source.
     for d in &derivations {
         let mut owners: BTreeSet<String> = BTreeSet::new();
-        let mut inputs = String::new();
+        let (mut inputs, mut readiness) = (String::new(), String::new());
         let mut r = db
             .query(
-                "SELECT owner_kind, owner_id, inputs_json FROM type::record('insight_snapshot', $s)",
+                "SELECT owner_kind, owner_id, inputs_json, readiness_json
+                   FROM type::record('insight_snapshot', $s)",
             )
             .bind(("s", d.snapshot_id.clone()))
             .await?
             .check()?;
         for o in r.take::<Vec<Owner>>(0)? {
             inputs = o.inputs_json.clone();
+            readiness = o.readiness_json.clone();
             if matches!(o.owner_kind.as_str(), "article" | "atlas") {
                 owners.insert(o.owner_id);
             }
@@ -385,7 +417,8 @@ pub async fn memory_record_edges(
         }
         for owner in owners {
             for a in articles(db, &owner).await? {
-                let current = current_metadata(db, &inputs, &a).await?;
+                let refs = retained_refs(&inputs, &readiness, &d.insight_kind);
+                let current = current_metadata(db, &refs, &a).await?;
                 out.insert(article_edge(
                     &a.run_id,
                     &a.article_id,
@@ -595,4 +628,31 @@ pub fn republished_stages(
         .into_iter()
         .filter(|s| outputs.contains_key(*s))
         .collect()
+}
+
+#[cfg(test)]
+mod retained_refs_tests {
+    use super::retained_refs;
+    use serde_json::json;
+
+    #[test]
+    fn a_scoped_publication_uses_the_sibling_kinds_carried_refs() {
+        let inputs =
+            json!({"source_refs": [{"source_id": "article:a", "revision": "new"}]}).to_string();
+        let readiness = json!({"carried_kinds": [
+            {"kind": "claim", "source_snapshot_id": "s0",
+             "inputs": {"source_refs": [{"source_id": "article:a", "revision": "old"}]}}
+        ]})
+        .to_string();
+        assert_eq!(
+            retained_refs(&inputs, &readiness, "claim")[0]["revision"],
+            "old"
+        );
+        assert_eq!(
+            retained_refs(&inputs, &readiness, "inference")[0]["revision"],
+            "new"
+        );
+        assert_eq!(retained_refs(&inputs, "", "claim")[0]["revision"], "new");
+        assert!(retained_refs("", "", "claim").is_null());
+    }
 }

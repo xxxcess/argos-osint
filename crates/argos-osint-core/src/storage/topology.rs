@@ -10,10 +10,10 @@
 //! source node (its canonical binding needs the brief stage receipts, not
 //! ported), and `RetainedActor` is always provisional.
 //!
-//! Gaps (see acceptance.md): the `current_metadata_sql`
-//! article-revision fence is not applied to derivation provenance or cycle
-//! scope; memory nodes carry no revision (SurrealDB memories have none);
-//! reads are not one snapshot transaction.
+//! The `current_metadata_sql` article-revision fence (with sibling-kind
+//! carried refs) applies to derivation provenance and to cycle-scoped
+//! evidence. Gaps (see acceptance.md): memory nodes carry no revision
+//! (SurrealDB memories have none); reads are not one snapshot transaction.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
@@ -510,30 +510,55 @@ impl Query<'_> {
         Ok(derived.unwrap_or(0) > 0 || sourced.unwrap_or(0) > 0)
     }
 
+    /// `ScopedRows::Evidence`: a live derivation cites this source revision,
+    /// its snapshot owner is an article retained in `cycle`, and that
+    /// derivation's retained refs (the sibling kind's carried refs for a
+    /// scoped publication) still match the article's current metadata.
     async fn evidence_in_cycle(
         &mut self,
         source: &str,
         revision: &str,
         cycle: &str,
     ) -> Result<bool> {
-        let mut r = self
-            .repo
-            .db()
+        #[derive(SurrealValue)]
+        struct Cited {
+            kind: String,
+            owner_id: Option<String>,
+            inputs_json: Option<String>,
+            readiness_json: Option<String>,
+        }
+        let db = self.repo.db();
+        let mut r = db
             .query(
                 "LET $ds = (SELECT VALUE derivation_id FROM insight_derivation_evidence
                    WHERE source_id = $s AND source_revision = $rev);
-                 LET $owners = (SELECT VALUE type::record('insight_snapshot', snapshot_id).owner_id
-                   FROM insight_derivation WHERE record::id(id) INSIDE $ds AND status NOTINSIDE $dead);
-                 SELECT VALUE count() FROM atlas_article
-                   WHERE run_id = $c AND article_id INSIDE $owners GROUP ALL;",
+                 SELECT insight_kind AS kind,
+                     type::record('insight_snapshot', snapshot_id).owner_id AS owner_id,
+                     type::record('insight_snapshot', snapshot_id).inputs_json AS inputs_json,
+                     type::record('insight_snapshot', snapshot_id).readiness_json AS readiness_json
+                   FROM insight_derivation
+                   WHERE record::id(id) INSIDE $ds AND status NOTINSIDE $dead;",
             )
             .bind(("s", source.to_string()))
             .bind(("rev", revision.to_string()))
-            .bind(("c", cycle.to_string()))
             .bind(("dead", dead()))
             .await?
             .check()?;
-        Ok(r.take::<Option<i64>>(2)?.unwrap_or(0) > 0)
+        let cited: Vec<Cited> = r.take(1)?;
+        for c in cited {
+            let Some(owner) = c.owner_id else { continue };
+            let refs = super::provenance::retained_refs(
+                c.inputs_json.as_deref().unwrap_or(""),
+                c.readiness_json.as_deref().unwrap_or(""),
+                &c.kind,
+            );
+            for a in super::provenance::articles(db, &owner).await? {
+                if a.run_id == cycle && super::provenance::current_metadata(db, &refs, &a).await? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     async fn in_scope(&mut self, n: &TopologyNode) -> Result<bool> {

@@ -1,30 +1,10 @@
 ---
 name: graphify
-description: Before a repo-wide search, call shell with graphify query "<question>".
+description: Query the repository graph before broad searches; verify results against source.
 ---
 
-# Graphify in Argos
+When `graphify-out/graph.json` exists, start repo questions with shell `graphify query "<question>"`; verify returned paths against source. Use `graphify explain "<symbol>"` or `graphify path "<A>" "<B>"` for focused relationships. No separate graphify tool exists.
 
-For a codebase question, call the shell tool with `graphify query "<question>"` first when `graphify-out/graph.json` exists. There is no separate graphify tool. Use `graphify explain "<symbol>"` for a focused concept and `graphify path "<A>" "<B>"` for relationships. Read the returned paths to verify source details. If the graph is absent or unusable, use a path-scoped grep or glob and explain how to bootstrap the graph.
+If absent/unusable, use scoped grep/glob and explain bootstrap: `graphify extract . --code-only --cargo`, then `graphify cluster-only . --no-viz --no-label`. After code edits run `graphify update .`; retain graph.json, manifest.json and GRAPH_REPORT.md, not caches/visualizations.
 
-For `/graphify --help`, show these commands and stop:
-
-```
-graphify query "<question>"
-graphify explain "<concept>"
-graphify path "<A>" "<B>"
-graphify extract . --code-only --cargo
-graphify update .
-```
-
-The Argos graph is built without an LLM: `graphify extract . --code-only --cargo`. Generate the text report with `graphify cluster-only . --no-viz --no-label`. After code edits, use `graphify update .`. Commit `graph.json`, `manifest.json`, and `GRAPH_REPORT.md`; keep caches, analysis, and visualization local.
-
-Read detailed references only for the operation at hand:
-
-- [Query, path, and explain](references/query.md)
-- [Extraction options](references/extraction-spec.md)
-- [Incremental updates](references/update.md)
-- [Hooks and watch mode](references/hooks.md)
-- [Exports](references/exports.md)
-- [GitHub and merged graphs](references/github-and-merge.md)
-- [Add and transcription](references/transcribe.md)
+For `/graphify --help`, list query/explain/path/extract/update and stop. Load references only as needed: [query](references/query.md), [extraction](references/extraction-spec.md), [update](references/update.md), [hooks](references/hooks.md), [exports](references/exports.md), [GitHub/merge](references/github-and-merge.md), [watch](references/add-watch.md), [transcription](references/transcribe.md).

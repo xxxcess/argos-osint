@@ -14,7 +14,7 @@ Architect exploration children use AUDIT_UNIT mode; decision calls use CONSULT. 
 
 ## Models
 
-Role models and maximum-effort requests live in `.opencode/opencode.json` at `agents.<role>.model` and `request.body`. Architect/tester default to available `opencode/glm-5.3-flash-free#max`; coder retains `opencode/mimo-v2.6-flash-free#max`. The previous `opencode/step-5-preview-free` model was absent from the installed catalog. Provider/model support determines actual reasoning behavior.
+Role models and reasoning variants live in `.opencode/opencode.json` at `agents.<role>.model`. Architect defaults to `opencode/glm-5.3-flash-free#max`, coder to `opencode/mimo-v2.6-flash-free`, and tester to the vision-capable `opencode/nemotron-3.5-super-vl-free#xhigh`. All three base IDs are present in the installed free OpenCode catalog. GLM advertises `max`; Nemotron advertises `xhigh` as its highest variant. MiMo advertises no reasoning variants, so it uses provider defaults. Unsupported `#max` suffixes and raw reasoning-body overlays are not sent. Provider/model support determines actual reasoning behavior.
 
 Set exploration and editing child defaults independently:
 
@@ -31,12 +31,42 @@ A `sessionID` belongs to the calling parent: resume only a child returned by you
 
 If continuation returns unknown/foreign-session errors, confirm the old worker is no longer editing, then start a fresh child without sessionID and include the current spec, completed work and remaining scope. For model/permission/depth failures, report the exact diagnostic and stop that handoff for configuration repair. Do not claim success or fall back to direct edits/builds in the wrong role. Background children notify parents; do not poll or overlap owned edits with verification.
 
-The supplied screenshot shows a failed continued call followed by direct fallback, but omits the diagnostic. The exact original cause is unconfirmed; the configuration and instructions address the runtime's depth, role-mode and parent-ownership requirements.
-
 ## Permissions and tooling
 
-All roles may read/search, use shell and web tools, and load relevant skills. Architect/tester edit tools allow only planning evidence; coder may edit source. Shell access supports repo commands and is not a filesystem sandbox. Code Mode and browser tools remain denied. Delegation is restricted to the table above. Follow AGENTS.md for isolated Cargo commands, TUI capture/image/interaction/metric checks, documentation, scratch, compatibility and commits. Tester marks unavailable image/live evidence pending.
+All roles may read/search, use shell and web tools, and load relevant skills. Architect/tester edit tools allow only planning evidence; coder may edit source. Shell access supports repo commands and is not a filesystem sandbox. Code Mode is enabled so configured MCP discovery tools and worktree/session utilities remain available; nested tools still enforce their own permissions. Browser tools remain denied. Delegation is restricted to the table above. `.opencode/AGENTS.md` is a concise shared guide loaded by `instructions` for all models, alongside the unchanged root AGENTS.md (OpenCode combines these files; this is not an override). The project registers the installed `~/.agents/skills/planning-with-files` skill without changing global settings. Follow AGENTS.md for isolated Cargo commands, TUI capture/image/interaction/metric checks, documentation, scratch, compatibility and commits. Tester marks unavailable image/live evidence pending.
 
 Use the installed `opencode debug config` and initialized `/api/agent` catalog to inspect effective models, prompts and permissions. Initial catalog loads can be empty while initialization completes. Existing sessions retain selected agents/models; start a new architect session or explicitly switch. Retired sessions do not acquire new parent/child relationships.
 
 References: [official V2 agents](https://opencode.ai/v2/docs/agents), [config](https://opencode.ai/v2/docs/config), [tools](https://opencode.ai/v2/docs/tools). Existing [graph-first discovery](diagrams/agent-graphify.html) still applies.
+
+## Phase handoff and completion
+
+Every dispatch carries this compact envelope; children start with fresh context:
+
+```text
+MODE: PHASE | EDIT_UNIT | AUDIT_UNIT | CONSULT | VERIFY
+PLAN_ID / absolute PLAN_DIR / PHASE:
+INTEGRATION_ROOT / absolute WORKTREE / BASE_REVISION:
+OWNED_FILES: exact paths (read-only references listed separately)
+SPEC: file:line refs, contracts, constraints, performance/migration risks
+ACCEPTANCE: checks, expected results, evidence paths, user exclusions
+RETURN: COMPLETE | NEEDS_DECISION | FAILED; changed files and evidence
+```
+
+Tester uses PASS / FAIL / BLOCKED / PENDING and reports tested revision plus dirty-diff identity, command exit codes, skipped checks, screenshot inspection and outstanding acceptance. Its report is addressed to architect but returns through its calling coder. Coder relays it unchanged with integration notes. A CONSULT child returns an advisory decision; it cannot update the owning architect's plan or accept a phase. Questions affecting scope return to the owning architect.
+
+The owning architect updates the spec and planning files, then resumes its own coder with exact corrections. Coder resumes its own editors/tester as needed. No sibling/ancestor messaging or shared session IDs are assumed. Await foreground calls or background completion notifications before verification. Implementation requests continue phase by phase without routine user confirmation; plan-only requests stop after the spec. Completion requires all phase acceptance and final review, including performance risks; blocked/pending evidence remains explicit.
+
+## Worktree integration
+
+1. Coder records the main checkout as INTEGRATION_ROOT, its revision and existing dirty paths. Assign disjoint file ownership; shared contracts/lockfiles have one owner. Small sequential edits can use the integration tree; parallel feature units use task-owned worktrees under `.agent-scratch/worktrees/`.
+2. Create each worktree from the agreed baseline (`git worktree add --detach <absolute-path> <base>`). Include any required uncommitted phase baseline with a scoped patch; never silently omit dirty prerequisites or copy unrelated edits. Record that baseline so it is excluded from the worker's returned delta.
+3. Pass absolute WORKTREE and PLAN_DIR to the child. Subagent creation inherits location; it does not implicitly enter a worktree. Use absolute edit paths and shell `workdir`, or move only the child session with Code Mode and wait for that move to take effect. Read the shared plan in the integration tree; never create a competing plan in a worker.
+4. EDIT_UNIT children implement and format only. Return owned paths, diff and unresolved decisions. Coder waits for all editors, inspects changes (including new/untracked files), and integrates only each unit's delta. Without commit authorization use reviewed patches and `git apply --check` before applying; with authorization coordinator may commit exact paths and cherry-pick. Never blindly overwrite files or apply a baseline twice.
+5. Resolve integration conflicts through architect when contracts change, format the combined tree, then give tester that tree and diff identity. Never test in feature worktrees. Retain task-owned worktrees until changes are verified/integrated; remove only clean, fully integrated task worktrees without force.
+
+## Verification
+
+Rust: `scripts/local_matrix.sh --storage embedded` in INTEGRATION_ROOT, with ARGOS_EMBED unset. Targeted builds use `python3 scripts/agent_cargo.py … --locked` with the embedded defaults. Storage checks run via `test_surreal.py`; server is CI-only. Serialize Cargo and follow the 1–2 full runs / maximum 3 cap. Config-only changes use `node --test .opencode/tests/*.test.mjs` plus runtime checks, without a Rust build.
+
+Inspect `opencode debug config`, `opencode models`, and the initialized `/api/agent` catalog. Test actual handoffs in a fresh read-only session: architect → coder → EDIT_UNIT coder, coder → tester → CONSULT architect, then architect resumes its own coder via sessionID. A valid config alone is not proof of delivery. Keep raw runtime evidence in `.agent-scratch/`; never report a model/network failure as a passed handoff. Model variants and request overlays are preferences, not proof of provider-side reasoning; when switching models select its supported high/max variant and check the catalog rather than inventing one.

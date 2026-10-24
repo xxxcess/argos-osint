@@ -24,7 +24,7 @@ test("replacement roles permit nested handoffs and restrict source edits", () =>
   for (const id of ["build", "plan", "general", "explore"]) assert.equal(config.agents[id].disabled, true);
   for (const id of ["architect", "coder", "tester"]) {
     assert.equal(config.agents[id].mode, "all");
-    assert.equal(effect(id, "execute", "*"), "deny");
+    assert.equal(effect(id, "execute", "*"), "allow");
     assert.equal(effect(id, "browser", "*"), "deny");
     assert.equal(effect(id, "shell", "*"), "allow");
     assert.equal(effect(id, "subagent", "*"), "deny");
@@ -43,11 +43,13 @@ test("replacement roles permit nested handoffs and restrict source edits", () =>
   }
 });
 
-test("TUI command loads the registered screenshot skill and verify keeps offline flags", () => {
+test("TUI command selects tester and verify uses the embedded integration gate", () => {
   const command = readFileSync(join(root, "commands/tui-verify.md"), "utf8");
   assert.match(command, /argos-tui-verify/);
   const verify = readFileSync(join(root, "commands/ecc-verify.md"), "utf8");
-  assert.match(verify, /--locked --no-default-features/);
+  assert.match(command, /agent: tester/);
+  assert.match(verify, /local_matrix\.sh --storage embedded/);
+  assert.doesNotMatch(verify, /--no-default-features/);
   assert.match(verify, /ARGOS_EMBED.*unset/);
 });
 
@@ -60,4 +62,14 @@ test("worker prompts retain leaf roles and caller-owned continuation", () => {
   for (const id of ["architect", "coder", "tester"]) {
     assert.match(readFileSync(join(root, "agents", `${id}.md`), "utf8"), /Resume only your own child sessionID/);
   }
+});
+
+test("shared guide and planning skill are registered for every model", () => {
+  assert.deepEqual(config.instructions, [".opencode/AGENTS.md"]);
+  assert.ok(config.skills.includes("~/.agents/skills/planning-with-files"));
+  const guide = readFileSync(join(root, "AGENTS.md"), "utf8");
+  assert.ok(guide.length < readFileSync(join(root, "../AGENTS.md"), "utf8").length);
+  assert.equal(config.agents.architect.model, "opencode/glm-5.3-flash-free#max");
+  assert.equal(config.agents.tester.model, "opencode/nemotron-3.5-super-vl-free#xhigh");
+  assert.equal(config.agents.coder.model, "opencode/mimo-v2.6-flash-free");
 });

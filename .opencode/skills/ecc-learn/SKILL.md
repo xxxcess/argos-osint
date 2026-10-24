@@ -2,4 +2,5 @@
 name: ecc-learn
 description: Propose reusable Argos practices from verified work.
 ---
-Identify one repeatable practice supported by work in this session. Show exact proposed wording and target file. Request approval before changing persistent instructions. Keep task facts in the named plan; curate lasting decisions using docs/planning-artifacts.md.
+
+Propose one reusable practice grounded in verified work, with exact wording and target file. Obtain approval before persistent instruction edits unless already authorized. Keep task facts local; curate lasting decisions per `docs/planning-artifacts.md`.

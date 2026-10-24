@@ -37,6 +37,30 @@ pub(crate) fn list() -> Result<Vec<Memory>> {
     )
 }
 
+/// A retained Intel report job and the run of its article's latest
+/// sighting, for Profile → Attention "Open report" (`intel_report_job`,
+/// `atlas_article`). A short keyed read, like the Brain preview.
+#[cfg(feature = "surreal")]
+pub(crate) fn report_job_with_run(
+    id: &str,
+) -> Result<
+    Option<(
+        argos_osint_core::intel_recon::IntelReportJobRow,
+        Option<String>,
+    )>,
+> {
+    use argos_osint_core::storage::{atlas, recon_jobs, runtime};
+    runtime::blocking(|repo| async move {
+        let Some(job) = recon_jobs::report_job(&repo, id).await? else {
+            return Ok(None);
+        };
+        let run = atlas::latest_article_by_id(repo.db(), &job.article_id)
+            .await?
+            .map(|a| a.run_id);
+        Ok(Some((job, run)))
+    })
+}
+
 #[cfg(feature = "surreal")]
 pub(crate) fn preview(id: &str) -> Result<Option<InsightView>> {
     use argos_osint_core::storage::{insight_views, runtime};

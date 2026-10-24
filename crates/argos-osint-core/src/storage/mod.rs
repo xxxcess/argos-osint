@@ -11,6 +11,7 @@
 //! Existing `Store` callers are not converted yet; see
 //! `.planning/2026-10-22-surrealdb/phase1-design.md`.
 
+pub mod brain_scope;
 pub mod error;
 
 pub mod actor_bind;
@@ -72,6 +73,7 @@ pub mod repo;
 pub mod runtime;
 pub mod server;
 pub mod summaries;
+pub mod summary_flush;
 pub mod telemetry;
 pub mod topology;
 pub mod tx;

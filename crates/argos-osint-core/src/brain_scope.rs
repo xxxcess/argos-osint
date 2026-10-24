@@ -299,7 +299,7 @@ pub async fn run_scope_analysis(
     Ok(result)
 }
 
-async fn generate_inferences_with_model(
+pub(crate) async fn generate_inferences_with_model(
     secret: &ProviderSecret,
     claims: &[&crate::brain_topology::TopologyNode],
     entities: &[&crate::brain_topology::TopologyNode],
@@ -355,7 +355,7 @@ fn parse_inferences_response(response: &str) -> Result<Vec<ScopeInferenceCandida
     Ok(parsed.inferences.unwrap_or_default())
 }
 
-fn generate_inferences_deterministic(
+pub(crate) fn generate_inferences_deterministic(
     claims: &[&crate::brain_topology::TopologyNode],
     entities: &[&crate::brain_topology::TopologyNode],
 ) -> Vec<ScopeInferenceCandidate> {
@@ -383,7 +383,7 @@ fn generate_inferences_deterministic(
     out
 }
 
-async fn generate_links_with_model(
+pub(crate) async fn generate_links_with_model(
     secret: &ProviderSecret,
     nodes: &[crate::brain_topology::TopologyNode],
 ) -> Result<Vec<ScopeLinkCandidate>> {
@@ -446,7 +446,7 @@ async fn generate_links_with_model(
     Ok(out)
 }
 
-fn resolve_node_to_endpoint(
+pub(crate) fn resolve_node_to_endpoint(
     node_id: &str,
     nodes: &[crate::brain_topology::TopologyNode],
 ) -> Option<EndpointRef> {
@@ -504,7 +504,7 @@ fn resolve_node_to_endpoint(
     }
 }
 
-fn generate_links_deterministic(
+pub(crate) fn generate_links_deterministic(
     claims: &[&crate::brain_topology::TopologyNode],
     entities: &[&crate::brain_topology::TopologyNode],
 ) -> Vec<ScopeLinkCandidate> {

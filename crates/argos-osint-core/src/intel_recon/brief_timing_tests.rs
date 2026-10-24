@@ -1,4 +1,5 @@
 use super::*;
+use crate::tasks::ClaimedTask;
 use std::time::Duration;
 
 fn claimed(id: &str, started: &str) -> ClaimedTask {

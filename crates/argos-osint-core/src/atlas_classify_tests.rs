@@ -1,15 +1,14 @@
 //! Offline loopback fixtures for actual classifier wire attempts and receipts.
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
-use std::time::Instant;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::atlas_classify::{batches, execute, BatchAdapter};
-use crate::provider::{DecisionsResponse, SettingsFile};
+use crate::atlas_classify::BatchAdapter;
+use crate::provider::DecisionsResponse;
 use crate::recon::model_exec::DecisionsAdapter;
 use crate::secrets::ProviderSecret;
-use crate::store::{AtlasArticleRow, Store};
+use crate::store::AtlasArticleRow;
 
 fn article(id: usize) -> AtlasArticleRow {
     serde_json::from_value(json!({"run_id":"fixture","id":format!("a{id}"),"title":format!("Acme article {id}"),"description":"Jane Doe announces an office","url":format!("https://example.org/{id}"),"country":"us","source_name":"Desk","source_domain":"example.org","published_at":"","provider":"newsapi","temperature":1.0,"category":"unk","seen_at":"","author":"","image_url":""})).unwrap()

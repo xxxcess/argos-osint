@@ -1,5 +1,5 @@
 use super::*;
-use crate::intel_recon::brief_pipeline::{self as bp, BriefInputs};
+use crate::store::AtlasArticleRow;
 use serde_json::json;
 
 const HEAD: &str = "Baltic board suspended the ferry service on Monday. The harbour master confirmed the insurance certificate expired last week. Officials said the crossing would stay closed until the regulator reviews the lapse.";

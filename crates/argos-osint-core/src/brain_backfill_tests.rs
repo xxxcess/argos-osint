@@ -1,7 +1,6 @@
 use super::*;
 use crate::atlas_metadata::{ArticleMention, ArticleMetadata, MetadataState};
 use crate::store::AtlasArticleRow;
-use rusqlite::params;
 
 fn article(run: &str, id: &str, title: &str) -> AtlasArticleRow {
     AtlasArticleRow {

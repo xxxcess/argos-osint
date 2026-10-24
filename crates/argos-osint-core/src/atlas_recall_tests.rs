@@ -4,8 +4,7 @@
 mod tests {
     use std::sync::atomic::AtomicBool;
 
-    use crate::atlas::{run_atlas, AtlasEvent, Cursor, RunInput, RunStats, Stop};
-    use crate::store::{AtlasArticleRow, Store};
+    use crate::atlas::{run_atlas, AtlasEvent, RunInput, Stop};
 
     const RUN: &str = "classification-contract-fixture";
 

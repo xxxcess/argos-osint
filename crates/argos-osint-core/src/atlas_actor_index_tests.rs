@@ -1,6 +1,6 @@
-use super::*;
 use crate::atlas_metadata::{ArticleMention, ArticleMetadata, MetadataState};
 use crate::store::AtlasArticleRow;
+use crate::store::Store;
 
 pub(crate) fn seed(store: &Store, run: &str, id: &str, title: &str, names: &[&str]) {
     let _ = store.atlas_insert_run(run, "{}", "{}");

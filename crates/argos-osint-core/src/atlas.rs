@@ -1791,7 +1791,7 @@ impl SurrealCycleJob {
                 parent: None,
             };
             if let Err(e) = crate::storage::recon_jobs::begin_app_job(&repo, &spec).await {
-                tracing::warn!(job = %job, "atlas job start not recorded: {e:#}");
+                eprintln!("atlas job start not recorded: {e:#} (job {job})");
             }
         });
         Self {
@@ -1815,7 +1815,7 @@ impl SurrealCycleJob {
                     .await
                 {
                     Ok(flag) => stop |= flag,
-                    Err(e) => tracing::warn!(job = %job, "atlas job progress not recorded: {e:#}"),
+                    Err(e) => eprintln!("atlas job progress not recorded: {e:#} (job {job})"),
                 }
             }
             if stop {
@@ -1847,7 +1847,7 @@ impl SurrealCycleJob {
                 parent: Some(&parent),
             };
             if let Err(e) = crate::storage::recon_jobs::begin_app_job(&repo, &spec).await {
-                tracing::warn!(job = %job, "atlas phase job not recorded: {e:#}");
+                eprintln!("atlas phase job not recorded: {e:#} (job {job})");
             }
         });
         self.progress(child.clone(), phase_title(phase), None, None);
@@ -1877,7 +1877,7 @@ impl SurrealCycleJob {
             )
             .await
             {
-                tracing::warn!(job = %id, "atlas job finish not recorded: {e:#}");
+                eprintln!("atlas job finish not recorded: {e:#} (job {id})");
             }
         });
     }
@@ -2915,18 +2915,10 @@ where
             &stats,
         );
         emit(AtlasEvent::Status("Index actors and articles".into()));
-        // Brain actor indexing is not on SurrealDB yet: skip it and leave the
-        // index marked incomplete rather than touching SQLite.
-        let report = if store.is_surreal() {
-            emit(AtlasEvent::Note(
-                "Actor index skipped: not yet available on SurrealDB".into(),
-            ));
-            crate::atlas_actor_index::IndexReport::default()
-        } else {
-            store.sqlite("Atlas actor index", |s| {
-                crate::atlas_actor_index::index_run(s, &run_id, &|| cycle_paused(tracker, pause))
-            })?
-        };
+        let report = crate::atlas_actor_index::index_run_store(&store, &run_id, &|| {
+            cycle_paused(tracker, pause)
+        })
+        .await?;
         stats.coverage.actor_indexed = report.reused + report.indexed;
         stats.coverage.actor_zero = report.zero_actor;
         stats.coverage.actor_index_failed = report.failed;
@@ -2936,7 +2928,7 @@ where
         if report.stopped {
             return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel).await;
         }
-        actor_index_incomplete = store.is_surreal() || !report.complete();
+        actor_index_incomplete = !report.complete();
         cursor.leg = "actor_articles_done".into();
         save(&store, &run_id, &cursor, &stats).await?;
     }

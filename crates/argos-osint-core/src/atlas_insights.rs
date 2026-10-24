@@ -1953,7 +1953,7 @@ async fn retain_artifact(db_path: &Path, text: &str) -> Result<String> {
 
 /// The owner's desired insight generation, started (advanced to 1) when it
 /// has none, on the selected store.
-async fn owner_generation(db_path: &Path, kind: &str, owner: &str) -> Result<i64> {
+async fn owner_generation(db_path: &Path, kind: &str, owner: &str) -> Result<u32> {
     #[cfg(feature = "surreal")]
     if crate::recon::backend::sqlite_path(db_path).is_none() {
         let repo = crate::storage::runtime::repository().await?;
@@ -1976,7 +1976,7 @@ async fn owner_generation(db_path: &Path, kind: &str, owner: &str) -> Result<i64
         )
         .await
         .map_err(|e| anyhow!("atlas generation: {e}"))?;
-        return Ok(generation.value);
+        return Ok(u32::try_from(generation.value)?);
     }
     let store = Store::open(db_path)?;
     let generation =

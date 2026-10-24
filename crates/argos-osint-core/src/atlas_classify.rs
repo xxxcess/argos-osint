@@ -274,15 +274,16 @@ pub async fn execute(
 /// Queue a classifier cache write on the runtime's ordered queue (SurrealDB:
 /// `accept` cannot await). Best-effort, like the SQLite write it mirrors.
 fn cache_write_ordered(db: std::path::PathBuf, key: String, json: String) {
+    let label = key.clone();
     let queued = crate::storage::runtime::spawn_ordered(async move {
         if let Ok(store) = crate::atlas_store::AtlasStore::open(&db).await {
             if let Err(e) = store.app_state_set(&key, &json).await {
-                tracing::warn!(key = %key, "classifier cache not written: {e:#}");
+                eprintln!("classifier cache not written: {e:#} (key {key})");
             }
         }
     });
     if !queued {
-        tracing::warn!(key = %key, "classifier cache not written: no runtime");
+        eprintln!("classifier cache not written: no runtime (key {label})");
     }
 }
 

@@ -229,9 +229,17 @@ impl AtlasStore {
     }
     pub async fn save_metadata(&self, metadata: &ArticleMetadata) -> Result<bool> {
         dispatch!(self, s => s.atlas_save_metadata(metadata),
-            r => crate::storage::atlas_metadata::save_metadata(r.db(), metadata)
+        r => {
+            let saved = crate::storage::atlas_metadata::save_metadata(r.db(), metadata)
                 .await
-                .map_err(tx("atlas save metadata")))
+                .map_err(tx("atlas save metadata"))?;
+            if saved {
+                // SQLite refreshes the rating inside the save transaction.
+                crate::intel_recon::persist_article_rating_surreal(r, &metadata.article_id)
+                    .await?;
+            }
+            Ok(saved)
+        })
     }
     #[allow(clippy::too_many_arguments)]
     pub async fn set_classification(

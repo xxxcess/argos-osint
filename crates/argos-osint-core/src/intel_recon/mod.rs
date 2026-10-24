@@ -53,6 +53,8 @@ pub use classify_mode::{
 };
 pub(crate) use confidence::persist_article_rating;
 pub use confidence::{article_confidence, initial_rating, EvidenceConfidence};
+#[cfg(feature = "surreal")]
+pub(crate) use confidence::{article_confidence_surreal, persist_article_rating_surreal};
 pub use jobs::{
     active_job_for_mode, cancel_job, create_report_job, pause_job, resume_job, retry_failed_tasks,
     scoped_section_plan, start_report_worker, IntelReportEvent, ReportScope,

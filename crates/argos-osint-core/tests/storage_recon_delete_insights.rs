@@ -20,9 +20,15 @@ fn source(conversation: &str) -> MemorySource {
     }
 }
 
+/// An int result, or a bool as 0/1: a server refuses `<int>` on a bool.
 async fn n(repo: &Repository, sql: &str) -> i64 {
+    let sql = sql.replace("<int>", "");
     let mut r = repo.db().query(sql).await.unwrap().check().unwrap();
-    r.take::<Option<i64>>(0usize).unwrap().unwrap_or(-1)
+    match r.take::<Option<serde_json::Value>>(0usize).unwrap() {
+        Some(serde_json::Value::Bool(b)) => i64::from(b),
+        Some(v) => v.as_i64().unwrap_or(-1),
+        None => -1,
+    }
 }
 
 async fn claim(repo: &Repository, fp: &str, memory: &str, threads: &[&str]) {

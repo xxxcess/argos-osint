@@ -353,11 +353,19 @@ impl Store {
         run_id: &str,
         article_id: &str,
     ) -> Result<Option<ArticleMetadata>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::atlas_metadata(run_id, article_id);
+        }
         let json:Option<String>=self.conn.query_row("SELECT metadata_json FROM atlas_article_metadata WHERE run_id=?1 AND article_id=?2",params![run_id,article_id],|r|r.get(0)).optional()?;
         Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
     /// Reject work captured before a source replacement. The savepoint atomically replaces mentions.
     pub fn atlas_save_metadata(&self, metadata: &ArticleMetadata) -> Result<bool> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::atlas_save_metadata(metadata);
+        }
         let tx = rusqlite::Transaction::new_unchecked(
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
@@ -728,6 +736,17 @@ impl Store {
         receipt_json: &str,
         category: Option<&str>,
     ) -> Result<bool> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::atlas_set_classification(
+                run_id,
+                article_id,
+                captured_hash,
+                status,
+                receipt_json,
+                category,
+            );
+        }
         let tx = rusqlite::Transaction::new_unchecked(
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,

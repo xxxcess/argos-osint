@@ -49,6 +49,7 @@ pub mod intel;
 pub mod intel_brief_view;
 pub mod investigation;
 pub mod jobs;
+pub mod jobs_store;
 pub mod jobs_view;
 pub mod lifecycle;
 pub mod live_evidence;

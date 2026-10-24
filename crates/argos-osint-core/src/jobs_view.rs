@@ -748,35 +748,67 @@ pub fn event_apps(conn: &Connection) -> Result<Vec<String>> {
 /// Store-level access for the TUI (which has no raw connection).
 impl Store {
     pub fn list_jobs(&self, filter: &JobFilter, limit: usize) -> Result<Vec<JobRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::list_jobs(filter, limit);
+        }
         list_jobs(&self.conn, filter, limit)
     }
 
     pub fn job_counts(&self) -> Result<JobCounts> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::job_counts();
+        }
         job_counts(&self.conn)
     }
 
     pub fn job_detail(&self, id: &str, task_limit: usize) -> Result<Option<JobDetail>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::job_detail(id, task_limit);
+        }
         job_detail(&self.conn, id, task_limit)
     }
 
     pub fn get_job(&self, id: &str) -> Result<Option<JobRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::get_job(id);
+        }
         get_job(&self.conn, id)
     }
 
     pub fn retry_failed_tasks(&self, id: &str) -> Result<usize> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::retry_failed_tasks(id);
+        }
         retry_failed_tasks(&self.conn, id)
     }
     pub fn set_job_stage_coverage(&self, job_id: &str, coverage_json: &str) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::set_job_stage_coverage(job_id, coverage_json);
+        }
         crate::tasks::set_job_stage_coverage(&self.conn, job_id, coverage_json)
     }
 
     pub fn job_apps(&self) -> Result<Vec<String>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::job_apps();
+        }
         job_apps(&self.conn)
     }
 
     /// Jobs → Stop: dequeue/fence durable work, or request cooperative
     /// cancellation from its registered owner. Service loops are excluded.
     pub fn request_job_cancel(&self, id: &str) -> Result<crate::job_registry::CancelRequest> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::request_job_cancel(id);
+        }
         let Some(job) = self.get_job(id)? else {
             return Ok(crate::job_registry::CancelRequest::Missing);
         };
@@ -801,6 +833,10 @@ impl Store {
 
     /// Register a user-visible job before launching its work (idempotent).
     pub fn register_job(&self, job: &tasks::NewJob, meta: &tasks::JobMeta) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::register_job(job, meta);
+        }
         tasks::enqueue_job_with(&self.conn, job, meta, &chrono::Utc::now().to_rfc3339())
     }
 
@@ -814,6 +850,17 @@ impl Store {
         total: Option<i64>,
         error_summary: &str,
     ) -> Result<()> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::set_job_progress(
+                id,
+                state,
+                phase,
+                done,
+                total,
+                error_summary,
+            );
+        }
         let now = chrono::Utc::now().to_rfc3339();
         tasks::set_job_progress(
             &self.conn,
@@ -828,33 +875,61 @@ impl Store {
     }
 
     pub fn record_event(&self, event: &NewEvent) -> Result<String> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::record_event(event);
+        }
         events::record_event(&self.conn, event)
     }
 
     pub fn list_events(&self, filter: &EventFilter, limit: usize) -> Result<Vec<EventRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::list_events(filter, limit);
+        }
         events::list_events(&self.conn, filter, limit)
     }
 
     pub fn get_event(&self, id: &str) -> Result<Option<EventRow>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::get_event(id);
+        }
         events::get_event(&self.conn, id)
     }
 
     pub fn event_counts(&self) -> Result<EventCounts> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::event_counts();
+        }
         event_counts(&self.conn)
     }
 
     pub fn event_apps(&self) -> Result<Vec<String>> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::event_apps();
+        }
         event_apps(&self.conn)
     }
 
     /// Delete events past retention. Touches only `argos_events`.
     pub fn prune_events(&self, hours: i64) -> Result<usize> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::prune_events(hours);
+        }
         events::prune_events(&self.conn, hours)
     }
 
     /// Logs "Clear events". Touches only `argos_events`: jobs, task results and
     /// memories are kept.
     pub fn clear_events(&self) -> Result<usize> {
+        #[cfg(feature = "surreal")]
+        if crate::storage::brain_store::on() {
+            return crate::storage::jobs_store::clear_events();
+        }
         events::clear_events(&self.conn)
     }
 }

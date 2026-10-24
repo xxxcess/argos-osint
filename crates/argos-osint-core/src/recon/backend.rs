@@ -447,15 +447,15 @@ impl ReconStore {
         dispatch!(self, s => s.last_thread(),
             r => crate::storage::recon_threads::last_thread(r).await)
     }
-    /// Delete the thread. `with_insights` (also deleting the insights it
-    /// sourced) is SQLite-only: on SurrealDB the insights are kept.
+    /// Delete the thread; `with_insights` also deletes the insights it
+    /// alone sourced.
     pub async fn delete_thread(&self, tid: &str, with_insights: bool) -> Result<bool> {
         match self {
             Self::Sqlite(m) => lock(m).delete_thread(tid, with_insights),
             #[cfg(feature = "surreal")]
             Self::Surreal(r) => {
                 if with_insights {
-                    return Err(not_ported("deleting a thread with its insights"));
+                    return crate::storage::recon::delete_thread_with_insights(r, tid).await;
                 }
                 crate::storage::recon::delete_thread(r, tid).await
             }

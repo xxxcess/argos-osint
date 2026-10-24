@@ -152,7 +152,7 @@ async fn record_edges_follow_sources_topics_and_mentions() {
         return;
     };
     let (db, p) = fresh(&server, "prov_edges").await;
-    for id in ["a1", "a2"] {
+    for id in ["a1", "a2", "a3"] {
         atlas::upsert_article(
             &db,
             &AtlasArticleRow {
@@ -180,8 +180,10 @@ async fn record_edges_follow_sources_topics_and_mentions() {
     // A live derivation owned by article a2 with body evidence, and a
     // retired one owned by a1's run that must not count.
     db.query(
-        "CREATE type::record('insight_snapshot', 's1') SET owner_kind = 'article', owner_id = 'a2',
-           generation = 1, input_key = 'k', inputs_json = '{}', entities_json = '[]',
+        "CREATE type::record('nlp_artifact', 'h2') SET text = 't\n', byte_len = 2, created_at = '1';
+         CREATE type::record('insight_snapshot', 's1') SET owner_kind = 'article', owner_id = 'a2',
+           generation = 1, input_key = 'k', entities_json = '[]',
+           inputs_json = '{\"source_refs\":[{\"source_id\":\"article:a2\",\"url\":\"\",\"artifact_hash\":\"h2\"}]}',
            coverage_json = '{}', readiness_json = '{}', contract_version = 'c',
            policy_version = 'p', created_at = '1';
          CREATE type::record('insight_derivation', 'd1') SET snapshot_id = 's1', memory_id = $m,
@@ -190,6 +192,13 @@ async fn record_edges_follow_sources_topics_and_mentions() {
          CREATE type::record('insight_derivation', 'd2') SET snapshot_id = 's1', memory_id = $m,
            insight_kind = 'claim', fingerprint = 'f', item_json = '{}', assessment_json = '{}',
            status = 'retired', revision = '1';
+         CREATE type::record('insight_snapshot', 's3') SET owner_kind = 'article', owner_id = 'a3',
+           generation = 1, input_key = 'k', inputs_json = '{}', entities_json = '[]',
+           coverage_json = '{}', readiness_json = '{}', contract_version = 'c',
+           policy_version = 'p', created_at = '1';
+         CREATE type::record('insight_derivation', 'd3') SET snapshot_id = 's3', memory_id = $m,
+           insight_kind = 'claim', fingerprint = 'f', item_json = '{}', assessment_json = '{}',
+           status = 'assessed', revision = '1';
          CREATE insight_derivation_evidence SET derivation_id = 'd1', source_id = 'body:a2',
            source_revision = 'r1', memory_id = $m, evidence_json = '{\"q\":1}';
          CREATE insight_derivation_evidence SET derivation_id = 'd2', source_id = 'body:old',
@@ -207,6 +216,11 @@ async fn record_edges_follow_sources_topics_and_mentions() {
     assert_eq!(a1.status, "historical origin · revision unavailable");
     let a2 = find(&format!("article-evidence:article:run1/a2:{mem}")).expect("a2 source");
     assert!(a2.status.is_empty() && a2.receipt == "insight_derivations:d1");
+    let a3 = find(&format!("article-evidence:article:run1/a3:{mem}")).expect("a3 source");
+    assert_eq!(
+        a3.status, "historical origin · revision unavailable",
+        "a snapshot whose refs no longer describe the article is historical"
+    );
     assert!(find(&format!("evidence:source:evidence:body:a2@r1:{mem}")).is_some());
     assert!(
         find(&format!("evidence:source:evidence:body:old@r0:{mem}")).is_none(),

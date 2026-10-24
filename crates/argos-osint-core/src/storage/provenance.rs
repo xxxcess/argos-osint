@@ -227,6 +227,7 @@ struct Derivation {
 struct Owner {
     owner_kind: String,
     owner_id: String,
+    inputs_json: String,
 }
 
 #[derive(Debug, Clone, SurrealValue)]
@@ -256,15 +257,65 @@ struct SourceRow {
 struct ArticleRef {
     run_id: String,
     article_id: String,
+    title: String,
+    description: String,
+    url: String,
+    published_at: String,
 }
 
 async fn articles(db: &Surreal<Any>, article_id: &str) -> Result<Vec<ArticleRef>, TxError> {
     let mut r = db
-        .query("SELECT run_id, article_id FROM atlas_article WHERE article_id = $a ORDER BY run_id")
+        .query(
+            "SELECT run_id, article_id, title, description, url, published_at FROM atlas_article
+             WHERE article_id = $a ORDER BY run_id",
+        )
         .bind(("a", article_id.to_string()))
         .await?
         .check()?;
     Ok(r.take(0)?)
+}
+
+/// `brain_topology_query::current_metadata_sql`: a snapshot's retained
+/// source refs (`inputs_json.source_refs`) still describe the article as
+/// stored: a ref for `article:<id>` with the same URL and published time
+/// whose artifact text is the current title and description. An article
+/// edge that fails it is shown as a historical origin. The sibling-kind
+/// carried refs of a scoped publication are not consulted.
+async fn current_metadata(
+    db: &Surreal<Any>,
+    inputs_json: &str,
+    a: &ArticleRef,
+) -> Result<bool, TxError> {
+    let Ok(inputs) = serde_json::from_str::<serde_json::Value>(inputs_json) else {
+        return Ok(false);
+    };
+    let source = format!("article:{}", a.article_id);
+    let field =
+        |r: &serde_json::Value, k: &str| r.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    let hashes: Vec<String> = inputs
+        .get("source_refs")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|r| field(r, "source_id").as_deref() == Some(source.as_str()))
+        .filter(|r| field(r, "url").as_deref() == Some(a.url.as_str()))
+        .filter(|r| field(r, "published_at").unwrap_or_default() == a.published_at)
+        .filter_map(|r| field(r, "artifact_hash"))
+        .collect();
+    if hashes.is_empty() {
+        return Ok(false);
+    }
+    let text = format!("{}\n{}", a.title, a.description);
+    let mut r = db
+        .query(
+            "RETURN array::len(array::filter($hashes,
+               |$h| (SELECT VALUE text FROM ONLY type::record('nlp_artifact', $h)) == $text)) > 0",
+        )
+        .bind(("hashes", hashes))
+        .bind(("text", text))
+        .await?
+        .check()?;
+    Ok(r.take::<Option<bool>>(0)? == Some(true))
 }
 
 /// Source and Contains edges of one memory, read from live derivations
@@ -313,12 +364,16 @@ pub async fn memory_record_edges(
     // `article:<id>` evidence source.
     for d in &derivations {
         let mut owners: BTreeSet<String> = BTreeSet::new();
+        let mut inputs = String::new();
         let mut r = db
-            .query("SELECT owner_kind, owner_id FROM type::record('insight_snapshot', $s)")
+            .query(
+                "SELECT owner_kind, owner_id, inputs_json FROM type::record('insight_snapshot', $s)",
+            )
             .bind(("s", d.snapshot_id.clone()))
             .await?
             .check()?;
         for o in r.take::<Vec<Owner>>(0)? {
+            inputs = o.inputs_json.clone();
             if matches!(o.owner_kind.as_str(), "article" | "atlas") {
                 owners.insert(o.owner_id);
             }
@@ -330,11 +385,12 @@ pub async fn memory_record_edges(
         }
         for owner in owners {
             for a in articles(db, &owner).await? {
+                let current = current_metadata(db, &inputs, &a).await?;
                 out.insert(article_edge(
                     &a.run_id,
                     &a.article_id,
                     format!("insight_derivations:{}", d.id),
-                    false,
+                    !current,
                 ));
             }
         }

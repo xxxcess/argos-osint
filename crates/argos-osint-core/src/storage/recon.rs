@@ -18,19 +18,19 @@
 //! `[memory, actor, role]`.
 //!
 //! `recon_runs`, `osint_calls`, `recon_thread_entities` and the
-//! investigation tables are not ported yet. `delete_thread` here removes
-//! the thread, its messages and links, and its actor mentions; the full
-//! `Store::delete_thread` (insight cleanup, run and call cancellation)
-//! moves with the investigation write path.
+//! investigation tables are not ported yet. `delete_thread` runs the
+//! SQLite cascade keeping insights; `delete_thread_with_insights` also
+//! removes the insights the thread alone sourced.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use surrealdb::types::SurrealValue;
 
 use super::jobs::{rid, run};
 use super::repo::Repository;
-use super::tx::{run_tx, RetryPolicy};
+use super::tx::{run_tx, RetryPolicy, Tx, TxError};
 use crate::brain::{Memory, MemorySource};
 use crate::recon::{Message, Thread};
 
@@ -337,52 +337,135 @@ pub async fn delete_thread(repo: &Repository, id: &str) -> Result<bool> {
     let id = id.to_string();
     let done = run_tx(repo.db(), RetryPolicy::default(), |tx| {
         let id = id.clone();
-        async move {
+        async move { delete_thread_in(&tx, &id).await }
+    })
+    .await
+    .map_err(|e| anyhow!("delete thread: {e}"))?;
+    Ok(done.value)
+}
+
+/// [`delete_thread`]'s cascade in `tx`.
+pub async fn delete_thread_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
+    let mut r = run(
+        tx,
+        tx.query(
+            "LET $th = type::record('recon_thread', $id);
+             LET $found = record::exists($th) AND (SELECT VALUE deleted FROM ONLY $th) != true;
+             IF $found {
+               LET $runs = SELECT VALUE meta::id(id) FROM recon_run WHERE thread_id = $id;
+               DELETE brain_actor_mention WHERE origin_kind = 'thread' AND origin_id = $id RETURN NONE;
+               UPDATE insight_source SET deleted_origin = true, thread_id = NONE, run_id = NONE,
+                 answer_id = 'deleted-origin' WHERE thread_id = $id RETURN NONE;
+               UPDATE osint_call SET status = 'cancelled'
+                 WHERE thread_id = $id AND status INSIDE ['queued', 'running'] RETURN NONE;
+               DELETE extraction_job WHERE run_id INSIDE $runs RETURN NONE;
+               DELETE recon_model_operation WHERE run_id INSIDE $runs RETURN NONE;
+               DELETE investigation_strategy WHERE thread_id = $id RETURN NONE;
+               DELETE recon_message WHERE thread_id = $id RETURN NONE;
+               DELETE recon_run WHERE thread_id = $id RETURN NONE;
+               UPDATE osint_call SET thread_id = NONE, turn_id = NONE, run_id = NONE
+                 WHERE thread_id = $id RETURN NONE;
+               LET $cited = SELECT VALUE call_id FROM insight_source;
+               LET $derived = SELECT VALUE source_id FROM insight_derivation_evidence
+                 WHERE string::starts_with(source_id, 'call:');
+               FOR $c IN (SELECT VALUE meta::id(id) FROM osint_call
+                   WHERE origin = 'recon' AND thread_id = NONE AND run_id = NONE) {
+                 LET $key = 'call:' + $c;
+                 IF $c NOTINSIDE $cited AND array::len(array::filter($derived,
+                     |$s| $s == $key OR string::starts_with($s, $key + '#page'))) == 0 {
+                   DELETE type::record('osint_call', $c) RETURN NONE;
+                 };
+               };
+               DELETE $th RETURN NONE;
+               DELETE type::record('counter', $counter) RETURN NONE;
+               DELETE app_state:last_thread WHERE value = $id RETURN NONE;
+             };
+             RETURN $found;",
+        )
+        .bind(("id", id.to_string()))
+        .bind(("counter", super::recon_threads::sequence_counter(id))),
+    )
+    .await?;
+    let last = r.num_statements() - 1;
+    Ok(super::jobs::take::<Option<bool>>(&mut r, last)? == Some(true))
+}
+
+/// The memories a thread's deletion with insights removes
+/// (`investigation_memory_ids`): claims a source of this thread cites, or
+/// memories whose source is this conversation, unless a source of another
+/// live thread also cites the claim.
+const DOOMED_SURQL: &str = "LET $mine = array::distinct(
+       SELECT VALUE fingerprint FROM insight_source WHERE thread_id = $id);
+     LET $shared = array::distinct(
+       SELECT VALUE fingerprint FROM insight_source
+         WHERE thread_id != NONE AND thread_id != $id AND fingerprint INSIDE $mine);
+     LET $claimed = array::distinct(SELECT VALUE memory_id FROM insight_claim
+         WHERE record::id(id) INSIDE $mine AND record::id(id) NOTINSIDE $shared);
+     LET $kept = array::distinct(SELECT VALUE memory_id FROM insight_claim
+         WHERE record::id(id) INSIDE $shared);
+     LET $conv = SELECT VALUE record::id(id) FROM memory WHERE string::contains(source_json, $conv_key);
+     RETURN array::filter(array::distinct(array::concat($claimed, $conv)), |$m| $m NOTINSIDE $kept);";
+
+/// `Store::delete_thread(tid, true)`: [`delete_thread`]'s cascade plus the
+/// insights the thread alone sourced, in one publisher transaction. Each
+/// doomed memory goes through the user-delete cleanup
+/// (`insight::delete_memory_in`: tombstone, provenance downgrade, claims,
+/// sources, relations, user edits, graph summary); the thread's remaining
+/// sources on shared claims are deleted, derivations whose memory is gone
+/// are reconciled, and the removals are queued for the vector index.
+pub async fn delete_thread_with_insights(repo: &Repository, id: &str) -> Result<bool> {
+    let found = Arc::new(Mutex::new(false));
+    let (tid, slot) = (id.to_string(), found.clone());
+    let write: super::memory::MemoryWrite = Arc::new(move |tx| {
+        let (tid, slot) = (tid.clone(), slot.clone());
+        Box::pin(async move {
             let mut r = run(
                 &tx,
                 tx.query(
                     "LET $th = type::record('recon_thread', $id);
-                     LET $found = record::exists($th) AND (SELECT VALUE deleted FROM ONLY $th) != true;
-                     IF $found {
-                       LET $runs = SELECT VALUE meta::id(id) FROM recon_run WHERE thread_id = $id;
-                       DELETE brain_actor_mention WHERE origin_kind = 'thread' AND origin_id = $id RETURN NONE;
-                       UPDATE insight_source SET deleted_origin = true, thread_id = NONE, run_id = NONE,
-                         answer_id = 'deleted-origin' WHERE thread_id = $id RETURN NONE;
-                       UPDATE osint_call SET status = 'cancelled'
-                         WHERE thread_id = $id AND status INSIDE ['queued', 'running'] RETURN NONE;
-                       DELETE extraction_job WHERE run_id INSIDE $runs RETURN NONE;
-                       DELETE recon_model_operation WHERE run_id INSIDE $runs RETURN NONE;
-                       DELETE investigation_strategy WHERE thread_id = $id RETURN NONE;
-                       DELETE recon_message WHERE thread_id = $id RETURN NONE;
-                       DELETE recon_run WHERE thread_id = $id RETURN NONE;
-                       UPDATE osint_call SET thread_id = NONE, turn_id = NONE, run_id = NONE
-                         WHERE thread_id = $id RETURN NONE;
-                       LET $cited = SELECT VALUE call_id FROM insight_source;
-                       LET $derived = SELECT VALUE source_id FROM insight_derivation_evidence
-                         WHERE string::starts_with(source_id, 'call:');
-                       FOR $c IN (SELECT VALUE meta::id(id) FROM osint_call
-                           WHERE origin = 'recon' AND thread_id = NONE AND run_id = NONE) {
-                         LET $key = 'call:' + $c;
-                         IF $c NOTINSIDE $cited AND array::len(array::filter($derived,
-                             |$s| $s == $key OR string::starts_with($s, $key + '#page'))) == 0 {
-                           DELETE type::record('osint_call', $c) RETURN NONE;
-                         };
-                       };
-                       DELETE $th RETURN NONE;
-                       DELETE type::record('counter', $counter) RETURN NONE;
-                       DELETE app_state:last_thread WHERE value = $id RETURN NONE;
-                     };
-                     RETURN $found;",
+                     RETURN record::exists($th) AND (SELECT VALUE deleted FROM ONLY $th) != true;",
                 )
-                .bind(("id", id.clone()))
-                .bind(("counter", super::recon_threads::sequence_counter(&id))),
+                .bind(("id", tid.clone())),
+            )
+            .await?;
+            if super::jobs::take::<Option<bool>>(&mut r, 1)? != Some(true) {
+                return Ok(Vec::new());
+            }
+            let mut r = run(
+                &tx,
+                tx.query(DOOMED_SURQL)
+                    .bind(("id", tid.clone()))
+                    .bind(("conv_key", format!("\"conversation_id\":\"{tid}\""))),
             )
             .await?;
             let last = r.num_statements() - 1;
-            super::jobs::take::<Option<bool>>(&mut r, last)
-        }
-    })
-    .await
-    .map_err(|e| anyhow!("delete thread: {e}"))?;
-    Ok(done.value == Some(true))
+            let doomed: Vec<String> = super::jobs::take(&mut r, last)?;
+            let mut removed = Vec::new();
+            for memory in doomed {
+                if super::insight::delete_memory_in(&tx, &memory).await? {
+                    removed.push(memory);
+                }
+            }
+            run(
+                &tx,
+                tx.query("DELETE insight_source WHERE thread_id = $id RETURN NONE;")
+                    .bind(("id", tid.clone())),
+            )
+            .await?;
+            let gone = delete_thread_in(&tx, &tid).await?;
+            super::insight_owner::reconcile_deleted_memories_in(&tx).await?;
+            *slot.lock().expect("delete lock") = gone;
+            Ok(removed)
+        })
+    });
+    super::memory::write_then_index(repo.publisher(), write)
+        .await
+        .map_err(|e| anyhow!("delete thread with insights: {e}"))?;
+    let gone = *found.lock().expect("delete lock");
+    if gone {
+        super::jobs::cleanup_batch(repo.db(), chrono::Utc::now())
+            .await
+            .map_err(|e| anyhow!("job cleanup: {e}"))?;
+    }
+    Ok(gone)
 }

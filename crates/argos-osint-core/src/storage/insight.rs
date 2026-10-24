@@ -1080,7 +1080,7 @@ pub async fn remove_nlp_owner_in(tx: &Tx, kind: &str, owner: &str) -> Result<(),
     Ok(())
 }
 
-async fn delete_memory_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
+pub(crate) async fn delete_memory_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
     let mut r = run(
         tx,
         tx.query("RETURN record::exists(type::record('memory', $id));")

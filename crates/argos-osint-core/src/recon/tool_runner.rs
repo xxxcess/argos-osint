@@ -18,7 +18,7 @@ use tokio::sync::{watch, Mutex, Semaphore};
 use crate::osint::contracts::IntelligenceCategory;
 use crate::osint::{self, ProviderKeys, ToolDefinition, ToolResult};
 use crate::provider::SettingsFile;
-use crate::recon::backend::{sqlite_path, ReconStore};
+use crate::recon::backend::ReconStore;
 use crate::recon::orchestrate::BudgetedOutcome;
 use crate::recon::{CreditHold, PlanCall, Run};
 use crate::telemetry::{self, EventKind, TelemetryEvent, ToolOutcome, Trigger};

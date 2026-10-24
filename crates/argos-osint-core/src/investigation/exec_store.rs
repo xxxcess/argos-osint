@@ -178,21 +178,39 @@ impl ExecStore {
         }
     }
 
-    pub(crate) async fn progress(
+    /// The SQLite write runs before the future is built, so the future never
+    /// borrows the `!Sync` connection and stays `Send`.
+    pub(crate) fn progress<'a>(
         &self,
-        input: &PipelineInput,
-        stage: &str,
+        input: &'a PipelineInput,
+        stage: &'a str,
         windows: Option<usize>,
         withheld: Option<usize>,
-    ) -> Result<()> {
-        match self {
-            Self::Sqlite(s) => {
-                super::insight_execution::progress(&s.conn, input, stage, windows, withheld)
+    ) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
+        let sqlite = match self {
+            Self::Sqlite(s) => Some(super::insight_execution::progress(
+                &s.conn, input, stage, windows, withheld,
+            )),
+            #[cfg(feature = "surreal")]
+            Self::Surreal(_) => None,
+        };
+        #[cfg(feature = "surreal")]
+        let repo = match self {
+            Self::Surreal(r) => Some(r.clone()),
+            Self::Sqlite(_) => None,
+        };
+        async move {
+            if let Some(done) = sqlite {
+                return done;
             }
             #[cfg(feature = "surreal")]
-            Self::Surreal(r) => {
-                crate::storage::pipeline_exec::progress(r, input, stage, windows, withheld).await
+            if let Some(r) = repo {
+                return crate::storage::pipeline_exec::progress(
+                    &r, input, stage, windows, withheld,
+                )
+                .await;
             }
+            Ok(())
         }
     }
 

@@ -587,6 +587,29 @@ impl WorkerPool {
                 let mut loops = 0u32;
                 let mut schema_ready = false;
                 while !flag.load(Ordering::Relaxed) {
+                    #[cfg(feature = "surreal")]
+                    if crate::recon::backend::surreal_selected() {
+                        let owner = owner.clone();
+                        let drained = crate::storage::runtime::blocking(move |repo| async move {
+                            if !surreal_elected(&repo, &owner).await? {
+                                return Ok(0);
+                            }
+                            let out = crate::storage::summary_flush::drain(
+                                &repo,
+                                &owner,
+                                load_summarization_secret,
+                                DEFAULT_LEASE_SECS,
+                            )
+                            .await?;
+                            Ok(out.len())
+                        });
+                        let busy = matches!(drained, Ok(n) if n > 0);
+                        report_drainer(&db_path, "summary", drained);
+                        if !busy {
+                            std::thread::sleep(Duration::from_millis(750));
+                        }
+                        continue;
+                    }
                     let Ok(conn) = Connection::open(&db_path) else {
                         std::thread::sleep(Duration::from_secs(2));
                         continue;
@@ -637,16 +660,18 @@ impl WorkerPool {
     /// Spawn the default local pools (index + summary) for one state root.
     pub fn spawn_default(db_path: std::path::PathBuf) -> Vec<WorkerPool> {
         let owner = process_owner();
-        // Under a storage config nothing may open SQLite: only the insight
-        // refresh drainer has a repository path. The index, summary,
-        // backfill, actor-dedup, Intel brief and brain-scope pools are
-        // SQLite subsystems and stay off until they are ported; the index
-        // pool has a repository drainer.
+        // Under a storage config nothing may open SQLite: each pool below
+        // has a repository drainer. The Intel brief pool is a SQLite
+        // subsystem and stays off until it is ported.
         if crate::recon::backend::surreal_selected() {
             #[cfg(feature = "surreal")]
             return vec![
                 Self::spawn_surreal_index_drainer(db_path.clone(), owner.clone()),
-                Self::spawn_insight_refresh_drainer(db_path, owner),
+                Self::spawn_summary_flush_drainer(db_path.clone(), owner.clone()),
+                Self::spawn_insight_refresh_drainer(db_path.clone(), owner.clone()),
+                Self::spawn_brain_backfill_drainer(db_path.clone(), owner.clone()),
+                Self::spawn_actor_dedup_drainer(db_path.clone(), owner.clone()),
+                Self::spawn_brain_scope_drainer(db_path, owner),
             ];
             #[cfg(not(feature = "surreal"))]
             return vec![Self::spawn_insight_refresh_drainer(db_path, owner)];
@@ -725,6 +750,33 @@ impl WorkerPool {
                     return;
                 };
                 while !flag.load(Ordering::Acquire) {
+                    #[cfg(feature = "surreal")]
+                    if crate::recon::backend::surreal_selected() {
+                        let (owner, stop) = (owner.clone(), flag.clone());
+                        report_drainer(
+                            &db_path,
+                            "actor-dedup",
+                            crate::storage::runtime::blocking(move |repo| async move {
+                                if !surreal_elected(&repo, &owner).await? {
+                                    return Ok(0);
+                                }
+                                let auth = crate::secrets::AuthFile::load().unwrap_or_default();
+                                let settings =
+                                    crate::provider::SettingsFile::load().unwrap_or_default();
+                                crate::storage::actor_dedup::drain(
+                                    &repo, &owner, &stop, &auth, &settings,
+                                )
+                                .await
+                            }),
+                        );
+                        for _ in 0..120 {
+                            if flag.load(Ordering::Acquire) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
+                        continue;
+                    }
                     let elected = Connection::open(&db_path).ok().is_some_and(|conn| {
                         try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
                     });
@@ -757,6 +809,31 @@ impl WorkerPool {
             .name("argos-brain-backfill".into())
             .spawn(move || {
                 while !flag.load(Ordering::Acquire) {
+                    #[cfg(feature = "surreal")]
+                    if crate::recon::backend::surreal_selected() {
+                        let owner = owner.clone();
+                        let ran = crate::storage::runtime::blocking(move |repo| async move {
+                            if !surreal_elected(&repo, &owner).await? {
+                                return Ok(None);
+                            }
+                            crate::storage::brain_backfill::backfill(
+                                &repo,
+                                crate::brain_backfill::BATCH,
+                            )
+                            .await
+                            .map(|r| Some(r.complete))
+                        });
+                        let busy = matches!(ran, Ok(Some(false)));
+                        report_drainer(&db_path, "brain-backfill", ran);
+                        let pause = if busy { 1 } else { 30 };
+                        for _ in 0..pause * 4 {
+                            if flag.load(Ordering::Acquire) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
+                        continue;
+                    }
                     let elected = Connection::open(&db_path).ok().is_some_and(|conn| {
                         try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
                     });
@@ -949,6 +1026,22 @@ impl WorkerPool {
                     return;
                 };
                 while !flag.load(Ordering::Acquire) {
+                    #[cfg(feature = "surreal")]
+                    if crate::recon::backend::surreal_selected() {
+                        let (owner, stop) = (owner.clone(), flag.clone());
+                        report_drainer(
+                            &db_path,
+                            "brain-scope",
+                            crate::storage::runtime::blocking(move |repo| async move {
+                                if !surreal_elected(&repo, &owner).await? {
+                                    return Ok(0);
+                                }
+                                crate::storage::brain_scope::drain(&repo, &owner, &stop).await
+                            }),
+                        );
+                        std::thread::sleep(Duration::from_millis(750));
+                        continue;
+                    }
                     let elected = Connection::open(&db_path).ok().is_some_and(|conn| {
                         try_elect(&conn, &owner, DEFAULT_LEASE_SECS).unwrap_or(false)
                     });
@@ -970,6 +1063,21 @@ impl WorkerPool {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
+}
+
+/// Whether this process holds the repository's scheduler lease.
+#[cfg(feature = "surreal")]
+async fn surreal_elected(
+    repo: &crate::storage::repo::Repository,
+    owner: &str,
+) -> anyhow::Result<bool> {
+    Ok(
+        crate::storage::jobs::try_elect(repo.db(), owner, DEFAULT_LEASE_SECS, chrono::Utc::now())
+            .await
+            .map_err(|e| anyhow::anyhow!("elect: {e}"))?
+            .value
+            .elected,
+    )
 }
 
 impl Drop for WorkerPool {

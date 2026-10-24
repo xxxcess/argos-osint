@@ -10,8 +10,8 @@
 //! `telemetry_daily`, `telemetry_provider_capacity` (defined in [`SCHEMA`]),
 //! `article_body`, `atlas_run`, `atlas_article`, `atlas_article_metadata`
 //! and `task` (`atlas_related`). Recon runs, Recon coverage, Intel report
-//! jobs/tasks and Recon model operations/attempts are not on SurrealDB yet;
-//! they load as missing tables, which the views render as unavailable.
+//! jobs/tasks and Recon model operations/attempts come from
+//! `storage::recon_jobs` (registered in the bootstrap).
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -256,13 +256,7 @@ pub async fn load_tables(db: &Surreal<Any>) -> Result<ProfileTables> {
         })
         .collect();
 
-    // Until `recon_jobs::SCHEMA` is in the bootstrap, its tables may be
-    // missing: render them unavailable, like a missing SQLite table.
-    let recon = match super::recon_jobs::profile_rows(db).await {
-        Ok(rows) => Some(rows),
-        Err(e) if e.to_string().contains("does not exist") => None,
-        Err(e) => return Err(e),
-    };
+    let recon = Some(super::recon_jobs::profile_rows(db).await?);
     Ok(ProfileTables {
         telemetry_events: Some(
             events

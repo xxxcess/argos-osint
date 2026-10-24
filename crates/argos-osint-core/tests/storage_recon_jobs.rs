@@ -1,7 +1,7 @@
 //! The Recon job writers on SurrealDB (`storage::recon_jobs`): model
 //! operation `task_epoch` and attempts, coverage records, Intel report
 //! jobs and tasks, and the Recon job registry rows, on the full bootstrap
-//! schema plus `recon_jobs::SCHEMA`. Both modes via `scripts/test_surreal.py`.
+//! schema (which registers `recon_jobs::SCHEMA`). Both modes via `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
 
 mod support;
@@ -15,7 +15,6 @@ use support::*;
 async fn setup(server: &Server, db: &str) -> Repository {
     let repo = server.repo("argos", db).await;
     ensure_schema(repo.db()).await.unwrap();
-    rj::apply_schema(repo.db()).await.unwrap();
     repo
 }
 

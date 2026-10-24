@@ -2032,7 +2032,7 @@ async fn extract_bindings(
 ) -> Result<Vec<super::Binding>> {
     let step = plan.calls[index].clone();
     let expanded = if crate::nlp::configured_mode() == crate::nlp::Mode::Select {
-        crate::nlp::expanded_observations(observations)
+        crate::nlp::expanded_observations_async(observations).await
     } else {
         observations.clone()
     };
@@ -3020,8 +3020,16 @@ pub(crate) async fn previous_synthesis(store: &ReconStore, thread_id: &str) -> R
             .prompt_version()
             .into(),
     };
-    // SurrealDB reads its cache through `publish_selected` below.
-    if !store.is_surreal() {
+    if store.is_surreal() {
+        // `storage::summary_flush::cache_get`; SQLite is never opened here.
+        if let Ok(Some(hit)) = crate::summarization::cache_get_selected(&req, || {
+            anyhow::bail!("SQLite is not opened under SurrealDB")
+        })
+        .await
+        {
+            return Ok(hit.content);
+        }
+    } else {
         if let Ok(Some(hit)) = store.sqlite("summary cache", |s| {
             crate::summarization::cache_get(&s.conn, &req)
         }) {

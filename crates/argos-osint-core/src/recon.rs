@@ -2909,14 +2909,19 @@ fn finish_recon_job(
     outcome: &Result<Run>,
     cancel: &AtomicBool,
 ) {
-    use crate::job_registry::Finish;
     let Some(mut job) = job else {
         return;
     };
     if let Some(run_id) = run_id {
         job.link_run(run_id);
     }
-    let finish = match outcome {
+    job.finish(recon_finish(outcome, cancel));
+}
+
+/// Terminal registry outcome of a Recon investigation.
+fn recon_finish(outcome: &Result<Run>, cancel: &AtomicBool) -> crate::job_registry::Finish {
+    use crate::job_registry::Finish;
+    match outcome {
         Ok(run) if run.stage == "cut short" => Finish::Partial {
             summary: format!("cut short: {}", run.error.clone().unwrap_or_default()),
         },
@@ -2927,8 +2932,137 @@ fn finish_recon_job(
             summary: "cancelled by user".into(),
         },
         Err(err) => Finish::failed("recon", format!("{err:#}")),
-    };
-    job.finish(finish);
+    }
+}
+
+/// The registry row of one Recon question: the SQLite job registry, or the
+/// repository's `job` table under SurrealDB (never both).
+enum ReconJob {
+    Sqlite(crate::job_registry::JobHandle),
+    #[cfg(feature = "surreal")]
+    Surreal {
+        id: String,
+        span: std::time::Instant,
+        cancel: Arc<AtomicBool>,
+    },
+}
+
+impl ReconJob {
+    /// Begin (or, with `resume_run`, resume that run's row) a cancellable
+    /// Recon job. Best-effort: `None` when the registry is unavailable.
+    async fn begin(
+        db_path: &Path,
+        title: String,
+        resource: String,
+        resume_run: Option<&str>,
+        cancel: Arc<AtomicBool>,
+    ) -> Option<Self> {
+        #[cfg(feature = "surreal")]
+        if surreal_selected() {
+            use crate::storage::recon_jobs as rj;
+            let repo = crate::storage::runtime::repository().await.ok()?;
+            let existing = match resume_run {
+                Some(run) => rj::job_for_run(&repo, rj::RECON_OPERATION, run)
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            let spec = rj::ReconJob {
+                id: existing.as_deref(),
+                title: &title,
+                run_ref: resume_run.unwrap_or(""),
+                resource_ref: &resource,
+            };
+            let id = rj::begin_recon_job(&repo, &spec).await.ok()?;
+            return Some(Self::Surreal {
+                id,
+                span: std::time::Instant::now(),
+                cancel,
+            });
+        }
+        let db = sqlite_path(db_path)?;
+        let existing = resume_run.and_then(|run| {
+            rusqlite::Connection::open(db).ok().and_then(|conn| {
+                crate::job_registry::job_for_run(&conn, "recon_investigation", run)
+                    .ok()
+                    .flatten()
+            })
+        });
+        let mut spec = crate::job_registry::JobSpec::new("recon", "recon_investigation", title)
+            .resource(resource)
+            .cancellable();
+        if let Some(run) = resume_run {
+            spec = spec.run(run);
+        }
+        if let Some(id) = existing {
+            spec = spec.with_id(id);
+        }
+        crate::job_registry::begin_optional_with(db, spec, cancel).map(Self::Sqlite)
+    }
+
+    /// Phase heartbeat. On SurrealDB, Jobs → Cancel raises the cancel flag.
+    fn phase(&self, stage: &str) {
+        match self {
+            Self::Sqlite(job) => job.phase(stage, None, None),
+            #[cfg(feature = "surreal")]
+            Self::Surreal { id, cancel, .. } => {
+                let (id, stage, cancel) = (id.clone(), stage.to_string(), cancel.clone());
+                crate::storage::runtime::spawn_ordered(async move {
+                    let Ok(repo) = crate::storage::runtime::repository().await else {
+                        return;
+                    };
+                    if let Ok(true) =
+                        crate::storage::recon_jobs::set_recon_phase(&repo, &id, &stage).await
+                    {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                });
+            }
+        }
+    }
+
+    async fn finish(self, run_id: Option<&str>, outcome: &Result<Run>, cancel: &AtomicBool) {
+        match self {
+            Self::Sqlite(job) => finish_recon_job(Some(job), run_id, outcome, cancel),
+            #[cfg(feature = "surreal")]
+            Self::Surreal { id, span, .. } => {
+                use crate::job_registry::Finish;
+                let finish = recon_finish(outcome, cancel);
+                let (category, summary, result_ref) = match &finish {
+                    Finish::Completed { result_ref } => ("", String::new(), result_ref.clone()),
+                    Finish::Partial { summary } => ("partial", summary.clone(), String::new()),
+                    Finish::Failed { category, summary } => {
+                        (category.as_str(), summary.clone(), String::new())
+                    }
+                    Finish::Cancelled { summary } => ("cancelled", summary.clone(), String::new()),
+                    Finish::Blocked { summary } => ("blocked", summary.clone(), String::new()),
+                    Finish::Paused { summary } | Finish::Waiting { summary } => {
+                        ("", summary.clone(), String::new())
+                    }
+                };
+                // Queued behind the phase writes, so the finish lands last.
+                let (state, category) = (finish.state(), category.to_string());
+                let run = run_id.map(str::to_string);
+                let active_ms = span.elapsed().as_millis() as i64;
+                crate::storage::runtime::spawn_ordered(async move {
+                    if let Ok(repo) = crate::storage::runtime::repository().await {
+                        let _ = crate::storage::recon_jobs::finish_recon_job(
+                            &repo,
+                            &id,
+                            state,
+                            run.as_deref(),
+                            &category,
+                            &summary,
+                            &result_ref,
+                            active_ms,
+                        )
+                        .await;
+                    }
+                });
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3135,24 +3269,18 @@ impl Service {
         mut progress: impl FnMut(TurnEvent) + Send,
     ) -> Result<Run> {
         let title: String = question.trim().chars().take(80).collect();
-        // The job registry is SQLite-only: SurrealDB runs are untracked.
-        let job = sqlite_path(&self.db_path).and_then(|db| {
-            crate::job_registry::begin_optional_with(
-                db,
-                crate::job_registry::JobSpec::new(
-                    "recon",
-                    "recon_investigation",
-                    format!("Recon · {title}"),
-                )
-                .resource(format!("thread:{tid}"))
-                .cancellable(),
-                cancel.clone(),
-            )
-        });
+        let job = ReconJob::begin(
+            &self.db_path,
+            format!("Recon · {title}"),
+            format!("thread:{tid}"),
+            None,
+            cancel.clone(),
+        )
+        .await;
         let outcome = {
             let tracked = |event: TurnEvent| {
                 if let (Some(job), TurnEvent::Stage(stage)) = (&job, &event) {
-                    job.phase(stage, None, None);
+                    job.phase(stage);
                 }
                 progress(event)
             };
@@ -3170,7 +3298,9 @@ impl Service {
                 Err(_) => None,
             },
         };
-        finish_recon_job(job, run_id.as_deref(), &outcome, &cancel);
+        if let Some(job) = job {
+            job.finish(run_id.as_deref(), &outcome, &cancel).await;
+        }
         outcome
     }
 
@@ -3266,42 +3396,32 @@ impl Service {
         cancel: Arc<AtomicBool>,
         mut progress: impl FnMut(TurnEvent) + Send,
     ) -> Result<Run> {
-        let existing = sqlite_path(&self.db_path)
-            .and_then(|db| rusqlite::Connection::open(db).ok())
-            .and_then(|conn| {
-                crate::job_registry::job_for_run(&conn, "recon_investigation", rid)
-                    .ok()
-                    .flatten()
-            });
         let thread = match ReconStore::open(&self.db_path).await {
             Ok(store) => store.get_run(rid).await.ok().flatten(),
             Err(_) => None,
         }
         .map(|run| run.thread_id)
         .unwrap_or_default();
-        let mut spec = crate::job_registry::JobSpec::new(
-            "recon",
-            "recon_investigation",
-            "Recon · resumed investigation",
+        let job = ReconJob::begin(
+            &self.db_path,
+            "Recon · resumed investigation".into(),
+            format!("thread:{thread}"),
+            Some(rid),
+            cancel.clone(),
         )
-        .run(rid)
-        .resource(format!("thread:{thread}"))
-        .cancellable();
-        if let Some(id) = existing {
-            spec = spec.with_id(id);
-        }
-        let job = sqlite_path(&self.db_path)
-            .and_then(|db| crate::job_registry::begin_optional_with(db, spec, cancel.clone()));
+        .await;
         let outcome = {
             let tracked = |event: TurnEvent| {
                 if let (Some(job), TurnEvent::Stage(stage)) = (&job, &event) {
-                    job.phase(stage, None, None);
+                    job.phase(stage);
                 }
                 progress(event)
             };
             self.resume_untracked(rid, cancel.clone(), tracked).await
         };
-        finish_recon_job(job, Some(rid), &outcome, &cancel);
+        if let Some(job) = job {
+            job.finish(Some(rid), &outcome, &cancel).await;
+        }
         outcome
     }
 
@@ -3864,7 +3984,7 @@ impl Service {
             cancel,
             Some(on_event),
             Some(text_observer),
-            sqlite_path(&self.db_path),
+            Some(&self.db_path),
             true,
         );
         tokio::pin!(exec_fut);
@@ -3922,7 +4042,7 @@ impl Service {
                 cancel,
                 None,
                 None,
-                sqlite_path(&self.db_path),
+                Some(&self.db_path),
                 true,
             )
             .await;
@@ -4249,7 +4369,7 @@ impl Service {
             &cancel,
             None,
             None,
-            sqlite_path(&self.db_path),
+            Some(&self.db_path),
             false,
         )
         .await?;

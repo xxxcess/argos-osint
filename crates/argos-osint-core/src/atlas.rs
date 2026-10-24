@@ -478,18 +478,8 @@ impl CycleTelemetry {
         // Continue the occurrence numbering so a resumed cycle appends.
         // SQLite only without a storage config: under SurrealDB the count
         // starts at 0 rather than reopening SQLite.
-        let candidates = crate::recon::backend::sqlite_path(db)
-            .and_then(|db| rusqlite::Connection::open(db).ok())
-            .and_then(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM telemetry_events WHERE id GLOB ?1",
-                    rusqlite::params![format!("atlas-cand-{run_id}-*")],
-                    |row| row.get::<_, i64>(0),
-                )
-                .ok()
-            })
-            .unwrap_or(0)
-            .max(0);
+        // [`CycleTelemetry::open`] continues the numbering from the store.
+        let candidates = 0;
         Self {
             db: db.to_path_buf(),
             run_id: run_id.to_string(),
@@ -550,7 +540,7 @@ impl CycleTelemetry {
                 *n += 1;
                 seq
             }
-            None => crate::atlas_work::next_stage_seq(&self.db, &self.run_id, name),
+            None => 0,
         };
         self.stage = Some(OpenStage {
             name,
@@ -669,19 +659,9 @@ impl CycleTelemetry {
     /// Mean queue residence for this cycle's registry job, when the job recorded
     /// both a queue and an admission timestamp. Never derived from retry waits.
     fn queue_wait_ms(&self) -> Option<i64> {
-        let conn =
-            rusqlite::Connection::open(crate::recon::backend::sqlite_path(&self.db)?).ok()?;
-        let job = crate::job_registry::job_for_run(&conn, "atlas_cycle", &self.run_id)
-            .ok()
-            .flatten()?;
-        let (queued, active): (String, String) = conn
-            .query_row(
-                "SELECT queued_at, active_since FROM argos_jobs WHERE id=?1",
-                [job.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok()?;
-        rfc_ms(&queued, &active)
+        // The registry is the repository `job` table; it records no
+        // admission timestamp, so there is no queue wait to report.
+        None
     }
 
     /// The terminal cycle row. The event id is the run key, so a cycle that is
@@ -1912,31 +1892,13 @@ impl AtlasJob {
     }
 
     fn start(&mut self, run_id: &str) {
-        use crate::job_registry::{begin_optional, job_for_run, JobSpec};
         self.run_id = run_id.to_string();
         // Under SurrealDB the registry rows live in the repository; never
         // reopen SQLite there.
-        if crate::recon::backend::sqlite_path(&self.db).is_none() {
-            #[cfg(feature = "surreal")]
-            {
-                self.surreal = Some(SurrealCycleJob::begin(run_id));
-            }
-            return;
+        #[cfg(feature = "surreal")]
+        {
+            self.surreal = Some(SurrealCycleJob::begin(run_id));
         }
-        let existing = rusqlite::Connection::open(&self.db)
-            .ok()
-            .and_then(|conn| job_for_run(&conn, "atlas_cycle", run_id).ok().flatten());
-        let mut spec = JobSpec::new(
-            "atlas",
-            "atlas_cycle",
-            format!("Atlas news cycle · {run_id}"),
-        )
-        .run(run_id)
-        .resource(format!("atlas:{run_id}"));
-        if let Some(id) = existing {
-            spec = spec.with_id(id);
-        }
-        self.job = begin_optional(&self.db, spec);
     }
 
     fn enter(&mut self, phase: u8) {
@@ -3393,8 +3355,6 @@ mod telemetry_tests {
 mod tests {
     use super::*;
     use crate::provider;
-    use crate::store::Store;
-    use std::sync::{Arc, Mutex};
 
     #[test]
     fn the_classifier_keeps_a_known_choice_and_maps_anything_else_to_unk() {

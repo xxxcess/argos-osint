@@ -6,7 +6,6 @@ use crate::{
     store::{AtlasArticleRow, Store},
 };
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::sync::{atomic::AtomicBool, Arc};
 
@@ -585,29 +584,6 @@ async fn wait_cancelled(cancel: Arc<AtomicBool>) {
     }
 }
 
-fn metadata_job(
-    db: &std::path::Path,
-    run: &str,
-    operation: &str,
-    title: &str,
-    cancel: Arc<AtomicBool>,
-) -> Option<crate::job_registry::JobHandle> {
-    let mut spec = crate::job_registry::JobSpec::new("atlas", operation, title)
-        .run(run)
-        .resource(format!("atlas:{run}"))
-        .cancellable();
-    // Job tracking lives in SQLite; under SurrealDB Atlas runs untracked.
-    crate::recon::backend::sqlite_path(db)?;
-    spec.parent_id = rusqlite::Connection::open(db)
-        .ok()
-        .and_then(|c| {
-            crate::job_registry::job_for_run(&c, "atlas_cycle", run)
-                .ok()
-                .flatten()
-        })
-        .unwrap_or_default();
-    crate::job_registry::begin_optional_with(db, spec, cancel)
-}
 async fn record_unit(
     db: &std::path::Path,
     store: &AtlasStore,
@@ -1038,6 +1014,15 @@ async fn inventory_worker(
 }
 
 #[cfg(test)]
-mod inventory_tests {
-    use super::*;
+mod inventory_tests {}
+
+fn metadata_job(
+    _db: &std::path::Path,
+    _run: &str,
+    _operation: &str,
+    _title: &str,
+    _cancel: Arc<AtomicBool>,
+) -> Option<crate::job_registry::JobHandle> {
+    // Job tracking lived in SQLite; under SurrealDB Atlas runs untracked.
+    None
 }

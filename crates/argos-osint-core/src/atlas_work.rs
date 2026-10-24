@@ -103,46 +103,19 @@ pub fn cycle_outcome_label(state: &str) -> &'static str {
     }
 }
 
-/// Per-run, per-stage row counter. A resumed or replayed cycle appends the next
-/// stage interval instead of overwriting or double counting the previous one.
-/// Best-effort: a database that cannot be read returns zero.
-pub fn next_stage_seq(db_path: &Path, run_id: &str, stage: &str) -> i64 {
-    let prefix = format!("atlas-stage-{run_id}-{stage}-");
-    // Stage telemetry is SQLite-only; never create a SQLite file under SurrealDB.
-    let Some(db_path) = crate::recon::backend::sqlite_path(db_path) else {
-        return 0;
-    };
-    rusqlite::Connection::open(db_path)
-        .ok()
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM telemetry_events WHERE id GLOB ?1",
-                rusqlite::params![format!("{prefix}*")],
-                |row| row.get::<_, i64>(0),
-            )
-            .ok()
-        })
-        .unwrap_or(0)
-        .max(0)
-}
-
 /// Terminal telemetry for one work unit. The event id is the unit key, so a
 /// retried unit replaces its row and dispositions stay exactly one per unit.
 /// Best-effort: a write failure never fails the pipeline.
 /// [`next_stage_seq`] on the selected store: under SurrealDB the count
 /// comes from the repository's `telemetry_event` ids.
-pub async fn next_stage_seq_selected(db_path: &Path, run_id: &str, stage: &str) -> i64 {
-    #[cfg(feature = "surreal")]
-    if crate::recon::backend::sqlite_path(db_path).is_none() {
-        let prefix = format!("atlas-stage-{run_id}-{stage}-");
-        return match crate::storage::runtime::repository().await {
-            Ok(repo) => crate::storage::telemetry::count_ids_with_prefix(repo.db(), &prefix)
-                .await
-                .unwrap_or(0),
-            Err(_) => 0,
-        };
+pub async fn next_stage_seq_selected(_db_path: &Path, run_id: &str, stage: &str) -> i64 {
+    let prefix = format!("atlas-stage-{run_id}-{stage}-");
+    match crate::storage::runtime::repository().await {
+        Ok(repo) => crate::storage::telemetry::count_ids_with_prefix(repo.db(), &prefix)
+            .await
+            .unwrap_or(0),
+        Err(_) => 0,
     }
-    next_stage_seq(db_path, run_id, stage)
 }
 
 pub fn record_unit_stage_telemetry(db_path: &Path, manifest: &UnitManifest) {

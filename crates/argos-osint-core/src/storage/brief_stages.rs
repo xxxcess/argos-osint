@@ -89,6 +89,7 @@ pub async fn ensure(repo: &Repository, inputs: &BriefInputs) -> Result<jobs::Cha
     .map_err(|e| anyhow!("ensure brief chain {}: {e}", inputs.article_id))?
     .value;
     if chain.created {
+        mirror_runs(repo, &inputs.article_id).await?;
         let force_body = inputs.input_revision.contains(":reload:");
         for (index, (operation, _)) in brief_pipeline::STAGES.iter().enumerate() {
             let input = if brief_pipeline::prerequisites(operation).is_empty() {
@@ -115,6 +116,28 @@ pub async fn ensure(repo: &Repository, inputs: &BriefInputs) -> Result<jobs::Cha
         }
     }
     Ok(chain)
+}
+
+/// Mirror the article's chain runs into `intel_brief_run`, the fence the
+/// retained Intel display seeds read (`storage::brief::record_run`).
+async fn mirror_runs(repo: &Repository, article_id: &str) -> Result<()> {
+    #[derive(SurrealValue)]
+    struct Row {
+        job_id: String,
+        generation: i64,
+        state: String,
+    }
+    let mut r = repo
+        .db()
+        .query("SELECT record::id(job) AS job_id, generation, state FROM brief_run WHERE article_id = $a")
+        .bind(("a", article_id.to_string()))
+        .await?
+        .check()?;
+    let rows: Vec<Row> = r.take(0)?;
+    for row in rows {
+        super::brief::record_run(repo, &row.job_id, article_id, row.generation, &row.state).await?;
+    }
+    Ok(())
 }
 
 #[derive(SurrealValue)]
@@ -447,7 +470,137 @@ pub async fn commit(
         .bind(("j", rid("job", &leased.job_id)))
         .await?
         .check()?;
+    let run = run_of(repo, &leased.job_id).await?;
+    if last {
+        super::brief::record_run(
+            repo,
+            &leased.job_id,
+            &run.article_id,
+            run.generation,
+            "completed",
+        )
+        .await?;
+    }
+    publish_stage(repo, &leased.job_id, &leased.operation, &run).await?;
     Ok(true)
+}
+
+/// `brief_pipeline::publish_completed_stage`: merge a completed Claims,
+/// Inferences or Links stage into the displayed brief while its run is the
+/// article's newest live one, replace the links-stage leads, and bind the
+/// stage's canonical index state.
+///
+/// Gap (acceptance.md): the canonical Brain snapshot of a brief
+/// (`brief_canonical::publish_stage_on`) is not ported, so the bound state
+/// is `not_indexed` with that reason.
+async fn publish_stage(repo: &Repository, job_id: &str, operation: &str, run: &Run) -> Result<()> {
+    let stage = super::brief::Stage::from_operation(operation);
+    if stage == super::brief::Stage::Other {
+        return Ok(());
+    }
+    let mut r = repo
+        .db()
+        .query(
+            "RETURN count(SELECT 1 FROM brief_run WHERE article_id = $a AND generation > $g);
+             SELECT VALUE state FROM brief_run WHERE job = $j;",
+        )
+        .bind(("a", run.article_id.clone()))
+        .bind(("g", run.generation))
+        .bind(("j", rid("job", job_id)))
+        .await?
+        .check()?;
+    let newer: Option<i64> = r.take(0)?;
+    let states: Vec<String> = r.take(1)?;
+    let live = states
+        .first()
+        .is_some_and(|s| matches!(s.as_str(), "active" | "completed" | "failed"));
+    if newer.unwrap_or(0) > 0 || !live {
+        return Ok(());
+    }
+    let stages = SurrealStages::new(repo);
+    let output = |op: &'static str| {
+        let stages = &stages;
+        async move {
+            stages
+                .stage_output(job_id, op)
+                .await
+                .unwrap_or_else(|_| json!({}))
+        }
+    };
+    let body = output("intel_brief_body").await;
+    let claims = output("intel_brief_claims").await;
+    let inferences = output("intel_brief_inferences").await;
+    let links = output("intel_brief_links").await;
+    let own = stages.stage_output(job_id, operation).await?;
+    let snapshot_hash = crate::nlp::cache::hash(&json!([operation, own]).to_string());
+    let written = super::brief::publish(
+        repo,
+        &super::brief::Publication {
+            article_id: run.article_id.clone(),
+            job_id: job_id.to_string(),
+            generation: run.generation,
+            contract: brief_pipeline::CONTRACT.to_string(),
+            body_hash: body["content_hash"].as_str().unwrap_or("").to_string(),
+            snapshot_hash: snapshot_hash.clone(),
+            claims,
+            inferences: inferences.clone(),
+            leads: links["leads"].clone(),
+            stage,
+        },
+    )
+    .await?;
+    if !written {
+        return Ok(());
+    }
+    if stage == super::brief::Stage::Links {
+        let texts: std::collections::HashMap<&str, &str> = inferences["inferences"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|i| Some((i["id"].as_str()?, i["text"].as_str()?)))
+            .collect();
+        let leads: Vec<super::brief::Lead> = links["leads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|lead| {
+                let inference = lead["inference_id"].as_str().unwrap_or("");
+                let candidate = lead["article_id"].as_str().unwrap_or("");
+                super::brief::Lead {
+                    id: format!(
+                        "{}:{}:{inference}:{candidate}",
+                        run.article_id, run.generation
+                    ),
+                    inference_id: inference.to_string(),
+                    inference_text: texts.get(inference).copied().unwrap_or("").to_string(),
+                    candidate_article_id: candidate.to_string(),
+                    candidate_run_id: lead["article_run_id"].as_str().unwrap_or("").to_string(),
+                    candidate_metadata_revision: lead["metadata_revision"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                    interpretation: lead["why"].as_str().unwrap_or("").to_string(),
+                    verification_needed: lead["verification_needed"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                    citations_json: lead["metadata_evidence"].to_string(),
+                }
+            })
+            .collect();
+        super::brief::replace_leads(repo, &run.article_id, job_id, run.generation, &leads).await?;
+    }
+    let state = crate::intel_recon::brief_canonical::IndexState {
+        publication_version: 0,
+        state: "not_indexed".into(),
+        snapshot_id: String::new(),
+        reason: "canonical brief publication is not available on SurrealDB yet".into(),
+        job_id: job_id.to_string(),
+        required: Vec::new(),
+    };
+    super::brief::put_stage_receipt(repo, job_id, operation, &state).await?;
+    super::brief::put_index_state(repo, &run.article_id, &state).await?;
+    Ok(())
 }
 
 /// Fenced stage failure. The model chain is the single retry owner, so the

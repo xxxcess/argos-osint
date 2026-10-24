@@ -117,6 +117,21 @@ async fn surreal_contention_and_publication_delay_keep_leases_and_commit_once() 
     assert_eq!(recoveries.unwrap_or(0), 0);
     assert_eq!(states.len(), 4);
     assert!(states.iter().all(|s| s == "completed"), "{states:?}");
+    // Each published stage merged into the displayed brief, with its leads.
+    let (generation, claims, inferences) = crate::storage::brief::published_brief(&repo, "a1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(generation, 1);
+    assert_eq!(claims["claims"].as_array().map(Vec::len), Some(2));
+    assert_eq!(inferences["inferences"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        crate::storage::brief::leads(&repo, "a1")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     // Unchanged inputs attach to the completed chain.
     let again = surreal_stages::ensure(&repo, &inputs("r1")).await.unwrap();
     assert_eq!((again.job_id, again.created), (job, false));

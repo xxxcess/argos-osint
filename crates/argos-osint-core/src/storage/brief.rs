@@ -21,8 +21,9 @@
 //! (`intel_inference_article_leads`) live in `intel_inference_article_lead`,
 //! replaced per article by [`replace_leads_in`].
 //!
-//! Gap (acceptance.md): the brief chain itself (`brief_stages`) still runs
-//! on SQLite, so on a SurrealDB run nothing writes these tables yet.
+//! On a SurrealDB store `storage::brief_stages` writes these tables as
+//! stages commit. Gap (acceptance.md): the canonical Brain snapshot is not
+//! ported, so the bound index state is `not_indexed`.
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;

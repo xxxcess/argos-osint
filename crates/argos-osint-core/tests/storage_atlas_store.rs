@@ -143,3 +143,83 @@ async fn work_units_reject_empty_ids() {
         .unwrap()
         .is_empty());
 }
+
+fn related_article(
+    id: &str,
+    title: &str,
+    category: &str,
+) -> argos_osint_core::store::AtlasArticleRow {
+    argos_osint_core::store::AtlasArticleRow {
+        run_id: "run-r".into(),
+        id: id.into(),
+        title: title.into(),
+        url: format!("https://example.com/{id}"),
+        source_name: "Publisher".into(),
+        source_domain: "example.com".into(),
+        published_at: "2026-10-12".into(),
+        provider: "fixture".into(),
+        category: category.into(),
+        ..Default::default()
+    }
+}
+
+fn mention(
+    title: &str,
+    name: &str,
+    kind: &str,
+) -> argos_osint_core::atlas_metadata::ArticleMention {
+    let start = title.find(name).unwrap();
+    argos_osint_core::atlas_metadata::ArticleMention {
+        type_hint: kind.into(),
+        comparison_key: argos_osint_core::atlas_metadata::comparison_key(name),
+        field: "title".into(),
+        start_byte: start,
+        end_byte: start + name.len(),
+        original_text: name.into(),
+    }
+}
+
+/// `related_articles::build_on`: the same pairs on both stores, a cached
+/// rebuild, and a pair dropped once one of its articles goes.
+async fn related_script(store: &AtlasStore) -> Vec<usize> {
+    use argos_osint_core::atlas_metadata::{ArticleMetadata, MetadataState};
+    store.insert_run("run-r", "{}", "{}").await.unwrap();
+    let source = related_article("source", "Ada and Ada meet Acme", "economic");
+    let one = related_article("one", "Ada mentions Ada", "unk");
+    let two = related_article("two", "Ada meets Acme", "unk");
+    for a in [&source, &one, &two] {
+        store.upsert_article(a).await.unwrap();
+    }
+    let mut m = ArticleMetadata::pending(&source);
+    m.entity_state = MetadataState::Complete;
+    m.mentions.push(mention(&source.title, "Ada", "person"));
+    m.mentions
+        .push(mention(&source.title, "Acme", "organization"));
+    assert!(store.save_metadata(&m).await.unwrap());
+    let build = || argos_osint_core::related_articles::build_on(store, "run-r");
+    let first = build().await.unwrap();
+    let cached = build().await.unwrap();
+    store.delete_article("run-r", "two").await.unwrap();
+    let after_delete = build().await.unwrap();
+    vec![first, cached, after_delete]
+}
+
+#[tokio::test]
+async fn related_articles_build_matches_sqlite() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let surreal = surreal_store(&server, "atlas_related").await;
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = AtlasStore::from_sqlite(Store::open(&dir.path().join("argos.db")).unwrap());
+    let s = related_script(&surreal).await;
+    assert_eq!(s, related_script(&sqlite).await);
+    assert_eq!(s, vec![1, 1, 0]);
+    let repo = surreal.repository().unwrap();
+    assert_eq!(
+        atlas_metadata::related_count(repo.db(), "run-r")
+            .await
+            .unwrap(),
+        0
+    );
+}

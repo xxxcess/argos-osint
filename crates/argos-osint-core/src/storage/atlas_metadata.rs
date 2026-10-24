@@ -133,6 +133,74 @@ async fn write_metadata_in(tx: &Tx, m: &ArticleMetadata, json: String) -> Result
     Ok(())
 }
 
+/// The Related publication of `related_articles::build`: one transaction
+/// replaces the run's pairs, keeping only pairs whose two articles are still
+/// exactly the rows they were planned from. Returns the stored pair count.
+pub async fn replace_related(
+    db: &Surreal<Any>,
+    run_id: &str,
+    articles: &[crate::store::AtlasArticleRow],
+    planned: &[crate::related_articles::PlannedPair],
+) -> Result<usize, TxError> {
+    let (run_id, articles, planned) = (run_id.to_string(), articles.to_vec(), planned.to_vec());
+    run_tx(db, RetryPolicy::default(), move |tx| {
+        let (run_id, articles, planned) = (run_id.clone(), articles.clone(), planned.clone());
+        async move {
+            run(
+                &tx,
+                tx.query("DELETE atlas_related_article WHERE run_id = $run RETURN NONE;")
+                    .bind(("run", run_id.clone())),
+            )
+            .await?;
+            let mut count = 0usize;
+            for p in &planned {
+                let (left, right) = (&articles[p.left], &articles[p.right]);
+                if article_in(&tx, &run_id, &left.id).await?.as_ref() != Some(left)
+                    || article_in(&tx, &run_id, &right.id).await?.as_ref() != Some(right)
+                {
+                    continue;
+                }
+                run(
+                    &tx,
+                    tx.query(
+                        "UPSERT type::record('atlas_related_article', $key) CONTENT {
+                           run_id: $run, left_id: $l, right_id: $r, left_revision: $lr,
+                           right_revision: $rr, shared_json: $shared, match_version: $mv,
+                           named_count: $named, shared_count: $count, rarity: $rarity
+                         } RETURN NONE;",
+                    )
+                    .bind(("key", encode(&[&run_id, &left.id, &right.id])))
+                    .bind(("run", run_id.clone()))
+                    .bind(("l", left.id.clone()))
+                    .bind(("r", right.id.clone()))
+                    .bind(("lr", p.left_revision.clone()))
+                    .bind(("rr", p.right_revision.clone()))
+                    .bind(("shared", p.shared_json.clone()))
+                    .bind(("mv", crate::related_articles::MATCH_VERSION.to_string()))
+                    .bind(("named", p.named_count))
+                    .bind(("count", p.shared_count))
+                    .bind(("rarity", p.rarity)),
+                )
+                .await?;
+                count += 1;
+            }
+            Ok(count)
+        }
+    })
+    .await
+    .map(|c| c.value)
+}
+
+/// Stored Related pairs of one run.
+pub async fn related_count(db: &Surreal<Any>, run_id: &str) -> Result<usize, TxError> {
+    let mut r = db
+        .query("SELECT VALUE count() FROM atlas_related_article WHERE run_id = $run GROUP ALL")
+        .bind(("run", run_id.to_string()))
+        .await?
+        .check()?;
+    Ok(r.take::<Option<i64>>(0)?.unwrap_or(0) as usize)
+}
+
 /// `atlas_save_metadata`: false when the article is gone or changed since
 /// `metadata` was captured. A same-input save keeps the stored
 /// classification; the article's mentions and related pairs are replaced,

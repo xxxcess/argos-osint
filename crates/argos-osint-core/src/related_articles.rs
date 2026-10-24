@@ -254,13 +254,13 @@ pub(crate) fn current_ingest_related(
     }
     Ok(true)
 }
-/// Inverted token and entity postings avoid comparing all article pairs.
-pub fn build(store: &Store, run_id: &str) -> Result<usize> {
-    let articles = store.atlas_list_articles(run_id)?;
-    let mut metadata = Vec::new();
-    for a in &articles {
-        metadata.push(store.atlas_metadata(run_id, &a.id)?);
-    }
+/// The cache key and input revision of one run's Related build: equal
+/// revisions (and an equal stored pair count) mean the stored pairs are current.
+pub fn build_input(
+    run_id: &str,
+    articles: &[AtlasArticleRow],
+    metadata: &[Option<crate::atlas_metadata::ArticleMetadata>],
+) -> Result<(String, String)> {
     let build_key = format!("atlas-related-input:{run_id}");
     let input_revision = crate::nlp::cache::hash(&serde_json::to_string(&(
         MATCH_VERSION,
@@ -277,21 +277,142 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
             })
             .collect::<Vec<_>>(),
     ))?);
-    if let Some(cached) = store
-        .app_state_get(&build_key)?
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-    {
+    Ok((build_key, input_revision))
+}
+
+/// Whether a stored build marker matches this revision and pair count.
+pub fn build_is_current(marker: Option<&str>, input_revision: &str, count: usize) -> bool {
+    marker
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .is_some_and(|cached| {
+            cached.get("revision").and_then(|v| v.as_str()) == Some(input_revision)
+                && cached.get("count").and_then(|v| v.as_u64()) == Some(count as u64)
+        })
+}
+
+/// The build marker stored after publishing `count` pairs.
+pub fn build_marker(input_revision: &str, count: usize) -> Result<String> {
+    Ok(serde_json::to_string(
+        &serde_json::json!({"revision":input_revision,"count":count}),
+    )?)
+}
+
+/// One Related pair ready to store: `left`/`right` index the input articles
+/// (`left.id < right.id`); the caller checks both are still current.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlannedPair {
+    pub left: usize,
+    pub right: usize,
+    pub left_revision: String,
+    pub right_revision: String,
+    pub shared_json: String,
+    pub named_count: i64,
+    pub shared_count: i64,
+    pub rarity: f64,
+}
+
+/// Inverted token and entity postings avoid comparing all article pairs.
+pub fn build(store: &Store, run_id: &str) -> Result<usize> {
+    let articles = store.atlas_list_articles(run_id)?;
+    let mut metadata = Vec::new();
+    for a in &articles {
+        metadata.push(store.atlas_metadata(run_id, &a.id)?);
+    }
+    let (build_key, input_revision) = build_input(run_id, &articles, &metadata)?;
+    if let Some(marker) = store.app_state_get(&build_key)? {
         let count: usize = store.conn.query_row(
             "SELECT COUNT(*) FROM atlas_related_articles WHERE run_id=?1",
             [run_id],
             |r| r.get(0),
         )?;
-        if cached.get("revision").and_then(|v| v.as_str()) == Some(input_revision.as_str())
-            && cached.get("count").and_then(|v| v.as_u64()) == Some(count as u64)
-        {
+        if build_is_current(Some(&marker), &input_revision, count) {
             return Ok(count);
         }
     }
+    let planned = plan(&articles, &metadata)?;
+    let tx = store.conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM atlas_related_articles WHERE run_id=?1",
+        [run_id],
+    )?;
+    let mut count = 0;
+    for p in planned {
+        let (left, right) = (&articles[p.left], &articles[p.right]);
+        // Source/category revisions are checked inside this transaction before publication.
+        let current_left = store.atlas_article(run_id, &left.id)?;
+        let current_right = store.atlas_article(run_id, &right.id)?;
+        if current_left.as_ref() != Some(left) || current_right.as_ref() != Some(right) {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO atlas_related_articles VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                run_id,
+                left.id,
+                right.id,
+                p.left_revision,
+                p.right_revision,
+                p.shared_json,
+                MATCH_VERSION,
+                p.named_count,
+                p.shared_count,
+                p.rarity
+            ],
+        )?;
+        count += 1;
+    }
+    tx.execute("INSERT INTO app_state(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![build_key,build_marker(&input_revision, count)?])?;
+    tx.commit()?;
+    Ok(count)
+}
+
+/// [`build`] on the SurrealDB repository: same plan, same input marker
+/// (`app_state`), published by `storage::atlas_metadata::replace_related`.
+pub async fn build_on(store: &crate::atlas_store::AtlasStore, run_id: &str) -> Result<usize> {
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        return build_surreal(store, repo, run_id).await;
+    }
+    store.sqlite("related articles", |s| build(s, run_id))
+}
+
+#[cfg(feature = "surreal")]
+async fn build_surreal(
+    store: &crate::atlas_store::AtlasStore,
+    repo: &crate::storage::repo::Repository,
+    run_id: &str,
+) -> Result<usize> {
+    let articles = store.list_articles(run_id).await?;
+    let mut metadata = Vec::new();
+    for a in &articles {
+        metadata.push(store.metadata(run_id, &a.id).await?);
+    }
+    let (build_key, input_revision) = build_input(run_id, &articles, &metadata)?;
+    if let Some(marker) = store.app_state_get(&build_key).await? {
+        let count = crate::storage::atlas_metadata::related_count(repo.db(), run_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("atlas related count: {e}"))?;
+        if build_is_current(Some(&marker), &input_revision, count) {
+            return Ok(count);
+        }
+    }
+    let planned = plan(&articles, &metadata)?;
+    let count =
+        crate::storage::atlas_metadata::replace_related(repo.db(), run_id, &articles, &planned)
+            .await
+            .map_err(|e| anyhow::anyhow!("atlas related articles: {e}"))?;
+    store
+        .app_state_set(&build_key, &build_marker(&input_revision, count)?)
+        .await?;
+    Ok(count)
+}
+
+/// The Related pairs of one run's articles and metadata (pure; both stores
+/// publish its output).
+pub fn plan(
+    articles: &[AtlasArticleRow],
+    metadata: &[Option<crate::atlas_metadata::ArticleMetadata>],
+) -> Result<Vec<PlannedPair>> {
     let mut tokens: HashMap<String, BTreeSet<usize>> = HashMap::new();
     for (i, a) in articles.iter().enumerate() {
         for token in a
@@ -411,12 +532,7 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
             }
         }
     }
-    let tx = store.conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM atlas_related_articles WHERE run_id=?1",
-        [run_id],
-    )?;
-    let mut count = 0;
+    let mut out = Vec::new();
     for ((i, j), mut shared) in pairs {
         shared.sort_by(|a, b| a.0.key.cmp(&b.0.key));
         shared.dedup_by(|a, b| a.0.key == b.0.key && a.0.type_hint == b.0.type_hint);
@@ -429,47 +545,31 @@ pub fn build(store: &Store, run_id: &str) -> Result<usize> {
         {
             continue;
         }
-        let a = &articles[i];
-        let b = &articles[j];
-        let (left, right) = if a.id < b.id {
-            (a, b)
+        let (left, right) = if articles[i].id < articles[j].id {
+            (i, j)
         } else {
             for (s, _) in &mut shared {
                 std::mem::swap(&mut s.left, &mut s.right);
             }
-            (b, a)
+            (j, i)
         };
-        // Source/category revisions are checked inside this transaction before publication.
-        let current_left = store.atlas_article(run_id, &left.id)?;
-        let current_right = store.atlas_article(run_id, &right.id)?;
-        if current_left.as_ref() != Some(left) || current_right.as_ref() != Some(right) {
-            continue;
-        }
         let named_count = shared
             .iter()
             .filter(|(s, _)| s.type_hint != "place")
             .count();
         let rarity: f64 = shared.iter().map(|(_, r)| r).sum();
-        tx.execute(
-            "INSERT INTO atlas_related_articles VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![
-                run_id,
-                left.id,
-                right.id,
-                revision(left),
-                revision(right),
-                serde_json::to_string(&shared.iter().map(|(s, _)| s).collect::<Vec<_>>())?,
-                MATCH_VERSION,
-                named_count as i64,
-                shared.len() as i64,
-                rarity
-            ],
-        )?;
-        count += 1;
+        out.push(PlannedPair {
+            left,
+            right,
+            left_revision: revision(&articles[left]),
+            right_revision: revision(&articles[right]),
+            shared_json: serde_json::to_string(&shared.iter().map(|(s, _)| s).collect::<Vec<_>>())?,
+            named_count: named_count as i64,
+            shared_count: shared.len() as i64,
+            rarity,
+        });
     }
-    tx.execute("INSERT INTO app_state(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![build_key,serde_json::to_string(&serde_json::json!({"revision":input_revision,"count":count}))?])?;
-    tx.commit()?;
-    Ok(count)
+    Ok(out)
 }
 fn revision(a: &AtlasArticleRow) -> String {
     crate::nlp::cache::hash(&format!("{}:{}", atlas_metadata::input_hash(a), a.category))

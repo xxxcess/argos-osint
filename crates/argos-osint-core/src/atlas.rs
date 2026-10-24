@@ -2894,14 +2894,8 @@ where
         emit(AtlasEvent::Status(
             "Building shared headline/description leads".into(),
         ));
-        // Related leads are a SQLite subsystem; skipped on SurrealDB.
-        stats.coverage.related_pairs = if store.is_surreal() {
-            0
-        } else {
-            store.sqlite("related articles", |s| {
-                crate::related_articles::build(s, &run_id)
-            })? as u32
-        };
+        stats.coverage.related_pairs =
+            crate::related_articles::build_on(&store, &run_id).await? as u32;
         cursor.phase = 6;
         cursor.leg = "actor_articles".into();
         save(&store, &run_id, &cursor, &stats).await?;

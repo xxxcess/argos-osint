@@ -43,6 +43,8 @@ jobs:
         with:
           # One cache per OS x storage leg: embedded and server compile different feature sets.
           key: ${{ matrix.storage }}
+          # local_matrix.sh builds through scripts/agent_cargo.py into target/agents.
+          workspaces: . -> target/agents
           cache-on-failure: true
       - name: Show which protoc the build will use
         run: |

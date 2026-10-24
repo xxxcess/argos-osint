@@ -213,6 +213,10 @@ pub async fn task_id(repo: &Repository, input: &PipelineInput) -> Result<String>
 
 /// `insight_execution::operation_id`: `<key>:retry:<epoch>`.
 pub async fn operation_id(repo: &Repository, task_id: &str, key: &str) -> Result<String> {
+    // An empty record id is invalid on a server: no task means epoch 0.
+    if task_id.is_empty() {
+        return Ok(format!("{key}:retry:0"));
+    }
     let mut r = repo
         .db()
         .query("SELECT VALUE retry_epoch FROM ONLY type::record('insight_refresh_execution', $t)")
@@ -279,6 +283,9 @@ pub async fn record_activity(repo: &Repository, task_id: &str, label: &str) -> R
 
 /// `insight_execution::activity`: empty when idle or unknown.
 pub async fn activity(repo: &Repository, task_id: &str) -> Result<String> {
+    if task_id.is_empty() {
+        return Ok(String::new());
+    }
     let mut r = repo
         .db()
         .query("SELECT VALUE activity FROM ONLY type::record('insight_refresh_execution', $t)")

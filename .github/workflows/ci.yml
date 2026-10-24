@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # Superseded pushes to the same PR cancel the older run (main always completes).
 concurrency:
@@ -30,8 +31,9 @@ jobs:
           - { name: macOS arm64, os: macos-14 }
           - { name: macOS Intel, os: macos-15-intel }
         storage: [embedded, server]
-        # macOS Intel embedded (~45 min) runs only on pushes to main, not on PR events.
-        exclude: ${{ github.event_name == 'pull_request' && fromJSON('[{"platform":{"name":"macOS Intel","os":"macos-15-intel"},"storage":"embedded"}]') || fromJSON('[]') }}
+        # macOS Intel embedded (~45 min) runs on pushes to main and when a PR is marked
+        # ready for review; ordinary PR pushes skip it.
+        exclude: ${{ github.event_name == 'pull_request' && github.event.action != 'ready_for_review' && fromJSON('[{"platform":{"name":"macOS Intel","os":"macos-15-intel"},"storage":"embedded"}]') || fromJSON('[]') }}
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 90
     steps:

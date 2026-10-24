@@ -8,8 +8,9 @@
 //! [`step`] wraps it as the `validate` [`SnapshotStep`] that
 //! `insight::publish_snapshot` and `refresh_exec::run_refresh_slice` take.
 //!
-//! Refused, because their tables are not on SurrealDB: Recon owners
-//! (`recon_runs`) and tool evidence (`call:`, `osint_calls`).
+//! Recon owners check the run (`recon_run`, not cancelled) and its thread
+//! (`recon_thread`, not deleted); tool evidence (`call:`) checks the
+//! completed `osint_call`'s result hash.
 
 use std::sync::Arc;
 
@@ -61,9 +62,21 @@ pub async fn validate_in(tx: &Tx, snapshot: &EvidenceSnapshot) -> Result<(), TxE
             ensure(!live.is_empty(), "article owner no longer exists")?;
         }
         "recon" => {
-            return Err(refuse(
-                "Recon owner validation isn't available on SurrealDB yet",
-            ))
+            let mut r = run(
+                tx,
+                tx.query(
+                    "LET $run = (SELECT thread_id, state FROM ONLY $r);
+                     RETURN $run != NONE AND $run.state != 'cancelled'
+                       AND (SELECT VALUE deleted FROM ONLY type::record('recon_thread', $run.thread_id)) = false;",
+                )
+                .bind(("r", rid("recon_run", &snapshot.owner_id))),
+            )
+            .await?;
+            let last = r.num_statements() - 1;
+            ensure(
+                take::<Option<bool>>(&mut r, last)? == Some(true),
+                "Recon owner no longer active",
+            )?;
         }
         _ => return Err(refuse("unsupported publication owner")),
     }
@@ -94,10 +107,19 @@ pub async fn validate_in(tx: &Tx, snapshot: &EvidenceSnapshot) -> Result<(), TxE
                 }),
                 "report authority changed",
             )?;
-        } else if id.starts_with("call:") {
-            return Err(refuse(
-                "tool evidence validation isn't available on SurrealDB yet",
-            ));
+        } else if let Some(call) = id.strip_prefix("call:") {
+            let call = call.split("#page").next().unwrap_or(call);
+            let mut r = run(
+                tx,
+                tx.query("RETURN IF (SELECT VALUE status FROM ONLY $c) = 'completed' THEN (SELECT VALUE result_json FROM ONLY $c) ELSE NONE END")
+                    .bind(("c", rid("osint_call", call))),
+            )
+            .await?;
+            let json: Option<String> = take(&mut r, 0)?;
+            ensure(
+                json.is_some_and(|s| crate::nlp::cache::hash(&s) == reference.revision),
+                "tool evidence revision changed",
+            )?;
         } else if let Some(article) = id.strip_prefix("article:") {
             let mut r = run(
                 tx,

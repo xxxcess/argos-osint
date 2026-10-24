@@ -140,7 +140,7 @@ async fn live_evidence_is_checked_in_the_transaction() {
     assert!(validate(&db, &recon)
         .await
         .unwrap_err()
-        .contains("isn't available on SurrealDB yet"));
+        .contains("Recon owner no longer active"));
 }
 
 #[tokio::test]

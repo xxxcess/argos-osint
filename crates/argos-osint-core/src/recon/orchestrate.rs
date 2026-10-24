@@ -10,6 +10,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
+use super::backend::{sqlite_path, ReconStore};
 use super::{
     brain_resources::{self, BrainResourceSummary},
     investigation, picker, AnswerContext, CreditHold, EntityView, HypothesisView, Plan, PlanCall,
@@ -66,29 +67,59 @@ impl StageClock {
             return;
         }
         self.recorded = true;
+        let elapsed = self.started.elapsed_ms();
+        #[cfg(feature = "surreal")]
+        if super::backend::surreal_selected() {
+            // The attempt ordinal is read from the repository, so the whole
+            // write runs there; SQLite is never opened.
+            let (run_id, mode, stage) =
+                (self.run_id.clone(), self.mode.clone(), self.stage.clone());
+            crate::storage::runtime::spawn(async move {
+                let Ok(repo) = crate::storage::runtime::repository().await else {
+                    return;
+                };
+                let attempt = crate::storage::telemetry::stage_attempt(repo.db(), &run_id, &stage)
+                    .await
+                    .unwrap_or(1);
+                let event = stage_event(&run_id, &mode, &stage, attempt, elapsed);
+                let _ = crate::storage::telemetry::record(repo.db(), &event).await;
+            });
+            return;
+        }
         // A resumed or replayed stage is a new attempt, so the ordinal is
         // derived from the rows already written for this run and stage.
         let attempt = stage_attempt(&self.db_path, &self.run_id, &self.stage);
-        let event = TelemetryEvent::new(EventKind::ReconStage)
-            .with_id(format!("{}:{}:{}", self.run_id, self.stage, attempt))
-            .canonical(format!("{}:{}", self.run_id, self.stage))
-            .at(now_stamp())
-            .app("recon")
-            .trigger(Trigger::ReconPrompt)
-            .category(&self.stage)
-            .mode(&self.mode)
-            .outcome("completed")
-            .run(&self.run_id)
-            .duration_ms(Some(self.started.elapsed_ms()))
-            .count(1)
-            .payload(json!({
-                "stage": self.stage,
-                "mode": self.mode,
-                "attempt": attempt,
-                "resumed": attempt > 1,
-            }));
+        let event = stage_event(&self.run_id, &self.mode, &self.stage, attempt, elapsed);
         let _ = telemetry::record(&self.db_path, &event);
     }
+}
+
+/// The `recon_stage` row for one stage attempt.
+pub(crate) fn stage_event(
+    run_id: &str,
+    mode: &str,
+    stage: &str,
+    attempt: i64,
+    elapsed_ms: i64,
+) -> TelemetryEvent {
+    TelemetryEvent::new(EventKind::ReconStage)
+        .with_id(format!("{run_id}:{stage}:{attempt}"))
+        .canonical(format!("{run_id}:{stage}"))
+        .at(now_stamp())
+        .app("recon")
+        .trigger(Trigger::ReconPrompt)
+        .category(stage)
+        .mode(mode)
+        .outcome("completed")
+        .run(run_id)
+        .duration_ms(Some(elapsed_ms))
+        .count(1)
+        .payload(json!({
+            "stage": stage,
+            "mode": mode,
+            "attempt": attempt,
+            "resumed": attempt > 1,
+        }))
 }
 
 impl Drop for StageClock {
@@ -216,6 +247,7 @@ pub(crate) fn note_directives(
             .run(run_id)
             .turn(turn_id)
             .count(1);
+        // Routed to the repository under SurrealDB (`telemetry::record`).
         let _ = telemetry::record(db_path, &event);
     }
     assessments
@@ -323,6 +355,7 @@ pub(crate) fn note_run(
             "strategy": plan.strategy,
             "planning_mode": plan.planning_mode,
         }));
+    // Routed to the repository under SurrealDB (`telemetry::record`).
     let _ = telemetry::record(db_path, &event);
 }
 
@@ -362,7 +395,7 @@ pub async fn execute_budgeted(
         });
     }
     let limits = &service.settings.recon_limits;
-    let store = Store::open(&service.db_path)?;
+    let store = ReconStore::open(&service.db_path).await?;
     let mut affordable = Vec::new();
     let mut skipped = Vec::new();
     let mut holds: Vec<(String, CreditHold)> = Vec::new();
@@ -370,11 +403,14 @@ pub async fn execute_budgeted(
         if cancel.load(Ordering::Relaxed) {
             return Err(anyhow!("cancelled"));
         }
-        if !store.tool_enabled(&call.tool_id)? {
+        if !store.tool_enabled(&call.tool_id).await? {
             skipped.push(format!("{} — disabled in the catalog", call.tool_id));
             continue;
         }
-        if store.inflight_duplicate(&call.tool_id, &call.arguments)? {
+        if store
+            .inflight_duplicate(&call.tool_id, &call.arguments)
+            .await?
+        {
             skipped.push(format!(
                 "{} — a duplicate call is already queued or running",
                 call.tool_id
@@ -382,17 +418,17 @@ pub async fn execute_budgeted(
             continue;
         }
         let cache_key = crate::osint::cache_identity(&call.tool_id, &call.arguments);
-        let cached = store.cache_get(&cache_key)?.is_some();
+        let cached = store.cache_get(&cache_key).await?.is_some();
         if let Some((provider_name, cost)) =
             limits.configured_cost_for(&call.tool_id, &call.arguments)
         {
             if !cached && cost > 0 {
-                match store.reserve_credits(provider_name, cost, limits)? {
+                match store.reserve_credits(provider_name, cost, limits).await? {
                     Some(hold) => {
                         holds.push((format!("{}:{}", call.tool_id, call.arguments), hold));
                     }
                     None => {
-                        let available = store.credits_available(provider_name, limits)?;
+                        let available = store.credits_available(provider_name, limits).await?;
                         skipped.push(format!(
                             "{} — Argos {provider_name} credit allowance is exhausted ({available} left, needs {cost}; local monthly cap, not the provider dashboard)",
                             call.tool_id
@@ -424,23 +460,23 @@ pub async fn execute_budgeted(
     let results = match outcome {
         Ok(results) => results,
         Err(err) => {
-            let store = Store::open(&service.db_path)?;
+            let store = ReconStore::open(&service.db_path).await?;
             for (_, hold) in &holds {
-                store.release_credits(hold)?;
+                store.release_credits(hold).await?;
             }
             return Err(err);
         }
     };
-    settle_holds(service, &results, holds)?;
+    settle_holds(service, &results, holds).await?;
     Ok(BudgetedOutcome { results, skipped })
 }
 
-fn settle_holds(
+async fn settle_holds(
     service: &super::Service,
     results: &[(String, ToolResult)],
     mut holds: Vec<(String, CreditHold)>,
 ) -> Result<()> {
-    let store = Store::open(&service.db_path)?;
+    let store = ReconStore::open(&service.db_path).await?;
     for (_, result) in results {
         let signature = format!("{}:{}", result.tool_id, result.inputs);
         let Some(index) = holds.iter().position(|(sig, _)| sig == &signature) else {
@@ -451,13 +487,13 @@ fn settle_holds(
         if spend {
             let estimate = hold.trial_credits + hold.allowance_credits;
             let actual = result.credits_reported.unwrap_or(estimate);
-            store.reconcile_credits(&hold, actual)?;
+            store.reconcile_credits(&hold, actual).await?;
         } else {
-            store.release_credits(&hold)?;
+            store.release_credits(&hold).await?;
         }
     }
     for (_, hold) in holds {
-        store.release_credits(&hold)?;
+        store.release_credits(&hold).await?;
     }
     Ok(())
 }
@@ -486,19 +522,24 @@ pub async fn run_turn(
         "deriving directives",
     );
     stage(progress, "deriving directives");
-    let store = Store::open(&service.db_path)?;
-    store.set_run(&run.id, "running", "deriving directives", None, None)?;
+    let store = ReconStore::open(&service.db_path).await?;
+    store
+        .set_run(&run.id, "running", "deriving directives", None, None)
+        .await?;
     for (kind, value) in super::explicit_entities(question) {
-        store.link_entity(&run.thread_id, &kind, &value, None)?;
+        store
+            .link_entity(&run.thread_id, &kind, &value, None)
+            .await?;
     }
     // Brain recall stays first. Recalled insights are known facts, not instructions.
     let (recalled, unfamiliar, brain_resources) =
-        recall_for_turn(&store, &run.thread_id, question, "", &run.id)?;
+        recall_for_turn(&store, &run.thread_id, question, "", &run.id).await?;
     let brain_resource_line = brain_resources.prompt_line();
-    let history = store.list_messages(&run.thread_id)?;
+    let history = store.list_messages(&run.thread_id).await?;
     let opening = !history.iter().any(|message| message.role == "assistant");
     let titles: Vec<String> = store
-        .get_thread(&run.thread_id)?
+        .get_thread(&run.thread_id)
+        .await?
         .map(|thread| thread.title)
         .into_iter()
         .chain(
@@ -510,35 +551,38 @@ pub async fn run_turn(
                 .map(|message| message.content.chars().take(120).collect()),
         )
         .collect();
-    let useful = !store.calls_for_thread(&run.thread_id)?.is_empty();
+    let useful = !store.calls_for_thread(&run.thread_id).await?.is_empty();
     let previous = store
-        .latest_strategy_kind(&run.thread_id)?
+        .latest_strategy_kind(&run.thread_id)
+        .await?
         .unwrap_or_default();
     let choice = investigation::select_strategy(question, opening, useful, unfamiliar);
     let change = investigation::strategy_change_reason(&previous, &choice);
-    store.record_strategy(
-        &run.thread_id,
-        &run.id,
-        &choice.kind,
-        &choice.rationale,
-        if previous.is_empty() {
-            None
-        } else {
-            Some(previous.as_str())
-        },
-        change.as_deref(),
-    )?;
+    store
+        .record_strategy(
+            &run.thread_id,
+            &run.id,
+            &choice.kind,
+            &choice.rationale,
+            if previous.is_empty() {
+                None
+            } else {
+                Some(previous.as_str())
+            },
+            change.as_deref(),
+        )
+        .await?;
     drop(store);
     let known: Vec<String> = recalled.iter().map(|item| item.text.clone()).collect();
     let frame = investigation::investigation_frame(question, &known);
-    let enabled = enabled_tools(&service.db_path)?;
+    let enabled = enabled_tools(&service.db_path).await?;
     let unkeyed = unkeyed_tools(service);
     let catalog = picker::eligible_catalog(&enabled, &unkeyed);
     let gate = ModelGate::default();
     gate.bind_clock(clock.clone(), service.db_path.clone());
-    let opened = Store::open(&service.db_path)?;
-    let thread = thread_subject(&opened, &run.thread_id, &run.id)?;
-    let prior = previous_synthesis(&opened, &run.thread_id)?;
+    let opened = ReconStore::open(&service.db_path).await?;
+    let thread = thread_subject(&opened, &run.thread_id, &run.id).await?;
+    let prior = previous_synthesis(&opened, &run.thread_id).await?;
     drop(opened);
     advance_stage(
         &mut stage_slot,
@@ -548,7 +592,10 @@ pub async fn run_turn(
         "classifying mode",
     );
     stage(progress, "classifying mode");
-    Store::open(&service.db_path)?.set_run(&run.id, "running", "classifying mode", None, None)?;
+    ReconStore::open(&service.db_path)
+        .await?
+        .set_run(&run.id, "running", "classifying mode", None, None)
+        .await?;
     let report_mode = classify_turn_mode(service, question, &prior, &known).await;
     let derived = derive_directives(
         recon_secret,
@@ -586,13 +633,10 @@ pub async fn run_turn(
     );
     publish(&gate, &mut plan, progress);
     stage(progress, "picking tools");
-    Store::open(&service.db_path)?.set_run(
-        &run.id,
-        "running",
-        "picking tools",
-        Some(&plan),
-        None,
-    )?;
+    ReconStore::open(&service.db_path)
+        .await?
+        .set_run(&run.id, "running", "picking tools", Some(&plan), None)
+        .await?;
     let picker_secret = picker_secret(service, run)?;
     let picker_runtime =
         super::model_exec::RoleRuntime::new(service.auth.clone(), service.settings.clone());
@@ -702,7 +746,7 @@ pub async fn run_turn(
     apply_order(&mut plan, &ordered, question, &brain_resources);
     plan.picker_requests = picker.requests;
     plan.picker_cost = picker.cost;
-    sync_budget(&plan, &gate);
+    sync_budget(&plan, &gate).await;
     publish(&gate, &mut plan, progress);
     advance_stage(
         &mut stage_slot,
@@ -711,13 +755,10 @@ pub async fn run_turn(
         &plan.report_mode,
         "picking tools",
     );
-    Store::open(&service.db_path)?.set_run(
-        &run.id,
-        "running",
-        "picking tools",
-        Some(&plan),
-        None,
-    )?;
+    ReconStore::open(&service.db_path)
+        .await?
+        .set_run(&run.id, "running", "picking tools", Some(&plan), None)
+        .await?;
     let mut results = execute_ordered(
         service,
         run,
@@ -736,8 +777,8 @@ pub async fn run_turn(
         &mut stage_slot,
     )
     .await?;
-    let store = Store::open(&service.db_path)?;
-    for call in store.calls_for_run(&run.id)? {
+    let store = ReconStore::open(&service.db_path).await?;
+    for call in store.calls_for_run(&run.id).await? {
         if results.iter().any(|(id, _)| id == &call.id) {
             continue;
         }
@@ -754,13 +795,10 @@ pub async fn run_turn(
         &plan.report_mode,
         "synthesizing",
     );
-    Store::open(&service.db_path)?.set_run(
-        &run.id,
-        "running",
-        "synthesizing",
-        Some(&plan),
-        None,
-    )?;
+    ReconStore::open(&service.db_path)
+        .await?
+        .set_run(&run.id, "running", "synthesizing", Some(&plan), None)
+        .await?;
     let outcome = service
         .finish_answer(
             AnswerContext {
@@ -799,7 +837,7 @@ pub async fn continue_turn(
     clock: &Arc<std::sync::Mutex<super::budget::TurnClock>>,
     progress: &mut (impl FnMut(super::TurnEvent) + Send),
 ) -> Result<Option<String>> {
-    let enabled = enabled_tools(&service.db_path)?;
+    let enabled = enabled_tools(&service.db_path).await?;
     let unkeyed = unkeyed_tools(service);
     let catalog = picker::eligible_catalog(&enabled, &unkeyed);
     let _picker_secret = picker_secret(service, run)?;
@@ -837,8 +875,8 @@ pub async fn continue_turn(
     )
     .await?;
     refresh_directive_coverage(&mut plan);
-    let store = Store::open(&service.db_path)?;
-    for call in store.calls_for_run(&run.id)? {
+    let store = ReconStore::open(&service.db_path).await?;
+    for call in store.calls_for_run(&run.id).await? {
         if results.iter().any(|(id, _)| id == &call.id) {
             continue;
         }
@@ -847,26 +885,26 @@ pub async fn continue_turn(
         }
     }
     let (recalled, _, _) =
-        recall_for_turn(&store, &run.thread_id, question, &plan.report_mode, &run.id)?;
+        recall_for_turn(&store, &run.thread_id, question, &plan.report_mode, &run.id).await?;
     let opening = !store
-        .list_messages(&run.thread_id)?
+        .list_messages(&run.thread_id)
+        .await?
         .iter()
         .any(|message| message.role == "assistant");
-    let prior = previous_synthesis(&store, &run.thread_id)?;
+    let prior = previous_synthesis(&store, &run.thread_id).await?;
     if plan.report_mode.trim().is_empty() {
         let known: Vec<String> = recalled.iter().map(|item| item.text.clone()).collect();
         drop(store);
         let mode = classify_turn_mode(service, question, &prior, &known).await;
         plan.report_mode = mode.as_str().into();
-        Store::open(&service.db_path)?.set_run(
-            &run.id,
-            "running",
-            "synthesizing",
-            Some(&plan),
-            None,
-        )?;
+        ReconStore::open(&service.db_path)
+            .await?
+            .set_run(&run.id, "running", "synthesizing", Some(&plan), None)
+            .await?;
     } else {
-        store.set_run(&run.id, "running", "synthesizing", Some(&plan), None)?;
+        store
+            .set_run(&run.id, "running", "synthesizing", Some(&plan), None)
+            .await?;
         drop(store);
     }
     advance_stage(
@@ -1154,12 +1192,16 @@ struct TurnModels<'a> {
 /// on a thread's first turn, `sociavault_turn_credits_later` after; spec defaults D4, to
 /// confirm), never more than the remaining credits cover. Every SociaVault route in the
 /// catalog costs one call's price.
-fn sociavault_turn_calls(service: &super::Service, opening: bool) -> usize {
+async fn sociavault_turn_calls(service: &super::Service, opening: bool) -> usize {
     let limits = &service.settings.recon_limits;
     let cost = limits.sociavault_call_cost.max(1);
-    let credits = Store::open(&service.db_path)
-        .and_then(|store| store.credits_available("sociavault", limits))
-        .unwrap_or(0);
+    let credits = match ReconStore::open(&service.db_path).await {
+        Ok(store) => store
+            .credits_available("sociavault", limits)
+            .await
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
     (limits.sociavault_turn_credits(opening).min(credits) / cost) as usize
 }
 
@@ -1182,25 +1224,32 @@ async fn execute_ordered(
         recon_secret: models.recon_secret,
         gate: models.gate,
         cancel,
-        sociavault_calls: sociavault_turn_calls(service, models.opening),
+        sociavault_calls: sociavault_turn_calls(service, models.opening).await,
         google_min_results: service.settings.recon_limits.google_fallback_min_results as usize,
         news_calls: service.settings.recon_limits.news_calls_per_turn as usize,
         legal_calls: service.settings.recon_limits.legal_calls_per_turn as usize,
     };
     let db = service.db_path.clone();
     let run_id = run.id.clone();
-    let mut persist = move |plan: &Plan, stage: &str| -> Result<()> {
-        Store::open(&db)?.set_run(&run_id, "running", stage, Some(plan), None)?;
+    let mut persist = move |plan: &Plan, stage: &str| -> PersistFuture {
         // Stage retries are separate attempts: each stage start earns its own
         // measured row rather than rewriting the previous one.
         advance_stage(stage_slot, &db, &run_id, &plan.report_mode, stage);
-        Ok(())
+        let (db, run_id, plan, stage) =
+            (db.clone(), run_id.clone(), plan.clone(), stage.to_string());
+        Box::pin(async move {
+            ReconStore::open(&db)
+                .await?
+                .set_run(&run_id, "running", &stage, Some(&plan), None)
+                .await?;
+            Ok(())
+        })
     };
     let runner = |call: PlanCall| {
         let missing = missing.clone();
         async move {
-            let store = Store::open(&service.db_path)?;
-            if !store.tool_enabled(&call.tool_id)? {
+            let store = ReconStore::open(&service.db_path).await?;
+            if !store.tool_enabled(&call.tool_id).await? {
                 return Ok(StepOutcome::NotRun("disabled in the catalog".into()));
             }
             drop(store);
@@ -1232,7 +1281,7 @@ async fn execute_ordered(
     let outcome = execute_steps(plan, &env, picker, runner, progress, &mut persist).await;
     plan.picker_requests = plan.picker_requests.max(picker.requests);
     plan.picker_cost = plan.picker_cost.max(picker.cost);
-    let _ = persist(plan, "running tools");
+    let _ = persist(plan, "running tools").await;
     outcome
 }
 
@@ -1530,13 +1579,17 @@ fn usable(status: &str) -> bool {
 /// step per question platform with a handle, within the turn allowance. Disabled,
 /// unkeyed, or over-budget steps are deferred, with a replacement pick when fewer than
 /// three executable steps would remain.
+/// A plan checkpoint write (`execute_steps`' `persist`).
+pub(crate) type PersistFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
 pub(crate) async fn execute_steps<R, F>(
     plan: &mut Plan,
     env: &StepEnv<'_>,
     picker: &mut picker::Picker<'_>,
     mut runner: R,
     progress: &mut (impl FnMut(super::TurnEvent) + Send),
-    persist: &mut (impl FnMut(&Plan, &str) -> Result<()> + Send),
+    persist: &mut (impl FnMut(&Plan, &str) -> PersistFuture + Send),
 ) -> Result<Vec<(String, ToolResult)>>
 where
     R: FnMut(PlanCall) -> F + Send,
@@ -1633,7 +1686,7 @@ where
                 if !plan.unresolved_inputs.contains(&line) {
                     plan.unresolved_inputs.push(line);
                 }
-                persist(plan, "binding inputs")?;
+                persist(plan, "binding inputs").await?;
                 index += 1;
                 continue;
             }
@@ -1656,7 +1709,7 @@ where
             if !plan.unresolved_inputs.contains(&line) {
                 plan.unresolved_inputs.push(line);
             }
-            persist(plan, "binding inputs")?;
+            persist(plan, "binding inputs").await?;
             index += 1;
             continue;
         }
@@ -1695,20 +1748,20 @@ where
             }
         }
         let label = format!("running {}", step.tool_id);
-        sync_budget(plan, env.gate);
+        sync_budget(plan, env.gate).await;
         if let Some(clock) = env.gate.clock() {
             clock.lock().unwrap().begin_tools();
         }
         publish(env.gate, plan, progress);
         stage(progress, &label);
         refresh_unresolved(plan);
-        persist(plan, &label)?;
+        persist(plan, &label).await?;
         let call = plan.calls[index].clone();
         let outcome = match runner(call).await {
             Ok(outcome) => outcome,
             Err(err) if cancelled(&err) || env.cancel.load(Ordering::Relaxed) => {
                 plan.calls[index].status = "cancelled".into();
-                persist(plan, "cancelled")?;
+                persist(plan, "cancelled").await?;
                 return Err(err);
             }
             // One step's dispatch error fails that step, not the turn.
@@ -1724,7 +1777,7 @@ where
                     google_fallback(plan, env, index, "Firecrawl search failed to dispatch");
                 }
                 after_step(plan, env, picker, index, false, &mut fallback_for, progress).await?;
-                persist(plan, "running tools")?;
+                persist(plan, "running tools").await?;
                 index += 1;
                 continue;
             }
@@ -1760,7 +1813,7 @@ where
                 plan.calls[index].call_id = call_id.clone();
                 if result.status == "cancelled" || env.cancel.load(Ordering::Relaxed) {
                     plan.calls[index].status = "cancelled".into();
-                    persist(plan, "cancelled")?;
+                    persist(plan, "cancelled").await?;
                     return Err(anyhow!("cancelled"));
                 }
                 let ok = usable(&result.status);
@@ -1851,7 +1904,7 @@ where
             }
         }
         refresh_unresolved(plan);
-        persist(plan, "running tools")?;
+        persist(plan, "running tools").await?;
         index += 1;
     }
     // Every step was visited; anything still pending could not be bound.
@@ -2357,10 +2410,8 @@ fn expand_dork_children(
         record_grounding(plan, &step_id, &grounds);
     }
 
-    let mut insert_pos = index + 1;
-    for child in children {
+    for (insert_pos, child) in (index + 1..).zip(children) {
         plan.calls.insert(insert_pos, child);
-        insert_pos += 1;
     }
 }
 
@@ -2761,7 +2812,104 @@ async fn classify_turn_mode(
 /// Text Brain recall plus entity-linked insights for one turn. The bool is true when
 /// Brain context is thin (fewer than two solid text hits). The summary lists resource
 /// types and URLs linked to those hits when any exist.
-pub(crate) fn recall_for_turn(
+pub(crate) async fn recall_for_turn(
+    store: &ReconStore,
+    thread_id: &str,
+    question: &str,
+    mode: &str,
+    run_id: &str,
+) -> Result<(Vec<super::RecallInsight>, bool, BrainResourceSummary)> {
+    // SurrealDB: vector recall (DISKANN, lexical top-up; the full-text
+    // stopgap without a served embedding generation) over the same 20
+    // candidates, admission policy, five-memory cap, thin-Brain test and
+    // resource summary as SQLite, and the same recall_query telemetry row.
+    #[cfg(feature = "surreal")]
+    if let Some(repo) = store.repository() {
+        let embedder = crate::storage::vectors::Embedder::local();
+        let hits = crate::storage::recon_extract::recall_candidates_for_turn(
+            repo,
+            thread_id,
+            question,
+            embedder.as_ref(),
+            20,
+            usize::MAX,
+        )
+        .await?;
+        let unfamiliar = super::scores_are_thin(hits.iter().map(|hit| hit.score));
+        let candidates = hits.len();
+        let query = crate::brain_query::BrainQuery {
+            current_question: question.to_string(),
+            confirmed_subjects: store
+                .thread_entities(thread_id)
+                .await?
+                .into_iter()
+                .map(|e| e.1)
+                .collect(),
+            candidate_limit: 20,
+            token_budget: 1500,
+            ..Default::default()
+        };
+        let policy = crate::brain_query::AdmissionPolicy {
+            strict_mode: true,
+            allow_background: false,
+        };
+        let subject = super::question_subject(question);
+        let mut recalled: Vec<super::RecallInsight> = Vec::new();
+        for hit in hits {
+            if recalled.len() >= 5 {
+                break;
+            }
+            if !crate::brain_query::admit_text(&query, &hit.text, &policy)
+                || recalled.iter().any(|item| item.memory_id == hit.id)
+            {
+                continue;
+            }
+            recalled.push(super::RecallInsight {
+                memory_id: hit.id,
+                text: hit.text,
+                entity: subject.clone(),
+                predicate: "memory".into(),
+                updated_at: String::new(),
+                evidence_count: 0,
+            });
+        }
+        let mut found = std::collections::HashMap::new();
+        for item in &recalled {
+            found.insert(
+                item.memory_id.clone(),
+                (
+                    crate::storage::insight_views::insight_for_memory(repo, &item.memory_id)
+                        .await?,
+                    crate::storage::browse::get_memory(repo, &item.memory_id).await?,
+                ),
+            );
+        }
+        let resources = brain_resources::summarize_with(&recalled, question, |id| {
+            Ok(found.remove(id).unwrap_or((None, None)))
+        })?;
+        let accepted = recalled.len();
+        let facts = brain_resources::RecallQueryFacts {
+            candidates,
+            accepted,
+            rejection_reason: brain_resources::recall_gate_rejection(
+                candidates,
+                accepted,
+                candidates.saturating_sub(accepted),
+            ),
+            mode: mode.to_string(),
+            run_id: run_id.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let event = brain_resources::recall_query_event(&facts);
+        let _ = crate::storage::telemetry::record(repo.db(), &event).await;
+        return Ok((recalled, unfamiliar, resources));
+    }
+    store.sqlite("recall", |s| {
+        recall_sqlite(s, thread_id, question, mode, run_id)
+    })
+}
+
+fn recall_sqlite(
     store: &Store,
     thread_id: &str,
     question: &str,
@@ -2842,8 +2990,8 @@ pub(crate) fn recall_for_turn(
 }
 
 /// The latest earlier assistant message, compacted for the next turn's prompts.
-pub(crate) fn previous_synthesis(store: &Store, thread_id: &str) -> Result<String> {
-    let messages = store.list_messages(thread_id)?;
+pub(crate) async fn previous_synthesis(store: &ReconStore, thread_id: &str) -> Result<String> {
+    let messages = store.list_messages(thread_id).await?;
     let Some(latest) = messages
         .iter()
         .rev()
@@ -2872,8 +3020,13 @@ pub(crate) fn previous_synthesis(store: &Store, thread_id: &str) -> Result<Strin
             .prompt_version()
             .into(),
     };
-    if let Ok(Some(hit)) = crate::summarization::cache_get(&store.conn, &req) {
-        return Ok(hit.content);
+    // SurrealDB reads its cache through `publish_selected` below.
+    if !store.is_surreal() {
+        if let Ok(Some(hit)) = store.sqlite("summary cache", |s| {
+            crate::summarization::cache_get(&s.conn, &req)
+        }) {
+            return Ok(hit.content);
+        }
     }
     let content = if crate::nlp::configured_mode() == crate::nlp::Mode::Select {
         latest.content.clone()
@@ -2881,8 +3034,12 @@ pub(crate) fn previous_synthesis(store: &Store, thread_id: &str) -> Result<Strin
         compact_prior_synthesis(&latest.content)
     };
     let det = crate::summarization::deterministic_follow_up(&content, PRIOR_SYNTHESIS_CHARS);
-    let published =
-        crate::summarization::publish_deterministic_and_enqueue(&store.conn, &req, det)?;
+    if let Some(published) = crate::summarization::publish_selected(&req, det.clone()) {
+        return Ok(published.content);
+    }
+    let published = store.sqlite("summary cache", |s| {
+        crate::summarization::publish_deterministic_and_enqueue(&s.conn, &req, det)
+    })?;
     Ok(published.content)
 }
 
@@ -3071,12 +3228,12 @@ fn derived_note(count: usize, repair: Option<&str>) -> String {
 
 /// The thread's established subject: the directive entities of the latest earlier run
 /// whose plan has any.
-pub(crate) fn thread_subject(
-    store: &Store,
+pub(crate) async fn thread_subject(
+    store: &ReconStore,
     thread_id: &str,
     current_run: &str,
 ) -> Result<Vec<String>> {
-    for run in store.runs_for_thread(thread_id)?.into_iter().rev() {
+    for run in store.runs_for_thread(thread_id).await?.into_iter().rev() {
         if run.id == current_run {
             continue;
         }
@@ -3141,10 +3298,14 @@ async fn opening_discovery(
         "firecrawl_yandex_search",
         "firecrawl_mojeek_search",
     ];
-    let store = Store::open(&service.db_path)?;
-    let any_enabled = engines
-        .iter()
-        .any(|tool| store.tool_enabled(tool).unwrap_or(false));
+    let store = ReconStore::open(&service.db_path).await?;
+    let mut any_enabled = false;
+    for tool in engines {
+        if store.tool_enabled(tool).await.unwrap_or(false) {
+            any_enabled = true;
+            break;
+        }
+    }
     drop(store);
     if !any_enabled || service.provider_keys().firecrawl.trim().is_empty() {
         return Ok((
@@ -3489,11 +3650,11 @@ fn hypothesis_view(record: &investigation::HypothesisRecord) -> HypothesisView {
     }
 }
 
-fn enabled_tools(db: &std::path::Path) -> Result<HashSet<String>> {
-    let store = Store::open(db)?;
+async fn enabled_tools(db: &std::path::Path) -> Result<HashSet<String>> {
+    let store = ReconStore::open(db).await?;
     let mut ids = HashSet::new();
     for tool in crate::osint::registry() {
-        if store.tool_enabled(tool.id)? {
+        if store.tool_enabled(tool.id).await? {
             ids.insert(tool.id.to_string());
         }
     }
@@ -3501,14 +3662,14 @@ fn enabled_tools(db: &std::path::Path) -> Result<HashSet<String>> {
 }
 
 #[allow(dead_code)]
-fn note_cache(
+async fn note_cache(
     service: &super::Service,
     actions: &mut [investigation::ProposedAction],
 ) -> Result<()> {
-    let store = Store::open(&service.db_path)?;
+    let store = ReconStore::open(&service.db_path).await?;
     for action in actions.iter_mut() {
         let key = crate::osint::cache_identity(&action.tool_id, &action.arguments);
-        if store.cache_get(&key)?.is_some() {
+        if store.cache_get(&key).await?.is_some() {
             action.cache_available = true;
             action.credit_cost = 0;
             if !action.rank_reason.contains("cached") {
@@ -3529,14 +3690,14 @@ fn note_cache(
 }
 
 #[allow(dead_code)]
-fn credit_map(service: &super::Service) -> Result<HashMap<String, u32>> {
-    let store = Store::open(&service.db_path)?;
+async fn credit_map(service: &super::Service) -> Result<HashMap<String, u32>> {
+    let store = ReconStore::open(&service.db_path).await?;
     let limits = &service.settings.recon_limits;
     let mut map = HashMap::new();
     for provider_name in ["firecrawl", "hunter", "sociavault"] {
         map.insert(
             provider_name.into(),
-            store.credits_available(provider_name, limits)?,
+            store.credits_available(provider_name, limits).await?,
         );
     }
     Ok(map)
@@ -3743,43 +3904,46 @@ fn publish(gate: &ModelGate, plan: &mut Plan, _progress: &mut impl FnMut(super::
     drop(clock);
 }
 
-fn sync_budget(plan: &Plan, gate: &ModelGate) {
+async fn sync_budget(plan: &Plan, gate: &ModelGate) {
     let Some(clock) = gate.clock() else {
         return;
     };
-    let store = gate.db().and_then(|path| Store::open(&path).ok());
+    let store = match gate.db() {
+        Some(path) => ReconStore::open(&path).await.ok(),
+        None => None,
+    };
     let sequential = plan.calls.iter().any(|call| !call.depends_on.is_empty());
-    let calls = plan
+    let mut calls = Vec::new();
+    for call in plan
         .calls
         .iter()
         .filter(|call| !call.tool_id.is_empty())
         .filter(|call| !matches!(call.status.as_str(), "deferred" | "skipped" | "cancelled"))
-        .map(|call| {
-            let cached = store
-                .as_ref()
-                .and_then(|store| {
-                    let key = crate::osint::cache_identity(&call.tool_id, &call.arguments);
-                    store.cache_get(&key).ok().flatten()
-                })
-                .is_some();
-            super::budget::scheduled(&call.tool_id, cached)
-        })
-        .collect();
+    {
+        let cached = match &store {
+            Some(store) => {
+                let key = crate::osint::cache_identity(&call.tool_id, &call.arguments);
+                store.cache_get(&key).await.ok().flatten().is_some()
+            }
+            None => false,
+        };
+        calls.push(super::budget::scheduled(&call.tool_id, cached));
+    }
     clock
         .lock()
         .unwrap()
         .raise_calls_with_deps(calls, sequential);
 }
 
-fn call_cached(gate: &ModelGate, call: &PlanCall) -> bool {
+async fn call_cached(gate: &ModelGate, call: &PlanCall) -> bool {
     let Some(path) = gate.db() else {
         return false;
     };
-    let Ok(store) = Store::open(&path) else {
+    let Ok(store) = ReconStore::open(&path).await else {
         return false;
     };
     let key = crate::osint::cache_identity(&call.tool_id, &call.arguments);
-    store.cache_get(&key).ok().flatten().is_some()
+    store.cache_get(&key).await.ok().flatten().is_some()
 }
 
 /// Stops further Recon model calls in a turn after a provider rate limit, so the rule
@@ -3857,7 +4021,7 @@ async fn model_json(
         cancel,
         None,
         None,
-        db_path.as_deref(),
+        db_path.as_deref().and_then(sqlite_path),
         true,
     )
     .await;
@@ -3904,7 +4068,7 @@ mod tests {
             )
             .unwrap();
         let (recalled, _, _) =
-            recall_for_turn(&store, "no-thread", "northwind ferry timetable", "", "").unwrap();
+            recall_sqlite(&store, "no-thread", "northwind ferry timetable", "", "").unwrap();
         assert!(recalled.iter().any(|item| item.memory_id == memory.id));
         assert!(dir.path().join("memory_lancedb").is_dir());
     }
@@ -4914,7 +5078,7 @@ mod tests {
                 progress_log.push(stage);
             }
         };
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         let results = execute_steps(
             &mut plan,
             &env,
@@ -5053,7 +5217,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         execute_steps(
             &mut plan,
             &env,
@@ -5126,7 +5290,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         let outcome = execute_steps(
             &mut plan,
             &env,
@@ -5339,7 +5503,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         execute_steps(
             &mut plan,
             &env,
@@ -5495,7 +5659,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         execute_steps(
             &mut plan,
             &env,
@@ -5765,7 +5929,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         let results = execute_steps(
             &mut plan,
             &env,
@@ -5907,7 +6071,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         execute_steps(
             &mut plan,
             &env,
@@ -5998,7 +6162,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         let results = execute_steps(
             &mut plan,
             &env,
@@ -6149,7 +6313,7 @@ mod tests {
             async move { Ok(StepOutcome::Ran(id, Box::new(outcome))) }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         ground_fixtures(plan);
         execute_steps(
             plan,
@@ -6873,6 +7037,20 @@ mod tests {
         );
     }
 
+    /// Run a store future from a synchronous test.
+    fn block<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    /// The SQLite Recon store at a test's database directory.
+    fn recon_at(dir: &std::path::Path) -> ReconStore {
+        ReconStore::from_sqlite(Store::open(&dir.join("argos.db")).unwrap())
+    }
+
     /// AC7: a pronoun follow-up takes its entities from the thread subject.
     #[test]
     fn ac7_a_pronoun_follow_up_takes_the_thread_subject() {
@@ -6899,7 +7077,7 @@ mod tests {
         let run2 = store
             .new_run(&thread.id, &second.id, "local / m", "local / m")
             .unwrap();
-        let subject = thread_subject(&store, &thread.id, &run2.id).unwrap();
+        let subject = block(thread_subject(&recon_at(dir.path()), &thread.id, &run2.id)).unwrap();
         assert_eq!(subject, ["Elon Musk"]);
         assert!(investigation::refers_back(follow));
         assert_eq!(
@@ -6946,9 +7124,11 @@ mod tests {
             ["8.8.8.8"]
         );
         // The first turn of a thread has no subject.
-        assert!(thread_subject(&store, &thread.id, &run1.id)
-            .unwrap()
-            .is_empty());
+        assert!(
+            block(thread_subject(&recon_at(dir.path()), &thread.id, &run1.id))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A follow-up keeps names the previous synthesis established, and the directive
@@ -6999,7 +7179,7 @@ mod tests {
         store
             .add_message(&thread.id, "assistant", prior, None)
             .unwrap();
-        let loaded = previous_synthesis(&store, &thread.id).unwrap();
+        let loaded = block(previous_synthesis(&recon_at(dir.path()), &thread.id)).unwrap();
         assert_eq!(loaded, prior);
         let user = directive_user(&DirectivePrompt {
             question: follow,
@@ -7022,7 +7202,7 @@ mod tests {
         store
             .add_message(&thread.id, "assistant", &long, None)
             .unwrap();
-        let compact = previous_synthesis(&store, &thread.id).unwrap();
+        let compact = block(previous_synthesis(&recon_at(dir.path()), &thread.id)).unwrap();
         assert!(compact.contains("Donald Trump"));
         assert!(compact.contains("D1: Met"));
         assert!(!compact.contains("[call-"));
@@ -7434,7 +7614,7 @@ mod tests {
             async move { Ok(StepOutcome::Ran(id, Box::new(outcome))) }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         let results = execute_steps(
             &mut plan,
             &env,
@@ -8722,7 +8902,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         let results = execute_steps(
             &mut plan,
             &env,
@@ -9076,7 +9256,7 @@ mod tests {
             }
         };
         let mut progress = |_: super::super::TurnEvent| {};
-        let mut persist = |_: &Plan, _: &str| Ok(());
+        let mut persist = |_: &Plan, _: &str| -> PersistFuture { Box::pin(async { Ok(()) }) };
         let outcome = execute_steps(
             &mut plan,
             &env,

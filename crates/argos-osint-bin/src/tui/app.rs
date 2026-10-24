@@ -1,5 +1,8 @@
 //! App state and keyboard routing for the Argos terminal shell.
 
+use super::surreal_brain;
+use super::surreal_profile;
+use super::surreal_recon;
 use super::tracked;
 use super::ui::nudge;
 use anyhow::Result;
@@ -788,6 +791,16 @@ enum DashboardSnapshot {
 
 #[derive(Debug)]
 enum WorkEvent {
+    /// A Recon write on the repository finished (`surreal_recon`).
+    ReconWritten {
+        what: &'static str,
+        outcome: Result<(), String>,
+    },
+    /// A Recon thread was created on the repository (`surreal_recon`).
+    ReconThreadCreated {
+        then: surreal_recon::Then,
+        outcome: Result<recon::Thread, String>,
+    },
     LogsCleared {
         outcome: Result<usize, String>,
     },
@@ -864,6 +877,10 @@ enum WorkEvent {
         run_id: String,
         outcome: Result<bool, String>,
     },
+    MemoryGraphChecked {
+        id: String,
+        outcome: Result<Option<argos_osint_core::memory_metadata::MemoryKind>, String>,
+    },
     TopologyLoaded {
         generation: u64,
         seed: argos_osint_core::brain_topology::TopologySeed,
@@ -881,6 +898,12 @@ enum WorkEvent {
         filters: argos_osint_core::profile_stats::StatFilters,
         outcome: Result<Box<argos_osint_core::profile_stats::ProfileSnapshot>, String>,
         options: Vec<(String, Vec<String>)>,
+    },
+    /// A Profile attention action's run lookup on SurrealDB: the run's
+    /// thread, or `None` when the run is gone.
+    ProfileRunOwner {
+        run_id: String,
+        outcome: Result<Option<String>, String>,
     },
     ReconStage {
         thread_id: String,
@@ -1419,19 +1442,34 @@ impl App {
         // Finish any configuration commit a previous process left half applied.
         let _ = argos_osint_core::config_commit::recover_at_startup();
         let store = Store::open_ui(&paths::db_path())?;
-        store.recover_runs()?;
-        let threads = Vec::new();
-        let thread_states = HashMap::new();
-        let selected_thread = store.last_thread()?;
-        let messages = Vec::new();
-        let draft = selected_thread
+        // Under a storage config Recon reads only the repository (once,
+        // before the event loop); the SQLite Recon tables are not touched.
+        let surreal_boot = if surreal_recon::on() {
+            Some(surreal_recon::boot()?)
+        } else {
+            store.recover_runs()?;
+            None
+        };
+        let threads = surreal_boot
             .as_ref()
-            .and_then(|id| store.get_thread(id).ok().flatten())
-            .map(|t| t.draft)
+            .map(|boot| boot.threads.clone())
             .unwrap_or_default();
-        let chat_scroll = selected_thread
+        let thread_states = HashMap::new();
+        let selected_thread = match &surreal_boot {
+            Some(boot) => boot.last_thread.clone(),
+            None => store.last_thread()?,
+        };
+        let messages = Vec::new();
+        let boot_thread = selected_thread.as_ref().and_then(|id| match &surreal_boot {
+            Some(boot) => boot.threads.iter().find(|t| &t.id == id).cloned(),
+            None => store.get_thread(id).ok().flatten(),
+        });
+        let draft = boot_thread
             .as_ref()
-            .and_then(|id| store.get_thread(id).ok().flatten())
+            .map(|t| t.draft.clone())
+            .unwrap_or_default();
+        let chat_scroll = boot_thread
+            .as_ref()
             .map(|t| t.scroll.max(0) as usize)
             .unwrap_or_default();
         let calls = Vec::new();
@@ -1440,10 +1478,13 @@ impl App {
         let osint_result = manual_runs
             .get(manual_run_pos)
             .and_then(|call| call.result.clone().map(|result| (call.id.clone(), result)));
-        let tool_enabled = osint::registry()
-            .iter()
-            .map(|tool| store.tool_enabled(tool.id))
-            .collect::<Result<Vec<_>>>()?;
+        let tool_enabled = match surreal_boot {
+            Some(boot) => boot.tool_enabled,
+            None => osint::registry()
+                .iter()
+                .map(|tool| store.tool_enabled(tool.id))
+                .collect::<Result<Vec<_>>>()?,
+        };
         let memories = Vec::new();
         let memory_total = 0;
         let auth = AuthFile::load()?;
@@ -1812,7 +1853,14 @@ impl App {
         let text = text.into();
         let detail = detail.into();
         let event = super::logs::session_event(level, &text, &detail);
-        if self.store.record_event(&event).is_ok() && level == "error" {
+        // Under a storage config the line goes to the repository's
+        // `argos_event` (ordered, off the UI thread); SQLite is not written.
+        let recorded = if surreal_brain::on() {
+            surreal_brain::record_log(event)
+        } else {
+            self.store.record_event(&event).is_ok()
+        };
+        if recorded && level == "error" {
             self.logs.counts.error += 1;
         }
         if self.module == Some(ModuleId::Logs) {
@@ -1831,7 +1879,11 @@ impl App {
         }
         let first = self.dashboards_at.is_none() && !self.logs.loaded;
         self.dashboards_at = Some(Instant::now());
-        if first && self.background_db.is_none() {
+        if first && surreal_brain::on() {
+            std::thread::spawn(|| {
+                let _ = surreal_brain::prune_logs(super::logs::RETENTION_HOURS);
+            });
+        } else if first && self.background_db.is_none() {
             let _ = self.store.prune_events(super::logs::RETENTION_HOURS);
         }
         if self.module == Some(ModuleId::Intel) && self.intel_page == IntelPage::Briefing {
@@ -1842,7 +1894,7 @@ impl App {
             Some(ModuleId::Jobs) => self.reload_jobs(),
             Some(ModuleId::System) => self.reload_profile(),
             _ => {
-                if self.background_db.is_some() {
+                if self.background_db.is_some() || surreal_brain::on() {
                     self.request_dashboard_snapshot();
                 } else {
                     self.logs.refresh_counts(&self.store);
@@ -1868,6 +1920,24 @@ impl App {
         let generation = self.profile.generation;
         let filters = self.profile.filters.clone();
         let tx = self.work_tx.clone();
+        if surreal_profile::on() {
+            // Under a storage config the snapshot and its filter options come
+            // from the repository on this worker (never the SQLite store);
+            // `ProfileLoaded` drops a stale generation or filter set.
+            std::thread::spawn(move || {
+                let (outcome, options) = match surreal_profile::dashboard(&filters) {
+                    Ok((snapshot, options)) => (Ok(Box::new(snapshot)), options),
+                    Err(err) => (Err(format!("{err:#}")), Vec::new()),
+                };
+                let _ = tx.send(WorkEvent::ProfileLoaded {
+                    generation,
+                    filters,
+                    outcome,
+                    options,
+                });
+            });
+            return;
+        }
         let db = paths::db_path();
         std::thread::spawn(move || {
             let (outcome, options) = match Store::open_profile_reader(&db) {
@@ -1889,8 +1959,34 @@ impl App {
         });
     }
 
+    /// Look up a Profile attention item's run on the repository, on a plain
+    /// worker thread. Only the newest lookup is kept.
+    pub(crate) fn lookup_run_owner(&mut self, run_id: String) {
+        self.profile.pending_run_owner = Some(run_id.clone());
+        self.status = "Opening investigation…".into();
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = surreal_profile::run_thread(&run_id).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::ProfileRunOwner { run_id, outcome });
+        });
+    }
+
+    /// The run lookup finished: open its thread only while the System screen
+    /// is still showing and this is the newest lookup (a late result is
+    /// dropped).
+    fn on_profile_run_owner(&mut self, run_id: String, outcome: Result<Option<String>, String>) {
+        if self.profile.pending_run_owner.as_deref() != Some(run_id.as_str()) {
+            return;
+        }
+        self.profile.pending_run_owner = None;
+        if self.module != Some(ModuleId::System) {
+            return;
+        }
+        super::profile::open_run_thread(self, outcome);
+    }
+
     pub(crate) fn reload_logs(&mut self) {
-        if self.background_db.is_some() {
+        if self.background_db.is_some() || surreal_brain::on() {
             self.request_dashboard_snapshot();
             return;
         }
@@ -1907,8 +2003,14 @@ impl App {
         }
     }
 
+    /// Jobs reads run off the UI thread: on a background SQLite reader, or
+    /// on the SurrealDB repository under a storage config (never both).
+    fn jobs_async(&self) -> bool {
+        self.background_db.is_some() || surreal_brain::on()
+    }
+
     pub(crate) fn reload_jobs(&mut self) {
-        if self.background_db.is_some() {
+        if self.jobs_async() {
             self.request_dashboard_snapshot();
             return;
         }
@@ -1932,6 +2034,37 @@ impl App {
 
     fn request_dashboard_snapshot(&mut self) {
         if self.dashboard_reading {
+            return;
+        }
+        if surreal_brain::on() {
+            // Jobs, Logs and the header counts read only the repository.
+            self.dashboard_reading = true;
+            let module = self.module;
+            let key = self.dashboard_read_key();
+            let mut jobs = self.jobs.clone();
+            let mut logs = self.logs.clone();
+            let pending_job = self.pending_job.clone();
+            let tx = self.work_tx.clone();
+            std::thread::spawn(move || {
+                let outcome = match module {
+                    Some(ModuleId::Jobs) => {
+                        surreal_brain::load_jobs(&mut jobs, pending_job.as_deref());
+                        Ok(Box::new(DashboardSnapshot::Jobs(Box::new(jobs))))
+                    }
+                    Some(ModuleId::Logs) => {
+                        surreal_brain::load_logs(&mut logs);
+                        Ok(Box::new(DashboardSnapshot::Logs(Box::new(logs))))
+                    }
+                    _ => surreal_brain::log_counts()
+                        .map(|counts| Box::new(DashboardSnapshot::Counts(counts)))
+                        .map_err(|e| e.to_string()),
+                };
+                let _ = tx.send(WorkEvent::DashboardLoaded {
+                    module,
+                    key,
+                    outcome,
+                });
+            });
             return;
         }
         let Some(db) = self.background_db.clone() else {
@@ -1991,7 +2124,7 @@ impl App {
 
     /// Logs → Jobs for a job id (selected event's job, or the return path).
     fn open_job(&mut self, id: &str) -> Result<String> {
-        if self.background_db.is_some() {
+        if self.jobs_async() {
             self.pending_job = Some(id.into());
             self.select(ModuleId::Jobs.index());
             return Ok(format!("Loading job {}…", super::logs::short_id(id)));
@@ -2321,7 +2454,7 @@ impl App {
     /// Reopens the most recently closed tab
     pub fn reopen_closed_tab(&mut self) -> Result<()> {
         while let Some(thread_id) = self.tab_recently_closed.pop() {
-            if self.store.get_thread(&thread_id).ok().flatten().is_some() {
+            if self.recon_thread(&thread_id).is_some() {
                 self.open_investigation_tab(&thread_id)?;
                 self.enter_investigation(&thread_id)?;
                 self.status = "Investigation tab reopened".into();
@@ -2378,7 +2511,7 @@ impl App {
                     let valid_tabs: Vec<String> = state
                         .open_thread_ids
                         .into_iter()
-                        .filter(|id| self.store.get_thread(id).ok().flatten().is_some())
+                        .filter(|id| self.recon_thread(id).is_some())
                         .collect();
                     self.tab_ids = valid_tabs;
                     self.tab_recently_closed = state.recently_closed;
@@ -2497,6 +2630,10 @@ impl App {
         };
 
         // Atomic persistence: create thread
+        if surreal_recon::on() {
+            self.spawn_new_thread(title, None, surreal_recon::Then::Launch { question });
+            return Ok(());
+        }
         let thread = match self.store.new_thread(&title) {
             Ok(t) => t,
             Err(e) => {
@@ -2723,21 +2860,17 @@ impl App {
             "prev-tab" => {
                 let _ = self.prev_tab();
             }
-            "close-tab" => {
-                if self.tab_sel > 0 {
-                    let _ = self.close_tab(self.tab_sel);
-                }
+            "close-tab" if self.tab_sel > 0 => {
+                let _ = self.close_tab(self.tab_sel);
             }
             "reopen-tab" => {
                 let _ = self.reopen_closed_tab();
             }
-            "rename-investigation" => {
-                if self.selected_thread.is_some() {
-                    self.recon_chat = false;
-                    self.input = ":rename ".into();
-                    self.cursor = 8;
-                    self.set_focus(Target::Field(FieldId::Composer));
-                }
+            "rename-investigation" if self.selected_thread.is_some() => {
+                self.recon_chat = false;
+                self.input = ":rename ".into();
+                self.cursor = 8;
+                self.set_focus(Target::Field(FieldId::Composer));
             }
             "sessions" => {
                 self.module = Some(ModuleId::Recon);
@@ -2900,31 +3033,46 @@ impl App {
             "trace" => {
                 self.input.clear();
                 let id = self.selected_thread.clone().unwrap_or_default();
-                let count = self
-                    .store
-                    .list_investigation_events(&id)
-                    .map(|e| e.len())
-                    .unwrap_or(0);
+                let count = if surreal_recon::on() {
+                    surreal_recon::investigation_counts(&id)
+                        .map(|c| c.events)
+                        .unwrap_or(0)
+                } else {
+                    self.store
+                        .list_investigation_events(&id)
+                        .map(|e| e.len())
+                        .unwrap_or(0)
+                };
                 Ok(format!("Trace: {count} events logged"))
             }
             "directives" => {
                 self.input.clear();
                 let id = self.selected_thread.clone().unwrap_or_default();
-                let count = self
-                    .store
-                    .list_investigation_tasks(&id)
-                    .map(|t| t.len())
-                    .unwrap_or(0);
+                let count = if surreal_recon::on() {
+                    surreal_recon::investigation_counts(&id)
+                        .map(|c| c.tasks)
+                        .unwrap_or(0)
+                } else {
+                    self.store
+                        .list_investigation_tasks(&id)
+                        .map(|e| e.len())
+                        .unwrap_or(0)
+                };
                 Ok(format!("Directives / tasks: {count}"))
             }
             "evidence" => {
                 self.input.clear();
                 let id = self.selected_thread.clone().unwrap_or_default();
-                let count = self
-                    .store
-                    .list_evidence_passages(&id)
-                    .map(|p| p.len())
-                    .unwrap_or(0);
+                let count = if surreal_recon::on() {
+                    surreal_recon::investigation_counts(&id)
+                        .map(|c| c.passages)
+                        .unwrap_or(0)
+                } else {
+                    self.store
+                        .list_evidence_passages(&id)
+                        .map(|e| e.len())
+                        .unwrap_or(0)
+                };
                 Ok(format!("Evidence passages: {count}"))
             }
             "brain" | "atlas" | "osint" | "providers" | "tools" | "models" | "jobs" | "logs"
@@ -3154,7 +3302,7 @@ impl App {
             self.input = self
                 .selected_thread
                 .as_ref()
-                .and_then(|id| self.store.get_thread(id).ok().flatten())
+                .and_then(|id| self.recon_thread(id))
                 .map(|t| t.draft)
                 .unwrap_or_default();
         } else {
@@ -3399,7 +3547,139 @@ impl App {
         };
     }
 
+    /// A Recon thread: from the repository's thread list under a storage
+    /// config (no store read on the UI thread), otherwise from SQLite.
+    fn recon_thread(&self, id: &str) -> Option<recon::Thread> {
+        if surreal_recon::on() {
+            return self.threads.iter().find(|t| t.id == id).cloned();
+        }
+        self.store.get_thread(id).ok().flatten()
+    }
+
+    /// Store the thread's draft and chat scroll (on a worker under a
+    /// storage config).
+    fn save_thread_draft(&mut self, id: &str, draft: String) -> Result<()> {
+        let scroll = i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX);
+        if surreal_recon::on() {
+            if let Some(thread) = self.threads.iter_mut().find(|t| t.id == id) {
+                thread.draft = draft.clone();
+                thread.scroll = scroll;
+            }
+            let id = id.to_string();
+            self.spawn_recon_write_quiet("save the draft", move || {
+                surreal_recon::save_draft(&id, &draft, scroll)
+            });
+            return Ok(());
+        }
+        self.store.save_draft(id, &draft, scroll)
+    }
+
+    /// Run a Recon write on a worker; the result comes back as
+    /// `WorkEvent::ReconWritten` and refreshes the thread list.
+    fn spawn_recon_write(
+        &self,
+        what: &'static str,
+        f: impl FnOnce() -> Result<()> + Send + 'static,
+    ) {
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = f().map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::ReconWritten { what, outcome });
+        });
+    }
+
+    /// As [`Self::spawn_recon_write`], but only failures are reported.
+    fn spawn_recon_write_quiet(
+        &self,
+        what: &'static str,
+        f: impl FnOnce() -> Result<()> + Send + 'static,
+    ) {
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = f() {
+                let _ = tx.send(WorkEvent::ReconWritten {
+                    what,
+                    outcome: Err(format!("{e:#}")),
+                });
+            }
+        });
+    }
+
+    /// Create a Recon thread on a worker (attaching `call` when given);
+    /// [`Self::finish_new_thread`] continues on the UI thread.
+    fn spawn_new_thread(&mut self, title: String, call: Option<String>, then: surreal_recon::Then) {
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome =
+                surreal_recon::new_thread(&title, call.as_deref()).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::ReconThreadCreated { then, outcome });
+        });
+    }
+
+    fn finish_new_thread(
+        &mut self,
+        then: surreal_recon::Then,
+        outcome: Result<recon::Thread, String>,
+    ) {
+        let thread = match outcome {
+            Ok(thread) => thread,
+            Err(error) => {
+                if matches!(then, surreal_recon::Then::Launch { .. }) {
+                    self.home_draft_submitting = false;
+                    self.launch_state = LaunchState::RecoverableFailure;
+                }
+                self.status = format!("Could not create the investigation: {error}");
+                return;
+            }
+        };
+        self.threads.insert(0, thread.clone());
+        self.thread_sel = 0;
+        let result = match then {
+            surreal_recon::Then::Open => self.enter_investigation(&thread.id).map(|_| {
+                self.input.clear();
+                self.set_focus(Target::Field(FieldId::Composer));
+                "New investigation".to_string()
+            }),
+            surreal_recon::Then::Attached => self
+                .enter_investigation(&thread.id)
+                .map(|_| "Recon started from result".to_string()),
+            surreal_recon::Then::Launch { question } => {
+                let _ = self.open_investigation_tab(&thread.id);
+                self.clear_home_draft();
+                if self.module == Some(ModuleId::System) && self.overlay == Overlay::Configs {
+                    self.overlay = Overlay::None;
+                }
+                self.home_draft_submitting = false;
+                self.launch_state = LaunchState::Accepted;
+                let entered = if self.module.is_none() {
+                    self.enter_investigation(&thread.id)
+                } else {
+                    self.status = "Investigation started — Open".into();
+                    Ok(())
+                };
+                entered
+                    .and_then(|_| self.send_recon_query(&thread.id, &question))
+                    .map(|_| self.status.clone())
+            }
+        };
+        self.report(result);
+    }
+
     fn refresh_threads(&mut self) -> Result<()> {
+        if surreal_recon::on() {
+            if self.threads_reading {
+                self.threads_pending = true;
+                return Ok(());
+            }
+            self.threads_reading = true;
+            let query = self.recon_search.clone();
+            let tx = self.work_tx.clone();
+            std::thread::spawn(move || {
+                let outcome = surreal_recon::threads(&query).map_err(|e| format!("{e:#}"));
+                let _ = tx.send(WorkEvent::ThreadsLoaded { query, outcome });
+            });
+            return Ok(());
+        }
         if let Some(db) = self.background_db.clone() {
             if self.threads_reading {
                 self.threads_pending = true;
@@ -3462,9 +3742,12 @@ impl App {
         let generation = self.brain_generation;
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_profile_reader(&db)
-                .and_then(|store| store.insight_for_memory(&id))
-                .map_err(|e| e.to_string());
+            let outcome = if surreal_brain::on() {
+                surreal_brain::preview(&id)
+            } else {
+                Store::open_profile_reader(&db).and_then(|store| store.insight_for_memory(&id))
+            }
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::BrainPreviewLoaded {
                 generation,
                 memory_id: id,
@@ -3591,22 +3874,38 @@ impl App {
 
     fn open_thread_with_history(&mut self, id: &str, record: bool) -> Result<()> {
         if self.module == Some(ModuleId::Recon) {
-            if let Some(previous) = &self.selected_thread {
-                self.store.save_draft(
-                    previous,
-                    &self.input,
-                    i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX),
-                )?;
+            if let Some(previous) = self.selected_thread.clone() {
+                self.save_thread_draft(&previous, self.input.clone())?;
                 self.draft_dirty = false;
             }
         }
-        let thread = self
-            .store
-            .get_thread(id)?
-            .ok_or_else(|| anyhow::anyhow!("Thread not found"))?;
-        self.store.select_thread(id)?;
+        let thread = if surreal_recon::on() {
+            // The thread list is the repository's; a thread created on a
+            // worker a moment ago may not be listed yet.
+            let thread = self.recon_thread(id).unwrap_or_else(|| recon::Thread {
+                id: id.into(),
+                title: String::new(),
+                created_at: String::new(),
+                updated_at: String::new(),
+                draft: String::new(),
+                scroll: 0,
+                recall_insights: false,
+            });
+            let tid = id.to_string();
+            self.spawn_recon_write("select the investigation", move || {
+                surreal_recon::select_thread(&tid)
+            });
+            thread
+        } else {
+            let thread = self
+                .store
+                .get_thread(id)?
+                .ok_or_else(|| anyhow::anyhow!("Thread not found"))?;
+            self.store.select_thread(id)?;
+            thread
+        };
         self.selected_thread = Some(id.into());
-        if self.background_db.is_none() {
+        if self.background_db.is_none() && !surreal_recon::on() {
             self.messages = self.store.list_messages(id)?;
         } else {
             self.messages.clear();
@@ -3642,6 +3941,10 @@ impl App {
     }
 
     fn new_thread(&mut self) -> Result<()> {
+        if surreal_recon::on() {
+            self.spawn_new_thread("New investigation".into(), None, surreal_recon::Then::Open);
+            return Ok(());
+        }
         let thread = self.store.new_thread("New investigation")?;
         self.enter_investigation(&thread.id)?;
         self.input.clear();
@@ -3657,11 +3960,7 @@ impl App {
         if self.selected_thread.as_deref() == Some(tid) {
             self.input.clear();
             self.cursor = 0;
-            self.store.save_draft(
-                tid,
-                "",
-                i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX),
-            )?;
+            self.save_thread_draft(tid, String::new())?;
             self.live_answers.remove(tid);
             self.chat_follow = true;
         }
@@ -3776,7 +4075,16 @@ impl App {
             .map(|thread| thread.recall_insights)
             .unwrap_or(false);
         let next = !on;
-        if !self.store.set_recall_insights(&tid, next)? {
+        if surreal_recon::on() {
+            let id = tid.clone();
+            self.spawn_recon_write("set recall", move || {
+                anyhow::ensure!(
+                    surreal_recon::set_recall_insights(&id, next)?,
+                    "Investigation not found"
+                );
+                Ok(())
+            });
+        } else if !self.store.set_recall_insights(&tid, next)? {
             anyhow::bail!("Investigation not found");
         }
         if let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == tid) {
@@ -4146,6 +4454,14 @@ impl App {
         let Some(article) = self.intel_articles.get(self.intel_sel) else {
             return Ok("No article selected".into());
         };
+        if super::surreal_brain::on() {
+            super::surreal_brain::retry_article_extraction(
+                article.id.clone(),
+                self.auth.clone(),
+                self.settings.clone(),
+            );
+            return Ok("Retry extraction started; completed work retained".into());
+        }
         let Some(progress) = argos_osint_core::investigation::insight_execution::owner_progress(
             self.store.connection(),
             "article",
@@ -5167,7 +5483,7 @@ impl App {
                 self.jobs.scroll = 0;
                 self.jobs.detail_scroll = 0;
                 self.status =
-                    outcome.unwrap_or_else(|error| format!("Could not clear jobs: {error}"));
+                    outcome.unwrap_or_else(|error| format!("Jobs action failed: {error}"));
                 self.reload_jobs();
                 self.refresh_intel_briefing();
                 true
@@ -5405,6 +5721,19 @@ impl App {
                 }
                 true
             }
+            WorkEvent::ReconWritten { what, outcome } => {
+                match outcome {
+                    Ok(()) => {
+                        let _ = self.refresh_threads();
+                    }
+                    Err(error) => self.status = format!("Could not {what}: {error}"),
+                }
+                true
+            }
+            WorkEvent::ReconThreadCreated { then, outcome } => {
+                self.finish_new_thread(then, outcome);
+                true
+            }
             WorkEvent::ThreadDeleted { thread_id, outcome } => {
                 self.threads_deleting.remove(&thread_id);
                 match outcome {
@@ -5559,6 +5888,10 @@ impl App {
                 }
                 true
             }
+            WorkEvent::MemoryGraphChecked { id, outcome } => {
+                self.on_memory_graph_checked(id, outcome);
+                true
+            }
             WorkEvent::TopologyLoaded {
                 generation,
                 seed,
@@ -5633,6 +5966,10 @@ impl App {
                     self.push_log_detail("warn", "Brain: background repair incomplete", error);
                 }
                 self.reload_memories();
+                true
+            }
+            WorkEvent::ProfileRunOwner { run_id, outcome } => {
+                self.on_profile_run_owner(run_id, outcome);
                 true
             }
             WorkEvent::ProfileLoaded {
@@ -5760,7 +6097,7 @@ impl App {
                             );
                         }
                         self.osint_result = Some(value);
-                        if self.background_db.is_some() {
+                        if self.background_db.is_some() || surreal_recon::on() {
                             self.request_manual_history();
                         } else if let Ok(runs) = self.store.manual_calls() {
                             self.manual_runs = runs;
@@ -6455,6 +6792,28 @@ impl App {
     }
 
     fn refresh_selected(&mut self) -> Result<()> {
+        if surreal_recon::on() {
+            if self.recon_reading {
+                self.recon_pending = true;
+                return Ok(());
+            }
+            let Some(id) = self.selected_thread.clone() else {
+                return Ok(());
+            };
+            self.recon_reading = true;
+            let logged_calls = self.logged_calls.clone();
+            let tx = self.work_tx.clone();
+            std::thread::spawn(move || {
+                let outcome = surreal_recon::snapshot(&id, &logged_calls)
+                    .map(Box::new)
+                    .map_err(|e| format!("{e:#}"));
+                let _ = tx.send(WorkEvent::ReconLoaded {
+                    thread_id: id,
+                    outcome,
+                });
+            });
+            return Ok(());
+        }
         if let Some(db) = self.background_db.clone() {
             if self.recon_reading {
                 self.recon_pending = true;
@@ -6503,15 +6862,23 @@ impl App {
             self.manual_pending = true;
             return;
         }
-        let Some(db) = self.background_db.clone() else {
-            return;
+        let db = if surreal_recon::on() {
+            None
+        } else {
+            let Some(db) = self.background_db.clone() else {
+                return;
+            };
+            Some(db)
         };
         self.manual_reading = true;
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_profile_reader(&db)
-                .and_then(|store| store.manual_calls())
-                .map_err(|e| e.to_string());
+            let outcome = match db {
+                None => surreal_recon::manual_calls().map_err(|e| format!("{e:#}")),
+                Some(db) => Store::open_profile_reader(&db)
+                    .and_then(|store| store.manual_calls())
+                    .map_err(|e| e.to_string()),
+            };
             let _ = tx.send(WorkEvent::ManualHistoryLoaded { outcome });
         });
     }
@@ -6669,14 +7036,17 @@ impl App {
         self.brain_reading = Some(generation);
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_profile_reader(&db)
-                .and_then(|store| {
+            let outcome = if surreal_brain::on() {
+                surreal_brain::list()
+            } else {
+                Store::open_profile_reader(&db).and_then(|store| {
                     // One consistent read transaction; concurrent ingest cannot
                     // produce mixed revisions in the display projection.
                     store.connection().execute_batch("BEGIN")?;
                     store.brain_browse_memories(None, "")
                 })
-                .map_err(|e| e.to_string());
+            }
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::BrainLoaded {
                 generation,
                 outcome,
@@ -6792,27 +7162,56 @@ impl App {
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_default(),
             }
+        } else if surreal_brain::on() {
+            // The memory check reads the repository on a plain worker
+            // thread (never the SQLite store); `MemoryGraphChecked` opens
+            // the mapper.
+            let tx = self.work_tx.clone();
+            self.status = "Opening topology…".into();
+            std::thread::spawn(move || {
+                let outcome = surreal_brain::memory_kind(&id).map_err(|e| format!("{e:#}"));
+                let _ = tx.send(WorkEvent::MemoryGraphChecked { id, outcome });
+            });
+            return;
         } else {
-            match self.store.get_memory(&id) {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    self.status = format!("Memory unavailable: {id} no longer exists");
-                    return;
-                }
+            let outcome = match self.store.get_memory(&id) {
+                Ok(Some(_)) => argos_osint_core::brain_kinds::memory_kind(&self.store, &id)
+                    .map(Some)
+                    .map_err(|e| format!("{e:#}")),
+                Ok(None) => Ok(None),
                 Err(error) => {
                     self.status = format!("Memory unavailable: {error:#}");
                     return;
                 }
-            }
-            match argos_osint_core::brain_kinds::memory_kind(&self.store, &id) {
-                Ok(kind) => memory_topology_seed(kind, id),
-                Err(error) => {
-                    self.status = format!("Memory kind unreadable: {error:#}");
+            };
+            match memory_graph_seed(id, outcome) {
+                Ok(seed) => seed,
+                Err(status) => {
+                    self.status = status;
                     return;
                 }
             }
         };
         self.open_topology(seed, Some(1));
+    }
+
+    /// The SurrealDB memory check finished: open the mapper only while the
+    /// Brain list still has that memory selected (a late result is dropped).
+    fn on_memory_graph_checked(
+        &mut self,
+        id: String,
+        outcome: Result<Option<argos_osint_core::memory_metadata::MemoryKind>, String>,
+    ) {
+        let current = self.module == Some(ModuleId::Brain)
+            && self.brain_list_mode == BrainListMode::List
+            && self.memories.get(self.memory_sel).map(|m| m.id.as_str()) == Some(id.as_str());
+        if !current {
+            return;
+        }
+        match memory_graph_seed(id, outcome) {
+            Ok(seed) => self.open_topology(seed, Some(1)),
+            Err(status) => self.status = status,
+        }
     }
 
     /// Open the topology mapper on `seed`. `depth` is the starting hop count
@@ -6903,7 +7302,20 @@ impl App {
                 max_edges: 200,
                 continuation_token: None,
             };
-            if let Some(db) = self.background_db.clone() {
+            if surreal_topology(super::surreal_brain::on(), &seed) {
+                self.topology_reading = true;
+                let tx = self.work_tx.clone();
+                std::thread::spawn(move || {
+                    let outcome = super::surreal_brain::topology(&seed, &options)
+                        .map(Box::new)
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(WorkEvent::TopologyLoaded {
+                        generation,
+                        seed,
+                        outcome,
+                    });
+                });
+            } else if let Some(db) = self.background_db.clone() {
                 self.topology_reading = true;
                 let tx = self.work_tx.clone();
                 std::thread::spawn(move || {
@@ -6941,6 +7353,7 @@ impl App {
         let Some(seed) = self.topology_state.seed.clone() else {
             return;
         };
+        let surreal = surreal_topology(super::surreal_brain::on(), &seed);
         let options = argos_osint_core::brain_topology::TopologyOptions {
             depth: self.topology_state.depth,
             cycle_scope: self.topology_state.cycle_scope.clone(),
@@ -6993,7 +7406,17 @@ impl App {
             stop,
             limits: argos_osint_core::brain_neighborhood_brief_exec::WatchLimits::standard(),
         };
-        if let Some(db) = self.background_db.clone() {
+        if surreal {
+            // Under a storage config the summary cache and its task live in
+            // the repository; nothing opens SQLite.
+            std::thread::spawn(move || {
+                let send = |event| {
+                    let _ = tx.send(event);
+                };
+                let runtime = load_summary_runtime();
+                job.run_surreal(&runtime, &send);
+            });
+        } else if let Some(db) = self.background_db.clone() {
             // Auth/settings loading, the role runtime and the database open all
             // happen on the worker thread, never on the UI thread.
             std::thread::spawn(move || {
@@ -7962,7 +8385,7 @@ impl App {
             }
             ButtonId::NewThread => self.new_thread().map(|_| "New investigation".into()),
             ButtonId::DeleteThread => {
-                if self.background_db.is_some() {
+                if self.background_db.is_some() || surreal_recon::on() {
                     let result = self.request_thread_delete();
                     self.report(result);
                     return;
@@ -8151,7 +8574,16 @@ impl App {
                             .get(self.tool_sel)
                             .copied()
                             .unwrap_or(true);
-                        self.store.set_tool_enabled(tool.id, enabled).map(|_| {
+                        let saved = if surreal_recon::on() {
+                            let id = tool.id;
+                            self.spawn_recon_write("save the tool setting", move || {
+                                surreal_recon::set_tool_enabled(id, enabled)
+                            });
+                            Ok(())
+                        } else {
+                            self.store.set_tool_enabled(tool.id, enabled)
+                        };
+                        saved.map(|_| {
                             if let Some(state) = self.tool_enabled.get_mut(self.tool_sel) {
                                 *state = enabled;
                             }
@@ -8218,6 +8650,21 @@ impl App {
             ButtonId::AtlasResume => self.resume_atlas_run(),
             ButtonId::ClearLog => {
                 // Scope: durable events only. Jobs, task results and memories stay.
+                if surreal_brain::on() {
+                    if self.logs_clearing {
+                        self.status = "Events cleanup is already in progress".into();
+                        return;
+                    }
+                    self.logs_clearing = true;
+                    let tx = self.work_tx.clone();
+                    std::thread::spawn(move || {
+                        let outcome =
+                            surreal_brain::clear_logs().map_err(|error| error.to_string());
+                        let _ = tx.send(WorkEvent::LogsCleared { outcome });
+                    });
+                    self.status = "Clearing events…".into();
+                    return;
+                }
                 if let Some(db) = self.background_db.clone() {
                     if self.logs_clearing {
                         self.status = "Events cleanup is already in progress".into();
@@ -8257,6 +8704,10 @@ impl App {
                 let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
                     return;
                 };
+                if surreal_brain::on() {
+                    self.spawn_job_action(surreal_brain::JobAction::Retry(id));
+                    return;
+                }
                 let retried = self.store.retry_failed_tasks(&id);
                 self.reload_jobs();
                 retried.map(|n| {
@@ -8271,6 +8722,10 @@ impl App {
                 let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
                     return;
                 };
+                if surreal_brain::on() {
+                    self.spawn_job_action(surreal_brain::JobAction::Cancel(id));
+                    return;
+                }
                 let requested = self.store.request_job_cancel(&id);
                 self.reload_jobs();
                 requested.map(|outcome| match outcome {
@@ -8292,6 +8747,17 @@ impl App {
                     ButtonId::JobsClearStopped => JobStatusFilter::Stopped,
                     _ => JobStatusFilter::Failed,
                 };
+                if surreal_brain::on() {
+                    if self.jobs_clearing {
+                        self.status = "Jobs cleanup is already in progress".into();
+                        return;
+                    }
+                    self.jobs_clearing = true;
+                    self.spawn_job_action(surreal_brain::JobAction::Clear(status));
+                    self.status =
+                        format!("Clearing {} job history…", status.label().to_lowercase());
+                    return;
+                }
                 if let Some(db) = self.background_db.clone() {
                     if self.jobs_clearing {
                         self.status = "Jobs cleanup is already in progress".into();
@@ -8370,6 +8836,14 @@ impl App {
                     self.status = "Open or create a Recon thread first".into();
                     return;
                 };
+                if surreal_recon::on() {
+                    let (call, tid) = (call_id.clone(), tid.clone());
+                    self.spawn_recon_write("attach the result", move || {
+                        surreal_recon::attach_call(&call, &tid)
+                    });
+                    self.status = "Attaching result to thread…".into();
+                    return;
+                }
                 self.store
                     .attach_call(call_id, tid)
                     .map(|_| "Result attached to thread".into())
@@ -8381,6 +8855,11 @@ impl App {
                 };
                 let call_id = call_id.clone();
                 let title = format!("Investigate {}", result.tool_id);
+                if surreal_recon::on() {
+                    self.spawn_new_thread(title, Some(call_id), surreal_recon::Then::Attached);
+                    self.status = "Starting Recon from result…".into();
+                    return;
+                }
                 self.store.new_thread(&title).and_then(|thread| {
                     self.store.attach_call(&call_id, &thread.id)?;
                     self.enter_investigation(&thread.id)?;
@@ -9170,7 +9649,7 @@ impl App {
                 self.toggle_log();
             }
             Target::JobRow(index) => {
-                if self.background_db.is_some() {
+                if self.jobs_async() {
                     self.pending_job = None;
                     self.jobs.select_cached(index);
                     self.reload_jobs();
@@ -9411,13 +9890,25 @@ impl App {
                 .selected_thread
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("No thread selected"))?;
+            if surreal_recon::on() {
+                let title = title.to_string();
+                self.spawn_recon_write("rename the investigation", move || {
+                    anyhow::ensure!(
+                        surreal_recon::rename_thread(&id, &title)?,
+                        "Investigation not found"
+                    );
+                    Ok(())
+                });
+                self.input.clear();
+                return Ok("Renaming investigation…".into());
+            }
             self.store.rename_thread(&id, title)?;
             self.refresh_threads()?;
             self.input.clear();
             return Ok("Thread renamed".into());
         }
         if input == ":delete" || input == ":delete-with-insights" {
-            if self.background_db.is_some() {
+            if self.background_db.is_some() || surreal_recon::on() {
                 return self.request_thread_delete();
             }
             let id = self
@@ -9473,8 +9964,25 @@ impl App {
         self.running
             .remove(&id)
             .inspect(|cancel| cancel.store(true, Ordering::Relaxed));
-        let db = self.background_db.clone().expect("production database");
         let tx = self.work_tx.clone();
+        if surreal_recon::on() {
+            // Deleting the insights with the thread is not on SurrealDB yet:
+            // the thread goes and its insights are kept.
+            std::thread::spawn(move || {
+                let outcome = surreal_recon::delete_thread(&id, false)
+                    .and_then(|found| {
+                        anyhow::ensure!(found, "Investigation not found");
+                        Ok(0)
+                    })
+                    .map_err(|e| format!("{e:#}"));
+                let _ = tx.send(WorkEvent::ThreadDeleted {
+                    thread_id: id,
+                    outcome,
+                });
+            });
+            return Ok("Deleting investigation (insights are kept on SurrealDB)…".into());
+        }
+        let db = self.background_db.clone().expect("production database");
         std::thread::spawn(move || {
             let outcome = Store::open_light(&db)
                 .and_then(|mut store| {
@@ -9499,9 +10007,12 @@ impl App {
         let db = self.background_db.clone().expect("production database");
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let outcome = Store::open_light(&db)
-                .and_then(|store| store.delete_memory(&id))
-                .map_err(|e| e.to_string());
+            let outcome = if surreal_brain::on() {
+                surreal_brain::delete(&id)
+            } else {
+                Store::open_light(&db).and_then(|store| store.delete_memory(&id))
+            }
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::MemoryDeleted {
                 memory_id: id,
                 outcome,
@@ -10371,11 +10882,22 @@ impl App {
         self.set_focus(Target::LogLine(self.logs.sel));
     }
 
+    /// Run a Jobs action on the repository off the UI thread; the outcome
+    /// lands as `JobsCleared` (status line, then a Jobs reload).
+    fn spawn_job_action(&mut self, action: surreal_brain::JobAction) {
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = surreal_brain::job_action(action).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::JobsCleared { outcome });
+        });
+        self.status = "Working…".into();
+    }
+
     fn move_job(&mut self, delta: i32) {
         if self.jobs.rows.is_empty() {
             return;
         }
-        if self.background_db.is_some() {
+        if self.jobs_async() {
             self.pending_job = None;
             let index =
                 (self.jobs.sel as i32 + delta).clamp(0, self.jobs.rows.len() as i32 - 1) as usize;
@@ -10784,10 +11306,21 @@ pub async fn run(mut app: App) -> Result<()> {
     let _beat = argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok();
     // One-time retention cleanup is separate from the elected, resumable
     // backfill pool. Neither belongs to startup or the terminal event loop.
+    // Under a storage config, job retention runs on the repository only.
+    let surreal_jobs = surreal_brain::on();
+    if surreal_jobs {
+        surreal_brain::spawn_job_sweeper();
+    }
     let repair_tx = app.work_tx.clone();
     let repair_db = paths::db_path();
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
+            // Under a storage config events (and telemetry) are pruned on
+            // the repository and SQLite is not opened here.
+            if surreal_jobs {
+                surreal_brain::prune_logs(super::logs::RETENTION_HOURS)?;
+                return Ok(());
+            }
             let store = Store::open_light(&repair_db)?;
             store.prune_events(super::logs::RETENTION_HOURS)?;
             store.clear_old_jobs()?;
@@ -11009,6 +11542,19 @@ fn flush_streams(app: &mut App) -> bool {
 
 /// Topology seed for a stored memory of the given kind (legacy untyped memories
 /// are Claims).
+/// The memory check's result as the topology seed, or the status line for
+/// a missing or unreadable memory. Shared by the SQLite and SurrealDB paths.
+fn memory_graph_seed(
+    id: String,
+    outcome: Result<Option<argos_osint_core::memory_metadata::MemoryKind>, String>,
+) -> Result<argos_osint_core::brain_topology::TopologySeed, String> {
+    match outcome {
+        Ok(Some(kind)) => Ok(memory_topology_seed(kind, id)),
+        Ok(None) => Err(format!("Memory unavailable: {id} no longer exists")),
+        Err(error) => Err(format!("Memory kind unreadable: {error}")),
+    }
+}
+
 fn memory_topology_seed(
     kind: argos_osint_core::memory_metadata::MemoryKind,
     id: String,
@@ -11171,6 +11717,97 @@ impl TopologySummaryJob {
             Some(exec::Delivery::Pending) | None => {}
         }
     }
+}
+
+impl TopologySummaryJob {
+    /// [`Self::run`] on the repository (`storage::neighborhood_brief`).
+    fn run_surreal(
+        &self,
+        runtime: &argos_osint_core::recon::model_exec::RoleRuntime,
+        send: &dyn Fn(WorkEvent),
+    ) {
+        use argos_osint_core::brain_neighborhood_brief_exec as exec;
+        use argos_osint_core::storage::{neighborhood_brief as nb, runtime as storage};
+        let fingerprint = exec::route_fingerprint(runtime);
+        let (input, brief, retry) = (self.input.clone(), self.brief.clone(), self.retry);
+        let request = self.request.as_deref().cloned();
+        let published = storage::blocking(move |repo| async move {
+            if retry {
+                let req = request.unwrap_or_else(|| exec::build_request(&input, &fingerprint));
+                let _ = nb::retry(&repo, &req).await;
+                let delivery = nb::poll(&repo, &req).await?;
+                Ok((req, delivery))
+            } else {
+                nb::publish(&repo, &input, &brief, &fingerprint).await
+            }
+        });
+        let (req, mut delivery) = match published {
+            Ok(pair) => pair,
+            Err(error) => {
+                self.fail(exec::FailureKind::Storage, error.to_string(), send);
+                return;
+            }
+        };
+        send(WorkEvent::TopologySummaryStarted {
+            generation: self.generation,
+            seed: self.seed.clone(),
+            options: self.options.clone(),
+            basis_key: self.basis_key.clone(),
+            request: Box::new(req.clone()),
+        });
+        let begun = std::time::Instant::now();
+        let mut errors = 0u32;
+        while matches!(delivery, exec::Delivery::Pending) {
+            if self.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            if begun.elapsed() >= self.limits.deadline {
+                self.fail(
+                    exec::FailureKind::Timeout,
+                    "waiting for a worker: no summary result before the deadline".into(),
+                    send,
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(750));
+            let r = req.clone();
+            match storage::blocking(move |repo| async move { nb::poll(&repo, &r).await }) {
+                Ok(d) => {
+                    errors = 0;
+                    delivery = d;
+                }
+                Err(error) => {
+                    errors += 1;
+                    if errors >= self.limits.max_poll_errors {
+                        self.fail(
+                            exec::FailureKind::Storage,
+                            format!("could not read the summary state: {error:#}"),
+                            send,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        match delivery {
+            exec::Delivery::Generated(g) => send(self.event(Ok(g))),
+            exec::Delivery::Failed(f) => send(self.event(Err(f))),
+            exec::Delivery::Idle => self.fail(
+                exec::FailureKind::Storage,
+                "the summary request is no longer queued".into(),
+                send,
+            ),
+            exec::Delivery::Pending => {}
+        }
+    }
+}
+
+/// Under a storage config every topology seed is read only from the
+/// repository (`storage::topology`), on a plain worker thread through
+/// `storage::runtime::blocking`; it never falls back to the SQLite store.
+/// The repository refuses the retained Intel display seeds with an error.
+fn surreal_topology(surreal: bool, _seed: &argos_osint_core::brain_topology::TopologySeed) -> bool {
+    surreal
 }
 
 #[cfg(test)]
@@ -18428,7 +19065,7 @@ mod tests {
         let section_bottom = brief_y + brief_h as i32 - 1;
         // The image column stays inside the brief article section.
         assert!(image_x > brief_x, "{geo:?}");
-        assert!(image_x + image_w <= brief_x + brief_w - 1, "{geo:?}");
+        assert!(image_x + image_w < brief_x + brief_w, "{geo:?}");
         assert!(image_y > brief_y, "{geo:?}");
         assert!(image_bottom <= section_bottom, "{geo:?}");
         // The image column is strictly left of the brief prose.
@@ -21368,6 +22005,121 @@ mod tests {
             })
         );
         assert_eq!(app.topology_state.depth, 1);
+    }
+
+    #[test]
+    fn surreal_reads_every_topology_seed_from_the_repository() {
+        use argos_osint_core::brain_topology::TopologySeed;
+        let group = TopologySeed::ActorGroup {
+            name_key: "ana ruiz".into(),
+            member_ids: vec!["a1".into()],
+        };
+        assert!(surreal_topology(true, &group));
+        assert!(!surreal_topology(false, &group));
+        assert!(surreal_topology(true, &TopologySeed::Actor("a1".into())));
+        assert!(!surreal_topology(false, &TopologySeed::Actor("a1".into())));
+    }
+
+    #[test]
+    fn memory_check_outcome_maps_to_the_seed_or_status() {
+        use argos_osint_core::brain_topology::TopologySeed;
+        use argos_osint_core::memory_metadata::MemoryKind;
+        assert_eq!(
+            memory_graph_seed("m1".into(), Ok(Some(MemoryKind::Inference))),
+            Ok(TopologySeed::Inference("m1".into()))
+        );
+        assert_eq!(
+            memory_graph_seed("m1".into(), Ok(Some(MemoryKind::Claim))),
+            Ok(TopologySeed::Claim("m1".into()))
+        );
+        assert_eq!(
+            memory_graph_seed("m1".into(), Ok(None)),
+            Err("Memory unavailable: m1 no longer exists".into())
+        );
+        assert!(memory_graph_seed("m1".into(), Err("boom".into()))
+            .unwrap_err()
+            .starts_with("Memory kind unreadable"));
+    }
+
+    #[test]
+    fn a_stale_profile_run_lookup_is_dropped() {
+        let mut app = app();
+        app.module = Some(ModuleId::System);
+        app.profile.pending_run_owner = Some("run-new".into());
+        app.status.clear();
+        assert!(app.on_work_event(WorkEvent::ProfileRunOwner {
+            run_id: "run-old".into(),
+            outcome: Ok(None),
+        }));
+        assert_eq!(app.module, Some(ModuleId::System));
+        assert!(app.status.is_empty());
+        assert_eq!(app.profile.pending_run_owner.as_deref(), Some("run-new"));
+    }
+
+    #[test]
+    fn a_profile_run_lookup_after_leaving_system_is_dropped() {
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        app.profile.pending_run_owner = Some("run-1".into());
+        app.status.clear();
+        app.on_work_event(WorkEvent::ProfileRunOwner {
+            run_id: "run-1".into(),
+            outcome: Ok(Some("thread-1".into())),
+        });
+        assert_eq!(app.module, Some(ModuleId::Brain));
+        assert!(app.status.is_empty());
+        assert!(app.profile.pending_run_owner.is_none());
+    }
+
+    #[test]
+    fn a_current_profile_run_lookup_reports_a_missing_or_failed_run() {
+        let mut app = app();
+        app.module = Some(ModuleId::System);
+        app.profile.pending_run_owner = Some("run-1".into());
+        app.on_work_event(WorkEvent::ProfileRunOwner {
+            run_id: "run-1".into(),
+            outcome: Ok(None),
+        });
+        assert_eq!(app.status, "Investigation is no longer retained");
+        app.profile.pending_run_owner = Some("run-2".into());
+        app.on_work_event(WorkEvent::ProfileRunOwner {
+            run_id: "run-2".into(),
+            outcome: Err("boom".into()),
+        });
+        assert_eq!(app.status, "Could not load investigation: boom");
+        assert_eq!(app.module, Some(ModuleId::System));
+    }
+
+    #[test]
+    fn a_stale_profile_snapshot_generation_is_dropped() {
+        let mut app = app();
+        app.module = Some(ModuleId::System);
+        app.profile.generation = 2;
+        app.profile.loading = true;
+        let filters = app.profile.filters.clone();
+        assert!(app.on_work_event(WorkEvent::ProfileLoaded {
+            generation: 1,
+            filters,
+            outcome: Err("stale".into()),
+            options: vec![("provider".into(), vec!["x".into()])],
+        }));
+        assert!(!app.profile.loading);
+        assert!(app.profile.error.is_none());
+        assert!(app.profile.options.is_empty());
+        assert!(app.profile.loaded_at.is_none());
+    }
+
+    #[test]
+    fn a_late_memory_check_does_not_open_the_mapper() {
+        use argos_osint_core::memory_metadata::MemoryKind;
+        let mut app = app();
+        app.module = Some(ModuleId::Brain);
+        app.on_work_event(WorkEvent::MemoryGraphChecked {
+            id: "not-selected".into(),
+            outcome: Ok(Some(MemoryKind::Claim)),
+        });
+        assert_eq!(app.brain_list_mode, BrainListMode::List);
+        assert!(app.topology_state.seed.is_none());
     }
 
     #[test]

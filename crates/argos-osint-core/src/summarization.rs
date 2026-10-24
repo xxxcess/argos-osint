@@ -190,20 +190,16 @@ pub fn validate_result(
         return Err("empty summarization output".into());
     }
     match mode {
-        SummarizationMode::InvestigationTitle => {
-            if text.chars().count() > 80 {
-                return Err("title exceeds length budget".into());
-            }
+        SummarizationMode::InvestigationTitle if text.chars().count() > 80 => {
+            return Err("title exceeds length budget".into());
         }
         SummarizationMode::TopologyNeighborhood => {
             serde_json::from_str::<crate::brain_neighborhood_brief::NeighborhoodBrief>(text)
                 .map_err(|e| format!("malformed neighborhood brief: {e}"))?;
             return Ok(());
         }
-        SummarizationMode::PageEvidence => {
-            if text.chars().count() < 20 {
-                return Err("summary too short to be useful".into());
-            }
+        SummarizationMode::PageEvidence if text.chars().count() < 20 => {
+            return Err("summary too short to be useful".into());
         }
         _ => {}
     }
@@ -1215,5 +1211,46 @@ mod preparation_tests {
         assert!(wire_sizes[2] < wire_sizes[0], "{wire_sizes:?}");
         assert!(wire_sizes[3] < wire_sizes[0], "{wire_sizes:?}");
         eprintln!("summary gold source_bytes={} off_wire_bytes={} annotate_wire_bytes={} select_wire_bytes={} auto_wire_bytes={} requests_per_mode=1",text.len(),wire_sizes[0],wire_sizes[1],wire_sizes[2],wire_sizes[3]);
+    }
+}
+
+/// [`publish_deterministic_and_enqueue`] on the SurrealDB summary queue
+/// (`storage::summary_flush::publish`) when SurrealDB is selected; `None`
+/// otherwise, and the caller keeps its SQLite path. Nothing here opens
+/// SQLite. From synchronous code the publish completes before returning
+/// (a cached model result is returned); inside an async context it is
+/// queued on the storage runtime and `deterministic` is returned. A failed
+/// publish returns `deterministic`.
+pub fn publish_selected(
+    req: &SummaryRequest,
+    deterministic: SummaryResult,
+) -> Option<SummaryResult> {
+    if !crate::recon::backend::surreal_selected() {
+        return None;
+    }
+    #[cfg(feature = "surreal")]
+    {
+        let req = req.clone();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let det = deterministic.clone();
+            crate::storage::runtime::spawn(async move {
+                if let Ok(repo) = crate::storage::runtime::repository().await {
+                    let _ = crate::storage::summary_flush::publish(&repo, &req, det).await;
+                }
+            });
+            return Some(deterministic);
+        }
+        let det = deterministic.clone();
+        Some(
+            crate::storage::runtime::blocking(move |repo| async move {
+                crate::storage::summary_flush::publish(&repo, &req, det).await
+            })
+            .unwrap_or(deterministic),
+        )
+    }
+    #[cfg(not(feature = "surreal"))]
+    {
+        let _ = req;
+        Some(deterministic)
     }
 }

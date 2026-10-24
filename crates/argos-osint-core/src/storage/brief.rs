@@ -1,0 +1,521 @@
+//! Intel brief publications on SurrealDB: the repository side of
+//! `intel_brief_publications` and the `intel_brief_runs` fence that the
+//! retained Intel display seeds read (`brief_pipeline::publish`,
+//! `brief_pipeline::published_brief`, the retained-seed check in
+//! `brain_topology_query`).
+//!
+//! Record keys: `intel_brief_publication` by article id (one current
+//! publication per article, as SQLite's primary key), `intel_brief_run` by
+//! job id. A publication only replaces one of an equal or older generation;
+//! on replacement the shared fields move to the new job and only the
+//! publishing stage's list (claims, inferences or leads) is replaced, so
+//! earlier completed stages stay canonical while later ones run, exactly as
+//! the SQLite upsert does. The JSON lists are stored as strings.
+//!
+//! Canonical binding: `intel_brief_index_state` (by article id, the
+//! `intel-brief-canonical:{article}` app_state key) and
+//! `intel_brief_stage_receipt` (by `[job_id, operation]`, the
+//! `intel-brief-canonical-stage:{job}:{operation}` key) hold the
+//! `brief_canonical::IndexState` JSON; [`retained_canonical_state`] is the
+//! SQLite `retained_canonical_state`. Links-stage leads
+//! (`intel_inference_article_leads`) live in `intel_inference_article_lead`,
+//! replaced per article by [`replace_leads_in`].
+//!
+//! On a SurrealDB store `storage::brief_stages` writes these tables as
+//! stages commit. Gap (acceptance.md): the canonical Brain snapshot is not
+//! ported, so the bound index state is `not_indexed`.
+
+use anyhow::{anyhow, Result};
+use serde_json::Value;
+use surrealdb::types::SurrealValue;
+
+use super::jobs::{rid, run, take};
+use super::repo::Repository;
+use super::tx::{run_tx, RetryPolicy, Tx, TxError};
+
+/// Brief publication schema (idempotent).
+pub const SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS intel_brief_publication SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS job_id ON intel_brief_publication TYPE string;
+DEFINE FIELD IF NOT EXISTS generation ON intel_brief_publication TYPE int;
+DEFINE FIELD IF NOT EXISTS contract ON intel_brief_publication TYPE string;
+DEFINE FIELD IF NOT EXISTS body_hash ON intel_brief_publication TYPE string;
+DEFINE FIELD IF NOT EXISTS snapshot_hash ON intel_brief_publication TYPE string;
+DEFINE FIELD IF NOT EXISTS claims_json ON intel_brief_publication TYPE string;
+DEFINE FIELD IF NOT EXISTS inferences_json ON intel_brief_publication TYPE string;
+DEFINE FIELD IF NOT EXISTS leads_json ON intel_brief_publication TYPE string;
+DEFINE FIELD IF NOT EXISTS published_at ON intel_brief_publication TYPE string;
+
+DEFINE TABLE IF NOT EXISTS intel_brief_run SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS article_id ON intel_brief_run TYPE string;
+DEFINE FIELD IF NOT EXISTS generation ON intel_brief_run TYPE int;
+DEFINE FIELD IF NOT EXISTS state ON intel_brief_run TYPE string
+  ASSERT $value INSIDE ['queued', 'active', 'completed', 'failed', 'cancelled', 'superseded'];
+DEFINE FIELD IF NOT EXISTS updated_at ON intel_brief_run TYPE string;
+DEFINE INDEX IF NOT EXISTS intel_brief_run_article ON intel_brief_run FIELDS article_id, generation;
+
+DEFINE TABLE IF NOT EXISTS intel_brief_index_state SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS state_json ON intel_brief_index_state TYPE string;
+DEFINE FIELD IF NOT EXISTS updated_at ON intel_brief_index_state TYPE string;
+
+DEFINE TABLE IF NOT EXISTS intel_brief_stage_receipt SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS state_json ON intel_brief_stage_receipt TYPE string;
+DEFINE FIELD IF NOT EXISTS updated_at ON intel_brief_stage_receipt TYPE string;
+
+DEFINE TABLE IF NOT EXISTS intel_inference_article_lead SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS article_id ON intel_inference_article_lead TYPE string;
+DEFINE FIELD IF NOT EXISTS source_generation ON intel_inference_article_lead TYPE int;
+DEFINE FIELD IF NOT EXISTS job_id ON intel_inference_article_lead TYPE string;
+DEFINE FIELD IF NOT EXISTS inference_id ON intel_inference_article_lead TYPE string;
+DEFINE FIELD IF NOT EXISTS inference_text ON intel_inference_article_lead TYPE string;
+DEFINE FIELD IF NOT EXISTS candidate_article_id ON intel_inference_article_lead TYPE string;
+DEFINE FIELD IF NOT EXISTS candidate_run_id ON intel_inference_article_lead TYPE string;
+DEFINE FIELD IF NOT EXISTS candidate_metadata_revision ON intel_inference_article_lead TYPE string;
+DEFINE FIELD IF NOT EXISTS interpretation ON intel_inference_article_lead TYPE string;
+DEFINE FIELD IF NOT EXISTS verification_needed ON intel_inference_article_lead TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS citations_json ON intel_inference_article_lead TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON intel_inference_article_lead TYPE string;
+DEFINE INDEX IF NOT EXISTS intel_inference_article_lead_article ON intel_inference_article_lead FIELDS article_id;";
+
+/// Apply [`SCHEMA`] (idempotent). Until bootstrap registers it, callers and
+/// tests apply it themselves.
+pub async fn apply_schema(repo: &Repository) -> Result<()> {
+    repo.db().query(SCHEMA).await?.check()?;
+    Ok(())
+}
+
+/// The brief stage whose list a publication replaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Claims,
+    Inferences,
+    Links,
+    /// The body (or any other stage): shared fields only.
+    Other,
+}
+
+impl Stage {
+    /// From the brief operation name (`intel_brief_claims`, ...).
+    pub fn from_operation(operation: &str) -> Self {
+        match operation {
+            "intel_brief_claims" => Self::Claims,
+            "intel_brief_inferences" => Self::Inferences,
+            "intel_brief_links" => Self::Links,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// One publication write (`brief_pipeline::publish`).
+#[derive(Debug, Clone)]
+pub struct Publication {
+    pub article_id: String,
+    pub job_id: String,
+    pub generation: i64,
+    pub contract: String,
+    pub body_hash: String,
+    pub snapshot_hash: String,
+    pub claims: Value,
+    pub inferences: Value,
+    /// The `leads` list of the links stage.
+    pub leads: Value,
+    pub stage: Stage,
+}
+
+#[derive(SurrealValue)]
+struct Current {
+    generation: i64,
+}
+
+/// Publish inside `tx`. Returns false (nothing written) when a newer
+/// generation is already published for the article.
+pub async fn publish_in(tx: &Tx, p: &Publication) -> Result<bool, TxError> {
+    let key = rid("intel_brief_publication", &p.article_id);
+    let mut r = run(
+        tx,
+        tx.query("SELECT generation FROM ONLY $p")
+            .bind(("p", key.clone())),
+    )
+    .await?;
+    let current: Option<Current> = take(&mut r, 0)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    match current {
+        Some(c) if c.generation > p.generation => Ok(false),
+        Some(_) => {
+            let column = match p.stage {
+                Stage::Claims => Some(("claims_json", p.claims.to_string())),
+                Stage::Inferences => Some(("inferences_json", p.inferences.to_string())),
+                Stage::Links => Some(("leads_json", p.leads.to_string())),
+                Stage::Other => None,
+            };
+            let set_list = match &column {
+                Some((name, _)) => format!(", {name} = $list"),
+                None => String::new(),
+            };
+            run(
+                tx,
+                tx.query(format!(
+                    "UPDATE $p SET job_id = $job, generation = $g, contract = $contract,
+                       body_hash = $body, snapshot_hash = $snap, published_at = $now{set_list}
+                       RETURN NONE"
+                ))
+                .bind(("p", key))
+                .bind(("job", p.job_id.clone()))
+                .bind(("g", p.generation))
+                .bind(("contract", p.contract.clone()))
+                .bind(("body", p.body_hash.clone()))
+                .bind(("snap", p.snapshot_hash.clone()))
+                .bind(("now", now))
+                .bind(("list", column.map(|(_, v)| v).unwrap_or_default())),
+            )
+            .await?;
+            Ok(true)
+        }
+        None => {
+            run(
+                tx,
+                tx.query(
+                    "CREATE $p SET job_id = $job, generation = $g, contract = $contract,
+                       body_hash = $body, snapshot_hash = $snap, claims_json = $claims,
+                       inferences_json = $inferences, leads_json = $leads, published_at = $now
+                       RETURN NONE",
+                )
+                .bind(("p", key))
+                .bind(("job", p.job_id.clone()))
+                .bind(("g", p.generation))
+                .bind(("contract", p.contract.clone()))
+                .bind(("body", p.body_hash.clone()))
+                .bind(("snap", p.snapshot_hash.clone()))
+                .bind(("claims", p.claims.to_string()))
+                .bind(("inferences", p.inferences.to_string()))
+                .bind(("leads", p.leads.to_string()))
+                .bind(("now", now)),
+            )
+            .await?;
+            Ok(true)
+        }
+    }
+}
+
+/// [`publish_in`] as its own transaction.
+pub async fn publish(repo: &Repository, p: &Publication) -> Result<bool> {
+    let out = run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+        publish_in(&tx, p).await
+    })
+    .await
+    .map_err(|e| anyhow!("publish brief {}: {e}", p.article_id))?;
+    Ok(out.value)
+}
+
+/// Record (or move) a brief run's state for the retained-seed fence.
+pub async fn record_run(
+    repo: &Repository,
+    job_id: &str,
+    article_id: &str,
+    generation: i64,
+    state: &str,
+) -> Result<()> {
+    repo.db()
+        .query(
+            "UPSERT $r SET article_id = $a, generation = $g, state = $s, updated_at = $now
+               RETURN NONE",
+        )
+        .bind(("r", rid("intel_brief_run", job_id)))
+        .bind(("a", article_id.to_string()))
+        .bind(("g", generation))
+        .bind(("s", state.to_string()))
+        .bind(("now", chrono::Utc::now().to_rfc3339()))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+#[derive(SurrealValue)]
+struct Published {
+    generation: i64,
+    claims_json: String,
+    inferences_json: String,
+}
+
+/// `brief_pipeline::published_brief`: generation, claims and inferences.
+pub async fn published_brief(
+    repo: &Repository,
+    article_id: &str,
+) -> Result<Option<(i64, Value, Value)>> {
+    let mut r = repo
+        .db()
+        .query("SELECT generation, claims_json, inferences_json FROM ONLY $p")
+        .bind(("p", rid("intel_brief_publication", article_id)))
+        .await?
+        .check()?;
+    let row: Option<Published> = r.take(0usize)?;
+    row.map(|p| {
+        Ok((
+            p.generation,
+            serde_json::from_str(&p.claims_json)?,
+            serde_json::from_str(&p.inferences_json)?,
+        ))
+    })
+    .transpose()
+}
+
+/// Which retained list a seed names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetainedKind {
+    Claim,
+    Inference,
+}
+
+#[derive(SurrealValue)]
+struct Fence {
+    pub_job: Option<String>,
+    list: Option<String>,
+    run_article: Option<String>,
+    run_state: Option<String>,
+    run_generation: Option<i64>,
+    newest: Option<i64>,
+}
+
+/// SurrealQL for [`retained_item`]; public for the plan test.
+pub const RETAINED_SURQL: &str = "LET $pub = (SELECT * FROM ONLY $p);
+LET $run = (SELECT * FROM ONLY $r);
+RETURN {
+  pub_job: $pub.job_id,
+  list: IF $kind = 'inference' { $pub.inferences_json } ELSE { $pub.claims_json },
+  run_article: $run.article_id,
+  run_state: $run.state,
+  run_generation: $run.generation,
+  newest: (SELECT VALUE generation FROM intel_brief_run WHERE article_id = $a ORDER BY generation DESC LIMIT 1)[0]
+};";
+
+/// The retained-seed fence: true when `job_id` is the article's current
+/// publication, its run belongs to the article in an `active`, `completed`
+/// or `failed` state with no newer run, and the item `local_id` with exactly
+/// `text` is in the published list.
+pub async fn retained_item(
+    repo: &Repository,
+    article_id: &str,
+    job_id: &str,
+    kind: RetainedKind,
+    local_id: &str,
+    text: &str,
+) -> Result<bool> {
+    let mut r = repo
+        .db()
+        .query(RETAINED_SURQL)
+        .bind(("p", rid("intel_brief_publication", article_id)))
+        .bind(("r", rid("intel_brief_run", job_id)))
+        .bind(("a", article_id.to_string()))
+        .bind((
+            "kind",
+            match kind {
+                RetainedKind::Claim => "claim",
+                RetainedKind::Inference => "inference",
+            },
+        ))
+        .await?
+        .check()?;
+    let fence: Option<Fence> = r.take(2usize)?;
+    let Some(f) = fence else {
+        return Ok(false);
+    };
+    let live = f.pub_job.as_deref() == Some(job_id)
+        && f.run_article.as_deref() == Some(article_id)
+        && matches!(
+            f.run_state.as_deref(),
+            Some("active" | "completed" | "failed")
+        )
+        && f.run_generation.is_some()
+        && f.newest.unwrap_or(i64::MIN) <= f.run_generation.unwrap_or(i64::MIN);
+    if !live {
+        return Ok(false);
+    }
+    let list = match kind {
+        RetainedKind::Claim => "claims",
+        RetainedKind::Inference => "inferences",
+    };
+    let parsed: Value = f
+        .list
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(Value::Null);
+    Ok(parsed[list]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|c| c["id"] == *local_id && c["text"] == *text))
+}
+
+/// Store the article's canonical index state (`brief_canonical`'s
+/// `state_key`).
+pub async fn put_index_state(
+    repo: &Repository,
+    article_id: &str,
+    state: &crate::intel_recon::brief_canonical::IndexState,
+) -> Result<()> {
+    put_state(
+        repo,
+        "type::record('intel_brief_index_state', $a)",
+        article_id,
+        "",
+        state,
+    )
+    .await
+}
+
+/// Store one stage's canonical receipt (`publish_stage_on`), keyed by job
+/// and operation (`intel_brief_claims`, `intel_brief_inferences`).
+pub async fn put_stage_receipt(
+    repo: &Repository,
+    job_id: &str,
+    operation: &str,
+    state: &crate::intel_recon::brief_canonical::IndexState,
+) -> Result<()> {
+    put_state(
+        repo,
+        "type::record('intel_brief_stage_receipt', [$j, $op])",
+        job_id,
+        operation,
+        state,
+    )
+    .await
+}
+
+async fn put_state(
+    repo: &Repository,
+    target: &str,
+    a: &str,
+    op: &str,
+    state: &crate::intel_recon::brief_canonical::IndexState,
+) -> Result<()> {
+    repo.db()
+        .query(format!(
+            "UPSERT {target} CONTENT {{ state_json: $s, updated_at: $now }} RETURN NONE"
+        ))
+        .bind(("a", a.to_string()))
+        .bind(("j", a.to_string()))
+        .bind(("op", op.to_string()))
+        .bind(("s", serde_json::to_string(state)?))
+        .bind(("now", chrono::Utc::now().to_rfc3339()))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+/// SQLite `retained_canonical_state`: the article's index state when it is
+/// `indexed` for exactly `job_id`, else that job's `kind` stage receipt
+/// (earlier completed kinds stay canonical while later stages run or fail).
+pub async fn retained_canonical_state(
+    repo: &Repository,
+    article_id: &str,
+    job_id: &str,
+    kind: &str,
+) -> Result<Option<crate::intel_recon::brief_canonical::IndexState>> {
+    use crate::intel_recon::brief_canonical::IndexState;
+    let mut r = repo
+        .db()
+        .query(
+            "RETURN type::record('intel_brief_index_state', $a).state_json;
+             RETURN type::record('intel_brief_stage_receipt', [$j, $op]).state_json;",
+        )
+        .bind(("a", article_id.to_string()))
+        .bind(("j", job_id.to_string()))
+        .bind(("op", format!("intel_brief_{kind}s")))
+        .await?
+        .check()?;
+    let article: Option<String> = r.take(0usize)?;
+    let receipt: Option<String> = r.take(1usize)?;
+    let fenced = |json: Option<String>| {
+        json.and_then(|j| serde_json::from_str::<IndexState>(&j).ok())
+            .filter(|s| s.job_id == job_id && s.state == "indexed")
+    };
+    Ok(fenced(article).or_else(|| fenced(receipt)))
+}
+
+/// One `intel_inference_article_leads` row.
+#[derive(Debug, Clone, PartialEq, SurrealValue)]
+pub struct Lead {
+    pub id: String,
+    pub inference_id: String,
+    pub inference_text: String,
+    pub candidate_article_id: String,
+    pub candidate_run_id: String,
+    pub candidate_metadata_revision: String,
+    pub interpretation: String,
+    pub verification_needed: String,
+    pub citations_json: String,
+}
+
+/// Replace the article's leads with `leads` of `job_id`/`generation`, as the
+/// links-stage publication does (`brief_pipeline`, delete then insert).
+pub async fn replace_leads_in(
+    tx: &Tx,
+    article_id: &str,
+    job_id: &str,
+    generation: i64,
+    leads: &[Lead],
+) -> Result<(), TxError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    run(
+        tx,
+        tx.query("DELETE intel_inference_article_lead WHERE article_id = $a")
+            .bind(("a", article_id.to_string())),
+    )
+    .await?;
+    for l in leads {
+        run(
+            tx,
+            tx.query(
+                "CREATE $k CONTENT {
+                   article_id: $a, source_generation: $g, job_id: $j,
+                   inference_id: $l.inference_id, inference_text: $l.inference_text,
+                   candidate_article_id: $l.candidate_article_id,
+                   candidate_run_id: $l.candidate_run_id,
+                   candidate_metadata_revision: $l.candidate_metadata_revision,
+                   interpretation: $l.interpretation,
+                   verification_needed: $l.verification_needed,
+                   citations_json: $l.citations_json, created_at: $now
+                 }",
+            )
+            .bind(("k", rid("intel_inference_article_lead", &l.id)))
+            .bind(("a", article_id.to_string()))
+            .bind(("g", generation))
+            .bind(("j", job_id.to_string()))
+            .bind(("l", l.clone()))
+            .bind(("now", now.clone())),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// [`replace_leads_in`] in its own transaction.
+pub async fn replace_leads(
+    repo: &Repository,
+    article_id: &str,
+    job_id: &str,
+    generation: i64,
+    leads: &[Lead],
+) -> Result<()> {
+    run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+        replace_leads_in(&tx, article_id, job_id, generation, leads).await
+    })
+    .await
+    .map_err(|e| anyhow!("replace brief leads {article_id}: {e}"))?;
+    Ok(())
+}
+
+/// The article's leads, by id.
+pub async fn leads(repo: &Repository, article_id: &str) -> Result<Vec<Lead>> {
+    let mut r = repo
+        .db()
+        .query(
+            "SELECT record::id(id) AS id, inference_id, inference_text,
+                    candidate_article_id, candidate_run_id, candidate_metadata_revision,
+                    interpretation, verification_needed, citations_json
+               FROM intel_inference_article_lead WHERE article_id = $a ORDER BY id",
+        )
+        .bind(("a", article_id.to_string()))
+        .await?
+        .check()?;
+    Ok(take(&mut r, 0)?)
+}

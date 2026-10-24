@@ -182,17 +182,35 @@ pub fn summarize_for_recall(
     recalled: &[RecallInsight],
     question: &str,
 ) -> Result<BrainResourceSummary> {
+    summarize_with(recalled, question, |id| {
+        Ok((store.insight_for_memory(id)?, store.get_memory(id)?))
+    })
+}
+
+/// [`summarize_for_recall`] over any store: `lookup` returns a recalled
+/// memory's insight view and memory (SurrealDB prefetches both).
+pub fn summarize_with(
+    recalled: &[RecallInsight],
+    question: &str,
+    mut lookup: impl FnMut(
+        &str,
+    ) -> Result<(
+        Option<crate::recon::InsightView>,
+        Option<crate::brain::Memory>,
+    )>,
+) -> Result<BrainResourceSummary> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut items: Vec<BrainResourceHit> = Vec::new();
 
     for insight in recalled {
         let claim = insight.text.as_str();
-        if let Some(view) = store.insight_for_memory(&insight.memory_id)? {
+        let (view, memory) = lookup(&insight.memory_id)?;
+        if let Some(view) = view {
             for source in &view.sources {
                 push_source(&mut items, &mut seen, &insight.memory_id, claim, source);
             }
         }
-        if let Some(memory) = store.get_memory(&insight.memory_id)? {
+        if let Some(memory) = memory {
             if let Some(reference) = memory.source.reference.as_deref() {
                 push_raw(
                     &mut items,
@@ -483,7 +501,12 @@ pub fn recall_gate_rejection(
 /// Record one completed recall query at the relevance gate. Best effort: a
 /// telemetry failure never fails a recon turn.
 pub fn note_recall_query(store: &Store, facts: &RecallQueryFacts) {
-    let event = crate::telemetry::TelemetryEvent::new(crate::telemetry::EventKind::RecallQuery)
+    let _ = crate::telemetry::insert(&store.conn, &recall_query_event(facts));
+}
+
+/// The `recall_query` telemetry row of one completed recall query.
+pub fn recall_query_event(facts: &RecallQueryFacts) -> crate::telemetry::TelemetryEvent {
+    crate::telemetry::TelemetryEvent::new(crate::telemetry::EventKind::RecallQuery)
         .at(chrono::Utc::now().to_rfc3339())
         .app("recon")
         .trigger(crate::telemetry::Trigger::ReconPrompt)
@@ -497,8 +520,7 @@ pub fn note_recall_query(store: &Store, facts: &RecallQueryFacts) {
             "candidate_hits": facts.candidates,
             "accepted_hits": facts.accepted,
             "rejection_reason": facts.rejection_reason,
-        }));
-    let _ = crate::telemetry::insert(&store.conn, &event);
+        }))
 }
 
 #[cfg(test)]

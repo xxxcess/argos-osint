@@ -76,7 +76,7 @@ pub fn normalize_alias(text: &str) -> String {
         .join(" ")
 }
 
-fn hid(prefix: &str, parts: &[&str]) -> String {
+pub(crate) fn hid(prefix: &str, parts: &[&str]) -> String {
     let h = crate::nlp::cache::hash(&parts.join("\u{1f}"));
     format!("{prefix}-{}", &h[..h.len().min(24)])
 }
@@ -105,7 +105,7 @@ pub fn parse_subtype(raw: &str) -> ActorSubtype {
     }
 }
 
-fn state_str(s: IdentityState) -> &'static str {
+pub(crate) fn state_str(s: IdentityState) -> &'static str {
     match s {
         IdentityState::Provisional => "provisional",
         IdentityState::Ambiguous => "ambiguous",
@@ -113,7 +113,7 @@ fn state_str(s: IdentityState) -> &'static str {
     }
 }
 
-fn parse_state(raw: &str) -> IdentityState {
+pub(crate) fn parse_state(raw: &str) -> IdentityState {
     match raw {
         "resolved" => IdentityState::Resolved,
         "ambiguous" => IdentityState::Ambiguous,
@@ -235,7 +235,7 @@ pub fn candidates(
     Ok(canonical.into_iter().collect())
 }
 
-fn text_of(payload: &MemoryPayload) -> String {
+pub(crate) fn text_of(payload: &MemoryPayload) -> String {
     match payload {
         MemoryPayload::Actor(a) => {
             format!("Actor: {} ({})", a.display_name, subtype_str(a.subtype))
@@ -666,7 +666,7 @@ fn validate_endpoint(conn: &Connection, e: &EndpointRef) -> Result<()> {
     }
 }
 
-fn endpoint_key(e: &EndpointRef) -> String {
+pub(crate) fn endpoint_key(e: &EndpointRef) -> String {
     let (k, id, origin, rev) = e.index_key();
     format!("{k}:{origin}:{id}:{rev}")
 }

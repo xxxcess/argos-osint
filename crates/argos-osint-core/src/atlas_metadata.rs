@@ -1,4 +1,5 @@
 //! Native article annotations. Candidate mentions and publisher priors are not evidence.
+use crate::atlas_store::AtlasStore;
 use crate::{
     nlp,
     osint::wikipedia_rsp as rsp,
@@ -440,8 +441,10 @@ pub async fn process_run(
     if cancel.load(std::sync::atomic::Ordering::Acquire) {
         return Ok(coverage);
     }
-    let publishers_enabled = crate::store::Store::open(db_path)?.tool_enabled(rsp::TOOL_ID)?;
-    let articles = Store::open(db_path)?.atlas_list_articles(run_id)?;
+    let store = AtlasStore::open(db_path).await?;
+    let sqlite_db = crate::recon::backend::sqlite_path(db_path);
+    let publishers_enabled = store.tool_enabled(rsp::TOOL_ID).await?;
+    let articles = store.list_articles(run_id).await?;
     if articles.is_empty() {
         return Ok(coverage);
     }
@@ -460,7 +463,7 @@ pub async fn process_run(
         cancel.clone(),
     );
     let total = articles.len() as i64;
-    let stored = Store::open(db_path)?.app_state_get(rsp::APP_STATE_KEY)?;
+    let stored = store.app_state_get(rsp::APP_STATE_KEY).await?;
     #[cfg(test)]
     let index = stored
         .as_deref()
@@ -468,12 +471,9 @@ pub async fn process_run(
         .or_else(rsp::last_good_index);
     #[cfg(not(test))]
     let failed_in_inventory = {
-        let store = Store::open(db_path)?;
         let key = format!("atlas-publisher-failure:{run_id}");
-        let failed = store.app_state_get(&key)?.as_deref() == Some("1");
-        store
-            .conn
-            .execute("DELETE FROM app_state WHERE key=?1", [key])?;
+        let failed = store.app_state_get(&key).await?.as_deref() == Some("1");
+        store.app_state_delete(&key).await?;
         failed
     };
     #[cfg(not(test))]
@@ -481,7 +481,7 @@ pub async fn process_run(
         None
     } else {
         let lookup = tokio::select! {
-            result=rsp::warm_with_store_json_for_db(stored.as_deref(),user_agent,Some(db_path.to_path_buf()))=>Some(result),
+            result=rsp::warm_with_store_json_for_db(stored.as_deref(),user_agent,sqlite_db.map(std::path::Path::to_path_buf))=>Some(result),
             _=wait_cancelled(cancel.clone())=>None,
         };
         match lookup {
@@ -489,8 +489,9 @@ pub async fn process_run(
             Some(result) => match result {
                 Ok((index, changed)) => {
                     if changed {
-                        Store::open(db_path)?
-                            .app_state_set(rsp::APP_STATE_KEY, &rsp::index_to_json(&index)?)?;
+                        store
+                            .app_state_set(rsp::APP_STATE_KEY, &rsp::index_to_json(&index)?)
+                            .await?;
                     }
                     Some(index)
                 }
@@ -509,7 +510,7 @@ pub async fn process_run(
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
             break;
         }
-        let existing = Store::open(db_path)?.atlas_metadata(run_id, &article.id)?;
+        let existing = store.metadata(run_id, &article.id).await?;
         let mut metadata = if let Some(existing) = existing.filter(|m| {
             let mode = nlp::configured_mode();
             let entity_reusable = m.entity_version == ENTITY_VERSION
@@ -543,7 +544,7 @@ pub async fn process_run(
                     None
                 },
                 cancel.clone(),
-                Some(db_path),
+                sqlite_db.as_deref(),
             )
             .await
         };
@@ -555,8 +556,7 @@ pub async fn process_run(
                 .retain(|d| !d.starts_with("Publisher reliability"));
         }
         // Classification may finish while native work is in flight. Merge the durable receipt.
-        let store = Store::open(db_path)?;
-        if let Some(latest) = store.atlas_metadata(run_id, &article.id)? {
+        if let Some(latest) = store.metadata(run_id, &article.id).await? {
             if latest.input_hash == metadata.input_hash {
                 metadata.classification_status = latest.classification_status;
                 metadata.classification_receipt = latest.classification_receipt;
@@ -580,7 +580,7 @@ pub async fn process_run(
         coverage
             .warnings
             .extend(metadata.diagnostics.iter().cloned());
-        store.atlas_save_metadata(&metadata)?;
+        store.save_metadata(&metadata).await?;
         record_unit(
             db_path,
             &store,
@@ -588,7 +588,8 @@ pub async fn process_run(
             crate::atlas_work::STAGE_ENTITIES,
             &metadata.entity_state,
             metadata.entity_ms,
-        )?;
+        )
+        .await?;
         record_unit(
             db_path,
             &store,
@@ -596,7 +597,8 @@ pub async fn process_run(
             crate::atlas_work::STAGE_PUBLISHERS,
             &metadata.reliability_state,
             metadata.publisher_ms,
-        )?;
+        )
+        .await?;
         if let Some(job) = &entity_job {
             job.phase("Entities", Some(index_in_run as i64 + 1), Some(total));
         }
@@ -655,6 +657,8 @@ fn metadata_job(
         .run(run)
         .resource(format!("atlas:{run}"))
         .cancellable();
+    // Job tracking lives in SQLite; under SurrealDB Atlas runs untracked.
+    crate::recon::backend::sqlite_path(db)?;
     spec.parent_id = rusqlite::Connection::open(db)
         .ok()
         .and_then(|c| {
@@ -665,9 +669,9 @@ fn metadata_job(
         .unwrap_or_default();
     crate::job_registry::begin_optional_with(db, spec, cancel)
 }
-fn record_unit(
+async fn record_unit(
     db: &std::path::Path,
-    store: &Store,
+    store: &AtlasStore,
     m: &ArticleMetadata,
     stage: i32,
     state: &MetadataState,
@@ -709,7 +713,8 @@ fn record_unit(
         disposition: disposition.into(),
         receipt_json: serde_json::to_string(m)?,
     };
-    store.atlas_save_unit_manifest(&manifest)?;
+    store.save_unit_manifest(&manifest).await?;
+    // `telemetry::record` routes to the selected store.
     crate::atlas_work::record_unit_stage_telemetry(db, &manifest);
     Ok(())
 }
@@ -997,12 +1002,6 @@ pub struct NativeInventory {
 }
 impl NativeInventory {
     pub fn start(db_path: &std::path::Path, run_id: &str, user_agent: &str) -> Self {
-        if let Ok(store) = Store::open(db_path) {
-            let _ = store.conn.execute(
-                "DELETE FROM app_state WHERE key=?1",
-                [format!("atlas-publisher-failure:{run_id}")],
-            );
-        }
         let (sender, receiver) = tokio::sync::mpsc::channel(32);
         let cancel = Arc::new(AtomicBool::new(false));
         let db = db_path.to_path_buf();
@@ -1052,6 +1051,7 @@ impl Drop for NativeInventory {
 }
 
 async fn inventory_index(
+    store: &AtlasStore,
     db: &std::path::Path,
     user_agent: &str,
     enabled: bool,
@@ -1059,12 +1059,10 @@ async fn inventory_index(
     if !enabled {
         return None;
     }
-    let stored = Store::open(db)
-        .ok()
-        .and_then(|s| s.app_state_get(rsp::APP_STATE_KEY).ok().flatten());
+    let stored = store.app_state_get(rsp::APP_STATE_KEY).await.ok().flatten();
     #[cfg(test)]
     {
-        let _ = user_agent;
+        let _ = (user_agent, db);
         stored
             .as_deref()
             .and_then(|j| rsp::index_from_json(j).ok())
@@ -1075,16 +1073,14 @@ async fn inventory_index(
         match rsp::warm_with_store_json_for_db(
             stored.as_deref(),
             user_agent,
-            Some(db.to_path_buf()),
+            crate::recon::backend::sqlite_path(db).map(std::path::Path::to_path_buf),
         )
         .await
         {
             Ok((index, changed)) => {
                 if changed {
-                    if let Ok(store) = Store::open(db) {
-                        if let Ok(json) = rsp::index_to_json(&index) {
-                            let _ = store.app_state_set(rsp::APP_STATE_KEY, &json);
-                        }
+                    if let Ok(json) = rsp::index_to_json(&index) {
+                        let _ = store.app_state_set(rsp::APP_STATE_KEY, &json).await;
                     }
                 }
                 Some(index)
@@ -1093,22 +1089,22 @@ async fn inventory_index(
         }
     }
 }
-fn flush_inventory_publishers(
+async fn flush_inventory_publishers(
+    store: &AtlasStore,
     db: &std::path::Path,
     run: &str,
     pending: &mut Vec<(String, String)>,
     index: Option<&rsp::RspIndex>,
     enabled: bool,
 ) -> Result<()> {
-    let store = Store::open(db)?;
     for (id, hash) in pending.drain(..) {
-        let Some(article) = store.atlas_article(run, &id)? else {
+        let Some(article) = store.article(run, &id).await? else {
             continue;
         };
         if input_hash(&article) != hash {
             continue;
         }
-        let Some(mut metadata) = store.atlas_metadata(run, &id)? else {
+        let Some(mut metadata) = store.metadata(run, &id).await? else {
             continue;
         };
         if metadata.input_hash != hash {
@@ -1120,15 +1116,16 @@ fn flush_inventory_publishers(
             metadata.reliability_state = MetadataState::Skipped;
             metadata.publisher_prior = None;
         }
-        if store.atlas_save_metadata(&metadata)? {
+        if store.save_metadata(&metadata).await? {
             record_unit(
                 db,
-                &store,
+                store,
                 &metadata,
                 crate::atlas_work::STAGE_PUBLISHERS,
                 &metadata.reliability_state,
                 metadata.publisher_ms,
-            )?;
+            )
+            .await?;
         }
     }
     Ok(())
@@ -1140,11 +1137,15 @@ async fn inventory_worker(
     mut receiver: tokio::sync::mpsc::Receiver<AtlasArticleRow>,
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
+    let store = AtlasStore::open(&db).await?;
+    store
+        .app_state_delete(&format!("atlas-publisher-failure:{run}"))
+        .await?;
     let Some(first) = receiver.recv().await else {
         return Ok(());
     };
-    let store = Store::open(&db)?;
-    let enabled = store.tool_enabled(rsp::TOOL_ID)?;
+    let sqlite_db = crate::recon::backend::sqlite_path(&db);
+    let enabled = store.tool_enabled(rsp::TOOL_ID).await?;
     let entity_job = metadata_job(
         &db,
         &run,
@@ -1159,7 +1160,7 @@ async fn inventory_worker(
         "Collection publisher priors",
         cancel.clone(),
     );
-    let publisher = inventory_index(&db, &user_agent, enabled);
+    let publisher = inventory_index(&store, &db, &user_agent, enabled);
     tokio::pin!(publisher);
     let mut index: Option<Option<rsp::RspIndex>> = None;
     let mut pending = Vec::new();
@@ -1170,13 +1171,13 @@ async fn inventory_worker(
             break;
         }
         if let Some(article) = next.take() {
-            let native = collect_inner(&article, None, cancel.clone(), Some(&db));
+            let native = collect_inner(&article, None, cancel.clone(), sqlite_db.as_deref());
             tokio::pin!(native);
             let mut metadata = loop {
                 tokio::select! {
                  metadata=&mut native=>break metadata,
                  result=&mut publisher,if index.is_none()=>{
-                  index=Some(result);flush_inventory_publishers(&db,&run,&mut pending,index.as_ref().and_then(|i|i.as_ref()),enabled)?;
+                  index=Some(result);flush_inventory_publishers(&store,&db,&run,&mut pending,index.as_ref().and_then(|i|i.as_ref()),enabled).await?;
                  }
                 }
             };
@@ -1197,7 +1198,7 @@ async fn inventory_worker(
                     .diagnostics
                     .retain(|d| !d.starts_with("Publisher reliability"));
             }
-            if store.atlas_save_metadata(&metadata)? {
+            if store.save_metadata(&metadata).await? {
                 record_unit(
                     &db,
                     &store,
@@ -1205,7 +1206,8 @@ async fn inventory_worker(
                     crate::atlas_work::STAGE_ENTITIES,
                     &metadata.entity_state,
                     metadata.entity_ms,
-                )?;
+                )
+                .await?;
                 if index.is_some() {
                     record_unit(
                         &db,
@@ -1214,7 +1216,8 @@ async fn inventory_worker(
                         crate::atlas_work::STAGE_PUBLISHERS,
                         &metadata.reliability_state,
                         metadata.publisher_ms,
-                    )?;
+                    )
+                    .await?;
                 } else {
                     pending.push((article.id.clone(), metadata.input_hash.clone()));
                 }
@@ -1226,7 +1229,7 @@ async fn inventory_worker(
         }
         tokio::select! {
          article=receiver.recv()=>{match article {Some(article)=>next=Some(article),None=>{break;}}},
-         result=&mut publisher,if index.is_none()=>{index=Some(result);flush_inventory_publishers(&db,&run,&mut pending,index.as_ref().and_then(|i|i.as_ref()),enabled)?;}
+         result=&mut publisher,if index.is_none()=>{index=Some(result);flush_inventory_publishers(&store,&db,&run,&mut pending,index.as_ref().and_then(|i|i.as_ref()),enabled).await?;}
         }
     }
     if !cancel.load(std::sync::atomic::Ordering::Acquire) {
@@ -1234,22 +1237,21 @@ async fn inventory_worker(
             index = Some(publisher.await);
         }
         flush_inventory_publishers(
+            &store,
             &db,
             &run,
             &mut pending,
             index.as_ref().and_then(|i| i.as_ref()),
             enabled,
-        )?;
+        )
+        .await?;
     }
     if enabled && !cancel.load(std::sync::atomic::Ordering::Acquire) {
-        let store = Store::open(&db)?;
         let key = format!("atlas-publisher-failure:{run}");
         if index.as_ref().is_none_or(|i| i.is_none()) {
-            store.app_state_set(&key, "1")?;
+            store.app_state_set(&key, "1").await?;
         } else {
-            store
-                .conn
-                .execute("DELETE FROM app_state WHERE key=?1", [key])?;
+            store.app_state_delete(&key).await?;
         }
     }
     if let Some(job) = entity_job {

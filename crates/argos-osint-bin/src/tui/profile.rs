@@ -1096,6 +1096,9 @@ pub struct ProfileView {
     pub filter_edit: String,
     /// The bounded option lists for every dimension.
     pub options: Vec<(String, Vec<String>)>,
+    /// The run whose investigation an attention action is looking up on
+    /// SurrealDB; a lookup result for any other run is dropped.
+    pub pending_run_owner: Option<String>,
 }
 
 impl Default for ProfileView {
@@ -1136,6 +1139,7 @@ impl Default for ProfileView {
             filter_popup: None,
             filter_edit: String::new(),
             options: Vec::new(),
+            pending_run_owner: None,
         }
     }
 }
@@ -1924,11 +1928,28 @@ fn open_selected_owner(app: &mut App) {
     }
 }
 fn open_run_owner(app: &mut App, run_id: &str) {
-    match app.store.get_run(run_id) {
-        Ok(Some(run)) => {
+    if super::surreal_profile::on() {
+        // The run lookup reads the repository on a plain worker thread
+        // (never the SQLite store); `ProfileRunOwner` opens the thread.
+        app.lookup_run_owner(run_id.to_string());
+        return;
+    }
+    let outcome = app
+        .store
+        .get_run(run_id)
+        .map(|run| run.map(|run| run.thread_id))
+        .map_err(|error| format!("{error}"));
+    open_run_thread(app, outcome);
+}
+
+/// The run lookup's result: open its investigation, or say why not. Shared
+/// by the SQLite and SurrealDB paths.
+pub(crate) fn open_run_thread(app: &mut App, outcome: Result<Option<String>, String>) {
+    match outcome {
+        Ok(Some(thread_id)) => {
             app.profile.report = None;
             app.select(super::app::ModuleId::Recon.index());
-            if let Err(error) = app.open_thread(&run.thread_id) {
+            if let Err(error) = app.open_thread(&thread_id) {
                 app.status = format!("Could not open investigation: {error}");
             }
         }

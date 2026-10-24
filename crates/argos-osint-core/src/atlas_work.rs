@@ -108,6 +108,10 @@ pub fn cycle_outcome_label(state: &str) -> &'static str {
 /// Best-effort: a database that cannot be read returns zero.
 pub fn next_stage_seq(db_path: &Path, run_id: &str, stage: &str) -> i64 {
     let prefix = format!("atlas-stage-{run_id}-{stage}-");
+    // Stage telemetry is SQLite-only; never create a SQLite file under SurrealDB.
+    let Some(db_path) = crate::recon::backend::sqlite_path(db_path) else {
+        return 0;
+    };
     rusqlite::Connection::open(db_path)
         .ok()
         .and_then(|conn| {
@@ -125,6 +129,22 @@ pub fn next_stage_seq(db_path: &Path, run_id: &str, stage: &str) -> i64 {
 /// Terminal telemetry for one work unit. The event id is the unit key, so a
 /// retried unit replaces its row and dispositions stay exactly one per unit.
 /// Best-effort: a write failure never fails the pipeline.
+/// [`next_stage_seq`] on the selected store: under SurrealDB the count
+/// comes from the repository's `telemetry_event` ids.
+pub async fn next_stage_seq_selected(db_path: &Path, run_id: &str, stage: &str) -> i64 {
+    #[cfg(feature = "surreal")]
+    if crate::recon::backend::sqlite_path(db_path).is_none() {
+        let prefix = format!("atlas-stage-{run_id}-{stage}-");
+        return match crate::storage::runtime::repository().await {
+            Ok(repo) => crate::storage::telemetry::count_ids_with_prefix(repo.db(), &prefix)
+                .await
+                .unwrap_or(0),
+            Err(_) => 0,
+        };
+    }
+    next_stage_seq(db_path, run_id, stage)
+}
+
 pub fn record_unit_stage_telemetry(db_path: &Path, manifest: &UnitManifest) {
     if manifest.run_id.trim().is_empty() || manifest.unit_id.trim().is_empty() {
         return;

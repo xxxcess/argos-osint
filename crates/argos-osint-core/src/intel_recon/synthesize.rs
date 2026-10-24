@@ -136,15 +136,17 @@ async fn model_synthesize(
         .iter()
         .map(|(k, v)| {
             let mut digest = crate::summarization::deterministic_report_context(k, v, 600);
-            if let Ok(store) = crate::store::Store::open(&db_path) {
-                let req = crate::summarization::flush_request(
-                    crate::summarization::SummarizationMode::ReportContext,
-                    k,
-                    k,
-                    v,
-                    &input.section_key,
-                    600,
-                );
+            let req = crate::summarization::flush_request(
+                crate::summarization::SummarizationMode::ReportContext,
+                k,
+                k,
+                v,
+                &input.section_key,
+                600,
+            );
+            if let Some(published) = crate::summarization::publish_selected(&req, digest.clone()) {
+                digest = published;
+            } else if let Ok(store) = crate::store::Store::open(&db_path) {
                 if let Ok(published) = crate::summarization::publish_deterministic_and_enqueue(
                     &store.conn,
                     &req,
@@ -173,15 +175,17 @@ async fn model_synthesize(
     .await;
     let mut body_digest =
         crate::summarization::deterministic_report_context("body", &prepared.text, 3000);
-    if let Ok(store) = crate::store::Store::open(&db_path) {
-        let req = crate::summarization::flush_request(
-            crate::summarization::SummarizationMode::ReportContext,
-            "body",
-            &input.section_key,
-            &input.body_excerpt,
-            &input.section_key,
-            3000,
-        );
+    let req = crate::summarization::flush_request(
+        crate::summarization::SummarizationMode::ReportContext,
+        "body",
+        &input.section_key,
+        &input.body_excerpt,
+        &input.section_key,
+        3000,
+    );
+    if let Some(published) = crate::summarization::publish_selected(&req, body_digest.clone()) {
+        body_digest = published;
+    } else if let Ok(store) = crate::store::Store::open(&db_path) {
         if let Ok(published) = crate::summarization::publish_deterministic_and_enqueue(
             &store.conn,
             &req,
@@ -543,9 +547,15 @@ pub fn save_section(
         &section.section_key,
         480,
     );
-    let published =
-        crate::summarization::publish_deterministic_and_enqueue(&store.conn, &req, digest.clone())
-            .unwrap_or(digest);
+    let published = match crate::summarization::publish_selected(&req, digest.clone()) {
+        Some(published) => published,
+        None => crate::summarization::publish_deterministic_and_enqueue(
+            &store.conn,
+            &req,
+            digest.clone(),
+        )
+        .unwrap_or(digest),
+    };
     judgment.summary = published.content;
     let judgment = serde_json::to_string(&judgment).unwrap_or_else(|_| "{}".into());
     let evidence_ids = json!(output.judgment.cited_evidence_ids).to_string();

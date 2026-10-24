@@ -2,6 +2,9 @@ use super::*;
 
 #[path = "brief_configured_live_tests.rs"]
 mod configured_live;
+#[cfg(feature = "embedded")]
+#[path = "brief_stages_surreal_tests.rs"]
+mod surreal;
 #[path = "brief_user_chain_tests.rs"]
 mod user_chain;
 use crate::intel_recon::brief_pipeline::{ensure_chain, stage_views, BriefInputs};
@@ -1147,7 +1150,7 @@ async fn semantic_dedup_selects_existing_objects_and_preserves_distinctions() {
         item("old3", "Reopening could have been held up by expired insurance."),
         item("old4", "Inspections may delay reopening even after insurance is renewed.") ]});
     dedup_inferences(
-        &db.path,
+        &SqliteStages::new(&db.path),
         &mut mock,
         &StageContext::default(),
         &Arc::new(AtomicBool::new(false)),
@@ -1191,7 +1194,7 @@ async fn semantic_dedup_is_bounded_and_visits_later_candidates() {
     let mut out = json!({"inferences":(1..=15).map(|n|json!({"id":format!("old{n}"),
         "text":format!("Distinct conclusion number {n}."),"why":"Original reason.","evidence":[{"id":format!("b{n}")}]})).collect::<Vec<_>>()});
     dedup_inferences(
-        &db.path,
+        &SqliteStages::new(&db.path),
         &mut mock,
         &StageContext::default(),
         &Arc::new(AtomicBool::new(false)),

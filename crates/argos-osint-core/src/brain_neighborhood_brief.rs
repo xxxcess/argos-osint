@@ -1462,12 +1462,10 @@ impl IdAliases {
 
 fn trim_value(v: &mut serde_json::Value, shortened: &mut usize) {
     match v {
-        serde_json::Value::String(s) => {
-            if s.chars().count() > FIELD_CHARS_MAX {
-                let cut: String = s.chars().take(FIELD_CHARS_MAX).collect();
-                *s = format!("{}…", cut.trim_end());
-                *shortened += 1;
-            }
+        serde_json::Value::String(s) if s.chars().count() > FIELD_CHARS_MAX => {
+            let cut: String = s.chars().take(FIELD_CHARS_MAX).collect();
+            *s = format!("{}…", cut.trim_end());
+            *shortened += 1;
         }
         serde_json::Value::Array(a) => {
             for x in a.iter_mut() {

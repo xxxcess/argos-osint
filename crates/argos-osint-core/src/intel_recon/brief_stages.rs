@@ -738,7 +738,7 @@ fn validate_inference_selection(raw: &str, offered: &HashSet<String>) -> Result<
 /// Bounded semantic selection sees candidate text/reasoning only, never the
 /// article body again. All returned IDs resolve to already validated objects.
 async fn dedup_inferences(
-    db_path: &Path,
+    st: &dyn StageStore,
     backend: &mut dyn StageBackend,
     ctx: &StageContext,
     cancel: &Arc<AtomicBool>,
@@ -776,7 +776,7 @@ async fn dedup_inferences(
             })
             .collect();
         let raw = generate(
-            db_path,
+            st,
             backend,
             cancel,
             StageRequest {
@@ -1054,19 +1054,17 @@ async fn cancelled(flag: Arc<AtomicBool>) {
     }
 }
 
-fn activity(db_path: &Path, task: &str, label: &str) {
-    if let Ok(store) = Store::open_light(db_path) {
-        let _ = brief_pipeline::set_activity(&store.conn, task, label);
-    }
+fn activity(st: &dyn StageStore, task: &str, label: &str) {
+    st.activity(task, label);
 }
 
 fn generate<'a>(
-    db_path: &'a Path,
+    st: &'a dyn StageStore,
     backend: &mut dyn StageBackend,
     cancel: &'a Arc<AtomicBool>,
     request: StageRequest,
 ) -> BoxFut<'a, Result<Value>> {
-    let dispatch = generate_unmeasured(db_path, backend, cancel, request);
+    let dispatch = generate_unmeasured(st, backend, cancel, request);
     Box::pin(super::brief_timing::timed(
         super::brief_timing::Phase::Model,
         dispatch,
@@ -1074,18 +1072,18 @@ fn generate<'a>(
 }
 
 fn generate_unmeasured<'a>(
-    db_path: &'a Path,
+    st: &'a dyn StageStore,
     backend: &mut dyn StageBackend,
     cancel: &'a Arc<AtomicBool>,
     request: StageRequest,
 ) -> BoxFut<'a, Result<Value>> {
     let validator = request.validator.clone();
     let task = request.task_id.clone();
-    activity(db_path, &task, "waiting for model");
+    activity(st, &task, "waiting for model");
     let dispatch = backend.generate(request, cancel);
     Box::pin(async move {
         let raw = dispatch.await?;
-        activity(db_path, &task, "validating");
+        activity(st, &task, "validating");
         validator(&raw).map_err(|e| anyhow!("invalid stage output: {e}"))?;
         strict_json(&raw)
     })
@@ -1095,13 +1093,11 @@ fn generate_unmeasured<'a>(
 /// sibling or a later synthesis/fidelity failure must not re-pay successful
 /// classification on Retry. The hash binds the original body spans, claim,
 /// policy and captured classifier route, never the lease epoch.
-fn classify_context_cached<'a>(
-    db_path: &'a Path,
-    backend: &mut dyn StageBackend,
-    ctx: &'a StageContext,
-    batch: super::brief_context::ContextBatch,
-    cancel: &'a Arc<AtomicBool>,
-) -> BoxFut<'a, Result<HashMap<String, String>>> {
+async fn context_checkpoint(
+    st: &dyn StageStore,
+    ctx: &StageContext,
+    batch: &super::brief_context::ContextBatch,
+) -> Result<(Option<HashMap<String, String>>, String, String)> {
     let payload = batch.user();
     let item = format!("context:{}", crate::nlp::cache::hash(&payload));
     let input_hash = crate::nlp::cache::hash(
@@ -1113,39 +1109,42 @@ fn classify_context_cached<'a>(
         ])
         .to_string(),
     );
-    let cached = (|| -> Result<Option<HashMap<String, String>>> {
-        let store = Store::open_initialized_light(db_path)?;
-        let output = brief_pipeline::checkpoint_get(
-            &store.conn,
-            &ctx.job_id,
-            "intel_brief_inferences",
-            &item,
-            &input_hash,
-        )?;
-        // A damaged checkpoint is reclassified, never accepted as evidence.
-        Ok(output
-            .and_then(|v| serde_json::from_value::<HashMap<String, String>>(v).ok())
-            .filter(|labels| batch.selected(labels).is_ok()))
-    })();
-    match cached {
+    let output = st
+        .checkpoint_get(&ctx.job_id, "intel_brief_inferences", &item, &input_hash)
+        .await?;
+    // A damaged checkpoint is reclassified, never accepted as evidence.
+    let cached = output
+        .and_then(|v| serde_json::from_value::<HashMap<String, String>>(v).ok())
+        .filter(|labels| batch.selected(labels).is_ok());
+    Ok((cached, item, input_hash))
+}
+
+fn classify_context_cached<'a>(
+    st: &'a dyn StageStore,
+    backend: &mut dyn StageBackend,
+    ctx: &'a StageContext,
+    batch: super::brief_context::ContextBatch,
+    cancel: &'a Arc<AtomicBool>,
+    checkpoint: Result<(Option<HashMap<String, String>>, String, String)>,
+) -> BoxFut<'a, Result<HashMap<String, String>>> {
+    let (item, input_hash) = match checkpoint {
         Err(error) => return Box::pin(async move { Err(error) }),
-        Ok(Some(labels)) => return Box::pin(async move { Ok(labels) }),
-        Ok(None) => {}
-    }
+        Ok((Some(labels), _, _)) => return Box::pin(async move { Ok(labels) }),
+        Ok((None, item, hash)) => (item, hash),
+    };
     let dispatch = backend.classify_context(ctx, batch.clone(), cancel);
     Box::pin(async move {
         let labels = dispatch.await?;
         batch.selected(&labels).map_err(anyhow::Error::msg)?;
         ensure!(!cancel.load(Ordering::Acquire), "cancelled");
-        let store = Store::open_initialized_light(db_path)?;
-        brief_pipeline::checkpoint_put(
-            &store.conn,
+        st.checkpoint_put(
             &ctx.job_id,
             "intel_brief_inferences",
             &item,
             &input_hash,
             &serde_json::to_value(&labels)?,
-        )?;
+        )
+        .await?;
         Ok(labels)
     })
 }
@@ -1206,20 +1205,15 @@ fn snapshot_article(mut article: AtlasArticleRow, ctx: &StageContext) -> AtlasAr
     article
 }
 
-async fn execute(
-    db_path: &Path,
+pub(crate) async fn execute(
+    st: &dyn StageStore,
     claimed: &ClaimedTask,
     backend: &mut dyn StageBackend,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(Value, usize, String)> {
     let (article, job, ctx) = {
-        let store = Store::open(db_path)?;
-        let ctx = stage_context(&store, claimed)?;
-        (
-            snapshot_article(article_for(&store, &article_id_of(claimed, &store)?)?, &ctx),
-            claimed.job_id.clone(),
-            ctx,
-        )
+        let (ctx, article) = st.load(claimed).await?;
+        (snapshot_article(article, &ctx), claimed.job_id.clone(), ctx)
     };
     match claimed.operation.as_str() {
         "intel_brief_body" => {
@@ -1227,9 +1221,9 @@ async fn execute(
                 .ok()
                 .and_then(|v| v["force_body"].as_bool())
                 .unwrap_or(false);
-            activity(db_path, &claimed.id, "retrieving / cleaning");
+            activity(st, &claimed.id, "retrieving / cleaning");
             let artifact = backend.prepare_body(&ctx, &article, force, cancel).await?;
-            activity(db_path, &claimed.id, "validating");
+            activity(st, &claimed.id, "validating");
             stage_one_admissible(&artifact, artifact.acquisition_complete)?;
             // Row: "Completed · validated clean body" (plus any diagnostics).
             let mut reason = String::from("validated clean body");
@@ -1254,7 +1248,7 @@ async fn execute(
                     .map_err(|e| e.to_string())
             });
             let raw = generate(
-                db_path,
+                st,
                 backend,
                 cancel,
                 StageRequest {
@@ -1281,7 +1275,7 @@ async fn execute(
             let mut out = validate_claims(&raw.to_string(), &meta)?;
             let index: HashMap<&str, &Sentence> = meta.iter().map(|s| (s.id.as_str(), s)).collect();
             apply_fidelity(
-                db_path,
+                st,
                 backend,
                 &ctx,
                 &ctx.route_key(None, "evidence_curator"),
@@ -1303,26 +1297,13 @@ async fn execute(
             Ok((out, n, reason))
         }
         "intel_brief_inferences" => {
-            let (body, claims) = {
-                let store = Store::open(db_path)?;
-                (
-                    stage_output(&store, &job, "intel_brief_body")?,
-                    stage_output(&store, &job, "intel_brief_claims")?,
-                )
-            };
+            let (body, claims) = (
+                st.stage_output(&job, "intel_brief_body").await?,
+                st.stage_output(&job, "intel_brief_claims").await?,
+            );
             let (all, index_full) = super::sentence_index::body_sentences(&body);
-            let actors: Vec<super::brief_context::ContextActor> = {
-                let store = Store::open(db_path)?;
-                store
-                    .atlas_metadata(&article.run_id, &article.id)?
-                    .map(|metadata| {
-                        crate::atlas_metadata::article_actors(&article, &metadata)
-                            .iter()
-                            .map(super::brief_context::ContextActor::from)
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            };
+            let actors: Vec<super::brief_context::ContextActor> =
+                st.article_actors(&article).await?;
             let system = format!(
                 "{INFERENCES_PROMPT}{}{STRICT_JSON}{INFERENCES_SHAPE}",
                 super::brief_contracts::inferences_limits()
@@ -1364,7 +1345,7 @@ async fn execute(
                     .collect::<Vec<_>>()
                     .into_iter();
                 let mut running = FuturesUnordered::new();
-                activity(db_path, &claimed.id, "selecting claim context");
+                activity(st, &claimed.id, "selecting claim context");
                 super::brief_timing::timed(super::brief_timing::Phase::Model, async {
                     loop {
                         while running.len() < INFERENCE_CONCURRENCY {
@@ -1372,12 +1353,14 @@ async fn execute(
                             let Some((n, batch)) = jobs.next() else {
                                 break;
                             };
+                            let checkpoint = context_checkpoint(st, &ctx, &batch).await;
                             let dispatch = classify_context_cached(
-                                db_path,
+                                st,
                                 backend,
                                 &ctx,
                                 batch.clone(),
                                 cancel,
+                                checkpoint,
                             );
                             running.push(dispatch.map(move |result| (n, batch, result)).boxed());
                         }
@@ -1488,33 +1471,28 @@ async fn execute(
             let mut reused_indices = HashSet::new();
             let mut todo = Vec::new();
             {
-                let store = Store::open(db_path)?;
                 for (n, (claim_id, _, user, _)) in requests.iter().enumerate() {
                     if context_failed.contains(&n) {
                         continue;
                     }
-                    let cached = super::brief_pipeline::checkpoint_get(
-                        &store.conn,
-                        &job,
-                        &claimed.operation,
-                        claim_id,
-                        &checkpoint_hash(user),
-                    )?
-                    .and_then(|output| {
-                        let mut output = validate_claim_inferences(
-                            &output.to_string(),
-                            claim_id,
-                            &requests[n].1,
-                        )
-                        .ok()?;
-                        retain_inference_counterevidence(
-                            &mut output,
-                            &requests[n].1,
-                            &requests[n].3,
-                        )
-                        .ok()?;
-                        Some(output)
-                    });
+                    let cached = st
+                        .checkpoint_get(&job, &claimed.operation, claim_id, &checkpoint_hash(user))
+                        .await?
+                        .and_then(|output| {
+                            let mut output = validate_claim_inferences(
+                                &output.to_string(),
+                                claim_id,
+                                &requests[n].1,
+                            )
+                            .ok()?;
+                            retain_inference_counterevidence(
+                                &mut output,
+                                &requests[n].1,
+                                &requests[n].3,
+                            )
+                            .ok()?;
+                            Some(output)
+                        });
                     match cached {
                         Some(output) => {
                             outputs[n] = output;
@@ -1527,7 +1505,7 @@ async fn execute(
             }
             if reused > 0 {
                 activity(
-                    db_path,
+                    st,
                     &claimed.id,
                     &format!(
                         "reusing {reused} analyzed claim{}",
@@ -1548,7 +1526,7 @@ async fn execute(
                         };
                         let (claim_id, selected, user, _) = &requests[n];
                         let dispatch = generate_unmeasured(
-                            db_path,
+                            st,
                             backend,
                             cancel,
                             request(claim_id, selected, user),
@@ -1575,16 +1553,15 @@ async fn execute(
                     });
                     match processed {
                         Ok(output) => {
-                            if let Ok(store) = Store::open(db_path) {
-                                let _ = super::brief_pipeline::checkpoint_put(
-                                    &store.conn,
+                            let _ = st
+                                .checkpoint_put(
                                     &job,
                                     &claimed.operation,
                                     &requests[n].0,
                                     &checkpoint_hash(&requests[n].2),
                                     &output,
-                                );
-                            }
+                                )
+                                .await;
                             outputs[n] = output;
                         }
                         Err(error) => {
@@ -1631,7 +1608,7 @@ async fn execute(
             }
             let index: HashMap<&str, &Sentence> = all.iter().map(|s| (s.id.as_str(), s)).collect();
             apply_fidelity(
-                db_path,
+                st,
                 backend,
                 &ctx,
                 &ctx.route_key(
@@ -1647,7 +1624,7 @@ async fn execute(
                 "no supported inferences",
             )
             .await?;
-            dedup_inferences(db_path, backend, &ctx, cancel, &mut last).await?;
+            dedup_inferences(st, backend, &ctx, cancel, &mut last).await?;
             last["analysis_requests"] = json!(requests.len() - context_failed.len() - reused);
             last["path"] = json!("claim_context");
             last["context_policy"] = json!(super::brief_context::CONTEXT_POLICY);
@@ -1683,10 +1660,7 @@ async fn execute(
             Ok((last, n, reason))
         }
         "intel_brief_links" => {
-            let inferences = {
-                let store = Store::open(db_path)?;
-                stage_output(&store, &job, "intel_brief_inferences")?
-            };
+            let inferences = st.stage_output(&job, "intel_brief_inferences").await?;
             let inference_ids: HashSet<String> = inferences["inferences"]
                 .as_array()
                 .into_iter()
@@ -1716,7 +1690,7 @@ async fn execute(
                     .map_err(|e| e.to_string())
             });
             let raw = generate(
-                db_path,
+                st,
                 backend,
                 cancel,
                 StageRequest {
@@ -1823,8 +1797,8 @@ fn prepare_canonical(
 /// Claim assessor in batches of at most [`super::brief_fidelity::BATCH`].
 /// Fidelity receipts are keyed by the item's source/contract receipt plus
 /// the actual resolved route, so a route change re-assesses.
-pub async fn assess_cached(
-    db_path: &Path,
+pub async fn assess_cached_on(
+    st: &dyn StageStore,
     backend: &mut dyn StageBackend,
     ctx: &StageContext,
     route_key: &str,
@@ -1837,9 +1811,8 @@ pub async fn assess_cached(
     let mut labels = HashMap::new();
     let mut pending = Vec::new();
     {
-        let store = Store::open(db_path)?;
         for item in items {
-            match store.app_state_get(&receipt(&item))? {
+            match st.receipt_get(&receipt(&item)).await? {
                 Some(label) => {
                     labels.insert(item.id.clone(), label);
                 }
@@ -1849,13 +1822,12 @@ pub async fn assess_cached(
     }
     for batch in pending.chunks(super::brief_fidelity::BATCH) {
         let decided = backend.assess(ctx, batch.to_vec(), cancel).await?;
-        let store = Store::open(db_path)?;
         for item in batch {
             let label = decided
                 .get(&item.id)
                 .cloned()
                 .ok_or_else(|| anyhow!("fidelity decision missing for {}", item.id))?;
-            store.app_state_set(&receipt(item), &label)?;
+            st.receipt_set(&receipt(item), &label).await?;
             labels.insert(item.id.clone(), label);
         }
     }
@@ -1865,7 +1837,7 @@ pub async fn assess_cached(
 /// Keep only items the Claim assessor judged faithful to their own passages.
 #[allow(clippy::too_many_arguments)]
 async fn apply_fidelity(
-    db_path: &Path,
+    st: &dyn StageStore,
     backend: &mut dyn StageBackend,
     ctx: &StageContext,
     route_key: &str,
@@ -1938,10 +1910,10 @@ async fn apply_fidelity(
             }
         })
         .collect();
-    activity(db_path, &ctx.task_id, "checking fidelity");
+    activity(st, &ctx.task_id, "checking fidelity");
     let labels = super::brief_timing::timed(
         super::brief_timing::Phase::Fidelity,
-        assess_cached(db_path, backend, ctx, route_key, items, cancel),
+        assess_cached_on(st, backend, ctx, route_key, items, cancel),
     )
     .await?;
     let mut kept = Vec::new();
@@ -1962,6 +1934,158 @@ async fn apply_fidelity(
     out[key] = Value::Array(kept);
     out["withheld"] = json!(withheld);
     Ok(())
+}
+
+/// [`assess_cached_on`] over the SQLite store at `db_path`.
+pub async fn assess_cached(
+    db_path: &Path,
+    backend: &mut dyn StageBackend,
+    ctx: &StageContext,
+    route_key: &str,
+    items: Vec<super::brief_fidelity::FidelityItem>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<HashMap<String, String>> {
+    assess_cached_on(
+        &SqliteStages::new(db_path),
+        backend,
+        ctx,
+        route_key,
+        items,
+        cancel,
+    )
+    .await
+}
+
+/// The reads and writes a running stage makes: its context and article,
+/// earlier stage outputs, the article's actors, per-item checkpoints,
+/// fidelity receipts and the live activity label. [`SqliteStages`] is the
+/// SQLite store; `storage::brief_stages` is the repository.
+pub trait StageStore: Send + Sync {
+    /// The stage context and the article as currently stored (the caller
+    /// applies the captured metadata snapshot).
+    fn load<'a>(
+        &'a self,
+        claimed: &'a ClaimedTask,
+    ) -> BoxFut<'a, Result<(StageContext, AtlasArticleRow)>>;
+    fn stage_output<'a>(&'a self, job_id: &'a str, operation: &'a str)
+        -> BoxFut<'a, Result<Value>>;
+    fn article_actors<'a>(
+        &'a self,
+        article: &'a AtlasArticleRow,
+    ) -> BoxFut<'a, Result<Vec<super::brief_context::ContextActor>>>;
+    fn checkpoint_get<'a>(
+        &'a self,
+        job_id: &'a str,
+        stage: &'a str,
+        item: &'a str,
+        input_hash: &'a str,
+    ) -> BoxFut<'a, Result<Option<Value>>>;
+    fn checkpoint_put<'a>(
+        &'a self,
+        job_id: &'a str,
+        stage: &'a str,
+        item: &'a str,
+        input_hash: &'a str,
+        output: &'a Value,
+    ) -> BoxFut<'a, Result<()>>;
+    fn receipt_get<'a>(&'a self, key: &'a str) -> BoxFut<'a, Result<Option<String>>>;
+    fn receipt_set<'a>(&'a self, key: &'a str, value: &'a str) -> BoxFut<'a, Result<()>>;
+    /// Best effort: a failed label write never fails the stage.
+    fn activity(&self, task: &str, label: &str);
+}
+
+/// [`StageStore`] on the SQLite store at `db_path`; each call opens its own
+/// connection, as the stage executor always has.
+pub struct SqliteStages {
+    db_path: PathBuf,
+}
+
+impl SqliteStages {
+    pub fn new(db_path: &Path) -> Self {
+        Self {
+            db_path: db_path.to_path_buf(),
+        }
+    }
+}
+
+impl StageStore for SqliteStages {
+    fn load<'a>(
+        &'a self,
+        claimed: &'a ClaimedTask,
+    ) -> BoxFut<'a, Result<(StageContext, AtlasArticleRow)>> {
+        Box::pin(async move {
+            let store = Store::open(&self.db_path)?;
+            let ctx = stage_context(&store, claimed)?;
+            Ok((ctx, article_for(&store, &article_id_of(claimed, &store)?)?))
+        })
+    }
+
+    fn stage_output<'a>(
+        &'a self,
+        job_id: &'a str,
+        operation: &'a str,
+    ) -> BoxFut<'a, Result<Value>> {
+        Box::pin(async move { stage_output(&Store::open(&self.db_path)?, job_id, operation) })
+    }
+
+    fn article_actors<'a>(
+        &'a self,
+        article: &'a AtlasArticleRow,
+    ) -> BoxFut<'a, Result<Vec<super::brief_context::ContextActor>>> {
+        Box::pin(async move {
+            let store = Store::open(&self.db_path)?;
+            Ok(store
+                .atlas_metadata(&article.run_id, &article.id)?
+                .map(|metadata| {
+                    crate::atlas_metadata::article_actors(article, &metadata)
+                        .iter()
+                        .map(super::brief_context::ContextActor::from)
+                        .collect()
+                })
+                .unwrap_or_default())
+        })
+    }
+
+    fn checkpoint_get<'a>(
+        &'a self,
+        job_id: &'a str,
+        stage: &'a str,
+        item: &'a str,
+        input_hash: &'a str,
+    ) -> BoxFut<'a, Result<Option<Value>>> {
+        Box::pin(async move {
+            let store = Store::open_initialized_light(&self.db_path)?;
+            brief_pipeline::checkpoint_get(&store.conn, job_id, stage, item, input_hash)
+        })
+    }
+
+    fn checkpoint_put<'a>(
+        &'a self,
+        job_id: &'a str,
+        stage: &'a str,
+        item: &'a str,
+        input_hash: &'a str,
+        output: &'a Value,
+    ) -> BoxFut<'a, Result<()>> {
+        Box::pin(async move {
+            let store = Store::open_initialized_light(&self.db_path)?;
+            brief_pipeline::checkpoint_put(&store.conn, job_id, stage, item, input_hash, output)
+        })
+    }
+
+    fn receipt_get<'a>(&'a self, key: &'a str) -> BoxFut<'a, Result<Option<String>>> {
+        Box::pin(async move { Store::open(&self.db_path)?.app_state_get(key) })
+    }
+
+    fn receipt_set<'a>(&'a self, key: &'a str, value: &'a str) -> BoxFut<'a, Result<()>> {
+        Box::pin(async move { Store::open(&self.db_path)?.app_state_set(key, value) })
+    }
+
+    fn activity(&self, task: &str, label: &str) {
+        if let Ok(store) = Store::open_light(&self.db_path) {
+            let _ = brief_pipeline::set_activity(&store.conn, task, label);
+        }
+    }
 }
 
 /// Claim and run the next eligible brief stage. Returns None when idle.
@@ -2046,12 +2170,13 @@ pub async fn run_claimed(
             }
         })
     };
+    let stages = SqliteStages::new(db_path);
     let stage_clock = std::time::Instant::now();
     let clock = super::brief_timing::StageClock::default();
     let result = tokio::select! {
         r = super::brief_timing::with_clock(
             clock.clone(),
-            execute(db_path, &claimed, backend, &cancel),
+            execute(&stages, &claimed, backend, &cancel),
         ) => r,
         _ = cancelled(cancel.clone()) => Err(anyhow!("cancelled")),
     };
@@ -2319,6 +2444,24 @@ pub struct RuntimeBackend {
 }
 
 impl RuntimeBackend {
+    /// SQLite telemetry file, or `None` for a backend built without one
+    /// (the SurrealDB drainer), so nothing opens SQLite there.
+    fn telemetry(&self) -> Option<&Path> {
+        Some(self.db_path.as_path()).filter(|p| !p.as_os_str().is_empty())
+    }
+
+    /// Model-activity sink writing to the SQLite activity table, or `None`
+    /// without a telemetry file.
+    fn sink(
+        &self,
+        task_id: &str,
+        substep: &str,
+        role: &str,
+    ) -> Option<Arc<dyn Fn(crate::recon::model_exec::ModelExecEvent) + Send + Sync>> {
+        self.telemetry()
+            .map(|db| super::brief_timing::activity_sink(db, task_id, substep, role))
+    }
+
     fn job_runtime(
         &self,
         ctx: &StageContext,
@@ -2461,13 +2604,8 @@ impl StageBackend for RuntimeBackend {
                 &scope,
                 &adapter,
                 cancel,
-                Some(super::brief_timing::activity_sink(
-                    &self.db_path,
-                    task_id,
-                    "checking fidelity",
-                    scope.role,
-                )),
-                Some(self.db_path.as_path()),
+                self.sink(task_id, "checking fidelity", scope.role),
+                self.telemetry(),
             )
             .await?;
             Ok(labels)
@@ -2484,7 +2622,9 @@ impl StageBackend for RuntimeBackend {
         batch: super::brief_context::ContextBatch,
         cancel: &'a Arc<AtomicBool>,
     ) -> BoxFut<'a, Result<HashMap<String, String>>> {
-        let (auth, db_path) = (self.auth.clone(), self.db_path.clone());
+        let auth = self.auth.clone();
+        let sink = self.sink(&ctx.task_id, "selecting claim context", "classifier");
+        let db_path = self.telemetry().map(Path::to_path_buf);
         let settings = ctx.routed(&self.settings);
         Box::pin(async move {
             let operation_id = ctx.operation_id("claim-context", &batch.user());
@@ -2503,13 +2643,8 @@ impl StageBackend for RuntimeBackend {
                 &scope,
                 &adapter,
                 cancel,
-                Some(super::brief_timing::activity_sink(
-                    &db_path,
-                    &ctx.task_id,
-                    "selecting claim context",
-                    "classifier",
-                )),
-                Some(db_path.as_path()),
+                sink,
+                db_path.as_deref(),
             )
             .await?;
             Ok(labels)
@@ -2580,14 +2715,9 @@ impl StageBackend for RuntimeBackend {
                 &messages,
                 move |raw| validator(raw),
                 cancel,
-                Some(super::brief_timing::activity_sink(
-                    &backend.db_path,
-                    &request.task_id,
-                    &request.stage,
-                    request.role,
-                )),
+                backend.sink(&request.task_id, &request.stage, request.role),
                 None,
-                Some(backend.db_path.as_path()),
+                backend.telemetry(),
                 true,
             )
             .await?;

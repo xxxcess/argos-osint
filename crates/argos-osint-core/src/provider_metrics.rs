@@ -197,9 +197,15 @@ pub fn capacity_snapshot(conn: &rusqlite::Connection) -> CapacitySnapshot {
     let Ok(rows) = rows else {
         return CapacitySnapshot::unavailable();
     };
+    capacity_from_rows(rows.flatten().collect())
+}
+
+/// Builds the snapshot from stored rows, newest capture first (the order
+/// `capacity_snapshot` reads them in). No rows is unavailable, never zero.
+pub fn capacity_from_rows(rows: Vec<StoredCapacityRow>) -> CapacitySnapshot {
     let mut capacity: Vec<CapacityRow> = Vec::new();
     let mut latest_captured_at = String::new();
-    for row in rows.flatten() {
+    for row in rows {
         if row.captured_at > latest_captured_at {
             latest_captured_at = row.captured_at.clone();
         }

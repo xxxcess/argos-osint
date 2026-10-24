@@ -23,6 +23,7 @@ pub mod atlas_insights;
 pub mod atlas_memory;
 pub mod atlas_metadata;
 pub mod atlas_recall_tests;
+pub mod atlas_store;
 pub mod atlas_work;
 pub mod brain;
 pub mod brain_actor_dedup;
@@ -78,6 +79,8 @@ pub mod reliability_faults;
 pub mod request_policy;
 pub mod scheduler;
 pub mod secrets;
+#[cfg(feature = "surreal")]
+pub mod storage;
 pub mod store;
 pub mod subscription;
 pub mod summarization;

@@ -342,8 +342,13 @@ fn load_legacy_memory_evidence(
 }
 
 pub fn admit_memory(query: &BrainQuery, memory: &Memory, policy: &AdmissionPolicy) -> bool {
-    let memory_text: Vec<_> = memory
-        .text
+    admit_text(query, &memory.text, policy)
+}
+
+/// [`admit_memory`] on a memory's text alone (the SurrealDB recall hits
+/// carry no `Memory`).
+pub fn admit_text(query: &BrainQuery, text: &str, policy: &AdmissionPolicy) -> bool {
+    let memory_text: Vec<_> = text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
         .map(str::to_lowercase)

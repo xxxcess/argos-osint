@@ -63,7 +63,7 @@ fn has_table(conn: &Connection, t: &str) -> Result<bool> {
     )?)
 }
 
-fn h(v: &Value) -> String {
+pub(crate) fn h(v: &Value) -> String {
     crate::nlp::cache::hash(&format!(
         "{IDENTITY_INDEX_VERSION}|browse-associations-v2|{}|{v}",
         crate::related_articles::MATCH_VERSION

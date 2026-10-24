@@ -620,6 +620,35 @@ fn owner_claim_rows(
         params![article_id, kind],
         |r| r.get(0),
     )?;
+    claim_rows_from_output(&output, &lifecycle, article_id, |fp| {
+        let memory: Option<String> = conn.query_row("SELECT m.text FROM insight_claims c JOIN memories m ON m.id=c.memory_id WHERE c.fingerprint=?1",[fp],|r|r.get(0)).optional()?;
+        if memory.is_none() && crate::store::tombstone_runs(conn, fp)?.is_some() {
+            return Ok(ClaimMemory::Tombstoned);
+        }
+        Ok(memory.map_or(ClaimMemory::Unpublished, ClaimMemory::Current))
+    })
+    .map(Some)
+}
+
+/// What the store holds for one published claim fingerprint.
+pub enum ClaimMemory {
+    /// The claim's memory text now (possibly user-edited).
+    Current(String),
+    /// No memory row (not published, or not tracked by this store).
+    Unpublished,
+    /// Deleted by the user: hide the row.
+    Tombstoned,
+}
+
+/// Intel brief claim rows from an owner's active output (faithful claims and
+/// inferences), each labelled with its status. `memory` reports the stored
+/// memory for a fingerprint, so user edits and deletions show.
+pub fn claim_rows_from_output(
+    output: &super::insights::PipelineOutput,
+    lifecycle: &str,
+    article_id: &str,
+    mut memory: impl FnMut(&str) -> Result<ClaimMemory>,
+) -> Result<Vec<crate::store::AtlasArticleClaim>> {
     let mut rows = Vec::new();
     let mut push = |fp: String,
                     subject: &str,
@@ -633,15 +662,13 @@ fn owner_claim_rows(
         if !assessment.faithful() {
             return Ok(());
         }
-        let memory:Option<(String,String)>=conn.query_row("SELECT m.id,m.text FROM insight_claims c JOIN memories m ON m.id=c.memory_id WHERE c.fingerprint=?1",[&fp],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-        if memory.is_none() && crate::store::tombstone_runs(conn, &fp)?.is_some() {
-            return Ok(());
-        }
-        let edited = memory.as_ref().is_some_and(|(_, current)| current != text);
-        let text = memory
-            .as_ref()
-            .map(|(_, text)| text.as_str())
-            .unwrap_or(text);
+        let stored = match memory(&fp)? {
+            ClaimMemory::Tombstoned => return Ok(()),
+            ClaimMemory::Current(text) => Some(text),
+            ClaimMemory::Unpublished => None,
+        };
+        let edited = stored.as_ref().is_some_and(|current| current != text);
+        let text = stored.as_deref().unwrap_or(text);
         let status = if edited {
             "user_edited · unassessed".into()
         } else if lifecycle == "pending" || lifecycle == "previous" {
@@ -702,7 +729,7 @@ fn owner_claim_rows(
             &i.assessment,
         )?;
     }
-    Ok(Some(rows))
+    Ok(rows)
 }
 
 pub fn enqueue_refresh(
@@ -1093,6 +1120,21 @@ pub async fn recover_refreshes(
         }
     }
     Ok(completed)
+}
+
+/// [`validate_retry`] on the selected store: under SurrealDB it runs
+/// `storage::insight_retry::validate_retry` and never opens SQLite.
+pub(crate) async fn validate_retry_at(
+    db_path: &std::path::Path,
+    input: &PipelineInput,
+) -> Result<()> {
+    #[cfg(feature = "surreal")]
+    if crate::recon::backend::sqlite_path(db_path).is_none() {
+        let repo = crate::storage::runtime::repository().await?;
+        return crate::storage::insight_retry::validate_retry(repo.db(), input).await;
+    }
+    let store = crate::store::Store::open(db_path)?;
+    validate_retry(&store.conn, input)
 }
 
 pub(super) fn validate_retry(conn: &Connection, input: &PipelineInput) -> Result<()> {

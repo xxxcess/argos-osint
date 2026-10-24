@@ -18,8 +18,9 @@ use tokio::sync::{watch, Mutex, Semaphore};
 use crate::osint::contracts::IntelligenceCategory;
 use crate::osint::{self, ProviderKeys, ToolDefinition, ToolResult};
 use crate::provider::SettingsFile;
+use crate::recon::backend::ReconStore;
 use crate::recon::orchestrate::BudgetedOutcome;
-use crate::recon::{CreditHold, PlanCall, Run, Store};
+use crate::recon::{CreditHold, PlanCall, Run};
 use crate::telemetry::{self, EventKind, TelemetryEvent, ToolOutcome, Trigger};
 
 /// Who asked for a tool run. Attribution is passed down by the caller and is
@@ -211,8 +212,8 @@ impl ToolRunner {
 
         // 1. Cache hit check
         if !refresh {
-            if let Ok(store) = Store::open(&self.db_path) {
-                if let Ok(Some(cached)) = store.cache_get(&cache_key) {
+            if let Ok(store) = ReconStore::open(&self.db_path).await {
+                if let Ok(Some(cached)) = store.cache_get(&cache_key).await {
                     let projected = osint::project_cached_result(canonical, &inputs, &cached);
                     // A cache hit is served locally: it is not a remote request and
                     // a cache miss shape never counts as zero results.
@@ -303,8 +304,8 @@ impl ToolRunner {
 
         // 3. Check enabled status
         {
-            let store = Store::open(&self.db_path)?;
-            if !store.tool_enabled(canonical)? {
+            let store = ReconStore::open(&self.db_path).await?;
+            if !store.tool_enabled(canonical).await? {
                 self.note_failure(
                     canonical,
                     def,
@@ -324,10 +325,10 @@ impl ToolRunner {
         if reserve_credits {
             if let Some((provider_name, cost)) = cost_info {
                 if cost > 0 {
-                    let store = Store::open(&self.db_path)?;
-                    credit_hold = store.reserve_credits(provider_name, cost, limits)?;
+                    let store = ReconStore::open(&self.db_path).await?;
+                    credit_hold = store.reserve_credits(provider_name, cost, limits).await?;
                     if credit_hold.is_none() {
-                        let available = store.credits_available(provider_name, limits)?;
+                        let available = store.credits_available(provider_name, limits).await?;
                         self.note_failure(
                             canonical,
                             def,
@@ -350,7 +351,9 @@ impl ToolRunner {
             _ = wait_cancellation(cancel) => {
                 if reserve_credits {
                     if let (Some((_provider, _)), Some(hold)) = (cost_info, &credit_hold) {
-                        let _ = Store::open(&self.db_path).map(|s| s.release_credits(hold));
+                        if let Ok(s) = ReconStore::open(&self.db_path).await {
+                            let _ = s.release_credits(hold).await;
+                        }
                     }
                 }
                 self.note_cancelled(canonical, attribution, &clock);
@@ -394,7 +397,9 @@ impl ToolRunner {
             _ = wait_cancellation(cancel) => {
                 if reserve_credits {
                     if let (Some((_provider, _)), Some(hold)) = (cost_info, &credit_hold) {
-                        let _ = Store::open(&self.db_path).map(|s| s.release_credits(hold));
+                        if let Ok(s) = ReconStore::open(&self.db_path).await {
+                            let _ = s.release_credits(hold).await;
+                        }
                     }
                 }
                 self.note_cancelled(canonical, attribution, &clock);
@@ -408,7 +413,9 @@ impl ToolRunner {
             Err(err) => {
                 if reserve_credits {
                     if let (Some((_provider, _)), Some(hold)) = (cost_info, &credit_hold) {
-                        let _ = Store::open(&self.db_path).map(|s| s.release_credits(hold));
+                        if let Ok(s) = ReconStore::open(&self.db_path).await {
+                            let _ = s.release_credits(hold).await;
+                        }
                     }
                 }
                 self.note_failure(canonical, def, attribution, &cache_key, "transport", &clock);
@@ -419,7 +426,7 @@ impl ToolRunner {
         // 6. Settle or release credit hold
         if reserve_credits {
             if let (Some((_provider_name, _)), Some(hold)) = (cost_info, &credit_hold) {
-                if let Ok(store) = Store::open(&self.db_path) {
+                if let Ok(store) = ReconStore::open(&self.db_path).await {
                     let spend = matches!(result.status.as_str(), "completed" | "no_results")
                         && !result.cached;
                     let uncertain_whoxy = canonical == crate::osint::whoxy::TOOL_ID
@@ -434,9 +441,9 @@ impl ToolRunner {
                     if spend || uncertain_whoxy {
                         let estimate = hold.trial_credits + hold.allowance_credits;
                         let actual = result.credits_reported.unwrap_or(estimate);
-                        let _ = store.reconcile_credits(hold, actual);
+                        let _ = store.reconcile_credits(hold, actual).await;
                     } else {
-                        let _ = store.release_credits(hold);
+                        let _ = store.release_credits(hold).await;
                     }
                 }
             }
@@ -447,15 +454,16 @@ impl ToolRunner {
         let outcome = tool_outcome(&result, timed_out);
         if osint_cacheable(&result) {
             if let Some(ttl) = cache_ttl_for(def, &outcome) {
-                if let Ok(store) = Store::open(&self.db_path) {
-                    let _ = store.cache_put(&cache_key, &result, ttl);
+                if let Ok(store) = ReconStore::open(&self.db_path).await {
+                    let _ = store.cache_put(&cache_key, &result, ttl).await;
                 }
             }
         }
 
         // 8. NewsAPI quota charge
         if !result.cached && canonical.starts_with("newsapi_") {
-            if let Ok(store) = Store::open(&self.db_path) {
+            // One store: the SQLite `Store` or the repository, never both.
+            if let Ok(store) = ReconStore::open(&self.db_path).await {
                 let bucket = if osint::key_exhausted(&self.keys.newsapi)
                     && !self.keys.newsapi_fallback.trim().is_empty()
                 {
@@ -463,7 +471,7 @@ impl ToolRunner {
                 } else {
                     "newsapi"
                 };
-                crate::atlas::charge_quota(&store, bucket);
+                let _ = store.charge_quota(bucket).await;
             }
         }
 
@@ -502,7 +510,7 @@ impl ToolRunner {
             });
         }
         let limits = &self.settings.recon_limits;
-        let store = Store::open(&self.db_path)?;
+        let store = ReconStore::open(&self.db_path).await?;
         let mut affordable = Vec::new();
         let mut skipped = Vec::new();
         let mut holds: Vec<(String, CreditHold)> = Vec::new();
@@ -511,11 +519,14 @@ impl ToolRunner {
             if cancel.load(Ordering::Relaxed) {
                 return Err(anyhow!("cancelled"));
             }
-            if !store.tool_enabled(&call.tool_id)? {
+            if !store.tool_enabled(&call.tool_id).await? {
                 skipped.push(format!("{} — disabled in the catalog", call.tool_id));
                 continue;
             }
-            if store.inflight_duplicate(&call.tool_id, &call.arguments)? {
+            if store
+                .inflight_duplicate(&call.tool_id, &call.arguments)
+                .await?
+            {
                 skipped.push(format!(
                     "{} — a duplicate call is already queued or running",
                     call.tool_id
@@ -523,17 +534,17 @@ impl ToolRunner {
                 continue;
             }
             let cache_key = osint::cache_identity(&call.tool_id, &call.arguments);
-            let cached = store.cache_get(&cache_key)?.is_some();
+            let cached = store.cache_get(&cache_key).await?.is_some();
             if let Some((provider_name, cost)) =
                 limits.configured_cost_for(&call.tool_id, &call.arguments)
             {
                 if !cached && cost > 0 {
-                    match store.reserve_credits(provider_name, cost, limits)? {
+                    match store.reserve_credits(provider_name, cost, limits).await? {
                         Some(hold) => {
                             holds.push((format!("{}:{}", call.tool_id, call.arguments), hold));
                         }
                         None => {
-                            let available = store.credits_available(provider_name, limits)?;
+                            let available = store.credits_available(provider_name, limits).await?;
                             skipped.push(format!(
                                 "{} — Argos {provider_name} credit allowance is exhausted ({available} left, needs {cost}; local monthly cap, not the provider dashboard)",
                                 call.tool_id
@@ -560,10 +571,10 @@ impl ToolRunner {
         let mut results = Vec::new();
         for call in affordable {
             if cancel.load(Ordering::Relaxed) {
-                self.release_holds(&holds)?;
+                self.release_holds(&holds).await?;
                 return Err(anyhow!("cancelled"));
             }
-            let store = Store::open(&self.db_path)?;
+            let store = ReconStore::open(&self.db_path).await?;
             for value in call
                 .arguments
                 .as_object()
@@ -572,17 +583,21 @@ impl ToolRunner {
                 .filter_map(Value::as_str)
             {
                 for (kind, canonical) in crate::recon::explicit_entities(value) {
-                    let _ = store.link_entity(&run.thread_id, &kind, &canonical, None);
+                    let _ = store
+                        .link_entity(&run.thread_id, &kind, &canonical, None)
+                        .await;
                 }
             }
-            let call_id = store.queue_call(
-                &call.tool_id,
-                &call.arguments,
-                "recon",
-                Some(&run.id),
-                Some(&run.thread_id),
-                Some(&run.turn_id),
-            )?;
+            let call_id = store
+                .queue_call(
+                    &call.tool_id,
+                    &call.arguments,
+                    "recon",
+                    Some(&run.id),
+                    Some(&run.thread_id),
+                    Some(&run.turn_id),
+                )
+                .await?;
             drop(store);
 
             // Every call is attributed to the run it belongs to, and to the durable
@@ -630,8 +645,8 @@ impl ToolRunner {
                     credits_reported: None,
                 },
             };
-            let store = Store::open(&self.db_path)?;
-            store.finish_call(&call_id, &result)?;
+            let store = ReconStore::open(&self.db_path).await?;
+            store.finish_call(&call_id, &result).await?;
             if let Some(hosts) = result
                 .observations
                 .get("hostnames")
@@ -639,32 +654,33 @@ impl ToolRunner {
             {
                 for host in hosts.iter().filter_map(Value::as_str).take(100) {
                     for (kind, canonical) in crate::recon::explicit_entities(host) {
-                        let _ =
-                            store.link_entity(&run.thread_id, &kind, &canonical, Some(&call_id));
+                        let _ = store
+                            .link_entity(&run.thread_id, &kind, &canonical, Some(&call_id))
+                            .await;
                     }
                 }
             }
             results.push((call_id, result));
         }
 
-        self.settle_holds(&results, holds)?;
+        self.settle_holds(&results, holds).await?;
         Ok(BudgetedOutcome { results, skipped })
     }
 
-    fn release_holds(&self, holds: &[(String, CreditHold)]) -> Result<()> {
-        let store = Store::open(&self.db_path)?;
+    async fn release_holds(&self, holds: &[(String, CreditHold)]) -> Result<()> {
+        let store = ReconStore::open(&self.db_path).await?;
         for (_, hold) in holds {
-            store.release_credits(hold)?;
+            store.release_credits(hold).await?;
         }
         Ok(())
     }
 
-    pub fn settle_holds(
+    pub async fn settle_holds(
         &self,
         results: &[(String, ToolResult)],
         mut holds: Vec<(String, CreditHold)>,
     ) -> Result<()> {
-        let store = Store::open(&self.db_path)?;
+        let store = ReconStore::open(&self.db_path).await?;
         for (_, result) in results {
             let signature = format!("{}:{}", result.tool_id, result.inputs);
             let Some(index) = holds.iter().position(|(sig, _)| sig == &signature) else {
@@ -676,13 +692,13 @@ impl ToolRunner {
             if spend {
                 let estimate = hold.trial_credits + hold.allowance_credits;
                 let actual = result.credits_reported.unwrap_or(estimate);
-                store.reconcile_credits(&hold, actual)?;
+                store.reconcile_credits(&hold, actual).await?;
             } else {
-                store.release_credits(&hold)?;
+                store.release_credits(&hold).await?;
             }
         }
         for (_, hold) in holds {
-            store.release_credits(&hold)?;
+            store.release_credits(&hold).await?;
         }
         Ok(())
     }
@@ -870,6 +886,7 @@ struct InvocationFact<'a> {
 impl ToolRunner {
     /// Best-effort telemetry write; never fails a tool run.
     fn note(&self, event: &TelemetryEvent) {
+        // `telemetry::record` writes to the repository under SurrealDB.
         let _ = telemetry::record(&self.db_path, event);
     }
 
@@ -1081,6 +1098,7 @@ fn osint_cacheable(result: &ToolResult) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recon::Store;
     use serde_json::Value as JsonValue;
 
     fn result(

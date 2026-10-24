@@ -1,4 +1,5 @@
 //! Persistent investigations and evidence-grounded model orchestration.
+pub mod backend;
 mod brain_resources;
 pub(crate) mod budget;
 pub mod clocks;
@@ -21,6 +22,7 @@ use crate::{
     store::Store,
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use backend::{sqlite_path, surreal_selected, ReconStore};
 use chrono::Utc;
 use futures_util::future::join_all;
 use rusqlite::{params, OptionalExtension};
@@ -36,7 +38,7 @@ use std::{
     time::Duration,
 };
 static IDS: AtomicU64 = AtomicU64::new(0);
-pub(crate) fn id(prefix: &str) -> String {
+pub fn id(prefix: &str) -> String {
     format!(
         "{prefix}-{}-{}-{}",
         Utc::now().timestamp_micros(),
@@ -47,7 +49,7 @@ pub(crate) fn id(prefix: &str) -> String {
 fn now() -> String {
     Utc::now().to_rfc3339()
 }
-fn same_budget_month(stored: &str) -> bool {
+pub(crate) fn same_budget_month(stored: &str) -> bool {
     let now = Utc::now().format("%Y-%m").to_string();
     stored.starts_with(&now)
 }
@@ -212,7 +214,7 @@ fn explicit_entities(text: &str) -> Vec<(String, String)> {
     }
     found.into_iter().collect()
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Thread {
     pub id: String,
     pub title: String,
@@ -1978,7 +1980,12 @@ fn auxiliary(word: &str) -> bool {
 }
 
 fn brain_is_thin(hits: &[crate::brain::ScoredMemory]) -> bool {
-    hits.iter().filter(|hit| hit.score >= 0.3).count() < 2
+    scores_are_thin(hits.iter().map(|hit| hit.score))
+}
+
+/// [`brain_is_thin`] over bare scores: fewer than two hits at 0.3 or more.
+pub(crate) fn scores_are_thin(scores: impl IntoIterator<Item = f32>) -> bool {
+    scores.into_iter().filter(|score| *score >= 0.3).count() < 2
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2539,16 +2546,21 @@ fn packet_observation(value: &Value) -> Value {
                 let mut digest = crate::summarization::deterministic_tool_observation(
                     tool_id, call_id, status, value, 4000,
                 );
-                // Best-effort flush enqueue when the process DB is reachable.
-                if let Ok(store) = Store::open(&crate::paths::db_path()) {
-                    let req = crate::summarization::flush_request(
-                        crate::summarization::SummarizationMode::ToolObservation,
-                        call_id,
-                        call_id,
-                        &value.to_string(),
-                        tool_id,
-                        4000,
-                    );
+                // Best-effort flush enqueue: the SurrealDB queue under a
+                // storage config, else the process DB when reachable.
+                let req = crate::summarization::flush_request(
+                    crate::summarization::SummarizationMode::ToolObservation,
+                    call_id,
+                    call_id,
+                    &value.to_string(),
+                    tool_id,
+                    4000,
+                );
+                if let Some(published) =
+                    crate::summarization::publish_selected(&req, digest.clone())
+                {
+                    digest = published;
+                } else if let Ok(store) = Store::open(&crate::paths::db_path()) {
                     if let Ok(published) = crate::summarization::publish_deterministic_and_enqueue(
                         &store.conn,
                         &req,
@@ -2907,14 +2919,19 @@ fn finish_recon_job(
     outcome: &Result<Run>,
     cancel: &AtomicBool,
 ) {
-    use crate::job_registry::Finish;
     let Some(mut job) = job else {
         return;
     };
     if let Some(run_id) = run_id {
         job.link_run(run_id);
     }
-    let finish = match outcome {
+    job.finish(recon_finish(outcome, cancel));
+}
+
+/// Terminal registry outcome of a Recon investigation.
+fn recon_finish(outcome: &Result<Run>, cancel: &AtomicBool) -> crate::job_registry::Finish {
+    use crate::job_registry::Finish;
+    match outcome {
         Ok(run) if run.stage == "cut short" => Finish::Partial {
             summary: format!("cut short: {}", run.error.clone().unwrap_or_default()),
         },
@@ -2925,8 +2942,137 @@ fn finish_recon_job(
             summary: "cancelled by user".into(),
         },
         Err(err) => Finish::failed("recon", format!("{err:#}")),
-    };
-    job.finish(finish);
+    }
+}
+
+/// The registry row of one Recon question: the SQLite job registry, or the
+/// repository's `job` table under SurrealDB (never both).
+enum ReconJob {
+    Sqlite(crate::job_registry::JobHandle),
+    #[cfg(feature = "surreal")]
+    Surreal {
+        id: String,
+        span: std::time::Instant,
+        cancel: Arc<AtomicBool>,
+    },
+}
+
+impl ReconJob {
+    /// Begin (or, with `resume_run`, resume that run's row) a cancellable
+    /// Recon job. Best-effort: `None` when the registry is unavailable.
+    async fn begin(
+        db_path: &Path,
+        title: String,
+        resource: String,
+        resume_run: Option<&str>,
+        cancel: Arc<AtomicBool>,
+    ) -> Option<Self> {
+        #[cfg(feature = "surreal")]
+        if surreal_selected() {
+            use crate::storage::recon_jobs as rj;
+            let repo = crate::storage::runtime::repository().await.ok()?;
+            let existing = match resume_run {
+                Some(run) => rj::job_for_run(&repo, rj::RECON_OPERATION, run)
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            let spec = rj::ReconJob {
+                id: existing.as_deref(),
+                title: &title,
+                run_ref: resume_run.unwrap_or(""),
+                resource_ref: &resource,
+            };
+            let id = rj::begin_recon_job(&repo, &spec).await.ok()?;
+            return Some(Self::Surreal {
+                id,
+                span: std::time::Instant::now(),
+                cancel,
+            });
+        }
+        let db = sqlite_path(db_path)?;
+        let existing = resume_run.and_then(|run| {
+            rusqlite::Connection::open(db).ok().and_then(|conn| {
+                crate::job_registry::job_for_run(&conn, "recon_investigation", run)
+                    .ok()
+                    .flatten()
+            })
+        });
+        let mut spec = crate::job_registry::JobSpec::new("recon", "recon_investigation", title)
+            .resource(resource)
+            .cancellable();
+        if let Some(run) = resume_run {
+            spec = spec.run(run);
+        }
+        if let Some(id) = existing {
+            spec = spec.with_id(id);
+        }
+        crate::job_registry::begin_optional_with(db, spec, cancel).map(Self::Sqlite)
+    }
+
+    /// Phase heartbeat. On SurrealDB, Jobs → Cancel raises the cancel flag.
+    fn phase(&self, stage: &str) {
+        match self {
+            Self::Sqlite(job) => job.phase(stage, None, None),
+            #[cfg(feature = "surreal")]
+            Self::Surreal { id, cancel, .. } => {
+                let (id, stage, cancel) = (id.clone(), stage.to_string(), cancel.clone());
+                crate::storage::runtime::spawn_ordered(async move {
+                    let Ok(repo) = crate::storage::runtime::repository().await else {
+                        return;
+                    };
+                    if let Ok(true) =
+                        crate::storage::recon_jobs::set_recon_phase(&repo, &id, &stage).await
+                    {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                });
+            }
+        }
+    }
+
+    async fn finish(self, run_id: Option<&str>, outcome: &Result<Run>, cancel: &AtomicBool) {
+        match self {
+            Self::Sqlite(job) => finish_recon_job(Some(job), run_id, outcome, cancel),
+            #[cfg(feature = "surreal")]
+            Self::Surreal { id, span, .. } => {
+                use crate::job_registry::Finish;
+                let finish = recon_finish(outcome, cancel);
+                let (category, summary, result_ref) = match &finish {
+                    Finish::Completed { result_ref } => ("", String::new(), result_ref.clone()),
+                    Finish::Partial { summary } => ("partial", summary.clone(), String::new()),
+                    Finish::Failed { category, summary } => {
+                        (category.as_str(), summary.clone(), String::new())
+                    }
+                    Finish::Cancelled { summary } => ("cancelled", summary.clone(), String::new()),
+                    Finish::Blocked { summary } => ("blocked", summary.clone(), String::new()),
+                    Finish::Paused { summary } | Finish::Waiting { summary } => {
+                        ("", summary.clone(), String::new())
+                    }
+                };
+                // Queued behind the phase writes, so the finish lands last.
+                let (state, category) = (finish.state(), category.to_string());
+                let run = run_id.map(str::to_string);
+                let active_ms = span.elapsed().as_millis() as i64;
+                crate::storage::runtime::spawn_ordered(async move {
+                    if let Ok(repo) = crate::storage::runtime::repository().await {
+                        let _ = crate::storage::recon_jobs::finish_recon_job(
+                            &repo,
+                            &id,
+                            state,
+                            run.as_deref(),
+                            &category,
+                            &summary,
+                            &result_ref,
+                            active_ms,
+                        )
+                        .await;
+                    }
+                });
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2979,13 +3125,11 @@ impl Service {
         })
     }
     pub async fn retry_insights(&self, answer_id: &str) -> Result<()> {
-        let store = Store::open(&self.db_path)?;
-        let run_id:String=store.conn.query_row("SELECT run_id FROM extraction_jobs WHERE answer_id=?1 AND state IN ('queued','failed')",[answer_id],|r|r.get(0)).optional()?.ok_or_else(||anyhow!("retryable insight job not found"))?;
-        let contract: String = store.conn.query_row(
-            "SELECT contract_version FROM extraction_jobs WHERE answer_id=?1",
-            [answer_id],
-            |r| r.get(0),
-        )?;
+        let store = ReconStore::open(&self.db_path).await?;
+        let (run_id, contract) = store
+            .retryable_extraction(answer_id)
+            .await?
+            .ok_or_else(|| anyhow!("retryable insight job not found"))?;
         if contract == crate::investigation::insights::CONTRACT {
             // New-policy insights were staged from originals before the answer.
             // Retry the durable refresh, never mine the saved answer.
@@ -2999,17 +3143,47 @@ impl Service {
             .await?;
             return Ok(());
         }
-        ensure!(contract == "legacy-v1", "unknown extraction contract");
+        ensure!(
+            contract == "legacy-v1" || contract == backend::SURREAL_MINED,
+            "unknown extraction contract"
+        );
+        #[cfg(feature = "surreal")]
+        if let Some(repo) = store.repository() {
+            // New-policy insights retry the run's durable shared refresh
+            // first; only a run without one mines the saved answer.
+            let cancel = Arc::new(AtomicBool::new(false));
+            let execute = crate::storage::refresh_driver::pipeline(
+                &self.auth,
+                &self.settings,
+                &cancel,
+                self.db_path.clone(),
+            );
+            let retried = crate::storage::refresh_driver::retry_owner(
+                repo,
+                "recon",
+                &run_id,
+                &self.settings,
+                &cancel,
+                None,
+                execute,
+            )
+            .await?;
+            if retried != crate::storage::refresh_driver::Retried::Nothing {
+                return Ok(());
+            }
+        }
         let run = store
-            .get_run(&run_id)?
+            .get_run(&run_id)
+            .await?
             .ok_or_else(|| anyhow!("source run unavailable"))?;
         ensure!(
             store
-                .get_thread(&run.thread_id)?
+                .get_thread(&run.thread_id)
+                .await?
                 .is_some_and(|thread| thread.recall_insights),
             "Enable Recall for this investigation before retrying Brain insight extraction"
         );
-        let messages = store.list_messages(&run.thread_id)?;
+        let messages = store.list_messages(&run.thread_id).await?;
         let answer = messages
             .iter()
             .find(|m| m.id == answer_id)
@@ -3020,8 +3194,8 @@ impl Service {
             .ok_or_else(|| anyhow!("source question unavailable"))?
             .content
             .clone();
-        let evidence = store.answer_evidence(answer_id)?;
-        store.conn.execute("UPDATE extraction_jobs SET state='running',error=NULL,updated_at=?1 WHERE answer_id=?2",params![now(),answer_id])?;
+        let evidence = store.answer_evidence(answer_id).await?;
+        store.set_extraction(answer_id, "running", None).await?;
         let secret = snapshot_secret(&self.auth, &run.synthesis_model)?;
         let answer = answer.clone();
         drop(store);
@@ -3029,7 +3203,10 @@ impl Service {
             .extract_insights(&secret, &question, &answer, &evidence)
             .await;
         if let Err(err) = outcome {
-            Store::open(&self.db_path)?.conn.execute("UPDATE extraction_jobs SET state='failed',error=?1,updated_at=?2 WHERE answer_id=?3",params![err.to_string(),now(),answer_id])?;
+            ReconStore::open(&self.db_path)
+                .await?
+                .set_extraction(answer_id, "failed", Some(&err.to_string()))
+                .await?;
             return Err(err);
         }
         Ok(())
@@ -3045,12 +3222,17 @@ impl Service {
         cancel: Arc<AtomicBool>,
     ) -> Result<(String, ToolResult)> {
         osint::validate(tool_id, &inputs)?;
-        let store = Store::open(&self.db_path)?;
-        ensure!(store.tool_enabled(tool_id)?, "tool disabled");
-        let call_id = store.queue_call(tool_id, &inputs, "manual", None, None, None)?;
+        let store = ReconStore::open(&self.db_path).await?;
+        ensure!(store.tool_enabled(tool_id).await?, "tool disabled");
+        let call_id = store
+            .queue_call(tool_id, &inputs, "manual", None, None, None)
+            .await?;
         drop(store);
         let result = tokio::select! {r=self.execute(tool_id,inputs.clone(),false)=>match r{Ok(result)=>result,Err(err)=>ToolResult{tool_id:tool_id.into(),inputs:inputs.clone(),status:"failed".into(),source_url:String::new(),retrieved_at:now(),observations:Value::Null,raw:String::new(),error:Some(err.to_string()),cached:false,truncated:false,credits_charged:0,credits_reported:None}},_=wait_cancel(cancel)=>ToolResult{tool_id:tool_id.into(),inputs,status:"cancelled".into(),source_url:String::new(),retrieved_at:now(),observations:Value::Null,raw:String::new(),error:None,cached:false,truncated:false,credits_charged:0,credits_reported:None}};
-        Store::open(&self.db_path)?.finish_call(&call_id, &result)?;
+        ReconStore::open(&self.db_path)
+            .await?
+            .finish_call(&call_id, &result)
+            .await?;
         Ok((call_id, result))
     }
     pub(crate) fn provider_keys(&self) -> osint::ProviderKeys {
@@ -3088,9 +3270,9 @@ impl Service {
             .execute_tool_without_reservation(tool_id, inputs, refresh, &cancel)
             .await
     }
-    fn begin_title(&self, tid: &str, question: &str) -> Option<tokio::task::JoinHandle<()>> {
-        let store = Store::open(&self.db_path).ok()?;
-        let thread = store.get_thread(tid).ok()??;
+    async fn begin_title(&self, tid: &str, question: &str) -> Option<tokio::task::JoinHandle<()>> {
+        let store = ReconStore::open(&self.db_path).await.ok()?;
+        let thread = store.get_thread(tid).await.ok()??;
         if thread.title != PLACEHOLDER_TITLE {
             return None;
         }
@@ -3100,15 +3282,15 @@ impl Service {
         let auth = self.auth.clone();
         let settings = self.settings.clone();
         Some(tokio::spawn(async move {
-            let title = investigation_title(&auth, &settings, &question, Some(&db)).await;
-            let Ok(store) = Store::open(&db) else {
+            let title = investigation_title(&auth, &settings, &question, sqlite_path(&db)).await;
+            let Ok(store) = ReconStore::open(&db).await else {
                 return;
             };
-            let Ok(Some(current)) = store.get_thread(&tid) else {
+            let Ok(Some(current)) = store.get_thread(&tid).await else {
                 return;
             };
             if current.title == PLACEHOLDER_TITLE && title != PLACEHOLDER_TITLE {
-                let _ = store.rename_thread(&tid, &title);
+                let _ = store.rename_thread(&tid, &title).await;
             }
         }))
     }
@@ -3122,21 +3304,18 @@ impl Service {
         mut progress: impl FnMut(TurnEvent) + Send,
     ) -> Result<Run> {
         let title: String = question.trim().chars().take(80).collect();
-        let job = crate::job_registry::begin_optional_with(
+        let job = ReconJob::begin(
             &self.db_path,
-            crate::job_registry::JobSpec::new(
-                "recon",
-                "recon_investigation",
-                format!("Recon · {title}"),
-            )
-            .resource(format!("thread:{tid}"))
-            .cancellable(),
+            format!("Recon · {title}"),
+            format!("thread:{tid}"),
+            None,
             cancel.clone(),
-        );
+        )
+        .await;
         let outcome = {
             let tracked = |event: TurnEvent| {
                 if let (Some(job), TurnEvent::Stage(stage)) = (&job, &event) {
-                    job.phase(stage, None, None);
+                    job.phase(stage);
                 }
                 progress(event)
             };
@@ -3145,12 +3324,18 @@ impl Service {
         };
         let run_id = match &outcome {
             Ok(run) => Some(run.id.clone()),
-            Err(_) => Store::open(&self.db_path)
-                .ok()
-                .and_then(|store| store.runs_for_thread(tid).ok())
-                .and_then(|runs| runs.last().map(|run| run.id.clone())),
+            Err(_) => match ReconStore::open(&self.db_path).await {
+                Ok(store) => store
+                    .runs_for_thread(tid)
+                    .await
+                    .ok()
+                    .and_then(|runs| runs.last().map(|run| run.id.clone())),
+                Err(_) => None,
+            },
         };
-        finish_recon_job(job, run_id.as_deref(), &outcome, &cancel);
+        if let Some(job) = job {
+            job.finish(run_id.as_deref(), &outcome, &cancel).await;
+        }
         outcome
     }
 
@@ -3165,27 +3350,29 @@ impl Service {
         let recon_secret = provider::role_secret(&self.auth, &self.settings, "recon")?;
         let synthesis_secret = provider::role_secret(&self.auth, &self.settings, "synthesis")?;
         let picker_secret = provider::role_secret(&self.auth, &self.settings, "tool-picker")?;
-        let store = Store::open(&self.db_path)?;
-        let turn = store.add_message(tid, "user", question, None)?;
+        let store = ReconStore::open(&self.db_path).await?;
+        let turn = store.add_message(tid, "user", question, None).await?;
         let max_rounds = self.settings.recon_limits.max_rounds.clamp(1, 8);
         let max_calls = self.settings.recon_limits.max_calls.clamp(1, 24);
         let turn_seconds = self.settings.recon_limits.turn_seconds.clamp(300, 900);
-        let run = store.new_run_with_models(
-            tid,
-            &turn.id,
-            [
-                &format!("{} / {}", recon_secret.kind, recon_secret.model),
-                &format!("{} / {}", picker_secret.kind, picker_secret.model),
-                &format!("{} / {}", synthesis_secret.kind, synthesis_secret.model),
-            ],
-            RunLimits {
-                max_rounds,
-                max_calls,
-                turn_seconds,
-            },
-        )?;
+        let run = store
+            .new_run_with_models(
+                tid,
+                &turn.id,
+                [
+                    &format!("{} / {}", recon_secret.kind, recon_secret.model),
+                    &format!("{} / {}", picker_secret.kind, picker_secret.model),
+                    &format!("{} / {}", synthesis_secret.kind, synthesis_secret.model),
+                ],
+                RunLimits {
+                    max_rounds,
+                    max_calls,
+                    turn_seconds,
+                },
+            )
+            .await?;
         drop(store);
-        let title_task = self.begin_title(tid, question);
+        let title_task = self.begin_title(tid, question).await;
         let clock = turn_clock(
             turn_seconds,
             self.settings.recon_limits.effective_max_turn_seconds(),
@@ -3211,28 +3398,29 @@ impl Service {
                 } else {
                     "complete"
                 };
-                Store::open(&self.db_path)?.set_run(
-                    &run.id,
-                    "completed",
-                    stage,
-                    None,
-                    note.as_deref(),
-                )?;
+                ReconStore::open(&self.db_path)
+                    .await?
+                    .set_run(&run.id, "completed", stage, None, note.as_deref())
+                    .await?;
             }
             Err(err) => {
-                let store = Store::open(&self.db_path)?;
+                let store = ReconStore::open(&self.db_path).await?;
                 if cancel.load(Ordering::Relaxed) {
-                    store.cancel_run(&run.id)?;
-                    store.conn.execute("UPDATE osint_calls SET status='cancelled',completed_at=?1 WHERE run_id=?2 AND status IN ('queued','running')",params![now(),run.id])?;
+                    store.cancel_run(&run.id).await?;
+                    store.settle_open_calls(&run.id, "cancelled").await?;
                 } else {
-                    store.set_run(&run.id, "failed", "failed", None, Some(&err.to_string()))?;
-                    store.conn.execute("UPDATE osint_calls SET status='interrupted',completed_at=?1 WHERE run_id=?2 AND status IN ('queued','running')",params![now(),run.id])?;
+                    store
+                        .set_run(&run.id, "failed", "failed", None, Some(&err.to_string()))
+                        .await?;
+                    store.settle_open_calls(&run.id, "interrupted").await?;
                 }
                 return Err(err);
             }
         }
-        Store::open(&self.db_path)?
-            .get_run(&run.id)?
+        ReconStore::open(&self.db_path)
+            .await?
+            .get_run(&run.id)
+            .await?
             .ok_or_else(|| anyhow!("run was deleted"))
     }
     /// Resume an interrupted or failed investigation. The run's existing job
@@ -3243,40 +3431,32 @@ impl Service {
         cancel: Arc<AtomicBool>,
         mut progress: impl FnMut(TurnEvent) + Send,
     ) -> Result<Run> {
-        let existing = rusqlite::Connection::open(&self.db_path)
-            .ok()
-            .and_then(|conn| {
-                crate::job_registry::job_for_run(&conn, "recon_investigation", rid)
-                    .ok()
-                    .flatten()
-            });
-        let thread = Store::open(&self.db_path)
-            .ok()
-            .and_then(|store| store.get_run(rid).ok().flatten())
-            .map(|run| run.thread_id)
-            .unwrap_or_default();
-        let mut spec = crate::job_registry::JobSpec::new(
-            "recon",
-            "recon_investigation",
-            "Recon · resumed investigation",
-        )
-        .run(rid)
-        .resource(format!("thread:{thread}"))
-        .cancellable();
-        if let Some(id) = existing {
-            spec = spec.with_id(id);
+        let thread = match ReconStore::open(&self.db_path).await {
+            Ok(store) => store.get_run(rid).await.ok().flatten(),
+            Err(_) => None,
         }
-        let job = crate::job_registry::begin_optional_with(&self.db_path, spec, cancel.clone());
+        .map(|run| run.thread_id)
+        .unwrap_or_default();
+        let job = ReconJob::begin(
+            &self.db_path,
+            "Recon · resumed investigation".into(),
+            format!("thread:{thread}"),
+            Some(rid),
+            cancel.clone(),
+        )
+        .await;
         let outcome = {
             let tracked = |event: TurnEvent| {
                 if let (Some(job), TurnEvent::Stage(stage)) = (&job, &event) {
-                    job.phase(stage, None, None);
+                    job.phase(stage);
                 }
                 progress(event)
             };
             self.resume_untracked(rid, cancel.clone(), tracked).await
         };
-        finish_recon_job(job, Some(rid), &outcome, &cancel);
+        if let Some(job) = job {
+            job.finish(Some(rid), &outcome, &cancel).await;
+        }
         outcome
     }
 
@@ -3286,20 +3466,22 @@ impl Service {
         cancel: Arc<AtomicBool>,
         mut progress: impl FnMut(TurnEvent) + Send,
     ) -> Result<Run> {
-        let store = Store::open(&self.db_path)?;
+        let store = ReconStore::open(&self.db_path).await?;
         let run = store
-            .get_run(rid)?
+            .get_run(rid)
+            .await?
             .ok_or_else(|| anyhow!("run not found"))?;
         ensure!(
             matches!(run.state.as_str(), "interrupted" | "failed"),
             "only interrupted or failed runs can resume"
         );
         ensure!(
-            store.get_thread(&run.thread_id)?.is_some(),
+            store.get_thread(&run.thread_id).await?.is_some(),
             "source thread was deleted"
         );
         let question = store
-            .list_messages(&run.thread_id)?
+            .list_messages(&run.thread_id)
+            .await?
             .into_iter()
             .find(|m| m.id == run.turn_id)
             .ok_or_else(|| anyhow!("source question unavailable"))?
@@ -3316,35 +3498,32 @@ impl Service {
                 validate_ordered_plan(plan)?;
             }
         }
-        let prior_calls = store.calls_for_run(rid)?;
-        let answer_exists = store.has_final_answer_for_run(rid)?;
+        let prior_calls = store.calls_for_run(rid).await?;
+        let answer_exists = store.has_final_answer_for_run(rid).await?;
         if answer_exists {
-            Store::open(&self.db_path)?.set_run(rid, "completed", "complete", None, None)?;
-            return Store::open(&self.db_path)?
-                .get_run(rid)?
+            ReconStore::open(&self.db_path)
+                .await?
+                .set_run(rid, "completed", "complete", None, None)
+                .await?;
+            return ReconStore::open(&self.db_path)
+                .await?
+                .get_run(rid)
+                .await?
                 .ok_or_else(|| anyhow!("run missing"));
         }
-        let (prev_gen, last_draft): (u32, String) = store
-            .conn
-            .query_row(
-                "SELECT generation, draft FROM recon_model_operations WHERE run_id=?1 AND role='synthesis' ORDER BY generation DESC LIMIT 1",
-                [rid],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+        let (prev_gen, last_draft) = store
+            .synthesis_operation(rid)
+            .await
+            .ok()
+            .flatten()
             .unwrap_or((0, String::new()));
         let resume_gen = prev_gen + 1;
-        let op_id = format!("{rid}-synthesis");
-        let _ = store.conn.execute(
-            "INSERT INTO recon_model_operations(id, run_id, task_id, role, generation, status, draft, created_at, updated_at)
-             VALUES (?1, ?2, '', 'synthesis', ?3, 'running', ?4, ?5, ?5)
-             ON CONFLICT(id) DO UPDATE SET generation=excluded.generation, status='running', updated_at=excluded.updated_at",
-            rusqlite::params![op_id, rid, resume_gen, last_draft, now()],
-        );
+        let _ = store.begin_synthesis(rid, resume_gen, &last_draft).await;
         let recon_secret = provider::role_secret(&self.auth, &self.settings, "recon")
             .or_else(|_| snapshot_secret(&self.auth, &run.recon_model))?;
         let synthesis_secret = provider::role_secret(&self.auth, &self.settings, "synthesis")
             .or_else(|_| snapshot_secret(&self.auth, &run.synthesis_model))?;
-        ensure!(store.restart_run(rid)?, "run could not restart");
+        ensure!(store.restart_run(rid).await?, "run could not restart");
         drop(store);
         let clock = turn_clock(
             run.turn_seconds,
@@ -3409,9 +3588,10 @@ impl Service {
             progress(TurnEvent::Stage("resuming tools".into()));
             let new_results =
                 orchestrate::execute_budgeted(self, &run, &missing.calls, &cancel).await?;
-            let store = Store::open(&self.db_path)?;
+            let store = ReconStore::open(&self.db_path).await?;
             let mut results: Vec<_> = store
-                .calls_for_thread(&run.thread_id)?
+                .calls_for_thread(&run.thread_id)
+                .await?
                 .into_iter()
                 .rev()
                 .take(20)
@@ -3423,12 +3603,15 @@ impl Service {
                 }
             }
             let (recalled, _, _) =
-                orchestrate::recall_for_turn(&store, &run.thread_id, &question, "", &run.id)?;
-            let prior = orchestrate::previous_synthesis(&store, &run.thread_id)?;
+                orchestrate::recall_for_turn(&store, &run.thread_id, &question, "", &run.id)
+                    .await?;
+            let prior = orchestrate::previous_synthesis(&store, &run.thread_id).await?;
             drop(store);
             let max_calls = usize::from(run.max_calls);
-            let opening = !Store::open(&self.db_path)?
-                .list_messages(&run.thread_id)?
+            let opening = !ReconStore::open(&self.db_path)
+                .await?
+                .list_messages(&run.thread_id)
+                .await?
                 .iter()
                 .any(|message| message.role == "assistant");
             self.finish_answer(
@@ -3467,26 +3650,27 @@ impl Service {
                 } else {
                     "complete"
                 };
-                Store::open(&self.db_path)?.set_run(
-                    rid,
-                    "completed",
-                    stage,
-                    None,
-                    note.as_deref(),
-                )?;
+                ReconStore::open(&self.db_path)
+                    .await?
+                    .set_run(rid, "completed", stage, None, note.as_deref())
+                    .await?;
             }
             Err(err) => {
-                let store = Store::open(&self.db_path)?;
+                let store = ReconStore::open(&self.db_path).await?;
                 if cancel.load(Ordering::Relaxed) {
-                    store.cancel_run(rid)?;
+                    store.cancel_run(rid).await?;
                 } else {
-                    store.set_run(rid, "failed", "failed", None, Some(&err.to_string()))?;
+                    store
+                        .set_run(rid, "failed", "failed", None, Some(&err.to_string()))
+                        .await?;
                 }
                 return Err(err);
             }
         }
-        Store::open(&self.db_path)?
-            .get_run(rid)?
+        ReconStore::open(&self.db_path)
+            .await?
+            .get_run(rid)
+            .await?
             .ok_or_else(|| anyhow!("run missing"))
     }
 
@@ -3519,15 +3703,16 @@ impl Service {
                 {
                     continue;
                 }
-                let store = Store::open(&self.db_path)?;
+                let store = ReconStore::open(&self.db_path).await?;
                 ensure!(
                     store
-                        .get_run(&run.id)?
+                        .get_run(&run.id)
+                        .await?
                         .is_some_and(|r| r.state == "running")
-                        && store.get_thread(&run.thread_id)?.is_some(),
+                        && store.get_thread(&run.thread_id).await?.is_some(),
                     "run no longer active"
                 );
-                if !store.tool_enabled(&call.tool_id)? {
+                if !store.tool_enabled(&call.tool_id).await? {
                     finished.insert(call.step_id.clone());
                     continue;
                 }
@@ -3539,17 +3724,21 @@ impl Service {
                     .filter_map(Value::as_str)
                 {
                     for (kind, canonical) in explicit_entities(value) {
-                        store.link_entity(&run.thread_id, &kind, &canonical, None)?;
+                        store
+                            .link_entity(&run.thread_id, &kind, &canonical, None)
+                            .await?;
                     }
                 }
-                let call_id = store.queue_call(
-                    &call.tool_id,
-                    &call.arguments,
-                    "recon",
-                    Some(&run.id),
-                    Some(&run.thread_id),
-                    Some(&run.turn_id),
-                )?;
+                let call_id = store
+                    .queue_call(
+                        &call.tool_id,
+                        &call.arguments,
+                        "recon",
+                        Some(&run.id),
+                        Some(&run.thread_id),
+                        Some(&run.turn_id),
+                    )
+                    .await?;
                 ready.push((call.clone(), call_id));
             }
             if ready.is_empty() {
@@ -3565,8 +3754,8 @@ impl Service {
                 (call,call_id,result)
             })).await;
             for (call, call_id, result) in executed {
-                let store = Store::open(&self.db_path)?;
-                store.finish_call(&call_id, &result)?;
+                let store = ReconStore::open(&self.db_path).await?;
+                store.finish_call(&call_id, &result).await?;
                 if let Some(hosts) = result
                     .observations
                     .get("hostnames")
@@ -3574,7 +3763,9 @@ impl Service {
                 {
                     for host in hosts.iter().filter_map(Value::as_str).take(100) {
                         for (kind, canonical) in explicit_entities(host) {
-                            store.link_entity(&run.thread_id, &kind, &canonical, Some(&call_id))?;
+                            store
+                                .link_entity(&run.thread_id, &kind, &canonical, Some(&call_id))
+                                .await?;
                         }
                     }
                 }
@@ -3633,80 +3824,33 @@ impl Service {
         }
         let _ = (max_calls, opening);
         progress(TurnEvent::Stage("assessing source claims".into()));
-        let mut insight_input = {
-            let store = Store::open(&self.db_path)?;
-            let evidence =
-                crate::investigation::insights::evidence_from_tools(&store.conn, results)?;
-            let generation = crate::investigation::insight_persist::desired_generation(
-                &store.conn,
-                "recon",
-                &run.id,
-            )?;
-            let generation = if generation == 0 {
-                crate::investigation::insight_persist::advance_generation(
-                    &store.conn,
-                    "recon",
-                    &run.id,
-                    &now(),
-                )?
-            } else {
-                generation
-            };
-            crate::investigation::insights::PipelineInput {
-                snapshot: crate::investigation::insights::snapshot(
-                    "recon", &run.id, generation, &evidence,
-                ),
-                evidence,
-                objective: question.into(),
-                surface: "recon".into(),
-                required_tasks_complete: plan.calls.iter().all(|call| {
-                    results
-                        .iter()
-                        .any(|(_, r)| r.tool_id == call.tool_id && r.status == "completed")
-                }),
-                save_insights: store
-                    .get_thread(&run.thread_id)?
-                    .is_some_and(|t| t.recall_insights),
-                recall_enabled: store
-                    .get_thread(&run.thread_id)?
-                    .is_some_and(|t| t.recall_insights),
-            }
-        };
-        let refresh_task = {
-            let store = Store::open(&self.db_path)?;
-            crate::investigation::insight_persist::enqueue_refresh(
-                &store.conn,
-                &mut insight_input,
-                &self.settings,
-                &now(),
-            )?
-        };
-        let assessed = crate::investigation::insight_persist::run_refresh_slice(
-            &self.db_path,
-            &refresh_task,
-            &self.auth,
-            &self.settings,
-            cancel,
-        )
-        .await;
-        let assessed = match assessed {
-            Ok(Some(output)) => Some(output),
-            Ok(None) => crate::investigation::insight_persist::active_output(
-                &Store::open(&self.db_path)?.conn,
-                "recon",
-                &run.id,
-            )?,
-            Err(error) => {
-                if cancel.load(Ordering::Acquire) {
-                    return Err(error);
+        let assessed = if surreal_selected() {
+            // The claim assessment pipeline is still SQLite-only: synthesize
+            // from the active SurrealDB output, else withhold inferences.
+            let store = ReconStore::open(&self.db_path).await?;
+            #[cfg(feature = "surreal")]
+            let active = match store.repository() {
+                Some(repo) => {
+                    crate::storage::insight_owner::active_output(repo, "recon", &run.id).await?
                 }
+                None => None,
+            };
+            #[cfg(not(feature = "surreal"))]
+            let active = {
+                drop(store);
+                None
+            };
+            Some(active.unwrap_or_else(|| {
                 let mut withheld = crate::investigation::insights::PipelineOutput::default();
                 withheld
                     .readiness
                     .gaps
-                    .push(format!("Claim assessment blocked: {error}"));
-                Some(withheld)
-            }
+                    .push("Claim assessment is not on SurrealDB yet".into());
+                withheld
+            }))
+        } else {
+            self.assess_sqlite(run, question, plan, results, cancel)
+                .await?
         };
         let synthesis_results = if self.settings.nlp.mode != crate::nlp::Mode::Off
             || results
@@ -3714,13 +3858,10 @@ impl Service {
                 .any(|(_, result)| page_needs_compact(&result.observations))
         {
             progress(TurnEvent::Stage("compacting evidence".into()));
-            Store::open(&self.db_path)?.set_run(
-                &run.id,
-                "running",
-                "compacting evidence",
-                None,
-                None,
-            )?;
+            ReconStore::open(&self.db_path)
+                .await?
+                .set_run(&run.id, "running", "compacting evidence", None, None)
+                .await?;
             compact_page_evidence(
                 &self.auth,
                 &self.settings,
@@ -3730,14 +3871,17 @@ impl Service {
                 cancel,
                 progress,
                 &run.id,
-                Some(&self.db_path),
+                sqlite_path(&self.db_path),
             )
             .await?
         } else {
             results.to_vec()
         };
         progress(TurnEvent::Stage("synthesizing".into()));
-        Store::open(&self.db_path)?.set_run(&run.id, "running", "synthesizing", None, None)?;
+        ReconStore::open(&self.db_path)
+            .await?
+            .set_run(&run.id, "running", "synthesizing", None, None)
+            .await?;
         let prior_view = crate::nlp::prepare_mode(
             crate::nlp::Source::derived(&run.thread_id, "prior", prior),
             "synthesis-prior",
@@ -3762,7 +3906,7 @@ impl Service {
             )
             .await;
             if self.settings.nlp.mode != crate::nlp::Mode::Off {
-                if let Ok(store) = Store::open(&self.db_path) {
+                if let Some(Ok(store)) = sqlite_path(&self.db_path).map(Store::open) {
                     let _ = crate::nlp::cache::register(
                         &store.conn,
                         "memory",
@@ -3796,20 +3940,18 @@ impl Service {
             synthesis_prompt.push_str("\nNo current assessment result: return observations, attributed claims and coverage gaps only; withhold analytical inferences.");
         }
         {
-            let mut clock_guard = clock.lock().unwrap();
-            clock_guard.set_evidence(synthesis_user.chars().count());
-            clock_guard.begin_synthesis();
-            let note = clock_guard.breakdown();
-            drop(clock_guard);
+            let note = {
+                let mut clock_guard = clock.lock().unwrap();
+                clock_guard.set_evidence(synthesis_user.chars().count());
+                clock_guard.begin_synthesis();
+                clock_guard.breakdown()
+            };
             let mut logged = plan.clone();
             logged.deadline_note = note;
-            Store::open(&self.db_path)?.set_run(
-                &run.id,
-                "running",
-                "synthesizing",
-                Some(&logged),
-                None,
-            )?;
+            ReconStore::open(&self.db_path)
+                .await?
+                .set_run(&run.id, "running", "synthesizing", Some(&logged), None)
+                .await?;
         }
         let synthesis_prompt = synthesis_prompt.as_str();
         let synthesis_messages = [
@@ -3821,15 +3963,21 @@ impl Service {
             crate::nlp::message_bytes(&synthesis_messages, &Value::Null) <= 48 * 1024,
             "BudgetExceeded: mandatory synthesis evidence exceeds serialized byte budget"
         );
-        let (prev_gen, _): (u32, String) = Store::open(&self.db_path)?
-            .conn
-            .query_row(
-                "SELECT generation, draft FROM recon_model_operations WHERE run_id=?1 AND role='synthesis' ORDER BY generation DESC LIMIT 1",
-                [&run.id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap_or((0, String::new()));
-        let generation = prev_gen.max(1);
+        let store = ReconStore::open(&self.db_path).await?;
+        let prev_gen = store
+            .synthesis_operation(&run.id)
+            .await
+            .ok()
+            .flatten()
+            .map_or(0, |(generation, _)| generation);
+        let generation = u32::try_from(prev_gen.max(1)).unwrap_or(1);
+        if store.is_surreal() {
+            // add_answer finalizes the run's synthesis operation.
+            store
+                .begin_synthesis(&run.id, i64::from(generation), "")
+                .await?;
+        }
+        drop(store);
         let op_id = format!("{}-synthesis", run.id);
         let scope = model_exec::OperationScope::new(&op_id, "synthesis")
             .with_run(&run.id)
@@ -3970,37 +4118,138 @@ impl Service {
                 "Synthesis cited unknown evidence id(s) {}; they were dropped after the repair",
                 dropped.join(", ")
             ));
-            Store::open(&self.db_path)?.set_run(
-                &run.id,
-                "running",
-                "synthesizing",
-                Some(&logged),
-                None,
-            )?;
+            ReconStore::open(&self.db_path)
+                .await?
+                .set_run(&run.id, "running", "synthesizing", Some(&logged), None)
+                .await?;
         }
-        let answer_msg = self.store_answer(run, recalled, &answer, results, &[])?;
+        let answer_msg = self
+            .store_answer(run, recalled, &answer, results, &[])
+            .await?;
         let cited_ids = citation_ids(&answer);
         let cited_results: Vec<_> = synthesis_results
             .iter()
             .filter(|(id, _)| cited_ids.contains(id))
             .cloned()
             .collect();
+        let store = ReconStore::open(&self.db_path).await?;
         if !cited_results.iter().any(|(_, r)| r.status == "completed") {
-            Store::open(&self.db_path)?.conn.execute(
-                "UPDATE extraction_jobs SET state='skipped',updated_at=?1 WHERE answer_id=?2",
-                params![now(), answer_msg.id],
-            )?;
+            store
+                .set_extraction(&answer_msg.id, "skipped", None)
+                .await?;
             return Ok(None);
         }
         progress(TurnEvent::Stage("saving insights".into()));
-        Store::open(&self.db_path)?.conn.execute("UPDATE extraction_jobs SET state='completed',contract_version='insights-v1',updated_at=?1 WHERE answer_id=?2",params![now(),answer_msg.id])?;
-        let _ = cited_results; // Shared pre-answer refresh already owns derivations.
+        if !store.is_surreal() {
+            store.complete_extraction_v1(&answer_msg.id).await?;
+            let _ = cited_results; // Shared pre-answer refresh already owns derivations.
+            return Ok(None);
+        }
+        // SurrealDB has no pre-answer refresh yet: mine the cited evidence.
+        drop(store);
+        if let Err(err) = self
+            .extract_insights(synthesis_secret, question, &answer_msg, &cited_results)
+            .await
+        {
+            ReconStore::open(&self.db_path)
+                .await?
+                .set_extraction(&answer_msg.id, "failed", Some(&err.to_string()))
+                .await?;
+        }
         Ok(None)
+    }
+
+    /// The SQLite claim assessment: refresh the run's insight snapshot and
+    /// return its output (withheld with the blocking error on failure).
+    async fn assess_sqlite(
+        &self,
+        run: &Run,
+        question: &str,
+        plan: &Plan,
+        results: &[(String, ToolResult)],
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Option<crate::investigation::insights::PipelineOutput>> {
+        let mut insight_input = {
+            let store = Store::open(&self.db_path)?;
+            let evidence =
+                crate::investigation::insights::evidence_from_tools(&store.conn, results)?;
+            let generation = crate::investigation::insight_persist::desired_generation(
+                &store.conn,
+                "recon",
+                &run.id,
+            )?;
+            let generation = if generation == 0 {
+                crate::investigation::insight_persist::advance_generation(
+                    &store.conn,
+                    "recon",
+                    &run.id,
+                    &now(),
+                )?
+            } else {
+                generation
+            };
+            crate::investigation::insights::PipelineInput {
+                snapshot: crate::investigation::insights::snapshot(
+                    "recon", &run.id, generation, &evidence,
+                ),
+                evidence,
+                objective: question.into(),
+                surface: "recon".into(),
+                required_tasks_complete: plan.calls.iter().all(|call| {
+                    results
+                        .iter()
+                        .any(|(_, r)| r.tool_id == call.tool_id && r.status == "completed")
+                }),
+                save_insights: store
+                    .get_thread(&run.thread_id)?
+                    .is_some_and(|t| t.recall_insights),
+                recall_enabled: store
+                    .get_thread(&run.thread_id)?
+                    .is_some_and(|t| t.recall_insights),
+            }
+        };
+        let refresh_task = {
+            let store = Store::open(&self.db_path)?;
+            crate::investigation::insight_persist::enqueue_refresh(
+                &store.conn,
+                &mut insight_input,
+                &self.settings,
+                &now(),
+            )?
+        };
+        let assessed = crate::investigation::insight_persist::run_refresh_slice(
+            &self.db_path,
+            &refresh_task,
+            &self.auth,
+            &self.settings,
+            cancel,
+        )
+        .await;
+        let assessed = match assessed {
+            Ok(Some(output)) => Some(output),
+            Ok(None) => crate::investigation::insight_persist::active_output(
+                &Store::open(&self.db_path)?.conn,
+                "recon",
+                &run.id,
+            )?,
+            Err(error) => {
+                if cancel.load(Ordering::Acquire) {
+                    return Err(error);
+                }
+                let mut withheld = crate::investigation::insights::PipelineOutput::default();
+                withheld
+                    .readiness
+                    .gaps
+                    .push(format!("Claim assessment blocked: {error}"));
+                Some(withheld)
+            }
+        };
+        Ok(assessed)
     }
 
     /// Saves the text streamed so far plus a deterministic evidence summary. The run stays
     /// running; the caller marks it completed (cut short) or cancelled.
-    fn keep_partial(
+    async fn keep_partial(
         &self,
         run: &Run,
         plan: &Plan,
@@ -4013,18 +4262,12 @@ impl Service {
         let mut logged = plan.clone();
         logged.deadline_note = note.clone();
         logged.binding_notes.push(note.clone());
-        Store::open(&self.db_path)?.set_run(
-            &run.id,
-            "running",
-            "synthesizing",
-            Some(&logged),
-            None,
-        )?;
-        if let Ok(store) = Store::open(&self.db_path) {
-            let _ = store.conn.execute(
-                "UPDATE recon_model_operations SET draft = ?1, updated_at = ?2 WHERE run_id = ?3 AND role = 'synthesis'",
-                params![answer, now(), run.id],
-            );
+        ReconStore::open(&self.db_path)
+            .await?
+            .set_run(&run.id, "running", "synthesizing", Some(&logged), None)
+            .await?;
+        if let Ok(store) = ReconStore::open(&self.db_path).await {
+            let _ = store.set_synthesis_drafts(&run.id, &answer).await;
         }
         Ok(note)
     }
@@ -4050,32 +4293,32 @@ impl Service {
             .cloned()
             .collect();
         if gathered.is_empty() {
-            self.keep_partial(run, plan, results, watched, UNCITED)?;
+            self.keep_partial(run, plan, results, watched, UNCITED)
+                .await?;
             return Ok(None);
         }
         let note = cut_footer(UNCITED);
         let mut logged = plan.clone();
         logged.deadline_note = note.clone();
         logged.binding_notes.push(note);
-        Store::open(&self.db_path)?.set_run(
-            &run.id,
-            "running",
-            "synthesizing",
-            Some(&logged),
-            None,
-        )?;
+        ReconStore::open(&self.db_path)
+            .await?
+            .set_run(&run.id, "running", "synthesizing", Some(&logged), None)
+            .await?;
         let stored = cut_short_answer(watched, results, UNCITED);
-        let answer_msg = self.store_answer(run, recalled, &stored, results, &[])?;
+        let answer_msg = self
+            .store_answer(run, recalled, &stored, results, &[])
+            .await?;
         progress(TurnEvent::Stage("saving insights".into()));
         let _ = question;
-        Store::open(&self.db_path)?.conn.execute(
-            "UPDATE extraction_jobs SET state='completed',contract_version='insights-v1',updated_at=?1 WHERE answer_id=?2",
-            params![now(), answer_msg.id],
-        )?;
+        ReconStore::open(&self.db_path)
+            .await?
+            .complete_extraction_v1(&answer_msg.id)
+            .await?;
         Ok(None)
     }
 
-    fn store_answer(
+    async fn store_answer(
         &self,
         run: &Run,
         recalled: &[RecallInsight],
@@ -4083,10 +4326,11 @@ impl Service {
         results: &[(String, ToolResult)],
         _inferred_evidence: &[String],
     ) -> Result<Message> {
-        let mut store = Store::open(&self.db_path)?;
+        let store = ReconStore::open(&self.db_path).await?;
         ensure!(
             store
-                .get_run(&run.id)?
+                .get_run(&run.id)
+                .await?
                 .is_some_and(|r| r.state == "running"),
             "run no longer active"
         );
@@ -4096,10 +4340,14 @@ impl Service {
             .filter(|id| known.contains(id.as_str()))
             .collect();
         let memory_ids: Vec<String> = recalled.iter().map(|item| item.memory_id.clone()).collect();
-        let answer_msg =
-            store.add_answer(&run.thread_id, &run.id, answer, &cited_ids, &memory_ids)?;
-        store.conn.execute("UPDATE extraction_jobs SET contract_version='insights-v1',state='completed',updated_at=?1 WHERE answer_id=?2",params![now(),answer_msg.id])?;
-        store.conn.execute("UPDATE insight_sources SET answer_id=?1 WHERE run_id=?2 AND answer_id IN (SELECT active_snapshot_id FROM insight_owner_state WHERE owner_kind='recon' AND owner_id=?2)",params![answer_msg.id,run.id])?;
+        let answer_msg = store
+            .add_answer(&run.thread_id, &run.id, answer, &cited_ids, &memory_ids)
+            .await?;
+        if !store.is_surreal() {
+            // SurrealDB answers stay queued until their claims are mined.
+            store.complete_extraction_v1(&answer_msg.id).await?;
+        }
+        store.relink_sources(&run.id, &answer_msg.id).await?;
         Ok(answer_msg)
     }
     async fn extract_insights(
@@ -4109,12 +4357,13 @@ impl Service {
         answer: &Message,
         evidence: &[(String, ToolResult)],
     ) -> Result<()> {
-        let store = Store::open(&self.db_path)?;
+        let store = ReconStore::open(&self.db_path).await?;
         if store
-            .get_thread(&answer.thread_id)?
+            .get_thread(&answer.thread_id)
+            .await?
             .is_none_or(|thread| !thread.recall_insights)
         {
-            store.conn.execute("UPDATE extraction_jobs SET state='completed',error=NULL,updated_at=?1 WHERE answer_id=?2",params![now(),answer.id])?;
+            store.set_extraction(&answer.id, "completed", None).await?;
             return Ok(());
         }
         drop(store);
@@ -4166,8 +4415,10 @@ impl Service {
             .cloned()
             .ok_or_else(|| anyhow!("claims array missing"))?;
         infer_uncited_evidence(&answer.content, evidence, &mut claims);
-        let mut store = Store::open(&self.db_path)?;
-        persist_claims(&mut store, answer, evidence, &claims)
+        ReconStore::open(&self.db_path)
+            .await?
+            .persist_claims(answer, evidence, &claims)
+            .await
     }
 }
 fn persist_claims(

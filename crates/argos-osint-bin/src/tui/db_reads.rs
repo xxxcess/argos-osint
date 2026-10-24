@@ -105,6 +105,10 @@ impl IntelBriefSnapshot {
         job: Option<&str>,
         related_limit: usize,
     ) -> Result<Self> {
+        #[cfg(feature = "surreal")]
+        if super::surreal_brain::on() {
+            return Self::read_repository(store, article, scope, job, related_limit);
+        }
         let conn = store.connection();
         let metadata = store.atlas_metadata(&article.run_id, &article.id)?;
         let mut out = Self {
@@ -120,9 +124,7 @@ impl IntelBriefSnapshot {
             metadata_present: metadata.is_some(),
             publisher_prior: metadata.and_then(|m| m.publisher_prior),
             related: super::related_articles::ArticleRelatedView {
-                page: store
-                    .related_articles_global(&article.run_id, &article.id, scope, None, 20)?
-                    .into_page(0),
+                page: related_page(store, article, scope, None, 20)?.into_page(0),
                 ..Default::default()
             },
             progress: investigation::insight_execution::owner_progress(
@@ -139,15 +141,14 @@ impl IntelBriefSnapshot {
         };
         while out.related.page.rows.len() < related_limit && out.related.page.has_more {
             let offset = out.related.page.rows.len();
-            let page = store
-                .related_articles_global(
-                    &article.run_id,
-                    &article.id,
-                    scope,
-                    Some(&offset.to_string()),
-                    (related_limit - offset).min(100),
-                )?
-                .into_page(offset);
+            let page = related_page(
+                store,
+                article,
+                scope,
+                Some(&offset.to_string()),
+                (related_limit - offset).min(100),
+            )?
+            .into_page(offset);
             if page.rows.is_empty() {
                 break;
             }
@@ -159,24 +160,7 @@ impl IntelBriefSnapshot {
         if let Some(output) =
             investigation::insight_persist::active_output(conn, "article", &article.id)?
         {
-            for entity in output.entities {
-                let name = entity.original_forms.first().cloned().unwrap_or_default();
-                if name.trim().is_empty()
-                    || out.actors.iter().any(|a| {
-                        a.type_hint == entity.type_hint
-                            && a.display_name.eq_ignore_ascii_case(&name)
-                    })
-                {
-                    continue;
-                }
-                out.actors.push(atlas_metadata::ArticleActor {
-                    id: entity.id,
-                    type_hint: entity.type_hint,
-                    display_name: name,
-                    spellings: entity.original_forms,
-                    mentions: Vec::new(),
-                });
-            }
+            merge_output_actors(&mut out.actors, output);
         }
         let ids: Vec<_> = out.claims.iter().map(|c| c.fingerprint.clone()).collect();
         out.relations = store.insight_relations_among(&ids)?;
@@ -238,4 +222,123 @@ impl IntelBriefSnapshot {
         }
         Ok(out)
     }
+}
+
+/// Add the active output's entities not already listed as metadata actors.
+fn merge_output_actors(
+    actors: &mut Vec<atlas_metadata::ArticleActor>,
+    output: investigation::insights::PipelineOutput,
+) {
+    for entity in output.entities {
+        let name = entity.original_forms.first().cloned().unwrap_or_default();
+        if name.trim().is_empty()
+            || actors.iter().any(|a| {
+                a.type_hint == entity.type_hint && a.display_name.eq_ignore_ascii_case(&name)
+            })
+        {
+            continue;
+        }
+        actors.push(atlas_metadata::ArticleActor {
+            id: entity.id,
+            type_hint: entity.type_hint,
+            display_name: name,
+            spellings: entity.original_forms,
+            mentions: Vec::new(),
+        });
+    }
+}
+
+#[cfg(feature = "surreal")]
+impl IntelBriefSnapshot {
+    /// The brief snapshot under a storage config: every part read from the
+    /// repository. Brief-chain stages, outputs and the publication footer
+    /// wait for the SurrealDB brief chain, so a job shows as unavailable.
+    fn read_repository(
+        store: &Store,
+        article: &AtlasArticleRow,
+        scope: RelatedScope,
+        job: Option<&str>,
+        related_limit: usize,
+    ) -> Result<Self> {
+        let parts = super::surreal_brain::brief_parts(article)?;
+        let mut out = Self {
+            actors: parts
+                .metadata
+                .as_ref()
+                .map(|m| atlas_metadata::article_actors(article, m))
+                .unwrap_or_default(),
+            actor_state: parts
+                .metadata
+                .as_ref()
+                .map(|m| m.entity_state.as_str())
+                .unwrap_or("pending")
+                .into(),
+            metadata_present: parts.metadata.is_some(),
+            publisher_prior: parts.metadata.and_then(|m| m.publisher_prior),
+            lifecycle: parts.lifecycle,
+            status: parts.status,
+            claims: parts.claims,
+            relations: parts.relations,
+            explanations: parts.explanations,
+            body: parts.body,
+            ..Default::default()
+        };
+        let mut offset = 0;
+        loop {
+            let page = related_page(
+                store,
+                article,
+                scope,
+                (offset > 0).then(|| offset.to_string()).as_deref(),
+                (related_limit.max(20) - offset).clamp(1, 100),
+            )?
+            .into_page(offset);
+            let more = page.has_more && !page.rows.is_empty();
+            out.related.page.total = page.total;
+            out.related.page.has_more = page.has_more;
+            out.related.page.coverage = page.coverage;
+            out.related.page.rows.extend(page.rows);
+            offset = out.related.page.rows.len();
+            if !more || offset >= related_limit {
+                break;
+            }
+        }
+        if let Some(output) = parts.output {
+            merge_output_actors(&mut out.actors, output);
+        }
+        for (left, right) in out.explanations.keys() {
+            if !out
+                .relations
+                .iter()
+                .any(|(l, r, _)| l == left && r == right)
+            {
+                out.relations
+                    .push((left.clone(), right.clone(), "assessed".into()));
+            }
+        }
+        if job.is_some() {
+            out.publication = "Brief job unavailable on SurrealDB yet · Reload".into();
+        }
+        Ok(out)
+    }
+}
+
+/// Related leads from the repository under a storage config, else SQLite.
+fn related_page(
+    store: &Store,
+    article: &AtlasArticleRow,
+    scope: RelatedScope,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<argos_osint_core::related_global::GlobalRelatedPage> {
+    if super::surreal_brain::on() {
+        return super::surreal_brain::related_global(
+            &article.run_id,
+            &article.id,
+            scope,
+            cursor,
+            limit,
+        );
+    }
+    store.related_articles_global(&article.run_id, &article.id, scope, cursor, limit)
 }

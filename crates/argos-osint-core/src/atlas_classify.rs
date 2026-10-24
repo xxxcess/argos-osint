@@ -63,13 +63,16 @@ impl BatchAdapter {
             valid.insert(id.clone(), category.clone());
         }
         if let Some((db, key)) = &self.cache {
-            let store = Store::open(db).map_err(|e| e.to_string())?;
-            store
-                .app_state_set(
-                    key,
-                    &serde_json::to_string(&*valid).map_err(|e| e.to_string())?,
-                )
-                .map_err(|e| e.to_string())?;
+            let json = serde_json::to_string(&*valid).map_err(|e| e.to_string())?;
+            match crate::recon::backend::sqlite_path(db) {
+                Some(path) => {
+                    let store = Store::open(path).map_err(|e| e.to_string())?;
+                    store.app_state_set(key, &json).map_err(|e| e.to_string())?;
+                }
+                // `accept` is synchronous: under SurrealDB the batch write
+                // is queued in order, ahead of the end-of-call write.
+                None => cache_write_ordered(db.clone(), key.clone(), json),
+            }
         }
         if invalid || valid.len() != self.articles.len() {
             Err(format!(
@@ -220,9 +223,12 @@ pub async fn execute(
         "{PROMPT_VERSION}:{run}:{revision}:{}",
         crate::nlp::cache::hash(&serde_json::to_string(&routes).unwrap_or_default())
     );
+    let sqlite_db = crate::recon::backend::sqlite_path(db);
+    // Per-batch cache writes run on either store (see `accept`).
     adapter.cache = Some((db.to_path_buf(), cache_key.clone()));
-    if let Ok(store) = Store::open(db) {
-        if let Ok(Some(raw)) = store.app_state_get(&cache_key) {
+    let store = crate::atlas_store::AtlasStore::open(db).await.ok();
+    if let Some(store) = &store {
+        if let Ok(Some(raw)) = store.app_state_get(&cache_key).await {
             if let Ok(rows) = serde_json::from_str::<BTreeMap<String, String>>(&raw) {
                 let _ = adapter.accept(rows.into_iter().collect());
                 if adapter.pending().is_empty() {
@@ -251,17 +257,34 @@ pub async fn execute(
         &adapter,
         cancel,
         None,
-        Some(db),
+        sqlite_db.as_deref(),
     )
     .await;
     let receipt = adapter.receipt();
-    if let Ok(store) = Store::open(db) {
-        let _ = store.app_state_set(
-            &cache_key,
-            &serde_json::to_string(&receipt).unwrap_or_default(),
-        );
+    let json = serde_json::to_string(&receipt).unwrap_or_default();
+    if sqlite_db.is_none() {
+        // Behind any queued per-batch writes, so the final receipt wins.
+        cache_write_ordered(db.to_path_buf(), cache_key, json);
+    } else if let Some(store) = &store {
+        let _ = store.app_state_set(&cache_key, &json).await;
     }
     (receipt, result.err().map(|e| e.to_string()))
+}
+
+/// Queue a classifier cache write on the runtime's ordered queue (SurrealDB:
+/// `accept` cannot await). Best-effort, like the SQLite write it mirrors.
+fn cache_write_ordered(db: std::path::PathBuf, key: String, json: String) {
+    let label = key.clone();
+    let queued = crate::storage::runtime::spawn_ordered(async move {
+        if let Ok(store) = crate::atlas_store::AtlasStore::open(&db).await {
+            if let Err(e) = store.app_state_set(&key, &json).await {
+                tracing::warn!("classifier cache not written: {e:#} (key {key})");
+            }
+        }
+    });
+    if !queued {
+        tracing::warn!("classifier cache not written: no runtime (key {label})");
+    }
 }
 
 #[cfg(test)]

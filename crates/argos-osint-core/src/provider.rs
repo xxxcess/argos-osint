@@ -1975,7 +1975,7 @@ pub fn concrete_free_models(models: &[ListedModel]) -> Vec<ListedModel> {
         .filter(|model| !model.id.to_ascii_lowercase().starts_with("openrouter/"))
         .cloned()
         .collect();
-    free.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    free.sort_by_key(|a| a.name.to_lowercase());
     free
 }
 
@@ -2003,7 +2003,7 @@ pub fn parse_model_catalog(value: &Value) -> Vec<ListedModel> {
             free: is_concrete_free(id, item),
         });
     }
-    models.sort_by(|a, b| a.id.to_lowercase().cmp(&b.id.to_lowercase()));
+    models.sort_by_key(|a| a.id.to_lowercase());
     models
 }
 

@@ -388,7 +388,7 @@ impl TelemetryEvent {
 
     /// The dimension subset used by the hourly/daily rollups. A single
     /// `dim_key` per (bucket, event_type) keeps counts mergeable.
-    fn rollup_key(&self) -> String {
+    pub(crate) fn rollup_key(&self) -> String {
         let fields = [
             self.app.as_str(),
             self.trigger.as_str(),
@@ -463,7 +463,22 @@ fn rusqlite_result<T>(value: Result<T, rusqlite::Error>) -> anyhow::Result<T> {
 }
 
 /// Persists one event and refreshes its rollups.
+///
+/// Under a storage config (SurrealDB selected) the event goes to the
+/// repository instead (`storage::telemetry::record`, started on the process
+/// runtime without waiting) and SQLite is never opened: the two stores are
+/// never both written.
 pub fn record(db_path: &Path, event: &TelemetryEvent) -> anyhow::Result<()> {
+    #[cfg(feature = "surreal")]
+    if crate::storage::runtime::configured() {
+        let event = event.clone();
+        crate::storage::runtime::spawn(async move {
+            if let Ok(repo) = crate::storage::runtime::repository().await {
+                let _ = crate::storage::telemetry::record(repo.db(), &event).await;
+            }
+        });
+        return Ok(());
+    }
     let conn = write_connection(db_path)?;
     insert(&conn, event)
 }
@@ -567,7 +582,7 @@ fn rollup(
     Ok(())
 }
 
-fn event_bins(metric_ms: u64) -> Vec<i64> {
+pub(crate) fn event_bins(metric_ms: u64) -> Vec<i64> {
     let mut bins = vec![0i64; DURATION_BINS_MS.len() + 1];
     if metric_ms == 0 {
         return bins;
@@ -578,7 +593,7 @@ fn event_bins(metric_ms: u64) -> Vec<i64> {
 
 static ID_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn next_id() -> String {
+pub(crate) fn next_id() -> String {
     let n = ID_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     format!(
         "tel-{}-{n}",
@@ -606,7 +621,20 @@ impl Measured {
 
 /// Deletes raw events past the raw retention boundary and rollups past the
 /// rollup boundary. Rate limited; records when it last ran.
+///
+/// Under a storage config the prune runs on the repository
+/// (`storage::telemetry::prune`, started without waiting) and SQLite is
+/// never opened.
 pub fn prune(db_path: &Path, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
+    #[cfg(feature = "surreal")]
+    if crate::storage::runtime::configured() {
+        crate::storage::runtime::spawn(async move {
+            if let Ok(repo) = crate::storage::runtime::repository().await {
+                let _ = crate::storage::telemetry::prune(repo.db(), now).await;
+            }
+        });
+        return Ok(());
+    }
     let conn = write_connection(db_path)?;
     if !should_prune(&conn, now)? {
         return Ok(());

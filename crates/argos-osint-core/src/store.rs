@@ -20,11 +20,28 @@ pub use publication::{
     RejectedClaim, DELETED_REVISION, MEMORY_RECORD,
 };
 
+#[cfg(feature = "surreal")]
+pub(crate) use publication::reject_reason;
+
 static IDS: AtomicU64 = AtomicU64::new(1);
 
-fn new_id() -> String {
+/// Memory id: time, a random per-process salt and a sequence, so two
+/// processes writing one database in the same millisecond cannot collide.
+pub fn new_id() -> String {
+    static SALT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let salt = *SALT.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        // RandomState is seeded from the OS RNG; no extra dependency.
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u32(std::process::id());
+        h.finish()
+    });
     let n = IDS.fetch_add(1, Ordering::Relaxed);
-    format!("mem-{}-{n}", chrono::Utc::now().timestamp_millis())
+    format!(
+        "mem-{}-{:012x}-{n}",
+        chrono::Utc::now().timestamp_millis(),
+        salt & 0xffff_ffff_ffff
+    )
 }
 
 /// A saved explanation of one memory, keyed by the directive it was written from.
@@ -1566,10 +1583,8 @@ impl Store {
             return;
         };
         match brain_lance::serving_table_name(&self.conn) {
-            Ok(Some(name)) if !name.is_empty() => {
-                if index.serving_table_name() != name {
-                    index.set_serving_table(&name);
-                }
+            Ok(Some(name)) if !name.is_empty() && index.serving_table_name() != name => {
+                index.set_serving_table(&name);
             }
             _ => {}
         }
@@ -2819,11 +2834,13 @@ impl Store {
             preprocessing: serde_json::Value::Null,
             fallback: true,
         };
-        let _ = crate::summarization::publish_deterministic_and_enqueue(
-            &self.conn,
-            &req,
-            deterministic,
-        );
+        if crate::summarization::publish_selected(&req, deterministic.clone()).is_none() {
+            let _ = crate::summarization::publish_deterministic_and_enqueue(
+                &self.conn,
+                &req,
+                deterministic,
+            );
+        }
     }
 
     /// Writes Atlas claims into the same Brain tables Recon reads, through the

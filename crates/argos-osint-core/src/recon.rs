@@ -1,3 +1,4 @@
+//! @tag:recon-flow
 //! Persistent investigations and evidence-grounded model orchestration.
 pub mod backend;
 mod brain_resources;

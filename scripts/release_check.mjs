@@ -13,7 +13,7 @@ export function checkMessage(message, version = "0.1.0") {
   const [header, ...body] = message.replace(/\r\n/g, "\n").trimEnd().split("\n");
   const match = /^([a-z]+)(?:\(([a-z0-9][a-z0-9,._/-]*)\))?(!)?: (\S.*)$/.exec(header);
   if (!match || !types.has(match[1])) {
-    throw new Error("Use <type>(optional-scope): description; see docs/versioning.md for allowed types");
+    throw new Error("Use <type>(optional-scope): description; see docs/wiki/code/versioning.md for allowed types");
   }
   if (header !== header.trimEnd()) throw new Error("Commit title must not end in whitespace");
   const text = body.join("\n");

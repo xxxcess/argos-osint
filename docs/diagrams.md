@@ -28,10 +28,10 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Models and roles | Architecture | [model-roles.html](diagrams/model-roles.html) | [model-roles.svg](diagrams/model-roles.svg) |
 | Provider request scheduling | Data flow | [model-request-scheduling.html](diagrams/model-request-scheduling.html) | [model-request-scheduling.svg](diagrams/model-request-scheduling.svg) |
 | Persistence | Layer stack | [persistence.html](diagrams/persistence.html) | [persistence.svg](diagrams/persistence.svg) |
-| Report tables | Database schema | [schema-core.html](diagrams/schema-core.html) | [schema-core.svg](diagrams/schema-core.svg) |
+| Historical SQL report tables | Database schema | [schema-core.html](diagrams/schema-core.html) | [schema-core.svg](diagrams/schema-core.svg) |
 | Durable jobs | State machine | [jobs-lifecycle.html](diagrams/jobs-lifecycle.html) | [jobs-lifecycle.svg](diagrams/jobs-lifecycle.svg) |
 | Investigation harness | Process | [investigation-harness.html](diagrams/investigation-harness.html) | [investigation-harness.svg](diagrams/investigation-harness.svg) |
-| Agent exploration | Process | [agent-graphify.html](diagrams/agent-graphify.html) | [agent-graphify.svg](diagrams/agent-graphify.svg) |
+| Wiki navigation | Hierarchy | [wiki-navigation.html](diagrams/wiki-navigation.html) | [wiki-navigation.svg](diagrams/wiki-navigation.svg) |
 | Agent handoffs | Process | [agent-team.html](diagrams/agent-team.html) | [agent-team.svg](diagrams/agent-team.svg) |
 
 ## When to draw
@@ -45,10 +45,10 @@ Each `<svg>` has `role="img"` and unique `<title>` / `<desc>` ids (`<slug>-title
 ## Agent rule
 
 New or significant architectural/conceptual changes follow
-[the documentation policy](conventions.md#architecture-and-concepts): update affected
+[the documentation policy](wiki/code/conventions.md#architecture-and-concepts): update affected
 figures in the same change as code and prose. Check final ownership, flow, states,
 labels and failure/retry paths against the implementation. Keep HTML/inline SVG and
 sibling SVG consistent; update catalog/index/prose links for added, replaced or
-retired figures. A graphify refresh does not replace these maintained figures.
+retired figures. An index-only refresh does not replace these maintained figures.
 
-Follow this file and [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design). Put new figures in `docs/diagrams/` as HTML plus a sibling SVG, then link them from [README.md](README.md) and the matching prose doc. Do not drop Mermaid fences into `docs/`.
+Follow this file and [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design). Put new figures in `docs/diagrams/` as HTML plus a sibling SVG, then link them from this catalog and the matching wiki page. Do not drop Mermaid fences into `docs/`.

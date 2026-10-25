@@ -16,7 +16,8 @@ test("Git retains shared planning and curated deliverables while excluding sessi
     assert.ok([0, 1].includes(result.status), `git check-ignore failed for ${path}`);
     return result.status === 0;
   };
-  for (const path of ["docs/architecture.md", "docs/requirements.md", "docs/planning-artifacts.md",
+  for (const path of ["docs/wiki/code/architecture.md", "docs/requirements.md",
+    ...["task_plan.md", "findings.md", "progress.md"].map(name => `docs/wiki/code/templates/planning/${name}`), "docs/wiki/code/planning-artifacts.md",
     ...["design.md", "decisions.md", "acceptance.md", "handoff.md"].map(name => `.planning/2026-10-11-task/${name}`)]) {
     assert.equal(ignored(path), false, `${path} should be eligible for scoped staging`);
   }

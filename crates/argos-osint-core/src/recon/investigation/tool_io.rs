@@ -1,3 +1,4 @@
+//! @tag:recon-bindings
 //! Table-driven tool inputs and outputs.
 //!
 //! `TOOLS` has one row per catalog tool. The picker reads it for eligibility, input kinds,

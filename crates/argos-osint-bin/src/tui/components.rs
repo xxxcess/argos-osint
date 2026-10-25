@@ -1,3 +1,4 @@
+//! @tag:tui-components
 //! Shared cell-measured presentation primitives. Components never read storage.
 use ratatui::{layout::Rect, text::Line};
 

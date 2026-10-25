@@ -1,3 +1,4 @@
+//! @tag:intel-brief
 //! Intel brief preparation (`intel-brief-v2`): one durable job per article
 //! generation with four operations and explicit dependencies
 //! (`body=[]; claims=[]; inferences=[body,claims]; links=[inferences]`).

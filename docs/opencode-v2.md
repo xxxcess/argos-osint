@@ -14,14 +14,14 @@ Architect exploration children use AUDIT_UNIT mode; decision calls use CONSULT. 
 
 ## Models
 
-Role models and reasoning variants live in `.opencode/opencode.json` at `agents.<role>.model`. Architect and coder (including their workers) default to `opencode/glm-5.3-flash-free#max`, and tester to the vision-capable `opencode/nemotron-3.5-super-vl-free#xhigh`. Both base IDs are present in the installed free OpenCode catalog. GLM advertises `max`; Nemotron advertises `xhigh` as its highest variant. Unsupported `#max` suffixes and raw reasoning-body overlays are not sent. Provider/model support determines actual reasoning behavior.
+Role models and reasoning variants live in `.opencode/opencode.json` at `agents.<role>.model`. Architect and coder coordinators default to `opencode/glm-5.3-flash-free#max`, and tester to the vision-capable `opencode/nemotron-3.5-super-vl-free#xhigh`. Coder-spawned children use `opencode/mimo-v2.6-flash-free` (provider defaults; no advertised reasoning variant). All three base IDs are present in the installed free OpenCode catalog. GLM advertises `max`; Nemotron advertises `xhigh` as its highest variant. Unsupported `#max` suffixes and raw reasoning-body overlays are not sent. Provider/model support determines actual reasoning behavior.
 
 Set exploration and editing child defaults independently:
 
 - `.opencode/architect-worker.json`: architect's AUDIT_UNIT children.
-- `.opencode/coder-worker.json`: coder's EDIT_UNIT children.
+- `.opencode/coder-worker.json`: every child spawned by coder, including EDIT_UNIT coders, tester and architect CONSULT.
 
-Each file contains `{"model": "provider/model#variant"}`. The caller reads it and supplies `subagent.model` on every new/resumed worker call. An explicit user task override wins. Calls to a different role use that role's configured model unless the user overrides it. These files are workflow data, not native OpenCode config keys. Unavailable models/variants are reported without silent substitution.
+Each file contains `{"model": "provider/model#variant"}`. The caller reads it and supplies `subagent.model` on every new/resumed worker call. An explicit user task override wins. Coder always passes its worker override, even for another role; other callers use the target role's configured model except architect's AUDIT_UNIT override. The child keeps its role prompt/permissions; only its model changes. These files are workflow data, not native OpenCode config keys. Unavailable models/variants are reported without silent substitution.
 
 ## Delegation and continuation
 

@@ -6,7 +6,7 @@ Three workflows live in `.github/workflows/` (owned by Code Architect; code chan
 
 ## `ci.yml` — build and test matrix
 
-Runs on pushes to `main` and when a PR is opened, reopened or marked ready for review (drafts skipped). PR pushes do not build. All 8 legs run every time. `fail-fast: false`, 90-minute timeout, Rust 1.95.0, no debuginfo.
+Runs on pushes to `main` and when a PR is opened, reopened or marked ready for review (drafts skipped). PR pushes do not build. A manual dispatch (`gh workflow run ci.yml --ref <branch>`) runs the full matrix on any branch; Code Architect dispatches it at the end of a feature, fix or review-fix round. All 8 legs run every time. `fail-fast: false`, 90-minute timeout, Rust 1.95.0, no debuginfo.
 
 | Platform | Runner | Legs |
 |---|---|---|

@@ -7,11 +7,14 @@ on:
     # No builds on PR pushes (synchronize): CI runs when a PR is opened, reopened or
     # marked ready for review (drafts skipped), and on every push to main.
     types: [opened, reopened, ready_for_review]
+  # Manual full-matrix run on any branch: `gh workflow run ci.yml --ref <branch>`.
+  # Code Architect dispatches it at the end of a feature, fix or review-fix round.
+  workflow_dispatch:
 
-# Superseded pushes to the same PR cancel the older run (main always completes).
+# A newer PR event or dispatch on the same PR/branch cancels the older run (main pushes always complete).
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || (github.event_name == 'workflow_dispatch' && github.ref_name) || github.sha }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   CARGO_TERM_COLOR: always

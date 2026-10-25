@@ -264,3 +264,46 @@ async fn report_details_are_found_by_source_hash() {
         .unwrap()
         .is_none());
 }
+
+#[tokio::test]
+async fn event_seq_is_seeded_per_database_not_per_process() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    // First store: a write in this process creates its counter.
+    let first = server.repo("argos", "seq_first").await;
+    ensure_schema(first.db()).await.unwrap();
+    event_log::record_event(first.db(), &event(Severity::Info, "recon", "", "a"))
+        .await
+        .unwrap();
+
+    // Second store already holds events up to seq 5 and has no counter row,
+    // as a store written before the counter existed would.
+    let second = server.repo("argos", "seq_second").await;
+    ensure_schema(second.db()).await.unwrap();
+    for seq in 1..=5i64 {
+        second
+            .db()
+            .query(
+                "CREATE type::record('argos_event', $k) SET seq = $s, ts = <string>time::now(), \
+                 severity = 'info', rank = 1, app = 'old', event_type = 'session', \
+                 message = 'old', details = '', job_id = '', task_id = '', attempt_id = '', \
+                 run_id = '', resource_ref = '', correlation_id = ''",
+            )
+            .bind(("k", format!("old-{seq}")))
+            .bind(("s", seq))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    let id = event_log::record_event(second.db(), &event(Severity::Info, "recon", "", "new"))
+        .await
+        .unwrap();
+    let rows = event_log::list_events(second.db(), &EventFilter::default(), 10)
+        .await
+        .unwrap();
+    let new = rows.iter().find(|r| r.id == id).expect("new event listed");
+    assert_eq!(new.seq, 6, "seeded from this store's top seq");
+    assert_eq!(rows.first().map(|r| r.id.clone()), Some(id), "newest first");
+}

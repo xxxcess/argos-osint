@@ -1729,3 +1729,43 @@ async fn gone_processes_tasks_are_recovered_once_and_fenced() {
     assert_eq!(open, 2);
     assert_eq!(count(&db, "process").await, 2, "the dead row is removed");
 }
+
+#[tokio::test]
+async fn blocked_claim_page_keeps_paging_to_eligible_work() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "blocked_head_pages").await;
+    let pool = jobs::POOL_INTEL_BRIEF;
+    let at = Utc::now() - Duration::minutes(10);
+    // Job `busy` holds a running dependent stage, so none of its queued brief
+    // stages can be claimed; they fill the whole first claim page.
+    let ids: Vec<String> = (0..jobs::CLAIM_PAGE).map(|i| format!("b{i:02}")).collect();
+    let mut tasks = vec![task("d", "busy", "x", 0, at), {
+        let mut r = task("r", "busy", "x", 0, at);
+        r.deps = vec!["d"];
+        r
+    }];
+    for id in &ids {
+        tasks.push(task(id, "busy", pool, 0, at));
+    }
+    jobs::create_job(&db, &job("busy", None, at), &tasks)
+        .await
+        .unwrap();
+    db.query("UPDATE task:d SET state = 'completed'; UPDATE task:r SET state = 'running';")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    // An eligible brief stage in another job sorts past CLAIM_PAGE.
+    let later = at + Duration::minutes(1);
+    jobs::create_job(
+        &db,
+        &job("free", None, later),
+        &[task("late", "free", pool, 0, later)],
+    )
+    .await
+    .unwrap();
+    let got = claim(&db, pool, "w", Utc::now()).await;
+    assert_eq!(got.map(|t| t.id), Some("late".to_string()));
+}

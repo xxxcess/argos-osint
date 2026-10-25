@@ -11,8 +11,8 @@
 //! rolled-back write consumes no value; the numbers a reader misses come only
 //! from prune/clear deletions, which the old read-max allocator left
 //! non-contiguous too. Gaps are allowed: every consumer orders by `seq`
-//! (never by insert or commit order) and none requires contiguous values. On
-//! first use per process the counter is seeded to the highest stored `seq`
+//! (never by insert or commit order) and none requires contiguous values. When
+//! a database has no counter record yet it is seeded to the highest stored `seq`
 //! (read with ORDER BY/LIMIT, because `math::max` of no rows is -Infinity on
 //! a server). Messages and details are redacted and bounded
 //! before they are stored, as in SQLite. `investigation_event` is keyed by
@@ -26,15 +26,13 @@
 //! ([`event_apps`]), the retention prune ([`prune_events`]) and Clear log
 //! ([`clear_events`]). Prune and clear touch only `argos_event`.
 
-use std::sync::OnceLock;
-
 use anyhow::Result;
 use surrealdb::engine::any::Any;
 use surrealdb::types::SurrealValue;
 use surrealdb::Surreal;
 
 use super::counters;
-use super::jobs::{rid, run};
+use super::jobs::{rid, run, take};
 use super::tx::{run_tx, Tx, TxError};
 use crate::events::{
     bound, new_event_id, redact, severity_rank, EventFilter, EventRow, NewEvent, Severity,
@@ -154,31 +152,31 @@ impl From<StoredEvent> for EventRow {
 /// `index_change` counter names itself the same way).
 const SEQ_COUNTER: &str = "argos_event_seq";
 
-/// Per-process "the seq counter was seeded" marker, so the seed stays out of
-/// the hot path. Assumption: a store's `argos_event` writers run in this
-/// process (embedded, or this client against its server), so the first
-/// [`record_event`] sees the store as it is; a foreign process that seeds
-/// later only raises the counter with `math::max`, which still yields
-/// strictly increasing, possibly gapped (never reused) seqs.
-static SEQ_SEEDED: OnceLock<()> = OnceLock::new();
-
-/// Raise [`SEQ_COUNTER`] to the highest stored `seq` when it is lower —
-/// once per process, inside the first [`record_event`]'s transaction (see
-/// [`SEQ_SEEDED`]), so the seed commits atomically with that event. The max
-/// is read with ORDER BY/LIMIT because `math::max` of no rows is -Infinity
-/// on a server; `math::max` keeps a counter that is already ahead (pruned or
-/// cleared rows) from moving backwards.
-async fn seed_seq(tx: &Tx) -> Result<(), TxError> {
-    run(
+/// Allocate the next event `seq` inside `tx`. A store whose counter record
+/// already exists only increments it: every writer allocates through this
+/// counter, so it is never behind the stored rows. When the record is missing
+/// (a store written before the counter, or a cleared log) it is seeded from
+/// the highest stored `seq` in the same statement, so the seed commits
+/// atomically with the event. The check is per database, not per process, so
+/// several stores opened in one process (tests, server clients) never reuse
+/// a stored `seq`. The max is read with ORDER BY/LIMIT because `math::max`
+/// of no rows is -Infinity on a server.
+async fn next_seq(tx: &Tx) -> Result<i64, TxError> {
+    let mut res = run(
         tx,
         tx.query(
-            "LET $top = (SELECT VALUE seq FROM argos_event ORDER BY seq DESC LIMIT 1)[0] ?? 0;
-             UPSERT $c SET n = math::max([n ?? 0, $top]) RETURN NONE;",
+            "UPSERT $c SET n = (IF n = NONE {
+                 (SELECT VALUE seq FROM argos_event ORDER BY seq DESC LIMIT 1)[0] ?? 0
+             } ELSE { n }) + 1 RETURN VALUE n",
         )
         .bind(("c", rid("counter", SEQ_COUNTER))),
     )
     .await?;
-    Ok(())
+    let values: Vec<i64> = take(&mut res, 0)?;
+    values
+        .first()
+        .copied()
+        .ok_or_else(|| TxError::Abort(format!("counter {SEQ_COUNTER} returned no value")))
 }
 
 /// `events::record_event` on SurrealDB: persist one redacted event and
@@ -205,18 +203,12 @@ pub async fn record_event(db: &Surreal<Any>, event: &NewEvent) -> Result<String>
         correlation_id: event.correlation_id.clone(),
     };
     let key = id.clone();
-    // Read before the first attempt; a failed transaction leaves the marker
-    // unset so the next call seeds again.
-    let seed = SEQ_SEEDED.get().is_none();
     run_tx(db, counters::HOT_RECORD_POLICY, |tx| {
         let content = content.clone();
         let key = key.clone();
         async move {
-            if seed {
-                seed_seq(&tx).await?;
-            }
             let mut content = content;
-            content.seq = counters::next_in(&tx, SEQ_COUNTER).await?;
+            content.seq = next_seq(&tx).await?;
             run(
                 &tx,
                 tx.query("CREATE $e CONTENT $row RETURN NONE")
@@ -228,10 +220,6 @@ pub async fn record_event(db: &Surreal<Any>, event: &NewEvent) -> Result<String>
         }
     })
     .await?;
-    if seed {
-        // Losing the race to another task is fine: it seeded the same way.
-        let _ = SEQ_SEEDED.set(());
-    }
     Ok(id)
 }
 

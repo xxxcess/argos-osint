@@ -71,8 +71,8 @@ pub async fn drain_index(repo: &Repository, e: &Embedder, limit: i64) -> Result<
 
 /// Embed one buffered group of upserts (at most [`CHUNK`] changes): one
 /// embedder run, one chunked write, then one revision-exact `ack_many` for
-/// the group. When the chunk fails it aborted as a whole, so every change
-/// in the group is acknowledged failed with that outcome.
+/// the group. When the chunk fails it aborted as a whole, so the group is
+/// retried row by row and only rows that still fail are acknowledged failed.
 async fn flush(
     repo: &Repository,
     e: &Embedder,
@@ -102,22 +102,35 @@ async fn flush(
                 .collect();
             ack_all(repo, items, out).await?;
         }
-        Err(err) => {
-            let outcome = format!("{err:#}");
-            let items: Vec<outbox::AckItem> = group
-                .drain(..)
-                .map(|change| {
-                    let work_key = work_key_of(&change);
-                    outbox::AckItem {
-                        op_key: change.key,
-                        revision: change.revision,
-                        generation: change.generation,
-                        state: "failed".into(),
-                        outcome: outcome.clone(),
-                        work_key,
-                    }
-                })
-                .collect();
+        Err(_) => {
+            // The chunk commits in one transaction, so one bad row or an
+            // exhausted conflict retry aborts all of it. Retry row by row and
+            // fail only the rows that still fail on their own.
+            let mut items = Vec::with_capacity(group.len());
+            for change in group.drain(..) {
+                let ids = std::slice::from_ref(&change.record_id);
+                let (state, outcome) = match vectors::index_new_batch(repo, e, ids).await {
+                    Ok(applied) => (
+                        "completed",
+                        if applied.first().copied().unwrap_or(false) {
+                            "indexed"
+                        } else {
+                            "skipped"
+                        }
+                        .to_string(),
+                    ),
+                    Err(err) => ("failed", format!("{err:#}")),
+                };
+                let work_key = work_key_of(&change);
+                items.push(outbox::AckItem {
+                    op_key: change.key,
+                    revision: change.revision,
+                    generation: change.generation,
+                    state: state.into(),
+                    outcome,
+                    work_key,
+                });
+            }
             ack_all(repo, items, out).await?;
         }
     }

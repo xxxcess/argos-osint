@@ -148,7 +148,10 @@ async fn prune_and_clear_touch_only_argos_event() {
     assert_eq!(count(db, "argos_event").await, 0);
     assert_eq!(count(db, "job_event").await, 1);
     assert_eq!(event_log::clear_events(db).await.unwrap(), 0);
-    // Sequence numbering restarts cleanly after a clear.
+    // Sequence numbering continues from the counter record after a clear:
+    // old and fresh were 1 and 2, and `clear_events` only deletes
+    // `argos_event` rows (it never resets the counter), so the next event
+    // is 3. The old read-max allocator restarted at 1 here.
     event_log::record_event(db, &event(Severity::Warn, "recon", "", "after"))
         .await
         .unwrap();
@@ -156,7 +159,7 @@ async fn prune_and_clear_touch_only_argos_event() {
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].seq, 1);
+    assert_eq!(rows[0].seq, 3);
     assert_eq!(
         event_log::event_counts(db).await.unwrap().warn,
         1,

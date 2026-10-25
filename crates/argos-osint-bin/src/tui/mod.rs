@@ -30,4 +30,8 @@ pub mod topology_layout;
 mod tracked;
 mod ui;
 
+#[doc(hidden)]
+pub use app::testkit;
 pub use app::{run, App};
+#[doc(hidden)]
+pub use ui::draw;

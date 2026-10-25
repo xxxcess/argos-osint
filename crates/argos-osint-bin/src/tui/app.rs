@@ -1073,6 +1073,10 @@ pub struct App {
     pub thread_states: HashMap<String, String>,
     pub messages: Vec<recon::Message>,
     pub investigation_events: Vec<argos_osint_core::investigation::InvestigationEvent>,
+    /// Monotonic revision of `investigation_events`, bumped at every mutation
+    /// site below so the frame stamp stays content-sensitive without
+    /// Debug-formatting the event list on every stamp check.
+    pub investigation_events_rev: u64,
     pub compact_pages: [usize; 9],
     pub calls: Vec<recon::Call>,
     pub thread_sel: usize,
@@ -1556,6 +1560,7 @@ impl App {
             thread_states,
             messages,
             investigation_events: Vec::new(),
+            investigation_events_rev: 0,
             compact_pages: [0; 9],
             calls,
             thread_sel: 0,
@@ -11153,12 +11158,17 @@ fn surreal_topology(surreal: bool, _seed: &argos_osint_core::brain_topology::Top
     surreal
 }
 
-#[cfg(test)]
-mod tests {
+/// Construction helpers for the crate's integration tests, exported as
+/// `tui::testkit`. Always compiled - the frame-rebuild benchmark links
+/// this library outside `cfg(test)` - so nothing here may touch the
+/// storage runtime, the network or `ARGOS_HOME` state.
+#[doc(hidden)]
+pub mod testkit {
     use super::*;
 
-    fn app() -> App {
-        crate::test_storage::ensure();
+    /// A default [`App`] sized for a `width`-`height` terminal: the exact
+    /// field set the unit tests construct, without initializing storage.
+    pub fn app(width: u16, height: u16) -> App {
         let (provider_tx, provider_rx) = unbounded_channel();
         let (work_tx, work_rx) = unbounded_channel();
         App {
@@ -11206,6 +11216,7 @@ mod tests {
             thread_states: HashMap::new(),
             messages: Vec::new(),
             investigation_events: Vec::new(),
+            investigation_events_rev: 0,
             compact_pages: [0; 9],
             calls: Vec::new(),
             thread_sel: 0,
@@ -11299,7 +11310,7 @@ mod tests {
             provider_pending: None,
             focus: Target::App(0),
             cursor: 0,
-            screen: Rect::new(0, 0, 100, 34),
+            screen: Rect::new(0, 0, width, height),
             status: String::new(),
             memories: Vec::new(),
             selected_insight: None,
@@ -11430,6 +11441,42 @@ mod tests {
             work_tx,
             work_rx,
         }
+    }
+
+    /// Open the Recon transcript so `ensure_frame` builds blocks for the
+    /// current messages. `selected_thread` stays `None` on purpose:
+    /// `can_resume_recon` blocks on the storage runtime for a selected thread.
+    pub fn show_recon_chat(app: &mut App) {
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+    }
+
+    /// Append `count` synthetic recon messages with unique ids and varied
+    /// roles, content and run ids, so the transcript has bulk to rebuild.
+    pub fn push_messages(app: &mut App, count: usize) {
+        for index in 0..count {
+            let assistant = index % 2 == 1;
+            let role = if assistant { "assistant" } else { "user" };
+            app.messages.push(recon::Message {
+                id: format!("perf-msg-{index}"),
+                thread_id: "perf-thread".into(),
+                sequence: index as i64 + 1,
+                role: role.into(),
+                content: format!("perf transcript line {index:04} synthetic bulk content"),
+                run_id: assistant.then(|| format!("perf-run-{}", index / 2)),
+                created_at: String::new(),
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> App {
+        crate::test_storage::ensure();
+        testkit::app(100, 34)
     }
 
     fn click(app: &mut App, target: Target) {

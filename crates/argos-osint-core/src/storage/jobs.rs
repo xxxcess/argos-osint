@@ -130,6 +130,7 @@ pub(crate) async fn run(
     query: surrealdb::method::Query<'_, Any>,
 ) -> Result<IndexedResults, TxError> {
     let _ = tx;
+    super::tx::QUERY_ROUND_TRIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(query.await?.check()?)
 }
 

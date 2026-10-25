@@ -1,8 +1,3 @@
-mod cli;
-#[cfg(test)]
-mod test_storage;
-mod tui;
-
 #[tokio::main]
 async fn main() {
     // The one storage entry point: the CLI and TUI reach the SurrealDB
@@ -19,7 +14,7 @@ async fn main() {
         eprintln!("argos: {err:#}");
         std::process::exit(1);
     }
-    let outcome = cli::dispatch().await;
+    let outcome = argos_osint_bin::cli::dispatch().await;
     // Best-effort SurrealDB telemetry writes finish before the process exits.
     #[cfg(feature = "surreal")]
     argos_osint_core::storage::runtime::drain().await;

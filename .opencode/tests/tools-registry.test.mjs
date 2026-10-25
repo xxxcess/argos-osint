@@ -71,5 +71,6 @@ test("shared guide and planning skill are registered for every model", () => {
   assert.ok(guide.length < readFileSync(join(root, "../AGENTS.md"), "utf8").length);
   assert.equal(config.agents.architect.model, "opencode/glm-5.3-flash-free#max");
   assert.equal(config.agents.tester.model, "opencode/nemotron-3.5-super-vl-free#xhigh");
-  assert.equal(config.agents.coder.model, "opencode/mimo-v2.6-flash-free");
+  assert.equal(config.agents.coder.model, config.agents.architect.model);
+  assert.equal(JSON.parse(readFileSync(join(root, "coder-worker.json"), "utf8")).model, config.agents.coder.model);
 });

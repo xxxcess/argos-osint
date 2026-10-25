@@ -14,7 +14,7 @@ Architect exploration children use AUDIT_UNIT mode; decision calls use CONSULT. 
 
 ## Models
 
-Role models and reasoning variants live in `.opencode/opencode.json` at `agents.<role>.model`. Architect defaults to `opencode/glm-5.3-flash-free#max`, coder to `opencode/mimo-v2.6-flash-free`, and tester to the vision-capable `opencode/nemotron-3.5-super-vl-free#xhigh`. All three base IDs are present in the installed free OpenCode catalog. GLM advertises `max`; Nemotron advertises `xhigh` as its highest variant. MiMo advertises no reasoning variants, so it uses provider defaults. Unsupported `#max` suffixes and raw reasoning-body overlays are not sent. Provider/model support determines actual reasoning behavior.
+Role models and reasoning variants live in `.opencode/opencode.json` at `agents.<role>.model`. Architect and coder (including their workers) default to `opencode/glm-5.3-flash-free#max`, and tester to the vision-capable `opencode/nemotron-3.5-super-vl-free#xhigh`. Both base IDs are present in the installed free OpenCode catalog. GLM advertises `max`; Nemotron advertises `xhigh` as its highest variant. Unsupported `#max` suffixes and raw reasoning-body overlays are not sent. Provider/model support determines actual reasoning behavior.
 
 Set exploration and editing child defaults independently:
 

@@ -30,3 +30,11 @@ Use `/refresh-wiki <scope>` in OpenCode, or follow these steps in any host. Scop
 - [ ] Update phase checkboxes, evidence and Next Step as each item finishes. Report updated pages, actual checks and unresolved stale areas. A no-op refresh reports its scope and why no edits were needed.
 
 Setup and refresh update files; neither implies commit/push authorization. They do not install hooks, rewrite unrelated docs or regenerate historical evidence. The task's plan owner owns shared wiki updates; assigned editors report progress, and reviewers flag stale links/contracts as incomplete work.
+
+## Continuous documentation with Scribe
+
+[Scribe](../../.opencode/agents/scribe.md) reviews accumulated code changes at scheduled phase transitions, before verification of that checkpoint. Coder supplies the baseline, task-owned changed/new paths and exact doc ownership; Scribe reads current code/tests and updates affected canonical wiki pages, README links and diagram pairs. No-op reviews must explain why the inspected changes do not affect docs.
+
+Trigger a pass when a phase changes behavior, contracts, module ownership, navigation or diagrams. Architect may batch small internal-only phases and record the uncovered scope/next checkpoint in the plan. Always review any remaining delta before final delivery; do not repeat a review for unchanged scope. Later behavior/contract fixes invalidate the affected review and trigger another scoped pass. Scribe returns evidence and open decisions through its caller; architect updates shared phase checkboxes. Source comments/tags and agent/config changes remain coder-owned. This is a phase-triggered workflow, not an installed file watcher or unattended service.
+
+Select Scribe directly for documentation work, use `/docs-review <scope>` for a code-delta review, or `/setup-wiki` and `/refresh-wiki`. Its default model matches tester; delegated Scribe calls retain that model unless the user overrides it. See [role permissions and handoffs](code/opencode-v2.md).

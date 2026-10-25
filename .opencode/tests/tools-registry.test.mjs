@@ -22,7 +22,7 @@ test("replacement roles permit nested handoffs and restrict source edits", () =>
   assert.equal(config.experimental.subagent_depth, 3);
   assert.equal(config.subagent_depth, undefined);
   for (const id of ["build", "plan", "general", "explore"]) assert.equal(config.agents[id].disabled, true);
-  for (const id of ["architect", "coder", "tester"]) {
+  for (const id of ["architect", "coder", "tester", "scribe"]) {
     assert.equal(config.agents[id].mode, "all");
     assert.equal(effect(id, "execute", "*"), "allow");
     assert.equal(effect(id, "browser", "*"), "deny");
@@ -31,7 +31,7 @@ test("replacement roles permit nested handoffs and restrict source edits", () =>
     assert.equal(effect(id, "skill", "*"), "allow");
   }
   for (const parent of ["architect", "coder"]) {
-    for (const child of ["architect", "coder", "tester"]) assert.equal(effect(parent, "subagent", child), "allow");
+    for (const child of ["architect", "coder", "tester", "scribe"]) assert.equal(effect(parent, "subagent", child), "allow");
     const worker = JSON.parse(readFileSync(join(root, `${parent}-worker.json`), "utf8"));
     assert.match(worker.model, /^[^/]+\/[^/]+$/);
   }
@@ -73,4 +73,24 @@ test("shared guide and planning skill are registered for every model", () => {
   assert.equal(config.agents.tester.model, "opencode/nemotron-3.5-super-vl-free#xhigh");
   assert.equal(config.agents.coder.model, config.agents.architect.model);
   assert.equal(JSON.parse(readFileSync(join(root, "coder-worker.json"), "utf8")).model, "opencode/mimo-v2.6-flash-free");
+});
+
+test("Scribe preserves tester model and documentation-only leaf scope", () => {
+  assert.equal(config.agents.scribe.model, config.agents.tester.model);
+  assert.equal(effect("scribe", "edit", "*"), "deny");
+  for (const resource of ["docs/**", "**/docs/**", "README.md", "**/README.md", "**/.planning/**"]) {
+    assert.equal(effect("scribe", "edit", resource), "allow");
+  }
+  assert.equal(rules("scribe").some(r => r.action === "subagent" && r.effect === "allow"), false);
+  assert.equal(rules("scribe").some(r => r.action === "edit" && r.effect === "allow" && /crates|scripts|opencode/.test(r.resource)), false);
+  for (const name of ["setup-wiki", "refresh-wiki", "docs-review"]) {
+    assert.match(readFileSync(join(root, `commands/${name}.md`), "utf8"), /agent: scribe/);
+  }
+  const coder = readFileSync(join(root, "agents/coder.md"), "utf8");
+  assert.match(coder, /agents\.scribe\.model/);
+  assert.match(coder, /documentation updates before tester/);
+  assert.match(coder, /Re-run Scribe after fixes/);
+  const scribe = readFileSync(join(root, "agents/scribe.md"), "utf8");
+  assert.match(scribe, /do not delegate/i);
+  assert.match(scribe, /no-op review/i);
 });

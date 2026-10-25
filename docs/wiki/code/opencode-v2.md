@@ -2,28 +2,29 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-`architect` is the default. Architect, coder and tester all use `mode: all`, so they can run as primary agents or children. Legacy build/plan/general/explore agents are disabled; ECC agent definitions are replaced. `/ecc-plan` and `/ecc-review` select architect; `/ecc-verify` selects tester.
+`architect` is the default. Architect, coder, tester and Scribe all use `mode: all`, so they can run as primary agents or children. Legacy build/plan/general/explore agents are disabled; ECC agent definitions are replaced. `/ecc-plan` and `/ecc-review` select architect; `/ecc-verify` selects tester.
 
 | Caller | Permitted children | Purpose |
 | --- | --- | --- |
-| architect | architect, coder, tester | Explore code/docs, dispatch a phase, review evidence |
-| coder | coder, architect, tester | Delegate edits, ask decisions, verify a phase |
+| architect | architect, coder, tester, scribe | Explore code/docs, dispatch a phase, review evidence |
+| coder | coder, architect, tester, scribe | Delegate edits, ask decisions, verify a phase |
 | tester | architect | Ask a specific verification/design question |
+| scribe | none | Review code deltas and maintain canonical documentation |
 
-[Agent handoffs](../../diagrams/agent-team.html) follow one phase at a time. Architect uses planning-with-files, the wiki and current source to write the spec with exact files, contracts, performance/migration risks and acceptance. It owns shared planning files. Coder assigns disjoint EDIT_UNIT children, including tests/docs/fixtures when needed, waits for formatted edits, and invokes tester. Tester returns evidence to coder, which relays it to architect. Architect reviews actual diagnostics/source and performance, updates the plan and provides corrections before accepting or advancing a phase. Plan-only requests stop before implementation. User exclusions override routine build/test defaults.
+[Agent handoffs](../../diagrams/agent-team.html) follow one phase at a time. Architect uses planning-with-files, the wiki and current source to write the spec with exact files, contracts, performance/migration risks and acceptance. It owns shared planning files. Coder assigns disjoint EDIT_UNIT children, including tests/docs/fixtures when needed, waits for formatted edits, runs Scribe on accumulated changes at scheduled phase checkpoints, then invokes tester. Scribe updates owned docs/diagrams and returns review evidence; it reports source-tag or agent-guidance fixes to coder. Architect schedules meaningful phase checkpoints, may batch small internal-only phases with tracked uncovered scope, and requires remaining changes reviewed before final delivery. Later fixes that change documented behavior trigger another scoped Scribe pass. Tester returns evidence to coder, which relays it to architect. Architect reviews actual diagnostics/source and performance, updates the plan and provides corrections before accepting or advancing a phase. Plan-only requests stop before implementation. User exclusions override routine build/test defaults.
 
 Architect exploration children use AUDIT_UNIT mode; decision calls use CONSULT. Both are read-only leaf modes. EDIT_UNIT coder children edit/format only their assigned files and never delegate/build/test. Consultations return decisions to the caller rather than starting another workflow. Every handoff carries PLAN_ID, exact scope, references and acceptance; only architect updates shared plan files.
 
 ## Models
 
-Role models and reasoning variants live in `.opencode/opencode.json` at `agents.<role>.model`. Architect and coder coordinators default to `opencode/glm-5.3-flash-free#max`, and tester to the vision-capable `opencode/nemotron-3.5-super-vl-free#xhigh`. Coder-spawned children use `opencode/mimo-v2.6-flash-free` (provider defaults; no advertised reasoning variant). All three base IDs are present in the installed free OpenCode catalog. GLM advertises `max`; Nemotron advertises `xhigh` as its highest variant. Unsupported `#max` suffixes and raw reasoning-body overlays are not sent. Provider/model support determines actual reasoning behavior.
+Role models and reasoning variants live in `.opencode/opencode.json` at `agents.<role>.model`. Architect and coder coordinators default to `opencode/glm-5.3-flash-free#max`, and tester/Scribe to the vision-capable `opencode/nemotron-3.5-super-vl-free#xhigh`. Coder-spawned children other than Scribe use `opencode/mimo-v2.6-flash-free` (provider defaults; no advertised reasoning variant). All three base IDs are present in the installed free OpenCode catalog. GLM advertises `max`; Nemotron advertises `xhigh` as its highest variant. Unsupported `#max` suffixes and raw reasoning-body overlays are not sent. Provider/model support determines actual reasoning behavior.
 
 Set exploration and editing child defaults independently:
 
 - `.opencode/architect-worker.json`: architect's AUDIT_UNIT children.
-- `.opencode/coder-worker.json`: every child spawned by coder, including EDIT_UNIT coders, tester and architect CONSULT.
+- `.opencode/coder-worker.json`: EDIT_UNIT coders, tester and architect CONSULT spawned by coder; excludes Scribe.
 
-Each file contains `{"model": "provider/model#variant"}`. The caller reads it and supplies `subagent.model` on every new/resumed worker call. An explicit user task override wins. Coder always passes its worker override, even for another role; other callers use the target role's configured model except architect's AUDIT_UNIT override. The child keeps its role prompt/permissions; only its model changes. These files are workflow data, not native OpenCode config keys. Unavailable models/variants are reported without silent substitution.
+Each file contains `{"model": "provider/model#variant"}`. The caller reads it and supplies `subagent.model` on every new/resumed worker call. An explicit user task override wins. Coder passes its worker override for editor/tester/CONSULT children. For Scribe, all callers read and explicitly pass `agents.scribe.model` from `.opencode/opencode.json`, keeping it equal to tester’s role default; other callers use the target role's configured model except architect's AUDIT_UNIT override. The child keeps its role prompt/permissions; only its model changes. These files are workflow data, not native OpenCode config keys. Unavailable models/variants are reported without silent substitution.
 
 ## Delegation and continuation
 
@@ -35,18 +36,18 @@ If continuation returns unknown/foreign-session errors, confirm the old worker i
 
 ## Permissions and tooling
 
-All roles may read/search, use shell and web tools, and load relevant skills. Architect/tester edit tools allow only planning evidence; coder may edit source. Shell access supports repo commands and is not a filesystem sandbox. Code Mode is enabled so configured MCP discovery tools and worktree/session utilities remain available; nested tools still enforce their own permissions. Browser tools remain denied. Delegation is restricted to the table above. `.opencode/AGENTS.md` is a concise shared guide loaded by `instructions` for all models, alongside root AGENTS.md (OpenCode combines these files; this is not an override). The project registers the installed `~/.agents/skills/planning-with-files` skill without changing global settings. Follow AGENTS.md for isolated Cargo commands, TUI capture/image/interaction/metric checks, documentation, scratch, compatibility and commits. Tester marks unavailable image/live evidence pending.
+All roles may read/search, use shell and web tools, and load relevant skills. Architect/tester edit tools allow only planning evidence; coder may edit source. Scribe edit tools permit docs, README files and local planning evidence; its role prohibits source/test/config/agent-instruction edits, builds, commits and delegation. It reports required changes outside documentation to coder. Shell access supports repo commands and is not a filesystem sandbox. Code Mode is enabled so configured MCP discovery tools and worktree/session utilities remain available; nested tools still enforce their own permissions. Browser tools remain denied. Delegation is restricted to the table above. `.opencode/AGENTS.md` is a concise shared guide loaded by `instructions` for all models, alongside root AGENTS.md (OpenCode combines these files; this is not an override). The project registers the installed `~/.agents/skills/planning-with-files` skill without changing global settings. Follow AGENTS.md for isolated Cargo commands, TUI capture/image/interaction/metric checks, documentation, scratch, compatibility and commits. Tester marks unavailable image/live evidence pending.
 
 Use the installed `opencode debug config` and initialized `/api/agent` catalog to inspect effective models, prompts and permissions. Initial catalog loads can be empty while initialization completes. Existing sessions retain selected agents/models; start a new architect session or explicitly switch. Retired sessions do not acquire new parent/child relationships.
 
-References: [official V2 agents](https://opencode.ai/v2/docs/agents), [config](https://opencode.ai/v2/docs/config), [tools](https://opencode.ai/v2/docs/tools). Navigate through [the wiki](../../index.md), tags and scoped source searches. `/setup-wiki` and `/refresh-wiki` use the [maintenance workflow](../maintenance.md). The handoff plugin retains bounded idle/compaction summaries; source search has no graph gate.
+References: [official V2 agents](https://opencode.ai/v2/docs/agents), [config](https://opencode.ai/v2/docs/config), [tools](https://opencode.ai/v2/docs/tools). Navigate through [the wiki](../../index.md), tags and scoped source searches. `/docs-review`, `/setup-wiki` and `/refresh-wiki` select Scribe and use the [maintenance workflow](../maintenance.md). The handoff plugin retains bounded idle/compaction summaries; source search has no graph gate.
 
 ## Phase handoff and completion
 
 Every dispatch carries this compact envelope; children start with fresh context:
 
 ```text
-MODE: PHASE | EDIT_UNIT | AUDIT_UNIT | CONSULT | VERIFY
+MODE: PHASE | EDIT_UNIT | AUDIT_UNIT | CONSULT | VERIFY | DOC_REVIEW
 PLAN_ID / absolute PLAN_DIR / PHASE:
 INTEGRATION_ROOT / absolute WORKTREE / BASE_REVISION:
 OWNED_FILES: exact paths (read-only references listed separately)
@@ -54,6 +55,8 @@ SPEC: file:line refs, contracts, constraints, performance/migration risks
 ACCEPTANCE: checks, expected results, evidence paths, user exclusions
 RETURN: COMPLETE | NEEDS_DECISION | FAILED; changed files and evidence
 ```
+
+Scribe returns COMPLETE / NEEDS_DECISION / BLOCKED with reviewed baseline/dirty scope, doc changes, actual checks and gaps; a no-op still requires scope and rationale. It is a leaf role and cannot accept shared phases. Standalone Scribe maintains its own named plan.
 
 Tester uses PASS / FAIL / BLOCKED / PENDING and reports tested revision plus dirty-diff identity, command exit codes, skipped checks, screenshot inspection and outstanding acceptance. Its report is addressed to architect but returns through its calling coder. Coder relays it unchanged with integration notes. A CONSULT child returns an advisory decision; it cannot update the owning architect's plan or accept a phase. Questions affecting scope return to the owning architect.
 
@@ -65,10 +68,12 @@ The owning architect updates the spec and planning files, then resumes its own c
 2. Create each worktree from the agreed baseline (`git worktree add --detach <absolute-path> <base>`). Include any required uncommitted phase baseline with a scoped patch; never silently omit dirty prerequisites or copy unrelated edits. Record that baseline so it is excluded from the worker's returned delta.
 3. Pass absolute WORKTREE and PLAN_DIR to the child. Subagent creation inherits location; it does not implicitly enter a worktree. Use absolute edit paths and shell `workdir`, or move only the child session with Code Mode and wait for that move to take effect. Read the shared plan in the integration tree; never create a competing plan in a worker.
 4. EDIT_UNIT children implement and format only. Return owned paths, diff and unresolved decisions. Coder waits for all editors, inspects changes (including new/untracked files), and integrates only each unit's delta. Without commit authorization use reviewed patches and `git apply --check` before applying; with authorization coordinator may commit exact paths and cherry-pick. Never blindly overwrite files or apply a baseline twice.
-5. Resolve integration conflicts through architect when contracts change, format the combined tree, then give tester that tree and diff identity. Never test in feature worktrees. Retain task-owned worktrees until changes are verified/integrated; remove only clean, fully integrated task worktrees without force.
+5. Resolve integration conflicts through architect when contracts change, format the combined tree, at scheduled documentation checkpoints give Scribe exclusive ownership of the affected docs while it reviews the integrated delta. Wait for documentation updates before giving tester the final tree and diff identity. Never test in feature worktrees. Retain task-owned worktrees until changes are verified/integrated; remove only clean, fully integrated task worktrees without force.
 
 ## Verification
 
 Rust: `scripts/local_matrix.sh --storage embedded` in INTEGRATION_ROOT, with ARGOS_EMBED unset. Targeted builds use `python3 scripts/agent_cargo.py … --locked` with the embedded defaults. Storage checks run via `test_surreal.py`; server is CI-only. Serialize Cargo and follow the 1–2 full runs / maximum 3 cap. Config-only changes use `node --test .opencode/tests/*.test.mjs` plus runtime checks, without a Rust build.
 
-Inspect `opencode debug config`, `opencode models`, and the initialized `/api/agent` catalog. Test actual handoffs in a fresh read-only session: architect → coder → EDIT_UNIT coder, coder → tester → CONSULT architect, then architect resumes its own coder via sessionID. A valid config alone is not proof of delivery. Keep raw runtime evidence in `.agent-scratch/`; never report a model/network failure as a passed handoff. Model variants and request overlays are preferences, not proof of provider-side reasoning; when switching models select its supported high/max variant and check the catalog rather than inventing one.
+Inspect `opencode debug config`, `opencode models`, and the initialized `/api/agent` catalog. Test actual handoffs in a fresh read-only session: architect → coder → EDIT_UNIT coder, coder → Scribe documentation review and coder → tester → CONSULT architect, then architect resumes its own coder via sessionID. A valid config alone is not proof of delivery. Keep raw runtime evidence in `.agent-scratch/`; never report a model/network failure as a passed handoff. Model variants and request overlays are preferences, not proof of provider-side reasoning; when switching models select its supported high/max variant and check the catalog rather than inventing one.
+
+Continuous documentation is defined by the [Scribe workflow](../maintenance.md#continuous-documentation-with-scribe); it requires a phase-triggered review, not a background watcher.

@@ -14,3 +14,5 @@ AUDIT_UNIT and CONSULT are leaf modes: read-only, no delegation, return findings
 Resume only your own child sessionID. Use the documented handoff envelope/recovery; never replace failed delegation with another role's work.
 
 Own phase/item checkboxes and Next Step; update them as evidence arrives. Include affected wiki routes, tags and diagrams in scope.
+
+Schedule Scribe at meaningful phase transitions and before final delivery; batch small internal-only phases with uncovered scope/next checkpoint recorded in the plan. Require review evidence for accumulated changes, assign doc ownership and send documentation-only work directly to Scribe.

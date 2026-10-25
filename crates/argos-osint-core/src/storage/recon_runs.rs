@@ -244,7 +244,8 @@ pub async fn latest_run_state(repo: &Repository, thread_id: &str) -> Result<Opti
     Ok(latest_run(repo, thread_id).await?.map(|r| r.state))
 }
 
-/// Newest run state for each of `thread_ids`, in one query. Threads with no
+/// Newest run state for each of `thread_ids`, in one query that reads only
+/// one newest row per thread (`LIMIT 1` per thread, as in [`latest_run`]). Threads with no
 /// run are absent. Ties on `updated_at` keep whichever row the engine
 /// returns first, the same as [`latest_run_state`]'s `LIMIT 1`.
 pub async fn latest_run_states(
@@ -262,18 +263,18 @@ pub async fn latest_run_states(
     let mut r = repo
         .db()
         .query(
-            "SELECT thread_id, state FROM recon_run \
-             WHERE thread_id INSIDE $ids ORDER BY updated_at DESC",
+            "RETURN $ids.map(|$t| (SELECT thread_id, state FROM recon_run \
+             WHERE thread_id = $t ORDER BY updated_at DESC LIMIT 1)[0])",
         )
         .bind(("ids", thread_ids.to_vec()))
         .await?
         .check()?;
-    let rows: Vec<Row> = r.take(0usize)?;
-    let mut out = std::collections::HashMap::new();
-    for row in rows {
-        out.entry(row.thread_id).or_insert(row.state);
-    }
-    Ok(out)
+    let rows: Vec<Option<Row>> = r.take(0usize)?;
+    Ok(rows
+        .into_iter()
+        .flatten()
+        .map(|row| (row.thread_id, row.state))
+        .collect())
 }
 
 /// The most recently updated run, when it was interrupted or failed.

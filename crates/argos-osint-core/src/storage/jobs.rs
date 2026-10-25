@@ -627,12 +627,10 @@ async fn claim_in(
             break;
         }
         let ordered = claim_order(candidates, slot);
-        // Set when this worker's first candidate cannot be claimed (an Intel
-        // brief already running in its job, or a lost UPDATE race). A second
-        // page would probe another 32 rows inside this transaction; the next
-        // claim retries the head. Later rows on this page are still tried.
-        let mut head_blocked = false;
-        for (index, c) in ordered.iter().enumerate() {
+        // A candidate that cannot be claimed (an Intel brief already running
+        // in its job, or a lost UPDATE race) is skipped and the scan keeps
+        // paging, so one blocked row never hides eligible work behind it.
+        for c in ordered.iter() {
             if c.pool == POOL_INTEL_BRIEF {
                 // A dependent stage runs alone in its job; independent roots
                 // run together (CLAIM_ELIGIBLE parity).
@@ -649,9 +647,6 @@ async fn claim_in(
                 .await?;
                 let busy: Option<i64> = take(&mut res, 0)?;
                 if busy.unwrap_or(0) > 0 {
-                    if page == 0 && index == 0 {
-                        head_blocked = true;
-                    }
                     continue;
                 }
             }
@@ -675,9 +670,6 @@ async fn claim_in(
             .await?;
             let changed: Vec<surrealdb::types::Value> = take(&mut res, 0)?;
             if changed.len() != 1 {
-                if page == 0 && index == 0 {
-                    head_blocked = true;
-                }
                 continue;
             }
             let Some(task) = load_task(tx, &c.id).await? else {
@@ -705,9 +697,6 @@ async fn claim_in(
             }
             write_receipt(tx, op_key, "claim", &task.id, task.lease_epoch, &now_s).await?;
             return Ok(Some(task));
-        }
-        if head_blocked {
-            break;
         }
     }
     Ok(None)

@@ -1,5 +1,7 @@
 # Brief Inferences latency and status — checklist
 
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
 > Historical record. For current behavior, start at the [wiki](../index.md).
 
 Audit of main `1d3eb59` (Jobs detail of a partial `intel_brief`: Inferences timed out after 7m51s, categorised `invalid_result`, attempt history showing `#1` three times). Branch `fix/brief-inferences-latency-and-status`, draft PR. Fixes are root-cause and apply to every brief stage (Claims, Inferences, Links, cleanup), not to Inferences alone.
@@ -27,7 +29,7 @@ Standing rules: Inferences **always** uses thinking models. There is no faster n
 | B | Per-model thinking effort for Inferences (never off, no token caps); thinking-sized deadlines | see log |
 | C | Skip to the next route on a stall (no non-thinking primary); operation wall-clock cap that includes pacing and queue time | see log |
 | D | Per-claim checkpoints, re-run only failed claims, complete with warnings so Links can run | see log |
-| E | Jobs `r` retry parity; docs, diagrams, graphify, final matrix | **done** |
+| E | Jobs `r` retry parity; docs, diagrams, final matrix | **done** |
 
 ## Phase log
 
@@ -70,7 +72,7 @@ Standing rules: Inferences **always** uses thinking models. There is no faster n
 
 ### Phase E — parity, docs and final matrix
 - [x] Jobs panel `r` now uses `retry_stage` for brief chains (small and safe: `jobs_view::retry_failed_tasks` delegates for chains with an `intel_brief_runs` row, and `JobDetail.retryable` counts failed branches plus a warning stage). Test: `jobs_retry_resumes_failed_and_warning_brief_stages`.
-- [x] Diagrams updated: `intel-brief-chain` (per-claim checkpoints, warning completion, Retry), `intel-job-states` (Retry resumes, warnings), `model-request-scheduling` (stall falls through, wall-clock cap). `docs/wiki/code/architecture.md` and `docs/wiki/concepts/providers.md` updated. `graphify update .` run.
+- [x] Diagrams updated: `intel-brief-chain` (per-claim checkpoints, warning completion, Retry), `intel-job-states` (Retry resumes, warnings), `model-request-scheduling` (stall falls through, wall-clock cap). `docs/wiki/code/architecture.md` and `docs/wiki/concepts/providers.md` updated.
 - [x] Final matrix (all with `--locked`, clippy `-D warnings`): default features (LanceDB), `--no-default-features`, `--features nlp` — results in the PR body.
 
 ### Phase F — stage-wide request budget and route health (user's imported profile)

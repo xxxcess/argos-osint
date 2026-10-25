@@ -1,5 +1,7 @@
 # Brain browsing and Intel Focus Brief verification
 
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
 > Historical record. For current behavior, start at the [wiki](../index.md).
 
 Implementation baseline: `13c635bd5377eae836ec22b494619e7d6ba68254`. The reviewed change introduces Claims/Actor-name browsing, read-only graphs, typed association destinations, retired article Recon execution and ingest-authoritative Related associations with two distinct shared entity mentions. Investigation detections require Recall on; original Claim Sources retain their provenance.
@@ -51,4 +53,4 @@ Confidence fields and source-only caps remain unchanged. No Profile metric seman
 
 Final formatting and strict standard Clippy passed. Standard workspace tests passed: binary 222 passed / 10 ignored, core 984 passed / 8 ignored, integration 3 passed, doc tests 0. NLP strict Clippy and full workspace tests passed: binary 223 passed / 10 ignored, core 989 passed / 8 ignored, integration 3 passed, doc tests 0. The final navigation correction is included in this NLP workspace run. After that correction, formatting, strict standard Clippy and the complete standard binary suite passed again (223 passed / 10 ignored); standard core source was unchanged from the passing full workspace run.
 
-Live terminal interaction and live provider requests were not exercised. Tests use local fixtures/mock HTTP services; default LanceDB and ignored MiniLM integration were not run. `graphify update .` completed with missing SQL-parser and unsupported-symbol warnings; the prescribed graph artifacts are refreshed. Updated figures preserve paired HTML/SVG content and describe Brain browsing, two-entity Related matching, brief publication and the historical report lifecycle.
+Live terminal interaction and live provider requests were not exercised. Tests use local fixtures/mock HTTP services; default LanceDB and ignored MiniLM integration were not run. Updated figures preserve paired HTML/SVG content and describe Brain browsing, two-entity Related matching, brief publication and the historical report lifecycle.

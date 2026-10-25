@@ -1,5 +1,7 @@
 # Seeded topology and list density verification
 
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
 > Historical record. For current behavior, start at the [wiki](../index.md).
 
 Implementation baseline: `78dea7c`. The user approved the Graph first interactive
@@ -149,7 +151,5 @@ env -u ARGOS_EMBED ARGOS_HOME=/private/tmp/argos-topology-check python3 scripts/
 
 Live terminal interaction, live providers, default-feature LanceDB and ignored
 MiniLM integration have not been exercised.
-The demo and fixtures use fictional data. `graphify update .` completed with the
-existing missing SQL-parser/unsupported-symbol warnings; only the prescribed
-graph artifacts are retained. The existing topology HTML and SVG are consistent
+The demo and fixtures use fictional data. The existing topology HTML and SVG are consistent
 and describe seeded reads separately from explicit scope analysis writes.

@@ -1,5 +1,7 @@
 # Topology neighborhood summary: final design
 
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
 > Historical record. For current behavior, start at the [wiki](../index.md).
 
 Status: implemented on `feat/topology-mapper-scope-summary` (PR #48, draft). This replaces the earlier model-written scope-summary proposal, which was reverted in `9c43c2c` (new table, worker, throttle and failure card). Spec baseline: `main` `66878bc`. Progress is tracked in `.planning/2026-10-15-topology-mapper/checklist.md`; behavior is specified in [topology-mapper.md](../wiki/concepts/topology-mapper.md#neighborhood-summary).
@@ -53,7 +55,7 @@ The details panel takes 75% of the inspector height (min 8), leaving Relationshi
 | 1 | `d1c11c0` | Brief builder, typed packet, validator, cache/executor, snapshot fields |
 | 2 | `b55fcc1` | Scheduler role dispatch, lease/epoch fencing, truthful outcomes, `TopologySummaryLoaded`, delayed mock server |
 | 3 | `0b08923` | TUI tabs, watcher and states, history, tests, screenshots |
-| 4 | `1c6ca92` | Docs, diagram pair, plan, checklist, graphify |
+| 4 | `1c6ca92` | Docs, diagram pair, plan, checklist |
 | 5 | `8920477`, `d692708`, `d7cd6f8`, `c83df54`, `dba2fff` | CI fixes (lease heartbeat, bounded watcher, worker-thread config load, lazy idle tick); render cache; docs trim |
 
 ## Verification

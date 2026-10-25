@@ -1,5 +1,7 @@
 # TUI overhaul verification — 10 October 2026
 
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
 > Historical record. For current behavior, start at the [wiki](../index.md).
 
 Implemented the supplied `ARGOS_TUI_OVERHAUL_IMPLEMENTATION_SPEC.md` against baseline `864bffbe65170a0cde43fe979db5a656d2410ac7`. The change uses TabBar/ActionBar, ScrollPane, MeasuredEditor, TranscriptBlock, DetailTable and Overlay, preserving Profile Dashboard/Report geometry, all 20 primary metric IDs, theme tokens and authoritative investigation facts.
@@ -31,7 +33,7 @@ Non-Profile fixtures cover Home, all nine apps, three compact Tools pages, Confi
 
 Tests distinguish focused inactive tabs from active pages, suspend analytics reads on System/Configs, restore category expansion after search, reject disabled palette dispatch, discard stale image completions, validate article HTTP(S) URLs, preserve paused transcript anchors above 65,535 rows, replace streaming synthesis without duplication, and retain manual folds. Report tests exercise 240 records and independent section offsets without expanding the card. Existing configuration rollback/security and metric cohort/coverage/low-N tests remain authoritative.
 
-`graphify update .` refreshed the three prescribed tracked graph artifacts. It reports the existing missing `tree_sitter_sql` dependency for six SQL files and symbol-free data/module files; no SQL/core behavior was changed.
+No SQL/core behavior was changed.
 
 Final source check gate passed: `cargo fmt --all --check`; isolated workspace/all-target strict Clippy with `-D warnings`; isolated locked/no-default-features offline workspace tests. Results: **178 CLI/TUI + 709 core + 3 search fixtures = 890 passed, zero failures, eight ignored**; doc tests contain zero cases. The full gate was rerun after the Report row-budget correction. `git diff --check` also passed.
 

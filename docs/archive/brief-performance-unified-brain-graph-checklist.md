@@ -1,5 +1,7 @@
 # Brief Performance and a Unified Brain Memory Graph — checklist
 
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
 > Historical record. For current behavior, start at the [wiki](../index.md).
 
 Historical implementation checklist. The current automatic brief uses claim-specific Classifier-selected evidence and publishes Claims, Inferences and Links separately; see [the maintained architecture](../wiki/code/architecture.md#intel-brief-preparation-intel-brief-v2-dependency-graph). The chunk and final-only publication entries below record the prior implementation.
@@ -33,7 +35,7 @@ Legend: **done** / **partial** / **deferred** / pending.
 | 5 | `RelatedScope`, `related_articles_global`, `actor_articles`; AllRetained default in the UI | **done** — `related_global.rs`: `RelatedScope::{AllRetained (default), ThisCycle}`, `related_articles_global(run,article,scope,cursor,limit)`, `related_articles_global_for_memory`, `actor_articles(actor,…)`; one row per canonical URL with every origin occurrence, cycle count, bases (shared mentions / Brain Related basis / `same actor: X`) and tentative vs established; used by Intel Related, Brain Related Articles (actors list their articles) and `RuntimeBackend::related`; Links stage revision now includes `IDENTITY_INDEX_VERSION`, actor index contract and scope. Tests: `all_retained_is_default_one_row_per_url_…`, `this_cycle_scope_stays_inside_…`, `merged_canonical_actor_establishes_link_…`, `cursor_pages_without_overlap`, `related_pane_defaults_to_all_retained_…`. Phase 5: a clickable scope line toggles All retained cycles / This cycle in Intel and Brain Related (`related_scope_toggle_switches_all_cycles_and_this_cycle`). Link/Related memories start from their article endpoints | 4–5 |
 | 5 | Backfill + lifecycle (`atlas_delete_run` fix, redirects, TTL safety) | **done** — TTL audit: `job_cleanup` deletes only `argos_jobs`/tasks/attempts/owners/`intel_report_*`, and `telemetry::prune` touches only telemetry. Memory deletes in `store.rs` are lineage-driven claim retirement, not TTL. Schema 40 triggers: `brain_guard_actor_delete` aborts deleting a pinned, mentioned, referenced or redirected Actor; `brain_retire_dangling_edges` retires Link/Related records whose memory endpoint is deleted (`operational_ttl_never_removes_brain_identities_and_deletes_retire_edges`, cleanup run 10 years ahead) | 3–5 |
 | 2 | Focused vs full-body path comparison on a fixed corpus (measured) | **done (offline); path off by default** — `claims_query` and `focused_sentences` are wired into Inferences behind `defaults.focused_oversized_brief`, with fidelity still checked against the full body and the flag included in the revision. Fixed 6-story corpus: 3→1 requests, ~130.8 KB→~5.3 KB, gold 5/5; packet build cold p50/p95 37.70/38.82 ms, warm 28.87/29.61 ms (`docs/archive/brief-focused-comparison-2026-10-13.md`). Live model quality not measured | 5 |
-| 7 | All acceptance checks, test matrix, screenshots, docs/diagrams/graphify | **done** — see the phase 5 log | 5 |
+| 7 | All acceptance checks, test matrix, screenshots, docs/diagrams | **done** — see the phase 5 log | 5 |
 
 ## Phase log
 
@@ -63,6 +65,6 @@ Legend: **done** / **partial** / **deferred** / pending.
 - Focused oversized path: wired and measured offline (`docs/archive/brief-focused-comparison-2026-10-13.md`). It stays **off by default** (`defaults.focused_oversized_brief`) until a live held-out quality run.
 - Vector-row kind metadata is **deferred** because it would change the LanceDB schema and fingerprint and force a full rebuild. Kind filtering after retrieval is already enforced and cache-keyed.
 - Related scope toggle in Intel and Brain Related. Atlas stats show `actors indexed/articles` and failed counts for v2.
-- Docs: architecture, atlas-classification-and-related-articles, nlp-preprocessing, providers, tui-components. Diagrams: atlas-pipeline (6 phases) and brain-recall (kinds). graphify updated.
+- Docs: architecture, atlas-classification-and-related-articles, nlp-preprocessing, providers, tui-components. Diagrams: atlas-pipeline (6 phases) and brain-recall (kinds).
 - Matrix (`ARGOS_EMBED=0`, bin / core / 3rd / 4th): default 219/955/3/0, `--locked --no-default-features` 219/926/3/0, `--features nlp` 219/955/3/0; clippy `-D warnings` clean on default, `--locked --no-default-features` and `--features nlp`; `cargo fmt`, `git diff --check` clean. origin/main `a12bc9b` unchanged, so no merge was needed.
 - Screens: `docs/screens/brain-graph/p5-atlas-before-120x40.png`, `p5-atlas-phase6-partial-120x40-after.png`, `p5-related-scope-all-160x50-after.png`, `p5-related-scope-cycle-120x40-after.png` (all sizes are under `/workspace/screens/brain-graph/`; the before shots came from a temporary origin/main worktree, since removed).

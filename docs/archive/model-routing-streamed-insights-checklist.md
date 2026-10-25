@@ -1,5 +1,7 @@
 # Model routing, streamed insights and reliable Brain publication — checklist
 
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
 > Historical record. For current behavior, start at the [wiki](../index.md).
 
 Spec: "Argos — model routing, streamed insights and reliable Brain publication" (2026-10-13, audited main 322c528).
@@ -41,4 +43,3 @@ Status legend: **done** / **partial** / **deferred** / pending.
 | 7 | Job-level `superseded` state | deferred | not cheap/safe: job terminal-state lists in `store.rs` history cleanup, `profile_stats` JOB/REPORT terminal sets, Jobs status filter and `refresh_job_state` terminal handling would all need the new state, or superseded-only jobs could stop being cleared/counted. Task state, Jobs detail line and the `superseded` label are done; the aggregate stays `cancelled` |
 | 9 | Docs: `providers.md` (capability selection, streaming/deadlines), `investigation-harness.md` (progress, supersession, publication; schema 34), `nlp-preprocessing.md` (Classifier decisions/cleanup, role ownership), `architecture.md` (schemas 33/34, supersession), `usage.md` (Insight progress) | done | phase 5 |
 | 9 | Diagrams (HTML + sibling SVG kept identical): investigation-harness (streaming deadlines, capability routes, supersession), intel-report (supersession), persistence (schema 34 contents), recon-turn (Classifier decisions) | done | phase 5; rendered previews in `/workspace/screens/model-routing/diagrams/` |
-| 9 | `graphify update .` (repo skills require it after code edits) | done | graphify 0.9.88 (already on the box at `~/.local/bin/graphify`, from PyPI `graphifyy` via uv); uv 0.13.0; Python 3.13.5; graphify-out refreshed (10007 nodes / 24606 edges) |

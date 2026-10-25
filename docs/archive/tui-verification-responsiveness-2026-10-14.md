@@ -1,5 +1,7 @@
 # Database responsiveness verification — 2026-10-14
 
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
 > Historical record. For current behavior, start at the [wiki](../index.md).
 
 This verifies the worker ownership and cached presentation described in
@@ -128,6 +130,4 @@ bounded failure flags. External provider errors and token truncation are still
 possible after correcting the Google native schema MIME enum.
 
 The original live browse measurement (434 rows, 84,334 ms) cannot be compared
-with a second live timing because that database changed. Graphify updated the
-tracked code graph; SQL extraction was unavailable because `tree_sitter_sql`
-was not installed, and semantic document extraction was not configured.
+with a second live timing because that database changed.

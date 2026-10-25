@@ -1,5 +1,7 @@
 # Profile TUI implementation session — 2026-10-10
 
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
 > Historical record. For current behavior, start at the [wiki](../index.md).
 
 This record documents the process used to implement, test and verify the Profile analytics handoff, then establish the [reusable repo workflow](../wiki/code/tui-verification.md). Screenshots below reconstruct actual ratatui TestBackend buffers from deterministic fixtures. They are not live provider sessions or conceptual mockups. The original handoff was `ARGOS_PROFILE_ANALYTICS_DASHBOARD_SPEC.md`; approved Summary/Recon reference PNGs were unavailable locally, so visual review assessed the written contract. The maintained product contract is [profile-analytics-dashboard.md](../wiki/code/profile-analytics-dashboard.md).
@@ -80,7 +82,7 @@ After the hourly parser correction, focused Profile snapshot tests passed **18/1
 
 The strict gate used `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings`, and `cargo test --workspace --locked --no-default-features`. Actual mock-socket access was authorized. Approved reference-image comparison, live providers, default-feature LanceDB and MiniLM were not verified.
 
-After checks, `graphify update .` completed with 7,976 nodes and 20,559 edges. SQL extraction warned about unavailable `tree_sitter_sql`; community labels were automatically renamed without an LLM refresh. Only the three prescribed tracked graph files changed. `git diff --check` passed. Task fragment files, Pillow environment and task cache were removed; cells, PNGs and planning evidence were retained. No commit was made.
+`git diff --check` passed. Task fragment files, Pillow environment and task cache were removed; cells, PNGs and planning evidence were retained. No commit was made.
 
 ## Standardization follow-up
 

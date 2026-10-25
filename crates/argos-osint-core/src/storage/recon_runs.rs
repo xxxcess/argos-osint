@@ -244,6 +244,38 @@ pub async fn latest_run_state(repo: &Repository, thread_id: &str) -> Result<Opti
     Ok(latest_run(repo, thread_id).await?.map(|r| r.state))
 }
 
+/// Newest run state for each of `thread_ids`, in one query. Threads with no
+/// run are absent. Ties on `updated_at` keep whichever row the engine
+/// returns first, the same as [`latest_run_state`]'s `LIMIT 1`.
+pub async fn latest_run_states(
+    repo: &Repository,
+    thread_ids: &[String],
+) -> Result<std::collections::HashMap<String, String>> {
+    if thread_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    #[derive(SurrealValue)]
+    struct Row {
+        thread_id: String,
+        state: String,
+    }
+    let mut r = repo
+        .db()
+        .query(
+            "SELECT thread_id, state FROM recon_run \
+             WHERE thread_id INSIDE $ids ORDER BY updated_at DESC",
+        )
+        .bind(("ids", thread_ids.to_vec()))
+        .await?
+        .check()?;
+    let rows: Vec<Row> = r.take(0usize)?;
+    let mut out = std::collections::HashMap::new();
+    for row in rows {
+        out.entry(row.thread_id).or_insert(row.state);
+    }
+    Ok(out)
+}
+
 /// The most recently updated run, when it was interrupted or failed.
 pub async fn latest_resumable_run(repo: &Repository, thread_id: &str) -> Result<Option<Run>> {
     Ok(latest_run(repo, thread_id)

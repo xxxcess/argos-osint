@@ -122,12 +122,18 @@ fn patterns() -> &'static [(Regex, &'static str)] {
 
 /// Redact secrets (API keys, authorization headers, sensitive query parameters,
 /// credentialed URLs) from text before it is persisted or displayed.
+///
+/// The seven patterns stay separate passes. Their replacements are not the
+/// same string (`$1: [redacted]`, `Bearer [redacted]`, `${1}[redacted]`, …),
+/// so one alternation would not preserve which secret was matched. The
+/// blocking cost on this path is re-reading `auth.json`; that file is cached
+/// by mtime and length.
 pub fn redact(text: &str) -> String {
     let mut out = text.to_string();
     for (re, rep) in patterns() {
         out = re.replace_all(&out, *rep).into_owned();
     }
-    if let Ok(auth) = crate::secrets::AuthFile::load() {
+    if let Ok(auth) = crate::secrets::AuthFile::load_cached() {
         out = auth.redact(&out);
     }
     out

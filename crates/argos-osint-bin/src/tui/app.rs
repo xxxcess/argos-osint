@@ -1096,6 +1096,8 @@ pub struct App {
     pub recon_context_enabled: bool,
     /// Whether the thread draft has unsaved changes
     draft_dirty: bool,
+    /// Last edit of the Recon search field. The list reloads 250 ms later.
+    recon_search_at: Option<Instant>,
     pub scrolls: Scrolls,
     pub expanded: HashSet<String>,
     pub chat_sel: usize,
@@ -1595,6 +1597,7 @@ impl App {
             esc_arm: None,
             press: None,
             draft_dirty: false,
+            recon_search_at: None,
             home_draft_dirty: false,
             // The current content of the Home draft (investigation prompt)
             home_draft: String::new(),
@@ -9320,6 +9323,26 @@ impl App {
         if self.focus == Target::Field(FieldId::JobsSearch) {
             self.reload_jobs();
         }
+        if self.module == Some(ModuleId::Recon) && self.focus == Target::Field(FieldId::ReconSearch)
+        {
+            self.recon_search_at = Some(Instant::now());
+        }
+    }
+
+    /// Fire a pending Recon search once it has been quiet for 250 ms, and
+    /// shorten `wait` so the event loop wakes when that quiet period ends.
+    fn poll_recon_search(&mut self, wait: Duration) -> Duration {
+        let Some(at) = self.recon_search_at else {
+            return wait;
+        };
+        let due = at + Duration::from_millis(250);
+        let now = Instant::now();
+        if now >= due {
+            self.recon_search_at = None;
+            let _ = self.refresh_threads();
+            return wait;
+        }
+        wait.min(due.saturating_duration_since(now))
     }
 
     fn open_claim_article(&mut self, run_id: &str, article_id: &str) -> Result<String> {
@@ -9958,12 +9981,6 @@ impl App {
             KeyCode::Tab => self.focus_next(key.modifiers.contains(KeyModifiers::SHIFT)),
             KeyCode::BackTab => self.focus_next(true),
             _ => {}
-        }
-        if matches!(key.code, KeyCode::Char(_))
-            && self.module == Some(ModuleId::Recon)
-            && self.focus == Target::Field(FieldId::ReconSearch)
-        {
-            let _ = self.refresh_threads();
         }
         if matches!(key.code, KeyCode::Char(_))
             && self.module == Some(ModuleId::Osint)
@@ -10851,6 +10868,10 @@ pub async fn run(mut app: App) -> Result<()> {
         if atlas_countdown_visible(&app) {
             wait = wait.min(until_next_second());
         }
+        wait = app.poll_recon_search(wait);
+        if app.threads_reading {
+            wait = wait.min(Duration::from_millis(80));
+        }
         if animated
             || atlas_extracting_visible(&app)
             || intel_body_loading_visible(&app)
@@ -11259,6 +11280,7 @@ pub mod testkit {
             esc_arm: None,
             press: None,
             draft_dirty: false,
+            recon_search_at: None,
             frame: RefCell::new(super::super::ui::FrameCache::default()),
             thread_history: Vec::new(),
             history_pos: 0,

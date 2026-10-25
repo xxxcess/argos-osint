@@ -100,6 +100,15 @@ impl GlobalRelatedPage {
     }
 }
 
+/// Host of a canonical URL, lowercased. Empty when `key` is not a URL, so
+/// the caller keeps the unbounded scan for that key.
+fn url_host(key: &str) -> Option<String> {
+    reqwest::Url::parse(key)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .filter(|host| !host.is_empty())
+}
+
 fn url_key(a: &AtlasArticleRow) -> String {
     if a.url.trim().is_empty() {
         format!("occurrence:{}/{}", a.run_id, a.id)
@@ -235,7 +244,9 @@ fn finish(
 
 fn occurrences_of_url(store: &Store, key: &str) -> Result<Vec<AtlasArticleRow>> {
     let mut out = Vec::new();
-    for (run, id, url) in crate::storage::store_bridge::article_urls()? {
+    for (run, id, url) in
+        crate::storage::store_bridge::article_urls_matching(url_host(key).as_deref())?
+    {
         if canonical_url(&url) == key {
             if let Some(a) = store.atlas_article(&run, &id)? {
                 out.push(a);
@@ -284,8 +295,13 @@ pub async fn related_articles_global_on(
     };
     let key = url_key(&source);
     let sources = if scope == RelatedScope::AllRetained && !key.starts_with("occurrence:") {
+        let host = url_host(&key).unwrap_or_default();
         let mut r = db
-            .query("SELECT VALUE [run_id, article_id, url] FROM atlas_article WHERE url != ''")
+            .query(
+                "SELECT VALUE [run_id, article_id, url] FROM atlas_article \
+                 WHERE url != '' AND ($host = '' OR string::lowercase(url) CONTAINS $host)",
+            )
+            .bind(("host", host))
             .await?
             .check()?;
         let hits: Vec<Vec<String>> = r.take(0usize)?;

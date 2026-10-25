@@ -101,12 +101,11 @@ mod imp {
         with(|s| {
             Box::pin(async move {
                 let rows = s.list_threads(query).await?;
+                let ids: Vec<String> = rows.iter().map(|t| t.id.clone()).collect();
+                let found = s.latest_run_states(&ids).await?;
                 let mut states = HashMap::new();
                 for t in &rows {
-                    states.insert(
-                        t.id.clone(),
-                        s.latest_run_state(&t.id).await?.unwrap_or_default(),
-                    );
+                    states.insert(t.id.clone(), found.get(&t.id).cloned().unwrap_or_default());
                 }
                 Ok((rows, states))
             })

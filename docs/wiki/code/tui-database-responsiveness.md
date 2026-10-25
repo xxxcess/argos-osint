@@ -11,9 +11,9 @@ cohort fixes 150 article occurrences and 250 Actor-name groups instead.
 | Audited path | Execution and contention handling |
 | --- | --- |
 | Brain list entry, change watcher, Atlas/Recon/Intel completion | One read-only snapshot in flight; one newest invalidation is retained. Hidden Brain only marks the cache dirty. Find/kind filtering uses cached rows. |
-| Brain Actor totals, graph and Related tabs | Claims are selected in one SQL query; claim origins and ingest pair eligibility are shared across the list. Detail uses one association snapshot for graph, totals and tabs. |
+| Brain Actor totals, graph and Related tabs | `storage/browse.rs` and `storage/browse_assoc.rs` load Claims and retained associations through SurrealDB repository queries. Detail uses one association snapshot for graph, totals and tabs. |
 | Brain detail, Back, list anchors | Background readers; destination/request guards drop late navigation and preserve Back state. Errors retain the current view. Deleted Back destinations are skipped. |
-| Brain topology snapshot and scope worker | Background snapshot load via `Store::open_light`; `POOL_BRAIN_SCOPE` worker drains `brain_scope_analyze` tasks and publishes via `publish_snapshot_on` with vector work deferred to the index outbox. |
+| Brain topology snapshot and scope worker | Background snapshot load via `Store::open_light`; `storage/brain_scope.rs` drains the `POOL_BRAIN_SCOPE` pool, persists typed inference/link memories through the shared publisher, and defers vector work to the index outbox. |
 | Intel bulletin, brief polling, Related scope/expansion | Background snapshots keyed by article occurrence, scope, job and requested page size. Polling preserves Related selection and expanded pages. |
 | Atlas history, retention and cycle deletion | Background history/pruning and deletion; headline navigation fetches one article instead of decoding the retained corpus. Duplicate delete requests are rejected while pending. Completion updates caches after commit. |
 | Recon lists, transcript/tool/run history, recalled-memory popup and investigation deletion | Background reads/deletion with selection and pending-refresh guards; recalled-memory summaries arrive in the transcript snapshot, and historical tool-result log formatting and writes stay on the reader worker. |
@@ -23,7 +23,7 @@ cohort fixes 150 article occurrences and 250 Actor-name groups instead.
 | Rendering and list arrows | Cached presentation; no vector search or graph lookup during Brain list movement. |
 | Interactive point lookups and small edits | `Store::open_ui` returns a handle to the shared SurrealDB runtime. Reported writes preserve their error path; failed draft flushes remain dirty for retry. |
 | Startup | Schema initialization remains required; bulk Brain/history loads and backfill are deferred. The UI Store shares the process SurrealDB runtime. |
-| Index/background maintenance | Durable outbox and elected workers retain indexing ownership. Index polls attach the serving index without schema migration; backfill and brief claim polls use lightweight initialized connections. Scheduler table setup runs once per pool. |
+| Index/background maintenance | Durable outbox and elected workers retain indexing ownership. Index work uses the shared SurrealDB repository. Lightweight Store handles do not create separate database connections; schema bootstrap belongs to runtime initialization. |
 
 Background readers deliver immutable UI snapshots. Topology repository reads are not one database snapshot transaction; delivery fences prevent stale UI replacement, not mixed database revisions. A pump handles at most 32 work events and yields after its 8 ms processing budget, so background bursts leave time for keyboard/mouse handling.
 There is at most one read per surface, and an invalidation during a read schedules

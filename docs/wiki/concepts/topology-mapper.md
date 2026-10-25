@@ -72,7 +72,7 @@ independent of activation.
 | ActorGroup | Explicit members and recorded relationship binding receipts; grouping does not assess identity. |
 | Claim | Canonical Claim or exact retained publication projection. Extraction support does not establish world truth. |
 | Inference | Canonical Inference with retained derivation/premise receipts, reasoning and limitations. |
-| Topic | Derived `insight_claims.topic` and Atlas category attributes, with normalized key and original receipts. There is no canonical Topic memory kind. |
+| Topic | Derived `insight_claim.topic` and Atlas category attributes, with normalized key and original receipts. There is no canonical Topic memory kind. |
 | Article / Source | Exact occurrence/revision and provenance or evidence receipts. A publisher does not establish independent corroboration. |
 | Link | A selectable directed edge retaining its memory identity, relation, rationale and receipts. |
 | Related | Tentative adjacency with retained basis/revisions and verification gap; it is never required for direct mention/provenance edges. |
@@ -126,7 +126,7 @@ written; there is no migration and no canonical write.
    by the snapshot. Nothing is parsed from labels or IDs.
 2. **Queued generation.** `brain_neighborhood_brief_exec.rs` publishes the
    fallback and enqueues one deduplicated `topology_neighborhood` request
-   (`POOL_SUMMARY`) in `argos_derived_summaries`. Request identity is the
+   (`POOL_SUMMARY`). `storage/summary_flush.rs` stores results in `derived_summary` and queued request envelopes in `summary_flush_request`. Request identity is the
    `basis_key` (seed, options, hydrated content and revisions, coverage, format
    version; node labels are part of it, so a rename produces a new request), the
    packet hash, prompt/output versions, budget and a secret-free route

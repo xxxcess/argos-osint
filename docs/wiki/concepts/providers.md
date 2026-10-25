@@ -264,18 +264,17 @@ Export writes schema 1 unless either feature is used. Import keeps the document'
 
 ## Per-attempt usage, wire timings and task epochs
 
-The original SQLite schema-41 migration is historical. Current SurrealDB schemas are applied by [storage bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs); see the [storage map](../code/storage.md). The fields below describe the retained attempt telemetry contract.
+[Recon job storage](../../../crates/argos-osint-core/src/storage/recon_jobs.rs) defines the current SurrealDB attempt telemetry and operation epoch fields. [Storage bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs) applies them; see the [storage map](../code/storage.md).
 
-| Table | New columns |
+| SurrealDB table | Fields |
 | --- | --- |
-| `recon_model_attempts` | `reasoning_tokens`, `visible_tokens`, `reported_cost_usd`, `response_headers_ms`, `first_reasoning_ms`, `first_output_ms`, `stream_completion_ms` (all nullable), `policy_diagnostics_json` (`'[]'`) |
-| `recon_model_operations` | nullable `task_epoch`, index `(task_id, task_epoch)` |
-| `intel_brief_stage_timings` | nullable `task_epoch` |
+| `recon_model_attempt` | `reasoning_tokens`, `visible_tokens`, `reported_cost_usd`, `response_headers_ms`, `first_reasoning_ms`, `first_output_ms`, `stream_completion_ms` (all nullable), `policy_diagnostics_json` (`'[]'`) |
+| `recon_model_operation` | nullable `task_epoch`, index `(task_id, task_epoch)` |
 
-Rules for the new columns:
-- Counters are written only when the provider reported them. Cost is recorded only when it is reported in USD. Rows from before migration 41 stay NULL (unknown), never zero.
+Rules for these fields:
+- Counters are written only when the provider reported them. Cost is recorded only when it is reported in USD. Missing measurements remain unknown, never fabricated as zero.
 - Timings are measured from `sent_at`, using `AttemptProgress` marks (headers, first reasoning, stream complete). The first answer delta comes from the stream observer.
-- Brief stages bind each model operation to the task's lease epoch (`OperationScope::with_task_epoch`). The epoch is also the attempt generation, so a retried task writes new attempt rows and the previous epoch's rows stay immutable.
-- The stage-timing row stays the latest execution per task. It records that execution's epoch and aggregates only that epoch's attempts.
+- Brief stages bind each model operation to the task's lease epoch (`OperationScope::with_task_epoch`). The task epoch is part of the operation identity; attempt generation comes from the job generation. A retried task uses a new operation identity.
+- Do not query the retired `intel_brief_stage_timings` table. Current stage progress uses `brief_activity` and `brief_stage_meta`; provider attempt timing lives in `recon_model_attempt`.
 
 Brain Actor identity maintenance uses the existing Entity Resolver role for bounded identity decisions through the shared executor (native Decisions or chat). It processes a local name/acronym shortlist independently of Atlas cycles; absent configuration leaves local spelling repair active and makes no identity model requests. See [actor identity maintenance](../code/architecture.md#actor-identity-maintenance).

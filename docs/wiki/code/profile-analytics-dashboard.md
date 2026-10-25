@@ -92,7 +92,7 @@ Fixture checks cover all 20 unique IDs and per-page counts, shared scales (1 ver
 
 Scope actual terminal captures to affected Profile views/states using [tui-verification.md](tui-verification.md). Shared Profile geometry changes cover **160×50, 120×40, 100×32, 80×24, 60×18** and below minimum; local changes cover affected thresholds and states. Compare actual Summary/Recon output with approved references `exec-b07bd433-8370-4ae7-80de-ff3c11499435.png` and `exec-bb24eaf4-e7ba-4a5d-96da-5416c3469787.png` when available. Reference images contain sample data; metric definitions above override erroneous labels. Concept images are not runtime QA.
 
-Run fmt → clippy → test with `ARGOS_EMBED` unset. OpenCode build/clippy/test commands use `--locked --no-default-features` as specified in [AGENTS.md](../../../AGENTS.md). Report actual check results, screenshot paths, justified migrations and unverified live behavior; this document specifies acceptance and is not a test result.
+Run fmt → clippy → test with `ARGOS_EMBED` unset. Use the embedded matrix and isolated agent commands in the [contributor workflow](contributing.md); bare `--no-default-features` does not select a storage engine. Report actual check results, screenshot paths, justified migrations and unverified live behavior; this document specifies acceptance and is not a test result.
 
 Recorded results and retained screenshot examples are in [the implementation session](../../archive/tui-verification-session-2026-10-10.md). Reproduce the full matrix with [the capture workflow](tui-verification.md); captures belong to a fresh current-plan run, not a fixed historical directory. Artifact generation itself does not establish a reviewed result.
 

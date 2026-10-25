@@ -24,6 +24,7 @@ Use `/refresh-wiki <scope>` in OpenCode, or follow these steps in any host. Scop
 
 - [ ] Read `git status --short`, `git diff --name-status` and `git diff --cached --name-status`; for a revision range also inspect its diff. Include task-owned new files. Do not infer ownership from status alone.
 - [ ] Map changes through source links and tags to both routes, reference docs and figures. For renames/removals, search old paths, symbols and tags across docs and agent guidance.
+- [ ] For persistence claims, verify table/field names against the active `storage/` schema declarations and follow callers through the shared runtime. Old `schema_*.sql`, numbered SQLite migrations and migration-era source comments are not current schema authority; see the [storage map](code/storage.md#schema-and-runtime-authority).
 - [ ] Read final source and relevant tests. Update responsibilities, links, contracts and diagrams only where affected. Label historical material; merge duplicated explanations into their canonical page and link to it. Avoid parallel catalogs or volatile tree counts.
 - [ ] Verify relative paths and heading anchors; confirm every registered tag occurs in a maintained page and source comment. Walk one concept → code → test path per affected domain.
 - [ ] Compare diagram labels/arrows with source and paired SVG/HTML; visually inspect new/changed figures. Run appropriate checks from [contributor workflow](code/contributing.md); docs/comment-only edits do not need a Rust build.

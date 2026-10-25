@@ -65,7 +65,7 @@ A **failed transport is not zero results**. `verified_zero` means the engine or 
 | Hourly and daily rollups | 365 days | `telemetry::ROLLUP_RETENTION_DAYS` |
 | Prune sweep interval | 15 minutes | `telemetry::PRUNE_INTERVAL_SECS` |
 
-Counts and histograms merge `telemetry_events` with `telemetry_hourly` / `telemetry_daily`. A rollup bucket is read only when the whole bucket predates the raw retention boundary, so nothing is counted twice; at most one bucket of history is lost at that seam.
+Counts and histograms merge `telemetry_event` with `telemetry_hourly` / `telemetry_daily`. A rollup bucket is read only when the whole bucket predates the raw retention boundary, so nothing is counted twice; at most one bucket of history is lost at that seam.
 
 `observed_since` is the earliest moment this installation recorded anything still retained — the oldest raw event and the oldest rollup bucket, whichever came first. A fresh installation reports an empty string rather than an invented epoch. **A metric before `observed_since` is N/A, not zero**, and the dashboard marks coverage wherever historical facts are missing: legacy records lacking a link or an assessment show unavailable coverage, not zero.
 

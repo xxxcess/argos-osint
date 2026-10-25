@@ -3742,7 +3742,10 @@ impl App {
         } else {
             self.messages.clear();
             self.calls.clear();
-            self.investigation_events.clear();
+            if !self.investigation_events.is_empty() {
+                self.investigation_events.clear();
+                self.investigation_events_rev = self.investigation_events_rev.wrapping_add(1);
+            }
             self.runs.clear();
             self.answer_memories.clear();
             self.answer_memory_summaries.clear();
@@ -5353,7 +5356,12 @@ impl App {
                 match outcome {
                     Ok(snapshot) => {
                         self.messages = snapshot.messages;
+                        let events_changed = self.investigation_events != snapshot.events;
                         self.investigation_events = snapshot.events;
+                        if events_changed {
+                            self.investigation_events_rev =
+                                self.investigation_events_rev.wrapping_add(1);
+                        }
                         self.calls = snapshot.calls;
                         self.runs = snapshot.runs;
                         self.answer_memories = snapshot.memories;
@@ -9452,7 +9460,10 @@ impl App {
         if self.selected_thread.as_deref() == Some(id) {
             self.selected_thread = None;
             self.messages.clear();
-            self.investigation_events.clear();
+            if !self.investigation_events.is_empty() {
+                self.investigation_events.clear();
+                self.investigation_events_rev = self.investigation_events_rev.wrapping_add(1);
+            }
             self.calls.clear();
             self.runs.clear();
             self.answer_memories.clear();
@@ -12368,19 +12379,21 @@ mod tests {
         app.recon_chat = true;
         app.expanded.insert("tool:call-s1".into());
         let body = super::super::ui::chat_blocks(&app)
-            .into_iter()
+            .iter()
             .find(|block| block.key == "tool:call-s1")
             .expect("tool row")
-            .body;
+            .body
+            .clone();
         assert!(body.contains("Full result is in Logs"));
         assert!(body.contains("cache"));
         assert!(body.contains("query: Jane Roe"));
         assert!(!body.contains("Jane Roe role"));
         let title = super::super::ui::chat_blocks(&app)
-            .into_iter()
+            .iter()
             .find(|block| block.key == "tool:call-s1")
             .expect("tool row")
-            .title;
+            .title
+            .clone();
         assert!(title.contains("query=Jane Roe"), "{title}");
         assert!(title.contains("E1"), "{title}");
         app.chat_sel = 0;

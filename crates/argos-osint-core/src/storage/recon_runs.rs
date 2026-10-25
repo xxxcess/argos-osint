@@ -259,11 +259,13 @@ pub async fn latest_run_states(
     struct Row {
         thread_id: String,
         state: String,
+        #[allow(dead_code)]
+        updated_at: surrealdb::types::Value,
     }
     let mut r = repo
         .db()
         .query(
-            "RETURN $ids.map(|$t| (SELECT thread_id, state FROM recon_run \
+            "RETURN $ids.map(|$t| (SELECT thread_id, state, updated_at FROM recon_run \
              WHERE thread_id = $t ORDER BY updated_at DESC LIMIT 1)[0])",
         )
         .bind(("ids", thread_ids.to_vec()))

@@ -18,4 +18,10 @@ SurrealDB is the only current backend. Default `embedded,nlp` features use Rocks
 
 [![Current persistence](../../diagrams/persistence.svg)](../../diagrams/persistence.html)
 
-Run storage contracts through the harness; a skipped test is not a pass. Agents run only the embedded matrix locally; server checks belong to CI. Legacy `schema_*.sql` files and the [historical SQL table figure](../../diagrams/schema-core.html) are migration context, not the current schema authority.
+Run storage contracts through the harness; a skipped test is not a pass. Agents run only the embedded matrix locally; server checks belong to CI. Legacy `schema_*.sql` files are migration context, not the current schema authority.
+
+## Recall and source lifecycle
+
+[Brain recall](../../diagrams/brain-recall.html) shows DISKANN candidates followed by lexical top-up. Vector hits must match the current model, generation and memory revision and remain active with an allowed kind. Missing vectors or vector-search failure use lexical recall; vector hits rank first. Results are capped at five memories and 1,500 estimated tokens. See [recall.rs](../../../crates/argos-osint-core/src/storage/recall.rs) and [recall contracts](../../../crates/argos-osint-core/tests/storage_recall_turn.rs).
+
+[Source lifecycle](../../diagrams/brain-source-lifecycle.html) reconciles retained support and durable index work in SurrealDB. The worker rechecks eligibility before index changes. See [lifecycle.rs](../../../crates/argos-osint-core/src/storage/lifecycle.rs), [index_drain.rs](../../../crates/argos-osint-core/src/storage/index_drain.rs) and [lifecycle contracts](../../../crates/argos-osint-core/tests/storage_lifecycle.rs).

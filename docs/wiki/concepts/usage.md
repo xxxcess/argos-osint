@@ -68,7 +68,7 @@ Confidence retains the original large ASCII Admiralty grade and color gradient b
 
 Details: [concepts.md](glossary.md) · [architecture.md](../code/architecture.md#intel-reports).
 
-[![Historical Intel report job](../../diagrams/intel-report.svg)](../../diagrams/intel-report.html)
+[![Intel brief chain](../../diagrams/intel-brief-chain.svg)](../../diagrams/intel-brief-chain.html)
 
 ### Brain
 
@@ -211,8 +211,8 @@ State: `~/.argos` (`ARGOS_HOME` overrides).
 
 | Path | Contents |
 | --- | --- |
-| `argos.db` | SQLite, `user_version` 43 (`SCHEMA_VERSION` in `store.rs`), additive migrations |
-| `memory_lancedb/` | Brain vectors |
+| `storage/surreal/` | Embedded SurrealDB: records, provenance, graph and vectors |
+| `storage/config.json` | Persisted embedded/server mode configuration |
 | `config.toml` | Role defaults |
 | `auth.json` | Credentials (owner-only on Unix) |
 

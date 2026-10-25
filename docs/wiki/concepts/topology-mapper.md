@@ -64,9 +64,7 @@ independent of activation.
 
 ## Snapshot and provenance contract
 
-`Store::topology_snapshot` in `brain_topology.rs` delegates bounded query work to
-`brain_topology_query.rs`. One SQLite read transaction supplies the snapshot and
-authoritative `Store::memories_changed_seq`.
+`Store::topology_snapshot` delegates to [storage/topology.rs](../../../crates/argos-osint-core/src/storage/topology.rs). Bounded repository reads build an immutable UI snapshot and deterministic neighborhood brief. These reads are not one database snapshot transaction; generation fences reject stale UI deliveries but do not guarantee a single database revision across the load.
 
 | Presentation | Recorded basis |
 | --- | --- |
@@ -122,7 +120,7 @@ written; there is no migration and no canonical write.
 
 ### Flow
 
-1. **Fallback and frozen input.** Inside the topology read transaction
+1. **Fallback and frozen input.** During the topology background load
    (`brain_neighborhood_brief.rs`) bounded typed payloads (at most 160 reads)
    yield an immutable `NeighborhoodBrief` and `NeighborhoodInput` packet, owned
    by the snapshot. Nothing is parsed from labels or IDs.

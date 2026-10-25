@@ -81,7 +81,7 @@ history. Retained-source entries remain truthful when canonical indexing is abse
 
 [![Persistence stack](../../diagrams/persistence.svg)](../../diagrams/persistence.html)
 
-Historical reference: [pre-SurrealDB report tables](../../diagrams/schema-core.html).
+Current schema authority: [storage bootstrap and module schemas](../code/storage.md).
 
 ## Graph
 

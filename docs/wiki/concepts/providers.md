@@ -262,9 +262,9 @@ Export writes schema 1 unless either feature is used. Import keeps the document'
 - Unknown text models stay valid with conservative capabilities.
 - The TUI fallback picker applies the same rule.
 
-## Schema 41: per-attempt usage, wire timings and task epochs
+## Per-attempt usage, wire timings and task epochs
 
-`provider_execution_schema::migrate` runs inside `ensure_schema`'s transaction (`user_version` 41). Each column is added only if it is missing, so fresh and reopened databases go through the same path.
+The original SQLite schema-41 migration is historical. Current SurrealDB schemas are applied by [storage bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs); see the [storage map](../code/storage.md). The fields below describe the retained attempt telemetry contract.
 
 | Table | New columns |
 | --- | --- |

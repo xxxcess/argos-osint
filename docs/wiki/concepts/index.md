@@ -25,4 +25,4 @@ Argos combines interactive investigations, article analysis, headline collection
 
 ## 3. Go deeper
 
-These links are the canonical concept references. Past implementation evidence lives in the [archive](../../archive/index.md). Historical checklists and retired report/schema diagrams explain past work; they do not define current behavior. Switch to the [code route](../code/index.md) to inspect an implementation or plan a change.
+These links are the canonical concept references. Past implementation evidence lives in the [archive](../../archive/index.md). Historical checklists explain past work; the diagram catalog contains current contracts. Switch to the [code route](../code/index.md) to inspect an implementation or plan a change.

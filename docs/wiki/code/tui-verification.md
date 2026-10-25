@@ -68,7 +68,7 @@ env -u ARGOS_EMBED ARGOS_HOME=/private/tmp/argos-tui-check python3 scripts/agent
 
 The wrapper and fixture capture reserve `target/agents` for agent artifacts; the user’s normal `cargo run` continues using `target/debug`. Capture manifests record `CARGO_TARGET_DIR` and the explicit Cargo target argument. Do not override the target directory or delete a lock file. See [agent Cargo isolation](contributing.md#build-and-test).
 
-Use a task-specific temporary state path (Linux may use `/tmp`) rather than `~/.argos`. OpenCode shell calls use `timeout: 600000`. `env -u` expresses the unset requirement on macOS/Linux; do not substitute `ARGOS_EMBED=0` when reporting the offline gate. If the sandbox blocks local mock sockets, request host-required escalation and rerun affected checks. A permission failure does not prove a code regression. Ignored MiniLM, default-feature LanceDB and live-provider checks are separate results.
+Use a task-specific temporary state path (Linux may use `/tmp`) rather than `~/.argos`. OpenCode shell calls use `timeout: 600000`. `env -u` expresses the unset requirement on macOS/Linux; do not substitute `ARGOS_EMBED=0` when reporting the offline gate. If the sandbox blocks local mock sockets, request host-required escalation and rerun affected checks. A permission failure does not prove a code regression. Ignored MiniLM, server-mode and live-provider checks are separate results.
 
 Fix failures without weakening truthful assertions; rerun affected tests and the required gate. After a passing full gate, a final interaction-only edit may use focused follow-up plus fmt/Clippy if buffers are unchanged. Record the sequence instead of asserting an earlier suite ran on later source.
 

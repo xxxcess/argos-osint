@@ -73,16 +73,7 @@ Defaults live under **Models → Defaults**. Empty derived roles inherit. Explic
 
 ## Persistence
 
-SQLite (current schema version 34; harness tables from v20+; v33 adds `insight_refresh_execution.activity`/`activity_at`, v34 adds `insight_supersessions`):
-
-| Table | Contents |
-| --- | --- |
-| `investigation_tasks` | `pending`, `executing`, `completed`, `failed`, `blocked`, `cancelled` |
-| `investigation_task_dependencies` | Prerequisite edges |
-| `investigation_evidence_passages` | Deduped quotes, entity bindings, stance |
-| `investigation_claim_assessments` | `verified`, `refuted`, `inconclusive`, `insufficient_evidence` |
-| `investigation_events` | Gate/tool/transition trace, secrets redacted |
-| `investigation_stream_parts` | Durable streams for resume |
+SurrealDB repositories own the current records. [Investigation storage](../../../crates/argos-osint-core/src/storage/investigation.rs) stores `investigation_task`, `investigation_task_dep`, `investigation_passage` and `investigation_assessment`; [event logging](../../../crates/argos-osint-core/src/storage/event_log.rs) owns the trace. [Bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs) applies the module schemas. Legacy SQL table names and numbered SQLite migrations are historical context.
 
 ## Shared claims and derivations
 
@@ -96,12 +87,12 @@ Durable refreshes yield after two uncached logical operations, renewing their le
 
 Schema 32 adds `insight_refresh_execution` for explicit retry epochs and progress; it does not reset old checkpoints. **Retry extraction** admits one bounded epoch for recoverable unfinished work and clears only that owner's failed/cancelled dispatch barriers. Reopening a brief and restart never admit new retry epochs. Compatible completed work remains reusable; relevant role changes are compared against the prior task's captured `role_snapshot`, not recomputed with today's routes. Deleted, superseded and history-retired work cannot be retried. Recovery logs an individual owner's error and continues with later owners. Index retries remain a separate local worker action and make no inference requests.
 
-Recon stages insights from retained tools before the analytical answer. Its new `insights-v1` extraction receipt prevents answer mining and citation retrofit; legacy queued jobs retain `legacy-v1` dispatch. Article reports delegate to one durable `insight_refresh` task after asynchronous inventory, collection and assessment. Section and BLUF prose consume its readiness result; insufficient evidence produces observations and gaps.
+Recon stages insights from retained tools before the analytical answer. Its new `insights-v1` extraction receipt prevents answer mining and citation retrofit; legacy queued jobs retain `legacy-v1` dispatch. Article report execution is retired. Active Intel briefs use the [stage chain](../../diagrams/intel-brief-chain.html), publishing Claims, Inferences and Links independently.
 
-See [NLP coverage](../concepts/nlp-preprocessing.md) and the [shared harness](../../diagrams/investigation-harness.html). Schema 29 stores generation, lease-fenced activation, immutable original evidence and stage receipts alongside canonical Brain records.
+See [NLP coverage](../concepts/nlp-preprocessing.md) and the [shared harness](../../diagrams/investigation-harness.html). Durable insight storage retains generation, lease-fenced activation, immutable original evidence and stage receipts alongside canonical Brain records.
 
 Atlas uses [classification-only collection and Related articles](../concepts/atlas-classification-and-related-articles.md). Its local shared mentions are tentative browsing leads, separate from investigative claims, assessed Links and evidence confidence. Current Atlas stages count article metadata; historical memory units retain legacy labels.
 
 ## Progress, supersession and publication
 
-Intel and Jobs show one status sequence: Queued → Waiting for output (or Waiting for decision) → Receiving output → Validating → Published → Indexed, with explicit Stalled, Retry wait and failure states; header receipt is never shown as model activity and no fake percentages or token counts are shown. Notable activity transitions are logged as `insight.activity` events (never per delta). When a source body, completed report, captured role route or preparation contract changes, the owner's generation advances: older queued tasks become `superseded` immediately and running tasks are retired at admission, pre-send, the 30s heartbeat (dropping the in-flight request) or the publication fence. Supersession is intentional retirement — no error category, refunded attempt, no owner error — with reason and replacement link in `insight_supersessions` and an `insight.superseded` event; Jobs detail reads `Superseded · replaced by <job> · <reason>`. Visits, polling, heartbeats and progress never create generations. Index-only repair after publication drains the canonical outbox without new model calls. Figures: [intel-report](../../diagrams/intel-report.html), [persistence](../../diagrams/persistence.html).
+Intel and Jobs show one status sequence: Queued → Waiting for output (or Waiting for decision) → Receiving output → Validating → Published → Indexed, with explicit Stalled, Retry wait and failure states; header receipt is never shown as model activity and no fake percentages or token counts are shown. Notable activity transitions are logged as `insight.activity` events (never per delta). When a source body, completed report, captured role route or preparation contract changes, the owner's generation advances: older queued tasks become `superseded` immediately and running tasks are retired at admission, pre-send, the 30s heartbeat (dropping the in-flight request) or the publication fence. Supersession is intentional retirement — no error category, refunded attempt, no owner error — with reason and replacement link in `insight_supersessions` and an `insight.superseded` event; Jobs detail reads `Superseded · replaced by <job> · <reason>`. Visits, polling, heartbeats and progress never create generations. Index-only repair after publication drains the canonical outbox without new model calls. Figures: [Intel brief chain](../../diagrams/intel-brief-chain.html), [persistence](../../diagrams/persistence.html).

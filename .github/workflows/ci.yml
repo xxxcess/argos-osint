@@ -5,15 +5,18 @@ on:
     branches: [main]
   pull_request:
     # No builds on PR pushes (synchronize): CI runs when a PR is opened, reopened or
-    # marked ready for review (drafts skipped), and on every push to main.
-    types: [opened, reopened, ready_for_review]
+    # marked ready for review (drafts skipped), when the `ci:full` label is added
+    # (end of a feature, fix or review-fix round; results show in the PR's checks),
+    # and on every push to main.
+    types: [opened, reopened, ready_for_review, labeled]
   # Manual full-matrix run on any branch: `gh workflow run ci.yml --ref <branch>`.
-  # Code Architect dispatches it at the end of a feature, fix or review-fix round.
+  # Runs on a branch only; they don't appear in a PR's checks, so PRs use `ci:full`.
   workflow_dispatch:
 
 # A newer PR event or dispatch on the same PR/branch cancels the older run (main pushes always complete).
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || (github.event_name == 'workflow_dispatch' && github.ref_name) || github.sha }}
+  # Adding any other label gets its own group, so it never cancels a real run.
+  group: ci-${{ github.workflow }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'ci:full') && format('skip-{0}', github.run_id) || github.event.pull_request.number || (github.event_name == 'workflow_dispatch' && github.ref_name) || github.sha }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
@@ -36,7 +39,10 @@ jobs:
           - { name: macOS arm64, os: macos-14 }
           - { name: macOS Intel, os: macos-15-intel }
         storage: [embedded, server]
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+       (github.event.action != 'labeled' || github.event.label.name == 'ci:full'))
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 90
     steps:

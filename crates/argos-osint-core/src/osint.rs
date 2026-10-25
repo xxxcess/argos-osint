@@ -2854,10 +2854,11 @@ impl Executor {
         }
         if id == holehe::TOOL_ID {
             let lookup_input: holehe::LookupInput = serde_json::from_value(inputs.clone())?;
-            let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(holehe::REQUEST_TIMEOUT)
-                .build()?;
+            let client = crate::http_client::client(
+                crate::http_client::ClientKey::new()
+                    .no_redirect()
+                    .timeout(holehe::REQUEST_TIMEOUT),
+            )?;
             let cancel = std::sync::atomic::AtomicBool::new(false);
             let observation = holehe::lookup(&client, lookup_input, user_agent, &cancel).await?;
             let status = holehe::observation_status(&observation);
@@ -2881,10 +2882,11 @@ impl Executor {
         }
         if id == "whatsmyname_lookup" {
             let lookup_input: whatsmyname::LookupInput = serde_json::from_value(inputs.clone())?;
-            let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(whatsmyname::REQUEST_TIMEOUT)
-                .build()?;
+            let client = crate::http_client::client(
+                crate::http_client::ClientKey::new()
+                    .no_redirect()
+                    .timeout(whatsmyname::REQUEST_TIMEOUT),
+            )?;
             let observation = whatsmyname::lookup(&client, lookup_input, user_agent).await?;
             let status = if observation.coverage.found > 0 {
                 "completed"

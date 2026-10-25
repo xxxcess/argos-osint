@@ -8,7 +8,7 @@
 //! - Durable operation state (pending/running/failed/cancelled/final).
 //! - No credentials or reasoning text persisted.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1185,6 +1185,101 @@ pub fn save_operation_draft(db_path: Option<&Path>, operation_id: &str, draft: &
     Ok(())
 }
 
+/// Minimum wall-clock gap between throttled draft saves.
+const DRAFT_SAVE_INTERVAL: Duration = Duration::from_millis(250);
+/// Minimum byte growth of the accumulated draft between throttled saves.
+const DRAFT_SAVE_GROWTH: usize = 8192;
+
+/// One attempt's guarded stream state: the accumulated text plus the
+/// throttle bookkeeping. A draft save replaces the whole `draft` row
+/// (`set_operation_draft`), so a save is only due once text grew and either
+/// [`DRAFT_SAVE_INTERVAL`] elapsed or [`DRAFT_SAVE_GROWTH`] bytes piled up —
+/// instead of one full-draft UPDATE per SSE delta, which made write volume
+/// O(n²) per completion.
+#[derive(Default)]
+struct StreamedDraft {
+    /// Everything streamed so far; saves always carry this full text.
+    acc: String,
+    /// When the draft was last persisted; `None` until the first save, so
+    /// the first delta saves immediately (the draft row appears as streaming
+    /// starts, as it did with the old per-delta write).
+    last_saved: Option<Instant>,
+    /// `acc.len()` (bytes) at the last save: the growth watermark.
+    last_len: usize,
+}
+
+impl StreamedDraft {
+    /// Append one delta and report whether the draft is due for a save now.
+    /// Pure predicate: the caller supplies `now`, so the throttle is
+    /// deterministic under test (no I/O, no sleeping clock).
+    fn observe(&mut self, delta: &str, now: Instant) -> bool {
+        self.acc.push_str(delta);
+        self.due(now)
+    }
+
+    /// Due when text grew since the last save (an empty or unchanged draft
+    /// never saves) and either the interval elapsed or the byte-growth
+    /// threshold was reached — whichever comes first.
+    fn due(&mut self, now: Instant) -> bool {
+        let grew = self.acc.len().saturating_sub(self.last_len);
+        if self.acc.is_empty() || grew == 0 {
+            return false;
+        }
+        let interval_elapsed = self
+            .last_saved
+            .is_none_or(|at| now.saturating_duration_since(at) >= DRAFT_SAVE_INTERVAL);
+        if !interval_elapsed && grew < DRAFT_SAVE_GROWTH {
+            return false;
+        }
+        self.last_saved = Some(now);
+        self.last_len = self.acc.len();
+        true
+    }
+
+    /// True when text accumulated that no save has carried yet.
+    fn dirty(&self) -> bool {
+        !self.acc.is_empty() && self.last_len < self.acc.len()
+    }
+
+    /// The whole accumulated draft if anything unsaved remains, marking
+    /// everything saved; `None` when there is nothing to write (empty or the
+    /// last throttle save already carried the full text). Saves replace the
+    /// row, so the full text is returned — never just the tail.
+    fn flush(&mut self, now: Instant) -> Option<String> {
+        if !self.dirty() {
+            return None;
+        }
+        self.last_saved = Some(now);
+        self.last_len = self.acc.len();
+        Some(self.acc.clone())
+    }
+}
+
+/// Flushes a dropped stream's unsaved tail. `provider_chain` races
+/// cancellation against the dispatch future and drops the future when cancel
+/// wins, so the in-attempt flush never runs on that path; this guard writes
+/// any still-throttled tail from the future's destructor instead (also on
+/// panic or task abort), so throttling never loses the last deltas on
+/// cancellation. Normal paths flush first and leave nothing dirty, so the
+/// guard is a no-op there.
+struct DraftTailGuard {
+    state: Arc<std::sync::Mutex<StreamedDraft>>,
+    db: Option<PathBuf>,
+    op_id: String,
+}
+
+impl Drop for DraftTailGuard {
+    fn drop(&mut self) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        // Same best-effort, spawn_ordered-serialized write as every other save.
+        if let Some(tail) = state.flush(Instant::now()) {
+            let _ = save_operation_draft(self.db.as_deref(), &self.op_id, &tail);
+        }
+    }
+}
+
 /// Mark operation as terminal status (failed, cancelled, final).
 pub fn update_operation_status(
     db_path: Option<&Path>,
@@ -1507,20 +1602,30 @@ where
             let start_t = Instant::now();
             let mut timings = AttemptTimings::queued(&queued_at, queued_instant);
             timings.admitted();
-            let streamed_acc = Arc::new(std::sync::Mutex::new(String::new()));
+            let streamed_acc = Arc::new(std::sync::Mutex::new(StreamedDraft::default()));
+            // Cancel safety: provider_chain races cancellation against this
+            // future (`tokio::select!`) and drops it when cancel wins,
+            // skipping the flush below — so persist any still-unsaved tail
+            // from the destructor. Throttling then never loses the last
+            // deltas on cancellation.
+            let _draft_tail = DraftTailGuard {
+                state: streamed_acc.clone(),
+                db: db_path_buf.clone(),
+                op_id: op_id.clone(),
+            };
             let streamed_for_obs = streamed_acc.clone();
             let obs_db = db_path_buf.clone();
             let obs_op_id = op_id.clone();
             let obs_wrapper = text_obs.clone().map(|cb| {
                 Arc::new(move |delta: &str| {
-                    let text = if let Ok(mut acc) = streamed_for_obs.lock() {
-                        acc.push_str(delta);
-                        acc.clone()
-                    } else {
-                        String::new()
-                    };
-                    if !text.is_empty() {
-                        let _ = save_operation_draft(obs_db.as_deref(), &obs_op_id, &text);
+                    // Throttled persistence: the draft write replaces the row
+                    // wholesale, so it borrows the accumulated text under the
+                    // guard — one internal copy per SAVING delta (at most one
+                    // per 250 ms / 8 KiB), never a full clone per SSE delta.
+                    if let Ok(mut state) = streamed_for_obs.lock() {
+                        if state.observe(delta, Instant::now()) {
+                            let _ = save_operation_draft(obs_db.as_deref(), &obs_op_id, &state.acc);
+                        }
                     }
                     cb(delta);
                 })
@@ -1616,8 +1721,22 @@ where
             }
             timings.policy_diagnostics = rep.policy_diagnostics.clone();
             let elapsed_ms = start_t.elapsed().as_millis() as u64;
-            let partial = streamed_acc.lock().map(|s| s.clone()).unwrap_or_default();
-            if !partial.is_empty() {
+            // Final-save guarantee for this attempt: the stream has ended
+            // (success, failure and attempt-observed cancellation all reach
+            // this line), so flush whatever tail the per-delta throttle held
+            // back. `flush` is a no-op when a throttle save already carried
+            // the whole draft (its write is enqueued and ordered on the same
+            // spawn_ordered path, so the row converges to `acc` either way).
+            // A cancellation that drops this future skips this line and
+            // fires `DraftTailGuard` instead; on success the chain tail below
+            // re-persists the full final text, and on failure/cancel this
+            // partial is what a resumed run reads back — so the last-delta
+            // tail is never dropped.
+            if let Some(partial) = streamed_acc
+                .lock()
+                .ok()
+                .and_then(|mut state| state.flush(Instant::now()))
+            {
                 let _ = save_operation_draft(db_path_buf.as_deref(), &op_id, &partial);
             }
 
@@ -2615,6 +2734,58 @@ mod tests {
         assert_eq!(outcome.wait_ms, 30);
         assert_eq!(AttemptOutcome::ok(Some("stop"), 4, 7).outcome, "ok");
         assert!(AttemptOutcome::default().category.is_none());
+    }
+
+    #[test]
+    fn streamed_draft_saves_are_throttled_by_interval_or_growth() {
+        let t0 = Instant::now();
+        let mut draft = StreamedDraft::default();
+
+        // The first delta saves immediately: the draft row exists as soon as
+        // streaming starts, as it did with the old per-delta write.
+        assert!(draft.observe("hello", t0));
+        // That save carried everything so far.
+        assert!(!draft.dirty());
+        // Neither threshold reached: no full-draft write per delta, but the
+        // text is now unsaved.
+        assert!(!draft.observe(", world", t0 + Duration::from_millis(100)));
+        assert!(draft.dirty());
+        // ≥ DRAFT_SAVE_INTERVAL since the last save: due despite tiny growth.
+        assert!(draft.observe("!", t0 + DRAFT_SAVE_INTERVAL));
+        assert!(!draft.dirty());
+        // Still inside the interval: held back, and the text stays dirty.
+        assert!(!draft.observe("?", t0 + DRAFT_SAVE_INTERVAL + Duration::from_millis(50),));
+        assert!(draft.dirty());
+        // The flush carries the whole accumulated draft (draft saves replace
+        // the row, they never append just the delta)...
+        assert_eq!(
+            draft
+                .flush(t0 + DRAFT_SAVE_INTERVAL + Duration::from_millis(60))
+                .as_deref(),
+            Some("hello, world!?"),
+        );
+        // ...and leaves nothing unsaved behind.
+        assert_eq!(draft.flush(t0 + DRAFT_SAVE_INTERVAL * 2), None);
+        // An empty delta never saves, however long it has been.
+        assert!(!draft.observe("", t0 + Duration::from_secs(60)));
+
+        // DRAFT_SAVE_GROWTH bytes of growth save before the interval is up.
+        let mut growth = StreamedDraft::default();
+        assert!(growth.observe("seed", t0));
+        let chunk = "x".repeat(DRAFT_SAVE_GROWTH);
+        assert!(growth.observe(&chunk, t0 + Duration::from_millis(1)));
+        assert!(!growth.dirty());
+        // One more byte, still inside the interval: held back again.
+        assert!(!growth.observe("y", t0 + Duration::from_millis(2)));
+        assert!(growth.dirty());
+
+        // Growth is counted in bytes, not characters: 2732 `€` characters
+        // are 8196 bytes and cross the threshold far below 8192 chars.
+        let euro = "\u{20ac}";
+        let mut unicode = StreamedDraft::default();
+        assert!(unicode.observe(euro, t0));
+        let euros = euro.repeat(DRAFT_SAVE_GROWTH / 3 + 1);
+        assert!(unicode.observe(&euros, t0 + Duration::from_millis(3)));
     }
 }
 

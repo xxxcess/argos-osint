@@ -83,6 +83,22 @@ fn auth_stamp(path: &Path) -> AuthStamp {
 
 static AUTH_CACHE: std::sync::RwLock<Option<CachedAuth>> = std::sync::RwLock::new(None);
 
+/// Drop the cached `auth.json` parse so the next [`AuthFile::load_cached`]
+/// rereads the file. Called whenever Argos itself writes config files.
+pub fn invalidate_auth_cache() {
+    *AUTH_CACHE.write().unwrap_or_else(|err| err.into_inner()) = None;
+}
+
+/// Clears the auth cache when dropped, so a write path invalidates it on
+/// every exit, including errors and rollbacks.
+pub(crate) struct AuthCacheReset;
+
+impl Drop for AuthCacheReset {
+    fn drop(&mut self) {
+        invalidate_auth_cache();
+    }
+}
+
 impl AuthFile {
     pub fn redact(&self, text: &str) -> String {
         let mut result = text.to_string();
@@ -167,8 +183,9 @@ impl AuthFile {
     }
 
     /// [`crate::events::redact`] calls this on every event. The parsed file is
-    /// reused until `auth.json`'s mtime or length changes, including the
-    /// missing-file case (the default document). A legacy migration rewrites
+    /// reused until `auth.json`'s mtime or length changes or Argos writes a
+    /// config file itself ([`invalidate_auth_cache`]); a stamp without an mtime
+    /// (including a missing file) always rereads. A legacy migration rewrites
     /// the file, so the cache is filled from a stat taken after the load.
     pub fn load_cached() -> Result<Self> {
         let path = auth_path();
@@ -176,7 +193,9 @@ impl AuthFile {
         {
             let guard = AUTH_CACHE.read().unwrap_or_else(|err| err.into_inner());
             if let Some(hit) = guard.as_ref() {
-                if hit.stamp == stamp {
+                // No mtime means the stamp cannot tell a rewrite apart:
+                // treat it as a miss.
+                if stamp.modified.is_some() && hit.stamp == stamp {
                     return Ok(hit.auth.clone());
                 }
             }

@@ -62,6 +62,14 @@ async fn runs_follow_the_sqlite_state_machine() {
         rr::latest_run_state(&repo, &t.id).await.unwrap().as_deref(),
         Some("running")
     );
+    assert_eq!(
+        rr::latest_run_states(&repo, std::slice::from_ref(&t.id))
+            .await
+            .unwrap()
+            .get(&t.id)
+            .map(String::as_str),
+        Some("running")
+    );
     assert!(rr::latest_resumable_run(&repo, &t.id)
         .await
         .unwrap()

@@ -1,3 +1,4 @@
+//! @tag:atlas-collection
 //! Atlas collects regional headlines, tags them, and stores the run's statistics.
 //!
 //! Phase 1 reads the latest headlines. Phase 2 headlines are saved on the run and

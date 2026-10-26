@@ -1,6 +1,6 @@
 # Reviewed TUI buffers
 
-Actual deterministic TestBackend captures, reviewed with an image-capable viewer. See [verification ledger](../../tui-overhaul-verification-2026-10-10.md) for check results, viewport matrix, fixes and limits. The provenance JSON files retain capture commands, source fingerprints and hashes for this selection. Full matrices are regenerated with `scripts/tui_review.py`; temporary matrices and development captures are removed after review.
+Actual deterministic TestBackend captures, reviewed with an image-capable viewer. See [verification ledger](../../archive/tui-overhaul-verification-2026-10-10.md) for check results, viewport matrix, fixes and limits. The provenance JSON files retain capture commands, source fingerprints and hashes for this selection. Full matrices are regenerated with `scripts/tui_review.py`; temporary matrices and development captures are removed after review.
 
 | Surface | Selected evidence |
 | --- | --- |

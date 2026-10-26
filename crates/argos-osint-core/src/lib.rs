@@ -53,6 +53,7 @@ pub mod events;
 pub mod evidence;
 pub mod explore;
 pub mod hardware;
+mod http_client;
 pub mod intel_recon;
 pub mod investigation;
 pub mod iso3166;

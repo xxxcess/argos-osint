@@ -1,5 +1,7 @@
 # Semantic-versioning setup acceptance
 
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
 Assessed 2026-10-11 for implementation commit `fca363a`. This is a historical
 acceptance record, not a claim that subsequent revisions have passed these checks.
 The maintained release contract and activation steps are in
@@ -23,7 +25,6 @@ The maintained release contract and activation steps are in
   new workflows; optional shellcheck/pyflakes integrations were disabled.
 - Skill validation passed. After OpenCode reload, resolved permissions and the
   repository-scoped live skill/command APIs exposed `argos-commit` and `ecc-commit`.
-- Graphify refresh completed with existing SQL extraction/community-label warnings.
 
 The dependency-free Node checks above can be rerun directly from the repository
 root. The external updater simulation and schema/actionlint checks used temporary

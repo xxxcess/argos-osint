@@ -139,7 +139,7 @@ Selected unchanged PNGs from that reviewed run:
 - [Failed extraction and its retry](../../docs/screenshots/insight-reliability-2026-10-13/insight-jobs-failed-80x24.png)
 - [Extraction actions at minimum width](../../docs/screenshots/insight-reliability-2026-10-13/insight-palette-60x18.png)
 
-Using the Python/Pillow environment described in [TUI verification](../../docs/tui-verification.md),
+Using the Python/Pillow environment described in [TUI verification](../../docs/wiki/code/tui-verification.md),
 reproduce into a new directory:
 
 ```sh

@@ -1,6 +1,8 @@
 # Topology neighborhood summary checklist
 
-See the [final design](../../docs/topology-scope-summary-plan.md) and [specification](../../docs/topology-mapper.md#neighborhood-summary).
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
+See the [final design](../../docs/archive/topology-scope-summary-plan.md) and [specification](../../docs/wiki/concepts/topology-mapper.md#neighborhood-summary).
 
 ## Phase 1 — brief, packet, cache (`d1c11c0`)
 - [x] Deterministic `NeighborhoodBrief` and typed `NeighborhoodInput` built in the topology read transaction
@@ -28,7 +30,6 @@ See the [final design](../../docs/topology-scope-summary-plan.md) and [specifica
 
 ## Phase 4 — docs and verification
 - [x] topology-mapper.md, diagram pair, architecture.md, tui-components.md, plan, this checklist
-- [x] graphify update
 - [x] PR #48 body rewritten; screenshots pinned to the final SHA
 - [x] CI matrix green on all four targets (macOS arm64/x86_64, Linux x86_64/aarch64) at `dba2fff` (run 39047777535) and at `4758691` (run 39050891830: Linux x86_64/aarch64, macOS arm64/Intel, policy all pass)
 - [x] Local matrix (default, `--no-default-features`, nlp) fmt/clippy/tests via `scripts/agent_cargo.py` (run before the last heartbeat commit; CI covers `dba2fff`)

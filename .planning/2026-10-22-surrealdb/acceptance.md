@@ -1,5 +1,7 @@
 # SurrealDB migration checklist (acceptance)
 
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
 See [plan.md](design.md). Status is honest: unchecked means not done or not
 verified.
 
@@ -206,7 +208,7 @@ telemetry are wired (see "Combined tree" at the end).
 - [ ] `cargo fmt --all --check`
 - [ ] clippy `-D warnings` + tests via `scripts/agent_cargo.py`: default; `--locked --no-default-features`; `--no-default-features --features nlp`; `--no-default-features --features surreal`; `--no-default-features --features embedded`
 - [ ] `python3 scripts/test_surreal.py` (server + embedded)
-- [ ] `graphify update .` as the last commit
+- [ ] Review current wiki links, tags and diagrams before final delivery
 - [ ] Atlas deletes (step 3) on Surreal leave to the caller: NLP cache/`nlp_source_refs`, `brain_backfill_receipts` cleanup, `jobs::cleanup_batch`, and `retire_deleted_article_leads` (reads `app_state`).
 - [ ] `atlas_save_metadata` on Surreal does not run `persist_article_rating` (confidence inputs still SQLite).
 - [ ] Step 4 remainder: `legacy_receipt` and the Source/MentionedIn/Contains edges are done. Still open: `bind_claim_subject` and `refresh_cached_publication`; see P3 above for exactly what each still reads from SQLite.

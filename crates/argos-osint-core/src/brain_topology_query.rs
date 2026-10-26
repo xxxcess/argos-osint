@@ -8,55 +8,6 @@ use super::*;
 use crate::brain_actors as actors;
 use crate::store::Store;
 
-type Adjacency = (TopologyNode, TopologyEdge);
-
-enum ScopedRows<'a> {
-    Never,
-    Memory(usize),
-    Article(usize),
-    Mention { kind: usize, run: usize },
-    Evidence { source: usize, revision: usize },
-    Link(&'a TopologyNode),
-}
-
-fn sql_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-/// Match retained metadata content, URL and publication time, rather than
-/// assigning today's article revision to a historical derivation by owner ID.
-fn carried_kinds_sql(snapshot: &str) -> String {
-    format!("CASE WHEN json_valid({snapshot}.readiness_json) THEN COALESCE(json_extract({snapshot}.readiness_json,'$.carried_kinds'),'[]') ELSE '[]' END")
-}
-
-fn source_snapshot_sql(snapshot: &str, kind: &str) -> String {
-    let carried = carried_kinds_sql(snapshot);
-    format!("COALESCE((SELECT NULLIF(json_extract(topology_carried.value,'$.source_snapshot_id'),'') FROM json_each({carried}) topology_carried WHERE json_extract(topology_carried.value,'$.kind')={kind} LIMIT 1),{snapshot}.id)")
-}
-
-fn current_metadata_sql(snapshot: &str, article: &str, kind: &str) -> String {
-    let carried = carried_kinds_sql(snapshot);
-    let original = format!("CASE WHEN json_valid({snapshot}.inputs_json) THEN json_extract({snapshot}.inputs_json,'$.source_refs') ELSE '[]' END");
-    // A scoped publication carries the sibling kind's original retained
-    // metadata. Never assign the new kind's source revision to that sibling.
-    let refs = format!("COALESCE((SELECT json_extract(topology_carried.value,'$.inputs.source_refs') FROM json_each({carried}) topology_carried WHERE json_extract(topology_carried.value,'$.kind')={kind} LIMIT 1),{original})");
-    format!("EXISTS(SELECT 1 FROM json_each({refs}) topology_ref JOIN nlp_artifacts topology_artifact ON topology_artifact.hash=json_extract(topology_ref.value,'$.artifact_hash') WHERE json_extract(topology_ref.value,'$.source_id')='article:'||{article}.article_id AND topology_artifact.text={article}.title||char(10)||{article}.description AND json_extract(topology_ref.value,'$.url')={article}.url AND COALESCE(json_extract(topology_ref.value,'$.published_at'),'')={article}.published_at)")
-}
-
-/// New publications write canonical premise IDs in the existing indexed
-/// evidence relation. JSON payload/local-ID searches below remain necessary
-/// only for historical records without that relational receipt.
-pub(super) const INDEXED_PREMISE_INFERENCES_SQL: &str = "SELECT DISTINCT d.memory_id,d.id,e.premise_id FROM insight_derivation_evidence e INDEXED BY insight_evidence_memory JOIN insight_derivations d ON d.id=e.derivation_id WHERE e.memory_id=?1 AND e.premise_id<>'' AND e.premise_id NOT LIKE 'memory:%' AND d.insight_kind='inference' AND d.memory_id IS NOT NULL AND d.status NOT IN ('deleted','retired','rejected') ORDER BY d.memory_id,d.id,e.premise_id";
-
-fn memory_cycle_sql(memory: &str, cycle: &str) -> String {
-    let current = current_metadata_sql(
-        "topology_snapshot",
-        "topology_article",
-        "topology_derivation.insight_kind",
-    );
-    format!("(EXISTS(SELECT 1 FROM insight_derivations topology_derivation JOIN insight_snapshots topology_snapshot ON topology_snapshot.id=topology_derivation.snapshot_id JOIN atlas_articles topology_article ON topology_article.article_id=topology_snapshot.owner_id WHERE topology_derivation.memory_id={memory} AND topology_article.run_id={cycle} AND topology_derivation.status NOT IN ('deleted','retired','rejected') AND {current}) OR EXISTS(SELECT 1 FROM insight_sources topology_source JOIN insight_claims topology_claim ON topology_claim.fingerprint=topology_source.fingerprint WHERE topology_claim.memory_id={memory} AND topology_source.run_id={cycle} AND topology_source.deleted_origin=0) OR EXISTS(SELECT 1 FROM brain_actor_mentions topology_mention WHERE topology_mention.actor_id={memory} AND topology_mention.origin_kind='article' AND topology_mention.origin_scope={cycle}) OR EXISTS(SELECT 1 FROM brain_memory_actor_refs topology_actor_ref JOIN insight_derivations topology_derivation ON topology_derivation.memory_id=topology_actor_ref.memory_id JOIN insight_snapshots topology_snapshot ON topology_snapshot.id=topology_derivation.snapshot_id JOIN atlas_articles topology_article ON topology_article.article_id=topology_snapshot.owner_id WHERE topology_actor_ref.actor_id={memory} AND topology_article.run_id={cycle} AND topology_derivation.status NOT IN ('deleted','retired','rejected') AND {current}) OR EXISTS(SELECT 1 FROM brain_memory_actor_refs topology_actor_ref JOIN insight_claims topology_claim ON topology_claim.memory_id=topology_actor_ref.memory_id JOIN insight_sources topology_source ON topology_source.fingerprint=topology_claim.fingerprint WHERE topology_actor_ref.actor_id={memory} AND topology_source.run_id={cycle} AND topology_source.deleted_origin=0))")
-}
-
 pub(crate) fn node(id: String, kind: TopologyNodeKind, label: String) -> TopologyNode {
     TopologyNode {
         id,

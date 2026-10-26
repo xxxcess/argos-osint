@@ -107,9 +107,12 @@ pub async fn new_thread(repo: &Repository, title: &str) -> Result<Thread> {
     Ok(thread)
 }
 
+/// Newest matches returned by [`list_threads`]. Same cap as the Jobs page.
+pub const LIST_LIMIT: i64 = 200;
+
 /// `Store::list_threads`: live threads whose title, or one of whose linked
 /// entities' canonical name, contains `search` (case-insensitive, as
-/// SQLite `LIKE`), newest update first.
+/// SQLite `LIKE`), newest update first, capped at [`LIST_LIMIT`].
 pub async fn list_threads(repo: &Repository, search: &str) -> Result<Vec<Thread>> {
     let mut r = repo
         .db()
@@ -125,9 +128,11 @@ pub async fn list_threads(repo: &Repository, search: &str) -> Result<Vec<Thread>
               WHERE deleted = false
                 AND ($n = '' OR string::contains(string::lowercase(title), $n)
                      OR meta::id(id) INSIDE $hits)
-              ORDER BY updated_at DESC;",
+              ORDER BY updated_at DESC
+              LIMIT $lim;",
         )
         .bind(("s", search.trim().to_string()))
+        .bind(("lim", LIST_LIMIT))
         .await?
         .check()?;
     let rows: Vec<ThreadRow> = r.take(2usize)?;

@@ -1,10 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 380" role="img" aria-labelledby="title desc">
-<title id="title">Brain source removal and index eligibility</title>
-<desc id="desc">Deletion removes current source contributions in one SQLite transaction. Shared evidence survives; zero-support evidence, actors and dependent edges retire. Durable index work rechecks eligibility before removing or restoring vectors. Retired rows and evidence history remain retained.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 380" role="img" aria-labelledby="brain-source-lifecycle-title brain-source-lifecycle-desc">
+<title id="brain-source-lifecycle-title">Brain source removal and index eligibility</title>
+<desc id="brain-source-lifecycle-desc">Deletion removes current source contributions in one SurrealDB transaction. Shared evidence survives; zero-support evidence, actors and dependent edges retire. Durable index work rechecks eligibility before removing or restoring vectors. Retired rows and evidence history remain retained.</desc>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#4f5d75"/></marker></defs>
 <rect width="1000" height="380" fill="#f5f5f5"/>
 <g font-family="system-ui,sans-serif" fill="#2d3142">
-<text x="30" y="30" font-size="14">SQLITE TRANSACTION</text>
+<text x="30" y="30" font-size="14">SURREALDB TRANSACTION</text>
 <rect x="30" y="55" width="235" height="90" fill="#fff" stroke="#2d3142"/>
 <text x="45" y="84" font-size="15">Delete article / investigation</text><text x="45" y="111" font-size="12">Remove current contributions</text><text x="45" y="130" font-size="12">Recompute retained source counts</text>
 <rect x="335" y="55" width="270" height="90" fill="#fff4ee" stroke="#eb6c36"/>

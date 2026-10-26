@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 540" role="img" aria-labelledby="brain-topology-title brain-topology-desc">
 <title id="brain-topology-title">Argos Brain Memory Topology, Neighborhood Summary and Scope Analysis</title>
-<desc id="brain-topology-desc">Brain graph panes and exact Intel Actor, Claim and Inference records seed a bounded two-hop retained neighborhood. Staged publication persists canonical actor associations, claim premises and tentative article leads; maps remain available while vector indexing is pending. A generation-fenced background read delivers one immutable snapshot to GraphCanvas and inspector. Explicit scope analysis remains separate. The same read transaction builds an immutable deterministic neighborhood brief and a frozen typed model packet. The brief is shown first in the Summary tab. A deduplicated queued request runs the configured Summarization role chain, and only a complete validated answer atomically replaces the fallback through a fenced TopologySummaryLoaded event; any failure keeps the fallback. Record keeps the selection details.</desc>
+<desc id="brain-topology-desc">Brain graph panes and exact Intel Actor, Claim and Inference records seed a bounded two-hop retained neighborhood. Staged publication persists canonical actor associations, claim premises and tentative article leads; maps remain available while vector indexing is pending. A generation-fenced background read delivers one immutable snapshot to GraphCanvas and inspector. Explicit scope analysis remains separate. The background load builds an immutable deterministic neighborhood brief and a frozen typed model packet. The brief is shown first in the Summary tab. A deduplicated queued request runs the configured Summarization role chain, and only a complete validated answer atomically replaces the fallback through a fenced TopologySummaryLoaded event; any failure keeps the fallback. Record keeps the selection details.</desc>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#4f5d75"/></marker></defs>
 <rect width="800" height="540" fill="#f5f5f5"/>
 <g fill="none" stroke="#4f5d75" marker-end="url(#arrow)">
@@ -16,64 +16,64 @@
 <path d="M700 420 V390 H597 V360"/>
 </g>
 <g font-family="Geist,system-ui,sans-serif" font-size="13" fill="#2d3142" text-anchor="middle">
-<text x="410" y="285" font-size="11" fill="#4f5d75">Explicit action</text>
-<text x="378" y="145" font-size="11" fill="#4f5d75">Refresh</text>
+<text x="410" y="285" font-size="10" fill="#4f5d75">Explicit action</text>
+<text x="378" y="145" font-size="10" fill="#4f5d75">Refresh</text>
 <rect x="20" y="40" width="174" height="80" rx="6" fill="#fff" stroke="#2d3142"/>
 <text x="107" y="68">Typed Topology Seed</text>
-<text x="107" y="88" font-size="11" fill="#4f5d75">Brain claim / actor group graph</text>
-<text x="107" y="106" font-size="11" fill="#4f5d75">Intel claim / inference / actor</text>
+<text x="107" y="88" font-size="10" fill="#4f5d75">Brain claim / actor group graph</text>
+<text x="107" y="106" font-size="10" fill="#4f5d75">Intel claim / inference / actor</text>
 
 <rect x="20" y="160" width="174" height="80" rx="6" fill="#fff" stroke="#2d3142"/>
 <text x="107" y="188">Cycle &amp; Bounds</text>
-<text x="107" y="208" font-size="11" fill="#4f5d75">2 hops default · bounded (1..3)</text>
-<text x="107" y="226" font-size="11" fill="#4f5d75">AllRetained · ThisCycle</text>
+<text x="107" y="208" font-size="10" fill="#4f5d75">2 hops default · bounded (1..3)</text>
+<text x="107" y="226" font-size="10" fill="#4f5d75">AllRetained · ThisCycle</text>
 
 <rect x="250" y="40" width="194" height="80" rx="6" fill="#fff4ee" stroke="#eb6c36"/>
 <text x="347" y="66">Store::topology_snapshot</text>
-<text x="347" y="86" font-size="11">background read · generation fence</text>
-<text x="347" y="105" font-size="11" fill="#4f5d75">path closure · truthful omissions</text>
+<text x="347" y="86" font-size="10">background read · generation fence</text>
+<text x="347" y="105" font-size="10" fill="#4f5d75">path closure · truthful omissions</text>
 
 <rect x="250" y="160" width="194" height="80" rx="6" fill="#fff" stroke="#2d3142"/>
 <text x="347" y="186">Explicit Scope Analysis</text>
-<text x="347" y="206" font-size="11">POOL_BRAIN_SCOPE · light</text>
-<text x="347" y="225" font-size="11" fill="#4f5d75">Validated records · explicit writes</text>
+<text x="347" y="206" font-size="10">POOL_BRAIN_SCOPE · light</text>
+<text x="347" y="225" font-size="10" fill="#4f5d75">Validated records · explicit writes</text>
 
 <rect x="500" y="40" width="194" height="80" rx="6" fill="#fff4ee" stroke="#eb6c36"/>
 <text x="597" y="66">Presentation Nodes &amp; Edges</text>
-<text x="597" y="86" font-size="11">Actors / groups · Claims · Inferences</text>
-<text x="597" y="105" font-size="11" fill="#4f5d75">Derived Topics · Articles · Sources</text>
+<text x="597" y="86" font-size="10">Actors / groups · Claims · Inferences</text>
+<text x="597" y="105" font-size="10" fill="#4f5d75">Derived Topics · Articles · Sources</text>
 
 <rect x="500" y="260" width="194" height="100" rx="6" fill="#fff" stroke="#2d3142"/>
 <text x="597" y="288">Graph First TUI</text>
-<text x="597" y="308" font-size="11">Inspector: Summary | Record</text>
-<text x="597" y="327" font-size="11">Basis opens Record · no recenter</text>
-<text x="597" y="346" font-size="11" fill="#4f5d75">Compact pages · Back restores origin</text>
+<text x="597" y="308" font-size="10">Inspector: Summary | Record</text>
+<text x="597" y="327" font-size="10">Basis opens Record · no recenter</text>
+<text x="597" y="346" font-size="10" fill="#4f5d75">Compact pages · Back restores origin</text>
 </g>
 
 <g font-family="Geist,system-ui,sans-serif" font-size="13" fill="#2d3142" text-anchor="middle">
-<text x="400" y="404" font-size="12" fill="#4f5d75">Neighborhood summary: fallback first, queued generation, validated replacement or failure</text>
+<text x="400" y="404" font-size="11" fill="#4f5d75">Neighborhood summary: fallback first, queued generation, validated replacement or failure</text>
 <rect x="20" y="420" width="160" height="100" rx="6" fill="#fff4ee" stroke="#eb6c36"/>
 <text x="100" y="446">Fallback Brief</text>
-<text x="100" y="466" font-size="11">Built in the read transaction</text>
-<text x="100" y="484" font-size="11">Shown first · typed basis refs</text>
-<text x="100" y="502" font-size="11" fill="#4f5d75">Immutable · no model, no writes</text>
+<text x="100" y="466" font-size="10">Built from loaded records</text>
+<text x="100" y="484" font-size="10">Shown first · typed basis refs</text>
+<text x="100" y="502" font-size="10" fill="#4f5d75">Immutable · no model, no writes</text>
 
 <rect x="220" y="420" width="160" height="100" rx="6" fill="#fff" stroke="#2d3142"/>
 <text x="300" y="446">Frozen Request</text>
-<text x="300" y="466" font-size="11">Typed packet · basis_key</text>
-<text x="300" y="484" font-size="11">Prompt/output version · budget</text>
-<text x="300" y="502" font-size="11" fill="#4f5d75">Route fingerprint · no secrets</text>
+<text x="300" y="466" font-size="10">Typed packet · basis_key</text>
+<text x="300" y="484" font-size="10">Prompt/output version · budget</text>
+<text x="300" y="502" font-size="10" fill="#4f5d75">Route fingerprint · no secrets</text>
 
 <rect x="420" y="420" width="160" height="100" rx="6" fill="#fff" stroke="#2d3142"/>
 <text x="500" y="446">Queued Generation</text>
-<text x="500" y="466" font-size="11">argos_derived_summaries + flush</text>
-<text x="500" y="484" font-size="11">POOL_SUMMARY · lease + epoch</text>
-<text x="500" y="502" font-size="11" fill="#4f5d75">Summarization role chain</text>
+<text x="500" y="466" font-size="10">derived_summary + flush</text>
+<text x="500" y="484" font-size="10">POOL_SUMMARY · lease + epoch</text>
+<text x="500" y="502" font-size="10" fill="#4f5d75">Summarization role chain</text>
 
 <rect x="620" y="420" width="160" height="100" rx="6" fill="#fff4ee" stroke="#eb6c36"/>
 <text x="700" y="446">Validate · Deliver</text>
-<text x="700" y="466" font-size="11">Complete answer only</text>
-<text x="700" y="484" font-size="11">Atomic replace · fenced event</text>
-<text x="700" y="502" font-size="11" fill="#4f5d75">Failure keeps the fallback</text>
+<text x="700" y="466" font-size="10">Complete answer only</text>
+<text x="700" y="484" font-size="10">Atomic replace · fenced event</text>
+<text x="700" y="502" font-size="10" fill="#4f5d75">Failure keeps the fallback</text>
 </g>
 </svg>

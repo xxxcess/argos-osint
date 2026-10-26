@@ -1,6 +1,7 @@
 //! Layout, chat transcript, and mouse hit areas for the Argos terminal shell.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -871,9 +872,15 @@ pub struct ChatBlock {
     pub has_memory: bool,
 }
 
-pub fn chat_blocks(app: &App) -> Vec<ChatBlock> {
+pub fn chat_blocks(app: &App) -> Arc<Vec<ChatBlock>> {
     ensure_frame(app);
     app.frame.borrow().blocks.clone()
+}
+
+/// Cheap cached-block count: reads the stored frame cache without cloning it.
+fn chat_block_count(app: &App) -> usize {
+    ensure_frame(app);
+    app.frame.borrow().blocks.len()
 }
 
 fn build_blocks(app: &App) -> Vec<ChatBlock> {
@@ -958,27 +965,31 @@ fn build_blocks(app: &App) -> Vec<ChatBlock> {
                     }
                 }
                 if let Some(calls) = calls_by_run.get(run.id.as_str()) {
+                    // One O(C) pre-pass groups this run's completed/no_results calls by
+                    // tool id; the peer count below is the group size. Only `len()` is
+                    // ever consumed, so grouping keeps duplicates and first-seen order
+                    // (the `grouped` set below) — and therefore output order — intact.
+                    let mut peers_by_tool: HashMap<&str, usize> = HashMap::new();
+                    for (_, call) in calls.iter() {
+                        if matches!(call.status.as_str(), "completed" | "no_results") {
+                            *peers_by_tool.entry(call.tool_id.as_str()).or_default() += 1;
+                        }
+                    }
                     let mut grouped = HashSet::new();
                     for &(call_index, call) in calls {
                         used.insert(call_index);
                         if matches!(call.status.as_str(), "completed" | "no_results") {
-                            let peers: Vec<_> = calls
-                                .iter()
-                                .filter(|(_, peer)| {
-                                    peer.tool_id == call.tool_id
-                                        && matches!(
-                                            peer.status.as_str(),
-                                            "completed" | "no_results"
-                                        )
-                                })
-                                .collect();
-                            if peers.len() > 1 {
+                            let peers = peers_by_tool
+                                .get(call.tool_id.as_str())
+                                .copied()
+                                .unwrap_or(0);
+                            if peers > 1 {
                                 let key = format!("activity-group:{}:{}", run.id, call.tool_id);
                                 if grouped.insert(call.tool_id.as_str()) {
                                     blocks.push(ChatBlock {
                                         part: InvestigationPart::ToolActivity,
                                         key: key.clone(),
-                                        title: format!("✓ {} · {} completed evidence activities · Enter details", call.tool_id, peers.len()),
+                                        title: format!("✓ {} · {} completed evidence activities · Enter details", call.tool_id, peers),
                                         body: String::new(), collapsible: true, message_index: None, has_memory: false,
                                     });
                                 }
@@ -1979,6 +1990,9 @@ struct FrameStamp {
     messages: u64,
     calls: u64,
     runs: u64,
+    /// Content revision of `App::investigation_events`, carried as the monotonic
+    /// `App::investigation_events_rev` counter (bumped at every mutation site)
+    /// instead of Debug-formatting the whole event list on every stamp check.
     events: u64,
     expanded: Vec<String>,
 }
@@ -1986,8 +2000,8 @@ struct FrameStamp {
 #[derive(Default)]
 pub struct FrameCache {
     stamp: FrameStamp,
-    blocks: Vec<ChatBlock>,
-    rows: Vec<ChatRow>,
+    blocks: Arc<Vec<ChatBlock>>,
+    rows: Arc<Vec<ChatRow>>,
     frozen: HashMap<String, super::components::TranscriptBlock<Vec<markdown::MdLine>>>,
 }
 
@@ -2022,7 +2036,7 @@ fn frame_stamp(app: &App, width: u16) -> FrameStamp {
         messages: message_stamp(&app.messages),
         calls: call_stamp(&app.calls),
         runs: run_stamp(&app.runs),
-        events: text_revision(&format!("{:?}", app.investigation_events)),
+        events: app.investigation_events_rev,
         expanded,
     }
 }
@@ -2101,8 +2115,8 @@ fn ensure_frame(app: &App) {
     let rows = rows_for(app, &blocks, width as usize, &mut frozen);
     *app.frame.borrow_mut() = FrameCache {
         stamp,
-        blocks,
-        rows,
+        blocks: Arc::new(blocks),
+        rows: Arc::new(rows),
         frozen,
     };
 }
@@ -2371,7 +2385,7 @@ fn transcript_rect(app: &App) -> Rect {
     inset(recon_chat_areas(app, body).0)
 }
 
-fn chat_view(app: &App) -> (Rect, usize, Vec<ChatRow>) {
+fn chat_view(app: &App) -> (Rect, usize, Arc<Vec<ChatRow>>) {
     ensure_frame(app);
     let inner = transcript_rect(app);
     let rows = app.frame.borrow().rows.clone();
@@ -2384,9 +2398,15 @@ fn chat_view(app: &App) -> (Rect, usize, Vec<ChatRow>) {
     (inner, scroll, rows)
 }
 
+/// Cheap scroll maximum: reads the cached row count without cloning rows.
 fn chat_max(app: &App) -> usize {
-    let (inner, _, rows) = chat_view(app);
-    rows.len().saturating_sub(inner.height as usize)
+    ensure_frame(app);
+    let inner = transcript_rect(app);
+    app.frame
+        .borrow()
+        .rows
+        .len()
+        .saturating_sub(inner.height as usize)
 }
 
 struct Spot {
@@ -2509,7 +2529,7 @@ pub fn normalize(app: &mut App) {
     } else {
         None
     };
-    let count = chat_blocks(app).len();
+    let count = chat_block_count(app);
     if count == 0 {
         app.chat_sel = 0;
     } else if app.chat_follow || app.chat_sel >= count {
@@ -2559,7 +2579,7 @@ fn normalize_memories(app: &mut App) {
 }
 
 pub fn move_chat(app: &mut App, delta: i32) {
-    let count = chat_blocks(app).len();
+    let count = chat_block_count(app);
     if count == 0 {
         return;
     }
@@ -2614,7 +2634,7 @@ pub fn navigate_turn(app: &mut App, next: bool) {
 }
 
 pub fn fold_chat(app: &mut App, expand: bool) {
-    let Some(block) = chat_blocks(app).into_iter().nth(app.chat_sel) else {
+    let Some(block) = chat_blocks(app).get(app.chat_sel).cloned() else {
         return;
     };
     if !block.collapsible {
@@ -2628,7 +2648,7 @@ pub fn fold_chat(app: &mut App, expand: bool) {
 }
 
 pub fn toggle_chat(app: &mut App) {
-    let Some(block) = chat_blocks(app).into_iter().nth(app.chat_sel) else {
+    let Some(block) = chat_blocks(app).get(app.chat_sel).cloned() else {
         return;
     };
     if !block.collapsible {
@@ -2642,7 +2662,7 @@ pub fn toggle_chat(app: &mut App) {
 }
 
 pub fn open_block(app: &mut App, index: usize) {
-    let Some(block) = chat_blocks(app).into_iter().nth(index) else {
+    let Some(block) = chat_blocks(app).get(index).cloned() else {
         return;
     };
     let title = block.title.clone();
@@ -2657,8 +2677,7 @@ pub fn open_block(app: &mut App, index: usize) {
 
 pub fn open_memory(app: &mut App, block_index: usize) {
     let Some(message_index) = chat_blocks(app)
-        .into_iter()
-        .nth(block_index)
+        .get(block_index)
         .and_then(|block| block.message_index)
     else {
         return;

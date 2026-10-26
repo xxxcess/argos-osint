@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,50 @@ pub struct DeviceEndpoints {
 
 fn default_scope() -> String {
     "openid profile email".into()
+}
+
+/// mtime plus length. `None` mtime is a missing file (or a stat that could
+/// not report a time); length is 0 in that case.
+#[derive(PartialEq, Eq)]
+struct AuthStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+struct CachedAuth {
+    stamp: AuthStamp,
+    auth: AuthFile,
+}
+
+fn auth_stamp(path: &Path) -> AuthStamp {
+    match fs::metadata(path) {
+        Ok(meta) => AuthStamp {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        },
+        Err(_) => AuthStamp {
+            modified: None,
+            len: 0,
+        },
+    }
+}
+
+static AUTH_CACHE: std::sync::RwLock<Option<CachedAuth>> = std::sync::RwLock::new(None);
+
+/// Drop the cached `auth.json` parse so the next [`AuthFile::load_cached`]
+/// rereads the file. Called whenever Argos itself writes config files.
+pub fn invalidate_auth_cache() {
+    *AUTH_CACHE.write().unwrap_or_else(|err| err.into_inner()) = None;
+}
+
+/// Clears the auth cache when dropped, so a write path invalidates it on
+/// every exit, including errors and rollbacks.
+pub(crate) struct AuthCacheReset;
+
+impl Drop for AuthCacheReset {
+    fn drop(&mut self) {
+        invalidate_auth_cache();
+    }
 }
 
 impl AuthFile {
@@ -137,6 +182,34 @@ impl AuthFile {
         Self::load_from(&auth_path())
     }
 
+    /// [`crate::events::redact`] calls this on every event. The parsed file is
+    /// reused until `auth.json`'s mtime or length changes or Argos writes a
+    /// config file itself ([`invalidate_auth_cache`]); a stamp without an mtime
+    /// (including a missing file) always rereads. A legacy migration rewrites
+    /// the file, so the cache is filled from a stat taken after the load.
+    pub fn load_cached() -> Result<Self> {
+        let path = auth_path();
+        let stamp = auth_stamp(&path);
+        {
+            let guard = AUTH_CACHE.read().unwrap_or_else(|err| err.into_inner());
+            if let Some(hit) = guard.as_ref() {
+                // No mtime means the stamp cannot tell a rewrite apart:
+                // treat it as a miss.
+                if stamp.modified.is_some() && hit.stamp == stamp {
+                    return Ok(hit.auth.clone());
+                }
+            }
+        }
+        let auth = Self::load_from(&path)?;
+        let stamp = auth_stamp(&path);
+        let mut guard = AUTH_CACHE.write().unwrap_or_else(|err| err.into_inner());
+        *guard = Some(CachedAuth {
+            stamp,
+            auth: auth.clone(),
+        });
+        Ok(auth)
+    }
+
     /// Public staged loader. Reads an auth document from `path`, migrating the
     /// legacy `research` / `gmail` slots away; the migration rewrite itself goes
     /// through the commit store's secure primitive.
@@ -148,10 +221,11 @@ impl AuthFile {
         if raw.trim().is_empty() {
             return Ok(Self::default());
         }
-        let mut auth: Self = serde_json::from_str(&raw)?;
+        let value: serde_json::Value = serde_json::from_str(&raw)?;
+        let legacy = value.get("research").is_some() || value.get("gmail").is_some();
+        let mut auth: Self = serde_json::from_value(value)?;
         auth.drop_removed_providers();
-        let legacy: serde_json::Value = serde_json::from_str(&raw)?;
-        if legacy.get("research").is_some() || legacy.get("gmail").is_some() {
+        if legacy {
             auth.save_to(path)?;
         }
         Ok(auth)

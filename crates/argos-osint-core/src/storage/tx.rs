@@ -14,6 +14,7 @@
 //! a closure that can run more than once.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +26,43 @@ use super::error;
 
 /// One open transaction, shared with the body for the length of one attempt.
 pub type Tx = Arc<Transaction<Any>>;
+
+/// Debug counter of SurrealDB round trips for the perf-time tests of
+/// `.planning/2026-10-24-rust-performance-and-scalability-audit` (P0-lite).
+///
+/// Two increment sites, both counted on issue — before the `await` — so a
+/// statement batch counts even if it then errors:
+///
+/// - one count per transaction attempt executed through [`run_tx`]: an
+///   attempt is a `BEGIN` → statement batches → `COMMIT` sequence, and a
+///   conflicted attempt that re-runs its whole body counts again, so the
+///   counter reflects retried work;
+/// - one count per statement batch executed through `storage::jobs::run` or
+///   through `storage::topology`'s `stmt` helper.
+///
+/// Coverage is exactly: all `run_tx` attempts, all `jobs::run` batches and
+/// all topology statement batches. Residual paths that are NOT counted: direct
+/// `Tx::query(…)` sites in modules not routed through `jobs::run`
+/// (`store_bridge.rs`, `derivations.rs`, `entities.rs`,
+/// `neighborhood_brief.rs`, `jobs_store.rs`, `investigation.rs`,
+/// `atlas_work.rs`, `recon_extract.rs`, `outbox.rs`, `brief_publish.rs`,
+/// `refresh_exec.rs`, …) and direct non-tx `db.query(…)` schema/commands
+/// calls.
+///
+/// Relaxed ordering throughout: this is diagnostics, never a barrier.
+pub static QUERY_ROUND_TRIPS: AtomicU64 = AtomicU64::new(0);
+
+/// Current value of [`QUERY_ROUND_TRIPS`].
+#[inline]
+pub fn query_round_trips() -> u64 {
+    QUERY_ROUND_TRIPS.load(Ordering::Relaxed)
+}
+
+/// Reset [`QUERY_ROUND_TRIPS`] to 0, bracketing one measured section.
+#[inline]
+pub fn reset_query_round_trips() {
+    QUERY_ROUND_TRIPS.store(0, Ordering::Relaxed);
+}
 
 /// Retry limits for [`run_tx`].
 #[derive(Debug, Clone, Copy)]
@@ -133,6 +171,7 @@ where
             tokio::time::sleep(backoff(policy, attempt)).await;
         }
         let tx: Tx = Arc::new(db.clone().begin().await.map_err(TxError::from)?);
+        QUERY_ROUND_TRIPS.fetch_add(1, Ordering::Relaxed);
         let result = body(tx.clone()).await;
         let tx = Arc::try_unwrap(tx)
             .unwrap_or_else(|_| panic!("run_tx body kept a transaction handle past its attempt"));

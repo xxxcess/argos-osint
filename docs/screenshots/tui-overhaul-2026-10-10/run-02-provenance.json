@@ -3,7 +3,7 @@
   "capture_status": "complete",
   "git_head": "864bffbe65170a0cde43fe979db5a656d2410ac7",
   "tracked_diff_sha256": "31a05d0d36c53972c051fbd550c105ee2931e03ec9903310dc9b7c701c7e1724",
-  "git_status": "M .opencode/agents/ecc-edit.md\n M .opencode/agents/ecc-planner.md\n M .opencode/agents/ecc-reviewer.md\n M .opencode/skills/argos-implement/SKILL.md\n M .opencode/skills/argos-plan/SKILL.md\n M .opencode/skills/argos-tui-verify/SKILL.md\n M AGENTS.md\n M Cargo.lock\n M Cargo.toml\n M crates/argos-osint-bin/Cargo.toml\n M crates/argos-osint-bin/src/tui/app.rs\n M crates/argos-osint-bin/src/tui/commands.rs\n M crates/argos-osint-bin/src/tui/components.rs\n M crates/argos-osint-bin/src/tui/mod.rs\n M crates/argos-osint-bin/src/tui/profile.rs\n M crates/argos-osint-bin/src/tui/profile_config.rs\n M crates/argos-osint-bin/src/tui/profile_layout.rs\n M crates/argos-osint-bin/src/tui/ui.rs\n M docs/README.md\n M docs/profile-analytics-dashboard.md\n M docs/tui-components.md\n M docs/tui-design-spec.md\n M docs/ui-interaction-audit.md\n M docs/usage.md\n M graphify-out/GRAPH_REPORT.md\n M graphify-out/graph.json\n M graphify-out/manifest.json\n?? crates/argos-osint-bin/src/tui/article_image.rs\n?? crates/argos-osint-bin/src/tui/tool_catalog.rs\n?? docs/tui-overhaul-verification-2026-10-10.md",
+  "git_status": "M .opencode/agents/ecc-edit.md\n M .opencode/agents/ecc-planner.md\n M .opencode/agents/ecc-reviewer.md\n M .opencode/skills/argos-implement/SKILL.md\n M .opencode/skills/argos-plan/SKILL.md\n M .opencode/skills/argos-tui-verify/SKILL.md\n M AGENTS.md\n M Cargo.lock\n M Cargo.toml\n M crates/argos-osint-bin/Cargo.toml\n M crates/argos-osint-bin/src/tui/app.rs\n M crates/argos-osint-bin/src/tui/commands.rs\n M crates/argos-osint-bin/src/tui/components.rs\n M crates/argos-osint-bin/src/tui/mod.rs\n M crates/argos-osint-bin/src/tui/profile.rs\n M crates/argos-osint-bin/src/tui/profile_config.rs\n M crates/argos-osint-bin/src/tui/profile_layout.rs\n M crates/argos-osint-bin/src/tui/ui.rs\n M docs/README.md\n M docs/profile-analytics-dashboard.md\n M docs/tui-components.md\n M docs/tui-design-spec.md\n M docs/ui-interaction-audit.md\n M docs/usage.md\n?? crates/argos-osint-bin/src/tui/article_image.rs\n?? crates/argos-osint-bin/src/tui/tool_catalog.rs\n?? docs/tui-overhaul-verification-2026-10-10.md",
   "command": [
     "cargo",
     "test",
@@ -233,17 +233,7 @@
     ".opencode/skills/ecc-plan/SKILL.md": "bcb9d7eb872dc914966c22ec030b5fed62304b74312c8c33877a6187985f4dec",
     ".opencode/skills/ecc-review/SKILL.md": "812344b5bcdc6bb2ecf999b250d665f260a85ee1b6652e0c8fbf0307c3456a47",
     ".opencode/skills/ecc-verify/SKILL.md": "632cbe488202ba9da6ab456769cf32d645d497677162d410ae2cd766679f0b4c",
-    ".opencode/skills/graphify/SKILL.md": "aed405243260a7de8887aa1b8b1f85ea13203d9958888fc0324daff8a60d3a59",
-    ".opencode/skills/graphify/references/add-watch.md": "1e77351815547334c7e030f018dba513b303d397bf73d11fac47df03ace3b3f4",
-    ".opencode/skills/graphify/references/exports.md": "ee47fae477f106d8aed38798c58493b5a7f060a0d9d2581ce6132302827bc14b",
-    ".opencode/skills/graphify/references/extraction-spec.md": "f72a6d2dfa67446f06f27a8f0053af1adc8d53b02e393c8472045f6740c6183e",
-    ".opencode/skills/graphify/references/github-and-merge.md": "e5ebd90c7686f50363ff7a535556bc2f596d4c47ec1e6c8b95e11e36a0dfea2b",
-    ".opencode/skills/graphify/references/hooks.md": "b9a4e9f66813c6fc720589f1071d1a03c95756ab7101447e14e57291fe7844e5",
-    ".opencode/skills/graphify/references/query.md": "e563ddcb1e155aa230f107e5ef9380bc1249c5cd8241128de7ed8a7bd9c20cf5",
-    ".opencode/skills/graphify/references/transcribe.md": "676a1e39aa6d43cdfcc416ec56616e36f7bad74066a82bd33a9485515b9a865c",
-    ".opencode/skills/graphify/references/update.md": "661f559b3ff4f3db7ba47bc2ba1c7e19f1c1d66a36f647e49221eecb174f2228",
     ".opencode/tests/agent-cargo.test.mjs": "27a26d10d0e6b900c983e9d72529bfde0a23cfe32d10d8a732c3f31b1543e95a",
-    ".opencode/tests/graphify.test.mjs": "3d900d41d73dd4d1f40d60b0f35dcdda46ccfe38c318cc1c88630b320adbdb18",
     ".opencode/tests/gsd-v2.test.mjs": "a0440532388c4a361506d0256318f5fe778745e16032b8b754f48c6ad44d24a2",
     ".opencode/tests/tools-registry.test.mjs": "7cc17db61d985507377d7439eaa833f3c5988624657a77b31e09fb8e69bf0b8f",
     ".opencode/tests/tui-review.test.mjs": "06eb050e7db9f036b419d437959698fc4f3e48c55fbda5ce7cefd3e202175529"
@@ -327,5 +317,6 @@
     "recon-transcript-120x40.png",
     "overlay-fallback-60x18.png"
   ],
-  "original_artifact_count": 162
+  "original_artifact_count": 162,
+  "provenance_cleanup": "Retired code-index tooling entries were removed on 2026-10-24; capture results and other source hashes are unchanged."
 }

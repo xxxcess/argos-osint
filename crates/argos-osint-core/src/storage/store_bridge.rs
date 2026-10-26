@@ -1025,16 +1025,31 @@ pub fn memory_article_endpoints(
 
 /// `(run, article, url)` for every stored article with a URL.
 pub fn article_urls() -> Result<Vec<(String, String, String)>> {
+    article_urls_matching(None)
+}
+
+/// `(run, article, url)` for stored articles with a URL.
+///
+/// `host` restricts the scan to URLs that contain that host (already
+/// lowercased). `None` reads every non-empty URL. Callers still compare the
+/// canonical URL in Rust; the host clause only drops other hosts before the
+/// rows leave the database.
+pub fn article_urls_matching(host: Option<&str>) -> Result<Vec<(String, String, String)>> {
     #[derive(SurrealValue)]
     struct UrlRow {
         run_id: String,
         article_id: String,
         url: String,
     }
+    let host = host.unwrap_or("").to_string();
     let rows: Vec<UrlRow> = runtime::blocking(|repo| async move {
         let mut r = repo
             .db()
-            .query("SELECT run_id, article_id, url FROM atlas_article WHERE url != ''")
+            .query(
+                "SELECT run_id, article_id, url FROM atlas_article \
+                 WHERE url != '' AND ($host = '' OR string::lowercase(url) CONTAINS $host)",
+            )
+            .bind(("host", host))
             .await?
             .check()?;
         Ok(r.take(0usize)?)

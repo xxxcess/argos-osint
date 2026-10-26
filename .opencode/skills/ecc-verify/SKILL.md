@@ -2,14 +2,9 @@
 name: ecc-verify
 description: Verify Argos changes in the repository CI order.
 ---
-Run `cargo fmt --all --check`, then `python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked --no-default-features -- -D warnings`, then `python3 scripts/agent_cargo.py test --workspace --locked --no-default-features`. Keep `ARGOS_EMBED` unset. Do not pass `--features lancedb`. After code changes, run `graphify update .`. Report each result and changed graph artifacts.
 
-Profile verification follows `docs/profile-analytics-dashboard.md`: all 20 unique primary IDs and per-app counts, scales/denominators/units, unknown/overflow capacity, missing/low-N lines, stable colors, Unicode/no wrapping, independent scroll/focus restoration, mouse parity and System/Configs. Render actual terminal fixtures with `scripts/render_tui_cells.py` at 160×50, 120×40, 100×32, 80×24, 60×18 and too-small/empty/stale. Compare Summary/Recon reference composition when images are available and explicitly report missing references or unverified live behavior. Acceptance instructions are not completed checks.
+Follow `.opencode/agents/tester.md`. In the combined integration tree run `scripts/local_matrix.sh --storage embedded` with ARGOS_EMBED unset. Feature worktrees edit/format only; server is CI-only. Respect the full-gate cap (normally 1–2, max 3). After architect-directed fixes, target `python3 scripts/agent_cargo.py check --workspace --all-targets --locked` and failing tests before the final gate; preserve embedded defaults.
 
-TUI process and artifact retention: `docs/tui-verification.md` / `argos-tui-verify`. The parent owns capture and image/action/metric verification; editors remain formatting-only.
+TUI: use argos-tui-verify and `docs/wiki/code/tui-verification.md`; Profile adds `docs/wiki/code/profile-analytics-dashboard.md`. Report actual image/interaction/metric evidence separately. Refresh affected wiki routes/tags/diagrams after code edits.
 
-For commit/release/configuration changes, run `node scripts/release_check.mjs versions` and the relevant offline Node tests (`node --test .opencode/tests/*.test.mjs`). Validate prepared messages with `node scripts/release_check.mjs message --file <path>`. These checks complement the Rust/TUI gates; see `docs/versioning.md`.
-
-Follow `docs/planning-artifacts.md` when recording acceptance: curate actual results, revision, reproducible commands and limitations; keep raw logs/captures local. Git ignore policy is exercised by `.opencode/tests/planning-artifacts.test.mjs`.
-
-For architectural/conceptual shifts, check relevant docs and diagrams against final code using `docs/conventions.md#architecture-and-concepts`, including HTML/SVG consistency and links. Report updated paths and actual checks, or a concrete reason no figure is affected; graphify output is separate evidence.
+Config/commit/release changes: run relevant `node --test .opencode/tests/*.test.mjs`, release `versions`, and prepared-message checks. Check affected docs/diagrams against final behavior. Record commands, results and limitations under `docs/wiki/code/planning-artifacts.md`; planned or skipped checks are not passes.

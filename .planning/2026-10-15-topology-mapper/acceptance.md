@@ -1,5 +1,7 @@
 # Topology mapper acceptance
 
+> Maintenance note (2026-10-24): retired code-index tooling notes were removed; other recorded results are unchanged.
+
 Baseline: `78dea7c`. The user approved the Graph first demo and authorized
 production implementation. The working-tree change implements its canvas,
 inspector, relationship list, compact pages, real scoped depth-two data and exact
@@ -18,8 +20,8 @@ core 1010, integration 3; 18 expected ignored, doc tests 0. Two preexisting leas
 timing failures in an earlier parallel run passed isolated reruns and the final
 full suite, without changes to those tests. All 126 final selected TestBackend
 PNGs received image review. Capture assertions and screenshot-tooling regression
-passed. Final source/artifact hashes, diagram XML/HTML-SVG parity, Graphify update
-and whitespace checks passed; Graphify retains its existing SQL-parser warnings.
+passed. Final source/artifact hashes, diagram XML/HTML-SVG parity
+and whitespace checks passed.
 
 Native terminal/provider behavior, default-feature LanceDB and MiniLM are outside
 the exercised checks. Crowded maps pan; minimum 60×20 terminal abbreviates labels

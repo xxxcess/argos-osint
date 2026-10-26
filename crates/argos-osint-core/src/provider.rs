@@ -1612,10 +1612,10 @@ pub(crate) async fn decide_with_dispatch(
     questions: &Value,
     on_dispatch: impl FnOnce(),
 ) -> Result<DecisionsResponse> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(45))
-        .build()
-        .context("http client")?;
+    let client = crate::http_client::client(
+        crate::http_client::ClientKey::new().timeout(Duration::from_secs(45)),
+    )
+    .context("http client")?;
     let caps = crate::provider_capabilities::for_secret(secret);
     let compiled = crate::provider_adapters::compile_decisions(secret, state, questions, &caps);
     let url = compiled.endpoint.clone();
@@ -2098,10 +2098,10 @@ pub async fn list_models(secret: &ProviderSecret) -> Result<Vec<String>> {
 }
 
 fn http() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()
-        .context("http client")
+    crate::http_client::client(
+        crate::http_client::ClientKey::new().timeout(Duration::from_secs(120)),
+    )
+    .context("http client")
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -130,6 +130,7 @@ pub(crate) async fn run(
     query: surrealdb::method::Query<'_, Any>,
 ) -> Result<IndexedResults, TxError> {
     let _ = tx;
+    super::tx::QUERY_ROUND_TRIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(query.await?.check()?)
 }
 
@@ -625,7 +626,11 @@ async fn claim_in(
         if candidates.is_empty() {
             break;
         }
-        for c in &claim_order(candidates, slot) {
+        let ordered = claim_order(candidates, slot);
+        // A candidate that cannot be claimed (an Intel brief already running
+        // in its job, or a lost UPDATE race) is skipped and the scan keeps
+        // paging, so one blocked row never hides eligible work behind it.
+        for c in ordered.iter() {
             if c.pool == POOL_INTEL_BRIEF {
                 // A dependent stage runs alone in its job; independent roots
                 // run together (CLAIM_ELIGIBLE parity).

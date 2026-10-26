@@ -12,5 +12,5 @@
 <rect x="296" y="228" width="232" height="80" rx="6" fill="#fff" stroke="#7a8399"/><text x="312" y="256" font-size="16">Claims → readiness</text><text x="312" y="280" font-size="12">Then Synthesis; checkpoints reused</text>
 <rect x="32" y="228" width="200" height="80" rx="6" fill="#fff" stroke="#7a8399"/><text x="48" y="256" font-size="16">Validate + publish</text><text x="48" y="280" font-size="12">Generation / revisions / lease</text>
 <rect x="592" y="344" width="240" height="64" rx="6" fill="#fff" stroke="#7a8399"/><text x="608" y="369" font-size="16">Native / model fallback</text><text x="608" y="392" font-size="12">Full mandatory prose stays retained</text>
-<text x="440" y="356" font-size="12" fill="#4f5d75">failure</text><text x="32" y="448" font-size="13" fill="#4f5d75">Schema 29: immutable sources → assessed derivations → atomic owner head; shared evidence survives deletion.</text>
+<text x="440" y="356" font-size="12" fill="#4f5d75">failure</text><text x="32" y="448" font-size="13" fill="#4f5d75">Durable publication: immutable sources → assessed derivations → atomic owner head; shared evidence survives deletion.</text>
 </g></svg>

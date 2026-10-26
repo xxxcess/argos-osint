@@ -103,22 +103,24 @@ async fn put_all(repo: &Repository, e: &Embedder, rows: &[Active], generation: i
         let vectors = e
             .run(chunk.iter().map(|r| r.text.clone()).collect())
             .await?;
-        for (row, v) in chunk.iter().zip(vectors) {
-            let revision = memory_revision(&row.text);
-            embeddings::put(
-                repo.db(),
-                &Embedding {
-                    key: &row.id,
-                    kind: &row.memory_kind,
-                    generation,
-                    revision: &revision,
-                    model: &e.model,
-                    embedding: &v,
-                },
-            )
-            .await
-            .map_err(|err| anyhow!("embedding {}: {err}", row.id))?;
-        }
+        let revisions: Vec<String> = chunk.iter().map(|r| memory_revision(&r.text)).collect();
+        // One embed batch in, one chunked write out: `put_multi` commits the
+        // whole chunk in a single transaction (row failures keep the
+        // `embedding {id}: {err}` shape the per-row loop produced).
+        let batch: Vec<Embedding<'_>> = chunk
+            .iter()
+            .zip(&revisions)
+            .zip(&vectors)
+            .map(|((row, revision), vector)| Embedding {
+                key: &row.id,
+                kind: &row.memory_kind,
+                generation,
+                revision: revision.as_str(),
+                model: &e.model,
+                embedding: vector.as_slice(),
+            })
+            .collect();
+        embeddings::put_multi(repo.db(), &batch).await?;
     }
     let indexed: Vec<IndexedRow> = rows
         .iter()
@@ -176,25 +178,44 @@ pub async fn reindex(repo: &Repository, e: &Embedder) -> Result<ReindexReport> {
 /// for this embedder's model (post-commit, after `add_memory`). A memory
 /// that is gone or inactive is skipped.
 pub async fn index_new(repo: &Repository, e: &Embedder, ids: &[String]) -> Result<usize> {
+    Ok(index_new_batch(repo, e, ids)
+        .await?
+        .iter()
+        .filter(|applied| **applied)
+        .count())
+}
+
+/// [`index_new`] in batches: one `Embedder::run` per 32 texts and one
+/// `put_multi` per batch, so a caller with many ids pays one transaction per
+/// 32 rows instead of one per row. Returns, in `ids` order, whether each id
+/// was written (false: the memory is gone or inactive, or no generation
+/// serves this embedder's model).
+pub async fn index_new_batch(repo: &Repository, e: &Embedder, ids: &[String]) -> Result<Vec<bool>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
     let Some(s) = state(repo).await? else {
-        return Ok(0);
+        return Ok(vec![false; ids.len()]);
     };
     if s.model != e.model {
-        return Ok(0);
+        return Ok(vec![false; ids.len()]);
     }
-    let ids: Vec<_> = ids
+    let rids: Vec<_> = ids
         .iter()
         .map(|id| super::jobs::rid("memory", id))
         .collect();
     let mut r = repo
         .db()
         .query("SELECT meta::id(id) AS id, text, memory_kind FROM $ids WHERE lifecycle = 'active'")
-        .bind(("ids", ids))
+        .bind(("ids", rids))
         .await?
         .check()?;
     let rows: Vec<Active> = r.take(0usize)?;
     put_all(repo, e, &rows, s.generation).await?;
-    Ok(rows.len())
+    // `meta::id(id)` yields the plain record key, the same string the caller
+    // passed (and the embedding key), so membership answers per id.
+    let applied: std::collections::HashSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    Ok(ids.iter().map(|id| applied.contains(id.as_str())).collect())
 }
 
 /// The query vector for recall: Some only when a generation is served for

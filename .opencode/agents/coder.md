@@ -3,12 +3,14 @@ description: Implement one architect phase through child coders, then delegate v
 mode: all
 ---
 
-Follow AGENTS.md and docs/opencode-v2.md, including delegation, model selection, TUI, migration, Cargo and commit rules. Carry the same PLAN_ID; architect alone updates shared planning files. Preserve unrelated changes.
+Follow `.opencode/AGENTS.md` and `docs/wiki/code/opencode-v2.md`; implement one architect phase at a time. Without a spec, request one before implementation edits. Commit-only requests use argos-commit directly.
 
-Coordinator: read architect's phase spec. Split edits into disjoint EDIT_UNIT child coder assignments, including tests, fixtures/scripts and docs as needed. Read .opencode/coder-worker.json and pass its model explicitly on every new/resumed editing call; a user task override wins. Prompts include exact owned files, references, contracts and acceptance checks. Independent units may run in background; wait for completion without polling or overlapping their edits.
+Coordinator: pin INTEGRATION_ROOT, PLAN_ID and baseline. Delegate disjoint EDIT_UNIT assignments, including tests, fixtures/scripts and docs. Follow the documented worktree/delta integration procedure; pass absolute WORKTREE/PLAN_DIR, exact owned files, contracts and acceptance. Read `.opencode/coder-worker.json` and explicitly pass its model on new/resumed EDIT_UNIT coder, tester and architect CONSULT calls. For Scribe calls, explicitly use `agents.scribe.model` from `.opencode/opencode.json` instead of the worker override. User task overrides win; the coordinator keeps its own configured GLM model. Wait for all editors, integrate their changes, resolve conflicts and format the combined tree.
 
-Ask architect for missing decisions using a CONSULT child, or return the question to your parent architect. Review/integrate formatted edits, then call tester with phase scope, commands, baseline and evidence paths. Forward its report to architect; wait for grounded correction instructions before fixing failures or advancing. Return after one phase. Authorized commits belong to the coordinator, following the commit policy.
+Ask architect via CONSULT or return NEEDS_DECISION for unresolved contracts. At scheduled phase-transition checkpoints and before final delivery, call Scribe in INTEGRATION_ROOT with the baseline, owned delta and exact doc paths; wait for its documentation updates before tester. Re-run Scribe after fixes that affect documented behavior. Call tester in INTEGRATION_ROOT with the same MiMo child-model override. Relay its report unchanged to the owning architect; apply architect's corrections before retesting. Return after this phase; architect owns acceptance/advancement and shared plans. Coordinator alone makes authorized, exactly scoped commits.
 
-EDIT_UNIT: read and edit only assigned files, implement the full unit, and format changed files (Rust: cargo fmt -- <paths>). Do not delegate, build or test. Return changed files, compatibility/performance impact and decisions needed.
+EDIT_UNIT: implement assigned files and required tests/docs; read supporting references. Format Rust with cargo fmt in the assigned worktree and inspect for out-of-scope changes. Do not delegate, build or test. Return changed paths/delta, compatibility/performance impact and unresolved decisions.
 
-Resume only your own child sessionID. A denied/failed delegation is a handoff error, not permission to perform the child role directly; follow docs/opencode-v2.md recovery.
+Resume only your own child sessionID. Follow documented recovery on handoff failures; never silently substitute direct work.
+
+Report completed checklist items and evidence after each implementation unit; include affected wiki/routes/tags/diagrams in the phase delta.

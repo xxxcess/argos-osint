@@ -1,45 +1,10 @@
-# Argos OSINT — Agent Orientation
+# Argos OSINT — Agent orientation
 
-Rust OSINT workbench (CLI + TUI) with Recon, Intel, Atlas and Brain pipelines, storing state in SurrealDB.
+Rust OSINT CLI/TUI: Recon, Intel, Atlas and Brain, backed by SurrealDB.
 
-## Repo map
-
-- `crates/argos-osint-core/` — OSINT, Recon, Brain, persistence. Storage: `src/storage/`. Storage contract tests: `tests/storage_*.rs` (shared harness `tests/support/`). Tool bindings: `src/recon/investigation/tool_io.rs`; provider adapters: `src/osint/providers.rs`.
-- `crates/argos-osint-bin/` — CLI/TUI (`src/tui/`).
-- `scripts/` — `agent_cargo.py` (isolated agent builds), `local_matrix.sh`, `test_surreal.py`, `release_check.mjs`, `tui_review.py`.
-- `.github/workflows/` — CI, commit policy, Release Please. Owned by Code Architect. See [docs/ci.md](docs/ci.md).
-
-## Where to look first
-
-- [docs/README.md](docs/README.md) index; [architecture](docs/architecture.md), [concepts](docs/concepts.md), [providers](docs/providers.md), [usage](docs/usage.md), [conventions](docs/conventions.md), [versioning](docs/versioning.md), [diagrams](docs/diagrams.md).
-- `.planning/<date-slug>/` — active designs; SurrealDB migration is `.planning/2026-10-22-surrealdb/` (design.md, acceptance.md).
-- `.opencode/skills/` — `argos-plan`, `argos-implement`, `argos-commit`, `argos-tui-verify`, `ecc-*`, `graphify`. Tool allowlist: `.opencode/opencode.json`; see [opencode-v2.md](docs/opencode-v2.md). OpenCode roles: `architect` (default; audits/plans), coordinator `coder` (delegates disjoint EDIT_UNIT children, owns authorized commits) and `tester`; nesting depth 3, leaf modes never delegate.
-- If `graphify-out/graph.json` exists, start repo questions with `graphify query` (then `graphify-out/wiki/index.md` or `GRAPH_REPORT.md`).
-- TUI work: [tui-design-spec](docs/tui-design-spec.md), [tui-components](docs/tui-components.md), [tui-verification](docs/tui-verification.md) and the `argos-tui-verify` skill; Profile work also [profile-analytics-dashboard](docs/profile-analytics-dashboard.md). Capture with `scripts/tui_review.py`, scoped to affected views/sizes, and actually inspect the PNGs.
-
-## Build and test
-
-Rust 1.95.0 pinned. Agents always build through `python3 scripts/agent_cargo.py … --locked` (artifacts in `target/agents`; `target/debug` is the user's), with `ARGOS_EMBED` unset. `cargo fmt` runs directly.
-
-```sh
-scripts/local_matrix.sh --storage embedded   # fmt → clippy -D warnings → cargo test --workspace → test_surreal.py --mode embedded
-```
-
-That is the only leg agents run locally; the `server` leg runs in CI only ([docs/ci.md](docs/ci.md)). Serialize Cargo jobs sharing `target/agents`; never delete locks or kill unrelated Cargo processes (diagnose with `lsof -nP target/debug/.cargo-lock`). MiniLM tests are `#[ignore]` and need `ARGOS_EMBED=1`.
-
-## Storage facts
-
-- Default features `embedded,nlp`: embedded SurrealDB (RocksDB, in-process) under `<ARGOS_HOME>/storage/surreal`; `ARGOS_HOME` defaults to `~/.argos`.
-- Server mode is opt-in: `--no-default-features --features server,nlp`, selected by `argos storage init --mode server` or `ARGOS_STORAGE_MODE=server|embedded` (env → `storage/config.json` → embedded).
-- Storage is SurrealDB only. CI fails if `rusqlite` or `lancedb` appears in `cargo tree`.
-- Storage tests pick their mode from `ARGOS_SURREAL_MODE` and skip without it (and without `ARGOS_SURREAL_BIN`); run them via `test_surreal.py`.
-
-## Workflow rules
-
-- **Worktrees are edit-only:** in a feature worktree run only `cargo fmt`. One combined integration tree runs the gate (`local_matrix.sh --storage embedded`).
-- **Repeat cap:** run the full gate 1–2 times, max 3. On failure fix with `cargo check --workspace --all-targets` and rerun only the failing `--test <name>`, then one full run.
-- **Commits:** Conventional Commits (`feat` minor, `fix`/`perf` patch; breaking = `!` + `BREAKING CHANGE:` footer). Check with `node scripts/release_check.mjs message --file <path>` and `… versions`. Release Please owns version bumps; never hand-bump or invent `Release-As`. Stage exact paths; preserve unrelated changes.
-- **`.github`** changes go through Code Architect.
-- **Planning:** multi-phase work uses `.planning/<YYYY-MM-DD-slug>/` (`task_plan.md`, `findings.md`, `progress.md`); see [planning-artifacts](docs/planning-artifacts.md).
-- **Scratch** lives only in `.agent-scratch/`, never in `crates/`, `docs/`, `scripts/`; never stage it.
-- **Docs:** architecture/contract changes update docs and diagrams in the same change ([conventions](docs/conventions.md#architecture-and-concepts)). Tests stay offline.
+- Start at [docs/index.md](docs/index.md): choose **concepts** for behavior or **code** for implementation; follow links before broad searches.
+- Before edits/checks, read [contributor workflow](docs/wiki/code/contributing.md) and relevant [conventions](docs/wiki/code/conventions.md). Preserve unrelated changes. `.github` changes belong to Code Architect.
+- Trace cross-cutting features with [tags](docs/wiki/tags.md): `rg -n '@tag:<slug>' docs crates`. Keep affected routes, tags, contracts and diagrams current in the same change; follow [setup/refresh wiki](docs/wiki/maintenance.md).
+- Multi-phase work uses `.planning/<YYYY-MM-DD-slug>/` and the [planning format](docs/wiki/code/planning-artifacts.md#working-format). Update phase item checkboxes as work finishes, plus evidence and Next Step; do not mark unverified work complete.
+- TUI work loads `argos-tui-verify` and follows [design](docs/wiki/code/tui-design-spec.md), [components](docs/wiki/code/tui-components.md) and [verification](docs/wiki/code/tui-verification.md). Profile also uses [analytics](docs/wiki/code/profile-analytics-dashboard.md). Inspect captured PNGs.
+- OpenCode roles/skills: [.opencode/AGENTS.md](.opencode/AGENTS.md), [workflow](docs/wiki/code/opencode-v2.md). Scratch belongs only in `.agent-scratch/`, unstaged.

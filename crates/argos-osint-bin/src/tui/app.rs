@@ -1073,6 +1073,10 @@ pub struct App {
     pub thread_states: HashMap<String, String>,
     pub messages: Vec<recon::Message>,
     pub investigation_events: Vec<argos_osint_core::investigation::InvestigationEvent>,
+    /// Monotonic revision of `investigation_events`, bumped at every mutation
+    /// site below so the frame stamp stays content-sensitive without
+    /// Debug-formatting the event list on every stamp check.
+    pub investigation_events_rev: u64,
     pub compact_pages: [usize; 9],
     pub calls: Vec<recon::Call>,
     pub thread_sel: usize,
@@ -1092,6 +1096,8 @@ pub struct App {
     pub recon_context_enabled: bool,
     /// Whether the thread draft has unsaved changes
     draft_dirty: bool,
+    /// Last edit of the Recon search field. The list reloads 250 ms later.
+    recon_search_at: Option<Instant>,
     pub scrolls: Scrolls,
     pub expanded: HashSet<String>,
     pub chat_sel: usize,
@@ -1556,6 +1562,7 @@ impl App {
             thread_states,
             messages,
             investigation_events: Vec::new(),
+            investigation_events_rev: 0,
             compact_pages: [0; 9],
             calls,
             thread_sel: 0,
@@ -1590,6 +1597,7 @@ impl App {
             esc_arm: None,
             press: None,
             draft_dirty: false,
+            recon_search_at: None,
             home_draft_dirty: false,
             // The current content of the Home draft (investigation prompt)
             home_draft: String::new(),
@@ -3737,7 +3745,10 @@ impl App {
         } else {
             self.messages.clear();
             self.calls.clear();
-            self.investigation_events.clear();
+            if !self.investigation_events.is_empty() {
+                self.investigation_events.clear();
+                self.investigation_events_rev = self.investigation_events_rev.wrapping_add(1);
+            }
             self.runs.clear();
             self.answer_memories.clear();
             self.answer_memory_summaries.clear();
@@ -5348,7 +5359,12 @@ impl App {
                 match outcome {
                     Ok(snapshot) => {
                         self.messages = snapshot.messages;
+                        let events_changed = self.investigation_events != snapshot.events;
                         self.investigation_events = snapshot.events;
+                        if events_changed {
+                            self.investigation_events_rev =
+                                self.investigation_events_rev.wrapping_add(1);
+                        }
                         self.calls = snapshot.calls;
                         self.runs = snapshot.runs;
                         self.answer_memories = snapshot.memories;
@@ -9307,6 +9323,26 @@ impl App {
         if self.focus == Target::Field(FieldId::JobsSearch) {
             self.reload_jobs();
         }
+        if self.module == Some(ModuleId::Recon) && self.focus == Target::Field(FieldId::ReconSearch)
+        {
+            self.recon_search_at = Some(Instant::now());
+        }
+    }
+
+    /// Fire a pending Recon search once it has been quiet for 250 ms, and
+    /// shorten `wait` so the event loop wakes when that quiet period ends.
+    fn poll_recon_search(&mut self, wait: Duration) -> Duration {
+        let Some(at) = self.recon_search_at else {
+            return wait;
+        };
+        let due = at + Duration::from_millis(250);
+        let now = Instant::now();
+        if now >= due {
+            self.recon_search_at = None;
+            let _ = self.refresh_threads();
+            return wait;
+        }
+        wait.min(due.saturating_duration_since(now))
     }
 
     fn open_claim_article(&mut self, run_id: &str, article_id: &str) -> Result<String> {
@@ -9447,7 +9483,10 @@ impl App {
         if self.selected_thread.as_deref() == Some(id) {
             self.selected_thread = None;
             self.messages.clear();
-            self.investigation_events.clear();
+            if !self.investigation_events.is_empty() {
+                self.investigation_events.clear();
+                self.investigation_events_rev = self.investigation_events_rev.wrapping_add(1);
+            }
             self.calls.clear();
             self.runs.clear();
             self.answer_memories.clear();
@@ -9942,12 +9981,6 @@ impl App {
             KeyCode::Tab => self.focus_next(key.modifiers.contains(KeyModifiers::SHIFT)),
             KeyCode::BackTab => self.focus_next(true),
             _ => {}
-        }
-        if matches!(key.code, KeyCode::Char(_))
-            && self.module == Some(ModuleId::Recon)
-            && self.focus == Target::Field(FieldId::ReconSearch)
-        {
-            let _ = self.refresh_threads();
         }
         if matches!(key.code, KeyCode::Char(_))
             && self.module == Some(ModuleId::Osint)
@@ -10835,6 +10868,10 @@ pub async fn run(mut app: App) -> Result<()> {
         if atlas_countdown_visible(&app) {
             wait = wait.min(until_next_second());
         }
+        wait = app.poll_recon_search(wait);
+        if app.threads_reading {
+            wait = wait.min(Duration::from_millis(80));
+        }
         if animated
             || atlas_extracting_visible(&app)
             || intel_body_loading_visible(&app)
@@ -11153,12 +11190,17 @@ fn surreal_topology(surreal: bool, _seed: &argos_osint_core::brain_topology::Top
     surreal
 }
 
-#[cfg(test)]
-mod tests {
+/// Construction helpers for the crate's integration tests, exported as
+/// `tui::testkit`. Always compiled - the frame-rebuild benchmark links
+/// this library outside `cfg(test)` - so nothing here may touch the
+/// storage runtime, the network or `ARGOS_HOME` state.
+#[doc(hidden)]
+pub mod testkit {
     use super::*;
 
-    fn app() -> App {
-        crate::test_storage::ensure();
+    /// A default [`App`] sized for a `width`-`height` terminal: the exact
+    /// field set the unit tests construct, without initializing storage.
+    pub fn app(width: u16, height: u16) -> App {
         let (provider_tx, provider_rx) = unbounded_channel();
         let (work_tx, work_rx) = unbounded_channel();
         App {
@@ -11206,6 +11248,7 @@ mod tests {
             thread_states: HashMap::new(),
             messages: Vec::new(),
             investigation_events: Vec::new(),
+            investigation_events_rev: 0,
             compact_pages: [0; 9],
             calls: Vec::new(),
             thread_sel: 0,
@@ -11237,6 +11280,7 @@ mod tests {
             esc_arm: None,
             press: None,
             draft_dirty: false,
+            recon_search_at: None,
             frame: RefCell::new(super::super::ui::FrameCache::default()),
             thread_history: Vec::new(),
             history_pos: 0,
@@ -11299,7 +11343,7 @@ mod tests {
             provider_pending: None,
             focus: Target::App(0),
             cursor: 0,
-            screen: Rect::new(0, 0, 100, 34),
+            screen: Rect::new(0, 0, width, height),
             status: String::new(),
             memories: Vec::new(),
             selected_insight: None,
@@ -11430,6 +11474,42 @@ mod tests {
             work_tx,
             work_rx,
         }
+    }
+
+    /// Open the Recon transcript so `ensure_frame` builds blocks for the
+    /// current messages. `selected_thread` stays `None` on purpose:
+    /// `can_resume_recon` blocks on the storage runtime for a selected thread.
+    pub fn show_recon_chat(app: &mut App) {
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+    }
+
+    /// Append `count` synthetic recon messages with unique ids and varied
+    /// roles, content and run ids, so the transcript has bulk to rebuild.
+    pub fn push_messages(app: &mut App, count: usize) {
+        for index in 0..count {
+            let assistant = index % 2 == 1;
+            let role = if assistant { "assistant" } else { "user" };
+            app.messages.push(recon::Message {
+                id: format!("perf-msg-{index}"),
+                thread_id: "perf-thread".into(),
+                sequence: index as i64 + 1,
+                role: role.into(),
+                content: format!("perf transcript line {index:04} synthetic bulk content"),
+                run_id: assistant.then(|| format!("perf-run-{}", index / 2)),
+                created_at: String::new(),
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> App {
+        crate::test_storage::ensure();
+        testkit::app(100, 34)
     }
 
     fn click(app: &mut App, target: Target) {
@@ -12321,19 +12401,21 @@ mod tests {
         app.recon_chat = true;
         app.expanded.insert("tool:call-s1".into());
         let body = super::super::ui::chat_blocks(&app)
-            .into_iter()
+            .iter()
             .find(|block| block.key == "tool:call-s1")
             .expect("tool row")
-            .body;
+            .body
+            .clone();
         assert!(body.contains("Full result is in Logs"));
         assert!(body.contains("cache"));
         assert!(body.contains("query: Jane Roe"));
         assert!(!body.contains("Jane Roe role"));
         let title = super::super::ui::chat_blocks(&app)
-            .into_iter()
+            .iter()
             .find(|block| block.key == "tool:call-s1")
             .expect("tool row")
-            .title;
+            .title
+            .clone();
         assert!(title.contains("query=Jane Roe"), "{title}");
         assert!(title.contains("E1"), "{title}");
         app.chat_sel = 0;

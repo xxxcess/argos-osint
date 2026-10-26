@@ -2778,8 +2778,10 @@ impl Executor {
             ["www.sec.gov", "index.commoncrawl.org"].contains(&host),
             "metadata host is not allowed"
         );
-        let _permit = self.global.acquire().await?;
+        // Host pacing is a local schedule wait, not wire work: it runs without a
+        // permit so a slow schedule never occupies one of the four global slots.
         self.pace_host(host, Duration::from_secs(1)).await;
+        let _permit = self.global.acquire().await?;
         let request = self
             .client
             .get(url)
@@ -2854,10 +2856,11 @@ impl Executor {
         }
         if id == holehe::TOOL_ID {
             let lookup_input: holehe::LookupInput = serde_json::from_value(inputs.clone())?;
-            let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(holehe::REQUEST_TIMEOUT)
-                .build()?;
+            let client = crate::http_client::client(
+                crate::http_client::ClientKey::new()
+                    .no_redirect()
+                    .timeout(holehe::REQUEST_TIMEOUT),
+            )?;
             let cancel = std::sync::atomic::AtomicBool::new(false);
             let observation = holehe::lookup(&client, lookup_input, user_agent, &cancel).await?;
             let status = holehe::observation_status(&observation);
@@ -2881,10 +2884,11 @@ impl Executor {
         }
         if id == "whatsmyname_lookup" {
             let lookup_input: whatsmyname::LookupInput = serde_json::from_value(inputs.clone())?;
-            let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(whatsmyname::REQUEST_TIMEOUT)
-                .build()?;
+            let client = crate::http_client::client(
+                crate::http_client::ClientKey::new()
+                    .no_redirect()
+                    .timeout(whatsmyname::REQUEST_TIMEOUT),
+            )?;
             let observation = whatsmyname::lookup(&client, lookup_input, user_agent).await?;
             let status = if observation.coverage.found > 0 {
                 "completed"
@@ -3014,7 +3018,10 @@ impl Executor {
                 "request host is not allowed for {id}"
             );
         }
-        let _permit = self.global.acquire().await?;
+        // Host pacing is awaited without a permit: it needs no visit slot, and holding
+        // one of the four global permits across the sleep would collapse global
+        // concurrency to whatever one slow host allows. The permit is taken inside the
+        // loop, immediately around each wire send.
         let interval = host_interval(id);
         #[cfg(test)]
         let (url_override, interval) = match test_base(&host) {
@@ -3050,7 +3057,6 @@ impl Executor {
         let cap = body_cap(id);
         loop {
             attempts += 1;
-            let sent_at = crate::telemetry::Measured::start();
             let mut builder = if let Some(body) = &req.body {
                 self.client.post(url.clone()).json(body)
             } else if let Some(form) = &req.form {
@@ -3065,6 +3071,15 @@ impl Executor {
             if let Some((name, value)) = &send_credential {
                 builder = builder.header(name, value);
             }
+            // One permit per wire send, reacquired on every attempt (a redirect or a
+            // key fallback requeues through the top of the loop). It is held only for
+            // the wire exchange — the send, its response body and the telemetry
+            // recorded for it — never across a wait: the backoff and the 202 recheck
+            // drop it before sleeping, and the drop after the telemetry covers the
+            // Firecrawl polling and the SERP recovery wait. Reacquisition queues; that
+            // fairness is intended.
+            let _permit = self.global.acquire().await?;
+            let sent_at = crate::telemetry::Measured::start();
             let response =
                 tokio::time::timeout(Duration::from_secs(def.timeout_seconds), builder.send())
                     .await??;
@@ -3111,6 +3126,7 @@ impl Executor {
                     .unwrap_or(1 << attempts)
                     .min(15);
                 let jitter = Utc::now().timestamp_subsec_millis() as u64 % 250;
+                drop(_permit);
                 tokio::time::sleep(Duration::from_secs(delay) + Duration::from_millis(jitter))
                     .await;
                 continue;
@@ -3118,6 +3134,7 @@ impl Executor {
             // Hunter's verifier answers 202 while the SMTP check is still running.
             if id == "hunter_email_verifier" && response.status().as_u16() == 202 && verifying < 3 {
                 verifying += 1;
+                drop(_permit);
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
@@ -3147,6 +3164,9 @@ impl Executor {
             };
             // One wire attempt, counted separately from the logical invocation.
             note_wire_request(id, attempts, status.as_u16(), sent_at.elapsed_ms());
+            // The wire exchange is complete: release the slot before parsing, the key
+            // fallback, Firecrawl polling and the SERP recovery wait below.
+            drop(_permit);
             // A truncated SERP body is never parsed as a valid empty page
             // (spec §9 fix 6): the envelope cut mid-payload proves nothing.
             if truncated && serp.is_some() {
@@ -3400,13 +3420,22 @@ impl Executor {
             if let Some((name, value)) = credential {
                 builder = builder.header(name, value);
             }
-            let sent_at = crate::telemetry::Measured::start();
-            let Ok(response) = builder.send().await else {
+            // The 2 s poll wait above holds no permit. Take one only around this poll's
+            // send (and its telemetry), then release it before the body read below.
+            let send = {
+                let _permit = self.global.acquire().await?;
+                let sent_at = crate::telemetry::Measured::start();
+                let send = builder.send().await;
+                if let Ok(response) = &send {
+                    // Every poll is a wire request, counted separately from the POST.
+                    note_wire_request(id, polls, response.status().as_u16(), sent_at.elapsed_ms());
+                }
+                send
+            };
+            let Ok(response) = send else {
                 continue;
             };
             let code = response.status();
-            // Every poll is a wire request, counted separately from the POST.
-            note_wire_request(id, polls, code.as_u16(), sent_at.elapsed_ms());
             if code.as_u16() == 429 || code.is_server_error() {
                 continue;
             }
@@ -3437,7 +3466,11 @@ impl Executor {
         if let Some((name, value)) = credential {
             cancel = cancel.header(name, value);
         }
-        let _ = cancel.send().await;
+        {
+            // The deadline-cancel is a wire send as well: permit only for the send.
+            let _permit = self.global.acquire().await?;
+            let _ = cancel.send().await;
+        }
         if last.is_empty() {
             last = json!({"status": "partial", "data": []}).to_string();
         }

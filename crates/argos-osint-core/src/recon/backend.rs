@@ -174,6 +174,8 @@ impl ReconStore {
         dispatch!(self,
             r => crate::storage::recon_threads::new_thread(r, title).await)
     }
+    /// Live threads matching `search`, newest first. The storage read is
+    /// capped at [`crate::storage::recon_threads::LIST_LIMIT`].
     pub async fn list_threads(&self, search: &str) -> Result<Vec<Thread>> {
         dispatch!(self,
             r => crate::storage::recon_threads::list_threads(r, search).await)
@@ -440,6 +442,14 @@ impl ReconStore {
     pub async fn latest_run_state(&self, tid: &str) -> Result<Option<String>> {
         dispatch!(self,
             r => crate::storage::recon_runs::latest_run_state(r, tid).await)
+    }
+    /// Newest run state for each thread, one query (`latest_run_states`).
+    pub async fn latest_run_states(
+        &self,
+        thread_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        dispatch!(self,
+            r => crate::storage::recon_runs::latest_run_states(r, thread_ids).await)
     }
     /// Store the thread's composer draft and chat scroll.
     pub async fn save_draft(&self, tid: &str, draft: &str, scroll: i64) -> Result<()> {

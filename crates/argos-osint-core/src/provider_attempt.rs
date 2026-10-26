@@ -464,12 +464,10 @@ async fn run(
 ) -> Result<Completion, ProviderFailure> {
     use crate::provider_adapters as adapters;
     let kind = provider::effective_kind(secret);
-    let client = reqwest::Client::builder()
-        .connect_timeout(deadlines.connect)
-        .build()
-        .map_err(|e| {
-            ProviderFailure::from_error(Stage::Configuration, Category::Configuration, &e)
-        })?;
+    let client = crate::http_client::client(
+        crate::http_client::ClientKey::new().connect_timeout(deadlines.connect),
+    )
+    .map_err(|e| ProviderFailure::from_error(Stage::Configuration, Category::Configuration, &e))?;
     let caps = match admitted {
         Some(snapshot) => crate::provider_capabilities::with_observed(
             snapshot.clone(),

@@ -369,15 +369,43 @@ pub async fn pending(
     after_seq: i64,
     limit: i64,
 ) -> Result<Vec<Change>, TxError> {
-    let mut res = db
-        .query(format!(
-            "SELECT {CHANGE_FIELDS} FROM index_change \
-             WHERE state = 'pending' AND seq > $after ORDER BY seq LIMIT $n"
-        ))
-        .bind(("after", after_seq))
-        .bind(("n", limit))
-        .await?
-        .check()?;
+    pending_filtered(db, None, after_seq, limit).await
+}
+
+/// Pending changes of one `record_kind` after `after_seq`, in `seq` order.
+/// The kind filter is pushed into SQL, so rows another consumer owns never
+/// consume this caller's `limit` (or reach its loop to be filtered out).
+pub async fn pending_of_kind(
+    db: &Surreal<Any>,
+    kind: &str,
+    after_seq: i64,
+    limit: i64,
+) -> Result<Vec<Change>, TxError> {
+    pending_filtered(db, Some(kind), after_seq, limit).await
+}
+
+/// [`pending`] and [`pending_of_kind`] share one query builder; `kind` is the
+/// optional `record_kind = $kind` clause. `seq` ordering is kept either way.
+async fn pending_filtered(
+    db: &Surreal<Any>,
+    kind: Option<&str>,
+    after_seq: i64,
+    limit: i64,
+) -> Result<Vec<Change>, TxError> {
+    let sql = format!(
+        "SELECT {CHANGE_FIELDS} FROM index_change WHERE {}state = 'pending' \
+         AND seq > $after ORDER BY seq LIMIT $n",
+        if kind.is_some() {
+            "record_kind = $kind AND "
+        } else {
+            ""
+        }
+    );
+    let mut q = db.query(sql).bind(("after", after_seq)).bind(("n", limit));
+    if let Some(kind) = kind {
+        q = q.bind(("kind", kind.to_string()));
+    }
+    let mut res = q.await?.check()?;
     Ok(res.take(0)?)
 }
 
@@ -478,6 +506,96 @@ pub async fn ack(
         )
         .await?;
         Ok(Ack::Done)
+    })
+    .await
+}
+
+/// One acknowledgment inside [`ack_many`]. `work_key` is the `index_work`
+/// record key released when the row is actually updated.
+pub struct AckItem {
+    pub op_key: String,
+    pub revision: String,
+    pub generation: String,
+    pub state: String,
+    pub outcome: String,
+    pub work_key: String,
+}
+
+/// One change's ack as a SurrealQL block, same rules as [`ack`]: a row that
+/// is missing, stale, or already terminal is left alone, and the work lock
+/// is released only when this revision moves to a terminal state. `{i}`
+/// suffixes the bindings. A chunk of these is one round trip.
+const ACK_BLOCK: &str = "{
+    LET $e = (SELECT revision, generation, state FROM ONLY $r{i});
+    IF $e != NONE AND $e.revision = $rev{i} AND $e.generation = $gen{i} AND $e.state IN $active {
+        UPDATE $r{i} SET state = $state{i}, outcome = $outcome{i}, updated_at = <datetime>$now \
+            WHERE state IN $active RETURN NONE;
+        DELETE $w{i} WHERE change = $key{i} RETURN NONE;
+    };
+    RETURN NONE;
+};
+";
+
+fn ack_many_sql(n: usize) -> String {
+    let mut sql = String::new();
+    for i in 0..n {
+        sql.push_str(&ACK_BLOCK.replace("{i}", &i.to_string()));
+    }
+    sql
+}
+
+/// Acknowledge every item in one transaction. Each item keeps [`ack`]'s
+/// revision and generation check, so a stale row in the chunk does not
+/// reject the others and does not release their work locks.
+pub async fn ack_many(
+    db: &Surreal<Any>,
+    items: &[AckItem],
+    now: DateTime<Utc>,
+) -> Result<Committed<()>, TxError> {
+    if items.is_empty() {
+        return Ok(Committed {
+            value: (),
+            retries: 0,
+        });
+    }
+    for item in items {
+        if item.state != "completed" && item.state != "failed" {
+            return Err(TxError::Abort(format!("invalid ack state {}", item.state)));
+        }
+    }
+    let sql = ack_many_sql(items.len());
+    let owned: Vec<AckItem> = items
+        .iter()
+        .map(|item| AckItem {
+            op_key: item.op_key.clone(),
+            revision: item.revision.clone(),
+            generation: item.generation.clone(),
+            state: item.state.clone(),
+            outcome: item.outcome.clone(),
+            work_key: item.work_key.clone(),
+        })
+        .collect();
+    run_tx(db, RetryPolicy::default(), |tx| {
+        let sql = sql.clone();
+        let owned = &owned;
+        async move {
+            let mut q = tx
+                .query(sql)
+                .bind(("active", ACTIVE_STATES.to_vec()))
+                .bind(("now", ts(now)));
+            for (i, item) in owned.iter().enumerate() {
+                q = q
+                    .bind((format!("r{i}"), rid("index_change", &item.op_key)))
+                    .bind((format!("w{i}"), rid("index_work", &item.work_key)))
+                    .bind((format!("key{i}"), item.op_key.clone()))
+                    .bind((format!("rev{i}"), item.revision.clone()))
+                    .bind((format!("gen{i}"), item.generation.clone()))
+                    .bind((format!("state{i}"), item.state.clone()))
+                    .bind((format!("outcome{i}"), item.outcome.clone()));
+            }
+            run(&tx, q).await?;
+            Ok(())
+        }
     })
     .await
 }

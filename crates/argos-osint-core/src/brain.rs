@@ -1,3 +1,4 @@
+//! @tag:brain-memory
 //! User-centric recall for conversations in other Argos apps.
 
 use serde::{Deserialize, Serialize};

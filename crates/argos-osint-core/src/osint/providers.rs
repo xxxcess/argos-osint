@@ -1,3 +1,4 @@
+//! @tag:osint-providers
 //! Primary-provider adapters (issue #27): the SociaVault route matrix, Firecrawl site
 //! discovery, multi-page retrieval and structured extraction, and Hunter enrichment reads.
 //! Every route here is a fixed-host GET or POST built from validated inputs, like the

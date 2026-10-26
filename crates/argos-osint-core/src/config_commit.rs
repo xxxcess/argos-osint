@@ -71,6 +71,7 @@ static RELOAD_TX: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
 /// target; the parent directory is fsynced best effort so the rename is durable.
 /// The temporary file never survives an error path.
 pub fn write_secure(path: &Path, body: &str) -> Result<()> {
+    let _auth_cache = crate::secrets::AuthCacheReset;
     let dir = parent_of(path);
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let (temp, mut file) = create_sibling(dir, TEMP_PREFIX)
@@ -200,6 +201,9 @@ impl ConfigLock {
     /// and returns that error: the targets never hold a mix of revisions.
     pub fn commit_files(&self, files: &[CommitFile]) -> Result<u64> {
         validate_batch(files)?;
+        // Argos rewrote config files: drop the cached auth redaction set on
+        // every exit path (commit or rollback).
+        let _auth_cache = crate::secrets::AuthCacheReset;
         let generation = current_generation().max(self.generation) + 1;
         let mut journal = CommitJournal {
             generation,
@@ -320,6 +324,7 @@ pub fn recover_at_startup() -> RecoveryReport {
 /// had not landed is restored from its backup, or removed when there is no
 /// backup, and the journal is rewritten as `restored`.
 pub fn recover_at_startup_at(root: &Path) -> RecoveryReport {
+    let _auth_cache = crate::secrets::AuthCacheReset;
     let clean = RecoveryReport {
         state: "clean",
         generation: current_generation(),

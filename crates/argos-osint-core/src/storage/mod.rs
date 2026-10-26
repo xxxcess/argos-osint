@@ -1,3 +1,4 @@
+//! @tag:surreal-storage
 //! SurrealDB storage foundation (migration phases P0 and P1).
 //!
 //! `error` normalizes engine errors, `tx` runs bounded-retry transactions,

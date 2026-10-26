@@ -2,10 +2,19 @@
 //! (`crate::events`) and the per-thread `investigation_events` trace
 //! (`investigation::persist`), which the Recon pane reads.
 //!
-//! `argos_event` is keyed by the event id and ordered by `seq`, assigned in
-//! the write's transaction from the highest stored `seq` (a concurrent writer
-//! conflicts and retries). The highest value is read with ORDER BY/LIMIT,
-//! because `math::max` of no rows is -Infinity on a server. Messages and details are redacted and bounded
+//! `argos_event` is keyed by the event id and ordered by `seq`, allocated in
+//! the write's transaction from the `argos_event_seq` counter record
+//! (`storage::counters::next_in`, the outbox's `index_change` seq
+//! precedent): every writer increments that one record, so concurrent writers
+//! serialize on it and the loser retries the whole transaction
+//! (`counters::HOT_RECORD_POLICY`). The increment commits with the row, so a
+//! rolled-back write consumes no value; the numbers a reader misses come only
+//! from prune/clear deletions, which the old read-max allocator left
+//! non-contiguous too. Gaps are allowed: every consumer orders by `seq`
+//! (never by insert or commit order) and none requires contiguous values. When
+//! a database has no counter record yet it is seeded to the highest stored `seq`
+//! (read with ORDER BY/LIMIT, because `math::max` of no rows is -Infinity on
+//! a server). Messages and details are redacted and bounded
 //! before they are stored, as in SQLite. `investigation_event` is keyed by
 //! the event id; a rewrite of an existing id only updates its status, summary
 //! and payload, like SQLite's `ON CONFLICT(id) DO UPDATE`.
@@ -22,8 +31,9 @@ use surrealdb::engine::any::Any;
 use surrealdb::types::SurrealValue;
 use surrealdb::Surreal;
 
-use super::jobs::{rid, run};
-use super::tx::{run_tx, RetryPolicy};
+use super::counters;
+use super::jobs::{rid, run, take};
+use super::tx::{run_tx, Tx, TxError};
 use crate::events::{
     bound, new_event_id, redact, severity_rank, EventFilter, EventRow, NewEvent, Severity,
     MAX_DETAIL_CHARS, MAX_MESSAGE_CHARS,
@@ -138,8 +148,40 @@ impl From<StoredEvent> for EventRow {
     }
 }
 
+/// Counter record that orders `argos_event` rows (the outbox's
+/// `index_change` counter names itself the same way).
+const SEQ_COUNTER: &str = "argos_event_seq";
+
+/// Allocate the next event `seq` inside `tx`. A store whose counter record
+/// already exists only increments it: every writer allocates through this
+/// counter, so it is never behind the stored rows. When the record is missing
+/// (a store written before the counter, or a cleared log) it is seeded from
+/// the highest stored `seq` in the same statement, so the seed commits
+/// atomically with the event. The check is per database, not per process, so
+/// several stores opened in one process (tests, server clients) never reuse
+/// a stored `seq`. The max is read with ORDER BY/LIMIT because `math::max`
+/// of no rows is -Infinity on a server.
+async fn next_seq(tx: &Tx) -> Result<i64, TxError> {
+    let mut res = run(
+        tx,
+        tx.query(
+            "UPSERT $c SET n = (IF n = NONE {
+                 (SELECT VALUE seq FROM argos_event ORDER BY seq DESC LIMIT 1)[0] ?? 0
+             } ELSE { n }) + 1 RETURN VALUE n",
+        )
+        .bind(("c", rid("counter", SEQ_COUNTER))),
+    )
+    .await?;
+    let values: Vec<i64> = take(&mut res, 0)?;
+    values
+        .first()
+        .copied()
+        .ok_or_else(|| TxError::Abort(format!("counter {SEQ_COUNTER} returned no value")))
+}
+
 /// `events::record_event` on SurrealDB: persist one redacted event and
-/// return its id.
+/// return its id. `seq` is allocated from the [`SEQ_COUNTER`] record in the
+/// same transaction as the row, so the two commit (or roll back) together.
 pub async fn record_event(db: &Surreal<Any>, event: &NewEvent) -> Result<String> {
     let now = chrono::Utc::now();
     let id = new_event_id(now.timestamp_millis());
@@ -161,19 +203,17 @@ pub async fn record_event(db: &Surreal<Any>, event: &NewEvent) -> Result<String>
         correlation_id: event.correlation_id.clone(),
     };
     let key = id.clone();
-    run_tx(db, RetryPolicy::default(), |tx| {
+    run_tx(db, counters::HOT_RECORD_POLICY, |tx| {
         let content = content.clone();
         let key = key.clone();
         async move {
+            let mut content = content;
+            content.seq = next_seq(&tx).await?;
             run(
                 &tx,
-                tx.query(
-                    "LET $top = (SELECT VALUE seq FROM argos_event ORDER BY seq DESC LIMIT 1)[0] ?? 0;
-                     CREATE $e CONTENT $row RETURN NONE;
-                     UPDATE $e SET seq = $top + 1 RETURN NONE;",
-                )
-                .bind(("e", rid("argos_event", &key)))
-                .bind(("row", content)),
+                tx.query("CREATE $e CONTENT $row RETURN NONE")
+                    .bind(("e", rid("argos_event", &key)))
+                    .bind(("row", content)),
             )
             .await?;
             Ok(())
@@ -336,17 +376,29 @@ pub async fn event_counts(db: &Surreal<Any>) -> Result<EventCounts> {
     Ok(counts)
 }
 
+#[derive(SurrealValue)]
+struct AppCount {
+    app: String,
+    n: i64,
+}
+
 /// `jobs_view::event_apps` on SurrealDB: distinct non-empty apps, sorted,
-/// at most 32.
+/// at most 32. A `GROUP BY app` aggregate replaces the whole-table
+/// `array::distinct` + `array::sort` scan: the dedup happens in the
+/// database (one row per app, `count()` kept for the aggregate shape shared
+/// with [`event_counts`]), and the sort happens in Rust — byte order, which
+/// `array::sort` also uses for strings (UTF-8 byte order is code-point
+/// order, and neither side folds case), so the output order and contents are
+/// unchanged.
 pub async fn event_apps(db: &Surreal<Any>) -> Result<Vec<String>> {
     let mut r = db
-        .query(
-            "RETURN array::slice(array::sort(array::distinct(
-               (SELECT VALUE app FROM argos_event WHERE app != ''))), 0, 32);",
-        )
+        .query("SELECT app, count() AS n FROM argos_event WHERE app != '' GROUP BY app;")
         .await?
         .check()?;
-    let apps: Vec<String> = r.take(0)?;
+    let rows: Vec<AppCount> = r.take(0)?;
+    let mut apps: Vec<String> = rows.into_iter().map(|row| row.app).collect();
+    apps.sort();
+    apps.truncate(32);
     Ok(apps)
 }
 

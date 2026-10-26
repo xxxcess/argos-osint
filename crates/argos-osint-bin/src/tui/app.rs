@@ -12693,6 +12693,10 @@ mod tests {
             "Explain claim path",
         ))
         .expect("registered");
+        // Registration is written in the background (`spawn_ordered`); wait
+        // for both rows to land before listing, or a slow runner can render
+        // the Jobs table with only the first job.
+        crate::test_storage::drain();
         app.select(ModuleId::Jobs.index());
         assert!(app.jobs.focus_job(&app.store, &id), "listed");
         let text = buffer_text(&render(&mut app, 140, 40));
@@ -12733,12 +12737,23 @@ mod tests {
         super::super::tracked::finish(Some(summary), "summary", &Ok::<(), String>(()), None);
         crate::test_storage::drain();
         app.reload_jobs();
-        settle(&mut app, |app| {
-            app.jobs
-                .rows
-                .iter()
-                .any(|r| r.title == "Explain claim path" && r.state == "completed")
-        });
+        // Wait for both terminal states (deterministic condition, bounded
+        // deadline) rather than assuming the finishes have landed.
+        let settled = |app: &App| {
+            let done = |title: &str, state: &str| {
+                app.jobs
+                    .rows
+                    .iter()
+                    .any(|r| r.title == title && r.state == state)
+            };
+            done("Run WHOIS lookup", "cancelled") && done("Explain claim path", "completed")
+        };
+        let until = Instant::now() + Duration::from_secs(10);
+        while !settled(&app) && Instant::now() < until {
+            crate::test_storage::drain();
+            app.reload_jobs();
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let rows: HashMap<String, String> = app
             .jobs
             .rows

@@ -28,6 +28,7 @@ The maps link stable module paths rather than line numbers. Search symbols in th
 | Local Intel web/API and stack launcher | [Intel web](intel-web.md) |
 | Pipeline boundaries and data flow | [Architecture](architecture.md) |
 | Investigation execution and tool decisions | [Harness](investigation-harness.md), [decision gates](jev-decision-gates.md) |
+| React UI design, components and review | [React UI rules](react-ui.md) |
 | TUI layout and components | [Design contract](tui-design-spec.md), [component catalog](tui-components.md) |
 | Profile presentation and data | [Dashboard geometry](profile-analytics-dashboard.md), [metrics and configuration](profile-dashboard-and-search.md) |
 | Background reads and responsiveness | [Database responsiveness](tui-database-responsiveness.md) |

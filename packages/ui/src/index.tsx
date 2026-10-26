@@ -1,16 +1,23 @@
 "use client";
-import React from "react";
+import React, { useState } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
+
+// Web translation of crates/argos-osint-bin/src/tui/theme.rs.
 export const colors = {
-  bg: "#0a0f14",
-  panel: "#101820",
-  raised: "#17232d",
-  border: "#293740",
-  text: "#dce5eb",
-  muted: "#8c9da9",
-  accent: "#80d7b7",
-  danger: "#ffae94",
+  bg: "#141414",
+  panel: "#1e1e1e",
+  raised: "#303030",
+  border: "#535353",
+  text: "#e8e8e8",
+  dim: "#b5b5b5",
+  muted: "#919191",
+  accent: "#87bfff",
+  success: "#98c379",
+  warning: "#e5c07b",
+  danger: "#f08a8a",
 };
+export const fonts = { mono: "monospace", body: "Arial" };
+
 export function Label({ children }: { children: React.ReactNode }) {
   return <Text style={s.label}>{children}</Text>;
 }
@@ -21,25 +28,42 @@ export function Button({
   children,
   onPress,
   active,
-  disabled,
+  disabled = false,
   label,
+  variant = "default",
 }: {
   children: React.ReactNode;
   onPress: () => void;
   active?: boolean;
   disabled?: boolean;
   label?: string;
+  variant?: "default" | "quiet";
 }) {
+  const [hovered, setHovered] = useState(false);
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={label}
+      accessibilityState={{ disabled }}
+      aria-pressed={active}
       disabled={disabled}
       onPress={onPress}
-      style={[s.button, active && s.active, disabled && { opacity: 0.4 }]}
+      onHoverIn={() => setHovered(true)}
+      onHoverOut={() => setHovered(false)}
+      style={({ pressed }) => [
+        s.button,
+        variant === "quiet" && s.quiet,
+        !disabled && (hovered || pressed) && s.hovered,
+        active && s.active,
+        disabled && s.disabled,
+      ]}
     >
       <Text
-        style={{ color: active ? colors.accent : colors.text, fontSize: 13 }}
+        style={[
+          s.buttonText,
+          variant === "quiet" && s.quietText,
+          active && s.activeText,
+        ]}
       >
         {children}
       </Text>
@@ -55,7 +79,11 @@ export function Panel({
 }) {
   return (
     <View style={s.panel}>
-      {title && <Label>{title}</Label>}
+      {title ? (
+        <Text accessibilityRole="header" style={s.panelTitle}>
+          {title}
+        </Text>
+      ) : null}
       {children}
     </View>
   );
@@ -63,35 +91,70 @@ export function Panel({
 export function Notice({ children }: { children: React.ReactNode }) {
   return (
     <View accessibilityRole="alert" style={s.notice}>
-      <Text style={{ color: colors.danger }}>{children}</Text>
+      <Text style={s.noticeText}>{children}</Text>
     </View>
   );
 }
 const s = StyleSheet.create({
   label: {
-    fontSize: 10,
-    letterSpacing: 2,
+    fontFamily: fonts.mono,
+    fontSize: 11,
+    lineHeight: 18,
     color: colors.muted,
-    textTransform: "uppercase",
-    marginBottom: 15,
-    fontWeight: "700",
   },
-  copy: { color: colors.text, fontSize: 14, lineHeight: 23 },
+  copy: {
+    fontFamily: fonts.body,
+    color: colors.dim,
+    fontSize: 14,
+    lineHeight: 23,
+  },
   button: {
-    paddingVertical: 10,
-    paddingHorizontal: 14,
+    minHeight: 40,
+    maxWidth: "100%",
+    justifyContent: "center",
+    paddingVertical: 9,
+    paddingHorizontal: 12,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: 4,
-    backgroundColor: colors.panel,
+    borderRadius: 2,
+    backgroundColor: "transparent",
   },
-  active: { borderColor: colors.accent, backgroundColor: "#152b28" },
-  panel: { backgroundColor: colors.panel, padding: 24, gap: 14, minWidth: 0 },
+  buttonText: {
+    fontFamily: fonts.mono,
+    color: colors.text,
+    fontSize: 12,
+    lineHeight: 19,
+    flexShrink: 1,
+  },
+  quiet: { borderColor: "transparent" },
+  quietText: { color: colors.dim },
+  hovered: { backgroundColor: colors.raised },
+  active: { borderColor: colors.accent, backgroundColor: colors.accent },
+  activeText: { color: colors.bg, fontWeight: "700" },
+  disabled: { opacity: 0.45 },
+  panel: { backgroundColor: colors.bg, padding: 20, gap: 16, minWidth: 0 },
+  panelTitle: {
+    fontFamily: fonts.mono,
+    fontSize: 12,
+    lineHeight: 20,
+    color: colors.accent,
+    paddingBottom: 14,
+    marginBottom: 4,
+    borderBottomWidth: 1,
+    borderColor: colors.border,
+  },
   notice: {
-    padding: 16,
-    borderWidth: 1,
-    borderColor: "#765345",
-    backgroundColor: "#2b201b",
-    borderRadius: 4,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderLeftWidth: 2,
+    borderColor: colors.danger,
+    backgroundColor: colors.panel,
+    minWidth: 0,
+  },
+  noticeText: {
+    fontFamily: fonts.body,
+    fontSize: 14,
+    lineHeight: 22,
+    color: colors.danger,
   },
 });

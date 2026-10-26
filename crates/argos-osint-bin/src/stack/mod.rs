@@ -671,6 +671,9 @@ async fn run(up: Up) -> Result<()> {
                 .command("node");
             cmd.current_dir(root);
             if up.profile == Profile::Dev {
+                // Next's development Babel loader resolves next/babel from the
+                // process cwd, even when the app directory is an explicit arg.
+                cmd.current_dir(root.join("apps/web-desktop"));
                 cmd.arg(root.join("apps/web-desktop/node_modules/next/dist/bin/next"))
                     .args(["dev", "--webpack", "-H", "127.0.0.1", "-p"])
                     .arg(web_port.to_string())

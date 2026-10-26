@@ -9,7 +9,7 @@ Understand the product, then follow its implementation. This is the maintained e
 
 [![Wiki navigation](diagrams/wiki-navigation.svg)](diagrams/wiki-navigation.html)
 
-[Intel web implementation specification](argos-intel-living-spec.md) · [Local web/API contract](wiki/code/intel-web.md)
+[Branch-to-main scope](argos-intel-living-spec.md#branch-to-main-scope-2026-10-26) · [Intel web implementation specification](argos-intel-living-spec.md) · [Local web/API contract](wiki/code/intel-web.md)
 
 ## Directory map
 

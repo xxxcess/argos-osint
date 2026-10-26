@@ -2,7 +2,7 @@
 import React, {
   createContext,
   useContext,
-  useEffect,
+  useSyncExternalStore,
   useMemo,
   useState,
 } from "react";
@@ -80,12 +80,24 @@ interface Health {
   api_version: number;
   instance_id: string;
 }
+export const DEFAULT_BACKEND = "http://127.0.0.1:8080";
+
+// Each app supplies its platform persistence and request-ID implementation.
+export interface BackendSettings {
+  subscribe: (onChange: () => void) => () => void;
+  getSnapshot: () => string;
+  getServerSnapshot: () => string;
+  setBase: (base: string) => void;
+  createRequestId: () => string;
+}
+
 interface Backend {
   base: string;
   setBase: (s: string) => void;
   instance: string;
   connected: boolean;
   retry: () => void;
+  createRequestId: () => string;
   theme: "dark" | "light";
   setTheme: (v: "dark" | "light") => void;
 }
@@ -125,7 +137,13 @@ async function request<T>(
   }
   return response.json();
 }
-export function BackendProvider({ children }: { children: React.ReactNode }) {
+export function BackendProvider({
+  children,
+  settings,
+}: {
+  children: React.ReactNode;
+  settings: BackendSettings;
+}) {
   const [client] = useState(
     () =>
       new QueryClient({
@@ -137,29 +155,26 @@ export function BackendProvider({ children }: { children: React.ReactNode }) {
   );
   return (
     <QueryClientProvider client={client}>
-      <Connection>{children}</Connection>
+      <Connection settings={settings}>{children}</Connection>
     </QueryClientProvider>
   );
 }
 const READY_POLL_MS = 60_000;
 
-function Connection({ children }: { children: React.ReactNode }) {
-  const [base, update] = useState("http://127.0.0.1:8080");
+function Connection({
+  children,
+  settings,
+}: {
+  children: React.ReactNode;
+  settings: BackendSettings;
+}) {
+  const base = useSyncExternalStore(
+    settings.subscribe,
+    settings.getSnapshot,
+    settings.getServerSnapshot,
+  );
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const client = useQueryClient();
-  useEffect(() => {
-    try {
-      update(
-        safeBackend(
-          new URLSearchParams(location.search).get("api") ||
-            localStorage.getItem("argos.backend") ||
-            base,
-        ),
-      );
-    } catch {
-      /* default local endpoint */
-    }
-  }, []); // Initial configuration only.
   const health = useQuery({
     queryKey: ["health", base],
     queryFn: () => request<Health>(base, "health/ready"),
@@ -176,14 +191,14 @@ function Connection({ children }: { children: React.ReactNode }) {
   const setBase = (raw: string) => {
     const next = safeBackend(raw);
     client.clear();
-    update(next);
-    localStorage.setItem("argos.backend", next);
+    settings.setBase(next);
   };
   const value: Backend = {
     base,
     setBase,
     instance,
     connected,
+    createRequestId: settings.createRequestId,
     retry: () => {
       void health.refetch();
     },

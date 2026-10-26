@@ -14,3 +14,5 @@ EDIT_UNIT: implement assigned files and required tests/docs; read supporting ref
 Resume only your own child sessionID. Follow documented recovery on handoff failures; never silently substitute direct work.
 
 Report completed checklist items and evidence after each implementation unit; include affected wiki/routes/tags/diagrams in the phase delta.
+
+Keep shared React Native primitives and the enabled React Compiler/Hooks checks. For React UI work load `argos-react-ui` and `argos-react-patterns`; pass the applicable design rules and state/viewport acceptance to EDIT_UNITs. Preserve the leaf edit-only rule; tester owns verification.

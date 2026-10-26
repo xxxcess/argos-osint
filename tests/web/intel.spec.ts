@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+const captureDir = process.env.ARGOS_WEB_CAPTURE_DIR || ".agent-scratch/web-ui";
 const runtimeErrors = new WeakMap<Page, string[]>();
 test.beforeEach(async ({ page }) => {
   const errors: string[] = [];
@@ -7,9 +8,9 @@ test.beforeEach(async ({ page }) => {
   page.on("console", (message) => {
     if (
       message.type() === "error" &&
-      /content security policy|hydration|unexpected text node/i.test(
-        message.text(),
-      )
+      // These fixtures deliberately abort API/image requests and return 503s.
+      // Keep browser transport diagnostics separate from application errors.
+      !message.text().startsWith("Failed to load resource:")
     )
       errors.push(message.text());
   });
@@ -30,14 +31,22 @@ const a = {
   url: "https://example.test/news",
   author: "Fixture reporter",
 };
-async function fixtures(page: Page, bodyAvailable = true, imageUrl = "") {
+async function fixtures(
+  page: Page,
+  bodyAvailable = true,
+  imageUrl = "",
+  articleOverrides: Partial<typeof a> = {},
+  apiOrigin = "http://127.0.0.1:8080",
+) {
+  const article = { ...a, ...articleOverrides };
   let online = true;
   const mutations: string[] = [];
+  const reloads: string[] = [];
   const seeds: unknown[] = [];
   const requests: string[] = [];
   const admissions: { run: string; id: string }[] = [];
   let admissionFails = false;
-  await page.route("http://127.0.0.1:8080/api/v1/**", async (route) => {
+  await page.route(`${apiOrigin}/api/v1/**`, async (route) => {
     const url = new URL(route.request().url());
     if (!online) {
       await route.abort();
@@ -61,11 +70,11 @@ async function fixtures(page: Page, bodyAvailable = true, imageUrl = "") {
           url.searchParams.get("search") === "missing"
             ? []
             : [
-                { ...a, image_url: imageUrl },
+                { ...article, image_url: imageUrl },
                 ...(imageUrl
                   ? [
                       {
-                        ...a,
+                        ...article,
                         id: "a2",
                         title: "Another regional signal",
                         image_url: imageUrl,
@@ -78,7 +87,7 @@ async function fixtures(page: Page, bodyAvailable = true, imageUrl = "") {
       };
     else if (path === "articles/detail")
       body = {
-        article: a,
+        article,
         source_revision: "fixture-source",
         actors: [
           {
@@ -152,6 +161,10 @@ async function fixtures(page: Page, bodyAvailable = true, imageUrl = "") {
         return;
       }
       body = { job_id: "job1" };
+    } else if (path === "brief/reload") {
+      mutations.push(path);
+      reloads.push(route.request().postDataJSON().request_id);
+      body = { job_id: "job1" };
     } else if (route.request().method() === "POST") {
       mutations.push(path);
       body = { job_id: "job1" };
@@ -169,6 +182,7 @@ async function fixtures(page: Page, bodyAvailable = true, imageUrl = "") {
       online = true;
     },
     mutations,
+    reloads,
     admissions,
     failAdmission: (failed: boolean) => {
       admissionFails = failed;
@@ -233,6 +247,10 @@ test("automatic admission errors are visible on narrow Reader and can be retried
   ).toBeVisible();
   expect(f.admissions).toEqual([{ run: "r1", id: "a1" }]);
   f.failAdmission(false);
+  await page.screenshot({
+    path: `${captureDir}/brief-admission-error.png`,
+    fullPage: true,
+  });
   await page.getByRole("button", { name: "Context", exact: true }).click();
   await page.getByRole("button", { name: "Ensure / resume brief" }).click();
   await expect.poll(() => f.admissions.length).toBe(2);
@@ -306,7 +324,7 @@ for (const width of [1440, 768, 390, 320]) {
     ).toBeVisible();
     if (width === 1440 || width === 320)
       await page.screenshot({
-        path: `.planning/2026-10-26-intel-images/web-feed-${width}.png`,
+        path: `${captureDir}/web-feed-${width}.png`,
         fullPage: true,
       });
     await card.getByRole("button", { name: "Open Focus Brief ↗" }).click();
@@ -345,7 +363,9 @@ test("gates the workspace when the API is unavailable", async ({ page }) => {
   await expect(
     page.getByText("Connect to your Intel workspace."),
   ).toBeVisible();
-  await expect(page.getByText("The world, in focus.")).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Intelligence bulletin", exact: true }),
+  ).toHaveCount(0);
   await page
     .getByRole("textbox", { name: "API endpoint" })
     .fill("http://evil.test:8080");
@@ -353,13 +373,20 @@ test("gates the workspace when the API is unavailable", async ({ page }) => {
   await expect(
     page.getByRole("alert").filter({ hasText: "loopback" }),
   ).toBeVisible();
+  await page.screenshot({
+    path: `${captureDir}/connection-error.png`,
+    fullPage: true,
+  });
 });
 test("browse, search, brief, related, topology and reconnect", async ({
   page,
 }) => {
+  await page.clock.install();
   const f = await fixtures(page);
   await page.goto("/");
-  await expect(page.getByText("The world, in focus.")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Intelligence bulletin", exact: true }),
+  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Jobs", exact: true }),
   ).toHaveCount(0);
@@ -378,6 +405,10 @@ test("browse, search, brief, related, topology and reconnect", async ({
   await expect(
     page.getByText("No articles match this day, category and search."),
   ).toBeVisible();
+  await page.screenshot({
+    path: `${captureDir}/empty-search.png`,
+    fullPage: true,
+  });
   await page.getByRole("textbox", { name: "Search articles" }).fill("");
   await page.getByRole("button", { name: "Open Focus Brief ↗" }).click();
   await expect.poll(() => f.admissions).toEqual([{ run: "r1", id: "a1" }]);
@@ -393,7 +424,7 @@ test("browse, search, brief, related, topology and reconnect", async ({
     page.getByText("Related leads · not corroboration", { exact: true }),
   ).toBeVisible();
   await page.screenshot({
-    path: ".planning/2026-10-25-argos-intel/web-focus-wide.png",
+    path: `${captureDir}/web-focus-wide.png`,
     fullPage: true,
   });
   await page.getByRole("button", { name: "Ensure / resume brief" }).click();
@@ -402,6 +433,9 @@ test("browse, search, brief, related, topology and reconnect", async ({
     .getByRole("button", { name: "Reload article / new generation" })
     .click();
   await expect.poll(() => f.mutations).toContain("brief/reload");
+  expect(f.reloads[0]).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
   await page
     .getByRole("button", { name: "Port authority · organization" })
     .click();
@@ -431,6 +465,7 @@ test("browse, search, brief, related, topology and reconnect", async ({
     });
   await expect(page.getByText("Recorded actor")).toBeVisible();
   f.offline();
+  await page.clock.fastForward(60_000);
   await expect(page.getByText("Connect to your Intel workspace.")).toBeVisible({
     timeout: 75000,
   });
@@ -439,14 +474,16 @@ test("browse, search, brief, related, topology and reconnect", async ({
   ).toHaveCount(0);
   f.online();
   await page.getByRole("button", { name: "Connect / retry" }).click();
-  await expect(page.getByText("The world, in focus.")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Intelligence bulletin", exact: true }),
+  ).toBeVisible();
   expect(
     f.requests.filter((path) =>
       /^(jobs|logs)(\/|$)|^brief\/stages$/.test(path),
     ),
   ).toEqual([]);
   await page.screenshot({
-    path: ".planning/2026-10-25-argos-intel/web-wide.png",
+    path: `${captureDir}/web-wide.png`,
     fullPage: true,
   });
 });
@@ -475,14 +512,17 @@ test("narrow Focus Brief tabs and static hosting policy", async ({
     ),
   ).toBe(true);
   await page.screenshot({
-    path: ".planning/2026-10-25-argos-intel/web-narrow.png",
+    path: `${captureDir}/web-narrow.png`,
     fullPage: true,
   });
   const response = await request.get("/");
-  expect(response.headers()["content-security-policy"]).toContain(
-    "frame-ancestors 'none'",
-  );
-  expect(response.headers()["x-content-type-options"]).toBe("nosniff");
+  expect(response.status()).toBe(200);
+  if (process.env.ARGOS_WEB_PROFILE !== "dev") {
+    expect(response.headers()["content-security-policy"]).toContain(
+      "frame-ancestors 'none'",
+    );
+    expect(response.headers()["x-content-type-options"]).toBe("nosniff");
+  }
 });
 
 test("metadata excerpt is not presented as a retained full body", async ({
@@ -495,4 +535,140 @@ test("metadata excerpt is not presented as a retained full body", async ({
     page.getByText("Officials meet to discuss regional shipping access."),
   ).toBeVisible();
   await expect(page.getByText(/Full article body/)).toHaveCount(0);
+});
+
+test("selection controls support keyboard activation and visible focus", async ({
+  page,
+}) => {
+  await fixtures(page);
+  await page.goto("/");
+  const economic = page.getByRole("button", { name: "Economic", exact: true });
+  await economic.focus();
+  await economic.press("Enter");
+  await expect(economic).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByRole("button", { name: "Geopolitical", exact: true }),
+  ).toHaveAttribute("aria-pressed", "false");
+  const search = page.getByRole("textbox", { name: "Search articles" });
+  await search.focus();
+  await search.press("Tab");
+  const day = page.getByRole("button", { name: "Day 2026-10-25" });
+  await expect(day).toBeFocused();
+  expect(await day.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe(
+    "solid",
+  );
+  await day.press("Tab");
+  const open = page.getByRole("button", { name: "Open Focus Brief ↗" });
+  await expect(open).toBeFocused();
+  await page.screenshot({
+    path: `${captureDir}/keyboard-focus.png`,
+    fullPage: true,
+  });
+  await open.press("Space");
+  await expect(
+    page.getByRole("heading", { name: "02 / Reader" }),
+  ).toBeVisible();
+});
+
+for (const width of [1440, 768, 390, 320]) {
+  test(`minimal workspace wraps long content and preserves brief panes at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await fixtures(page, true, "", {
+      title:
+        "Regional shipping negotiations resume as port authorities outline a longer-term agreement on access and security",
+      source_name: "International Maritime and Regional Affairs Review",
+      description:
+        "Officials met to discuss regional shipping access. The agreement remains under review, with further talks planned between port authorities and local representatives. Reported commitments have not yet been independently verified.",
+    });
+    await page.goto("/");
+    const noOverflow = async () =>
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth),
+      ).toBeLessThanOrEqual(width);
+    await expect(page.getByTestId("article-card-a1")).toBeVisible();
+    await noOverflow();
+    await page.screenshot({
+      path: `${captureDir}/bulletin-${width}.png`,
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "Open Focus Brief ↗" }).click();
+    if (width < 850) {
+      for (const tab of ["Reader", "Extracted", "Context"]) {
+        const button = page.getByRole("button", { name: tab, exact: true });
+        await button.click();
+        await expect(button).toHaveAttribute("aria-pressed", "true");
+        await expect(
+          page.getByRole("heading", { name: new RegExp(` / ${tab}$`) }),
+        ).toBeVisible();
+        await noOverflow();
+        await page.screenshot({
+          path: `${captureDir}/brief-${tab.toLowerCase()}-${width}.png`,
+          fullPage: true,
+        });
+      }
+    } else {
+      for (const title of ["01 / Extracted", "02 / Reader", "03 / Context"])
+        await expect(page.getByRole("heading", { name: title })).toBeVisible();
+      await noOverflow();
+      await page.screenshot({
+        path: `${captureDir}/brief-wide-${width}.png`,
+        fullPage: true,
+      });
+    }
+    await page
+      .getByRole("button", { name: "Explore article topology" })
+      .click();
+    await expect(page.getByText("Recorded actor")).toBeVisible();
+    await noOverflow();
+    await page.screenshot({
+      path: `${captureDir}/topology-${width}.png`,
+      fullPage: true,
+    });
+  });
+}
+
+test("web settings hydrate persisted endpoints and honor explicit API URLs", async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    localStorage.setItem("argos.backend", "http://127.0.0.1:8099"),
+  );
+  const saved = await fixtures(page, true, "", {}, "http://127.0.0.1:8099");
+  const defaultApi = await fixtures(page);
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "Intelligence bulletin" }),
+  ).toBeVisible();
+  expect(saved.requests).toContain("health/ready");
+  await page.goto("/?api=http://127.0.0.1:8080");
+  await expect(
+    page.getByRole("heading", { name: "Intelligence bulletin" }),
+  ).toBeVisible();
+  expect(defaultApi.requests).toContain("health/ready");
+});
+
+test("a blocked browser store still allows a session backend switch", async ({
+  page,
+}) => {
+  await page.route("http://127.0.0.1:8080/**", (route) => route.abort());
+  const nextApi = await fixtures(page, true, "", {}, "http://127.0.0.1:8099");
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "Connect to your Intel workspace." }),
+  ).toBeVisible();
+  await page.evaluate(() => {
+    Storage.prototype.setItem = () => {
+      throw new DOMException("Storage blocked", "SecurityError");
+    };
+  });
+  await page
+    .getByRole("textbox", { name: "API endpoint" })
+    .fill("http://127.0.0.1:8099");
+  await page.getByRole("button", { name: "Connect / retry" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Intelligence bulletin" }),
+  ).toBeVisible();
+  expect(nextApi.requests).toContain("health/ready");
 });

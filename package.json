@@ -8,8 +8,9 @@
   },
   "scripts": {
     "build": "pnpm --dir apps/web-desktop build",
+    "check:web-build": "node scripts/check_web_build.mjs",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint apps packages",
+    "lint": "eslint apps packages --max-warnings=0",
     "test:e2e": "playwright test"
   },
   "devDependencies": {

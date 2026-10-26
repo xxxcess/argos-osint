@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+const development = process.env.ARGOS_WEB_PROFILE === "dev";
 export default defineConfig({
   testDir: "tests/web",
   fullyParallel: false,
@@ -9,7 +10,10 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "node scripts/serve_web.mjs --port 3100",
+    command: development
+      ? "pnpm --dir apps/web-desktop dev --port 3100"
+      : "node scripts/serve_web.mjs --port 3100",
+    timeout: 120_000,
     url: "http://127.0.0.1:3100",
     reuseExistingServer: false,
   },

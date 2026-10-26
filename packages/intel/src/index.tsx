@@ -22,7 +22,15 @@ import {
   type Brief,
   type Seed,
 } from "@argos/api-client";
-import { Button, Label, Copy, Panel, Notice, colors as c } from "@argos/ui";
+import {
+  Button,
+  Label,
+  Copy,
+  Panel,
+  Notice,
+  fonts,
+  colors as c,
+} from "@argos/ui";
 const categories = [
   "geopolitical",
   "economic",
@@ -36,45 +44,50 @@ export function IntelApp() {
   const [endpoint, setEndpoint] = useState("http://127.0.0.1:8080");
   const [error, setError] = useState("");
   return (
-    <View style={{ minHeight: "100%", backgroundColor: c.bg }}>
+    <View style={s.shell}>
       <View style={s.masthead}>
-        <View style={s.row}>
-          <Text style={s.brand}>◉ ARGOS</Text>
-          <Text style={s.wordmark}>INTELLIGENCE WORKSPACE</Text>
+        <View style={s.headerInner}>
+          <View style={s.row}>
+            <Text style={s.brand}>
+              ARGOS<Text style={{ color: c.accent }}> / </Text>INTEL
+            </Text>
+            <Text nativeID="workspace-description" style={s.wordmark}>
+              Local intelligence workspace
+            </Text>
+          </View>
+          <Text
+            style={{
+              color: b.connected ? c.success : c.warning,
+              fontFamily: fonts.mono,
+              fontSize: 11,
+              lineHeight: 18,
+            }}
+          >
+            ● {b.connected ? "API connected" : "Offline · reconnecting"}
+          </Text>
         </View>
-        <Text
-          style={{
-            color: b.connected ? c.accent : c.danger,
-            fontSize: 11,
-            letterSpacing: 1,
-          }}
-        >
-          ● {b.connected ? "LOCAL API CONNECTED" : "OFFLINE · RECONNECTING"}
-        </Text>
       </View>
       {!b.connected ? (
-        <View
-          style={{
-            maxWidth: 560,
-            width: "100%",
-            alignSelf: "center",
-            padding: 28,
-            marginTop: 80,
-            gap: 20,
-          }}
-        >
+        <View style={s.connection}>
           <Label>Connection required</Label>
-          <Text style={s.title}>Connect to your Intel workspace.</Text>
+          <Text accessibilityRole="header" style={s.title}>
+            Connect to your Intel workspace.
+          </Text>
           <Copy>
             The local Argos API must be ready before articles and actions are
             available. Start the API, then retry.
           </Copy>
-          <TextInput
-            accessibilityLabel="API endpoint"
-            value={endpoint}
-            onChangeText={setEndpoint}
-            style={s.input}
-          />
+          <View style={s.field}>
+            <Label>API endpoint</Label>
+            <TextInput
+              accessibilityLabel="API endpoint"
+              value={endpoint}
+              onChangeText={setEndpoint}
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={s.input}
+            />
+          </View>
           <Button
             onPress={() => {
               try {
@@ -89,7 +102,7 @@ export function IntelApp() {
             Connect / retry
           </Button>
           {error.length > 0 && <Notice>{error}</Notice>}
-          <Copy>Local development · no authentication gate</Copy>
+          <Text style={s.small}>Loopback only · local development</Text>
         </View>
       ) : (
         <Workspace key={`${b.base}/${b.instance}`} />
@@ -114,21 +127,27 @@ function Workspace() {
   return (
     <>
       <View style={s.nav}>
-        <View style={s.row}>
-          <Button
-            active={screen === "bulletin"}
-            onPress={() => setScreen("bulletin")}
-          >
-            Bulletin
-          </Button>
-          <Button
-            active={screen === "topology"}
-            onPress={() => setScreen("topology")}
-          >
-            Topology
-          </Button>
+        <View style={s.navInner}>
+          <View style={s.row}>
+            <Button
+              variant="quiet"
+              active={screen === "bulletin"}
+              onPress={() => setScreen("bulletin")}
+            >
+              Bulletin
+            </Button>
+            <Button
+              variant="quiet"
+              active={screen === "topology"}
+              onPress={() => setScreen("topology")}
+            >
+              Topology
+            </Button>
+          </View>
+          <Text nativeID="workspace-route" style={s.small}>
+            Atlas → Intel → Brain
+          </Text>
         </View>
-        <Text style={s.small}>RETAINED INTELLIGENCE / ALL CYCLES</Text>
       </View>
       {screen === "topology" ? (
         <Topology seed={seed} onSeed={setSeed} />
@@ -142,7 +161,7 @@ function Workspace() {
         />
       ) : (
         <View style={s.page}>
-          <Label>Atlas / Intel bulletin</Label>
+          <Label>01 / Atlas collection</Label>
           <View
             style={[
               s.row,
@@ -154,24 +173,19 @@ function Workspace() {
             ]}
           >
             <View
-              style={{ gap: 12, minWidth: 0, maxWidth: "100%", flexShrink: 1 }}
+              style={{ gap: 8, minWidth: 0, maxWidth: "100%", flexShrink: 1 }}
             >
-              <Text style={s.title}>The world, in focus.</Text>
-              <Copy>
-                Signals, evidence and the context behind the headline.
-              </Copy>
+              <Text accessibilityRole="header" style={s.title}>
+                Intelligence bulletin
+              </Text>
+              <Copy>Retained articles from Atlas.</Copy>
             </View>
-            <Text style={s.small}>{selectedDay || "NO RETAINED CYCLES"}</Text>
           </View>
-          <View
-            style={[
-              s.row,
-              { flexWrap: "wrap", marginTop: 30, marginBottom: 24 },
-            ]}
-          >
+          <View style={[s.row, { flexWrap: "wrap", marginTop: 12, gap: 4 }]}>
             {categories.map((cat) => (
               <Button
                 key={cat}
+                variant="quiet"
                 active={category === cat}
                 onPress={() => setCategory(cat)}
               >
@@ -179,24 +193,26 @@ function Workspace() {
               </Button>
             ))}
           </View>
-          <View style={[s.row, { flexWrap: "wrap", marginBottom: 28 }]}>
+          <View style={s.filters}>
+            <Label>Search articles</Label>
             <TextInput
               accessibilityLabel="Search articles"
-              placeholder="Search headlines, sources and descriptions…"
+              placeholder="Headlines, sources, descriptions…"
               placeholderTextColor={c.muted}
               value={search}
               onChangeText={setSearch}
-              style={[s.input, { flexGrow: 1, minWidth: 220 }]}
+              style={s.input}
             />
           </View>
           <FlatList
             horizontal
             data={days.data?.days || []}
             keyExtractor={(day) => day}
-            style={{ marginBottom: 20 }}
+            style={{ flexGrow: 0, marginBottom: 8 }}
             contentContainerStyle={{ gap: 8 }}
             renderItem={({ item: d }) => (
               <Button
+                variant="quiet"
                 active={d === selectedDay}
                 label={`Day ${d}`}
                 onPress={() => setDay(d)}
@@ -223,6 +239,15 @@ function Workspace() {
               <Copy>No articles match this day, category and search.</Copy>
             </Panel>
           )}
+          <View style={s.listHeading}>
+            <Label>Signals / {category}</Label>
+            <Text accessibilityLiveRegion="polite" style={s.small}>
+              {list.data
+                ? `${list.data.pages.reduce((count, page) => count + page.rows.length, 0)} loaded`
+                : "—"}
+              {list.isFetching && !list.isPending ? " · refreshing" : ""}
+            </Text>
+          </View>
           <FlatList
             scrollEnabled={false}
             data={list.data?.pages.flatMap((p) => p.rows) || []}
@@ -242,7 +267,7 @@ function Workspace() {
                 void list.fetchNextPage();
               }}
             >
-              Load more articles
+              {list.isFetchingNextPage ? "Loading…" : "Load more articles"}
             </Button>
           )}
         </View>
@@ -265,15 +290,7 @@ function ArticleCard({
   return (
     <View
       testID={`article-card-${a.id}`}
-      style={[
-        s.card,
-        featured && {
-          borderColor: "#456459",
-          padding: 28,
-          backgroundColor: "#101e20",
-        },
-        compact && { padding: 14, gap: 12 },
-      ]}
+      style={[s.card, compact && { gap: 12, paddingVertical: 20 }]}
     >
       {thumbnail && (
         <Image
@@ -290,16 +307,17 @@ function ArticleCard({
           ]}
         />
       )}
-      <View style={{ flex: 1, minWidth: 0, gap: 12 }}>
+      <View style={{ flex: 1, minWidth: 0, gap: 10 }}>
         <Label>
           {featured ? "Featured signal · " : ""}
           {a.category} / {a.source_name || a.source_domain}
         </Label>
         <Text
+          accessibilityRole="header"
           style={[
             s.headline,
-            featured && { fontSize: 28 },
-            compact && { fontSize: 20, lineHeight: 27 },
+            featured && { fontSize: 23, lineHeight: 31 },
+            compact && { fontSize: 18, lineHeight: 26 },
           ]}
         >
           {a.title}
@@ -309,7 +327,9 @@ function ArticleCard({
           {a.published_at.slice(0, 16)} · {a.author || "Source article"}
         </Text>
         <View style={{ alignSelf: "flex-start" }}>
-          <Button onPress={onPress}>Open Focus Brief ↗</Button>
+          <Button variant="quiet" onPress={onPress}>
+            Open Focus Brief ↗
+          </Button>
         </View>
       </View>
     </View>
@@ -443,7 +463,9 @@ function Focus({
   );
   const reader = (
     <Panel title="02 / Reader">
-      <Text style={s.headline}>{shown.title}</Text>
+      <Text accessibilityRole="header" style={s.readerTitle}>
+        {shown.title}
+      </Text>
       <Text style={s.small}>
         {shown.source_name} · {shown.published_at} · {shown.author}
       </Text>
@@ -455,18 +477,12 @@ function Focus({
           resizeMode="cover"
         />
       )}
-      <Text
-        style={{
-          fontFamily: "Georgia",
-          fontSize: 17,
-          lineHeight: 31,
-          color: c.text,
-        }}
-      >
+      <Text style={s.readerCopy}>
         {shown.description || "No description available."}
       </Text>
       {safeLink(shown.url) && (
         <Button
+          variant="quiet"
           onPress={() => {
             void Linking.openURL(shown.url);
           }}
@@ -496,12 +512,13 @@ function Focus({
         {ensure.isPending ? "Admitting…" : "Ensure / resume brief"}
       </Button>
       <Button
+        variant="quiet"
         disabled={reload.isPending}
         onPress={() =>
           reload.mutate({
             run: a.run_id,
             id: a.id,
-            request_id: crypto.randomUUID(),
+            request_id: backend.createRequestId(),
           })
         }
       >
@@ -509,6 +526,7 @@ function Focus({
       </Button>
       {reload.error && <Notice>{reload.error.message}</Notice>}
       <Button
+        variant="quiet"
         onPress={() => {
           void detail.refetch();
           void related.refetch();
@@ -547,6 +565,7 @@ function Focus({
         </Button>
       )}
       <Button
+        variant="quiet"
         onPress={() =>
           onTopology({
             Article: {
@@ -563,11 +582,15 @@ function Focus({
     </Panel>
   );
   return (
-    <View>
-      <View style={[s.nav, { flexWrap: "wrap" }]}>
-        <Button onPress={onBack}>← Bulletin</Button>
+    <View style={s.focusPage}>
+      <View style={s.focusHeader}>
+        <Button variant="quiet" onPress={onBack}>
+          ← Bulletin
+        </Button>
         <Label>Focus Brief / {shown.category}</Label>
-        <Text style={s.small}>EVIDENCE BEFORE ASSUMPTION</Text>
+        {!narrow ? (
+          <Text style={s.small}>Evidence before assumption</Text>
+        ) : null}
       </View>
       {detail.isError && <Notice>{detail.error.message}</Notice>}
       {ensure.error && (
@@ -577,9 +600,14 @@ function Focus({
       )}
       {detail.isPending && <Copy>Loading Focus Brief…</Copy>}
       {narrow && (
-        <View style={[s.row, { padding: 16 }]}>
+        <View style={[s.row, { paddingVertical: 12, gap: 4 }]}>
           {["Extracted", "Reader", "Context"].map((t) => (
-            <Button key={t} active={t === tab} onPress={() => setTab(t)}>
+            <Button
+              key={t}
+              variant="quiet"
+              active={t === tab}
+              onPress={() => setTab(t)}
+            >
               {t}
             </Button>
           ))}
@@ -591,20 +619,22 @@ function Focus({
           alignItems: "stretch",
           gap: 1,
           backgroundColor: c.border,
+          borderWidth: 1,
+          borderColor: c.border,
         }}
       >
         {(!narrow || tab === "Extracted") && (
-          <View style={{ flex: 24, minWidth: 0, backgroundColor: c.panel }}>
+          <View style={{ flex: 24, minWidth: 0, backgroundColor: c.bg }}>
             {extracted}
           </View>
         )}
         {(!narrow || tab === "Reader") && (
-          <View style={{ flex: 48, minWidth: 0, backgroundColor: c.panel }}>
+          <View style={{ flex: 48, minWidth: 0, backgroundColor: c.bg }}>
             {reader}
           </View>
         )}
         {(!narrow || tab === "Context") && (
-          <View style={{ flex: 28, minWidth: 0, backgroundColor: c.panel }}>
+          <View style={{ flex: 28, minWidth: 0, backgroundColor: c.bg }}>
             {context}
           </View>
         )}
@@ -623,8 +653,8 @@ function Topology({
   return (
     <View style={s.page}>
       <Label>Brain / Topology</Label>
-      <Text style={s.title}>
-        {graph.data?.root_label || "Follow the evidence."}
+      <Text accessibilityRole="header" style={s.title}>
+        {graph.data?.root_label || "Evidence topology"}
       </Text>
       <Copy>
         Select an actor, claim or article from a Focus Brief to begin.
@@ -635,11 +665,11 @@ function Topology({
       <View
         style={[
           s.row,
-          { flexWrap: "wrap", alignItems: "stretch", marginTop: 28 },
+          { flexWrap: "wrap", alignItems: "stretch", marginTop: 12 },
         ]}
       >
         {graph.data?.nodes.map((n) => (
-          <View key={n.id} style={{ flexBasis: 280, flexGrow: 1 }}>
+          <View key={n.id} style={s.topologyNode}>
             <Panel title={n.kind}>
               <Text style={s.headline}>{n.label}</Text>
               <Copy>{n.detail}</Copy>
@@ -719,75 +749,146 @@ function safeLink(raw: string) {
   }
 }
 const s = StyleSheet.create({
-  masthead: {
-    paddingVertical: 22,
-    paddingHorizontal: 32,
-    borderBottomWidth: 1,
-    borderColor: c.border,
+  shell: { minHeight: "100%", backgroundColor: c.bg },
+  masthead: { borderBottomWidth: 1, borderColor: c.border },
+  headerInner: {
+    width: "100%",
+    maxWidth: 1320,
+    alignSelf: "center",
+    paddingVertical: 20,
+    paddingHorizontal: 20,
     flexDirection: "row",
     flexWrap: "wrap",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 18,
+    gap: 12,
   },
-  brand: { fontSize: 22, fontWeight: "700", letterSpacing: 3, color: c.text },
-  wordmark: { fontSize: 9, letterSpacing: 2, color: c.muted },
+  brand: {
+    fontFamily: fonts.mono,
+    fontSize: 17,
+    lineHeight: 24,
+    fontWeight: "700",
+    color: c.text,
+  },
+  wordmark: {
+    fontFamily: fonts.mono,
+    fontSize: 11,
+    lineHeight: 18,
+    color: c.muted,
+  },
   row: {
     flexDirection: "row",
     flexWrap: "wrap",
     flexShrink: 1,
-    gap: 10,
+    gap: 12,
     alignItems: "center",
   },
-  nav: {
-    flexWrap: "wrap",
-    paddingVertical: 18,
-    paddingHorizontal: 32,
-    borderBottomWidth: 1,
-    borderColor: c.border,
+  nav: { borderBottomWidth: 1, borderColor: c.border },
+  navInner: {
+    width: "100%",
+    maxWidth: 1320,
+    alignSelf: "center",
+    paddingVertical: 10,
+    paddingHorizontal: 20,
     flexDirection: "row",
+    flexWrap: "wrap",
     justifyContent: "space-between",
     alignItems: "center",
-    gap: 14,
+    gap: 10,
   },
-  small: { fontSize: 10, color: c.muted, letterSpacing: 1, lineHeight: 18 },
+  small: {
+    fontFamily: fonts.mono,
+    fontSize: 11,
+    color: c.muted,
+    lineHeight: 19,
+    flexShrink: 1,
+  },
   page: {
-    padding: 28,
-    maxWidth: 1440,
+    paddingHorizontal: 20,
+    paddingVertical: 32,
+    maxWidth: 1160,
     width: "100%",
     alignSelf: "center",
-    gap: 14,
+    gap: 16,
   },
   title: {
-    fontSize: 38,
-    lineHeight: 46,
+    fontSize: 27,
+    lineHeight: 35,
     fontWeight: "600",
     color: c.text,
-    letterSpacing: -1,
+    letterSpacing: -0.5,
   },
-  headline: { fontSize: 22, lineHeight: 30, fontWeight: "600", color: c.text },
-  card: {
-    borderWidth: 1,
+  headline: { fontSize: 19, lineHeight: 28, fontWeight: "600", color: c.text },
+  readerTitle: {
+    fontSize: 26,
+    lineHeight: 35,
+    fontWeight: "600",
+    color: c.text,
+    letterSpacing: -0.4,
+  },
+  readerCopy: { fontSize: 16, lineHeight: 29, color: c.text, maxWidth: 640 },
+  filters: { gap: 8, paddingTop: 12, borderTopWidth: 1, borderColor: c.border },
+  field: { gap: 8 },
+  listHeading: {
+    borderBottomWidth: 1,
     borderColor: c.border,
-    padding: 22,
-    marginBottom: 14,
-    backgroundColor: c.panel,
+    paddingBottom: 12,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  card: {
+    borderBottomWidth: 1,
+    borderColor: c.border,
+    paddingVertical: 26,
     flexDirection: "row",
     gap: 24,
-    borderRadius: 5,
   },
-  thumbnail: {
-    flexShrink: 0,
-    borderRadius: 4,
-    backgroundColor: c.raised,
-  },
+  thumbnail: { flexShrink: 0, borderRadius: 2, backgroundColor: c.panel },
   input: {
+    minHeight: 44,
+    width: "100%",
+    minWidth: 0,
     borderWidth: 1,
     borderColor: c.border,
-    borderRadius: 4,
+    borderRadius: 2,
     backgroundColor: c.panel,
     padding: 12,
     color: c.text,
     fontSize: 14,
+    lineHeight: 20,
+  },
+  connection: {
+    maxWidth: 520,
+    width: "100%",
+    alignSelf: "center",
+    padding: 20,
+    marginTop: 48,
+    gap: 20,
+  },
+  focusPage: {
+    maxWidth: 1440,
+    width: "100%",
+    alignSelf: "center",
+    padding: 16,
+    paddingBottom: 40,
+    gap: 12,
+  },
+  focusHeader: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    paddingVertical: 4,
+  },
+  topologyNode: {
+    flexBasis: 280,
+    flexGrow: 1,
+    minWidth: 0,
+    maxWidth: "100%",
+    borderWidth: 1,
+    borderColor: c.border,
   },
 });

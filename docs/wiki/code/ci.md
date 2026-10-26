@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-Four workflows live in `.github/workflows/` (owned by Code Architect; code changes don't touch `.github`).
+Four workflows live in `.github/workflows/` (owned by Code Architect; CI changes are scoped separately from product edits).
 
 ![CI matrix](../../img/ci-matrix.svg)
 
@@ -38,6 +38,17 @@ On pushes to `main` (or manual dispatch): Release Please opens/updates the relea
 
 ## `intel-web.yml` — local web client checks
 
-The Phase 1 web workflow runs on matching web changes on `main` and pull requests, plus manual dispatch. It uses Node from `.node-version` and pnpm 12.15.0, installs with the frozen lockfile, runs typecheck/lint, builds the static export without a running API, installs Chromium, and runs offline Playwright contracts. The existing Rust matrix is unchanged and continues to check the new API workspace members in its embedded leg. No public deployment or live provider keys are used.
+The web workflow runs on matching web/config/build-check changes on `main` and pull requests (including PR pushes), plus manual dispatch. Node comes from `.node-version`; pnpm is pinned to 12.15.0. The first-party checkout/setup/artifact actions are pinned to their verified v7 commit SHAs. Existing Rust, commit-policy and release workflows are unchanged.
 
-The user authorized this one `.github` addition as an ownership exception; Code Architect review remains the repository handoff. Workflow YAML syntax and its commands are verified locally; a hosted Actions run requires publishing the change and is not claimed as local evidence.
+| Check | Enforced behavior |
+| --- | --- |
+| Frozen install and peer check | Reproducible lockfile and compatible dependency peers |
+| `pnpm typecheck` / `pnpm lint` | Type checking and recommended Hooks/compiler diagnostics with zero warnings |
+| `pnpm build` | Static export using the enabled strict React Compiler pipeline; no API needed |
+| `pnpm check:web-build` | Built Next configuration retains strict compiler options and RN Web/shared transpilation; exported **app page** chunks contain compiler memoization (framework runtime alone is insufficient) |
+| Offline Playwright | The same Chromium fixtures run against the static export and the Next development server; both exercise RN Web UI, compilation, hydration, connection/actions and responsive layout. Static-host CSP/header assertions apply to export only. |
+| Retained evidence | Export/dev test results and screenshots use separate directories under `test-results/`; HTML reports use `playwright-report/export` and `playwright-report/dev`. Uploaded with `always()` and seven-day retention. |
+
+The evidence upload ignores absent files when an earlier step fails; it does not turn a missing build/test into a pass. Captures are review evidence, not automatic visual approval. No public deployment, live provider keys, secrets or native builds are involved. Path filters mean a docs-only PR does not run this job; configure required checks with that behavior in mind rather than assuming a workflow run for every PR.
+
+The user authorized the original web workflow addition and this follow-up CI update under Code Architect ownership. Workflow/action validation, the real build guard (including rejection cases), peer/type/lint/build/browser commands and artifact generation are checked locally. Hosted Actions execution requires publication and is not claimed as local evidence.

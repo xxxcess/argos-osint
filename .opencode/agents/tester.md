@@ -14,3 +14,7 @@ Return PASS / FAIL / BLOCKED / PENDING addressed to architect through the callin
 Resume only your own child sessionID; follow documented recovery. Never fix tests to make verification pass.
 
 Check affected wiki links, tag/source pairs and diagrams; report unmet checklist acceptance without marking unverified items complete.
+
+Keep shared React Native primitives and the enabled React Compiler/Hooks checks. For React UI work load `argos-react-ui` and `argos-react-patterns`; follow `docs/wiki/code/react-ui.md` for frontend checks, fixture screenshots and keyboard/state coverage. Shell Playwright is available without browser-tool permission changes; missing image evidence stays pending.
+
+When compiler configuration or dependency pins change, verify emitted/shared-package compiler transformations alongside lint/build/browser behavior; a config flag alone is insufficient evidence.

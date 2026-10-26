@@ -42,6 +42,12 @@ Use the installed `opencode debug config` and initialized `/api/agent` catalog t
 
 References: [official V2 agents](https://opencode.ai/v2/docs/agents), [config](https://opencode.ai/v2/docs/config), [tools](https://opencode.ai/v2/docs/tools). Navigate through [the wiki](../../index.md), tags and scoped source searches. `/docs-review`, `/setup-wiki` and `/refresh-wiki` select Scribe and use the [maintenance workflow](../maintenance.md). The handoff plugin retains bounded idle/compaction summaries; source search has no graph gate.
 
+## React UI skills
+
+React work uses [React UI rules](react-ui.md). `argos-react-ui` covers design, accessibility and visual evidence; `argos-react-patterns` covers React Native composition, compiler-compatible hooks, Query state and rendering. All React roles retain the enabled Next Compiler and zero-warning Hooks/compiler lint baseline; platform persistence/request IDs stay behind the app adapter. Canonical files live in `.opencode/skills/`; `.agents/skills/` symlinks expose the same skills to other hosts. Existing plan/implementation skills route through the role prompts, which select these UI skills only for relevant work.
+
+`/react-ui-review <scope>` selects tester for a read-only review (default: current UI delta). Frontend verification uses the pinned Node/pnpm, offline Playwright fixtures and inspected screenshots; shell Playwright does not require enabling the denied browser tool. Missing image/tool evidence remains pending. Roles, models and delegation permissions are unchanged.
+
 ## Phase handoff and completion
 
 Every dispatch carries this compact envelope; children start with fresh context:

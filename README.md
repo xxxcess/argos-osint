@@ -120,9 +120,11 @@ cargo build --locked -p argos-api-host
 
 Stopping this web stack leaves the adopted API running. For a different web port, configure the standalone host's `--origins` allowlist accordingly. All API/web hosting is local loopback. macOS, Android, iOS and Windows stack targets remain planned.
 
-See the [web/API guide](docs/wiki/code/intel-web.md) for backend selection, storage ownership and endpoint contracts, and the [living implementation specification](docs/argos-intel-living-spec.md) for verified milestones.
+See the [web/API guide](docs/wiki/code/intel-web.md) for backend selection, storage ownership and endpoint contracts, and the [living implementation specification](docs/argos-intel-living-spec.md) for verified milestones and the [branch-to-main delivery scope](docs/argos-intel-living-spec.md#branch-to-main-scope-2026-10-26), including the minimalist web UI based on the core TUI.
 
 ### Development checks
+
+Shared UI uses React Native primitives mapped to React Native Web. React Compiler is enabled for Next and the shared packages; lint includes Hooks/compiler diagnostics with zero warnings. Keep both integrations enabled. [React UI rules](docs/wiki/code/react-ui.md#react-native-and-compiler-baseline) describe the platform boundary and verification requirements.
 
 ```sh
 cargo fmt --all --check
@@ -133,8 +135,10 @@ scripts/local_matrix.sh --storage embedded
 pnpm typecheck
 pnpm lint
 pnpm build
+pnpm check:web-build
 pnpm exec playwright install chromium
 pnpm test:e2e
+ARGOS_WEB_PROFILE=dev pnpm test:e2e  # Also verify Next development compilation
 ```
 
 Navigation, CLI, and state directory: [usage guide](docs/wiki/concepts/usage.md). Contributors and agents should follow the [contributor workflow](docs/wiki/code/contributing.md), including the agent Cargo wrapper and CI-only server storage gate. Agent guidance: [AGENTS.md](AGENTS.md).

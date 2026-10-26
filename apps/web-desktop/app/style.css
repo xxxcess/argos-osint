@@ -1,3 +1,4 @@
+/* Keep browser surfaces aligned with @argos/ui and the core TUI theme. */
 * {
   box-sizing: border-box;
 }
@@ -5,9 +6,10 @@ html,
 body {
   margin: 0;
   min-height: 100%;
-  background: #0a0f14;
-  color: #dce5eb;
+  background: #141414;
+  color: #e8e8e8;
   font-family: Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 body {
   color-scheme: dark;
@@ -18,36 +20,29 @@ select {
   font: inherit;
 }
 a {
-  color: #80d7b7;
+  color: #87bfff;
 }
 input,
 select {
-  background: #101a23;
-  border: 1px solid #354651;
-  border-radius: 4px;
-  color: #dce5eb;
-  padding: 11px;
+  background: #1e1e1e;
+  border: 1px solid #535353;
+  border-radius: 2px;
+  color: #e8e8e8;
   min-width: 0;
 }
 :focus-visible {
-  outline: 2px solid #80d7b7;
-  outline-offset: 3px;
+  outline: 2px solid #87bfff;
+  outline-offset: -2px;
 }
-.reader-body {
-  white-space: pre-wrap;
-  font:
-    17px/1.85 Georgia,
-    serif;
-  color: #d0d9df;
+::selection {
+  background: #87bfff;
+  color: #141414;
 }
-.intel-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 24fr) minmax(0, 48fr) minmax(0, 28fr);
-  gap: 1px;
-  background: #293740;
-}
-@media (max-width: 850px) {
-  .intel-grid {
-    display: block;
+
+/* Keep static-export markup identical across initial browser widths. */
+@media (max-width: 599px) {
+  #workspace-description,
+  #workspace-route {
+    display: none;
   }
 }

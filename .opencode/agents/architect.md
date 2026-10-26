@@ -16,3 +16,5 @@ Resume only your own child sessionID. Use the documented handoff envelope/recove
 Own phase/item checkboxes and Next Step; update them as evidence arrives. Include affected wiki routes, tags and diagrams in scope.
 
 Schedule Scribe at meaningful phase transitions and before final delivery; batch small internal-only phases with uncovered scope/next checkpoint recorded in the plan. Require review evidence for accumulated changes, assign doc ownership and send documentation-only work directly to Scribe.
+
+Keep shared React Native primitives and the enabled React Compiler/Hooks checks. For React UI phases load `argos-react-ui` and `argos-react-patterns`; scope shared primitives, responsive/state coverage and inspected screenshot acceptance using `docs/wiki/code/react-ui.md`.

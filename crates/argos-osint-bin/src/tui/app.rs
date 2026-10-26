@@ -6777,7 +6777,9 @@ impl App {
     }
 
     fn filter_memory_cache(&mut self) {
-        if self.background_db.is_none() {
+        // SurrealDB homes have no SQLite worker path. Their snapshot still
+        // lives in `brain_cache`, and Find filters that cache.
+        if self.background_db.is_none() && !surreal_brain::on() {
             self.reload_memories();
             return;
         }
@@ -14957,19 +14959,17 @@ mod tests {
                 app.scrolls.intel_brief =
                     (geometry.brief.3 + 3).min(super::super::ui::intel_brief_scroll_max(&app));
                 let text = buffer_text(&render(&mut app, width, height));
-                assert!(text.contains("full article"), "{state} at {width}x{height}");
-                if matches!(
-                    state,
-                    "committed" | "committed-overflow" | "cached-read-error"
-                ) {
+                assert!(text.contains("summary"), "{state} at {width}x{height}");
+                if width >= 80 {
                     assert!(
-                        text.contains("Ready article"),
+                        text.contains("First sentence of the deterministic preview"),
                         "{state} at {width}x{height}"
                     );
                 }
-                if state != "running" {
-                    assert!(!text.contains("Retrieving full article"));
-                }
+                assert!(
+                    !text.contains("Ready article") && !text.contains("Retrieving full article"),
+                    "{state} at {width}x{height}"
+                );
                 if let Some(dir) = &dir {
                     dump_cells(
                         &mut app,

@@ -382,10 +382,13 @@ test("browse, search, brief, related, topology and reconnect", async ({
   await page.getByRole("button", { name: "Open Focus Brief ↗" }).click();
   await expect.poll(() => f.admissions).toEqual([{ run: "r1", id: "a1" }]);
   await expect(
+    page.getByText("Officials meet to discuss regional shipping access."),
+  ).toBeVisible();
+  await expect(
     page.getByText(
       "The full retained article describes the negotiations and their regional context.",
     ),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(
     page.getByText("Related leads · not corroboration", { exact: true }),
   ).toBeVisible();
@@ -489,7 +492,7 @@ test("metadata excerpt is not presented as a retained full body", async ({
   await page.goto("/");
   await page.getByRole("button", { name: "Open Focus Brief ↗" }).click();
   await expect(
-    page.getByText(/Full article body is not retained yet/),
+    page.getByText("Officials meet to discuss regional shipping access."),
   ).toBeVisible();
-  await expect(page.getByText(/Description · metadata excerpt/)).toBeVisible();
+  await expect(page.getByText(/Full article body/)).toHaveCount(0);
 });

@@ -37,10 +37,11 @@ separation; every other consumer retains spaced records. Keep wrapped
 and expanded content together; gaps never count as records or activate adjacent
 items. Shared list geometry governs capacity, reveal and pointer mapping, without
 trailing overflow. Small panes retain gaps and scroll; charts and horizontal
-navigation retain their existing geometry. Full article displays current-job
-committed Body or usable current body content immediately. Messages and orphan
-legacy running rows cannot establish retrieval activity. Read failures retain
-cached content; Reload invalidates the old presentation.
+navigation retain their existing geometry. The Focus Brief reader shows the
+stored article description. Retrieval of the full body continues for extraction
+and stays off that pane. Messages and orphan legacy running rows cannot
+establish retrieval activity. Read failures retain cached content; Reload
+invalidates the old presentation.
 
 `theme.rs` remains authoritative: preserve all RGB/semantic tokens, the stable `SERIES` mapping and map colors/heat ramp. Use thin terminal borders, one-cell horizontal padding, ACCENT titles, normal-size bold KPI values, ACCENT navigation fill/dark text and ACCENT focus border with `• focused`. Selected table rows use SELECT/TEXT.
 

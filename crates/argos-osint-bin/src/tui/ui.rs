@@ -8017,27 +8017,23 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
             ButtonId::IntelBodyRefresh,
             "Reload article",
         );
-        if intel_body_loading(app) {
-            draw_intel_body_loading(frame, center, layout.full, app);
-        } else {
-            draw_clipped_md_pane(
-                frame,
-                center,
-                layout.full,
-                if matches!(
-                    app.focus,
-                    Target::IntelFullArticle | Target::Button(ButtonId::IntelBodyMore)
-                ) {
-                    " full article • focused "
-                } else {
-                    " full article "
-                },
-                &layout.full_lines[..layout.full_lines.len().min(
-                    app.scrolls.intel_full.min(layout.full_scroll_max) as usize + layout.full_room,
-                )],
-                app.scrolls.intel_full.min(layout.full_scroll_max),
-            );
-        }
+        draw_clipped_md_pane(
+            frame,
+            center,
+            layout.full,
+            if matches!(
+                app.focus,
+                Target::IntelFullArticle | Target::Button(ButtonId::IntelBodyMore)
+            ) {
+                " summary • focused "
+            } else {
+                " summary "
+            },
+            &layout.full_lines[..layout.full_lines.len().min(
+                app.scrolls.intel_full.min(layout.full_scroll_max) as usize + layout.full_room,
+            )],
+            app.scrolls.intel_full.min(layout.full_scroll_max),
+        );
         if let Some((rect, _)) = intersect_abs(center, layout.full) {
             app.layout
                 .borrow_mut()
@@ -9840,32 +9836,18 @@ pub(crate) fn intel_body_has_content(app: &App) -> bool {
 }
 
 fn intel_brief_full_lines(app: &App, width: usize) -> Vec<Line<'static>> {
-    match intel_body_presentation(app) {
-        IntelBodyPresentation::Retrieving => Vec::new(),
-        IntelBodyPresentation::Status(reason) => super::components::measured_lines(
-            vec![Line::styled(reason, theme::dim())],
-            width.max(1).min(u16::MAX as usize) as u16,
-        ),
-        IntelBodyPresentation::Content { markdown, warning } => {
-            let mut lines = Vec::new();
-            if let Some(warning) = warning {
-                lines.push(Line::styled(warning, theme::dim()));
-            }
-            if app.intel_full_collapsed {
-                lines.push(Line::styled(
-                    "[collapsed — press Reload to retrieve again]",
-                    theme::dim(),
-                ));
-            } else {
-                lines.extend(
-                    super::markdown::markdown_lines(markdown, width.max(1))
-                        .into_iter()
-                        .map(md_line_to_line),
-                );
-            }
-            lines
-        }
-    }
+    let Some(article) = app.intel_articles.get(app.intel_sel) else {
+        return vec![Line::styled("No article selected.", theme::dim())];
+    };
+    let summary = if article.description.trim().is_empty() {
+        "No article summary stored.".to_string()
+    } else {
+        article.description.clone()
+    };
+    wrap_text(&summary, width.max(1))
+        .into_iter()
+        .map(|chunk| Line::from(Span::styled(chunk, theme::text())))
+        .collect()
 }
 
 pub(crate) fn intel_body_loading(app: &App) -> bool {
@@ -9883,35 +9865,6 @@ pub(crate) fn intel_insights_loading(app: &App) -> bool {
     app.intel_insights_running.contains(&article.id)
 }
 
-fn draw_intel_body_loading(frame: &mut Frame, viewport: Rect, area: AbsRect, app: &App) {
-    let Some((vis, _)) = intersect_abs(viewport, area) else {
-        return;
-    };
-    frame.render_widget(Block::default().style(theme::text()), vis);
-    stroke_clipped_box(
-        frame,
-        viewport,
-        area,
-        if app.focus == Target::IntelFullArticle {
-            " full article • focused "
-        } else {
-            " full article "
-        },
-    );
-
-    let inner = AbsRect {
-        x: area.x.saturating_add(1),
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-    let Some((inner_vis, _)) = intersect_abs(viewport, inner) else {
-        return;
-    };
-    let (label, detail) = intel_body_progress_lines(app);
-    draw_centered_loading_card(frame, inner_vis, &label, detail.as_deref());
-}
-
 /// Centered loading card over a briefing side pane (extracted / confidence).
 fn intel_insights_progress_detail(app: &App) -> Option<String> {
     let message = app.intel_body_message.trim();
@@ -9924,45 +9877,6 @@ fn intel_insights_progress_detail(app: &App) -> Option<String> {
     } else {
         None
     }
-}
-
-/// Popup card: bordered block horizontally and vertically centered in `area`.
-fn draw_centered_loading_card(frame: &mut Frame, area: Rect, label: &str, detail: Option<&str>) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let mut lines = vec![Line::from(Span::styled(label.to_string(), theme::dim()))];
-    if let Some(detail) = detail.filter(|text| !text.is_empty()) {
-        lines.push(Line::from(Span::styled(detail.to_string(), theme::dim())));
-    }
-    let content_h = lines.len() as u16;
-    let text_w = lines
-        .iter()
-        .map(|line| line.width() as u16)
-        .max()
-        .unwrap_or(0)
-        .max(16);
-    let desired_w = text_w.saturating_add(4).max(18);
-    let card_w = desired_w.min(area.width).max(1);
-    let desired_h = content_h.saturating_add(2).max(3);
-    let card_h = desired_h.min(area.height).max(1);
-    let x = area.x + area.width.saturating_sub(card_w) / 2;
-    let y = area.y + area.height.saturating_sub(card_h) / 2;
-    let card = Rect {
-        x,
-        y,
-        width: card_w,
-        height: card_h,
-    };
-    frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
-                .style(theme::text()),
-        ),
-        card,
-    );
 }
 
 /// Mirror `insights_progress_lines`: braille spinner + phase label, optional detail.
@@ -10674,7 +10588,7 @@ fn memory_popup(app: &App, message_id: &str) -> String {
 fn help_text(app: &App) -> &'static str {
     match app.module {
         None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools · 8 Models · 9 Profile\nNumber keys switch apps when you are not typing in a field\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
-        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, full article, extracted claims/inferences/context/links, and confidence\nClick a claim or actor, or focus it and press Enter, to map its two-hop neighborhood\nTopology selection inspects; Recenter changes the seed; Back restores this brief\nRelated beneath Full Article reflects ingest associations with at least two shared entities\nJobs pane tracks focus-brief background progress\nEsc returns from briefing to bulletin, or from bulletin to home",
+        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, stored description, extracted claims/inferences/context/links, and confidence\nClick a claim or actor, or focus it and press Enter, to map its two-hop neighborhood\nTopology selection inspects; Recenter changes the seed; Back restores this brief\nRelated beneath Full Article reflects ingest associations with at least two shared entities\nJobs pane tracks focus-brief background progress\nEsc returns from briefing to bulletin, or from bulletin to home",
         Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 60 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 60 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, and Delete sit between the map and those panes. Resume continues retained collection/classification and native metadata. Coverage shows classifications, entities, publisher priors, and Related pairs. Atlas collects articles without creating Brain claim memories. When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon investigation\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between transcript and prompt\n↑↓ select a query, plan, evidence activity, or answer\n←→ or h/l fold the selected Plan or activity\nEnter toggles that fold · o inspects the captured source · f opens full text\n◉ brain opens memories used by Synthesis\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",

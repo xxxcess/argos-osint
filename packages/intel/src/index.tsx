@@ -463,14 +463,7 @@ function Focus({
           color: c.text,
         }}
       >
-        {detail.isError
-          ? "The retained body could not be loaded. Refresh the brief in Context."
-          : reload.isPending || d?.body_pending
-            ? "Reloading article body. Previous retrieval is hidden until the new body stage commits."
-            : detail.isPending
-              ? "Loading retained article body…"
-              : d?.body?.body_markdown ||
-                `Full article body is not retained yet.\n\nDescription · metadata excerpt\n${shown.description || "No description available."}`}
+        {shown.description || "No description available."}
       </Text>
       {safeLink(shown.url) && (
         <Button

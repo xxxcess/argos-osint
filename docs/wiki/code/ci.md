@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-Three workflows live in `.github/workflows/` (owned by Code Architect; code changes don't touch `.github`).
+Four workflows live in `.github/workflows/` (owned by Code Architect; code changes don't touch `.github`).
 
 ![CI matrix](../../img/ci-matrix.svg)
 
@@ -35,3 +35,9 @@ On PRs (including title/body edits) and pushes to `main`: `node scripts/release_
 ## `release-please.yml`
 
 On pushes to `main` (or manual dispatch): Release Please opens/updates the release PR and tags from Conventional Commits (`release-please-config.json`, `.release-please-manifest.json`). Uses a GitHub App token or `RELEASE_PLEASE_TOKEN` so release PRs trigger CI; see [versioning.md](versioning.md).
+
+## `intel-web.yml` — local web client checks
+
+The Phase 1 web workflow runs on matching web changes on `main` and pull requests, plus manual dispatch. It uses Node from `.node-version` and pnpm 12.15.0, installs with the frozen lockfile, runs typecheck/lint, builds the static export without a running API, installs Chromium, and runs offline Playwright contracts. The existing Rust matrix is unchanged and continues to check the new API workspace members in its embedded leg. No public deployment or live provider keys are used.
+
+The user authorized this one `.github` addition as an ownership exception; Code Architect review remains the repository handoff. Workflow YAML syntax and its commands are verified locally; a hosted Actions run requires publishing the change and is not claimed as local evidence.

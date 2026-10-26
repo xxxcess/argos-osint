@@ -30,7 +30,7 @@ fn uuid_lite() -> u64 {
     N.fetch_add(1, Ordering::Relaxed)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct ArticleBodyRow {
     pub id: String,
     pub article_id: String,

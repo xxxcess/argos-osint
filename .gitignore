@@ -26,3 +26,14 @@ progress.md
 !/docs/wiki/code/templates/planning/task_plan.md
 !/docs/wiki/code/templates/planning/findings.md
 !/docs/wiki/code/templates/planning/progress.md
+
+# Web workspace build and test artifacts.
+node_modules/
+.next/
+apps/web-desktop/out/
+*.tsbuildinfo
+playwright-report/
+test-results/
+
+# Next regenerates this alongside route types.
+**/next-env.d.ts

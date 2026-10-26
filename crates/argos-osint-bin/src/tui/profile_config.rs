@@ -742,6 +742,8 @@ mod tests {
     #[test]
     fn confirmed_export_overwrites_the_same_destination() {
         let dir = tempfile::tempdir().unwrap();
+        // Export snapshots live AuthFile/SettingsFile from ARGOS_HOME.
+        std::env::set_var("ARGOS_HOME", dir.path().join("home"));
         let path = dir.path().join("config.json");
         std::fs::write(&path, "old").unwrap();
         let mut view = ConfigView {
@@ -750,7 +752,7 @@ mod tests {
         };
         assert!(view.run_export().is_err());
         assert!(view.export_confirm);
-        assert!(view.run_export().is_ok());
+        view.run_export().expect("confirmed overwrite");
         assert!(std::fs::read_to_string(path)
             .unwrap()
             .contains("schema_version"));

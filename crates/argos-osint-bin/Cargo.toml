@@ -13,20 +13,20 @@ path = "src/main.rs"
 
 [features]
 default = ["embedded", "nlp"]
-nlp = ["argos-osint-core/nlp"]
+nlp = ["argos-osint-core/nlp", "argos-osint-api/nlp"]
 surreal = ["argos-osint-core/surreal"]
-embedded = ["surreal", "argos-osint-core/embedded"]
-server = ["surreal", "argos-osint-core/server"]
+embedded = ["surreal", "argos-osint-core/embedded", "argos-osint-api/embedded"]
+server = ["surreal", "argos-osint-core/server", "argos-osint-api/server"]
 
 [dependencies]
+argos-osint-api = { path = "../argos-osint-api", default-features = false }
+axum = "0.8.8"
 anyhow.workspace = true
 argos-osint-core = { path = "../argos-osint-core", default-features = false }
 chrono.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
-ratatui-image.workspace = true
-image.workspace = true
 reqwest.workspace = true
 rpassword.workspace = true
 serde_json.workspace = true
@@ -39,3 +39,6 @@ unicode-width = "0.2"
 [dev-dependencies]
 argos-osint-core = { path = "../argos-osint-core", default-features = false, features = ["fixtures"] }
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

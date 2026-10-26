@@ -22,7 +22,12 @@ use crate::jobs_view::{task_label, AttemptRow, JobCounts, JobDetail, JobFilter, 
 const ELIGIBLE: &str = "created_at >= <datetime>$cutoff \
     AND !record::exists(type::record('job_retirement', record::id(id)))";
 
-const ROW: &str = "SELECT record::id(id) AS key,
+// Keep the running stack reachable even when active work/history fills the page.
+const RANK: &str = "IF kind = 'service' AND state = 'running' AND operation IN ['api_server', 'web_server'] { -1 } \
+    ELSE IF state IN ['running', 'queued', 'retry_scheduled'] AND kind != 'service' { 0 } \
+    ELSE IF kind = 'service' { 2 } ELSE { 1 }";
+
+const ROW_FIELDS: &str = "record::id(id) AS key,
     IF parent != NONE { record::id(parent) } ELSE { '' } AS parent_id,
     kind, operation, state, phase, cancel_requested, cancellable AS cancellable_flag,
     app, title, provider, model, tool, run_ref, resource_ref, result_ref, error_category,
@@ -30,15 +35,18 @@ const ROW: &str = "SELECT record::id(id) AS key,
     attempts_used, attempt_cap, worker_owner, progress_done, progress_total,
     IF heartbeat_at != NONE { <string>heartbeat_at } ELSE { '' } AS heartbeat_at,
     IF active_since != NONE { <string>active_since } ELSE { '' } AS active_since,
-    count((SELECT VALUE id FROM job_event WHERE job_id = record::id($parent.id)
-      OR job_id IN (SELECT VALUE record::id(id) FROM job WHERE parent = $parent.id)))
-    + count((SELECT VALUE id FROM argos_event WHERE job_id = record::id($parent.id)
-      OR job_id IN (SELECT VALUE record::id(id) FROM job WHERE parent = $parent.id))) AS events,
     <string>created_at AS created_at,
-    IF finished_at != NONE { <string>finished_at } ELSE { '' } AS finished_at,
-    updated_at,
-    IF state IN ['running', 'queued', 'retry_scheduled'] AND kind != 'service' { 0 }
-      ELSE IF kind = 'service' { 2 } ELSE { 1 } AS rank,
+    IF finished_at != NONE { <string>finished_at } ELSE { '' } AS finished_at, updated_at";
+
+// Single-job/detail reads retain their full correlated projection. The list
+// loads the same metrics in grouped queries scoped to its selected IDs.
+// Event totals cover the job and its immediate children. The child walk is a
+// direct subquery of this job: nesting it under `argos_event` rebinds
+// `$parent` to the event row and drops the children's events.
+const ROW_RELATIONS: &str = "<int>(math::sum((SELECT VALUE \
+      count((SELECT VALUE id FROM job_event WHERE job_id = record::id($parent.id))) \
+      + count((SELECT VALUE id FROM argos_event WHERE job_id = record::id($parent.id))) \
+      FROM job WHERE id = $parent.id OR parent = $parent.id)) ?? 0) AS events,
     count((SELECT VALUE id FROM job WHERE parent = $parent.id)) AS children,
     count((SELECT VALUE id FROM task WHERE job = $parent.id)) AS tasks,
     count((SELECT VALUE id FROM attempt WHERE task.job = $parent.id)) AS attempt_rows,
@@ -47,8 +55,11 @@ const ROW: &str = "SELECT record::id(id) AS key,
       ?? '' AS open_attempt_started,
     (SELECT VALUE <string>started_at FROM task
        WHERE job = $parent.id AND started_at != NONE ORDER BY started_at LIMIT 1)[0]
-      ?? '' AS started_at
-  FROM job";
+      ?? '' AS started_at";
+
+fn row_select() -> String {
+    format!("SELECT {ROW_FIELDS}, {RANK} AS rank, {ROW_RELATIONS} FROM job")
+}
 
 #[derive(SurrealValue)]
 struct Raw {
@@ -148,9 +159,10 @@ fn retryable_ops() -> Vec<String> {
 }
 
 /// `list_jobs`: top-level visible jobs, active first, then most recently
-/// updated, services last. Bounded by `limit`.
+/// updated, other services last. Running API/Web services stay first. Select
+/// the bounded page before loading correlated event/task/attempt details.
 pub async fn list_jobs(db: &Surreal<Any>, filter: &JobFilter, limit: usize) -> Result<Vec<JobRow>> {
-    let mut sql = format!("{ROW} WHERE parent = NONE AND {ELIGIBLE}");
+    let mut sql = format!("SELECT id, record::id(id) AS key, updated_at, {RANK} AS rank FROM job WHERE parent = NONE AND {ELIGIBLE}");
     let states: Vec<String> = filter
         .status
         .states()
@@ -179,7 +191,12 @@ pub async fn list_jobs(db: &Surreal<Any>, filter: &JobFilter, limit: usize) -> R
         sql.push_str(" AND created_at >= <datetime>$since");
     }
     sql.push_str(" ORDER BY rank, updated_at DESC, key LIMIT $n");
-    let rows: Vec<Raw> = db
+    let rows_query = format!(
+        "SELECT {ROW_FIELDS}, {RANK} AS rank, 0 AS events, 0 AS children,
+        0 AS tasks, 0 AS attempt_rows, '' AS open_attempt_started, '' AS started_at FROM job"
+    );
+    let sql = format!("LET $visible = ({sql}); {rows_query} WHERE id IN $visible.id ORDER BY rank, updated_at DESC, key");
+    let mut rows: Vec<Raw> = db
         .query(sql)
         .bind(("cutoff", cutoff(Utc::now())))
         .bind(("states", states))
@@ -190,14 +207,111 @@ pub async fn list_jobs(db: &Surreal<Any>, filter: &JobFilter, limit: usize) -> R
         .bind(("n", limit.max(1) as i64))
         .await?
         .check()?
-        .take(0)?;
+        .take(1)?;
+    load_page_relations(db, &mut rows).await?;
     Ok(rows.into_iter().map(row).collect())
+}
+
+#[derive(SurrealValue)]
+struct PageChild {
+    job_id: String,
+    child_id: String,
+}
+#[derive(SurrealValue)]
+struct PageCount {
+    job_id: String,
+    n: i64,
+}
+#[derive(SurrealValue)]
+struct PageStart {
+    job_id: String,
+    at: String,
+}
+
+/// Grouped metadata reads prevent one event/task/attempt scan per display row.
+/// Event counts preserve the existing root-plus-immediate-children cohort.
+async fn load_page_relations(db: &Surreal<Any>, rows: &mut [Raw]) -> Result<()> {
+    use std::collections::HashMap;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let positions: HashMap<String, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.key.clone(), i))
+        .collect();
+    let jobs: Vec<_> = rows.iter().map(|r| rid("job", &r.key)).collect();
+    let mut result = db.query(
+        "SELECT record::id(parent) AS job_id, record::id(id) AS child_id FROM job WHERE parent IN $jobs;
+         SELECT job_id, count() AS n FROM (SELECT record::id(job) AS job_id FROM task WHERE job IN $jobs) GROUP BY job_id;
+         SELECT job_id, <string>time::min(started_at) AS at FROM
+           (SELECT record::id(job) AS job_id, started_at FROM task WHERE job IN $jobs AND started_at != NONE) GROUP BY job_id;
+         SELECT job_id, count() AS n FROM
+           (SELECT record::id(task.job) AS job_id FROM attempt WHERE task IN (SELECT VALUE id FROM task WHERE job IN $jobs)) GROUP BY job_id;
+         SELECT job_id, <string>time::min(started_at) AS at FROM
+           (SELECT record::id(task.job) AS job_id, started_at FROM attempt
+            WHERE task IN (SELECT VALUE id FROM task WHERE job IN $jobs) AND finished_at = NONE) GROUP BY job_id;"
+    ).bind(("jobs", jobs)).await?.check()?;
+    let children: Vec<PageChild> = result.take(0)?;
+    let tasks: Vec<PageCount> = result.take(1)?;
+    let starts: Vec<PageStart> = result.take(2)?;
+    let attempts: Vec<PageCount> = result.take(3)?;
+    let open: Vec<PageStart> = result.take(4)?;
+    let mut parents = HashMap::new();
+    for child in children {
+        if let Some(&index) = positions.get(&child.job_id) {
+            rows[index].children += 1;
+        }
+        parents.insert(child.child_id, child.job_id);
+    }
+    for count in tasks {
+        if let Some(&i) = positions.get(&count.job_id) {
+            rows[i].tasks = count.n;
+        }
+    }
+    for start in starts {
+        if let Some(&i) = positions.get(&start.job_id) {
+            rows[i].started_at = start.at;
+        }
+    }
+    for count in attempts {
+        if let Some(&i) = positions.get(&count.job_id) {
+            rows[i].attempt_rows = count.n;
+        }
+    }
+    for start in open {
+        if let Some(&i) = positions.get(&start.job_id) {
+            rows[i].open_attempt_started = start.at;
+        }
+    }
+    let event_jobs: Vec<_> = positions.keys().chain(parents.keys()).cloned().collect();
+    let mut result = db
+        .query(
+            "SELECT job_id, count() AS n FROM job_event WHERE job_id IN $jobs GROUP BY job_id;
+         SELECT job_id, count() AS n FROM argos_event WHERE job_id IN $jobs GROUP BY job_id;",
+        )
+        .bind(("jobs", event_jobs))
+        .await?
+        .check()?;
+    for counts in [
+        result.take::<Vec<PageCount>>(0)?,
+        result.take::<Vec<PageCount>>(1)?,
+    ] {
+        for count in counts {
+            let root = parents.get(&count.job_id).unwrap_or(&count.job_id);
+            if let Some(&i) = positions.get(root) {
+                rows[i].events += count.n;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `get_job`: one visible job by id, at any depth.
 pub async fn get_job(db: &Surreal<Any>, id: &str) -> Result<Option<JobRow>> {
+    let row_query = row_select();
     let rows: Vec<Raw> = db
-        .query(format!("{ROW} WHERE id = $j AND {ELIGIBLE}"))
+        .query(format!("{row_query} WHERE id = $j AND {ELIGIBLE}"))
         .bind(("j", rid("job", id)))
         .bind(("cutoff", cutoff(Utc::now())))
         .await?
@@ -378,9 +492,10 @@ pub async fn job_detail(
     let Some(job) = get_job(db, id).await? else {
         return Ok(None);
     };
+    let row_query = row_select();
     let mut r = db
         .query(format!(
-            "{ROW} WHERE parent = $j ORDER BY created_at, id LIMIT 50;
+            "{row_query} WHERE parent = $j ORDER BY created_at, id LIMIT 50;
              SELECT record::id(id) AS id, operation, pool, state, attempts, max_attempts, active_ms,
                queue_ms, retry_wait_ms, error_category, error_message, result_ref,
                <string>next_eligible_at AS next_eligible_at, <string>updated_at AS updated_at,

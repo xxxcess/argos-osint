@@ -1264,7 +1264,6 @@ pub struct App {
     pub intel_day: String,
     pub intel_days: Vec<String>,
     pub intel_articles: Vec<AtlasArticleRow>,
-    pub article_images: crate::tui::article_image::ArticleImages,
     pub intel_sel: usize,
     pub intel_claims: Vec<AtlasArticleClaim>,
     pub intel_relations: Vec<(String, String, String)>,
@@ -1668,7 +1667,6 @@ impl App {
             choice_sel: 0,
             choice_note: String::new(),
             palette_query: String::new(),
-            article_images: crate::tui::article_image::ArticleImages::default(),
             palette_recent: Vec::new(),
             palette_restore: None,
             palette_sel: 0,
@@ -6677,7 +6675,7 @@ impl App {
     /// Reload the Brain list, keeping the selected memory (by id), Find, and
     /// scroll. A read failure keeps the last good list and reports the error.
     fn reload_memories_selecting(&mut self, prefer: Option<String>) {
-        if self.background_db.is_some() {
+        if self.background_db.is_some() || surreal_brain::on() {
             if prefer.is_some() {
                 self.brain_prefer = prefer;
             }
@@ -10718,7 +10716,21 @@ fn atlas_poll_wait(app: &App, fallback: Duration) -> Duration {
         .max(Duration::from_millis(1))
 }
 
-pub async fn run(mut app: App) -> Result<()> {
+pub async fn run(app: App) -> Result<()> {
+    run_with_shutdown(
+        app,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        true,
+    )
+}
+
+/// Run on a plain terminal thread while a stack supervisor owns the async API.
+/// The cancellation flag lets stack down restore the terminal through Restore.
+pub fn run_with_shutdown(
+    mut app: App,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    start_workers: bool,
+) -> Result<()> {
     use crossterm::{
         execute,
         terminal::{enable_raw_mode, EnterAlternateScreen},
@@ -10744,10 +10756,10 @@ pub async fn run(mut app: App) -> Result<()> {
     )?;
     let mut terminal: Terminal<ratatui::backend::CrosstermBackend<Stdout>> =
         Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
-    app.article_images.detect();
     // Durable local workers (index outbox + summary flush), each claiming only
     // its own pool. Stopped when dropped at the end of the session.
-    let _workers = argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path());
+    let _workers = start_workers
+        .then(|| argos_osint_core::scheduler::WorkerPool::spawn_default(paths::db_path()));
     // Process liveness for the job registry: jobs left running by a process
     // that exited become interrupted; cross-process Cancel reaches this one.
     // Under a storage config the beat writes `process:[owner]` on the
@@ -10785,6 +10797,11 @@ pub async fn run(mut app: App) -> Result<()> {
     // Set when the last draw painted a loading animation (see `anim`).
     let mut animated = false;
     loop {
+        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+            app.persist_view_session();
+            app.flush_draft();
+            return Ok(());
+        }
         if pump(&mut app) {
             dirty = true;
         }
@@ -10807,25 +10824,6 @@ pub async fn run(mut app: App) -> Result<()> {
                 }
                 dirty = true;
             }
-        }
-        let image_area = super::ui::article_image_area(&app);
-        let image_article = if app.module == Some(ModuleId::Intel) && app.overlay == Overlay::None {
-            app.intel_articles
-                .get(app.intel_sel)
-                .map(|article| (article.id.as_str(), article.image_url.as_str()))
-        } else {
-            None
-        };
-        if app.article_images.update(image_article, image_area) {
-            dirty = true;
-        }
-        if app.article_images.clear_graphics {
-            use std::io::Write;
-            // Kitty delete-all is ignored by other protocols; clearing the cell
-            // buffer also erases Sixel/iTerm and half-block leftovers.
-            let _ = std::io::stdout().write_all(b"\x1b_Ga=d,d=A;\x1b\\");
-            terminal.clear()?;
-            app.article_images.clear_graphics = false;
         }
         if dirty {
             if let Ok(size) = terminal.size() {
@@ -11321,7 +11319,6 @@ pub mod testkit {
             choice_sel: 0,
             choice_note: String::new(),
             palette_query: String::new(),
-            article_images: crate::tui::article_image::ArticleImages::default(),
             palette_recent: Vec::new(),
             palette_restore: None,
             palette_sel: 0,
@@ -13442,6 +13439,96 @@ mod tests {
         }
     }
 
+    #[test]
+    fn service_jobs_and_traffic_screens() {
+        use argos_osint_core::{
+            events::EventRow,
+            jobs_view::{JobDetail, JobRow},
+        };
+        let mut app = app();
+        let api = JobRow {
+            id: "api-service".into(),
+            kind: "service".into(),
+            operation: "api_server".into(),
+            title: "Rust API server".into(),
+            app: "system".into(),
+            state: "running".into(),
+            events: 2,
+            active_ms: Some(1200),
+            ..Default::default()
+        };
+        let web = JobRow {
+            id: "web-service".into(),
+            kind: "service".into(),
+            operation: "web_server".into(),
+            title: "Next.js web server".into(),
+            app: "system".into(),
+            state: "running".into(),
+            events: 2,
+            active_ms: Some(1600),
+            ..Default::default()
+        };
+        app.module = Some(ModuleId::Jobs);
+        app.jobs.rows = vec![api.clone(), web];
+        app.jobs.loaded = true;
+        app.jobs.detail = Some(JobDetail {
+            job: api,
+            ..Default::default()
+        });
+        app.focus = Target::JobRow(0);
+        assert!(!app.jobs.can_cancel() && !app.jobs.can_retry());
+        assert!(super::super::jobs::buttons(&app.jobs, false).contains(&ButtonId::JobsViewLogs));
+        for (width, height) in [(160, 50), (120, 40), (80, 24), (60, 18)] {
+            let text = buffer_text(&render(&mut app, width, height));
+            assert!(text.contains("Rust"), "{text}");
+            if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
+                std::fs::create_dir_all(&dir).unwrap();
+                dump_cells(
+                    &mut app,
+                    &dir,
+                    &format!("service-jobs-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+        }
+        app.module = Some(ModuleId::Logs);
+        app.logs.job = "api-service".into();
+        app.logs.loaded = true;
+        app.logs.counts.info = 1;
+        app.logs.back_to_job = Some("api-service".into());
+        app.logs.rows = vec![EventRow {
+            id: "evt-api".into(),
+            seq: 1,
+            ts: "2026-10-26T12:00:00Z".into(),
+            severity: "info".into(),
+            app: "system".into(),
+            event_type: "api.request".into(),
+            message: "GET /api/v1/days · 200 · 3 ms".into(),
+            details: "".into(),
+            job_id: "api-service".into(),
+            task_id: "".into(),
+            attempt_id: "".into(),
+            run_id: "".into(),
+            resource_ref: "".into(),
+            correlation_id: "".into(),
+        }];
+        app.focus = Target::LogLine(0);
+        for (width, height) in [(160, 50), (120, 40), (80, 24), (60, 18)] {
+            let text = buffer_text(&render(&mut app, width, height));
+            assert!(text.contains("GET /api/v1/days"), "{text}");
+            if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
+                dump_cells(
+                    &mut app,
+                    &dir,
+                    &format!("service-logs-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+        }
+    }
+
     fn dump_cells(app: &mut App, dir: &str, name: &str, width: u16, height: u16) {
         let buffer = render(app, width, height);
         let mut cells = Vec::new();
@@ -14643,7 +14730,7 @@ mod tests {
             .collect();
         app.jobs.loaded = true;
         app.intel_articles = (0..20)
-            .map(|i| intel_brief_image_article(&format!("article-{i}"), ""))
+            .map(|i| intel_article_fixture(&format!("article-{i}"), ""))
             .collect();
         app.intel_page = IntelPage::Bulletin;
         for i in 0..3 {
@@ -14746,7 +14833,7 @@ mod tests {
         let mut app = app();
         app.module = Some(ModuleId::Intel);
         app.intel_page = IntelPage::Briefing;
-        let article = intel_brief_image_article("body-state", "");
+        let article = intel_article_fixture("body-state", "");
         app.intel_articles = vec![article.clone()];
         app.intel_brief_job = Some("body-job".into());
         app.intel_body_owner = Some((article.id.clone(), app.intel_brief_job.clone()));
@@ -14902,7 +14989,7 @@ mod tests {
             intel_body_loading, intel_body_presentation, IntelBodyPresentation,
         };
         let mut app = app();
-        app.intel_articles = vec![intel_brief_image_article("presentation", "")];
+        app.intel_articles = vec![intel_article_fixture("presentation", "")];
         app.intel_sel = 0;
         app.intel_brief_job = Some("job-current".into());
         app.intel_body_running.insert("presentation".into());
@@ -15851,8 +15938,7 @@ mod tests {
         let mut app = app();
         app.module = Some(ModuleId::Intel);
         app.intel_page = IntelPage::Briefing;
-        app.intel_articles
-            .push(intel_brief_image_article("prior", ""));
+        app.intel_articles.push(intel_article_fixture("prior", ""));
         app.intel_metadata_present = true;
         app.intel_publisher_prior = Some(publisher_prior_fixture());
         app.intel_evidence_confidence = None;
@@ -15869,12 +15955,12 @@ mod tests {
         );
     }
 
-    fn intel_brief_image_article(id: &str, image_url: &str) -> AtlasArticleRow {
+    fn intel_article_fixture(id: &str, image_url: &str) -> AtlasArticleRow {
         AtlasArticleRow {
             run_id: "r1".into(),
             id: id.into(),
-            title: "Brief focus article with an image column".into(),
-            description: "First sentence of the deterministic preview stays readable beside the image column. Second sentence keeps the prose wide enough to wrap across several rows. Third sentence makes the section taller than the image so the image stays vertically centered. Fourth sentence leaves the reader readable at every supported viewport size.".into(),
+            title: "Brief focus article with full-width text".into(),
+            description: "First sentence of the deterministic preview stays readable across the full reader width. Second sentence keeps the prose wide enough to wrap across several rows. Third sentence makes the section tall enough to verify centered text. Fourth sentence leaves the reader readable at every supported viewport size.".into(),
             url: "https://example.com/article".into(),
             country: "us".into(),
             source_name: "Test Source".into(),
@@ -15894,7 +15980,7 @@ mod tests {
         let mut app = app();
         app.module = Some(ModuleId::Intel);
         app.intel_page = IntelPage::Briefing;
-        let article = intel_brief_image_article("actors", "");
+        let article = intel_article_fixture("actors", "");
         app.store.atlas_upsert_article(&article).unwrap();
         app.intel_articles = vec![article.clone()];
         app.intel_publisher_prior = Some(publisher_prior_fixture());
@@ -16140,158 +16226,57 @@ mod tests {
         }
     }
 
-    /// Select Intel, install one brief-article fixture and return the center
-    /// reader geometry for the requested viewport.
-    fn intel_brief_image_geometry(
-        app: &mut App,
-        article: AtlasArticleRow,
-        width: u16,
-        height: u16,
-        reader_page: usize,
-    ) -> crate::tui::ui::IntelCenterGeometry {
-        app.select(ModuleId::Intel.index());
-        app.intel_page = IntelPage::Briefing;
-        app.intel_articles = vec![article];
-        app.intel_sel = 0;
-        app.compact_pages[ModuleId::Intel.index()] = reader_page;
-        app.screen = Rect::new(0, 0, width, height);
-        crate::tui::ui::intel_center_geometry_for(app)
-            .unwrap_or_else(|| panic!("brief layout missing at {width}x{height}"))
-    }
-
     #[test]
-    fn intel_brief_image_column_sits_beside_brief_content_and_centers_vertically() {
-        let mut app = app();
-        let geo = intel_brief_image_geometry(
-            &mut app,
-            intel_brief_image_article("art-1", "https://example.com/image.png"),
-            160,
-            50,
-            0,
-        );
-        let (image_x, image_y, image_w, image_h) = geo.image;
-        let (brief_x, brief_y, brief_w, brief_h) = geo.brief;
-        let (text_x, text_y, text_w, text_h) = geo.brief_text;
-        let inner_w = brief_w.saturating_sub(2) as usize;
-        let columns = image_w as usize + 1 + text_w as usize;
-        let image_bottom = image_y + image_h as i32;
-        let section_bottom = brief_y + brief_h as i32 - 1;
-        // The image column stays inside the brief article section.
-        assert!(image_x > brief_x, "{geo:?}");
-        assert!(image_x + image_w < brief_x + brief_w, "{geo:?}");
-        assert!(image_y > brief_y, "{geo:?}");
-        assert!(image_bottom <= section_bottom, "{geo:?}");
-        // The image column is strictly left of the brief prose.
-        assert!(image_x + image_w <= text_x, "{geo:?}");
-        // Image, gutter and prose fill the section inner width.
-        assert_eq!(columns, inner_w, "{geo:?}");
-        assert!(text_w >= 24, "{geo:?}");
-        // Image and prose are vertically centered inside the section.
-        let section_mid = brief_y + brief_h as i32 / 2;
-        let image_mid = image_y + image_h as i32 / 2;
-        let text_mid = text_y + text_h as i32 / 2;
-        assert!((image_mid - section_mid).abs() <= 1, "{geo:?}");
-        assert!((text_mid - section_mid).abs() <= 1, "{geo:?}");
-        assert!((14..=40).contains(&image_w), "{geo:?}");
-        assert!((5..=12).contains(&image_h), "{geo:?}");
-    }
-
-    #[test]
-    fn intel_brief_image_column_adapts_and_collapses_by_viewport() {
-        let mut app = app();
-        for (width, height) in [(160u16, 50u16), (120, 40), (100, 32), (80, 24), (60, 18)] {
-            let geo = intel_brief_image_geometry(
-                &mut app,
-                intel_brief_image_article("art-1", "https://example.com/image.png"),
-                width,
-                height,
-                1,
-            );
-            assert!(geo.image.2 > 0, "{width}x{height}: {geo:?}");
-            assert!((5..=12).contains(&geo.image.3), "{width}x{height}: {geo:?}");
-            assert!(geo.brief_text.2 >= 24, "{width}x{height}: {geo:?}");
-            match width {
-                160 => assert!(geo.image.2 >= 20, "{width}x{height}: {geo:?}"),
-                100 => assert!(
-                    (21..=23).contains(&geo.image.2),
-                    "{width}x{height}: {geo:?}"
-                ),
-                80 | 60 => assert_eq!(geo.image.3, 5, "{width}x{height}: {geo:?}"),
-                _ => {}
-            }
-        }
-        // The image column collapses at 40x20; the prose keeps the inner width.
-        let geo = intel_brief_image_geometry(
-            &mut app,
-            intel_brief_image_article("art-1", "https://example.com/image.png"),
-            40,
-            20,
-            1,
-        );
-        assert_eq!(geo.image.2, 0, "{geo:?}");
-        assert_eq!(geo.image.3, 0, "{geo:?}");
-        assert_eq!(geo.brief_text.0, geo.brief.0 + 1, "{geo:?}");
-        assert_eq!(geo.brief_text.2, geo.brief.2 - 2, "{geo:?}");
-    }
-
-    #[test]
-    fn intel_brief_text_keeps_full_width_without_image() {
-        let mut app = app();
-        for (label, image_url) in [("absent", ""), ("invalid", "file:///etc/passwd")] {
-            let geo = intel_brief_image_geometry(
-                &mut app,
-                intel_brief_image_article("art-1", image_url),
-                160,
-                50,
-                0,
-            );
-            assert_eq!(geo.image.2, 0, "{label}: {geo:?}");
-            assert_eq!(geo.image.3, 0, "{label}: {geo:?}");
-            assert_eq!(geo.brief_text.0, geo.brief.0 + 1, "{label}: {geo:?}");
-            assert_eq!(geo.brief_text.2, geo.brief.2 - 2, "{label}: {geo:?}");
-        }
-    }
-
-    #[test]
-    fn intel_brief_image_column_renders_beside_content_in_buffer() {
-        let mut app = app();
-        let geo = intel_brief_image_geometry(
-            &mut app,
-            intel_brief_image_article("art-1", "https://example.com/image.png"),
-            160,
-            50,
-            0,
-        );
-        let image_area = crate::tui::ui::article_image_area(&app);
-        if image_area.width > 0 && image_area.height > 0 {
-            app.article_images
-                .fixture("art-1", "https://example.com/image.png", image_area);
-        }
-        let buffer = render(&mut app, 160, 50);
-        let painted = buffer_text(&buffer);
-        assert!(painted.contains(" brief article "), "{painted}");
-        let (image_x, image_y, image_w, image_h) = geo.image;
-        let (text_x, text_y, text_w, text_h) = geo.brief_text;
-        let rows = buffer.area.height as i32;
-        let cols = buffer.area.width;
-        let mut image_blocks = 0;
-        for row in image_y..(image_y + image_h as i32).min(rows) {
-            for col in image_x..(image_x + image_w).min(cols) {
-                if matches!(buffer[(col, row as u16)].symbol(), "▀" | "▄") {
-                    image_blocks += 1;
+    fn intel_article_images_do_not_change_terminal_layout() {
+        super::super::anim::with_frame(0, || {
+            let mut app = app();
+            let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+            for (width, height) in [
+                (160, 50),
+                (120, 40),
+                (100, 32),
+                (80, 24),
+                (60, 18),
+                (40, 20),
+            ] {
+                for page in [IntelPage::Bulletin, IntelPage::Briefing] {
+                    let mut reference = None;
+                    for image_url in ["", "file:///etc/passwd", "https://example.com/image.png"] {
+                        app.module = Some(ModuleId::Intel);
+                        app.intel_page = page;
+                        app.intel_articles = vec![intel_article_fixture("art-1", image_url)];
+                        app.intel_sel = 0;
+                        app.compact_pages[ModuleId::Intel.index()] = 1;
+                        app.screen = Rect::new(0, 0, width, height);
+                        if page == IntelPage::Briefing {
+                            let geo = crate::tui::ui::intel_center_geometry_for(&app).unwrap();
+                            assert_eq!(geo.brief_text.0, geo.brief.0 + 1, "{geo:?}");
+                            assert_eq!(geo.brief_text.2, geo.brief.2 - 2, "{geo:?}");
+                        }
+                        let buffer = render(&mut app, width, height);
+                        if let Some(expected) = &reference {
+                            assert_eq!(&buffer, expected);
+                        }
+                        reference = Some(buffer);
+                    }
+                    if let Some(dir) = &dir {
+                        std::fs::create_dir_all(dir).unwrap();
+                        let name = if page == IntelPage::Bulletin {
+                            "bulletin"
+                        } else {
+                            "reader"
+                        };
+                        dump_cells(
+                            &mut app,
+                            dir,
+                            &format!("intel-text-{name}-{width}x{height}"),
+                            width,
+                            height,
+                        );
+                    }
                 }
             }
-        }
-        assert!(image_blocks > 0, "no image glyphs in {image_area:?}");
-        let mut text_blocks = 0;
-        for row in text_y..(text_y + text_h as i32).min(rows) {
-            for col in text_x..(text_x + text_w).min(cols) {
-                if matches!(buffer[(col, row as u16)].symbol(), "▀" | "▄") {
-                    text_blocks += 1;
-                }
-            }
-        }
-        assert_eq!(text_blocks, 0, "image glyphs inside {image_area:?}");
+        });
     }
 
     fn hit(app: &App, target: Target) -> bool {
@@ -17423,41 +17408,25 @@ mod tests {
             app.overlay = Overlay::None;
             app.select(ModuleId::Intel.index());
             app.intel_articles.push(AtlasArticleRow {
-                run_id: "fixture".into(), id: "fixture-article".into(), title: "Article imagery and browser actions keep a long headline fully visible by wrapping across several preview rows instead of truncating it".into(), description: "Deterministic article preview. Image opens the article URL. Secondary stories remain reachable.".into(),
+                run_id: "fixture".into(), id: "fixture-article".into(), title: "Article text and browser actions keep a long headline fully visible by wrapping across several preview rows instead of truncating it".into(), description: "Deterministic text-only article preview. Visit article site opens the source URL. Secondary stories remain reachable.".into(),
                 url: "https://example.com/article".into(), country: "US".into(), source_name: "Fixture".into(), source_domain: "example.com".into(), published_at: "2026-10-10T12:00:00Z".into(), provider: "fixture".into(), temperature: 0.5,
                 category: "world".into(), seen_at: "2026-10-10T12:00:00Z".into(), author: "Fixture author".into(), image_url: "https://example.com/image.png".into(),
             });
             app.intel_sel = app.intel_articles.len() - 1;
             render(&mut app, width, height);
-            let image_area = crate::tui::ui::article_image_area(&app);
-            if image_area.width > 0 && image_area.height > 0 {
-                app.article_images.fixture(
-                    "fixture-article",
-                    "https://example.com/image.png",
-                    image_area,
-                );
-            }
             dump_cells(
                 &mut app,
                 &dir,
-                &format!("intel-image-{width}x{height}"),
+                &format!("intel-bulletin-text-{width}x{height}"),
                 width,
                 height,
             );
             app.intel_page = IntelPage::Briefing;
             app.compact_pages[ModuleId::Intel.index()] = 1;
-            let image_area = crate::tui::ui::article_image_area(&app);
-            if image_area.width > 0 && image_area.height > 0 {
-                app.article_images.fixture(
-                    "fixture-article",
-                    "https://example.com/image.png",
-                    image_area,
-                );
-            }
             dump_cells(
                 &mut app,
                 &dir,
-                &format!("intel-brief-image-{width}x{height}"),
+                &format!("intel-brief-text-{width}x{height}"),
                 width,
                 height,
             );
@@ -17623,7 +17592,7 @@ mod tests {
         let mut app = app();
         app.module = Some(ModuleId::Intel);
         app.intel_page = IntelPage::Briefing;
-        app.intel_articles = vec![intel_brief_image_article("attributed-claim", "")];
+        app.intel_articles = vec![intel_article_fixture("attributed-claim", "")];
         app.intel_brief_outputs.insert("intel_brief_claims".into(), serde_json::json!({"claims":[{"id":"c1","text":"Exact publication text","attributed_to":"Aster Logistics","modality":"reported"}]}));
         assert!(app.intel_topology_claim_entries()[0].1.contains("reported"));
         app.focus = Target::IntelPreview;
@@ -17642,7 +17611,7 @@ mod tests {
             let mut app = app();
             app.module = Some(ModuleId::Intel);
             app.intel_page = IntelPage::Briefing;
-            app.intel_articles = vec![intel_brief_image_article("inference-actions", "")];
+            app.intel_articles = vec![intel_article_fixture("inference-actions", "")];
             app.intel_brief_job = Some("exact-brief-job".into());
             app.intel_brief_outputs.insert(
                 "intel_brief_claims".into(),
@@ -19030,7 +18999,7 @@ mod tests {
         let mut app = app();
         app.module = Some(ModuleId::Intel);
         app.intel_page = IntelPage::Briefing;
-        app.intel_articles = vec![intel_brief_image_article("topology-article", "")];
+        app.intel_articles = vec![intel_article_fixture("topology-article", "")];
         app.intel_actors = vec![argos_osint_core::atlas_metadata::ArticleActor {
             id: "source-local-actor".into(),
             display_name: "Unindexed actor".into(),
@@ -19057,7 +19026,7 @@ mod tests {
     fn topology_back_checks_its_owner_and_handles_deleted_origin() {
         let mut app = app();
         app.module = Some(ModuleId::Brain);
-        app.intel_articles = vec![intel_brief_image_article("unrelated", "")];
+        app.intel_articles = vec![intel_article_fixture("unrelated", "")];
         let claim = app
             .store
             .add_user_claim(
@@ -19082,7 +19051,7 @@ mod tests {
 
         app.module = Some(ModuleId::Intel);
         app.intel_page = IntelPage::Briefing;
-        app.intel_articles = vec![intel_brief_image_article("origin-article", "")];
+        app.intel_articles = vec![intel_article_fixture("origin-article", "")];
         app.open_topology(
             argos_osint_core::brain_topology::TopologySeed::Claim("missing".into()),
             None,

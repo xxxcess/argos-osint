@@ -55,6 +55,8 @@ pub mod explore;
 pub mod hardware;
 mod http_client;
 pub mod intel_recon;
+#[cfg(feature = "surreal")]
+pub mod intel_service;
 pub mod investigation;
 pub mod iso3166;
 pub mod job_cleanup;

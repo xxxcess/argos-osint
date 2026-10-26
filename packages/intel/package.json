@@ -1,0 +1,13 @@
+{
+  "name": "@argos/intel",
+  "private": true,
+  "main": "src/index.tsx",
+  "types": "src/index.tsx",
+  "dependencies": {
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "@argos/ui": "workspace:*",
+    "@argos/api-client": "workspace:*",
+    "@tanstack/react-query": "5.104.5"
+  }
+}

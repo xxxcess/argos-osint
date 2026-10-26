@@ -23,6 +23,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Start and manage a local application stack.
+    Stack {
+        #[command(subcommand)]
+        command: crate::stack::StackCommand,
+    },
     /// Save a sourced insight for recall by another chat app.
     Remember {
         #[arg(long)]
@@ -315,7 +320,25 @@ enum AtlasCommand {
 }
 
 pub async fn dispatch() -> Result<()> {
-    let command = Cli::parse().command;
+    let command = match Cli::parse().command {
+        Some(command) => Some(command),
+        None => {
+            let Some(selection) = tokio::task::spawn_blocking(crate::welcome::run).await?? else {
+                return Ok(());
+            };
+            // Validate before applying storage setup. A separate process releases
+            // its datastore handles before the chosen TUI/API becomes the owner.
+            let command = Cli::try_parse_from(selection.args)?.command;
+            if let Some(args) = selection.storage_init {
+                let status = tokio::process::Command::new(std::env::current_exe()?)
+                    .args(args)
+                    .status()
+                    .await?;
+                anyhow::ensure!(status.success(), "storage setup failed: {status}");
+            }
+            command
+        }
+    };
     #[cfg(feature = "surreal")]
     let command = match surreal_brain(command).await? {
         Some(command) => command,
@@ -323,6 +346,7 @@ pub async fn dispatch() -> Result<()> {
     };
     match command {
         None => tui::run(App::boot()?).await,
+        Some(Command::Stack { command }) => crate::stack::dispatch(command).await,
         Some(Command::Remember {
             app,
             conversation,

@@ -112,6 +112,41 @@ pub fn article_actors(article: &AtlasArticleRow, metadata: &ArticleMetadata) -> 
     actors
 }
 
+/// Add extraction entities that are not already article-local actors.
+/// Identity is the actor id. A normalized display name can differ from the
+/// raw spelling stored on the extraction entity, and those two rows still
+/// name the same actor.
+pub fn merge_output_actors(actors: &mut Vec<ArticleActor>, entities: &[nlp::EntityCandidate]) {
+    for entity in entities {
+        let name = entity
+            .original_forms
+            .first()
+            .map(String::as_str)
+            .unwrap_or("")
+            .trim();
+        if name.is_empty()
+            || actors.iter().any(|actor| {
+                actor.id == entity.id
+                    || (actor.type_hint == entity.type_hint
+                        && (actor.display_name.eq_ignore_ascii_case(name)
+                            || actor
+                                .spellings
+                                .iter()
+                                .any(|spelling| spelling.eq_ignore_ascii_case(name))))
+            })
+        {
+            continue;
+        }
+        actors.push(ArticleActor {
+            id: entity.id.clone(),
+            type_hint: entity.type_hint.clone(),
+            display_name: name.to_string(),
+            spellings: entity.original_forms.clone(),
+            mentions: Vec::new(),
+        });
+    }
+}
+
 /// Calendar mentions cannot become people just because a tagger also labels
 /// them Person. Full names such as August Wilson and May Chen remain eligible.
 pub(crate) fn temporal_person_mention(
@@ -1014,7 +1049,47 @@ async fn inventory_worker(
 }
 
 #[cfg(test)]
-mod inventory_tests {}
+mod inventory_tests {
+    use super::{merge_output_actors, ArticleActor};
+    use crate::nlp::EntityCandidate;
+
+    #[test]
+    fn output_entities_do_not_repeat_an_actor_id() {
+        let mut actors = vec![ArticleActor {
+            id: "actor:art-1:same".into(),
+            type_hint: "organization".into(),
+            display_name: "Port Authority".into(),
+            spellings: vec!["Port Authority's".into()],
+            mentions: Vec::new(),
+        }];
+        merge_output_actors(
+            &mut actors,
+            &[
+                EntityCandidate {
+                    id: "actor:art-1:same".into(),
+                    type_hint: "organization".into(),
+                    comparison_key: "port authority s".into(),
+                    original_forms: vec!["Port Authority's".into()],
+                    mention_refs: Vec::new(),
+                },
+                EntityCandidate {
+                    id: "actor:art-1:other".into(),
+                    type_hint: "person".into(),
+                    comparison_key: "ada".into(),
+                    original_forms: vec!["Ada".into()],
+                    mention_refs: Vec::new(),
+                },
+            ],
+        );
+        assert_eq!(
+            actors
+                .iter()
+                .map(|actor| actor.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["actor:art-1:same", "actor:art-1:other"]
+        );
+    }
+}
 
 fn metadata_job(
     _db: &std::path::Path,

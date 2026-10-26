@@ -62,8 +62,8 @@ The parent runs these in order with `ARGOS_EMBED` unset:
 
 ```sh
 env -u ARGOS_EMBED cargo fmt --all --check
-env -u ARGOS_EMBED python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked --no-default-features -- -D warnings
-env -u ARGOS_EMBED ARGOS_HOME=/private/tmp/argos-tui-check python3 scripts/agent_cargo.py test --workspace --locked --no-default-features
+env -u ARGOS_EMBED python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked -- -D warnings
+env -u ARGOS_EMBED ARGOS_HOME=/private/tmp/argos-tui-check python3 scripts/agent_cargo.py test --workspace --locked
 ```
 
 The wrapper and fixture capture reserve `target/agents` for agent artifacts; the user’s normal `cargo run` continues using `target/debug`. Capture manifests record `CARGO_TARGET_DIR` and the explicit Cargo target argument. Do not override the target directory or delete a lock file. See [agent Cargo isolation](contributing.md#build-and-test).
@@ -87,7 +87,7 @@ uv pip install --python .agent-scratch/tui-review-env/bin/python Pillow
 
 Substitute the selected plan name for `<PLAN_ID>`. Dependency downloads may require host approval. DejaVu Sans Mono on Linux or Courier New on macOS is required; missing fonts are reported. No system Python mutation or Cargo dependency is needed.
 
-The capture tool runs the selected binary test with locked dependencies, no default features, `ARGOS_EMBED` removed and temporary `ARGOS_HOME`. It requires a new directory under `.planning/`, preventing stale dumps from appearing fresh. It validates dimensions/cell fields, renders PNGs and writes a gallery/manifest with command, result, source fingerprint, environment, renderer/font versions and artifact hashes. Review remains **pending**. It does not run the full workspace gate or certify actions/metrics. Incomplete runs remain visible; failed diagnostic logs stay in `.agent-scratch/`. Successful capture removes its log and temporary state.
+The capture tool runs the selected library test filter with workspace feature unification matching the gate, locked dependencies, the default embedded features, `ARGOS_EMBED` removed and temporary `ARGOS_HOME`. Other library tests are filtered out. It requires a new directory under `.planning/`, preventing stale dumps from appearing fresh. It validates dimensions/cell fields, renders PNGs and writes a gallery/manifest with command, result, source fingerprint, environment, renderer/font versions and artifact hashes. Review remains **pending**. It does not run the full workspace gate or certify actions/metrics. Incomplete runs remain visible; failed diagnostic logs stay in `.agent-scratch/`. Successful capture removes its log and temporary state.
 
 For another module, extend a deterministic test to emit the same cell format into `ARGOS_SCREEN_DIR`, then select it:
 
@@ -105,7 +105,7 @@ Only explicitly ignored fixture tests need `--ignored`. A filter matching zero t
 | Surface | Test | Example include patterns |
 | --- | --- | --- |
 | Tools | `dump_overhaul_screens` | `tools-page-*` |
-| Intel article imagery | `dump_overhaul_screens` | `intel-image-*`, `intel-brief-image-*` |
+| Intel text-only article media contract | `intel_article_images_do_not_change_terminal_layout` | `intel-text-bulletin-*`, `intel-text-reader-*` |
 | Recon transcript/history | `dump_overhaul_screens` | `recon-transcript-*`, `recon-history-*` |
 | Profile Configs | `dump_overhaul_screens` | `configs-draft-*`, `configs-error-*` |
 | Shared overlays | `dump_overhaul_screens` | `palette-*`, `help-*`, `record-*`, `overlay-*` |

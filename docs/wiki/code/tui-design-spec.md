@@ -57,6 +57,7 @@ The shared data/render separation, geometry, scrolling and measured input apply 
 | Screen | Preset / retained behavior | TUI entry points |
 | --- | --- | --- |
 | Home | Measured launcher; shrink logo by height; nine apps and composer reachable | `ui.rs::home_layout_metrics`, `draw_home` |
+| Service launcher | Centered ARGOS VENTURE composition; core wordmark strokes and shared theme; numbered choice cards, editable ports/URL, settings review; final terminal display; 40×14 minimum | `welcome/terminal.rs::Question`, `wordmark.rs` |
 | Recon | Transcript + 30% context at ≥110 columns; compact context page; measured composer | `ui.rs::draw_recon_chat`, `draw_recon_context`, `composer_height`; `recon_parts.rs` |
 | Intel | Three columns ≥132, two at 100–131, tabbed below 100 or short height; borderless center stack with bordered Full Article followed by Related; brief Jobs in context | `ui.rs::intel_briefing_areas`, `draw_intel_briefing`, `draw_clipped_md_pane` |
 | Atlas | Dashboard/table presets; compact Origins/Coverage/Headlines pages; preserve map | Atlas layout/draw functions; `atlas_table.rs`, `map.rs` |
@@ -85,9 +86,9 @@ Profile has Overview / System / Configs. Overview retains Summary / Intel / Reco
 
 Report datasets are bounded DetailTable sections with sticky headers, virtual capacity of 10 logical records on tall screens and 3 on short screens. Spaced data extent is `2*N-1`, plus title/header/footer/gutter, clipped to the viewport. Each section keeps its own row/offset; Tab reveals subsequent sections, wheel/PgUp/PgDn scroll the table then its card at a boundary. Full record prose remains reachable through Enter. Report selection, sort, chart/table mode and dashboard restoration remain separate state.
 
-Intel imagery uses the Ratatui image adapter with protocol detection once outside draw, a half-block fallback, contain fit, bounded background fetch/decode/encoding and article-ID + URL identity. Missing/invalid/failed images collapse. Image and Visit article site actions open the article HTTP(S) URL. Tools categories toggle independently of search; Documentation and Test response have independent scrolling, with Catalog / Documentation / Test compact pages. Ctrl+K groups Recently used (8 stable IDs), Current app shortcuts and Universal; headings are not selectable.
+Intel terminal Bulletin and Focus Brief are text-only. They do not fetch/decode article images, probe terminal graphics capabilities or reserve image columns. Article image URLs remain metadata for the React Native client. Visit article site opens the article HTTP(S) URL. Tools categories toggle independently of search; Documentation and Test response have independent scrolling, with Catalog / Documentation / Test compact pages. Ctrl+K groups Recently used (8 stable IDs), Current app shortcuts and Universal; headings are not selectable.
 
-In the brief focus reader the article image occupies the left column inside the brief article section, vertically centered beside the brief content, and collapses when the reader is too narrow to give it at least 14 columns.
+The brief focus reader uses the full inner width for prose and preserves its source action and scroll behavior.
 
 Recon uses a SURFACE user band with ACCENT edge, quiet Markdown synthesis and expandable evidence activity. Failed activities keep a short reason visible. Transcript offsets are usize, Unicode padding uses terminal cells, completed Markdown keeps revision/width caches, and cached block/local-row anchors preserve history during updates. Jump to latest resumes follow; previous/next-turn commands select user-query boundaries.
 

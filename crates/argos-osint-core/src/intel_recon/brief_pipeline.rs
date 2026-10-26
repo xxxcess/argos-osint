@@ -107,7 +107,7 @@ fn checkpoint_key(job_id: &str, stage: &str, item: &str) -> String {
 
 /// One immutable stage row for every surface (brief Jobs panel, section
 /// headers, global Jobs, Logs).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct StageView {
     pub operation: String,
     pub label: &'static str,

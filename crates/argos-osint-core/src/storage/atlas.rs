@@ -46,6 +46,7 @@ DEFINE FIELD IF NOT EXISTS author ON atlas_article TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS image_url ON atlas_article TYPE string DEFAULT '';
 DEFINE INDEX IF NOT EXISTS atlas_article_run ON atlas_article FIELDS run_id;
 DEFINE INDEX IF NOT EXISTS atlas_article_id ON atlas_article FIELDS article_id;
+DEFINE INDEX IF NOT EXISTS atlas_article_bulletin ON atlas_article FIELDS category, published_at, seen_at, article_id, run_id;
 DEFINE TABLE IF NOT EXISTS atlas_quota SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS used ON atlas_quota TYPE int DEFAULT 0;
 DEFINE TABLE IF NOT EXISTS atlas_checkpoint SCHEMAFULL;

@@ -34,6 +34,170 @@ fn task<'a>(id: &'a str, job: &'a str, operation: &'a str) -> NewTask<'a> {
 }
 
 #[tokio::test]
+async fn running_stack_services_stay_visible_on_a_crowded_jobs_page() {
+    use argos_osint_core::{
+        events::{EventFilter, NewEvent},
+        storage::event_log,
+    };
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = server.root("argos", "crowded_services").await;
+    db.query(
+        "FOR $i IN 0..300 {
+        LET $id = type::record('job', string::concat('work-', <string>$i));
+        CREATE $id SET root = $id, kind = 'task', operation = 'summaries',
+          state = IF $i < 150 { 'running' } ELSE { 'completed' },
+          app = 'intel', title = string::concat('Work ', <string>$i),
+          created_at = time::now(), updated_at = time::now();
+      };
+      CREATE job:api SET root = job:api, kind = 'service', operation = 'api_server',
+        state = 'running', app = 'system', title = 'Rust API server',
+        created_at = time::now() - 1h, updated_at = time::now() - 1h;
+      CREATE job:web SET root = job:web, kind = 'service', operation = 'web_server',
+        state = 'running', app = 'system', title = 'Next.js web server',
+        created_at = time::now() - 2h, updated_at = time::now() - 2h;
+      CREATE job:other SET root = job:other, kind = 'service', operation = 'index_service',
+        state = 'running', app = 'system', title = 'Other service',
+        created_at = time::now(), updated_at = time::now();",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    for (job_id, message) in [
+        ("api", "GET /api/v1/days · 200 · 1 ms"),
+        ("web", "GET / 200 in 4ms"),
+    ] {
+        event_log::record_event(
+            &db,
+            &NewEvent {
+                job_id: job_id.into(),
+                app: "system".into(),
+                event_type: "service.request".into(),
+                message: message.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+    for limit in [2, 100, 200] {
+        let started = std::time::Instant::now();
+        let rows = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            view::list_jobs(&db, &JobFilter::default(), limit),
+        )
+        .await
+        .expect("bounded grouped Jobs page exceeded 20s")
+        .unwrap();
+        eprintln!("crowded Jobs page limit={limit}: {:?}", started.elapsed());
+        assert_eq!(rows.len(), limit);
+        assert_eq!((&*rows[0].id, &*rows[1].id), ("api", "web"));
+        for service in &rows[..2] {
+            assert!(service.is_service() && !service.cancellable);
+            assert_eq!(service.events, 1);
+            let logs = event_log::list_events(
+                &db,
+                &EventFilter {
+                    job_id: service.id.clone(),
+                    ..Default::default()
+                },
+                10,
+            )
+            .await
+            .unwrap();
+            assert_eq!(logs.len(), 1);
+            assert_eq!(logs[0].job_id, service.id);
+        }
+    }
+    let intel = JobFilter {
+        app: "intel".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        view::list_jobs(&db, &intel, 1).await.unwrap()[0].app,
+        "intel"
+    );
+    let web = JobFilter {
+        text: "next.js".into(),
+        ..Default::default()
+    };
+    assert_eq!(view::list_jobs(&db, &web, 1).await.unwrap()[0].id, "web");
+    let done = JobFilter {
+        status: JobStatusFilter::Completed,
+        ..Default::default()
+    };
+    assert_eq!(
+        view::list_jobs(&db, &done, 1).await.unwrap()[0].state,
+        "completed"
+    );
+    let missing = JobFilter {
+        operation: "missing".into(),
+        ..Default::default()
+    };
+    assert!(view::list_jobs(&db, &missing, 10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn grouped_page_metadata_matches_single_job_details() {
+    use argos_osint_core::{events::NewEvent, storage::event_log};
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = server.root("argos", "page_metrics").await;
+    jobs::create_job(
+        &db,
+        &job("root", None, 1),
+        &[task("first", "root", "a"), task("second", "root", "b")],
+    )
+    .await
+    .unwrap();
+    for (id, parent) in [
+        ("child", Some("root")),
+        ("grandchild", Some("child")),
+        ("sibling", None),
+    ] {
+        jobs::create_job(&db, &job(id, parent, 1), &[])
+            .await
+            .unwrap();
+    }
+    db.query("UPDATE task:first SET started_at = time::now() - 10s;
+        UPDATE task:second SET started_at = time::now() - 5s;
+        CREATE attempt SET task = task:first, root = job:root, number = 1, epoch = 0, owner = 'worker',
+          started_at = time::now() - 8s, finished_at = time::now(), outcome = 'completed';
+        CREATE attempt SET task = task:second, root = job:root, number = 1, epoch = 0, owner = 'worker',
+          started_at = time::now() - 4s;")
+      .await.unwrap().check().unwrap();
+    for job_id in ["root", "child", "grandchild", "sibling"] {
+        event_log::record_event(
+            &db,
+            &NewEvent {
+                job_id: job_id.into(),
+                message: job_id.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let rows = view::list_jobs(&db, &JobFilter::default(), 10)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for listed in &rows {
+        assert_eq!(
+            listed,
+            &view::get_job(&db, &listed.id).await.unwrap().unwrap()
+        );
+    }
+    let root = rows.iter().find(|r| r.id == "root").unwrap();
+    assert_eq!((root.children, root.attempt_rows, root.events), (1, 2, 2));
+    assert!(!root.started_at.is_empty() && !root.open_attempt_started.is_empty());
+    assert!(root.cancellable);
+}
+
+#[tokio::test]
 async fn jobs_view_lists_details_and_retries_like_sqlite() {
     let Some(server) = Server::start() else {
         return;

@@ -801,9 +801,7 @@ pub async fn stage_meta(repo: &Repository, task: &str) -> Result<Option<(i64, St
 /// without its SQLite file (no telemetry rows), with the body and related
 /// reads served by the repository.
 ///
-/// Gap: article body acquisition (retrieval routes, cleanup and the
-/// retrieval-attempt ledger) is not ported. A body stage reuses a clean
-/// artifact already stored in the repository and otherwise fails visibly.
+/// Body acquisition, cleanup and the retrieval-attempt ledger use BodyDb::Surreal.
 pub struct SurrealRuntimeBackend {
     inner: crate::intel_recon::brief_stages::RuntimeBackend,
     repo: Repository,

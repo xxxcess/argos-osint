@@ -4,6 +4,12 @@
 
 The [design contract](tui-design-spec.md) preserves the palette in `theme.rs`. Profile follows the [20-view dashboard contract](profile-analytics-dashboard.md) and retains metric semantics/history in [profile-dashboard-and-search.md](profile-dashboard-and-search.md). Components render immutable data; storage reads belong to background refresh/detail delivery.
 
+## Service launcher
+
+`welcome/terminal.rs` presents **ARGOS VENTURE** using the core wordmark glyph style and shared `wordmark::paint_logo` stroke palette. It reuses `theme::panel`, semantic text/focus styles and Ratatui cell measurements. The measured composition, question card, choices, editable value, settings summary and controls are centered. Small terminals use a compact text title. Each question owns one choice list or text editor and a scrollable settings summary. The same measured choice rows drive mouse activation and rendering; click commits on mouse-up within one cell of press. Keyboard selection, validation, Unicode cursor/editing, paste, cancellation, resize and below-minimum behavior are covered by focused launcher tests. It opens no datastore; the resulting selection dispatches the existing stack commands after restoring the terminal.
+
+Server traffic uses existing Jobs service rows and Jobs → View logs navigation. Running API/Web service rows sort ahead of ordinary work within the selected filters, keeping them visible on crowded bounded pages; other service rows retain their normal ordering. Work-count headers exclude services. Renderers consume the normal `JobRow` / `EventRow` snapshots; API and frontend producers attach redacted events through a bounded queue rather than writing terminal escape sequences into the app. The repository limits the ID page before loading correlated event/task/attempt details.
+
 ## AnalyticsCard and Dashboard preset
 
 `profile_layout::LayoutResult::new(area, page, count, offset)` is the pure shared geometry result for the **Dashboard** preset: tabs, section navigation, controls, KPI cards, visible analytic panels, scroll extent and status. Drawing, focus registration and pointer routing consume those same rectangles. `PanelRect` includes visible `rect`, virtual `height` and `source_offset`, preserving panel geometry while cropping scrolled rows. `profile_components::{kpi, panel, table_row, clipped}` composes reusable Profile KPI/chart/table panels; general text/editor/transcript primitives stay in `components`.
@@ -153,17 +159,7 @@ let frozen = TranscriptBlock { revision, width, content: rendered_lines };
 
 ## Application presets
 
-Intel article imagery preserves decoded source pixels within the bounded decoder limits.
-Background encoding performs one Lanczos contain resize at the terminal's pixel dimensions;
-the encoded image is centered horizontally and vertically inside its registered area.
-In the brief focus reader the encoded image occupies the left column inside the brief
-article section, beside the brief content; image and content are vertically centered
-within the section. The column is sized adaptively from the reader width (14–40 columns,
-keeping at least 24 columns of brief text) and height (5–12 rows), and collapses when
-the reader is too narrow.
-Bulletin preview text is vertically centered when shorter than its viewport and scrolls
-normally when overflowing. Native graphics preserve photographic detail; half-block
-fallback is inherently limited to two color samples per terminal cell.
+Intel Bulletin previews and Focus Brief prose use the full text width. Short previews remain vertically centered and overflowing previews retain normal scrolling. Article media is displayed by the React Native Intel feed, not the terminal.
 
 Home shrinks its logo and uses two launcher columns on short screens. Recon uses a transcript and 30% context column at 110 cells; compact screens expose Transcript/Investigation pages. Intel uses three columns at 132 cells, two at 100–131, and Extracted/Reader/Context pages on smaller or short screens. Its center stack is borderless, with bordered Full Article and Related cards in every state. Atlas exposes compact Origins/Coverage/Headlines pages. Brain Claims support Split/Graph/Related/Summary expansion; Actor groups use Graph/Related, 65%/35% at ≥100×28 and compact pages otherwise. Tools and Models expose list/editor pages; the model role list registers its rows. System exposes Host/Paths pages on short screens.
 
@@ -176,7 +172,7 @@ Profile has Overview / System / Configs. Overview retains Summary / Intel / Reco
 
 Report datasets are bounded DetailTable sections with sticky headers, virtual capacity of 10 logical records on tall screens and 3 on short screens. Spaced data extent is `2*N-1`, plus title/header/footer/gutter, clipped to the viewport. Each section keeps its own row/offset; Tab reveals subsequent sections, wheel/PgUp/PgDn scroll the table then its card at a boundary. Full record prose remains reachable through Enter. Report selection, sort, chart/table mode and dashboard restoration remain separate state.
 
-Intel imagery uses the Ratatui image adapter with protocol detection once outside draw, a half-block fallback, contain fit, bounded background fetch/decode/encoding and article-ID + URL identity. Missing/invalid/failed images collapse. Image and Visit article site actions open the article HTTP(S) URL. Tools categories toggle independently of search; Documentation and Test response have independent scrolling, with Catalog / Documentation / Test compact pages. Ctrl+K groups Recently used (8 stable IDs), Current app shortcuts and Universal; headings are not selectable.
+Intel terminal Bulletin and Focus Brief are text-only. They do not fetch/decode article images, probe terminal graphics capabilities or reserve image columns. Article image URLs remain metadata for the React Native client. Visit article site opens the article HTTP(S) URL. Tools categories toggle independently of search; Documentation and Test response have independent scrolling, with Catalog / Documentation / Test compact pages. Ctrl+K groups Recently used (8 stable IDs), Current app shortcuts and Universal; headings are not selectable.
 
 Recon uses a SURFACE user band with ACCENT edge, quiet Markdown synthesis and expandable evidence activity. Failed activities keep a short reason visible. Transcript offsets are usize, Unicode padding uses terminal cells, completed Markdown keeps revision/width caches, and cached block/local-row anchors preserve history during updates. Jump to latest resumes follow; previous/next-turn commands select user-query boundaries.
 

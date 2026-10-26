@@ -802,15 +802,7 @@ fn line_width(line: &Line<'_>) -> usize {
 }
 
 /// ANSI Shadow wordmark. The right-edge and baseline strokes are the shade.
-const LOGO: [&str; 6] = [
-    " █████╗  ██████╗   ██████╗   ██████╗  ███████╗    ██████╗  ███████╗ ██╗ ███╗   ██╗ ████████╗",
-    "██╔══██╗ ██╔══██╗ ██╔════╝  ██╔═══██╗ ██╔════╝   ██╔═══██╗ ██╔════╝ ██║ ████╗  ██║ ╚══██╔══╝",
-    "███████║ ██████╔╝ ██║  ███╗ ██║   ██║ ███████╗   ██║   ██║ ███████╗ ██║ ██╔██╗ ██║    ██║",
-    "██╔══██║ ██╔══██╗ ██║   ██║ ██║   ██║ ╚════██║   ██║   ██║ ╚════██║ ██║ ██║╚██╗██║    ██║",
-    "██║  ██║ ██║  ██║ ╚██████╔╝ ╚██████╔╝ ███████║   ╚██████╔╝ ███████║ ██║ ██║ ╚████║    ██║",
-    "╚═╝  ╚═╝ ╚═╝  ╚═╝  ╚═════╝   ╚═════╝  ╚══════╝    ╚═════╝  ╚══════╝ ╚═╝ ╚═╝  ╚═══╝    ╚═╝",
-];
-const LOGO_SPLIT: [usize; 6] = [50, 49, 49, 49, 49, 50];
+use super::wordmark::{paint_logo, LOGO, LOGO_SPLIT};
 
 fn logo_width() -> usize {
     LOGO.iter()
@@ -834,29 +826,6 @@ fn logo_rows() -> Vec<HomeRow> {
                 LOGO_SPLIT[index],
                 bottom,
             ))))
-        })
-        .collect()
-}
-
-fn paint_logo(pattern: &str, split: usize, bottom: bool) -> Vec<Span<'static>> {
-    pattern
-        .chars()
-        .enumerate()
-        .map(|(index, ch)| {
-            let bright = index >= split;
-            let (face, shade) = if bright {
-                (theme::TEXT, Color::Rgb(78, 108, 120))
-            } else {
-                (theme::DIM, Color::Rgb(42, 64, 76))
-            };
-            let shade_stroke = bottom && ch != ' ' || matches!(ch, '╗' | '║' | '╝');
-            if ch == ' ' {
-                Span::styled(" ", Style::default().bg(theme::BG))
-            } else if shade_stroke {
-                Span::styled(ch.to_string(), Style::default().fg(shade).bg(theme::BG))
-            } else {
-                Span::styled(ch.to_string(), Style::default().fg(face).bg(theme::BG))
-            }
         })
         .collect()
 }
@@ -3606,7 +3575,6 @@ pub fn tool_room_for(app: &App) -> usize {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub struct IntelCenterGeometry {
-    pub image: (u16, i32, u16, u16),
     pub brief: (u16, i32, u16, u16),
     pub brief_text: (u16, i32, u16, u16),
 }
@@ -3619,7 +3587,6 @@ pub fn intel_center_geometry_for(app: &App) -> Option<IntelCenterGeometry> {
     let layout = intel_center_layout(app, center)?;
     let rect = |area: AbsRect| (area.x, area.y, area.width, area.height);
     Some(IntelCenterGeometry {
-        image: rect(layout.image),
         brief: rect(layout.brief),
         brief_text: rect(layout.brief_text),
     })
@@ -7749,9 +7716,6 @@ fn draw_intel_bulletin(frame: &mut Frame, app: &App, area: Rect) {
         );
         story_inner.height -= 1;
     }
-    let (image, preview) = bulletin_image_preview(app, story_inner);
-    draw_article_image(frame, app, image);
-    story_inner = preview;
     let story_lines = intel_hero_lines(app, story_inner.width as usize);
     let lines = super::components::measured_lines(story_lines, story_inner.width);
     let start = app
@@ -7842,75 +7806,6 @@ fn draw_intel_bulletin(frame: &mut Frame, app: &App, area: Rect) {
         );
     }
     frame.render_widget(List::new(items), list_inner);
-}
-
-fn bulletin_image_preview(app: &App, area: Rect) -> (Rect, Rect) {
-    let visible = app
-        .intel_articles
-        .get(app.intel_sel)
-        .is_some_and(|article| app.article_images.visible(&article.id, &article.image_url));
-    if !visible || area.height < 3 {
-        return (Rect::default(), area);
-    }
-    if area.width >= 100 {
-        let width = (area.width * 32 / 100).min(40);
-        (
-            Rect::new(area.x, area.y, width, area.height),
-            Rect::new(
-                area.x + width + 1,
-                area.y,
-                area.width.saturating_sub(width + 1),
-                area.height,
-            ),
-        )
-    } else {
-        let height = (area.height / 2).clamp(2, 8);
-        (
-            Rect::new(area.x, area.y, area.width, height),
-            Rect::new(
-                area.x,
-                area.y + height + 1,
-                area.width,
-                area.height.saturating_sub(height + 1),
-            ),
-        )
-    }
-}
-
-pub(crate) fn article_image_area(app: &App) -> Rect {
-    if app.module != Some(ModuleId::Intel) || app.overlay != Overlay::None {
-        return Rect::default();
-    }
-    let body = chrome(app.screen, app).body;
-    if app.intel_page == IntelPage::Bulletin {
-        let (_, _, hero, _, _) = intel_bulletin_areas(body);
-        let mut inner = pane(" image ").inner(hero);
-        inner.height = inner.height.saturating_sub(1);
-        bulletin_image_preview(app, inner).0
-    } else {
-        let (_, center, _) = intel_briefing_areas(app, body);
-        intel_center_layout(app, center)
-            .and_then(|layout| intersect_abs(center, layout.image))
-            .map_or(Rect::default(), |(rect, _)| rect)
-    }
-}
-
-fn draw_article_image(frame: &mut Frame, app: &App, area: Rect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    if let Some(article) = app.intel_articles.get(app.intel_sel) {
-        app.article_images
-            .draw(frame, area, &article.id, &article.image_url);
-        if !url::Url::parse(&article.url)
-            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
-        {
-            return;
-        }
-        app.layout
-            .borrow_mut()
-            .register(Target::Button(ButtonId::IntelVisit), area);
-    }
 }
 
 fn intel_hero_lines(app: &App, width: usize) -> Vec<Line<'static>> {
@@ -8101,13 +7996,10 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
     // Side panes stay fixed; only the center stack scrolls.
     frame.render_widget(Block::default().style(theme::text()), center);
     if let Some(layout) = intel_center_layout(app, center) {
-        // The brief pane owns the background: paint it before the image column.
+        // The brief pane owns its full-width text background.
         draw_intel_brief_article(frame, center, &layout);
         if let Some((rect, _)) = intersect_abs(center, layout.brief) {
             app.layout.borrow_mut().register(Target::IntelPreview, rect);
-        }
-        if let Some((rect, _)) = intersect_abs(center, layout.image) {
-            draw_article_image(frame, app, rect);
         }
         draw_clipped_button(
             frame,
@@ -8176,8 +8068,7 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
     draw_intel_jobs_pane(frame, app, right_rows[2]);
 }
 
-/// Brief article section: the image occupies a left column beside the brief
-/// prose, both vertically centered inside the bordered pane.
+/// Full-width brief prose, vertically centered inside the bordered pane.
 fn draw_intel_brief_article(frame: &mut Frame, viewport: Rect, layout: &IntelCenterLayout) {
     let Some((vis, _top_clip)) = intersect_abs(viewport, layout.brief) else {
         return;
@@ -8221,7 +8112,6 @@ fn intel_reader_actions(area: AbsRect) -> (AbsRect, AbsRect) {
 }
 
 struct IntelCenterLayout {
-    image: AbsRect,
     brief: AbsRect,
     brief_text: AbsRect,
     reload: AbsRect,
@@ -8297,32 +8187,7 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     // Two borders, one readable row and the three-row See more action cannot overlap.
     let full_h = term_pct_height(app, 0.50, 8).min(viewport.height.saturating_sub(8).max(6));
 
-    // The article image lives in a left column inside the brief article section;
-    // the prose keeps the remaining columns and both are vertically centered.
-    let gap: u16 = 1;
-    let mut image_w: u16 = 0;
-    let mut image_h: u16 = 0;
-    if app.article_images.visible(&article.id, &article.image_url) {
-        // ~35% of the reader inner width, bounded, but never squeeze the brief prose
-        image_w = ((inner_w as u16).saturating_mul(35) / 100).clamp(14, 40);
-        let text_room = (inner_w as u16).saturating_sub(24 + gap);
-        if image_w > text_room {
-            image_w = text_room;
-        }
-        if image_w >= 14 {
-            // ~20% of the reader height, bounded; never taller than the box is wide
-            // in pixel terms (terminal cells are ~1:2 pixels, so rows <= cols / 2)
-            image_h = (viewport.height.saturating_mul(20) / 100)
-                .clamp(5, 12)
-                .min((image_w / 2).max(3));
-        } else {
-            // Too narrow: collapse, text keeps the full width.
-            image_w = 0;
-        }
-    }
-    let image_columns = if image_w > 0 { image_w + gap } else { 0 };
-    let text_w = (inner_w as u16).saturating_sub(image_columns).max(1) as usize;
-
+    let text_w = inner_w;
     let mut brief_lines = intel_brief_preview_lines(article, text_w);
     if app
         .status
@@ -8336,7 +8201,6 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
         );
     }
     let brief_h = (brief_lines.len() as u16)
-        .max(image_h)
         .saturating_add(2)
         .max(min_section);
 
@@ -8364,19 +8228,12 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
 
     let mut y = i32::from(viewport.y) - scroll;
     let brief = abs_rect(viewport.x, y, viewport.width, brief_h);
-    // Image and prose sit inside the brief section, vertically centered.
+    // Prose uses the entire brief section, vertically centered.
     let brief_inner_h = brief_h.saturating_sub(2);
-    let image_top = brief_inner_h.saturating_sub(image_h) / 2;
     let text_top =
         brief_inner_h.saturating_sub(brief_lines.len().min(brief_inner_h as usize) as u16) / 2;
-    let image = abs_rect(
-        viewport.x + 1,
-        brief.y + 1 + i32::from(image_top),
-        image_w,
-        image_h,
-    );
     let brief_text = abs_rect(
-        viewport.x + 1 + image_columns,
+        viewport.x + 1,
         brief.y + 1 + i32::from(text_top),
         text_w as u16,
         brief_lines.len() as u16,
@@ -8397,7 +8254,6 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     let related = abs_rect(viewport.x, y, viewport.width, related_h);
 
     Some(IntelCenterLayout {
-        image,
         brief,
         brief_text,
         reload,

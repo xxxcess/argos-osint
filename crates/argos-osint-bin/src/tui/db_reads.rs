@@ -61,23 +61,7 @@ fn merge_output_actors(
     actors: &mut Vec<atlas_metadata::ArticleActor>,
     output: investigation::insights::PipelineOutput,
 ) {
-    for entity in output.entities {
-        let name = entity.original_forms.first().cloned().unwrap_or_default();
-        if name.trim().is_empty()
-            || actors.iter().any(|a| {
-                a.type_hint == entity.type_hint && a.display_name.eq_ignore_ascii_case(&name)
-            })
-        {
-            continue;
-        }
-        actors.push(atlas_metadata::ArticleActor {
-            id: entity.id,
-            type_hint: entity.type_hint,
-            display_name: name,
-            spellings: entity.original_forms,
-            mentions: Vec::new(),
-        });
-    }
+    atlas_metadata::merge_output_actors(actors, &output.entities);
 }
 
 #[cfg(feature = "surreal")]

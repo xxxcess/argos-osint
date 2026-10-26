@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/argos-osint-core",
     "crates/argos-osint-bin",
+    "crates/argos-osint-api",
+    "crates/argos-api-host",
 ]
 
 [workspace.package]
@@ -20,8 +22,6 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 dirs = "5"
 futures-util = "0.3"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_28", "all-widgets", "layout-cache", "macros", "underline-color"] }
-ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 regex = "1"
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }

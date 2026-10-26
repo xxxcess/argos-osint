@@ -1,0 +1,26 @@
+{
+  "name": "argos-intel",
+  "private": true,
+  "packageManager": "pnpm@12.15.0",
+  "engines": {
+    "node": ">=24 <25",
+    "pnpm": "12.15.0"
+  },
+  "scripts": {
+    "build": "pnpm --dir apps/web-desktop build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint apps packages",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "eslint": "9.39.1",
+    "eslint-plugin-react-hooks": "7.0.1",
+    "prettier": "3.6.2",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.48.0"
+  }
+}

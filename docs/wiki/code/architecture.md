@@ -5,7 +5,7 @@
 | Crate | Owns |
 | --- | --- |
 | `argos-osint-core` | Store, OSINT registry/executor, provider routing, Recon |
-| `argos-osint-bin` | CLI and ratatui TUI |
+| `argos-osint-bin` | CLI, ratatui TUI and local stack supervisor; optional shared-process API for TUI display |
 
 Home launches Intel, Atlas, Brain, Recon. Tools / Models / Profile configure Argos (`Osint`, `Providers`, `System`). Jobs and Logs watch background work.
 
@@ -569,3 +569,7 @@ Related article eligibility requires **at least two distinct overlapping entity 
 Recon Recall is stored per transcript and defaults off. Captured extraction requests do not grant publication authority: the canonical derivation writer rechecks the live, non-deleted thread through the owning run inside its publication transaction. Both the captured save/recall flags and live opt-in must permit Recon Brain memory/index writes. Legacy claim extraction checks before dispatch and again under its persistence transaction. Transcript-local assessed snapshots and answers remain available while off; earlier opted-in memories remain stored. Article brief publication is independent.
 
 Summary flush and local index worker rows describe long-lived elected services, including idle time, rather than finite requests. Both worker loops refresh service heartbeats periodically while elected; task attempts report actual work and failures separately.
+
+## Local Intel HTTP boundary
+
+The [local web/API contract](intel-web.md) adds a UI-independent Intel service, an unauthenticated loopback HTTP adapter and a separate API host over the existing repository. The CLI stack supervisor waits for storage-backed readiness before starting the web application; the TUI continues to access core/storage directly. See the [web lifecycle figure](../../diagrams/intel-web.html) for startup, disconnect and owned/adopted shutdown paths. Public hosting and native application packaging remain deferred.

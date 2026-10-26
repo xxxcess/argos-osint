@@ -2,11 +2,12 @@
 
 [Wiki](../../index.md) · [Explore concepts](../concepts/index.md)
 
-Start with the [workspace manifest](../../../Cargo.toml) and [workspace diagram](../../diagrams/workspace.html). The core crate owns domain behavior; the binary crate exposes it through CLI/TUI. SurrealDB is the current persistence backend.
+Start with the [workspace manifest](../../../Cargo.toml) and [workspace diagram](../../diagrams/workspace.html). The core crate owns domain behavior; the binary crate exposes it through CLI/TUI, and the API adapter/host serve the local Intel web client. SurrealDB is the current persistence backend.
 
 | Branch | What to inspect | Next page |
 | --- | --- | --- |
 | [argos-osint-core](../../../crates/argos-osint-core/src) | Recon, Atlas, Intel, Brain, providers and NLP | [Core map](core.md) |
+| [Intel HTTP API / host](../../../crates/argos-osint-api) | Local web adapter and readiness-gated process lifecycle | [Intel web](intel-web.md) |
 | [storage](../../../crates/argos-osint-core/src/storage) | Open/bootstrap, repositories, publication, jobs and recall | [Storage map](storage.md) |
 | [argos-osint-bin](../../../crates/argos-osint-bin/src) | CLI, state, rendering and shared components | [Interfaces](interfaces.md) |
 | [core tests](../../../crates/argos-osint-core/tests) and [scripts](../../../scripts) | Offline contracts and verification entry points | [Contributor workflow](contributing.md) |
@@ -24,6 +25,7 @@ The maps link stable module paths rather than line numbers. Search symbols in th
 
 | Topic | Canonical reference |
 | --- | --- |
+| Local Intel web/API and stack launcher | [Intel web](intel-web.md) |
 | Pipeline boundaries and data flow | [Architecture](architecture.md) |
 | Investigation execution and tool decisions | [Harness](investigation-harness.md), [decision gates](jev-decision-gates.md) |
 | TUI layout and components | [Design contract](tui-design-spec.md), [component catalog](tui-components.md) |

@@ -768,24 +768,22 @@ function Focus({
         style={{
           flexDirection: narrow ? "column" : "row",
           alignItems: "stretch",
-          gap: 1,
-          backgroundColor: c.glassBorder,
-          borderWidth: 1,
-          borderColor: c.glassBorder,
+          gap: 0,
+          backgroundColor: "transparent",
         }}
       >
         {(!narrow || tab === "Extracted") && (
-          <View style={{ flex: 24, minWidth: 0, backgroundColor: c.glass, ...(glass as object), borderWidth: 0 }}>
+          <View style={{ flex: 24, minWidth: 0, backgroundColor: "transparent" }}>
             {extracted}
           </View>
         )}
         {(!narrow || tab === "Reader") && (
-          <View style={{ flex: 48, minWidth: 0, backgroundColor: c.glass, ...(glass as object), borderWidth: 0 }}>
+          <View style={{ flex: 48, minWidth: 0, backgroundColor: "transparent" }}>
             {reader}
           </View>
         )}
         {(!narrow || tab === "Context") && (
-          <View style={{ flex: 28, minWidth: 0, backgroundColor: c.glass, ...(glass as object), borderWidth: 0 }}>
+          <View style={{ flex: 28, minWidth: 0, backgroundColor: "transparent" }}>
             {context}
           </View>
         )}

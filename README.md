@@ -143,11 +143,22 @@ See the [web/API guide](docs/wiki/code/intel-web.md) for backend selection, stor
 Shared UI uses React Native primitives mapped to React Native Web. React Compiler is enabled for Next and the shared packages; lint includes Hooks/compiler diagnostics with zero warnings. Keep both integrations enabled. [React UI rules](docs/wiki/code/react-ui.md#react-native-and-compiler-baseline) describe the platform boundary and verification requirements.
 
 ```sh
+# Targeted local Rust checks & tests (fast iteration on the host machine; embedded storage mode)
+cargo check --locked -p argos-osint-core                  # or -p argos-osint-bin | -p argos-osint-api | -p argos-api-host
+cargo clippy --locked -p argos-osint-core --all-targets -- -D warnings
+cargo test --locked -p argos-osint-core --lib <filter>    # scoped unit tests
+cargo test --locked -p argos-osint-api --test api_contract
+ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
+  cargo test --locked -p argos-osint-core --test storage_jobs <filter> -- --nocapture
+
+# Full workspace & embedded storage gate (agents use `python3 scripts/agent_cargo.py … --locked`)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked  # offline; ARGOS_EMBED unset
 ARGOS_EMBED=1 cargo test --locked -p argos-osint-core -- --ignored minilm
 scripts/local_matrix.sh --storage embedded
+
+# Web & E2E checks
 pnpm typecheck
 pnpm lint
 pnpm build
@@ -166,7 +177,7 @@ Contributors working with agentic coding CLIs follow the shared repository stand
 - **Workspace & persistence standards:**
   - **Temporary files & worktrees (`.agent-scratch/`):** Keep all scratch files, patches, diagnostic logs, isolated build caches, and feature worktrees (`.agent-scratch/worktrees/`) inside `.agent-scratch/` (unstaged and never committed).
   - **Long-term planning (`.planning/`):** Record multi-phase plans, design specs, and decision ledgers in `.planning/<YYYY-MM-DD-slug>/` following the [planning format](docs/wiki/code/planning-artifacts.md#working-format).
-  - **Rust embedded storage & host-native builds (see `.github/workflows/ci.yml`):** Local **Rust** builds and tests run strictly in **embedded storage mode** (`scripts/local_matrix.sh --storage embedded`, `python3 scripts/agent_cargo.py … --locked`, and `python3 scripts/test_surreal.py --mode embedded`; `server` mode is CI-only) and target the **local host machine platform** (inspectable via bash shell commands such as `uname -ms` and `rustc -vV | grep host`). Reference [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/intel-web.yml`](.github/workflows/intel-web.yml), [`.github/workflows/commit-policy.yml`](.github/workflows/commit-policy.yml), and the [CI workflow guide](docs/wiki/code/ci.md), keep React Compiler/Hooks lint at zero warnings, and update affected `docs/wiki/` routes, `@tag:<slug>` entries, and diagrams in the same change.
+  - **Rust embedded storage, host-native platform & targeted builds (see `.github/workflows/ci.yml`):** Local **Rust** builds and tests run strictly in **embedded storage mode** (`--storage embedded`, default features `embedded,nlp`; `server` mode is CI-only) and target the **local host machine platform** (inspectable via bash shell commands such as `uname -ms` and `rustc -vV | grep '^host:'`). Prefer targeted crate and test commands (`python3 scripts/agent_cargo.py check|clippy|test --locked -p <crate> [--lib | --bin <bin> | --test <name>]`, and `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 python3 scripts/agent_cargo.py test --locked -p argos-osint-core --test storage_<name>`) during scoped iteration before running `scripts/local_matrix.sh --storage embedded`. Reference [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/intel-web.yml`](.github/workflows/intel-web.yml), [`.github/workflows/commit-policy.yml`](.github/workflows/commit-policy.yml), and the [CI workflow guide](docs/wiki/code/ci.md), keep React Compiler/Hooks lint at zero warnings, and update affected `docs/wiki/` routes, `@tag:<slug>` entries, and diagrams in the same change.
 - **OpenCode setup (`.opencode/`):**
   - Configured in [.opencode/opencode.json](.opencode/opencode.json) and [.opencode/AGENTS.md](.opencode/AGENTS.md) with the 4-agent team (`architect`, `coder`, `tester`, `scribe`), worker model overrides (`.opencode/architect-worker.json`, `.opencode/coder-worker.json`), and repository skills (`.opencode/skills/`).
   - Follow the [OpenCode agent team guide](docs/wiki/code/opencode-v2.md) for role permissions, phase handoff envelopes, disjoint `EDIT_UNIT` worktree integration, and Scribe documentation checkpoints.

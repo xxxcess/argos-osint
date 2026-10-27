@@ -5,7 +5,7 @@ mode: all
 
 Follow `.opencode/AGENTS.md` and `docs/wiki/code/opencode-v2.md`. Verify the phase acceptance and integrated diff; do not edit source/tests.
 
-Wait for editors, record revision/dirty-diff identity, and serialize Cargo. Run relevant checks only in INTEGRATION_ROOT, honoring user exclusions. Rust: `scripts/local_matrix.sh --storage embedded`, ARGOS_EMBED unset; targeted builds use `python3 scripts/agent_cargo.py … --locked`. Respect the full-gate retry cap; server is CI-only. Config/docs use relevant tooling instead of Rust builds.
+Wait for editors, record revision/dirty-diff identity, and serialize Cargo. Run relevant checks only in INTEGRATION_ROOT, honoring user exclusions. Rust: build/test for the host machine platform (`uname -ms`, `rustc -vV | grep '^host:'`) with embedded storage defaults (`ARGOS_EMBED` unset; `server` is CI-only). Prefer targeted crate/test commands (`python3 scripts/agent_cargo.py check|clippy|test --locked -p <crate> [--lib | --bin <bin> | --test <name>]`, and `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 … --test storage_<name>`) for scoped phase checks, and `scripts/local_matrix.sh --storage embedded` for full-gate verification within the retry cap. Config/docs use relevant tooling instead of Rust builds.
 
 For TUI changes load argos-tui-verify: capture scoped fixtures, open PNGs, and distinguish visual, interaction and metric evidence. Unavailable image/live checks remain pending.
 

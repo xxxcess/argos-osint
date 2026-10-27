@@ -30,9 +30,15 @@ When given a task item or specification, evaluate its scope against this matrix 
    * Clean, integrated worktrees under `.agent-scratch/worktrees/` and stale temporary files in `.agent-scratch/` must be pruned before completing the workflow.
 2. **Long-Term Commit Persistence (`.planning/`):**
    * All durable planning artifacts, architectural specifications, phase roadmaps, and decision records intended for long-term persistence and GitHub commits **must** be stored in the appropriate `.planning/` directory (initialized and maintained via `~/.agents/skills/planning-with-files`).
-3. **Rust Builds & Tests — Embedded Storage Mode & Host Platform (See `.github/workflows/ci.yml`):**
+3. **Rust Builds & Tests — Embedded Storage Mode, Host Platform & Targeted Scope (See `.github/workflows/ci.yml`):**
    * Local **Rust** build and test verification **must** run in **embedded storage mode** (`--storage embedded`, default features `embedded,nlp` with `ARGOS_EMBED` unset) and for the **local host machine's platform type** (never run the CI-only `server` storage leg or cross-compile Rust for non-host targets).
-   * Reference `.github/workflows/ci.yml` and [docs/wiki/code/ci.md](../docs/wiki/code/ci.md) to match Rust verification to the corresponding embedded host platform leg (`macos-14` arm64, `macos-15-intel` x86_64, `ubuntu-24.04` x86_64, `ubuntu-24.04-arm` aarch64), and `.github/workflows/intel-web.yml` / `.github/workflows/commit-policy.yml` when web or policy checks apply.
-   * Agents should detect the host machine platform, OS/architecture, CPU cores, and native Rust target triple via bash shell commands (`uname -ms`, `rustc -vV | grep host`, `sysctl -n hw.ncpu 2>/dev/null || nproc`) before running `scripts/local_matrix.sh --storage embedded` or `python3 scripts/agent_cargo.py … --locked`.
+   * Reference `.github/workflows/ci.yml`, [docs/wiki/code/ci.md](../docs/wiki/code/ci.md), and [docs/wiki/code/contributing.md](../docs/wiki/code/contributing.md#targeted-local-rust-builds-and-tests-fast-iteration) to match Rust verification to the corresponding embedded host platform leg (`macos-14` arm64, `macos-15-intel` x86_64, `ubuntu-24.04` x86_64, `ubuntu-24.04-arm` aarch64), and `.github/workflows/intel-web.yml` / `.github/workflows/commit-policy.yml` when web or policy checks apply.
+   * Detect the host machine platform, OS/architecture, CPU cores, and native Rust target triple via bash shell commands (`uname -ms`, `rustc -vV | grep '^host:'`, `sysctl -n hw.ncpu 2>/dev/null || nproc`).
+   * **Use targeted Rust build & test commands for scoped iteration** before running the full embedded gate:
+     * Scoped compile & lint by crate: `python3 scripts/agent_cargo.py check --locked -p <crate>` and `python3 scripts/agent_cargo.py clippy --locked -p <crate> --all-targets -- -D warnings` (`argos-osint-core`, `argos-osint-bin`, `argos-osint-api`, `argos-api-host`).
+     * Scoped unit/binary tests: `python3 scripts/agent_cargo.py test --locked -p <crate> --lib [filter]` or `--bin argos [filter]`.
+     * Scoped integration test binary: `python3 scripts/agent_cargo.py test --locked -p <crate> --test <name> [filter]` (e.g., `--test api_contract`, `--test stack_cli`).
+     * Scoped embedded storage contract test (single binary instead of all 60+ storage binaries): `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 python3 scripts/agent_cargo.py test --locked -p argos-osint-core --test storage_<name> [filter] -- --nocapture`.
+     * Full embedded storage suite / full local matrix gate: `python3 scripts/test_surreal.py --mode embedded --no-fail-fast` or `scripts/local_matrix.sh --storage embedded`.
 
 ---

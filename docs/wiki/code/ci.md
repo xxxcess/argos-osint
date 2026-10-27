@@ -26,7 +26,7 @@ Storage tests are selected by `ARGOS_SURREAL_MODE`; with no mode and no `ARGOS_S
 
 Cache: `Swatinem/rust-cache` keyed per OS × storage, covering `target/agents` (where `scripts/agent_cargo.py` builds).
 
-**Local rule:** agents run only `scripts/local_matrix.sh --storage embedded`. Server mode is CI-only.
+**Local rule:** agents run only the **embedded** storage mode on the **local host machine platform** (inspectable via `uname -ms` and `rustc -vV | grep '^host:'`). Server mode and non-host platform legs are CI-only. During development and scoped verification, prefer targeted crate and test commands (`python3 scripts/agent_cargo.py check|clippy|test --locked -p <crate> [--lib | --test <name>]`, or `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 python3 scripts/agent_cargo.py test --locked -p argos-osint-core --test storage_<name>`) before running the full `scripts/local_matrix.sh --storage embedded` gate; see [contributor workflow](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration).
 
 ## `commit-policy.yml`
 

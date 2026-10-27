@@ -30,8 +30,9 @@ When given a task item or specification, evaluate its scope against this matrix 
    * Clean, integrated worktrees under `.agent-scratch/worktrees/` and stale temporary files in `.agent-scratch/` must be pruned before completing the workflow.
 2. **Long-Term Commit Persistence (`.planning/`):**
    * All durable planning artifacts, architectural specifications, phase roadmaps, and decision records intended for long-term persistence and GitHub commits **must** be stored in the appropriate `.planning/` directory (initialized and maintained via `~/.agents/skills/planning-with-files`).
-3. **Host-Native Rust Builds & Machine Specs:**
-   * Agents only need to run Rust builds and tests for the local machine and platform they are currently working on (do not attempt cross-compilation or non-native platform targets).
-   * Use the shell (e.g., `uname -ms`, `rustc -vV`, `sysctl -n hw.ncpu` or `nproc`) to inspect the local machine specs, OS/architecture, and native target triple if needed to know which platform to build and test for.
+3. **Embedded Storage Mode & Host-Native Platform Builds (See `.github/workflows/`):**
+   * All local test and build verification work **must** run exclusively in **embedded storage mode** (`--storage embedded`, default features `embedded,nlp` with `ARGOS_EMBED` unset) and for the **local host machine's platform type** (never run the CI-only `server` storage leg or attempt cross-compilation for non-host targets).
+   * Reference `.github/workflows/ci.yml`, `.github/workflows/intel-web.yml`, `.github/workflows/commit-policy.yml`, and [docs/wiki/code/ci.md](../docs/wiki/code/ci.md) to map task scope to the matching local CI contract for the detected host platform (e.g., `macos-14` arm64, `macos-15-intel` x86_64, `ubuntu-24.04` x86_64, `ubuntu-24.04-arm` aarch64).
+   * Agents should inspect the host machine platform, OS/architecture, CPU cores, and native Rust target triple via bash shell commands (`uname -ms`, `rustc -vV | grep host`, `sysctl -n hw.ncpu 2>/dev/null || nproc`) before running `scripts/local_matrix.sh --storage embedded` or `python3 scripts/agent_cargo.py … --locked`.
 
 ---

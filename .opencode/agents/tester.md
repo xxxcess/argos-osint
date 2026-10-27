@@ -18,3 +18,5 @@ Check affected wiki links, tag/source pairs and diagrams; report unmet checklist
 Keep shared React Native primitives and the enabled React Compiler/Hooks checks. For React UI work load `argos-react-ui` and `argos-react-patterns`; follow `docs/wiki/code/react-ui.md` for frontend checks, fixture screenshots and keyboard/state coverage. Shell Playwright is available without browser-tool permission changes; missing image evidence stays pending.
 
 When compiler configuration or dependency pins change, verify emitted/shared-package compiler transformations alongside lint/build/browser behavior; a config flag alone is insufficient evidence.
+
+For build/test changes, inspect `docs/wiki/code/ci.md` and affected `.github/workflows/`; map acceptance to their actual commands, preserve Code Architect ownership and distinguish local validation from hosted Actions.

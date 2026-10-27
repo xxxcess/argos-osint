@@ -96,6 +96,7 @@ interface Backend {
   setBase: (s: string) => void;
   instance: string;
   connected: boolean;
+  connecting: boolean;
   retry: () => void;
   createRequestId: () => string;
   theme: "dark" | "light";
@@ -198,6 +199,7 @@ function Connection({
     setBase,
     instance,
     connected,
+    connecting: health.isFetching,
     createRequestId: settings.createRequestId,
     retry: () => {
       void health.refetch();

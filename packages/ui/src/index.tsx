@@ -1,6 +1,12 @@
 "use client";
 import React, { useState } from "react";
-import { View, Text, Pressable, StyleSheet } from "react-native";
+import {
+  View,
+  Text,
+  Pressable,
+  StyleSheet,
+  ActivityIndicator,
+} from "react-native";
 
 // Web translation of crates/argos-osint-bin/src/tui/theme.rs.
 export const colors = {
@@ -24,6 +30,46 @@ export function Label({ children }: { children: React.ReactNode }) {
 export function Copy({ children }: { children: React.ReactNode }) {
   return <Text style={s.copy}>{children}</Text>;
 }
+export function LoadingState({
+  label,
+  compact = false,
+}: {
+  label: string;
+  compact?: boolean;
+}) {
+  return (
+    <View
+      accessibilityRole="progressbar"
+      accessibilityLabel={label}
+      accessibilityState={{ busy: true }}
+      style={[s.loading, compact && { paddingVertical: 0 }]}
+    >
+      <ActivityIndicator
+        size="small"
+        color={colors.accent}
+        aria-hidden={true}
+      />
+      <Text style={s.copy}>{label}</Text>
+    </View>
+  );
+}
+export function EmptyState({
+  title,
+  children,
+}: {
+  title: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <View style={s.empty}>
+      <Text accessibilityRole="header" style={s.emptyTitle}>
+        {title}
+      </Text>
+      {children != null ? <Copy>{children}</Copy> : null}
+    </View>
+  );
+}
+
 export function Button({
   children,
   onPress,
@@ -96,6 +142,21 @@ export function Notice({ children }: { children: React.ReactNode }) {
   );
 }
 const s = StyleSheet.create({
+  loading: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 20,
+    minWidth: 0,
+  },
+  empty: { paddingVertical: 24, gap: 8, minWidth: 0 },
+  emptyTitle: {
+    color: colors.text,
+    fontSize: 15,
+    lineHeight: 23,
+    fontWeight: "600",
+  },
   label: {
     fontFamily: fonts.mono,
     fontSize: 11,

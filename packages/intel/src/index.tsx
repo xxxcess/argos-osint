@@ -5,6 +5,7 @@ import {
   Text,
   TextInput,
   FlatList,
+  ScrollView,
   Image,
   Linking,
   useWindowDimensions,
@@ -28,6 +29,8 @@ import {
   Copy,
   Panel,
   Notice,
+  LoadingState,
+  EmptyState,
   fonts,
   colors as c,
 } from "@argos/ui";
@@ -70,6 +73,9 @@ export function IntelApp() {
       {!b.connected ? (
         <View style={s.connection}>
           <Label>Connection required</Label>
+          {b.connecting ? (
+            <LoadingState label="Checking local API…" compact />
+          ) : null}
           <Text accessibilityRole="header" style={s.title}>
             Connect to your Intel workspace.
           </Text>
@@ -89,6 +95,7 @@ export function IntelApp() {
             />
           </View>
           <Button
+            disabled={b.connecting}
             onPress={() => {
               try {
                 b.setBase(endpoint);
@@ -99,7 +106,7 @@ export function IntelApp() {
               }
             }}
           >
-            Connect / retry
+            {b.connecting ? "Connecting…" : "Connect / retry"}
           </Button>
           {error.length > 0 && <Notice>{error}</Notice>}
           <Text style={s.small}>Loopback only · local development</Text>
@@ -118,8 +125,23 @@ function Workspace() {
   const [screen, setScreen] = useState<"bulletin" | "topology">("bulletin");
   const [seed, setSeed] = useState<Seed | null>(null);
   const days = useRead<{ days: string[] }>("days");
-  const selectedDay = day || days.data?.days[0] || "";
+  const selectedDay = days.data?.days.includes(day)
+    ? day
+    : days.data?.days[0] || "";
   const list = useArticles(category, selectedDay, search);
+  const articles = [
+    ...new Map(
+      (list.data?.pages.flatMap((page) => page.rows) || []).map((article) => [
+        keyFor(article),
+        article,
+      ]),
+    ).values(),
+  ];
+  function loadNextPage() {
+    if (!list.hasNextPage || list.isFetching || list.isFetchNextPageError)
+      return;
+    void list.fetchNextPage({ cancelRefetch: false });
+  }
   function topology(next: Seed) {
     setSeed(next);
     setScreen("topology");
@@ -149,129 +171,162 @@ function Workspace() {
           </Text>
         </View>
       </View>
-      {screen === "topology" ? (
-        <Topology seed={seed} onSeed={setSeed} />
-      ) : article ? (
-        <Focus
-          key={`${article.run_id}/${article.id}`}
-          article={article}
-          onBack={() => setArticle(null)}
-          onArticle={setArticle}
-          onTopology={topology}
-        />
-      ) : (
-        <View style={s.page}>
-          <Label>01 / Atlas collection</Label>
-          <View
-            style={[
-              s.row,
-              {
-                justifyContent: "space-between",
-                alignItems: "flex-end",
-                flexWrap: "wrap",
-              },
-            ]}
-          >
+      <ScrollView
+        testID="workspace-scroll"
+        style={{ flex: 1, minHeight: 0 }}
+        contentContainerStyle={{ flexGrow: 1 }}
+        scrollEventThrottle={100}
+        onScroll={({
+          nativeEvent: { contentOffset, contentSize, layoutMeasurement },
+        }) => {
+          if (
+            screen === "bulletin" &&
+            !article &&
+            contentOffset.y + layoutMeasurement.height >=
+              contentSize.height - 240
+          )
+            loadNextPage();
+        }}
+      >
+        {screen === "topology" ? (
+          <Topology seed={seed} onSeed={setSeed} />
+        ) : article ? (
+          <Focus
+            key={`${article.run_id}/${article.id}`}
+            article={article}
+            onBack={() => setArticle(null)}
+            onArticle={setArticle}
+            onTopology={topology}
+          />
+        ) : (
+          <View style={s.page}>
+            <Label>01 / Atlas collection</Label>
             <View
-              style={{ gap: 8, minWidth: 0, maxWidth: "100%", flexShrink: 1 }}
+              style={[
+                s.row,
+                {
+                  justifyContent: "space-between",
+                  alignItems: "flex-end",
+                  flexWrap: "wrap",
+                },
+              ]}
             >
-              <Text accessibilityRole="header" style={s.title}>
-                Intelligence bulletin
-              </Text>
-              <Copy>Retained articles from Atlas.</Copy>
+              <View
+                style={{ gap: 8, minWidth: 0, maxWidth: "100%", flexShrink: 1 }}
+              >
+                <Text accessibilityRole="header" style={s.title}>
+                  Intelligence bulletin
+                </Text>
+                <Copy>Retained articles from Atlas.</Copy>
+              </View>
             </View>
-          </View>
-          <View style={[s.row, { flexWrap: "wrap", marginTop: 12, gap: 4 }]}>
-            {categories.map((cat) => (
-              <Button
-                key={cat}
-                variant="quiet"
-                active={category === cat}
-                onPress={() => setCategory(cat)}
-              >
-                {cat[0].toUpperCase() + cat.slice(1)}
-              </Button>
-            ))}
-          </View>
-          <View style={s.filters}>
-            <Label>Search articles</Label>
-            <TextInput
-              accessibilityLabel="Search articles"
-              placeholder="Headlines, sources, descriptions…"
-              placeholderTextColor={c.muted}
-              value={search}
-              onChangeText={setSearch}
-              style={s.input}
-            />
-          </View>
-          <FlatList
-            horizontal
-            data={days.data?.days || []}
-            keyExtractor={(day) => day}
-            style={{ flexGrow: 0, marginBottom: 8 }}
-            contentContainerStyle={{ gap: 8 }}
-            renderItem={({ item: d }) => (
-              <Button
-                variant="quiet"
-                active={d === selectedDay}
-                label={`Day ${d}`}
-                onPress={() => setDay(d)}
-              >
-                {d}
-              </Button>
-            )}
-          />
-          {(days.isError || list.isError) && (
-            <Notice>{String(days.error || list.error)}</Notice>
-          )}
-          {list.isPending && Boolean(selectedDay) && (
-            <Copy>Loading bulletin…</Copy>
-          )}
-          {!days.isPending && !selectedDay && (
-            <Panel title="No articles yet">
-              <Copy>
-                Collect an Atlas cycle in Argos to populate this bulletin.
-              </Copy>
-            </Panel>
-          )}
-          {list.data && list.data.pages.flatMap((p) => p.rows).length === 0 && (
-            <Panel>
-              <Copy>No articles match this day, category and search.</Copy>
-            </Panel>
-          )}
-          <View style={s.listHeading}>
-            <Label>Signals / {category}</Label>
-            <Text accessibilityLiveRegion="polite" style={s.small}>
-              {list.data
-                ? `${list.data.pages.reduce((count, page) => count + page.rows.length, 0)} loaded`
-                : "—"}
-              {list.isFetching && !list.isPending ? " · refreshing" : ""}
-            </Text>
-          </View>
-          <FlatList
-            scrollEnabled={false}
-            data={list.data?.pages.flatMap((p) => p.rows) || []}
-            keyExtractor={(a) => a.run_id + "/" + a.id}
-            renderItem={({ item, index }) => (
-              <ArticleCard
-                article={item}
-                featured={index === 0}
-                onPress={() => setArticle(item)}
+            <View style={[s.row, { flexWrap: "wrap", marginTop: 12, gap: 4 }]}>
+              {categories.map((cat) => (
+                <Button
+                  key={cat}
+                  variant="quiet"
+                  active={category === cat}
+                  onPress={() => setCategory(cat)}
+                >
+                  {cat[0].toUpperCase() + cat.slice(1)}
+                </Button>
+              ))}
+            </View>
+            <View style={s.filters}>
+              <Label>Search articles</Label>
+              <TextInput
+                accessibilityLabel="Search articles"
+                placeholder="Headlines, sources, descriptions…"
+                placeholderTextColor={c.muted}
+                value={search}
+                onChangeText={setSearch}
+                style={s.input}
               />
+            </View>
+            <FlatList
+              horizontal
+              data={days.data?.days || []}
+              keyExtractor={(day) => day}
+              style={{ flexGrow: 0, marginBottom: 8 }}
+              contentContainerStyle={{ gap: 8 }}
+              renderItem={({ item: d }) => (
+                <Button
+                  variant="quiet"
+                  active={d === selectedDay}
+                  label={`Day ${d}`}
+                  onPress={() => setDay(d)}
+                >
+                  {d}
+                </Button>
+              )}
+            />
+            {(days.isError || list.isError) && (
+              <Notice>{String(days.error || list.error)}</Notice>
             )}
-          />
-          {list.hasNextPage && (
-            <Button
-              disabled={list.isFetchingNextPage}
-              onPress={() => {
-                void list.fetchNextPage();
-              }}
-            >
-              {list.isFetchingNextPage ? "Loading…" : "Load more articles"}
-            </Button>
-          )}
-        </View>
-      )}
+            {days.isPending ? (
+              <LoadingState label="Loading retained days…" />
+            ) : null}
+            {list.isPending && selectedDay ? (
+              <LoadingState label="Loading bulletin…" />
+            ) : null}
+            {days.isSuccess && !selectedDay ? (
+              <EmptyState title="No articles yet">
+                Collect an Atlas cycle in Argos to populate this bulletin.
+              </EmptyState>
+            ) : null}
+            {list.isSuccess && selectedDay && articles.length === 0 ? (
+              <EmptyState title="No matching articles">
+                No articles match this day, category and search.
+              </EmptyState>
+            ) : null}
+            <View style={s.listHeading}>
+              <Label>Signals / {category}</Label>
+              <Text accessibilityLiveRegion="polite" style={s.small}>
+                {list.data || (days.isSuccess && days.data.days.length === 0)
+                  ? `${articles.length} loaded`
+                  : "—"}
+              </Text>
+            </View>
+            {list.isRefetching && !list.isFetchingNextPage ? (
+              <LoadingState label="Refreshing bulletin…" compact />
+            ) : null}
+            <FlatList
+              scrollEnabled={false}
+              data={articles}
+              keyExtractor={(a) => a.run_id + "/" + a.id}
+              renderItem={({ item, index }) => (
+                <ArticleCard
+                  article={item}
+                  featured={index === 0}
+                  onPress={() => setArticle(item)}
+                />
+              )}
+            />
+            {list.isFetchingNextPage ? (
+              <LoadingState label="Loading more articles…" />
+            ) : null}
+            {list.isFetchNextPageError ? (
+              <Notice>
+                Could not load more articles. {list.error?.message}
+              </Notice>
+            ) : null}
+            {list.hasNextPage && (
+              <Button
+                disabled={list.isFetchingNextPage}
+                onPress={() => {
+                  void list.fetchNextPage({ cancelRefetch: false });
+                }}
+              >
+                {list.isFetchingNextPage
+                  ? "Loading…"
+                  : list.isFetchNextPageError
+                    ? "Retry loading articles"
+                    : "Load more articles"}
+              </Button>
+            )}
+          </View>
+        )}
+      </ScrollView>
     </>
   );
 }
@@ -389,76 +444,83 @@ function Focus({
   const shown = d?.article || a;
   const extracted = (
     <Panel title="01 / Extracted">
-      <Label>Confidence</Label>
-      <Copy>
-        {d?.confidence?.score != null
-          ? `${d.confidence.score}/100 · ${d.confidence.provisional ? "provisional" : "assessed"} evidence score`
-          : "No assessed confidence yet"}
-      </Copy>
-      <Label>Actors</Label>
-      {uniqueById(d?.actors ?? []).map((actor) => (
-        <Button
-          key={actor.id}
-          onPress={() =>
-            onTopology({
-              RetainedActor: {
-                run_id: a.run_id,
-                article_id: a.id,
-                revision: d?.source_revision || "",
-                actor_ref: actor.id,
-                name: actor.display_name,
-              },
-            })
-          }
-        >
-          {actor.display_name} · {actor.type_hint}
-        </Button>
-      ))}
-      <Label>Claims</Label>
-      {d?.claims
-        .filter((claim) => claim.classification !== "inference")
-        .map((claim) => (
-          <View key={claim.id} style={{ gap: 8 }}>
-            <Copy>{claim.text}</Copy>
-            <Text style={s.small}>
-              {claim.confidence == null
-                ? "Unassessed"
-                : `${Math.round(claim.confidence * 100)}%`}{" "}
-              · {claim.admiralty} · {claim.classification}
-            </Text>
+      {detail.isPending ? (
+        <LoadingState label="Loading extracted evidence…" />
+      ) : !d ? (
+        <EmptyState title="Evidence unavailable">
+          Retry the brief request to load retained evidence.
+        </EmptyState>
+      ) : (
+        <>
+          <Label>Confidence</Label>
+          <Copy>
+            {d?.confidence?.score != null
+              ? `${d.confidence.score}/100 · ${d.confidence.provisional ? "provisional" : "assessed"} evidence score`
+              : "No assessed confidence yet"}
+          </Copy>
+          <Label>Actors</Label>
+          {uniqueById(d?.actors ?? []).map((actor) => (
             <Button
+              key={actor.id}
               onPress={() =>
-                onTopology(
-                  claim.topology_seed || {
-                    RetainedClaim: {
-                      run_id: a.run_id,
-                      article_id: a.id,
-                      revision: d?.source_revision || "",
-                      local_id: claim.id,
-                      text: claim.text,
-                      job_id: d?.job_id || "",
-                    },
+                onTopology({
+                  RetainedActor: {
+                    run_id: a.run_id,
+                    article_id: a.id,
+                    revision: d?.source_revision || "",
+                    actor_ref: actor.id,
+                    name: actor.display_name,
                   },
-                )
+                })
               }
             >
-              Explore claim
+              {actor.display_name} · {actor.type_hint}
             </Button>
-          </View>
-        ))}
-      {!d?.claims.some((claim) => claim.classification !== "inference") && (
-        <Copy>Extraction has not published claims.</Copy>
+          ))}
+          {d.actors.length === 0 ? (
+            <EmptyState title="No actors extracted">
+              No retained actors are available for this article.
+            </EmptyState>
+          ) : null}
+          <Label>Claims</Label>
+          {d?.claims
+            .filter((claim) => claim.classification !== "inference")
+            .map((claim) => (
+              <View key={claim.id} style={{ gap: 8 }}>
+                <Copy>{claim.text}</Copy>
+                <Text style={s.small}>
+                  {claim.confidence == null
+                    ? "Unassessed"
+                    : `${Math.round(claim.confidence * 100)}%`}{" "}
+                  · {claim.admiralty} · {claim.classification}
+                </Text>
+                <Button
+                  onPress={() =>
+                    onTopology(
+                      claim.topology_seed || {
+                        RetainedClaim: {
+                          run_id: a.run_id,
+                          article_id: a.id,
+                          revision: d?.source_revision || "",
+                          local_id: claim.id,
+                          text: claim.text,
+                          job_id: d?.job_id || "",
+                        },
+                      },
+                    )
+                  }
+                >
+                  Explore claim
+                </Button>
+              </View>
+            ))}
+          {!d?.claims.some((claim) => claim.classification !== "inference") && (
+            <EmptyState title="No published claims">
+              Extraction has not published claims.
+            </EmptyState>
+          )}
+        </>
       )}
-      <Label>Inferences</Label>
-      <JsonLines
-        value={
-          d?.output?.inferences ||
-          d?.publication?.[2] ||
-          d?.claims
-            .filter((claim) => claim.classification === "inference")
-            .map((claim) => ({ text: claim.text }))
-        }
-      />
     </Panel>
   );
   const reader = (
@@ -490,21 +552,51 @@ function Focus({
           Read original source ↗
         </Button>
       )}
+      <View testID="reader-inferences" style={{ gap: 12 }}>
+        <Label>Inferences</Label>
+        {detail.isPending ? (
+          <LoadingState label="Loading inferences…" />
+        ) : !d ? (
+          <EmptyState title="Inferences unavailable">
+            Retry the brief request to load retained inferences.
+          </EmptyState>
+        ) : (
+          <JsonLines
+            value={
+              d.output?.inferences ||
+              d.publication?.[2] ||
+              d.claims
+                .filter((claim) => claim.classification === "inference")
+                .map((claim) => ({ text: claim.text }))
+            }
+          />
+        )}
+      </View>
     </Panel>
   );
   const context = (
     <Panel title="03 / Context">
-      <Label>Brief lifecycle</Label>
-      <Copy>{d?.status || "Loading…"}</Copy>
-      <Text style={s.small}>Extraction: {d?.lifecycle || "unavailable"}</Text>
-      <Text style={s.small}>
-        Publication:{" "}
-        {d?.publication ? "Retained canonical brief" : "Not published"}
-      </Text>
-      <Copy>
-        Indexing: {d?.indexing?.state || "Not indexed"}
-        {d?.indexing?.reason ? ` · ${d.indexing.reason}` : ""}
-      </Copy>
+      {detail.isPending ? (
+        <LoadingState label="Loading brief status…" />
+      ) : d ? (
+        <>
+          <Label>Brief lifecycle</Label>
+          <Copy>{d?.status || "Loading…"}</Copy>
+          <Text style={s.small}>
+            Extraction: {d?.lifecycle || "unavailable"}
+          </Text>
+          <Text style={s.small}>
+            Publication:{" "}
+            {d?.publication ? "Retained canonical brief" : "Not published"}
+          </Text>
+          <Copy>
+            Indexing: {d?.indexing?.state || "Not indexed"}
+            {d?.indexing?.reason ? ` · ${d.indexing.reason}` : ""}
+          </Copy>
+        </>
+      ) : (
+        <EmptyState title="Brief status unavailable" />
+      )}
       <Button
         disabled={ensure.isPending}
         onPress={() => ensure.mutate({ run: a.run_id, id: a.id })}
@@ -535,8 +627,20 @@ function Focus({
         Refresh retained brief
       </Button>
       <Label>Links</Label>
-      <JsonLines value={d?.links} />
+      {detail.isPending ? (
+        <LoadingState label="Loading retained links…" />
+      ) : d ? (
+        <JsonLines value={d.links} />
+      ) : (
+        <EmptyState title="Links unavailable" />
+      )}
       <Label>Related leads · not corroboration</Label>
+      {related.isPending ? (
+        <LoadingState label="Loading related leads…" />
+      ) : null}
+      {related.isRefetching && !related.isFetchingNextPage ? (
+        <LoadingState label="Refreshing related leads…" compact />
+      ) : null}
       {related.error && <Notice>{related.error.message}</Notice>}
       {related.data?.pages
         .flatMap((p) => p.rows)
@@ -551,9 +655,13 @@ function Focus({
             </Copy>
           </View>
         ))}
-      {related.data?.pages.flatMap((p) => p.rows).length === 0 && (
-        <Copy>No retained leads.</Copy>
-      )}
+      {related.isSuccess &&
+      related.data.pages.flatMap((p) => p.rows).length === 0 ? (
+        <EmptyState title="No related leads">No retained leads.</EmptyState>
+      ) : null}
+      {related.isFetchingNextPage ? (
+        <LoadingState label="Loading more related leads…" />
+      ) : null}
       {related.hasNextPage && (
         <Button
           disabled={related.isFetchingNextPage}
@@ -598,7 +706,9 @@ function Focus({
           Could not start brief extraction: {ensure.error.message}
         </Notice>
       )}
-      {detail.isPending && <Copy>Loading Focus Brief…</Copy>}
+      {detail.isPending ? (
+        <LoadingState label="Loading Focus Brief…" compact />
+      ) : null}
       {narrow && (
         <View style={[s.row, { paddingVertical: 12, gap: 4 }]}>
           {["Extracted", "Reader", "Context"].map((t) => (
@@ -661,7 +771,22 @@ function Topology({
         Connections preserve their recorded meaning.
       </Copy>
       {graph.error && <Notice>{graph.error.message}</Notice>}
-      {seed && graph.isPending && <Copy>Loading topology…</Copy>}
+      {!seed ? (
+        <EmptyState title="No topology selected">
+          Open an actor, claim or article from a Focus Brief.
+        </EmptyState>
+      ) : null}
+      {seed && graph.isPending ? (
+        <LoadingState label="Loading topology…" />
+      ) : null}
+      {graph.isRefetching ? (
+        <LoadingState label="Refreshing topology…" compact />
+      ) : null}
+      {seed && graph.isSuccess && graph.data.nodes.length === 0 ? (
+        <EmptyState title="No retained connections">
+          No topology records are available for this seed.
+        </EmptyState>
+      ) : null}
       <View
         style={[
           s.row,
@@ -737,7 +862,7 @@ function JsonLines({ value }: { value: unknown }) {
       ))}
     </View>
   ) : (
-    <Copy>No retained output.</Copy>
+    <EmptyState title="No retained output" />
   );
 }
 
@@ -749,7 +874,7 @@ function safeLink(raw: string) {
   }
 }
 const s = StyleSheet.create({
-  shell: { minHeight: "100%", backgroundColor: c.bg },
+  shell: { height: "100%", minHeight: 0, backgroundColor: c.bg },
   masthead: { borderBottomWidth: 1, borderColor: c.border },
   headerInner: {
     width: "100%",

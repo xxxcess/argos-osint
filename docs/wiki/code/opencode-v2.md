@@ -78,6 +78,8 @@ The owning architect updates the spec and planning files, then resumes its own c
 
 ## Verification
 
+Map each phase to [CI contracts](ci.md) and the affected `.github/workflows/` before choosing commands. Frontend phases include strict compiler/export and development browser checks; Rust phases use the embedded local gate. Respect Code Architect ownership for workflow edits and report hosted Actions separately from local evidence.
+
 Rust: `scripts/local_matrix.sh --storage embedded` in INTEGRATION_ROOT, with ARGOS_EMBED unset. Targeted builds use `python3 scripts/agent_cargo.py … --locked` with the embedded defaults. Storage checks run via `test_surreal.py`; server is CI-only. Serialize Cargo and follow the 1–2 full runs / maximum 3 cap. Config-only changes use `node --test .opencode/tests/*.test.mjs` plus runtime checks, without a Rust build.
 
 Inspect `opencode debug config`, `opencode models`, and the initialized `/api/agent` catalog. Test actual handoffs in a fresh read-only session: architect → coder → EDIT_UNIT coder, coder → Scribe documentation review and coder → tester → CONSULT architect, then architect resumes its own coder via sessionID. A valid config alone is not proof of delivery. Keep raw runtime evidence in `.agent-scratch/`; never report a model/network failure as a passed handoff. Model variants and request overlays are preferences, not proof of provider-side reasoning; when switching models select its supported high/max variant and check the catalog rather than inventing one.

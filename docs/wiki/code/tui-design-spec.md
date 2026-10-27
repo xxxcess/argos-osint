@@ -51,6 +51,12 @@ Metric contracts distinguish attempts from operations, remote sends from cache h
 
 Tab/Shift+Tab follow top-left→bottom-right and reveal focus; arrows select rows/buckets; Enter expands and detail-row Enter opens owners. PgUp/PgDn/wheel scroll content then page consistently; `v` switches detail chart/table; Esc restores previous focus/scroll. Keep `f` filters, `r` refresh, `?` help, Configs and global shortcuts reachable with keyboard/mouse parity. Picker text and editor keys retain their input owners.
 
+## Venture return and Jobs filters
+
+The no-argument CLI owns a persistent Venture session. Closing its TUI or stopping its owned stack restores the terminal/services and returns to Venture; direct `stack up` commands keep their one-shot behavior. Esc in Venture returns one question and preserves valid values, with incompatible later branch answers invalidated. At the root choice Esc exits. See [Venture navigation](../../diagrams/venture-navigation.html). Each selected session runs in a child process; process exit releases its repository and maintenance workers before the parent menu reopens.
+
+Jobs filter changes are cohort transitions: clear old rows/detail/selection/scroll and pending owner navigation, then show loading until a snapshot for the new key arrives. Reject old keys; keep data during same-filter background refresh. Status/app/search and loaded state participate in action geometry invalidation. Keyboard and mouse filters use the same transition; zero matching rows are a successful empty result, not a loading placeholder.
+
 ## Other application presets
 
 The shared data/render separation, geometry, scrolling and measured input apply throughout Argos. Keep orchestration and navigation; a daemon/IPC rewrite is outside UI work.
@@ -94,3 +100,5 @@ The brief focus reader uses the full inner width for prose and preserves its sou
 Recon uses a SURFACE user band with ACCENT edge, quiet Markdown synthesis and expandable evidence activity. Failed activities keep a short reason visible. Transcript offsets are usize, Unicode padding uses terminal cells, completed Markdown keeps revision/width caches, and cached block/local-row anchors preserve history during updates. Jump to latest resumes follow; previous/next-turn commands select user-query boundaries.
 
 Acceptance and reproducible capture: [tui-verification.md](tui-verification.md), tests `dump_overhaul_screens` and `analytics_viewports_and_data_states`. Scope capture to affected apps/pages and states using the verification guide; shared layout changes cover affected consumers at all six viewport sizes including 40×20. Full shell/theme/navigation changes use both suites. Capture into a fresh plan directory and inspect the selected actual PNGs. Live graphics/browser checks are recorded separately from TestBackend evidence.
+
+Intel Focus Brief keeps Inferences as the final middle-column section, after Related. Its measured records, keyboard/page/wheel navigation, mouse targets and topology return use the center stack and Reader compact page; confidence, Actors and Claims stay in Extracted. React Native uses the same final Reader placement after its source link.

@@ -78,6 +78,20 @@ impl JobsView {
         }
     }
 
+    /// A user changed the cohort. Old rows/detail must not masquerade as the
+    /// new filter while an asynchronous read is still in flight.
+    pub fn invalidate_filter(&mut self) {
+        self.rows.clear();
+        self.sel = 0;
+        self.sel_id = None;
+        self.scroll = 0;
+        self.detail = None;
+        self.detail_scroll = 0;
+        self.detail_open = false;
+        self.error = None;
+        self.loaded = false;
+    }
+
     /// Reload rows and the selected job's detail, keeping the selection by id.
     pub fn reload(&mut self, store: &impl JobsSource) {
         match store.list(&self.filter(), PAGE) {

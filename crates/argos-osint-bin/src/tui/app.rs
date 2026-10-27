@@ -1999,6 +1999,13 @@ impl App {
         self.background_db.is_some() || surreal_brain::on()
     }
 
+    fn reload_jobs_filter(&mut self) {
+        self.pending_job = None;
+        self.jobs.invalidate_filter();
+        self.layout.borrow_mut().view_stamp.clear();
+        self.reload_jobs();
+    }
+
     pub(crate) fn reload_jobs(&mut self) {
         if self.jobs_async() {
             self.request_dashboard_snapshot();
@@ -8260,12 +8267,12 @@ impl App {
             }
             ButtonId::JobsStatus => {
                 self.jobs.cycle_status();
-                self.reload_jobs();
+                self.reload_jobs_filter();
                 Ok(format!("Status: {}", self.jobs.status.label()))
             }
             ButtonId::JobsApp => {
                 self.jobs.cycle_app();
-                self.reload_jobs();
+                self.reload_jobs_filter();
                 Ok("Jobs filtered".into())
             }
             ButtonId::JobsViewLogs => self.view_job_logs(),
@@ -8482,10 +8489,8 @@ impl App {
             ButtonId::IntelExtractionRetry => self.retry_selected_extraction(),
             ButtonId::IntelExtractionJob => self.open_selected_extraction_job(),
             ButtonId::IntelBodyMore => {
-                if let super::ui::IntelBodyPresentation::Content { markdown, .. } =
-                    super::ui::intel_body_presentation(self)
-                {
-                    let body = markdown.to_owned();
+                if let Some(text) = super::ui::intel_reader_text(self) {
+                    let body = text.to_owned();
                     self.overlay = Overlay::Block {
                         title: "Full article".into(),
                         body,
@@ -9321,7 +9326,7 @@ impl App {
             self.reload_logs();
         }
         if self.focus == Target::Field(FieldId::JobsSearch) {
-            self.reload_jobs();
+            self.reload_jobs_filter();
         }
         if self.module == Some(ModuleId::Recon) && self.focus == Target::Field(FieldId::ReconSearch)
         {
@@ -13670,6 +13675,105 @@ mod tests {
     }
 
     #[test]
+    fn jobs_filters_refresh_snapshot() {
+        use argos_osint_core::jobs_view::{JobRow, JobStatusFilter};
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        for (width, height) in [(160, 50), (80, 24)] {
+            for mouse in [false, true] {
+                let mut app = app();
+                app.module = Some(ModuleId::Jobs);
+                app.screen = Rect::new(0, 0, width, height);
+                app.jobs.rows = vec![JobRow {
+                    id: "old-cohort".into(),
+                    title: "Old row".into(),
+                    state: "completed".into(),
+                    app: "atlas".into(),
+                    ..Default::default()
+                }];
+                app.jobs.apps = vec!["atlas".into(), "recon".into()];
+                app.jobs.loaded = true;
+                app.pending_job = Some("old-cohort".into());
+                app.background_db = Some(PathBuf::from("controlled-worker"));
+                app.dashboard_reading = true;
+                let old_key = app.dashboard_read_key();
+                let old_snapshot = app.jobs.clone();
+                let before = buffer_text(&render(&mut app, width, height));
+                assert!(before.contains("Old row"), "{width}x{height}: {before}");
+                if mouse {
+                    click(&mut app, Target::Button(ButtonId::JobsStatus));
+                } else {
+                    app.set_focus(Target::Button(ButtonId::JobsStatus));
+                    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                }
+                assert_eq!(app.jobs.status, JobStatusFilter::Active);
+                assert!(app.pending_job.is_none());
+                let pending = buffer_text(&render(&mut app, width, height));
+                assert!(pending.contains("Loading jobs"), "{pending}");
+                assert!(!pending.contains("Old row"));
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("jobs-filter-loading-{mouse}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                }
+                app.on_work_event(WorkEvent::DashboardLoaded {
+                    module: Some(ModuleId::Jobs),
+                    key: old_key,
+                    outcome: Ok(Box::new(DashboardSnapshot::Jobs(Box::new(old_snapshot)))),
+                });
+                assert!(app.jobs.rows.is_empty(), "old cohort was not restored");
+                let mut current = app.jobs.clone();
+                current.rows = vec![JobRow {
+                    id: "current-cohort".into(),
+                    title: "New row".into(),
+                    state: "queued".into(),
+                    app: "recon".into(),
+                    ..Default::default()
+                }];
+                current.loaded = true;
+                let key = app.dashboard_read_key();
+                app.on_work_event(WorkEvent::DashboardLoaded {
+                    module: Some(ModuleId::Jobs),
+                    key,
+                    outcome: Ok(Box::new(DashboardSnapshot::Jobs(Box::new(current)))),
+                });
+                let filtered = buffer_text(&render(&mut app, width, height));
+                assert!(filtered.contains("New row"), "{filtered}");
+                assert!(!filtered.contains("Old row"));
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("jobs-filter-ready-{mouse}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                }
+                // App and search changes use the same invalidation path.
+                app.dashboard_reading = true;
+                click(&mut app, Target::Button(ButtonId::JobsApp));
+                assert!(app.jobs.rows.is_empty() && !app.jobs.loaded);
+                app.set_focus(Target::Field(FieldId::JobsSearch));
+                type_text(&mut app, "missing");
+                assert!(app.jobs.rows.is_empty() && !app.jobs.loaded);
+                app.jobs.loaded = true;
+                if let Some(dir) = &dir {
+                    dump_cells(
+                        &mut app,
+                        dir,
+                        &format!("jobs-filter-empty-{mouse}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn background_job_destination_selects_the_requested_record() {
         let mut app = app();
         register(&app, "job-one", "recon", "First investigation");
@@ -15724,7 +15828,10 @@ mod tests {
             .unwrap();
         let painted = screen_text(&terminal);
         assert!(painted.contains("claims"), "{painted}");
-        assert!(painted.contains("inferences"), "{painted}");
+        assert!(
+            !painted.contains("inferences"),
+            "inferences moved out of the left stack: {painted}"
+        );
         assert!(painted.contains("actors"), "{painted}");
         assert!(painted.contains("links"), "{painted}");
         assert!(!painted.contains("related context"), "{painted}");
@@ -15737,6 +15844,31 @@ mod tests {
         terminal
             .draw(|frame| super::super::ui::draw(frame, &app))
             .unwrap();
+
+        let left = app
+            .layout
+            .borrow()
+            .entries
+            .iter()
+            .find(|entry| entry.target == Target::IntelLeftColumn)
+            .unwrap()
+            .rect;
+        let left_scroll = app.scrolls.intel_extracted;
+        app.set_focus(Target::IntelTopologyInference(0));
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .unwrap();
+        let inference = app
+            .layout
+            .borrow()
+            .entries
+            .iter()
+            .find(|entry| entry.target == Target::IntelTopologyInference(0))
+            .unwrap()
+            .rect;
+        assert!(inference.x >= left.right());
+        assert_eq!(app.scrolls.intel_extracted, left_scroll);
+        assert!(screen_text(&terminal).contains("Widget will pressure competitors"));
 
         // Actor reviewing loading state
         app.intel_insights_running.insert("art-1".into());
@@ -16097,7 +16229,7 @@ mod tests {
             app.store
                 .commit_article_body(
                     &body.id,
-                    &text,
+                    "Retained acquisition body differs from the reader description.",
                     "fixture",
                     "complete",
                     "fixture",
@@ -16107,6 +16239,12 @@ mod tests {
                 )
                 .unwrap();
             app.intel_body = app.store.article_body_for_article(&article.id).unwrap();
+            // The reader displays the stored description, independently of the
+            // retained acquisition body. Give that actual source overflow text.
+            app.intel_articles[0].description = text.clone();
+            let geometry = super::super::ui::intel_center_geometry_for(&app).unwrap();
+            app.scrolls.intel_brief =
+                (geometry.brief.3 + 3).min(super::super::ui::intel_brief_scroll_max(&app));
             app.intel_body_message.clear();
             app.scrolls.intel_full = 0;
             if let Some(dir) = &dir {
@@ -16176,6 +16314,7 @@ mod tests {
                 );
             }
             app.intel_body = None;
+            app.intel_articles[0].description = article.description.clone();
             app.intel_brief_stages.clear();
             app.intel_body_message.clear();
             app.scrolls.intel_full = 0;
@@ -17588,6 +17727,62 @@ mod tests {
     }
 
     #[test]
+    fn intel_middle_inference_states() {
+        for (width, height) in [(160, 50), (80, 24), (60, 18)] {
+            let mut app = app();
+            app.module = Some(ModuleId::Intel);
+            app.intel_page = IntelPage::Briefing;
+            app.screen = Rect::new(0, 0, width, height);
+            app.compact_pages[ModuleId::Intel.index()] = 1;
+            app.intel_articles = vec![intel_article_fixture("middle-inferences", "")];
+            app.intel_insight_lifecycle = "active".into();
+            for state in ["loading", "empty", "ready"] {
+                app.intel_brief_stages.clear();
+                app.intel_brief_outputs.clear();
+                if state == "loading" {
+                    app.intel_brief_stages
+                        .push(intel_recon::brief_pipeline::StageView {
+                            operation: "intel_brief_inferences".into(),
+                            state: "running".into(),
+                            active: true,
+                            row: "Generating inferences".into(),
+                            ..Default::default()
+                        });
+                } else if state == "ready" {
+                    app.intel_brief_outputs.insert("intel_brief_inferences".into(), serde_json::json!({"inferences":[{"id":"middle-i1","text":"Clearance could allow partial service.","support":"conditional","why":"Inspection is pending.","limitations":["Approval remains unconfirmed"]}]}));
+                }
+                app.scrolls.intel_brief = super::super::ui::intel_brief_scroll_max(&app);
+                let text = buffer_text(&render(&mut app, width, height));
+                assert!(
+                    text.contains("inferences"),
+                    "{state} {width}x{height}: {text}"
+                );
+                if state == "loading" {
+                    assert!(text.contains("Generating"), "{text}");
+                } else if state == "empty" {
+                    assert!(text.contains("withheld"), "{text}");
+                } else {
+                    assert!(text.contains("Clearance could"), "{text}");
+                }
+                let geometry = super::super::ui::intel_center_geometry_for(&app).unwrap();
+                assert!(
+                    geometry.inferences.1 >= geometry.related.1 + i32::from(geometry.related.3)
+                );
+                assert_eq!(app.scrolls.intel_extracted, 0);
+                if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
+                    dump_cells(
+                        &mut app,
+                        &dir,
+                        &format!("intel-middle-{state}-{width}x{height}"),
+                        width,
+                        height,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn topology_intel_claim_uses_raw_identity_and_clicked_origin() {
         let mut app = app();
         app.module = Some(ModuleId::Intel);
@@ -17631,14 +17826,38 @@ mod tests {
             let order = super::super::ui::focus_order(&app);
             let pos = |target| order.iter().position(|value| *value == target).unwrap();
             assert!(pos(Target::IntelTopologyActor(0)) < pos(Target::IntelTopologyClaim(0)));
-            assert!(pos(Target::IntelTopologyClaim(0)) < pos(Target::IntelTopologyInference(0)));
+            if width >= 100 {
+                assert!(
+                    pos(Target::IntelTopologyClaim(0)) < pos(Target::IntelTopologyInference(0))
+                );
+            }
+            let left_scroll = app.scrolls.intel_extracted;
             app.set_focus(Target::IntelTopologyInference(1));
             assert!(
-                app.scrolls.intel_extracted > 0,
-                "inference after actors is revealed"
+                app.scrolls.intel_brief > 0,
+                "last middle-column inference is revealed"
             );
-            let scroll = app.scrolls.intel_extracted;
+            assert_eq!(app.scrolls.intel_extracted, left_scroll);
+            let scroll = app.scrolls.intel_brief;
+            super::super::ui::page(&mut app, -1);
+            assert!(app.scrolls.intel_brief < scroll);
+            assert_eq!(app.scrolls.intel_extracted, left_scroll);
+            app.set_focus(Target::IntelTopologyInference(1));
             render(&mut app, width, height);
+            let geometry = super::super::ui::intel_center_geometry_for(&app).unwrap();
+            assert!(geometry.inferences.1 >= geometry.related.1 + i32::from(geometry.related.3));
+            if width < 100 {
+                assert_eq!(app.compact_pages[ModuleId::Intel.index()], 1);
+            }
+            if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
+                dump_cells(
+                    &mut app,
+                    &dir,
+                    &format!("intel-middle-inferences-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
             assert!(app
                 .layout
                 .borrow()
@@ -17653,7 +17872,7 @@ mod tests {
             app.activate_button(ButtonId::TopologyBack);
             assert_eq!(app.module, Some(ModuleId::Intel));
             assert_eq!(app.focus, Target::IntelTopologyInference(1));
-            assert_eq!(app.scrolls.intel_extracted, scroll);
+            assert_eq!(app.scrolls.intel_brief, scroll);
             render(&mut app, width, height);
             click(&mut app, Target::IntelTopologyInference(1));
             assert_eq!(app.topology_state.seed.as_ref(), Some(&keyboard_seed));

@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import shutil
 import sys
@@ -110,6 +111,22 @@ def main():
             capture = bytearray()
             done = threading.Event()
 
+            def terminal_text(start=0):
+                """Return visible terminal bytes without redraw controls.
+
+                Ratatui's incremental ANSI updates can place a cursor/style
+                sequence inside a label. Match the rendered text rather than
+                assuming each label arrives as one contiguous byte sequence.
+                """
+                return re.sub(
+                    rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\\\))",
+                    b"",
+                    bytes(capture[start:]),
+                )
+
+            def sees(label, start=0):
+                return label in terminal_text(start)
+
             def read_terminal():
                 while not done.is_set():
                     if select.select([master], [], [], 0.1)[0]:
@@ -132,7 +149,7 @@ def main():
                 arguments = []
             # Keep a session owner alive after Argos exits. macOS revokes a
             # controlling PTY on session-owner exit, preventing a termios check.
-            keeper = "import subprocess,sys; p=subprocess.Popen(sys.argv[1:]); code=p.wait(); print('ARGOS_EXIT='+str(code), flush=True); sys.stdin.readline(); sys.exit(code)"
+            keeper = "import subprocess,sys,signal; signal.signal(signal.SIGINT, lambda *_: None); p=subprocess.Popen(sys.argv[1:]); code=p.wait(); print('ARGOS_EXIT='+str(code), flush=True); sys.stdin.readline(); sys.exit(code)"
             process = subprocess.Popen([sys.executable, "-c", keeper, str(binary), *arguments], cwd=ROOT,
                                        env={**env, "TERM": "xterm-256color"},
                                        stdin=slave, stdout=slave, stderr=slave,
@@ -142,14 +159,65 @@ def main():
             reader.start()
             try:
                 if wizard:
-                    eventually(lambda: b"Choose a service" in capture, process)
-                    os.write(master, b"2\r")
-                    eventually(lambda: b"API port" in capture, process)
-                    os.write(master, b"\x15" + str(api_port).encode() + b"\r")
-                    eventually(lambda: b"Storage mode" in capture, process)
+                    eventually(lambda: sees(b"Choose a service"), process)
+                    if target == "--tui":
+                        os.write(master, b"3\r")
+                        eventually(lambda: sees(b"Web port"), process)
+                        os.write(master, b"\x154010\r")
+                        eventually(lambda: sees(b"Web profile"), process)
+                        mark = len(capture)
+                        os.write(master, b"\x1b")
+                        eventually(lambda: sees(b"Web port", mark) and sees(b"4010", mark), process)
+                        mark = len(capture)
+                        os.write(master, b"\x1b")
+                        eventually(lambda: sees(b"Choose a service", mark), process)
+                        os.write(master, b"1\r")
+                    else:
+                        os.write(master, b"2\r")
+                        eventually(lambda: sees(b"API port"), process)
+                        os.write(master, b"\x15" + str(api_port).encode() + b"\r")
+                    eventually(lambda: sees(b"Storage mode"), process)
                     os.write(master, b"\r")
-                    eventually(lambda: b"Terminal display" in capture, process)
-                    os.write(master, b"\x1b[A\r")  # Logs default → TUI, then start.
+                    # Match the selected option label, not the question
+                    # title: an incremental cursor repaint can overwrite
+                    # part of the title in the raw PTY byte stream.
+                    terminal_choice = b"Jobs / Logs available" if target == "--tui" else b"Server logs"
+                    eventually(lambda: sees(terminal_choice), process)
+                    os.write(master, b"\r" if target == "--tui" else b"\x1b[A\r")
+                if target == "--tui":
+                    eventually(lambda: sees(b"Intel") and sees(b"Recon"), process)
+                    if sees(b"Open last app view session"):
+                        os.write(master, b"n")
+                    mark = len(capture)
+                    for _ in range(8):
+                        os.write(master, b"\x11\x11")
+                        time.sleep(0.25)
+                        if sees(b"Choose a service", mark):
+                            break
+                    eventually(lambda: sees(b"Choose a service", mark), process)
+                    assert not state_file.exists(), "direct TUI created a managed service stack"
+                    # Launch a different session in the same Venture parent:
+                    # the previous TUI must have released embedded storage.
+                    mark = len(capture)
+                    os.write(master, b"2\r")
+                    eventually(lambda: sees(b"API port", mark), process)
+                    os.write(master, b"\x15" + str(api_port).encode() + b"\r")
+                    eventually(lambda: sees(b"Storage mode", mark), process)
+                    os.write(master, b"\r")
+                    eventually(lambda: sees(b"Server logs", mark), process)
+                    os.write(master, b"\r")  # Default service logs.
+                    eventually(state, process, seconds=60)
+                    eventually(lambda: ready(api_port), process)
+                    mark = len(capture)
+                    os.write(master, b"\x03")  # Foreground logs stop; parent survives.
+                    eventually(lambda: sees(b"Choose a service", mark), process)
+                    assert not state_file.exists()
+                    os.write(master, b"\x1b")
+                    eventually(lambda: sees(b"ARGOS_EXIT=0"), process)
+                    assert (termios.tcgetattr(slave)[3] & (termios.ICANON | termios.ECHO)) == (before[3] & (termios.ICANON | termios.ECHO))
+                    os.write(master, b"\n")
+                    assert process.wait(timeout=10) == 0
+                    return
                 managed = eventually(state, process, seconds=60)
                 assert managed["terminal"] == "Tui"
                 assert managed["api_pid"] == managed["supervisor_pid"] and not managed["adopted"]
@@ -188,6 +256,7 @@ def main():
                 assert b"Unexpected text node" not in capture, "React Native rendered a raw text child inside View"
                 if target == "--web":
                     assert "fixture-private-query" not in (Path(tmp) / "stack-services.log").read_text()
+                return_mark = len(capture)
                 if quit_from_tui:
                     # Two Ctrl-Q presses arm/confirm quit. Repeat briefly in
                     # case a startup redraw consumed input.
@@ -199,6 +268,9 @@ def main():
                 else:
                     assert ready(api_port)
                     run("stack", "down", target)
+                if wizard:
+                    eventually(lambda: b"Choose a service" in capture[return_mark:], process, seconds=25)
+                    os.write(master, b"\x1b")
                 eventually(lambda: b"ARGOS_EXIT=0" in capture, process, seconds=25)
                 assert not state_file.exists()
                 assert (termios.tcgetattr(slave)[3] & (termios.ICANON | termios.ECHO)) == (before[3] & (termios.ICANON | termios.ECHO)), "terminal mode was not restored"
@@ -222,7 +294,7 @@ def main():
                     args.terminal_captures.mkdir(parents=True, exist_ok=True)
                     (args.terminal_captures / (target.removeprefix("--") + ".ansi")).write_bytes(capture)
                     service_log = Path(tmp) / "stack-services.log"
-                    if service_log.exists():
+                    if service_log.exists() and target != "--tui":
                         (args.terminal_captures / (target.removeprefix("--") + "-services.log")).write_bytes(service_log.read_bytes()[-65536:])
                 os.close(master)
                 os.close(slave)
@@ -230,6 +302,7 @@ def main():
         try:
             if args.tui_only:
                 run("storage", "init", "--mode", "embedded")
+                exercise_tui("--tui", wizard=True)
                 exercise_tui("--server", wizard=True)
                 exercise_tui("--web", quit_from_tui=True)
                 print("PASS: Venture wizard, shared embedded API/Web TUI, service Jobs/traffic Logs, clean startup, quit/down and raw-mode restoration")
@@ -277,6 +350,7 @@ def main():
             dev.send_signal(signal.SIGINT)
             assert dev.wait(timeout=15) == 0 and not state_file.exists()
             assert len(browser_log.read_text().splitlines()) == 1, "--no-open launched a browser"
+            exercise_tui("--tui", wizard=True)
             exercise_tui("--server", wizard=True)
             exercise_tui("--web", quit_from_tui=True)
             # Restart using a separately owned API. down must preserve it.

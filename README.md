@@ -10,6 +10,22 @@ Only Recon has a chat. Everything else is fields, lists, and buttons. Observatio
 
 [![Argos workspace](docs/diagrams/workspace.svg)](docs/diagrams/workspace.html)
 
+## Tech stack
+
+| Layer | Current implementation |
+| --- | --- |
+| CLI and core | Rust 1.95.0, Tokio, Clap; shared core plus CLI/TUI and local API crates |
+| Terminal UI | Ratatui 0.30 and Crossterm 0.28; shared theme, measured keyboard/mouse targets and deterministic terminal fixtures |
+| Persistence | SurrealDB 3.3.4; default in-process RocksDB storage, optional loopback SurrealDB server mode |
+| Local HTTP API | Axum 0.8 with typed `/api/v1` projections and storage-backed readiness; Rust owns data and workers |
+| Web UI | React 19.2.3, React Native 0.86.3 primitives mapped through React Native Web 0.21.4; Next.js 16.4.3 static export and development server |
+| React compilation and state | React Compiler 1.0.0; TanStack Query 5.104.5 for async/cache/cursor state, Context for connection/preferences, app adapters for browser settings |
+| JavaScript toolchain | Node 24.22.1, pnpm 12.15.0, TypeScript 5.9.3; pinned workspace manifests and frozen lockfile |
+| Providers and local NLP | Reqwest/rustls, QuickJS via rquickjs, tokenizers and tract-onnx; live provider/model execution is separate from offline tests |
+| Quality and CI | rustfmt, Clippy, Cargo/storage/process tests; ESLint 9 with Hooks/compiler rules; Playwright 1.64.1 export/dev browser fixtures; GitHub Actions |
+
+Versions and feature ownership are defined in [Cargo.toml](Cargo.toml), the [frontend manifests](package.json) and [web app manifest](apps/web-desktop/package.json). See the [architecture](docs/wiki/code/architecture.md), [React UI contract](docs/wiki/code/react-ui.md) and [CI guide](docs/wiki/code/ci.md). Expo mobile apps, Tauri desktop bundles and native-platform validation remain planned; the current native primitives do not imply shipped native clients.
+
 ## Applications
 
 | App | What it does | Read more |
@@ -38,7 +54,7 @@ cargo build --locked -p argos-osint-bin
 ./target/debug/argos stack up --tui
 ```
 
-Running `argos` without arguments opens a Ratatui service launcher with a centered ARGOS VENTURE banner and the same theme as the main TUI. Use ↑/↓, Tab or the numbered choices, then Enter; mouse clicks also select choices. Settings cover storage mode, API/web ports, the web profile, and starting or connecting to an API. Enter accepts a default, Ctrl+U clears a text field, and Esc cancels. PgUp/PgDn review the selected settings. The final choice starts the stack with either the normal TUI or server logs visible.
+Running `argos` without arguments opens a Ratatui service launcher with a centered ARGOS VENTURE banner and the same theme as the main TUI. Use ↑/↓, Tab or the numbered choices, then Enter; mouse clicks also select choices. Settings cover storage mode, API/web ports, the web profile, and starting or connecting to an API. Enter accepts a default, Ctrl+U clears a text field, and Esc returns to the previous question with its saved value (Esc at the service root exits). Ctrl+Q exits the wizard. PgUp/PgDn review the selected settings. The final choice starts the stack with either the normal TUI or server logs visible. When a session launched from Venture ends, its owned services stop and Venture reopens. Explicit `stack up` commands remain one-shot.
 
 Explicit `stack up` commands skip the launcher. The main TUI opens on Home: ↑/↓ and Enter open an app, keys `1`–`9` jump between apps, Esc returns Home, and `?` opens shortcuts. API Server and Web use the build prerequisites below.
 

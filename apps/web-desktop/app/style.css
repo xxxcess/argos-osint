@@ -5,6 +5,7 @@
 html,
 body {
   margin: 0;
+  height: 100%;
   min-height: 100%;
   background: #141414;
   color: #e8e8e8;
@@ -44,5 +45,11 @@ select {
   #workspace-description,
   #workspace-route {
     display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [role="progressbar"] svg {
+    animation: none !important;
   }
 }

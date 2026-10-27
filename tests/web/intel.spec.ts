@@ -672,3 +672,397 @@ test("a blocked browser store still allows a session backend switch", async ({
   ).toBeVisible();
   expect(nextApi.requests).toContain("health/ready");
 });
+
+const fixtureCors = { "access-control-allow-origin": "http://127.0.0.1:3100" };
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+test("loading days and a verified empty cycle are distinct states", async ({
+  page,
+}) => {
+  await fixtures(page);
+  const days = deferred();
+  await page.route("**/api/v1/days", async (route) => {
+    await days.promise;
+    await route.fulfill({ json: { days: [] }, headers: fixtureCors });
+  });
+  await page.goto("/");
+  await expect(
+    page.getByRole("progressbar", {
+      name: "Loading retained days…",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "No articles yet" }),
+  ).toHaveCount(0);
+  await page.screenshot({
+    path: `${captureDir}/days-loading.png`,
+    fullPage: true,
+  });
+  days.resolve();
+  await expect(
+    page.getByRole("heading", { name: "No articles yet" }),
+  ).toBeVisible();
+  await expect(page.getByRole("progressbar")).toHaveCount(0);
+  await expect(page.getByText("0 loaded", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: `${captureDir}/days-empty.png`,
+    fullPage: true,
+  });
+});
+
+test("pending articles never show a false empty result", async ({ page }) => {
+  await fixtures(page);
+  const articles = deferred();
+  await page.route(/\/api\/v1\/articles\?/, async (route) => {
+    await articles.promise;
+    await route.fulfill({
+      json: { rows: [], next_cursor: null, revision: "empty" },
+      headers: fixtureCors,
+    });
+  });
+  await page.goto("/");
+  await expect(
+    page.getByRole("progressbar", { name: "Loading bulletin…", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("No articles match this day, category and search."),
+  ).toHaveCount(0);
+  await page.screenshot({
+    path: `${captureDir}/articles-loading.png`,
+    fullPage: true,
+  });
+  articles.resolve();
+  await expect(
+    page.getByRole("heading", { name: "No matching articles" }),
+  ).toBeVisible();
+  await expect(page.getByText("0 loaded", { exact: true })).toBeVisible();
+});
+
+test("brief and related loading states preserve numeric zero and verified empty evidence", async ({
+  page,
+}) => {
+  await fixtures(page);
+  const detail = deferred(),
+    leads = deferred();
+  await page.route(/\/api\/v1\/articles\/detail\?/, async (route) => {
+    await detail.promise;
+    await route.fulfill({
+      json: {
+        article: a,
+        actors: [],
+        claims: [],
+        confidence: { score: 0, provisional: false },
+        lifecycle: "active",
+        status: "Published",
+        publication: null,
+        links: [],
+        revision: "zero",
+      },
+      headers: fixtureCors,
+    });
+  });
+  await page.route(/\/api\/v1\/articles\/related\?/, async (route) => {
+    await leads.promise;
+    await route.fulfill({
+      json: { rows: [], next_cursor: null },
+      headers: fixtureCors,
+    });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Focus Brief ↗" }).click();
+  await expect(
+    page.getByRole("progressbar", { name: "Loading extracted evidence…" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "No published claims" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("progressbar", { name: "Loading related leads…" }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: `${captureDir}/brief-loading.png`,
+    fullPage: true,
+  });
+  detail.resolve();
+  leads.resolve();
+  await expect(
+    page.getByText("0/100 · assessed evidence score", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "No actors extracted" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "No published claims" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "No related leads" }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: `${captureDir}/brief-empty-zero.png`,
+    fullPage: true,
+  });
+});
+
+for (const changeCategory of [false, true]) {
+  test(`scroll pagination is guarded and ${changeCategory ? "isolates a changed category" : "deduplicates occurrences"}`, async ({
+    page,
+  }) => {
+    await fixtures(page);
+    const next = deferred();
+    const cursors: string[] = [];
+    await page.route(/\/api\/v1\/articles\?/, async (route) => {
+      const url = new URL(route.request().url());
+      const category = url.searchParams.get("category")!;
+      const cursor = url.searchParams.get("cursor") || "";
+      cursors.push(`${category}:${cursor}`);
+      if (category === "economic") {
+        await route.fulfill({
+          json: {
+            rows: [
+              { ...a, id: "economic", category, title: "Economic signal" },
+            ],
+            next_cursor: null,
+            revision: "economic",
+          },
+          headers: fixtureCors,
+        });
+      } else if (!cursor) {
+        await route.fulfill({
+          json: {
+            rows: Array.from({ length: 12 }, (_, i) => ({
+              ...a,
+              id: `page-${i}`,
+              title: `Signal ${i}`,
+            })),
+            next_cursor: "opaque-next",
+            revision: "page-one",
+          },
+          headers: fixtureCors,
+        });
+      } else {
+        await next.promise;
+        await route.fulfill({
+          json: {
+            rows: [11, 12].map((i) => ({
+              ...a,
+              id: `page-${i}`,
+              title: `Signal ${i}`,
+            })),
+            next_cursor: null,
+            revision: "page-two",
+          },
+          headers: fixtureCors,
+        });
+      }
+    });
+    await page.goto("/");
+    await expect(page.getByTestId("article-card-page-0")).toBeVisible();
+    await expect(page.getByTestId("article-card-page-11")).toBeAttached();
+    const scroller = page.getByTestId("workspace-scroll");
+    await scroller.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    await expect
+      .poll(
+        () => cursors.filter((c) => c === "geopolitical:opaque-next").length,
+      )
+      .toBe(1);
+    await expect(
+      page.getByRole("progressbar", {
+        name: "Loading more articles…",
+        exact: true,
+      }),
+    ).toBeVisible();
+    for (let i = 0; i < 5; i++)
+      await scroller.evaluate((el) => el.dispatchEvent(new Event("scroll")));
+    expect(
+      cursors.filter((c) => c === "geopolitical:opaque-next"),
+    ).toHaveLength(1);
+    await page.screenshot({
+      path: `${captureDir}/next-page-loading-${changeCategory}.png`,
+      fullPage: true,
+    });
+    if (changeCategory) {
+      await page.getByRole("button", { name: "Economic", exact: true }).click();
+      await expect(
+        page.getByText("Economic signal", { exact: true }),
+      ).toBeVisible();
+    }
+    next.resolve();
+    if (changeCategory) {
+      await expect(page.getByTestId("article-card-page-12")).toHaveCount(0);
+      await expect(
+        page.getByText("Economic signal", { exact: true }),
+      ).toBeVisible();
+    } else {
+      await expect(page.getByTestId("article-card-page-12")).toBeVisible();
+      await expect(page.getByTestId("article-card-page-11")).toHaveCount(1);
+      await expect(page.getByText("13 loaded", { exact: true })).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Load more articles" }),
+      ).toHaveCount(0);
+    }
+  });
+}
+
+test("background refresh keeps readable bulletin rows", async ({ page }) => {
+  await page.clock.install();
+  await fixtures(page);
+  const refresh = deferred();
+  let reads = 0;
+  await page.route(/\/api\/v1\/articles\?/, async (route) => {
+    if (++reads > 1) await refresh.promise;
+    await route.fulfill({
+      json: {
+        rows: [{ ...a, title: reads > 1 ? "Refreshed signal" : a.title }],
+        next_cursor: null,
+        revision: String(reads),
+      },
+      headers: fixtureCors,
+    });
+  });
+  await page.goto("/");
+  await expect(page.getByText(a.title, { exact: true })).toBeVisible();
+  await page.clock.fastForward(5000);
+  await expect(
+    page.getByRole("progressbar", {
+      name: "Refreshing bulletin…",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(page.getByText(a.title, { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "No matching articles" }),
+  ).toHaveCount(0);
+  refresh.resolve();
+  await expect(
+    page.getByText("Refreshed signal", { exact: true }),
+  ).toBeVisible();
+});
+
+test("topology distinguishes no selection, loading and an empty graph", async ({
+  page,
+}) => {
+  await fixtures(page);
+  const graph = deferred();
+  await page.route("**/api/v1/topology", async (route) => {
+    await graph.promise;
+    await route.fulfill({
+      json: {
+        root_label: "Empty source",
+        nodes: [],
+        edges: [],
+        findings: { gaps: [] },
+        has_continuation: false,
+      },
+      headers: fixtureCors,
+    });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Topology", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "No topology selected" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Bulletin", exact: true }).click();
+  await page.getByRole("button", { name: "Open Focus Brief ↗" }).click();
+  await page.getByRole("button", { name: "Explore article topology" }).click();
+  await expect(
+    page.getByRole("progressbar", { name: "Loading topology…", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "No retained connections" }),
+  ).toHaveCount(0);
+  graph.resolve();
+  await expect(
+    page.getByRole("heading", { name: "No retained connections" }),
+  ).toBeVisible();
+});
+
+test("failed scroll pages retain rows and require an explicit retry", async ({
+  page,
+}) => {
+  await fixtures(page);
+  let requests = 0;
+  await page.route(/\/api\/v1\/articles\?/, async (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    if (cursor && ++requests <= 2) {
+      await route.fulfill({
+        status: 503,
+        json: { error: "Page unavailable" },
+        headers: fixtureCors,
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        rows: cursor
+          ? [{ ...a, id: "recovered", title: "Recovered page" }]
+          : Array.from({ length: 12 }, (_, i) => ({
+              ...a,
+              id: `retry-${i}`,
+              title: `Retry signal ${i}`,
+            })),
+        next_cursor: cursor ? null : "retry-cursor",
+        revision: cursor ? "retry-two" : "retry-one",
+      },
+      headers: fixtureCors,
+    });
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("article-card-retry-0")).toBeVisible();
+  await expect(page.getByTestId("article-card-retry-11")).toBeAttached();
+  const scroller = page.getByTestId("workspace-scroll");
+  await scroller.evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+  });
+  await expect(page.getByText(/Could not load more articles/)).toBeVisible();
+  await expect(page.getByTestId("article-card-retry-11")).toBeVisible();
+  for (let i = 0; i < 5; i++)
+    await scroller.evaluate((el) => el.dispatchEvent(new Event("scroll")));
+  expect(requests).toBe(2);
+  await page.getByRole("button", { name: "Retry loading articles" }).click();
+  await expect(page.getByTestId("article-card-recovered")).toBeVisible();
+  expect(requests).toBe(3);
+  await expect(page.getByText("13 loaded", { exact: true })).toBeVisible();
+});
+
+for (const width of [1440, 390]) {
+  test(`inferences finish the Reader column at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await fixtures(page);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Open Focus Brief ↗" }).click();
+    const section = page.getByTestId("reader-inferences");
+    await expect(section.getByText("Access may improve.")).toBeVisible();
+    await expect(section).toBeVisible();
+    expect(
+      await section.evaluate((el) => el === el.parentElement?.lastElementChild),
+    ).toBe(true);
+    const source = await page
+      .getByRole("button", { name: "Read original source ↗" })
+      .boundingBox();
+    const inference = await section.boundingBox();
+    expect(inference!.y).toBeGreaterThan(source!.y);
+    if (width < 850) {
+      await page
+        .getByRole("button", { name: "Extracted", exact: true })
+        .click();
+      await expect(section).toHaveCount(0);
+      await page.getByRole("button", { name: "Reader", exact: true }).click();
+      await expect(section.getByText("Access may improve.")).toBeVisible();
+    }
+    await page.screenshot({
+      path: `${captureDir}/inferences-reader-${width}.png`,
+      fullPage: true,
+    });
+  });
+}

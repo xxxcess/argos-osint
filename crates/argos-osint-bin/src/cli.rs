@@ -320,25 +320,46 @@ enum AtlasCommand {
 }
 
 pub async fn dispatch() -> Result<()> {
-    let command = match Cli::parse().command {
-        Some(command) => Some(command),
-        None => {
-            let Some(selection) = tokio::task::spawn_blocking(crate::welcome::run).await?? else {
-                return Ok(());
-            };
-            // Validate before applying storage setup. A separate process releases
-            // its datastore handles before the chosen TUI/API becomes the owner.
-            let command = Cli::try_parse_from(selection.args)?.command;
-            if let Some(args) = selection.storage_init {
-                let status = tokio::process::Command::new(std::env::current_exe()?)
-                    .args(args)
-                    .status()
-                    .await?;
-                anyhow::ensure!(status.success(), "storage setup failed: {status}");
-            }
-            command
+    let command = Cli::parse().command;
+    if command.is_some() {
+        return dispatch_command(command).await;
+    }
+    // Venture owns the session; child TUI/stack guards restore the terminal
+    // and stop owned services before the next menu is presented.
+    loop {
+        let Some(selection) = tokio::task::spawn_blocking(crate::welcome::run).await?? else {
+            return Ok(());
+        };
+        Cli::try_parse_from(&selection.args)?;
+        if let Some(args) = selection.storage_init {
+            let status = tokio::process::Command::new(std::env::current_exe()?)
+                .args(args)
+                .status()
+                .await?;
+            anyhow::ensure!(status.success(), "storage setup failed: {status}");
         }
-    };
+        // Each session owns its repository and background workers. Waiting for
+        // process exit releases embedded storage before Venture can launch again.
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
+            .args(selection.args.iter().skip(1))
+            .spawn()?;
+        let status = loop {
+            tokio::select! {
+                status = child.wait() => break status?,
+                signal = tokio::signal::ctrl_c() => {
+                    // The foreground child receives the same terminal signal.
+                    // Let its supervisor finish cleanup before reopening Venture.
+                    signal?;
+                }
+            }
+        };
+        if !status.success() {
+            eprintln!("Session ended: {status}");
+        }
+    }
+}
+
+async fn dispatch_command(command: Option<Command>) -> Result<()> {
     #[cfg(feature = "surreal")]
     let command = match surreal_brain(command).await? {
         Some(command) => command,

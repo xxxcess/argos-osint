@@ -13,3 +13,5 @@ For React UI changes, load `argos-react-ui` and, for components/state/performanc
 Keep the React Native Web alias/shared transpilation and React Compiler enabled in Next. `pnpm lint` enforces Hooks/compiler diagnostics with zero warnings; fix violations without disabling rules or adding blanket compiler opt-outs.
 
 Launch Next with this app directory as its working directory; an app path argument alone does not fix Babel preset resolution from the repo root. Compiler/launcher changes require export and development browser checks.
+
+Use [CI workflow contracts](../../docs/wiki/code/ci.md) and `.github/workflows/intel-web.yml` for frontend verification; async UI changes must cover pending, refresh, empty/zero, failure and cursor-page behavior.

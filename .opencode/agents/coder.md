@@ -16,3 +16,5 @@ Resume only your own child sessionID. Follow documented recovery on handoff fail
 Report completed checklist items and evidence after each implementation unit; include affected wiki/routes/tags/diagrams in the phase delta.
 
 Keep shared React Native primitives and the enabled React Compiler/Hooks checks. For React UI work load `argos-react-ui` and `argos-react-patterns`; pass the applicable design rules and state/viewport acceptance to EDIT_UNITs. Preserve the leaf edit-only rule; tester owns verification.
+
+For build/test changes, inspect `docs/wiki/code/ci.md` and affected `.github/workflows/`; map acceptance to their actual commands, preserve Code Architect ownership and distinguish local validation from hosted Actions.

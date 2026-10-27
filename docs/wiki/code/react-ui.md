@@ -8,7 +8,7 @@ Apply to React UI work in `apps/web-desktop`, `packages/ui`, `packages/intel` an
 
 | Concern | Authority |
 | --- | --- |
-| Shared palette and primitives | [packages/ui](../../../packages/ui/src/index.tsx): `colors`, `fonts`, `Label`, `Copy`, `Button`, `Panel`, `Notice` |
+| Shared palette and primitives | [packages/ui](../../../packages/ui/src/index.tsx): `colors`, `fonts`, `Label`, `Copy`, `Button`, `Panel`, `Notice`, `LoadingState`, `EmptyState` |
 | Screens and responsive composition | [packages/intel](../../../packages/intel/src/index.tsx): Bulletin, Focus Brief, Topology |
 | Remote state and connection | [packages/api-client](../../../packages/api-client/src/index.tsx): Context, TanStack Query v5, readiness and backend/instance keys |
 | Platform settings | [web adapter](../../../apps/web-desktop/app/backend-settings.ts): persisted endpoint, hydration-safe snapshots and request IDs through `BackendSettings` |
@@ -60,6 +60,16 @@ The shell uses a compact monospace ARGOS / INTEL wordmark, API connection status
 - Label inputs independently of placeholders; associate errors/help with the field, retain entered values after failures, and offer a concrete recovery action. Keep touch targets usable at narrow widths without overcrowding adjacent controls.
 - Distinguish initial loading, background refresh, empty results, partial data, action pending, action failure and offline/reconnect states. Avoid blanking readable content during ordinary refetch. Disable duplicate pending submissions and expose the result. Gate working UI/mutations on API readiness as required by the client contract.
 - Reserve image dimensions/aspect ratio to avoid layout shifts; use meaningful accessible descriptions for informative images and avoid duplicate announcements for decorative thumbnails. Validate external URLs through existing helpers and preserve failure fallback. Honor reduced motion if adding animation; prefer transform/opacity and avoid motion required to understand state.
+
+## Async data and pagination
+
+`LoadingState` is an accessible RN indeterminate progress indicator with a label; `EmptyState` names a verified empty collection and its context. Pending days/feed/detail/evidence/Related/Topology requests do not render empty data claims. Background refresh keeps readable rows and shows a compact status; next-page requests have their own loading/error/retry state. Confidence zero is valid; unavailable scores remain unassessed.
+
+One RN ScrollView owns workspace scrolling. Near the Bulletin's end, the client requests the next opaque cursor only when a page exists, no query fetch is running and the last next-page request is not in error. Query uses `cancelRefetch: false` to deduplicate repeated scroll events. Manual Load more/retry stays reachable. Loaded rows are deduplicated by run/article occurrence; category/day/search/backend/instance keys isolate scopes. Empty categories show a verified zero count; no retained days prompt Atlas collection.
+
+## Focus Brief column order
+
+Extracted contains confidence, actors and claims. Inferences are the last section of the middle Reader pane, after the article description and original-source link; narrow layouts keep them in the Reader tab. Preserve their distinct heading and pending/empty/error states. Core TUI places Inferences after Related at the end of its center stack. See [column order](../../diagrams/intel-focus-layout.html).
 
 ## Product meaning
 

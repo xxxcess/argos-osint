@@ -3118,7 +3118,6 @@ pub fn page(app: &mut App, direction: i32) {
                 app.focus,
                 Target::IntelLeftColumn
                     | Target::IntelTopologyClaim(_)
-                    | Target::IntelTopologyInference(_)
                     | Target::IntelTopologyActor(_)
             ) {
                 let max = intel_extracted_scroll_max(app);
@@ -3577,6 +3576,8 @@ pub fn tool_room_for(app: &App) -> usize {
 pub struct IntelCenterGeometry {
     pub brief: (u16, i32, u16, u16),
     pub brief_text: (u16, i32, u16, u16),
+    pub related: (u16, i32, u16, u16),
+    pub inferences: (u16, i32, u16, u16),
 }
 
 #[cfg(test)]
@@ -3589,6 +3590,8 @@ pub fn intel_center_geometry_for(app: &App) -> Option<IntelCenterGeometry> {
     Some(IntelCenterGeometry {
         brief: rect(layout.brief),
         brief_text: rect(layout.brief_text),
+        related: rect(layout.related),
+        inferences: rect(layout.inferences),
     })
 }
 
@@ -3767,7 +3770,11 @@ fn geometry_stamp(app: &App) -> String {
                 app.jobs.scroll,
                 app.jobs.detail_open,
                 app.jobs.rows.len(),
-                app.jobs.error.is_some()
+                app.jobs.error.is_some(),
+                app.jobs.status,
+                &app.jobs.app,
+                &app.jobs.search,
+                app.jobs.loaded,
             ),
             (
                 app.profile
@@ -3924,13 +3931,16 @@ pub fn focus_order(app: &App) -> Vec<Target> {
                     .actor_records
                     .iter()
                     .chain(&layout.claim_records)
-                    .chain(&layout.inference_records)
                     .map(|(_, target)| *target),
             );
         }
         let target = Target::Button(ButtonId::RelatedScope);
         if center.width > 0 && !seen.contains(&target) {
             order.push(target);
+        }
+        order.retain(|target| !matches!(target, Target::IntelTopologyInference(_)));
+        if let Some(layout) = intel_center_layout(app, center) {
+            order.extend(layout.inference_records.iter().map(|(_, target)| *target));
         }
     }
     if app.overlay != Overlay::None && !seen.contains(&Target::CloseOverlay) {
@@ -7950,28 +7960,7 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
                 &layout.claim_records,
             );
         }
-        // 3. inferences
-        if layout.inferences_loading {
-            draw_clipped_intel_loading(
-                frame,
-                left,
-                layout.inferences,
-                " inferences ",
-                &layout.phases[1],
-                detail.as_deref(),
-            );
-        } else {
-            draw_intel_topology_records(
-                frame,
-                app,
-                left,
-                layout.inferences,
-                " inferences ",
-                &layout.inferences_lines,
-                &layout.inference_records,
-            );
-        }
-        // 4. links
+        // 3. links
         if layout.links_loading {
             let phase = if !layout.phases[2].is_empty() {
                 layout.phases[2].as_str()
@@ -8050,6 +8039,26 @@ fn draw_intel_briefing(frame: &mut Frame, app: &App, area: Rect) {
             );
         }
         draw_intel_related(frame, app, center, layout.related);
+        if layout.inferences_loading {
+            draw_clipped_intel_loading(
+                frame,
+                center,
+                layout.inferences,
+                " inferences ",
+                &layout.inference_phase,
+                intel_insights_progress_detail(app).as_deref(),
+            );
+        } else {
+            draw_intel_topology_records(
+                frame,
+                app,
+                center,
+                layout.inferences,
+                " inferences ",
+                &layout.inferences_lines,
+                &layout.inference_records,
+            );
+        }
     }
 
     let right_rows = intel_briefing_right_rows(app, right);
@@ -8115,6 +8124,11 @@ struct IntelCenterLayout {
     full_more: Option<AbsRect>,
     full_room: usize,
     related: AbsRect,
+    inferences: AbsRect,
+    inferences_lines: Vec<Line<'static>>,
+    inference_records: Vec<(std::ops::Range<usize>, Target)>,
+    inferences_loading: bool,
+    inference_phase: String,
     brief_lines: Vec<Line<'static>>,
     full_lines: Vec<Line<'static>>,
     full_scroll_max: u16,
@@ -8215,10 +8229,15 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     // The focused pair fits together at wide/medium viewports, keeping the
     // Full Article header visible when Related is revealed.
     let related_h = viewport.height.saturating_sub(full_h).max(8);
+    let evidence = intel_extracted_layout(app, viewport)?;
+    let inferences_h = (evidence.inferences_lines.len() as u16)
+        .saturating_add(2)
+        .max(if evidence.inferences_loading { 5 } else { 3 });
     let total = brief_h
         .saturating_add(ACTION_H)
         .saturating_add(full_h)
-        .saturating_add(related_h);
+        .saturating_add(related_h)
+        .saturating_add(inferences_h);
     let stack_scroll_max = total.saturating_sub(viewport.height);
     let scroll = app.scrolls.intel_brief.min(stack_scroll_max) as i32;
 
@@ -8248,6 +8267,8 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
     });
     y += i32::from(full_h);
     let related = abs_rect(viewport.x, y, viewport.width, related_h);
+    y += i32::from(related_h);
+    let inferences = abs_rect(viewport.x, y, viewport.width, inferences_h);
 
     Some(IntelCenterLayout {
         brief,
@@ -8257,6 +8278,11 @@ fn intel_center_layout(app: &App, viewport: Rect) -> Option<IntelCenterLayout> {
         full_more,
         full_room: full_room as usize,
         related,
+        inferences,
+        inferences_lines: evidence.inferences_lines,
+        inference_records: evidence.inference_records,
+        inferences_loading: evidence.inferences_loading,
+        inference_phase: evidence.phases[1].clone(),
         brief_lines,
         full_lines,
         full_scroll_max,
@@ -8613,7 +8639,6 @@ fn draw_intel_topology_records(
 struct IntelExtractedLayout {
     confidence: AbsRect,
     claims: AbsRect,
-    inferences: AbsRect,
     actors: AbsRect,
     links: AbsRect,
 
@@ -8832,13 +8857,11 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     };
 
     let claims_h = section_h(claims_lines.len(), claims_loading);
-    let inferences_h = section_h(inferences_lines.len(), inferences_loading);
     let actors_h = section_h(actors_lines.len(), false);
     let links_h = section_h(links_lines.len(), links_loading);
     let confidence_h = section_h(confidence_lines.len(), false);
     let total = confidence_h
         .saturating_add(claims_h)
-        .saturating_add(inferences_h)
         .saturating_add(actors_h)
         .saturating_add(links_h);
     let stack_scroll_max = total.saturating_sub(viewport.height);
@@ -8851,15 +8874,12 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     y += i32::from(actors_h);
     let claims = abs_rect(viewport.x, y, viewport.width, claims_h);
     y += i32::from(claims_h);
-    let inferences = abs_rect(viewport.x, y, viewport.width, inferences_h);
-    y += i32::from(inferences_h);
     let links = abs_rect(viewport.x, y, viewport.width, links_h);
 
     Some(IntelExtractedLayout {
         confidence,
         confidence_lines,
         claims,
-        inferences,
         actors,
         links,
         claims_lines,
@@ -8913,25 +8933,49 @@ pub fn reveal_intel_related(app: &mut App, index: usize) {
 /// reveal, including rows currently outside the extracted-column viewport.
 pub fn reveal_intel_topology_entry(app: &mut App, target: Target) {
     let body = chrome(app.screen, app).body;
-    let (mut left, _, _) = intel_briefing_areas(app, body);
-    if left.width == 0 {
-        app.compact_pages[ModuleId::Intel.index()] = 0;
-        left = intel_briefing_areas(app, body).0;
-    }
-    let Some(layout) = intel_extracted_layout(app, left) else {
-        return;
-    };
-    let (area, records) = match target {
-        Target::IntelTopologyClaim(_) => (layout.claims, &layout.claim_records),
-        Target::IntelTopologyInference(_) => (layout.inferences, &layout.inference_records),
-        Target::IntelTopologyActor(_) => (layout.actors, &layout.actor_records),
-        _ => return,
-    };
+    let (viewport, area, records, max, center) =
+        if matches!(target, Target::IntelTopologyInference(_)) {
+            let mut viewport = intel_briefing_areas(app, body).1;
+            if viewport.width == 0 {
+                app.compact_pages[ModuleId::Intel.index()] = 1;
+                viewport = intel_briefing_areas(app, body).1;
+            }
+            let Some(layout) = intel_center_layout(app, viewport) else {
+                return;
+            };
+            (
+                viewport,
+                layout.inferences,
+                layout.inference_records,
+                layout.stack_scroll_max,
+                true,
+            )
+        } else {
+            let mut viewport = intel_briefing_areas(app, body).0;
+            if viewport.width == 0 {
+                app.compact_pages[ModuleId::Intel.index()] = 0;
+                viewport = intel_briefing_areas(app, body).0;
+            }
+            let Some(layout) = intel_extracted_layout(app, viewport) else {
+                return;
+            };
+            let (area, records) = match target {
+                Target::IntelTopologyClaim(_) => (layout.claims, layout.claim_records),
+                Target::IntelTopologyActor(_) => (layout.actors, layout.actor_records),
+                _ => return,
+            };
+            (viewport, area, records, layout.stack_scroll_max, false)
+        };
     let Some((range, _)) = records.iter().find(|(_, row_target)| *row_target == target) else {
         return;
     };
-    let effective_offset = app.scrolls.intel_extracted.min(layout.stack_scroll_max);
-    let start = (i64::from(area.y) - i64::from(left.y)
+    let offset = if center {
+        &mut app.scrolls.intel_brief
+    } else {
+        &mut app.scrolls.intel_extracted
+    };
+    let effective_offset = (*offset).min(max);
+    let start = (i64::from(area.y) - i64::from(viewport.y)
         + i64::from(effective_offset)
         + 1
         + range.start as i64)
@@ -8939,8 +8983,8 @@ pub fn reveal_intel_topology_entry(app: &mut App, target: Target) {
     let mut pane = super::components::ScrollPane {
         offset: effective_offset as usize,
     };
-    pane.reveal(start, range.len(), left.height as usize);
-    app.scrolls.intel_extracted = pane.offset.min(layout.stack_scroll_max as usize) as u16;
+    pane.reveal(start, range.len(), viewport.height as usize);
+    *offset = pane.offset.min(max as usize) as u16;
 }
 
 fn draw_intel_related(frame: &mut Frame, app: &App, viewport: Rect, area: AbsRect) {
@@ -9835,16 +9879,18 @@ pub(crate) fn intel_body_has_content(app: &App) -> bool {
     )
 }
 
-fn intel_brief_full_lines(app: &App, width: usize) -> Vec<Line<'static>> {
-    let Some(article) = app.intel_articles.get(app.intel_sel) else {
-        return vec![Line::styled("No article selected.", theme::dim())];
-    };
-    let summary = if article.description.trim().is_empty() {
-        "No article summary stored.".to_string()
+pub(crate) fn intel_reader_text(app: &App) -> Option<&str> {
+    let article = app.intel_articles.get(app.intel_sel)?;
+    Some(if article.description.trim().is_empty() {
+        "No article summary stored."
     } else {
-        article.description.clone()
-    };
-    wrap_text(&summary, width.max(1))
+        &article.description
+    })
+}
+
+fn intel_brief_full_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let summary = intel_reader_text(app).unwrap_or("No article selected.");
+    wrap_text(summary, width.max(1))
         .into_iter()
         .map(|chunk| Line::from(Span::styled(chunk, theme::text())))
         .collect()
@@ -10588,7 +10634,7 @@ fn memory_popup(app: &App, message_id: &str) -> String {
 fn help_text(app: &App) -> &'static str {
     match app.module {
         None => "Home\n\n↑↓ or j/k select an application\nEnter opens it\n1 Intel · 2 Atlas · 3 Brain · 4 Recon · 5 Jobs · 6 Logs · 7 Tools · 8 Models · 9 Profile\nNumber keys switch apps when you are not typing in a field\nCtrl+K command palette · ? help · Esc closes this card\nCtrl+C quits when nothing is running · Ctrl+Q quits from anywhere",
-        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, stored description, extracted claims/inferences/context/links, and confidence\nClick a claim or actor, or focus it and press Enter, to map its two-hop neighborhood\nTopology selection inspects; Recenter changes the seed; Back restores this brief\nRelated beneath Full Article reflects ingest associations with at least two shared entities\nJobs pane tracks focus-brief background progress\nEsc returns from briefing to bulletin, or from bulletin to home",
+        Some(ModuleId::Intel) => "Intel\n\nBulletin board browses Atlas-stored headlines by classification\nSix tabs: Geopolitical Economic Military Information Stability Tech\nThe day button filters by Atlas news-cycle run day\nSearch filters title, description, source, and URL\n↑↓ select a story · the hero updates with the selection\nEnter opens Briefing Focus for that article\nBriefing shows preview, stored description, extracted claims/context/links, and confidence\nInferences finish the Reader stack after Related\nClick a claim or actor, or focus it and press Enter, to map its two-hop neighborhood\nTopology selection inspects; Recenter changes the seed; Back restores this brief\nRelated beneath Full Article reflects ingest associations with at least two shared entities\nJobs pane tracks focus-brief background progress\nEsc returns from briefing to bulletin, or from bulletin to home",
         Some(ModuleId::Atlas) => "Atlas\n\nNews cycle is the view that opens. Go Live shows the pipeline\nRun starts the pipeline. Pause parks it after the current request\nResume continues that run. Ctrl+C pauses\nAuto Run starts the pipeline now and again every 60 minutes until it is turned off\nThe button shows when the next run starts. A manual run moves that time out by 60 minutes\nThe table shows country heat. The feed lists headlines from this session\n↑↓ move through headlines · the wheel and Ctrl+U/D scroll that list\nEnter or click opens the selected headline\nFailed requests, including rate limits, are written to Logs\nEnter on a ▸ error there opens the full API response\nNews cycle lists saved cycles by date and status. Enter or click opens that cycle's news feed\nStats for the selected cycle sit under the map, left of the list\nClick the stats pane, then ↑↓ or the wheel scrolls the country table\nThe world map sits above those panes and takes most of the view\nGo Live, Resume, and Delete sit between the map and those panes. Resume continues retained collection/classification and native metadata. Coverage shows classifications, entities, publisher priors, and Related pairs. Atlas collects articles without creating Brain claim memories. When auto run is on, Go Live counts down\nThe map follows the selected news cycle. It does not take keys or clicks\nTier 1 and 2 countries are named in full. Tier 3 shows the country code\nAnother news cycle row recolours the map and replaces the stats\nThe news list shows the title, then publisher, country code, and category\nEnter or click opens the article and zooms the map to its country\nWorld map restores the news cycle list and zooms back out\nDelete removes the selected cycle. Backspace does the same when a cycle is focused\nEsc on the news feed or on Live returns to news cycle\nEsc on news cycle returns home",
         Some(ModuleId::Recon) if !app.recon_chat => "Recon investigations\n\nThe list is the most recent investigations\n↑↓ move · Enter opens the transcript\nNew starts an investigation · Delete removes the selected one\nType to search titles\nEsc returns home · Ctrl+N new investigation",
         Some(ModuleId::Recon) => "Recon investigation\n\nEnter sends · Shift+Enter inserts a line · / opens commands\nTab moves between transcript and prompt\n↑↓ select a query, plan, evidence activity, or answer\n←→ or h/l fold the selected Plan or activity\nEnter toggles that fold · o inspects the captured source · f opens full text\n◉ brain opens memories used by Synthesis\nrecall: off skips insight extraction. recall: on writes claims for later answers\nCtrl+K command palette · Ctrl+U/Ctrl+D scroll\nEsc returns to investigations · Ctrl+C cancels a running turn\nCtrl+N new thread · Alt+←/→ recent threads",

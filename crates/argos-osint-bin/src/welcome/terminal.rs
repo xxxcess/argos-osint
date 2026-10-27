@@ -47,14 +47,62 @@ pub(super) fn run(existing: Option<&str>) -> anyhow::Result<Option<Selection>> {
             argos_osint_core::paths::ensure_home()?.display()
         )],
         notice: String::new(),
+        navigation: Navigation::default(),
     };
-    Ok(configure(&mut prompts, existing)?)
+    loop {
+        prompts.navigation.begin();
+        prompts.history.truncate(1);
+        prompts.notice.clear();
+        let selection = configure(&mut prompts, existing)?;
+        if !prompts.navigation.back_requested {
+            return Ok(selection);
+        }
+    }
 }
 
 struct Screen {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     history: Vec<String>,
     notice: String,
+    navigation: Navigation,
+}
+
+#[derive(Default)]
+struct Navigation {
+    answers: Vec<(String, String)>,
+    next: usize,
+    replay_until: usize,
+    back_requested: bool,
+}
+impl Navigation {
+    fn begin(&mut self) {
+        self.next = 0;
+        self.back_requested = false;
+    }
+    fn remembered(
+        &self,
+        index: usize,
+        label: &str,
+        valid: &dyn Fn(&str) -> bool,
+    ) -> Option<String> {
+        self.answers
+            .get(index)
+            .filter(|(saved_label, value)| saved_label == label && valid(value))
+            .map(|(_, value)| value.clone())
+    }
+    fn remember(&mut self, index: usize, label: &str, value: &str) {
+        let answer = (label.to_owned(), value.to_owned());
+        if self.answers.get(index) != Some(&answer) {
+            self.answers.truncate(index);
+            self.answers.push(answer);
+        }
+    }
+    fn previous(&mut self, index: usize) {
+        if index > 0 {
+            self.replay_until = index - 1;
+            self.back_requested = true;
+        }
+    }
 }
 
 impl Prompts for Screen {
@@ -75,18 +123,35 @@ impl Prompts for Screen {
         default: &str,
         valid: &dyn Fn(&str) -> bool,
     ) -> io::Result<Option<String>> {
-        let mut question = Question::new(label, default, valid);
+        let index = self.navigation.next;
+        self.navigation.next += 1;
+        let saved = self.navigation.remembered(index, label, valid);
+        if index < self.navigation.replay_until {
+            if let Some(value) = &saved {
+                let question = Question::new(label, value, valid);
+                self.history
+                    .push(format!("{}: {}", question.title(), question.shown_value()));
+                return Ok(Some(value.clone()));
+            }
+            self.navigation.replay_until = index;
+        }
+        let mut question = Question::new(label, saved.as_deref().unwrap_or(default), valid);
+        question.can_back = index > 0;
         loop {
             self.terminal
                 .draw(|frame| question.draw(frame, &self.history, &self.notice))?;
-            if let Some(answer) = question.event(event::read()?, valid) {
+            let event = event::read()?;
+            if matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc)
+            {
+                self.navigation.remember(index, label, question.raw_value());
+                self.navigation.previous(index);
+                return Ok(None);
+            }
+            if let Some(answer) = question.event(event, valid) {
                 if let Some(value) = &answer {
-                    let shown = question
-                        .choices
-                        .iter()
-                        .find(|(key, _)| key == value)
-                        .map_or(value.as_str(), |(_, name)| name.as_str());
-                    self.history.push(format!("{}: {shown}", question.title()));
+                    self.navigation.remember(index, label, value);
+                    self.history
+                        .push(format!("{}: {}", question.title(), question.shown_value()));
                 }
                 return Ok(answer);
             }
@@ -105,6 +170,7 @@ struct Question {
     pressed: Option<(usize, u16, u16)>,
     history_scroll: usize,
     too_small: bool,
+    can_back: bool,
 }
 
 impl Question {
@@ -153,7 +219,20 @@ impl Question {
             pressed: None,
             history_scroll: 0,
             too_small: false,
+            can_back: false,
         }
+    }
+
+    fn raw_value(&self) -> &str {
+        self.choices
+            .get(self.selected)
+            .map_or(self.value.as_str(), |(key, _)| key)
+    }
+
+    fn shown_value(&self) -> &str {
+        self.choices
+            .get(self.selected)
+            .map_or(self.value.as_str(), |(_, name)| name)
     }
 
     fn title(&self) -> &str {
@@ -167,9 +246,11 @@ impl Question {
         self.rows.clear();
         if self.too_small {
             frame.render_widget(
-                Paragraph::new(
-                    "ARGOS VENTURE\nService launcher\n\nResize to at least 40 × 14.\nEsc cancels.",
-                )
+                Paragraph::new(if self.can_back {
+                    "ARGOS VENTURE\nService launcher\n\nResize to at least 40 × 14.\nEsc goes back."
+                } else {
+                    "ARGOS VENTURE\nService launcher\n\nResize to at least 40 × 14.\nEsc quits."
+                })
                 .style(theme::accent())
                 .centered(),
                 Rect::new(
@@ -318,7 +399,23 @@ impl Question {
             Paragraph::new(lines.into_iter().skip(start).take(room).collect::<Vec<_>>()).centered(),
             summary,
         );
-        frame.render_widget(Paragraph::new(if area.width < 60 { "↑↓ select · Enter next · Esc cancel\nPgUp/Dn settings · mouse selects" } else { "↑↓ / Tab select · Enter continue · Esc cancel\nPgUp/PgDn review settings · mouse selects" }).style(theme::muted()).centered().wrap(Wrap { trim: false }), parts[3]);
+        let escape = if self.can_back {
+            "Esc back"
+        } else {
+            "Esc quit"
+        };
+        let help = if area.width < 60 {
+            format!("↑↓ select · Enter next · {escape}\nCtrl+Q quit · PgUp/Dn settings")
+        } else {
+            format!("↑↓ / Tab select · Enter continue · {escape}\nCtrl+Q quit · PgUp/PgDn settings · mouse selects")
+        };
+        frame.render_widget(
+            Paragraph::new(help)
+                .style(theme::muted())
+                .centered()
+                .wrap(Wrap { trim: false }),
+            parts[3],
+        );
     }
 
     fn accept(&mut self, valid: &dyn Fn(&str) -> bool) -> Option<Option<String>> {
@@ -463,6 +560,40 @@ mod tests {
     }
 
     #[test]
+    fn venture_back_retains_values_and_revalidates_changed_branches() {
+        let mut navigation = Navigation::default();
+        navigation.remember(0, "Service", "web");
+        navigation.remember(1, "Web port", "4010");
+        navigation.remember(2, "Profile", "dev");
+        navigation.previous(2);
+        assert!(navigation.back_requested);
+        assert_eq!(navigation.replay_until, 1);
+        navigation.begin();
+        assert!(!navigation.back_requested);
+        assert_eq!(
+            navigation
+                .remembered(1, "Web port", &super::super::port)
+                .as_deref(),
+            Some("4010")
+        );
+        navigation.remember(1, "Web port", "4010");
+        assert_eq!(
+            navigation.answers.len(),
+            3,
+            "unchanged answers keep valid later drafts"
+        );
+        navigation.remember(0, "Service", "tui");
+        assert_eq!(
+            navigation.answers.len(),
+            1,
+            "changed branch discards later answers"
+        );
+        assert!(navigation.remembered(1, "Storage", &|_| true).is_none());
+        navigation.previous(0);
+        assert!(!navigation.back_requested, "Escape at root leaves Venture");
+    }
+
+    #[test]
     fn keyboard_edits_validate_and_terminal_choice_is_final() {
         let mut field = Question::new("Web port", "3000", &|v| {
             v.parse::<u16>().is_ok_and(|p| p > 0)
@@ -522,6 +653,7 @@ mod tests {
                 ),
             ] {
                 let mut question = Question::new(label, default, &valid);
+                question.can_back = !label.starts_with("Choose a service");
                 if name == "invalid-port" {
                     question.accept(&valid);
                 }

@@ -46,3 +46,5 @@ cannot be reconstructed from the older status-only receipts.
 
 Validation and visual review are recorded in the
 [verification ledger](../../archive/tui-verification-responsiveness-2026-10-14.md).
+
+Jobs filter changes clear the displayed old cohort and pending owner lookup before requesting a new asynchronous snapshot. An older in-flight completion is fenced by module/filter/selection key and queues the latest scope; it cannot restore prior rows or filters. Same-filter refresh keeps retained data.

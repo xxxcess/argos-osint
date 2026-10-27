@@ -174,6 +174,7 @@ Contributors working with agentic coding CLIs follow the shared repository stand
   - Users running the `/teamwork` command in Google Antigravity CLI should reference [.agy/howto.md](.agy/howto.md) to select the right workflow spec for their task scope:
     - **Lite Team ([.agy/lite-team.md](.agy/lite-team.md)):** Fast-path 2-agent workflow (`coder` + `tester`) for scoped fixes and single-module updates ($\le 3$ files, no breaking contract/schema changes).
     - **Heavy Team ([.agy/heavy-team.md](.agy/heavy-team.md)):** Full 4-agent orchestration (`architect`, `coder`, `tester`, `scribe`) with Phase 0 `.planning/` bootstrap, parallel `.agent-scratch/worktrees/` execution, and full host-native verification gates.
+    - **Scope-specific React Native UI `tester` (`anthropic/claude-sonnet-5.5#low`):** Both specs dispatch a dedicated `tester` agent on `anthropic/claude-sonnet-5.5#low` for React Native UI scope (`apps/web-desktop`, `packages/{ui,intel,api-client}`) to enforce repository design standards and conventions ([React UI rules](docs/wiki/code/react-ui.md), [conventions](docs/wiki/code/conventions.md), `theme.rs` HUD/glass palette, React Compiler/Hooks lint, and Playwright fixture screenshot review), alongside `google/argon#low` for Rust/system verification.
 
 ## Figures
 

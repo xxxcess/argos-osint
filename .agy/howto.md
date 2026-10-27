@@ -18,6 +18,7 @@ When given a task item or specification, evaluate its scope against this matrix 
 | **Long-Term GitHub Persistence (`.planning/`)** | Minimal or no new `.planning/` scaffolding required (uses existing `.planning/` context if applicable) | Requires durable `.planning/` tracking (`planning-with-files` owned by `scribe`) for long-term GitHub commit persistence |
 | **Temporary Files & Worktrees (`.agent-scratch/`)** | All temporary files/dirs in `.agent-scratch/` or a single worktree in `.agent-scratch/worktrees/` | Disjoint parallel `EDIT_UNIT` worktrees in `.agent-scratch/worktrees/` and scratch files in `.agent-scratch/` |
 | **Primary Coordinator** | `coder` (`google/gemini-3.8-flash#high` or `anthropic/claude-sonnet-5.5#low`) | `architect` (`google/argon#low`) |
+| **Verification (`tester`)** | Separate `tester` by scope: `google/argon#low` (Rust/System) or `anthropic/claude-sonnet-5.5#low` (React Native UI, enforcing repo UI design standards & conventions) | Separate `tester` by scope: `google/argon#low` (Rust/System) and `anthropic/claude-sonnet-5.5#low` (React Native UI, enforcing `react-ui.md`, `theme.rs` HUD/glass palette, & conventions) |
 
 ---
 

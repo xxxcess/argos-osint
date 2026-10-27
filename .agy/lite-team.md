@@ -6,16 +6,17 @@ Fast-path 2-agent workflow (`coder` + `tester`) for scoped tasks ($\le 3$ files,
 
 | Caller | Permitted Children | Assigned `subagent.model` | Purpose | 
 | ----- | ----- | ----- | ----- | 
-| `coder` (Rust/System) | `coder`, `tester`, `architect` (`CONSULT`) | `google/gemini-3.8-flash#high` | Implement & format Rust/script changes (`crates/**`, `scripts/**`, `Cargo.*`), invoke `tester` | 
-| `coder` (React Native) | `coder`, `tester`, `architect` (`CONSULT`) | `anthropic/claude-sonnet-5.5#low` | Implement & format React/React Native changes (`apps/**`, `ui/**`, `**/*.tsx`, `**/*.ts`), invoke `tester` | 
-| `tester` | `architect` (`CONSULT`) | `google/argon#low` | Run host-native targeted verification gates in `INTEGRATION_ROOT` and return `PASS / FAIL / BLOCKED / PENDING` | 
+| `coder` (Rust/System) | `coder`, `tester`, `architect` (`CONSULT`) | `google/gemini-3.8-flash#high` | Implement & format Rust/script changes (`crates/**`, `scripts/**`, `Cargo.*`), invoke `tester` (`google/argon#low`) | 
+| `coder` (React Native) | `coder`, `tester`, `architect` (`CONSULT`) | `anthropic/claude-sonnet-5.5#low` | Implement & format React/React Native changes (`apps/**`, `packages/**`, `ui/**`, `**/*.tsx`, `**/*.ts`), invoke `tester` (`anthropic/claude-sonnet-5.5#low`) | 
+| `tester` (Rust/System) | `architect` (`CONSULT`) | `google/argon#low` | Run host-native targeted Rust/system verification gates in `INTEGRATION_ROOT` and return `PASS / FAIL / BLOCKED / PENDING` | 
+| `tester` (React Native UI) | `architect` (`CONSULT`) | `anthropic/claude-sonnet-5.5#low` | Run React Native UI verification gates in `INTEGRATION_ROOT`, enforce repo UI design standards and conventions (`docs/wiki/code/react-ui.md`, `docs/wiki/code/conventions.md`, `theme.rs` HUD/glass palette, React Compiler/Hooks lint, Playwright fixture screenshots), and return `PASS / FAIL / BLOCKED / PENDING` | 
 | `architect` (`CONSULT`) | `none` | `google/argon#low` | Optional read-only leaf consultation if `coder` or `tester` hits an unexpected contract ambiguity | 
 
 ## Fast-Path Execution Sequence
 
 1. **Scope Check & Model Selection:**
-   * If the task touches **Rust/Backend/Scripts**, `coder` runs on `google/gemini-3.8-flash#high`.
-   * If the task touches **React/React Native UI**, `coder` runs on `anthropic/claude-sonnet-5.5#low` and loads `.agents/skills/argos-react-ui` and `.agents/skills/argos-react-patterns`.
+   * If the task touches **Rust/Backend/Scripts**, `coder` runs on `google/gemini-3.8-flash#high` and pairs with `tester` on `google/argon#low`.
+   * If the task touches **React/React Native UI**, both `coder` and its dedicated `tester` agent run on `anthropic/claude-sonnet-5.5#low`, loading `.agents/skills/argos-react-ui` and `.agents/skills/argos-react-patterns` and enforcing [React UI rules](../docs/wiki/code/react-ui.md) and [repo conventions](../docs/wiki/code/conventions.md).
    * If scope expands beyond $3$ files, alters shared contracts, or requires full multi-phase `.planning/` lifecycle management, stop and escalate to `./heavy-team.md`.
 
 2. **Implementation & Storage Boundaries:**
@@ -24,7 +25,7 @@ Fast-path 2-agent workflow (`coder` + `tester`) for scoped tasks ($\le 3$ files,
    * All temporary files, scratch directories, and intermediate outputs **must** use `.agent-scratch/` or `.agent-scratch/worktrees/`.
    * If the task requires recording durable planning notes or spec updates intended for long-term commit persistence to GitHub, store them in the appropriate `.planning/` directory (never in `.agent-scratch/`).
 
-3. **Verification (`VERIFY`):** `coder` formats all modified files and dispatches `tester` with `subagent.model: google/argon#low`. `tester` checks machine specs via shell if needed, executes the targeted verification gate for the local host platform in `INTEGRATION_ROOT`, writes any temporary verification logs to `.agent-scratch/`, and returns exit codes and diagnostics.
+3. **Verification (`VERIFY`):** `coder` formats all modified files and dispatches the scope-appropriate `tester` (`google/argon#low` for Rust/system work; a separate `tester` on `anthropic/claude-sonnet-5.5#low` for React Native UI work). For React Native UI scope, `tester` validates strict adherence to repository UI design standards and conventions (`docs/wiki/code/react-ui.md`, `theme.rs` HUD/glass palette, shared React Native primitives, zero-warning React Compiler/Hooks lint, and Playwright fixture screenshot inspection). `tester` executes the targeted verification gate in `INTEGRATION_ROOT`, writes any temporary verification logs to `.agent-scratch/`, and returns exit codes and diagnostics.
 
 4. **Fix Loop & Cleanup:** If `tester` reports `FAIL`, `coder` applies targeted fixes and resumes `tester` via its parent-owned `sessionID`. Once `PASS` is achieved, `coder` cleans up `.agent-scratch/` and `.agent-scratch/worktrees/`.
 

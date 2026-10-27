@@ -159,6 +159,22 @@ ARGOS_WEB_PROFILE=dev pnpm test:e2e  # Also verify Next development compilation
 
 Navigation, CLI, and state directory: [usage guide](docs/wiki/concepts/usage.md). Contributors and agents should follow the [contributor workflow](docs/wiki/code/contributing.md), including the agent Cargo wrapper and CI-only server storage gate. Agent guidance: [AGENTS.md](AGENTS.md).
 
+### Agent & CLI workflows (OpenCode & Google Antigravity CLI)
+
+Contributors working with agentic coding CLIs follow the shared repository standards in [AGENTS.md](AGENTS.md), [contributor workflow](docs/wiki/code/contributing.md), and [planning artifacts](docs/wiki/code/planning-artifacts.md):
+
+- **Workspace & persistence standards:**
+  - **Temporary files & worktrees (`.agent-scratch/`):** Keep all scratch files, patches, diagnostic logs, isolated build caches, and feature worktrees (`.agent-scratch/worktrees/`) inside `.agent-scratch/` (unstaged and never committed).
+  - **Long-term planning (`.planning/`):** Record multi-phase plans, design specs, and decision ledgers in `.planning/<YYYY-MM-DD-slug>/` following the [planning format](docs/wiki/code/planning-artifacts.md#working-format).
+  - **Host-native builds & wiki sync:** Run isolated Rust builds via `python3 scripts/agent_cargo.py … --locked` and `scripts/local_matrix.sh --storage embedded` for the local host machine, keep React Compiler/Hooks lint at zero warnings, and update affected `docs/wiki/` routes, `@tag:<slug>` entries, and diagrams in the same change.
+- **OpenCode setup (`.opencode/`):**
+  - Configured in [.opencode/opencode.json](.opencode/opencode.json) and [.opencode/AGENTS.md](.opencode/AGENTS.md) with the 4-agent team (`architect`, `coder`, `tester`, `scribe`), worker model overrides (`.opencode/architect-worker.json`, `.opencode/coder-worker.json`), and repository skills (`.opencode/skills/`).
+  - Follow the [OpenCode agent team guide](docs/wiki/code/opencode-v2.md) for role permissions, phase handoff envelopes, disjoint `EDIT_UNIT` worktree integration, and Scribe documentation checkpoints.
+- **Google Antigravity CLI `/teamwork` guidance (`.agy/`):**
+  - Users running the `/teamwork` command in Google Antigravity CLI should reference [.agy/howto.md](.agy/howto.md) to select the right workflow spec for their task scope:
+    - **Lite Team ([.agy/lite-team.md](.agy/lite-team.md)):** Fast-path 2-agent workflow (`coder` + `tester`) for scoped fixes and single-module updates ($\le 3$ files, no breaking contract/schema changes).
+    - **Heavy Team ([.agy/heavy-team.md](.agy/heavy-team.md)):** Full 4-agent orchestration (`architect`, `coder`, `tester`, `scribe`) with Phase 0 `.planning/` bootstrap, parallel `.agent-scratch/worktrees/` execution, and full host-native verification gates.
+
 ## Figures
 
 Open in a browser for the HTML page, or view the SVG inline.

@@ -1,0 +1,52 @@
+# Antigravity Lite Agent Team (`lite-team.md`)
+
+[How-To Guide](./howto.md) · [Heavy Team](./heavy-team.md)
+
+Fast-path 2-agent workflow (`coder` + `tester`) for scoped tasks ($\le 3$ files, single module, no breaking contract/schema migrations). `coder` acts as the primary coordinator (`experimental.subagent_depth: 2`).
+
+| Caller | Permitted Children | Assigned `subagent.model` | Purpose | 
+| ----- | ----- | ----- | ----- | 
+| `coder` (Rust/System) | `coder`, `tester`, `architect` (`CONSULT`) | `google/gemini-3.8-flash#high` | Implement & format Rust/script changes (`crates/**`, `scripts/**`, `Cargo.*`), invoke `tester` | 
+| `coder` (React Native) | `coder`, `tester`, `architect` (`CONSULT`) | `anthropic/claude-sonnet-5.5#low` | Implement & format React/React Native changes (`apps/**`, `ui/**`, `**/*.tsx`, `**/*.ts`), invoke `tester` | 
+| `tester` | `architect` (`CONSULT`) | `google/argon#low` | Run host-native targeted verification gates in `INTEGRATION_ROOT` and return `PASS / FAIL / BLOCKED / PENDING` | 
+| `architect` (`CONSULT`) | `none` | `google/argon#low` | Optional read-only leaf consultation if `coder` or `tester` hits an unexpected contract ambiguity | 
+
+## Fast-Path Execution Sequence
+
+1. **Scope Check & Model Selection:**
+   * If the task touches **Rust/Backend/Scripts**, `coder` runs on `google/gemini-3.8-flash#high`.
+   * If the task touches **React/React Native UI**, `coder` runs on `anthropic/claude-sonnet-5.5#low` and loads `.agents/skills/argos-react-ui` and `.agents/skills/argos-react-patterns`.
+   * If scope expands beyond $3$ files, alters shared contracts, or requires full multi-phase `.planning/` lifecycle management, stop and escalate to `./heavy-team.md`.
+
+2. **Implementation & Storage Boundaries:**
+   * `coder` records `INTEGRATION_ROOT` and baseline dirty paths.
+   * Sequential edits across $\le 3$ files execute directly in `INTEGRATION_ROOT` or in a single isolated worktree under `.agent-scratch/worktrees/<task-id>`.
+   * All temporary files, scratch directories, and intermediate outputs **must** use `.agent-scratch/` or `.agent-scratch/worktrees/`.
+   * If the task requires recording durable planning notes or spec updates intended for long-term commit persistence to GitHub, store them in the appropriate `.planning/` directory (never in `.agent-scratch/`).
+
+3. **Verification (`VERIFY`):** `coder` formats all modified files and dispatches `tester` with `subagent.model: google/argon#low`. `tester` checks machine specs via shell if needed, executes the targeted verification gate for the local host platform in `INTEGRATION_ROOT`, writes any temporary verification logs to `.agent-scratch/`, and returns exit codes and diagnostics.
+
+4. **Fix Loop & Cleanup:** If `tester` reports `FAIL`, `coder` applies targeted fixes and resumes `tester` via its parent-owned `sessionID`. Once `PASS` is achieved, `coder` cleans up `.agent-scratch/` and `.agent-scratch/worktrees/`.
+
+## Handoff Envelope (`coder` → `tester` / `CONSULT`)
+
+```text
+MODE: VERIFY | EDIT_UNIT | CONSULT
+SUBAGENT_MODEL: google/argon#low | google/gemini-3.8-flash#high | anthropic/claude-sonnet-5.5#low
+INTEGRATION_ROOT / BASE_REVISION:
+WORKTREE / SCRATCH_DIR: .agent-scratch/ or .agent-scratch/worktrees/<task-id>
+PLAN_DIR (if persistent GitHub commit required): .planning/
+OWNED_FILES: exact modified paths
+SPEC: concise task goal, constraints, and file:line refs
+ACCEPTANCE: host-native targeted check commands and expected results
+RETURN: PASS | FAIL | BLOCKED | PENDING; command exit codes and evidence paths in .agent-scratch/
+```
+
+## Verification, Storage & Cleanup Conventions
+
+* **Temporary Files & Worktrees (`.agent-scratch/` & `.agent-scratch/worktrees/`):** Strictly confine all temporary files, scratch directories, build caches, and isolated worktrees to `.agent-scratch/` or `.agent-scratch/worktrees/`. Never commit `.agent-scratch/` contents to GitHub.
+* **Long-Term GitHub Persistence (`.planning/`):** Use the appropriate `.planning/` directory for any persistent planning or specification artifacts meant to be committed to GitHub.
+* **Host-Native Rust Builds & Machine Specs:** Agents only need to run Rust tests and builds based on the machine they are currently working on (do not cross-compile for other platforms). Use the shell (`uname -ms`, `rustc -vV`, `sysctl`/`nproc`) to find machine specs if needed to know which host platform target to build and test for.
+* **Targeted Rust Gate:** `python3 scripts/agent_cargo.py check --locked` and scoped host-native tests, or `scripts/local_matrix.sh --storage embedded` in `INTEGRATION_ROOT` (`ARGOS_EMBED` unset, `CARGO_BUILD_JOBS=2`).
+* **Targeted React Native / UI Gate:** Pinned Node/pnpm compiler/lint check (zero warnings) and relevant offline Playwright fixture.
+* **Post-Task Cleanup:** Follow root `AGENTS.md` cleanup rules. If a temporary worktree under `.agent-scratch/worktrees/` was used, remove it cleanly (`git worktree remove`) and run `git worktree prune` after integrating deltas. Delete temporary scratch files and retain only concise verification evidence in `.agent-scratch/`.

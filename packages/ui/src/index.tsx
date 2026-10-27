@@ -8,21 +8,86 @@ import {
   ActivityIndicator,
 } from "react-native";
 
-// Web translation of crates/argos-osint-bin/src/tui/theme.rs.
+// Dark HUD + glass tokens. Layout/semantics still follow the core TUI; the
+// surface treatment is the Intel web theme (see docs/wiki/code/react-ui.md).
 export const colors = {
-  bg: "#141414",
-  panel: "#1e1e1e",
-  raised: "#303030",
-  border: "#535353",
-  text: "#e8e8e8",
-  dim: "#b5b5b5",
-  muted: "#919191",
-  accent: "#87bfff",
-  success: "#98c379",
-  warning: "#e5c07b",
-  danger: "#f08a8a",
+  bg: "#0b0d10",
+  panel: "#12161b",
+  raised: "#1b2128",
+  border: "#2c353f",
+  text: "#e6edf3",
+  dim: "#b4c0cc",
+  muted: "#8b98a5",
+  accent: "#22d3ee",
+  accent2: "#c084fc",
+  success: "#4ade80",
+  warning: "#fbbf24",
+  danger: "#fb7185",
+  glass: "rgba(18, 22, 27, 0.55)",
+  glassStrong: "rgba(27, 33, 40, 0.72)",
+  glassBorder: "rgba(63, 74, 86, 0.6)",
+  accentSoft: "rgba(34, 211, 238, 0.14)",
 };
-export const fonts = { mono: "monospace", body: "Arial" };
+export const fonts = {
+  mono: 'ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace',
+  body: 'system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif',
+};
+// Web-only style props (RN Web supports them); typed loosely for RN.
+type WebStyle = Record<string, unknown>;
+export const glass: WebStyle = {
+  backgroundColor: colors.glass,
+  borderWidth: 1,
+  borderColor: colors.glassBorder,
+  backdropFilter: "blur(12px)",
+  WebkitBackdropFilter: "blur(12px)",
+};
+export const glow = (color: string): WebStyle => ({
+  boxShadow: `0 0 12px ${color}55, inset 0 0 0 1px ${color}33`,
+});
+export type Tone = "accent" | "success" | "warning" | "danger" | "purple";
+export const toneColor: Record<Tone, string> = {
+  accent: colors.accent,
+  success: colors.success,
+  warning: colors.warning,
+  danger: colors.danger,
+  purple: colors.accent2,
+};
+
+/** Bracketed uppercase telemetry tag, e.g. [ALERT: DEFCON 2]. */
+export function StatusTag({
+  children,
+  tone = "accent",
+}: {
+  children: React.ReactNode;
+  tone?: Tone;
+}) {
+  const color = toneColor[tone];
+  return (
+    <Text style={[s.tag, { color, borderColor: color + "66" }]}>
+      [{children}]
+    </Text>
+  );
+}
+/** Glass container with corner-accent HUD edge; `tone` tints the top rule. */
+export function Frame({
+  children,
+  tone = "accent",
+}: {
+  children: React.ReactNode;
+  tone?: Tone;
+}) {
+  return (
+    <View
+      style={[
+        s.frame,
+        glass as object,
+        { borderTopColor: toneColor[tone], borderTopWidth: 2 },
+      ]}
+    >
+      {children}
+    </View>
+  );
+}
 
 export function Label({ children }: { children: React.ReactNode }) {
   return <Text style={s.label}>{children}</Text>;
@@ -162,6 +227,8 @@ const s = StyleSheet.create({
     fontSize: 11,
     lineHeight: 18,
     color: colors.muted,
+    textTransform: "uppercase",
+    letterSpacing: 1.2,
   },
   copy: {
     fontFamily: fonts.body,
@@ -176,11 +243,13 @@ const s = StyleSheet.create({
     paddingVertical: 9,
     paddingHorizontal: 12,
     borderWidth: 1,
-    borderColor: colors.border,
     borderRadius: 2,
-    backgroundColor: "transparent",
+    backgroundColor: colors.glass,
+    borderColor: colors.glassBorder,
   },
   buttonText: {
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
     fontFamily: fonts.mono,
     color: colors.text,
     fontSize: 12,
@@ -189,12 +258,30 @@ const s = StyleSheet.create({
   },
   quiet: { borderColor: "transparent" },
   quietText: { color: colors.dim },
-  hovered: { backgroundColor: colors.raised },
-  active: { borderColor: colors.accent, backgroundColor: colors.accent },
+  hovered: {
+    backgroundColor: colors.accentSoft,
+    borderColor: colors.accent,
+  },
+  active: {
+    borderColor: colors.accent,
+    backgroundColor: colors.accent,
+    ...(glow(colors.accent) as object),
+  },
   activeText: { color: colors.bg, fontWeight: "700" },
   disabled: { opacity: 0.45 },
-  panel: { backgroundColor: colors.bg, padding: 20, gap: 16, minWidth: 0 },
+  panel: { ...(glass as object), padding: 20, gap: 16, minWidth: 0 },
+  frame: { padding: 16, gap: 12, minWidth: 0 },
+  tag: {
+    fontFamily: fonts.mono,
+    fontSize: 11,
+    lineHeight: 16,
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    fontWeight: "700",
+  },
   panelTitle: {
+    textTransform: "uppercase",
+    letterSpacing: 1.5,
     fontFamily: fonts.mono,
     fontSize: 12,
     lineHeight: 20,
@@ -209,7 +296,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 16,
     borderLeftWidth: 2,
     borderColor: colors.danger,
-    backgroundColor: colors.panel,
+    backgroundColor: "rgba(251, 113, 133, 0.1)",
     minWidth: 0,
   },
   noticeText: {

@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Intel web contract](intel-web.md) · [OpenCode](opencode-v2.md)
 
-Apply to React UI work in `apps/web-desktop`, `packages/ui`, `packages/intel` and UI-facing changes in `packages/api-client`. The theme follows the current core TUI with minimalist web layouts and components. This is the shared design baseline for creation, updates and reviews; task-specific design direction can change it deliberately. Rust terminal UI follows its own [design contract](tui-design-spec.md).
+Apply to React UI work in `apps/web-desktop`, `packages/ui`, `packages/intel` and UI-facing changes in `packages/api-client`. The web theme is the **Dark Digitized HUD + Glassmorphism** system below; the TUI keeps its own `theme.rs`, and web work preserves layout semantics and product contracts. This is the shared design baseline for creation, updates and reviews; task-specific design direction can change it deliberately. Rust terminal UI follows its own [design contract](tui-design-spec.md).
 
 ## Ownership and stack
 
@@ -28,22 +28,33 @@ Compiler optimization is not a correctness proof. Typecheck, Hooks/compiler diag
 
 ## Visual language
 
-The current **core TUI is the visual authority**, translated into a minimalist web interface. Read [TUI design](tui-design-spec.md#theme-data-and-interaction), the relevant [component entry](tui-components.md) and [theme.rs](../../../crates/argos-osint-bin/src/tui/theme.rs) before choosing colors or component treatments. Preserve its identity without copying terminal cell measurements or constraining web interaction to terminal keys.
+**Dark Digitized HUD + Glassmorphism** for `apps/web-desktop`, `packages/ui` and `packages/intel`. The TUI keeps [theme.rs](../../../crates/argos-osint-bin/src/tui/theme.rs) ([TUI design](tui-design-spec.md#theme-data-and-interaction)); the web uses this system while preserving layout semantics (pane order, Focus Brief 24/48/28, tabs when narrow) and product contracts. Do not copy terminal cell measurements.
 
-| Core semantic token | Web value from current TUI | Intended use |
-| --- | --- | --- |
-| BG / SURFACE / SELECT | `#141414` / `#1e1e1e` / `#303030` | Page, panels, selected rows |
-| BORDER / ACCENT | `#535353` / `#87bfff` | Thin dividers/borders, active actions/focus |
-| TEXT / DIM / MUTED | `#e8e8e8` / `#b5b5b5` / `#919191` | Primary text, secondary text, quiet metadata |
-| GREEN / WARN / RED | `#98c379` / `#e5c07b` / `#f08a8a` | Success, warning, failure semantics |
+Authority: tokens, `glass`, `glow()`, `Tone`/`toneColor`, `StatusTag`, `Frame` and `Panel` in [packages/ui](../../../packages/ui/src/index.tsx); grid backdrop, glow focus ring and thin scrollbars in [style.css](../../../apps/web-desktop/app/style.css). Add or change values there, never as scattered hex in feature components.
 
-These values mirror `theme.rs`; recheck that source when changing the palette. Shared web tokens and shell CSS now use this neutral/blue theme. Keep both aligned when extending the palette; add tokens in `@argos/ui` instead of scattering hex values through feature components.
+| Token group | Use |
+| --- | --- |
+| `colors` slate base/surfaces, text/dim/muted | Page, panels, hierarchy of text |
+| accent cyan `#22d3ee`, `accent2` purple, `accentSoft` | Active/selected/focus, links, secondary emphasis |
+| success, warning amber, danger crimson | Severity tones via `Tone`/`toneColor` |
+| `glass`, `glassStrong`, `glassBorder` | Translucent slate fills and muted borders |
+| `fonts.mono` / `fonts.body` | Telemetry labels, nav, metadata / prose |
 
-- Prefer flat, sparse compositions: one clear page hierarchy, quiet surfaces, thin borders only where they clarify grouping, compact controls and generous separation between sections. Avoid nested card grids, redundant outlines, oversized hero headings, gradients, shadows and decorative badges unless the task explicitly needs them.
-- Translate TUI components by purpose: TabBar into compact accessible web navigation; ActionBar into a restrained action row; ScrollPane into bounded content with discoverable scrolling; DetailTable into readable data rows; AnalyticsCard into a simple titled region. Use panels for meaningful boundaries, not every paragraph. Promote repeated treatments to shared primitives.
-- Match TUI emphasis: accent section titles, normal-size bold key values, accent-filled active navigation with dark text, selected rows on SELECT/TEXT, and a visible accent focus outline independent of selection. Keep active, focus and error states distinguishable beyond color.
-- Keep typography restrained and readable. Use a compact type scale with regular/bold hierarchy and a TUI-like monospace role for wordmarks, metadata, shortcuts or aligned values where useful. Retain comfortable reading width/line height for article prose; avoid forcing terminal density or monospace onto long text. Tiny metadata styles are not suitable for body text or essential actions.
-- Reuse a small consistent spacing/radius vocabulary. Preserve wrapping, usable touch targets and browser focus rather than literal one-cell padding or terminal glyph controls. A theme setting is not proof that all surfaces support that theme; inspect touched surfaces before claiming theme support.
+Principles:
+- Translucent slate fills, muted borders and backdrop blur. Blur and other web-only style props are web-only: cast them at the web boundary so native/RN types stay valid, and keep a readable opaque-enough fill when blur is unsupported.
+- Cyber accents with restrained glow: `glow()` on active, focused or critical elements only, never on every surface.
+- Bracketed uppercase mono telemetry labels (e.g. `[ STATUS ]`) for headings/metadata via `StatusTag`/`Frame`/`Panel`; prose stays in body font at a comfortable width.
+- Thin rules, high density, compact controls; responsive grid that wraps (md:flex-row-like) rather than shrinking text.
+- Contrast meets WCAG AA for text and essential controls against the glass fill over the backdrop. Honor `prefers-reduced-motion`; no motion needed to understand state.
+
+## UI/UX guidance
+
+- **State clarity:** active, selected, focus, hover, disabled, loading, empty, error and offline are distinct. **Glow is never the sole state indicator**; pair it with text, fill, border weight, `aria-pressed`/role state or icon.
+- **Density:** pack telemetry tightly, but keep touch targets usable and body text readable; one hierarchy per screen, panels only for meaningful groups.
+- **Tone usage:** danger = failure/blocking, warning = degraded/partial/stale, accent = active/informational, success = verified/healthy. Use `Tone`/`toneColor`, include a text label, and do not use tone to imply corroboration or confidence the data does not carry.
+- **Do:** reuse `Panel`/`Frame`/`StatusTag`; keep focus-visible glow ring; test 1440/768/390/320px; preserve error recovery actions.
+- **Don't:** stack nested glass cards, blur large scrolling lists needlessly, use glow/purple as decoration, tiny mono for essential actions or long text, or change contracts for style.
+- **Review checklist:** tokens come from `@argos/ui`; AA contrast on glass; non-color state cues; focus ring visible; reduced motion honored; blur cast web-only with fallback; no overflow at four widths; fixture PNGs inspected; contracts in [intel-web.md](intel-web.md) unchanged.
 
 ## Current web components
 

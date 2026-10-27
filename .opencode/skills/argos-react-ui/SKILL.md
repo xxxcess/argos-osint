@@ -7,7 +7,7 @@ description: Create, update or review Argos React Native Web UI, layout, styling
 
 Read `docs/wiki/code/react-ui.md` for the design baseline and evidence workflow; follow `docs/wiki/code/intel-web.md` for product semantics. Paths are relative to the repository root.
 
-- Before editing, identify the screen/state, nearest reusable primitive, layout constraints and acceptance. Translate the current core TUI theme into minimalist web layouts/components using the design baseline and `theme.rs`; apply explicit user design direction within the product contracts.
+- Before editing, identify the screen/state, nearest reusable primitive, layout constraints and acceptance. Apply the Dark Digitized HUD + Glassmorphism system (tokens in `packages/ui`, see react-ui.md; TUI keeps `theme.rs`) while preserving layout semantics and product contracts; apply explicit user design direction within the product contracts.
 - Use React Native primitives and keep the Next React Compiler pipeline and Hooks/compiler lint enabled; fix diagnostics and verify compiled-build behavior.
 - Reuse `@argos/ui`; keep feature composition in `@argos/intel` and browser-only behavior in the web app. For component APIs, remote state or render performance also load `argos-react-patterns`.
 - Cover wide/narrow layouts, long content and relevant loading/empty/error/offline states. Preserve source attribution, evidence distinctions, image fallback and ready-gated actions.

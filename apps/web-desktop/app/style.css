@@ -7,8 +7,14 @@ body {
   margin: 0;
   height: 100%;
   min-height: 100%;
-  background: #141414;
-  color: #e8e8e8;
+  background-color: #0b0d10;
+  background-image:
+    linear-gradient(rgba(34, 211, 238, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.04) 1px, transparent 1px),
+    radial-gradient(ellipse at top, #12202b 0%, #0b0d10 60%);
+  background-size: 32px 32px, 32px 32px, 100% 100%;
+  background-attachment: fixed;
+  color: #e6edf3;
   font-family: Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
@@ -21,23 +27,23 @@ select {
   font: inherit;
 }
 a {
-  color: #87bfff;
+  color: #22d3ee;
 }
 input,
 select {
-  background: #1e1e1e;
-  border: 1px solid #535353;
+  background: rgba(18, 22, 27, 0.7);
+  border: 1px solid #2c353f;
   border-radius: 2px;
-  color: #e8e8e8;
+  color: #e6edf3;
   min-width: 0;
 }
 :focus-visible {
-  outline: 2px solid #87bfff;
+  outline: 2px solid #22d3ee;
   outline-offset: -2px;
 }
 ::selection {
-  background: #87bfff;
-  color: #141414;
+  background: #22d3ee;
+  color: #0b0d10;
 }
 
 /* Keep static-export markup identical across initial browser widths. */
@@ -52,4 +58,13 @@ select {
   [role="progressbar"] svg {
     animation: none !important;
   }
+}
+
+/* HUD scrollbars and glow on keyboard focus. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2c353f transparent;
+}
+:focus-visible {
+  box-shadow: 0 0 0 1px #22d3ee, 0 0 12px rgba(34, 211, 238, 0.45);
 }

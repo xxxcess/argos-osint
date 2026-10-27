@@ -621,6 +621,8 @@ for (const width of [1440, 768, 390, 320]) {
       .getByRole("button", { name: "Explore article topology" })
       .click();
     await expect(page.getByText("Recorded actor")).toBeVisible();
+    await expect(page.locator("canvas").first()).toBeVisible();
+    await page.waitForTimeout(800);
     await noOverflow();
     await page.screenshot({
       path: `${captureDir}/topology-${width}.png`,
@@ -1066,3 +1068,88 @@ for (const width of [1440, 390]) {
     });
   });
 }
+
+test("topology graph explorer selects, filters and stays within 320px", async ({
+  page,
+}) => {
+  await fixtures(page);
+  await page.route("**/api/v1/topology", async (route) => {
+    await route.fulfill({
+      json: {
+        root_label: "Harbor",
+        nodes: [
+          {
+            id: "n1",
+            label: "Port authority",
+            kind: "entity",
+            detail: "Recorded actor",
+            topology_seed: { Actor: "actor1" },
+          },
+          {
+            id: "n2",
+            label: "Shipping claim",
+            kind: "claim",
+            detail: "Claim detail",
+          },
+          {
+            id: "n3",
+            label: "Harbor article",
+            kind: "article",
+            detail: "Article detail",
+          },
+        ],
+        edges: [
+          { id: "e1", from: "n1", to: "n2", label: "asserts" },
+          { id: "e2", from: "n3", to: "n2", label: "supports" },
+        ],
+        findings: { gaps: [] },
+        has_continuation: false,
+      },
+      headers: fixtureCors,
+    });
+  });
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Bulletin", exact: true }).click();
+  await page.getByRole("button", { name: "Open Focus Brief ↗" }).click();
+  await page.getByRole("button", { name: "Explore article topology" }).click();
+  for (const name of [
+    "Zoom in",
+    "Zoom out",
+    "Fit",
+    "Reset",
+    "Pause layout",
+    "Clear selection",
+  ])
+    await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+  await expect(page.getByText("Showing 3 of 3 nodes")).toBeVisible();
+  await expect(page.getByText("Recorded actor")).toBeVisible();
+  await expect(page.locator("canvas").first()).toBeVisible();
+  await page
+    .getByRole("button", { name: "Select node Shipping claim, claim" })
+    .click();
+  await expect(page.getByText("Claim detail")).toBeVisible();
+  await expect(page.getByText("Recorded actor")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: /Select neighbor Port authority/ }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Show article nodes" }).click();
+  await expect(page.getByText("Showing 2 of 3 nodes")).toBeVisible();
+  await page.getByRole("button", { name: "Clear selection" }).click();
+  await page
+    .getByRole("textbox", { name: "Filter nodes by label" })
+    .fill("zzz");
+  await page.getByRole("button", { name: "Show claim nodes" }).click();
+  await page.getByRole("button", { name: "Show entity nodes" }).click();
+  await expect(
+    page.getByRole("heading", { name: "No nodes match the filters" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Reset filters" }).first().click();
+  await expect(page.getByText("Showing 3 of 3 nodes")).toBeVisible();
+  await page.setViewportSize({ width: 320, height: 800 });
+  await expect(page.getByText("Showing 3 of 3 nodes")).toBeVisible();
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - window.innerWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
+});

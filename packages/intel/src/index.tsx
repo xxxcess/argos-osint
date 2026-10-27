@@ -17,7 +17,6 @@ import {
   useAction,
   useArticles,
   useRelated,
-  useTopology,
   keyFor,
   type Article,
   type Brief,
@@ -39,6 +38,7 @@ import {
   type Tone,
   colors as c,
 } from "@argos/ui";
+import { Topology } from "./topology/Topology";
 const categoryTone: Record<string, Tone> = {
   geopolitical: "accent",
   economic: "success",
@@ -203,7 +203,12 @@ function Workspace() {
         }}
       >
         {screen === "topology" ? (
-          <Topology seed={seed} onSeed={setSeed} />
+          <Topology
+            seed={seed}
+            onSeed={setSeed}
+            pageStyle={s.page}
+            titleStyle={s.title}
+          />
         ) : article ? (
           <Focus
             key={`${article.run_id}/${article.id}`}
@@ -382,7 +387,9 @@ function ArticleCard({
       )}
       <View style={{ flex: 1, minWidth: 0, gap: 10 }}>
         <View style={s.tagRow}>
-          {featured ? <StatusTag tone="warning">Featured signal</StatusTag> : null}
+          {featured ? (
+            <StatusTag tone="warning">Featured signal</StatusTag>
+          ) : null}
           <StatusTag tone={toneFor(a.category)}>
             {a.category.toUpperCase()}
           </StatusTag>
@@ -773,96 +780,27 @@ function Focus({
         }}
       >
         {(!narrow || tab === "Extracted") && (
-          <View style={{ flex: 24, minWidth: 0, backgroundColor: "transparent" }}>
+          <View
+            style={{ flex: 24, minWidth: 0, backgroundColor: "transparent" }}
+          >
             {extracted}
           </View>
         )}
         {(!narrow || tab === "Reader") && (
-          <View style={{ flex: 48, minWidth: 0, backgroundColor: "transparent" }}>
+          <View
+            style={{ flex: 48, minWidth: 0, backgroundColor: "transparent" }}
+          >
             {reader}
           </View>
         )}
         {(!narrow || tab === "Context") && (
-          <View style={{ flex: 28, minWidth: 0, backgroundColor: "transparent" }}>
+          <View
+            style={{ flex: 28, minWidth: 0, backgroundColor: "transparent" }}
+          >
             {context}
           </View>
         )}
       </View>
-    </View>
-  );
-}
-function Topology({
-  seed,
-  onSeed,
-}: {
-  seed: Seed | null;
-  onSeed: (s: Seed) => void;
-}) {
-  const graph = useTopology(seed);
-  return (
-    <View style={s.page}>
-      <Label>Brain / Topology</Label>
-      <Text accessibilityRole="header" style={s.title}>
-        {graph.data?.root_label || "Evidence topology"}
-      </Text>
-      <Copy>
-        Select an actor, claim or article from a Focus Brief to begin.
-        Connections preserve their recorded meaning.
-      </Copy>
-      {graph.error && <Notice>{graph.error.message}</Notice>}
-      {!seed ? (
-        <EmptyState title="No topology selected">
-          Open an actor, claim or article from a Focus Brief.
-        </EmptyState>
-      ) : null}
-      {seed && graph.isPending ? (
-        <LoadingState label="Loading topology…" />
-      ) : null}
-      {graph.isRefetching ? (
-        <LoadingState label="Refreshing topology…" compact />
-      ) : null}
-      {seed && graph.isSuccess && graph.data.nodes.length === 0 ? (
-        <EmptyState title="No retained connections">
-          No topology records are available for this seed.
-        </EmptyState>
-      ) : null}
-      <View
-        style={[
-          s.row,
-          { flexWrap: "wrap", alignItems: "stretch", marginTop: 12 },
-        ]}
-      >
-        {graph.data?.nodes.map((n) => (
-          <View key={n.id} style={s.topologyNode}>
-            <Panel title={n.kind}>
-              <Text style={s.headline}>{n.label}</Text>
-              <Copy>{n.detail}</Copy>
-              {n.topology_seed && (
-                <Button onPress={() => onSeed(n.topology_seed!)}>
-                  Navigate this node →
-                </Button>
-              )}
-            </Panel>
-          </View>
-        ))}
-      </View>
-      {graph.data?.edges.map((e) => (
-        <View key={e.id} style={s.card}>
-          <Copy>
-            {graph.data?.nodes.find((n) => n.id === e.from)?.label || e.from} →{" "}
-            {e.label} →{" "}
-            {graph.data?.nodes.find((n) => n.id === e.to)?.label || e.to}
-          </Copy>
-        </View>
-      ))}
-      {graph.data?.findings.gaps.map((g, i) => (
-        <Notice key={i}>{g}</Notice>
-      ))}
-      {graph.data?.has_continuation && (
-        <Copy>
-          Showing bounded topology. Navigate a node to explore further.
-        </Copy>
-      )}
     </View>
   );
 }
@@ -1005,7 +943,12 @@ const s = StyleSheet.create({
     letterSpacing: -0.4,
   },
   readerCopy: { fontSize: 16, lineHeight: 29, color: c.text, maxWidth: 640 },
-  filters: { gap: 8, paddingTop: 12, borderTopWidth: 1, borderColor: c.glassBorder },
+  filters: {
+    gap: 8,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderColor: c.glassBorder,
+  },
   field: { gap: 8 },
   listHeading: {
     borderBottomWidth: 1,
@@ -1027,7 +970,13 @@ const s = StyleSheet.create({
     flexDirection: "row",
     gap: 20,
   },
-  thumbnail: { flexShrink: 0, borderRadius: 2, backgroundColor: c.panel, borderWidth: 1, borderColor: c.glassBorder },
+  thumbnail: {
+    flexShrink: 0,
+    borderRadius: 2,
+    backgroundColor: c.panel,
+    borderWidth: 1,
+    borderColor: c.glassBorder,
+  },
   input: {
     minHeight: 44,
     width: "100%",

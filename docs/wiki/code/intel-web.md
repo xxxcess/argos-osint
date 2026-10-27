@@ -31,6 +31,17 @@ The React Native Web client uses the Dark Digitized HUD + Glassmorphism system (
 
 The TUI reader and its See more overlay use the same stored description. Acquisition body content remains separate input to enrichment; it does not replace displayed reader prose. Overflow fixtures keep those sources different and recalculate section positions after changing description length.
 
+## Interactive topology graph
+
+[Topology.tsx](../../../packages/intel/src/topology/Topology.tsx) owns data, selection, filters and the accessible lists; [ForceCanvas.tsx](../../../packages/intel/src/topology/ForceCanvas.tsx) wraps `react-force-graph-2d` (exact pin `1.29.2` in `packages/intel`). The canvas is client-only and lazy-loaded behind `Suspense` with a loading state; static export never renders it. The library mutates its data, so the canvas receives cloned nodes/links. Topology data and the `POST topology` seed contract are unchanged.
+
+- **Selection:** the first node is selected by default; Clear selection sets an explicit none (distinct from the default). The selected node stays visible under every filter. Selection recenters the canvas. A **Neighborhood** panel shows kind, label, outgoing/incoming counts and neighbors grouped by kind; each neighbor is a button that selects it.
+- **Controls:** Zoom in, Zoom out, Fit, Reset (reheat layout and fit), Pause/Resume layout, Clear selection, Reset filters.
+- **Filters:** node kind toggles, label text filter, connection-label filter, and neighbors-only depth (All / 1 / 2) around the selection. Non-matching nodes are removed from the graph; a no-match state offers Reset filters.
+- **Accessibility:** the canvas has a summary `aria-label` (node/connection/kind counts, selection) and is not the only path to content. Parallel lists "Topology nodes" (pressable, `aria-pressed`) and "Topology connections" (`from → label → to`) follow the same filters. Kind color is paired with a text kind label.
+- **Reduced motion:** `prefers-reduced-motion` zeroes zoom/center transitions, pre-settles the layout (warmup, short cooldown, fast decay) and disables node dragging.
+- **Rejected:** ChartKit was evaluated and not used: it has no network/graph chart, is React Native-only, and would need `react-native-svg`.
+
 Inferences are the final section in the middle Reader pane, following the source link. Narrow React Native layouts keep them in Reader rather than Extracted. Core TUI places them last after Related in its center stack, preserving independent left/center scrolling and topology return.
 
 ## Async presentation

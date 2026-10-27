@@ -68,6 +68,10 @@ The shell uses a compact mono ARGOS / INTEL wordmark, API connection status and 
 - `Panel`: glass container with bracketed uppercase mono heading. `Frame`: bracketed HUD frame for grouped telemetry. `StatusTag`: toned bracketed label (always carries text). `Notice`: alert. `Label`/`Copy`: mono metadata / body prose.
 - Mono is for navigation/telemetry, body font for headlines and descriptions. No theme toggle, animation library or new remote-data ownership was introduced.
 
+## Canvas visualizations
+
+Canvas content is invisible to assistive tech and tests. Every canvas needs an **accessible list/text twin** that carries the same entities, relationships, selection and filters, plus a summary label on the canvas. Pass tokens (`colors`, `toneColor`, palette) into draw code as props rather than hard-coding hex; keep kind/state distinguishable beyond color. Load canvas libraries lazily and client-only, hand them cloned data, and honor reduced motion (no animated transitions, no drag, pre-settled layout). Offer zoom/fit/reset/pause controls as real buttons. See the [topology contract](intel-web.md#interactive-topology-graph).
+
 ## Layout and interaction
 
 - Use `View`, `Text`, `Pressable`, `Image` and `StyleSheet` for shared UI; browser-only markup/styles belong in the app or an explicit web adapter. Keep strings inside `Text`; conditional children of `View` must not leak `0` or empty strings (`condition ? <Text>…</Text> : null` when needed).

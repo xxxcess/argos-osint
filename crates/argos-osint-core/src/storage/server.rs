@@ -11,10 +11,11 @@
 //! Credentials go to the child through `SURREAL_USER`/`SURREAL_PASS`, never
 //! argv, and are never logged.
 
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use tokio::net::TcpStream;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -113,7 +114,7 @@ async fn signed_in(port: u16, creds: &Credentials) -> Result<Surreal<Any>> {
 
 /// Check one recorded server; `Ok(true)` only if every probe passes.
 pub async fn probe(info: &ServerInfo, creds: &Credentials) -> bool {
-    if !pid_alive(info.pid) || TcpStream::connect(("127.0.0.1", info.port)).is_err() {
+    if !pid_alive(info.pid) || TcpStream::connect(("127.0.0.1", info.port)).await.is_err() {
         return false;
     }
     let check = async {
@@ -166,8 +167,10 @@ fn free_port() -> Result<u16> {
     Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
 }
 
-fn log_text(layout: &Layout) -> String {
-    std::fs::read_to_string(layout.server_log()).unwrap_or_default()
+async fn log_text(layout: &Layout) -> String {
+    tokio::fs::read_to_string(layout.server_log())
+        .await
+        .unwrap_or_default()
 }
 
 /// Spawn the server on `port` and wait until it listens. `Ok(None)`: the
@@ -208,8 +211,8 @@ async fn spawn_on(
     let ready = format!("Started web server on 127.0.0.1:{port}");
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
+        let log = log_text(layout).await;
         if let Some(status) = child.try_wait()? {
-            let log = log_text(layout);
             if log.contains("Address already in use") {
                 return Ok(None);
             }
@@ -218,7 +221,7 @@ async fn spawn_on(
                 layout.server_log().display()
             );
         }
-        if log_text(layout).contains(&ready) && TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        if log.contains(&ready) && TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
             // Reap it in the background so it never lingers as a zombie of
             // a long-lived parent; it keeps running after we exit.
             std::thread::spawn(move || {

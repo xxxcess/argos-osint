@@ -46,7 +46,14 @@ Inferences are the final section in the middle Reader pane, following the source
 
 ## Async presentation
 
+`@tag:abort-signal`
+
 Bulletin, brief evidence/status, Related and Topology use shared RN loading/empty components. Initial requests, background refresh, next-page loading and failures are distinct; zero confidence is preserved as a value. Missing cycles and zero matching rows have explicit empty states after successful reads. The workspace owns a native ScrollView; Bulletin requests opaque cursor pages near its end, guards concurrent/failed fetches, deduplicates occurrences and retains a manual load/retry control. Query keys keep categories, days, searches and backend instances separate. See [async UI contract](react-ui.md#async-data-and-pagination).
+
+- **AbortSignal propagation**: TanStack Query v5 hooks (`useRead`, `useArticles`, `useTopology`, `useRelated`, and the `health` connection probe in `packages/api-client`) accept the query context `{ signal }` and forward it into `request<T>`. `combineSignals` aggregates the caller's signal with a default 10-second timeout (`AbortSignal.timeout(10000)`), preferring native `AbortSignal.any` with an `AbortController` fallback for multi-signal cleanup. Component unmounting, view navigation, or query key invalidation immediately aborts in-flight browser `fetch` requests.
+- **Typed `ApiError` contract**: Non-200 HTTP responses parse structured JSON bodies (`{"error": "..."}` or `{"message": "..."}`) or fallback to trimmed text, throwing a typed `ApiError` containing the numerical `status` code and optional payload. HTTP 204 No Content cleanly resolves to `undefined`.
+- **Search input debouncing**: In `packages/intel/src/index.tsx`, the Bulletin search input uses a 300ms `useEffect` debounce timer (`debouncedSearch`). Rapid keystrokes immediately update local input state for responsive typing, while queries to `useArticles` fire only after typing pauses for 300ms, preventing SurrealDB `string::contains` query storms.
+
 
 ## Feed imagery
 
@@ -54,7 +61,14 @@ React Native Intel Bulletin cards show a cover-cropped article thumbnail to the 
 
 ## API contract
 
+`@tag:api-timeouts`
+
 All application endpoints are unauthenticated. The host binds **only `127.0.0.1`**. Host must equal `127.0.0.1:PORT` or `localhost:PORT` (HTTP port 80 may omit its default port). Origins are normalized to the browser’s canonical origin before allowlisting. An Origin, when supplied, must exactly match the configured loopback web origin; rejected Origins receive no CORS permission. Requests without Origin support local CLI clients. This is a trusted local development interface, not remote access protection.
+
+- **Request timeout**: The Axum router (`crates/argos-osint-api/src/lib.rs`) applies a 30-second request timeout layer via `tokio::time::timeout(Duration::from_secs(30), next.run(request))`. In-flight requests exceeding 30 seconds are terminated with HTTP 408 `StatusCode::REQUEST_TIMEOUT` and structured JSON `{"error": "Request timed out"}`.
+- **Structured JSON errors**: Protection middleware (`protect`) enforces structured JSON responses (`Content-Type: application/json`) for forbidden access errors: `{"error": "Host refused"}`, `{"error": "Origin refused"}`, and `{"error": "Origin required"}` with HTTP 403 `StatusCode::FORBIDDEN`.
+- **Bounded graceful shutdown**: Standalone API hosting (`crates/argos-api-host/src/main.rs`) wraps Axum graceful draining in a 15-second deadline upon receiving `SIGINT` or `SIGTERM`. If hanging requests or slow clients do not finish within 15 seconds, termination is enforced to guarantee that sockets, background workers, and storage runtime locks are freed.
+
 
 | Method / path (under `/api/v1`) | Input / result |
 | --- | --- |

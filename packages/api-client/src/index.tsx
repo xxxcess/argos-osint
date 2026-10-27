@@ -117,27 +117,123 @@ export function safeBackend(raw: string) {
     throw new Error("Use a loopback HTTP origin, e.g. http://127.0.0.1:8080");
   return u.origin;
 }
+export class ApiError extends Error {
+  status: number;
+  payload?: unknown;
+
+  constructor(status: number, message: string, payload?: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
+function combineSignals(
+  signal?: AbortSignal,
+  timeoutMs = 10000,
+): { signal?: AbortSignal; cleanup?: () => void } {
+  const timeoutSignal =
+    typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+      ? AbortSignal.timeout(timeoutMs)
+      : undefined;
+
+  if (!signal) {
+    return { signal: timeoutSignal };
+  }
+  if (!timeoutSignal) {
+    return { signal };
+  }
+
+  if (typeof AbortSignal.any === "function") {
+    return { signal: AbortSignal.any([signal, timeoutSignal]) };
+  }
+
+  const controller = new AbortController();
+  const onAbort = () => {
+    controller.abort(signal.aborted ? signal.reason : timeoutSignal.reason);
+  };
+  if (signal.aborted) {
+    controller.abort(signal.reason);
+    return { signal: controller.signal };
+  }
+  if (timeoutSignal.aborted) {
+    controller.abort(timeoutSignal.reason);
+    return { signal: controller.signal };
+  }
+  signal.addEventListener("abort", onAbort, { once: true });
+  timeoutSignal.addEventListener("abort", onAbort, { once: true });
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      signal.removeEventListener("abort", onAbort);
+      timeoutSignal.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
 async function request<T>(
   base: string,
   path: string,
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
-  const response = await fetch(`${base}/api/v1/${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers: body === undefined ? {} : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(10000),
-    credentials: "omit",
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    const error = await response
-      .json()
-      .catch(() => ({ error: `HTTP ${response.status}` }));
-    throw new Error(error.error || `HTTP ${response.status}`);
+  const combined = combineSignals(signal, 10000);
+  let response: Response;
+  try {
+    response = await fetch(`${base}/api/v1/${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: body === undefined ? {} : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: combined.signal,
+      credentials: "omit",
+      cache: "no-store",
+    });
+  } finally {
+    combined.cleanup?.();
   }
-  return response.json();
+
+  if (!response.ok) {
+    let payload: unknown = undefined;
+    let message = `HTTP ${response.status}`;
+    try {
+      const text = await response.text();
+      try {
+        const json = JSON.parse(text);
+        payload = json;
+        if (json && typeof json === "object") {
+          if ("error" in json && typeof (json as { error: unknown }).error === "string") {
+            message = (json as { error: string }).error;
+          } else if ("message" in json && typeof (json as { message: unknown }).message === "string") {
+            message = (json as { message: string }).message;
+          }
+        }
+      } catch {
+        if (text.trim().length > 0) {
+          message = text.trim();
+          payload = text;
+        }
+      }
+    } catch {
+      // response reading failed, keep default message
+    }
+    throw new ApiError(response.status, message, payload);
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+  const text = await response.text();
+  if (!text) {
+    return undefined as T;
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return text as unknown as T;
+  }
 }
+
 export function BackendProvider({
   children,
   settings,
@@ -178,7 +274,8 @@ function Connection({
   const client = useQueryClient();
   const health = useQuery({
     queryKey: ["health", base],
-    queryFn: () => request<Health>(base, "health/ready"),
+    queryFn: ({ signal }) =>
+      request<Health>(base, "health/ready", undefined, signal),
     refetchInterval: READY_POLL_MS,
     retry: false,
   });
@@ -220,7 +317,7 @@ export function useRead<T>(path: string, enabled = true) {
   const b = useBackend();
   return useQuery({
     queryKey: [b.base, b.instance, path],
-    queryFn: () => request<T>(b.base, path),
+    queryFn: ({ signal }) => request<T>(b.base, path, undefined, signal),
     enabled: b.connected && enabled,
     refetchInterval: 5000,
   });
@@ -245,7 +342,7 @@ export function useArticles(category: string, day: string, search: string) {
     initialPageParam: "",
     refetchInterval: 5000,
     enabled: b.connected && !!day,
-    queryFn: ({ pageParam }) =>
+    queryFn: ({ pageParam, signal }) =>
       request<{
         rows: Article[];
         next_cursor: string | null;
@@ -259,6 +356,8 @@ export function useArticles(category: string, day: string, search: string) {
             search,
             ...(pageParam ? { cursor: pageParam } : {}),
           }),
+        undefined,
+        signal,
       ),
     getNextPageParam: (last) => last.next_cursor || undefined,
   });
@@ -272,7 +371,8 @@ export function useTopology(seed: Seed | null) {
   return useQuery({
     queryKey: [b.base, b.instance, "topology", stable],
     enabled: b.connected && !!seed,
-    queryFn: () => request<Topology>(b.base, "topology", { seed }),
+    queryFn: ({ signal }) =>
+      request<Topology>(b.base, "topology", { seed }, signal),
   });
 }
 
@@ -282,7 +382,7 @@ export function useRelated(article: Article) {
     queryKey: [b.base, b.instance, "related", article.run_id, article.id],
     initialPageParam: "",
     enabled: b.connected,
-    queryFn: ({ pageParam }) =>
+    queryFn: ({ pageParam, signal }) =>
       request<{
         rows: { article: Article; basis: string[]; tentative: boolean }[];
         next_cursor: string | null;
@@ -291,6 +391,8 @@ export function useRelated(article: Article) {
         "articles/related?" +
           keyFor(article) +
           (pageParam ? "&" + new URLSearchParams({ cursor: pageParam }) : ""),
+        undefined,
+        signal,
       ),
     getNextPageParam: (last) => last.next_cursor || undefined,
     refetchInterval: 5000,

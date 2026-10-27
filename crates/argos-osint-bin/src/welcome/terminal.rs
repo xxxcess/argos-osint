@@ -30,7 +30,10 @@ impl Drop for Restore {
     }
 }
 
-pub(super) fn run(existing: Option<&str>, notice: Option<&str>) -> anyhow::Result<Option<Selection>> {
+pub(super) fn run(
+    existing: Option<&str>,
+    notice: Option<&str>,
+) -> anyhow::Result<Option<Selection>> {
     enable_raw_mode()?;
     let _restore = Restore;
     execute!(

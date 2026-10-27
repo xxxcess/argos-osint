@@ -716,6 +716,25 @@ pub async fn run_claimed(
             }
         })
     };
+    struct HeartbeatGuard {
+        done: Arc<AtomicBool>,
+        handle: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl Drop for HeartbeatGuard {
+        fn drop(&mut self) {
+            self.done.store(true, Ordering::Release);
+            if let Some(handle) = self.handle.take() {
+                handle.abort();
+            }
+        }
+    }
+
+    let mut heartbeat_guard = HeartbeatGuard {
+        done: done.clone(),
+        handle: Some(heartbeat),
+    };
+
     let stages = SurrealStages::new(repo);
     let watch = cancel.clone();
     let result = tokio::select! {
@@ -750,7 +769,9 @@ pub async fn run_claimed(
         }
     };
     done.store(true, Ordering::Release);
-    let _ = heartbeat.await;
+    if let Some(h) = heartbeat_guard.handle.take() {
+        let _ = h.await;
+    }
     let _ = set_activity(repo, &claimed.id, "").await;
     Ok(outcome)
 }

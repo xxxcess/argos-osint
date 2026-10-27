@@ -13,7 +13,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -54,8 +54,20 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/jobs/retry", post(retry))
         .route("/api/v1/topology", post(topology))
         .layer(DefaultBodyLimit::max(16 * 1024))
+        .layer(middleware::from_fn(request_timeout))
         .layer(middleware::from_fn_with_state(state.clone(), protect))
         .with_state(state)
+}
+
+async fn request_timeout(request: Request, next: Next) -> Response {
+    match tokio::time::timeout(Duration::from_secs(30), next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => (
+            StatusCode::REQUEST_TIMEOUT,
+            Json(json!({"error": "Request timed out"})),
+        )
+            .into_response(),
+    }
 }
 
 type ApiResult = Result<Json<Value>, ApiError>;
@@ -92,7 +104,11 @@ async fn protect(State(s): State<ApiState>, request: Request, next: Next) -> Res
         && host != format!("localhost:{}", s.port)
         && !(s.port == 80 && matches!(host, "127.0.0.1" | "localhost"))
     {
-        return (StatusCode::FORBIDDEN, "Host refused").into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Host refused"})),
+        )
+            .into_response();
     }
     let origin = request.headers().get("origin").cloned();
     if let Some(o) = &origin {
@@ -101,7 +117,11 @@ async fn protect(State(s): State<ApiState>, request: Request, next: Next) -> Res
             .iter()
             .any(|allowed| o.as_bytes() == allowed.as_bytes())
         {
-            return (StatusCode::FORBIDDEN, "Origin refused").into_response();
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "Origin refused"})),
+            )
+                .into_response();
         }
     }
     if request
@@ -110,8 +130,13 @@ async fn protect(State(s): State<ApiState>, request: Request, next: Next) -> Res
         .is_some_and(|v| v == "cross-site")
         && origin.is_none()
     {
-        return (StatusCode::FORBIDDEN, "Origin required").into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Origin required"})),
+        )
+            .into_response();
     }
+
     let mut response = if request.method() == Method::OPTIONS {
         StatusCode::NO_CONTENT.into_response()
     } else {

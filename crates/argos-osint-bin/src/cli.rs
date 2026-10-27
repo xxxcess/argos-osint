@@ -332,7 +332,8 @@ pub async fn dispatch() -> Result<()> {
         let Some(selection) = tokio::task::spawn_blocking(move || {
             crate::welcome::run_with_notice(current_notice.as_deref())
         })
-        .await?? else {
+        .await??
+        else {
             return Ok(());
         };
         notice = None;
@@ -340,6 +341,7 @@ pub async fn dispatch() -> Result<()> {
         if let Some(args) = selection.storage_init {
             let status = tokio::process::Command::new(std::env::current_exe()?)
                 .args(args)
+                .kill_on_drop(true)
                 .status()
                 .await?;
             if !status.success() {
@@ -353,9 +355,9 @@ pub async fn dispatch() -> Result<()> {
         let mut child = tokio::process::Command::new(std::env::current_exe()?)
             .args(selection.args.iter().skip(1))
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()?;
-        let last_err: Arc<std::sync::Mutex<Option<String>>> =
-            Arc::new(std::sync::Mutex::new(None));
+        let last_err: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
         let last_err_clone = Arc::clone(&last_err);
         if let Some(err_reader) = child.stderr.take() {
             tokio::spawn(async move {
@@ -372,6 +374,10 @@ pub async fn dispatch() -> Result<()> {
                 }
             });
         }
+        #[cfg(unix)]
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        let mut term_received = false;
         let status = loop {
             tokio::select! {
                 status = child.wait() => break status?,
@@ -380,8 +386,29 @@ pub async fn dispatch() -> Result<()> {
                     // Let its supervisor finish cleanup before reopening Venture.
                     signal?;
                 }
+                _ = async {
+                    #[cfg(unix)]
+                    if let Some(ref mut term) = sigterm {
+                        term.recv().await;
+                        return;
+                    }
+                    std::future::pending::<()>().await;
+                } => {
+                    // When container supervisors or process managers send SIGTERM,
+                    // forward the signal to the child so it triggers clean teardown.
+                    term_received = true;
+                    #[cfg(unix)]
+                    if let Some(pid) = child.id() {
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGTERM);
+                        }
+                    }
+                }
             }
         };
+        if term_received {
+            return Ok(());
+        }
         if !status.success() {
             eprintln!("Session ended: {status}");
             let detail = last_err.lock().ok().and_then(|g| g.clone());

@@ -90,6 +90,7 @@ node -p 'JSON.stringify({path:process.env.PATH,bin:process.env.NVM_BIN,dir:proce
             Command::new(tool)
         };
         command
+            .kill_on_drop(true)
             .env("PATH", &self.path)
             .env("NVM_BIN", &self.bin)
             .env("NVM_DIR", &self.dir);
@@ -170,5 +171,24 @@ nvm() {
             .as_std()
             .get_envs()
             .any(|(key, value)| key == "PATH" && value == Some(std::ffi::OsStr::new(&path))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn node_command_configures_kill_on_drop() {
+        let env = NodeEnvironment {
+            path: "/usr/bin:/bin".into(),
+            bin: "/bin".into(),
+            dir: "/tmp".into(),
+            version: "v24.22.1".into(),
+        };
+        let mut cmd = env.command("sleep");
+        cmd.arg("30");
+        let child = cmd.spawn().unwrap();
+        let pid = child.id().unwrap();
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
+        drop(child);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
     }
 }

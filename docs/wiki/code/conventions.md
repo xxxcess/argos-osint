@@ -65,3 +65,15 @@ work. Report updated docs/figures and actual validation, or a concrete reason no
 figure is affected; do not treat an index-only refresh as a maintained diagram update.
 
 TUI changes follow [the design contract](tui-design-spec.md) and [component catalog](tui-components.md). Name the components/preset before editing; preserve metric semantics, widget IDs and palette. Profile uses registered geometry and independent grid/report scrolling.
+
+## Async runtime and process safety
+
+Rules for asynchronous execution and process management:
+
+- **Non-blocking worker threads**: Never invoke synchronous sleeps (`std::thread::sleep`), blocking disk I/O, or CPU-bound loops on Tokio runtime threads. Use `tokio::task::spawn_blocking` to offload synchronous work (such as hardware metric sampling or synchronous NLP parsing) or native `tokio::fs` and `tokio::net` primitives.
+- **Synchronous drop safety**: Never spawn detached async tasks (`tokio::spawn`) within `Drop::drop` to perform state cleanup. State maps requiring teardown on drop must use synchronous synchronization (`std::sync::Mutex`) so entries are cleared synchronously and deterministically.
+- **RAII task cancellation**: Any background loop or lease renewal task spawned during stage execution must be held by an RAII guard that stores an atomic cancellation flag and invokes `handle.abort()` on drop. When exiting normally, the guard's handle is taken and cleanly awaited.
+- **Subprocess ownership**: Always set `.kill_on_drop(true)` on `tokio::process::Command` when spawning external processes, guaranteeing that children are terminated if the supervising future or task is cancelled or dropped.
+- **Dual-signal shutdown**: Supervisors and long-running daemons must handle both `SIGINT` and `SIGTERM` gracefully on Unix, forwarding signals to child processes and completing orderly teardown before exit.
+- **Process table hygiene**: Detached external command invocations (e.g. system browser openers) must explicitly wait on child process handles in dedicated background threads to harvest exit status codes and prevent zombie (`<defunct>`) processes.
+

@@ -7,13 +7,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
-use tokio::sync::{watch, Mutex, Semaphore};
+use tokio::sync::{watch, Semaphore};
 
 use crate::osint::contracts::IntelligenceCategory;
 use crate::osint::{self, ProviderKeys, ToolDefinition, ToolResult};
@@ -98,6 +98,19 @@ impl ToolAttribution {
     pub fn with_mode(mut self, mode: &str) -> Self {
         self.mode = mode.to_string();
         self
+    }
+}
+
+/// RAII cleanup guard to remove cache_key from inflight map synchronously on drop.
+pub(crate) struct InflightGuard {
+    pub(crate) key: String,
+    pub(crate) map: Arc<Mutex<HashMap<String, watch::Receiver<Option<ToolResult>>>>>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        map.remove(&self.key);
     }
 }
 
@@ -234,7 +247,7 @@ impl ToolRunner {
 
         // 2. In-flight deduplication
         let (tx, mut rx, is_leader) = {
-            let mut inflight = self.inflight.lock().await;
+            let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(existing_rx) = inflight.get(&cache_key) {
                 (None, existing_rx.clone(), false)
             } else {
@@ -283,20 +296,6 @@ impl ToolRunner {
         }
 
         // RAII cleanup guard to remove cache_key from inflight map
-        struct InflightGuard {
-            key: String,
-            map: Arc<Mutex<HashMap<String, watch::Receiver<Option<ToolResult>>>>>,
-        }
-        impl Drop for InflightGuard {
-            fn drop(&mut self) {
-                let key = self.key.clone();
-                let map = self.map.clone();
-                tokio::spawn(async move {
-                    let mut lock = map.lock().await;
-                    lock.remove(&key);
-                });
-            }
-        }
         let _guard = InflightGuard {
             key: cache_key.clone(),
             map: self.inflight.clone(),
@@ -1310,5 +1309,20 @@ mod tests {
             ToolRunner::invocation_id("crtsh_certificates", "key-a", ""),
             ToolRunner::invocation_id("crtsh_certificates", "key-b", "")
         );
+    }
+
+    #[test]
+    fn inflight_guard_synchronous_drop_cleans_map() {
+        let map = Arc::new(Mutex::new(HashMap::new()));
+        let (_tx, rx) = watch::channel(None);
+        map.lock().unwrap().insert("test_key".to_string(), rx);
+        assert!(map.lock().unwrap().contains_key("test_key"));
+        {
+            let _guard = InflightGuard {
+                key: "test_key".to_string(),
+                map: map.clone(),
+            };
+        }
+        assert!(!map.lock().unwrap().contains_key("test_key"));
     }
 }

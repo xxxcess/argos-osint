@@ -135,6 +135,13 @@ function Workspace() {
   const [category, setCategory] = useState(categories[0]);
   const [day, setDay] = useState("");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
   const [article, setArticle] = useState<Article | null>(null);
   const [screen, setScreen] = useState<"bulletin" | "topology">("bulletin");
   const [seed, setSeed] = useState<Seed | null>(null);
@@ -142,7 +149,7 @@ function Workspace() {
   const selectedDay = days.data?.days.includes(day)
     ? day
     : days.data?.days[0] || "";
-  const list = useArticles(category, selectedDay, search);
+  const list = useArticles(category, selectedDay, debouncedSearch);
   const articles = [
     ...new Map(
       (list.data?.pages.flatMap((page) => page.rows) || []).map((article) => [

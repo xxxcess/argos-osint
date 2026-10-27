@@ -388,6 +388,21 @@ pub fn profile_cached(fresh: bool) -> HardwareProfile {
     profile
 }
 
+/// Non-blocking hardware profile probe dispatched to the blocking thread pool
+/// so callers on async runtimes do not freeze executor threads on CPU sampling sleeps.
+pub async fn profile_fresh_async() -> HardwareProfile {
+    tokio::task::spawn_blocking(profile_fresh)
+        .await
+        .unwrap_or_else(|_| profile_fresh())
+}
+
+/// Non-blocking cached hardware profile fetch.
+pub async fn profile_cached_async(fresh: bool) -> HardwareProfile {
+    tokio::task::spawn_blocking(move || profile_cached(fresh))
+        .await
+        .unwrap_or_else(|_| profile_cached(fresh))
+}
+
 fn read_cache() -> Option<HardwareProfile> {
     let raw = std::fs::read_to_string(hardware_cache_path()).ok()?;
     let profile: HardwareProfile = serde_json::from_str(&raw).ok()?;
@@ -433,5 +448,12 @@ mod tests {
     fn arch_buckets() {
         assert_eq!(classify_arch("arm64"), "arm64");
         assert_eq!(classify_arch("x86_64"), "x86_64");
+    }
+
+    #[tokio::test]
+    async fn profile_fresh_async_produces_valid_profile() {
+        let profile = profile_fresh_async().await;
+        assert!(!profile.arch.is_empty());
+        assert!(!profile.os.is_empty());
     }
 }

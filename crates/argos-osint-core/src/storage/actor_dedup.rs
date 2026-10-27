@@ -586,7 +586,9 @@ pub async fn repair_local(repo: &Repository, limit: usize) -> Result<usize> {
         })
         .collect();
     let parsed = if nlp_enabled {
-        crate::nlp::Service::shared().actor_names(names)
+        tokio::task::spawn_blocking(move || crate::nlp::Service::shared().actor_names(names))
+            .await
+            .unwrap_or(None)
     } else {
         Some(names)
     };

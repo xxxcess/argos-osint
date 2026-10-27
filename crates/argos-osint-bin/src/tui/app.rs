@@ -1405,19 +1405,28 @@ fn open_external_url(url: &str) -> Result<()> {
     );
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open").arg(url).spawn()?;
+        let mut child = std::process::Command::new("open").arg(url).spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         return Ok(());
     }
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open").arg(url).spawn()?;
+        let mut child = std::process::Command::new("xdg-open").arg(url).spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         return Ok(());
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("rundll32")
+        let mut child = std::process::Command::new("rundll32")
             .args(["url.dll,FileProtocolHandler", url])
             .spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         return Ok(());
     }
     #[allow(unreachable_code)]

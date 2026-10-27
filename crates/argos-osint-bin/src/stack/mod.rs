@@ -510,7 +510,10 @@ pub async fn dispatch(command: StackCommand) -> Result<()> {
                 Ok(s) => s,
                 Err(_) => {
                     let _ = std::fs::remove_file(&path);
-                    println!("Removed corrupted supervisor state file at {}", path.display());
+                    println!(
+                        "Removed corrupted supervisor state file at {}",
+                        path.display()
+                    );
                     return Ok(());
                 }
             };
@@ -560,7 +563,8 @@ async fn run(up: Up) -> Result<()> {
                 anyhow::ensure!(
                     state.profile == up.profile
                         && state.terminal == up.terminal
-                        && (target != Target::Web || state.web_port == Some(up.port.unwrap_or(3000))),
+                        && (target != Target::Web
+                            || state.web_port == Some(up.port.unwrap_or(3000))),
                     "managed stack configuration differs; stop it before changing configuration"
                 );
                 if let Some(url) = &up.api_url {

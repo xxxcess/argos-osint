@@ -573,3 +573,26 @@ Summary flush and local index worker rows describe long-lived elected services, 
 ## Local Intel HTTP boundary
 
 The [local web/API contract](intel-web.md) adds a UI-independent Intel service, an unauthenticated loopback HTTP adapter and a separate API host over the existing repository. The CLI stack supervisor waits for storage-backed readiness before starting the web application; the TUI continues to access core/storage directly. See the [web lifecycle figure](../../diagrams/intel-web.html) for startup, disconnect and owned/adopted shutdown paths. Public hosting and native application packaging remain deferred.
+
+## Async runtime safety
+
+`@tag:async-runtime`
+
+Argos executes concurrent tasks across Tokio async worker runtimes and dedicated background thread pools. To ensure responsiveness and prevent worker starvation, components adhere to strict async runtime safety rules:
+
+1. **Non-blocking Tokio execution**: Synchronous delays (`std::thread::sleep`), blocking I/O, and CPU-intensive operations are prohibited on Tokio worker threads. Hardware CPU delta sampling is offloaded to the blocking thread pool via `tokio::task::spawn_blocking` in `hardware::profile_fresh_async()` and `hardware::profile_cached_async()`. Synchronous NLP parsing and channel timeouts (`rx.recv_timeout`) in actor deduplication maintenance (`storage/actor_dedup.rs`) are similarly wrapped in `tokio::task::spawn_blocking`.
+2. **Asynchronous network and filesystem operations**: Server readiness probing and startup log checks (`storage/server.rs`) use `tokio::net::TcpStream` and `tokio::fs::read_to_string` rather than blocking `std::net` / `std::fs` calls, ensuring that polling loops (`tokio::time::sleep`) yield cleanly without monopolizing runtime workers.
+3. **Synchronous drop safety**: Rust's `Drop::drop` executes synchronously. Asynchronous operations or detached task spawns (`tokio::spawn`) must never be triggered inside a `Drop` implementation to perform cleanup. For in-flight request deduplication (`recon/tool_runner.rs`), the cache map is guarded by `std::sync::Mutex` rather than an async mutex, enabling `InflightGuard` to synchronously and deterministically remove keys on drop without out-of-band task leakage or panics during runtime shutdown.
+4. **RAII heartbeat task cancellation**: Long-running asynchronous stage pipelines (`storage/brief_stages.rs`, `storage/neighborhood_brief.rs`) spawn lease renewal heartbeat tasks. To guarantee that background tasks are not leaked on early return (`?`), errors, or panics, tasks are wrapped in RAII drop guards (`HeartbeatGuard`). On drop, the guard sets the atomic termination flag (`Ordering::Release` / `Ordering::SeqCst`) and immediately calls `handle.abort()`. When completing normally, the guard's join handle is taken and cleanly awaited.
+
+## Process lifecycle and signal handling
+
+`@tag:process-lifecycle`
+
+Child process supervision and application shutdown follow deterministic lifecycle guarantees across CLI, TUI, and server hosts:
+
+1. **Child process drop termination**: All managed subprocess commands spawned via Tokio (`cli.rs:dispatch`, `stack/node.rs:NodeEnvironment::command`) configure `.kill_on_drop(true)` on `tokio::process::Command`. If a parent future is dropped, cancelled, or aborted, the operating system kernel immediately signals `SIGKILL` to the child process, preventing orphaned background workers from consuming CPU, memory, or port locks.
+2. **Dual-signal SIGINT/SIGTERM handling**: The CLI session supervisor (`cli.rs`) and API host (`argos-api-host`) listen for both interactive interruptions (`SIGINT` / Ctrl+C) and container supervisor termination signals (`SIGTERM`). On Unix, `tokio::signal::unix::signal(SignalKind::terminate())` intercepts SIGTERM, forwards the termination signal to the running child process via POSIX `libc::kill`, and allows the child to cleanly flush storage and teardown before exiting, preventing premature aborts or unwanted reopening of the interactive Venture launcher.
+3. **Detached child process reaping**: External command executions, such as opening browser URLs via system utilities (`open`, `xdg-open`, `rundll32` in `tui/app.rs`), spawn dedicated background threads (`std::thread::spawn(move || { let _ = child.wait(); })`) to await child termination and reap exit status codes, eliminating zombie (`<defunct>`) entries in POSIX process tables.
+4. **Bounded server graceful shutdown**: HTTP servers (`argos-api-host`) wrap Axum graceful draining in a bounded 15-second deadline via `tokio::time::timeout`. If client connections hang or fail to close during teardown, the server enforces termination after 15 seconds to ensure ports, locks, and resources are promptly released.
+

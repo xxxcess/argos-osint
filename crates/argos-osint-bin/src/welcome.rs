@@ -36,7 +36,12 @@ impl<R: BufRead, W: Write> Prompts for Lines<'_, R, W> {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn run() -> anyhow::Result<Option<Selection>> {
+    run_with_notice(None)
+}
+
+pub(crate) fn run_with_notice(notice: Option<&str>) -> anyhow::Result<Option<Selection>> {
     let mut existing = None;
     #[cfg(feature = "surreal")]
     {
@@ -50,8 +55,13 @@ pub(crate) fn run() -> anyhow::Result<Option<Selection>> {
             });
         }
     }
+    if let Some(msg) = notice {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            eprintln!("{msg}");
+        }
+    }
     if io::stdin().is_terminal() && io::stdout().is_terminal() {
-        return terminal::run(existing);
+        return terminal::run(existing, notice);
     }
     Ok(select(
         &mut io::stdin().lock(),

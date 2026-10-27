@@ -326,23 +326,52 @@ pub async fn dispatch() -> Result<()> {
     }
     // Venture owns the session; child TUI/stack guards restore the terminal
     // and stop owned services before the next menu is presented.
+    let mut notice = None;
     loop {
-        let Some(selection) = tokio::task::spawn_blocking(crate::welcome::run).await?? else {
+        let current_notice = notice.clone();
+        let Some(selection) = tokio::task::spawn_blocking(move || {
+            crate::welcome::run_with_notice(current_notice.as_deref())
+        })
+        .await?? else {
             return Ok(());
         };
+        notice = None;
         Cli::try_parse_from(&selection.args)?;
         if let Some(args) = selection.storage_init {
             let status = tokio::process::Command::new(std::env::current_exe()?)
                 .args(args)
                 .status()
                 .await?;
-            anyhow::ensure!(status.success(), "storage setup failed: {status}");
+            if !status.success() {
+                notice = Some(format!("Storage setup failed ({status})"));
+                continue;
+            }
         }
         // Each session owns its repository and background workers. Waiting for
         // process exit releases embedded storage before Venture can launch again.
+        let started = std::time::Instant::now();
         let mut child = tokio::process::Command::new(std::env::current_exe()?)
             .args(selection.args.iter().skip(1))
+            .stderr(std::process::Stdio::piped())
             .spawn()?;
+        let last_err: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let last_err_clone = Arc::clone(&last_err);
+        if let Some(err_reader) = child.stderr.take() {
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut reader = tokio::io::BufReader::new(err_reader).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    eprintln!("{line}");
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        if let Ok(mut guard) = last_err_clone.lock() {
+                            *guard = Some(trimmed.to_string());
+                        }
+                    }
+                }
+            });
+        }
         let status = loop {
             tokio::select! {
                 status = child.wait() => break status?,
@@ -355,6 +384,19 @@ pub async fn dispatch() -> Result<()> {
         };
         if !status.success() {
             eprintln!("Session ended: {status}");
+            let detail = last_err.lock().ok().and_then(|g| g.clone());
+            let elapsed = started.elapsed();
+            if let Some(msg) = detail {
+                if elapsed < std::time::Duration::from_secs(3) {
+                    notice = Some(format!("Launch failed: {msg}"));
+                } else {
+                    notice = Some(format!("Session error: {msg}"));
+                }
+            } else if elapsed < std::time::Duration::from_secs(3) {
+                notice = Some(format!("Service launch failed ({status})"));
+            } else {
+                notice = Some(format!("Session ended with failure ({status})"));
+            }
         }
     }
 }

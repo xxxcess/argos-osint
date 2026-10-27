@@ -94,3 +94,76 @@ fn terminal_display_and_browser_options_are_explicit() {
     assert_eq!(up.validate().unwrap(), Target::Web);
     assert!(Cli::try_parse_from(["argos", "up", "--web", "--terminal", "invalid"]).is_err());
 }
+
+#[test]
+fn abandoned_supervisor_state_is_reported_and_recovered() {
+    use std::process::Command;
+    let home = tempfile::tempdir().unwrap();
+    let stack_json = home.path().join("stack.json");
+    let state = serde_json::json!({
+        "target": "Web",
+        "profile": "Dev",
+        "terminal": "Logs",
+        "web_port": 3000,
+        "instance": "test_instance",
+        "token": "token123",
+        "control_port": 61234,
+        "api_url": "http://127.0.0.1:8080",
+        "api_instance": "api_inst",
+        "adopted": false,
+        "supervisor_pid": 999999,
+        "api_pid": null,
+        "frontend_pid": null
+    });
+    std::fs::write(&stack_json, serde_json::to_vec(&state).unwrap()).unwrap();
+
+    // 1. stack status detects abandoned state without crashing
+    let status_out = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .env("ARGOS_HOME", home.path())
+        .args(["stack", "status"])
+        .output()
+        .unwrap();
+    assert!(status_out.status.success());
+    let stdout = String::from_utf8(status_out.stdout).unwrap();
+    assert!(stdout.contains("Abandoned supervisor state"));
+    assert!(stdout.contains("Run 'argos stack down' to clean up"));
+    assert!(stack_json.exists());
+
+    // 2. stack down recovers abandoned state and removes stack.json
+    let down_out = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .env("ARGOS_HOME", home.path())
+        .args(["stack", "down", "--web"])
+        .output()
+        .unwrap();
+    assert!(down_out.status.success());
+    let down_stdout = String::from_utf8(down_out.stdout).unwrap();
+    assert!(down_stdout.contains("Cleaned up abandoned supervisor state"));
+    assert!(!stack_json.exists());
+}
+
+#[test]
+fn corrupted_supervisor_state_is_cleaned_up() {
+    use std::process::Command;
+    let home = tempfile::tempdir().unwrap();
+    let stack_json = home.path().join("stack.json");
+    std::fs::write(&stack_json, b"corrupted-non-json").unwrap();
+
+    // 1. stack status reports corrupted state
+    let status_out = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .env("ARGOS_HOME", home.path())
+        .args(["stack", "status"])
+        .output()
+        .unwrap();
+    assert!(status_out.status.success());
+    let stdout = String::from_utf8(status_out.stdout).unwrap();
+    assert!(stdout.contains("Corrupted supervisor state"));
+
+    // 2. stack down removes corrupted file
+    let down_out = Command::new(env!("CARGO_BIN_EXE_argos"))
+        .env("ARGOS_HOME", home.path())
+        .args(["stack", "down", "--web"])
+        .output()
+        .unwrap();
+    assert!(down_out.status.success());
+    assert!(!stack_json.exists());
+}

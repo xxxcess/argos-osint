@@ -30,7 +30,7 @@ impl Drop for Restore {
     }
 }
 
-pub(super) fn run(existing: Option<&str>) -> anyhow::Result<Option<Selection>> {
+pub(super) fn run(existing: Option<&str>, notice: Option<&str>) -> anyhow::Result<Option<Selection>> {
     enable_raw_mode()?;
     let _restore = Restore;
     execute!(
@@ -40,19 +40,22 @@ pub(super) fn run(existing: Option<&str>) -> anyhow::Result<Option<Selection>> {
         event::EnableBracketedPaste
     )?;
     let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    let initial_notice = notice.unwrap_or_default().to_string();
     let mut prompts = Screen {
         terminal,
         history: vec![format!(
             "Home: {}",
             argos_osint_core::paths::ensure_home()?.display()
         )],
-        notice: String::new(),
+        notice: initial_notice.clone(),
         navigation: Navigation::default(),
     };
     loop {
         prompts.navigation.begin();
         prompts.history.truncate(1);
-        prompts.notice.clear();
+        if prompts.notice.is_empty() {
+            prompts.notice = initial_notice.clone();
+        }
         let selection = configure(&mut prompts, existing)?;
         if !prompts.navigation.back_requested {
             return Ok(selection);
@@ -392,7 +395,14 @@ impl Question {
             .map(|value| Line::from(vec![Span::styled(value, theme::dim())]))
             .collect();
         if !notice.is_empty() {
-            lines.push(Line::styled(notice, theme::muted()));
+            let style = if notice.to_ascii_lowercase().contains("fail")
+                || notice.to_ascii_lowercase().contains("error")
+            {
+                theme::error()
+            } else {
+                theme::muted()
+            };
+            lines.push(Line::styled(notice, style));
         }
         let start = lines.len().saturating_sub(room + self.history_scroll);
         frame.render_widget(
@@ -740,5 +750,31 @@ mod tests {
         assert_eq!((cursor.x, cursor.y), (x + 2, y));
         question.event(key(KeyCode::Backspace), &|_| true);
         assert_eq!(question.value, "abc");
+    }
+
+    #[test]
+    fn error_notice_is_rendered_in_summary_area() {
+        use ratatui::backend::TestBackend;
+        let mut question = Question::new("Choose a service", "1", &|_| true);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                question.draw(
+                    frame,
+                    &["Home: /Users/demo/.argos".into()],
+                    "Launch failed: port in use",
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..24)
+            .flat_map(|y| {
+                let mut line: String = (0..80).map(|x| buffer[(x, y)].symbol()).collect();
+                line.push('\n');
+                line.into_bytes()
+            })
+            .map(|b| b as char)
+            .collect();
+        assert!(rendered.contains("Launch failed: port in use"));
     }
 }

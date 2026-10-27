@@ -285,6 +285,62 @@ async fn stop(owned: &mut OwnedChild) {
         let _ = owned.child.kill().await;
     }
 }
+
+pub(crate) fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let res = unsafe { libc::kill(pid as i32, 0) };
+        if res == 0 {
+            return true;
+        }
+        let err = std::io::Error::last_os_error();
+        err.raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+pub(crate) async fn reap_orphaned_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        if pid_alive(pid) {
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGTERM);
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+            for _ in 0..20 {
+                if !pid_alive(pid) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if pid_alive(pid) {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+async fn recover_abandoned_state(path: &Path, state: &Managed) -> Result<()> {
+    if let Some(pid) = state.api_pid {
+        reap_orphaned_pid(pid).await;
+    }
+    if let Some(pid) = state.frontend_pid {
+        reap_orphaned_pid(pid).await;
+    }
+    let _ = std::fs::remove_file(path);
+    Ok(())
+}
 async fn health(base: &str) -> Result<String> {
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -406,17 +462,40 @@ pub async fn dispatch(command: StackCommand) -> Result<()> {
                 println!("No managed stack");
                 return Ok(());
             }
-            let state: Managed = serde_json::from_slice(&std::fs::read(path)?)?;
-            println!(
-                "{}",
-                tokio::time::timeout(Duration::from_secs(2), control(&state, "STATUS")).await??
-            );
-            println!(
-                "API health: {} / adopted: {}",
-                health(&state.api_url).await?,
-                state.adopted
-            );
-            Ok(())
+            let bytes = std::fs::read(&path)?;
+            let state: Managed = match serde_json::from_slice(&bytes) {
+                Ok(s) => s,
+                Err(_) => {
+                    println!(
+                        "Corrupted supervisor state at {}. Run 'argos stack down' to clean up.",
+                        path.display()
+                    );
+                    return Ok(());
+                }
+            };
+            match tokio::time::timeout(Duration::from_secs(2), control(&state, "STATUS")).await {
+                Ok(Ok(status)) => {
+                    println!("{status}");
+                    println!(
+                        "API health: {} / adopted: {}",
+                        health(&state.api_url).await?,
+                        state.adopted
+                    );
+                    Ok(())
+                }
+                _ => {
+                    if !pid_alive(state.supervisor_pid) {
+                        println!(
+                            "Abandoned supervisor state at {} (supervisor PID {} exited). Run 'argos stack down' to clean up.",
+                            path.display(),
+                            state.supervisor_pid
+                        );
+                        Ok(())
+                    } else {
+                        bail!("supervisor unresponsive");
+                    }
+                }
+            }
         }
         StackCommand::Down(p) => {
             let target = p.target();
@@ -426,27 +505,108 @@ pub async fn dispatch(command: StackCommand) -> Result<()> {
                 println!("No managed stack");
                 return Ok(());
             }
-            let state: Managed = serde_json::from_slice(&std::fs::read(&path)?)?;
-            anyhow::ensure!(
-                state.target == target,
-                "requested target does not own this stack"
-            );
-            println!(
-                "{}",
-                tokio::time::timeout(Duration::from_secs(2), control(&state, "STOP")).await??
-            );
-            for _ in 0..100 {
-                if !path.exists() {
+            let bytes = std::fs::read(&path)?;
+            let state: Managed = match serde_json::from_slice(&bytes) {
+                Ok(s) => s,
+                Err(_) => {
+                    let _ = std::fs::remove_file(&path);
+                    println!("Removed corrupted supervisor state file at {}", path.display());
                     return Ok(());
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            };
+            if !pid_alive(state.supervisor_pid) {
+                recover_abandoned_state(&path, &state).await?;
+                println!("Cleaned up abandoned supervisor state and stopped surviving services.");
+                return Ok(());
             }
-            bail!("supervisor shutdown still in progress")
+            anyhow::ensure!(
+                state.target == target,
+                "requested target does not own this stack (active stack: {:?})",
+                state.target
+            );
+            match tokio::time::timeout(Duration::from_secs(2), control(&state, "STOP")).await {
+                Ok(Ok(reply)) => {
+                    println!("{reply}");
+                    for _ in 0..100 {
+                        if !path.exists() {
+                            return Ok(());
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    bail!("supervisor shutdown still in progress")
+                }
+                _ => {
+                    bail!("supervisor unresponsive");
+                }
+            }
         }
     }
 }
 async fn run(up: Up) -> Result<()> {
     let target = up.validate()?;
+    let path = state_path()?;
+    if path.exists() {
+        let bytes = std::fs::read(&path)?;
+        let state: Option<Managed> = serde_json::from_slice(&bytes).ok();
+        if let Some(state) = state {
+            if tokio::time::timeout(Duration::from_secs(2), control(&state, "STATUS"))
+                .await
+                .is_ok_and(|r| r.is_ok())
+            {
+                anyhow::ensure!(
+                    state.target == target,
+                    "another managed stack is running; use stack status/down"
+                );
+                anyhow::ensure!(
+                    state.profile == up.profile
+                        && state.terminal == up.terminal
+                        && (target != Target::Web || state.web_port == Some(up.port.unwrap_or(3000))),
+                    "managed stack configuration differs; stop it before changing configuration"
+                );
+                if let Some(url) = &up.api_url {
+                    anyhow::ensure!(
+                        loopback_url(url)?.origin() == loopback_url(&state.api_url)?.origin(),
+                        "managed API differs from requested API"
+                    );
+                }
+                if let Some(port) = up.api_port {
+                    anyhow::ensure!(
+                        loopback_url(&state.api_url)?.port_or_known_default() == Some(port),
+                        "managed API port differs"
+                    );
+                }
+                health(&state.api_url).await?;
+                println!("Stack already running: {}", state.api_url);
+                let port = state.web_port.unwrap_or(3000);
+                if target == Target::Web && !up.no_open {
+                    presentation::open_browser(
+                        &format!("http://localhost:{port}/?api={}", state.api_url),
+                        None,
+                    )
+                    .await;
+                }
+                return Ok(());
+            }
+            if !pid_alive(state.supervisor_pid) {
+                eprintln!(
+                    "argos: recovering from abandoned supervisor state (PID {} exited without cleanup)",
+                    state.supervisor_pid
+                );
+                recover_abandoned_state(&path, &state).await?;
+            } else {
+                bail!(
+                    "stale supervisor state at {}; verify its processes have exited before removing this file",
+                    path.display()
+                );
+            }
+        } else {
+            let _ = std::fs::remove_file(&path);
+            eprintln!(
+                "argos: removed corrupted supervisor state file at {}",
+                path.display()
+            );
+        }
+    }
     if target == Target::Tui {
         return crate::tui::run(crate::tui::App::boot()?).await;
     }
@@ -497,49 +657,6 @@ async fn run(up: Up) -> Result<()> {
     } else {
         None
     };
-    let path = state_path()?;
-    if path.exists() {
-        let state: Managed = serde_json::from_slice(&std::fs::read(&path)?)?;
-        if tokio::time::timeout(Duration::from_secs(2), control(&state, "STATUS"))
-            .await
-            .is_ok_and(|r| r.is_ok())
-        {
-            anyhow::ensure!(
-                state.target == target,
-                "another managed stack is running; use stack status/down"
-            );
-            anyhow::ensure!(
-                state.profile == up.profile
-                    && state.terminal == up.terminal
-                    && (target != Target::Web || state.web_port == Some(up.port.unwrap_or(3000))),
-                "managed stack configuration differs; stop it before changing configuration"
-            );
-            if let Some(url) = &up.api_url {
-                anyhow::ensure!(
-                    loopback_url(url)?.origin() == loopback_url(&state.api_url)?.origin(),
-                    "managed API differs from requested API"
-                );
-            }
-            if let Some(port) = up.api_port {
-                anyhow::ensure!(
-                    loopback_url(&state.api_url)?.port_or_known_default() == Some(port),
-                    "managed API port differs"
-                );
-            }
-            health(&state.api_url).await?;
-            println!("Stack already running: {}", state.api_url);
-            let port = state.web_port.unwrap_or(3000);
-            if target == Target::Web && !up.no_open {
-                presentation::open_browser(
-                    &format!("http://localhost:{port}/?api={}", state.api_url),
-                    None,
-                )
-                .await;
-            }
-            return Ok(());
-        }
-        bail!("stale supervisor state at {}; verify its processes have exited before removing this file",path.display());
-    }
     // Exclusive state reservation prevents concurrent embedded owners during startup.
     let mut options = std::fs::OpenOptions::new();
     options.create_new(true).write(true);

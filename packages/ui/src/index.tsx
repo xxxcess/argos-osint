@@ -8,25 +8,25 @@ import {
   ActivityIndicator,
 } from "react-native";
 
-// Dark HUD + glass tokens. Layout/semantics still follow the core TUI; the
-// surface treatment is the Intel web theme (see docs/wiki/code/react-ui.md).
+// Dark HUD + glass tokens. Colors are the core TUI palette from
+// crates/argos-osint-bin/src/tui/theme.rs; glass/glow is the web treatment (see docs/wiki/code/react-ui.md).
 export const colors = {
-  bg: "#0b0d10",
-  panel: "#12161b",
-  raised: "#1b2128",
-  border: "#2c353f",
-  text: "#e6edf3",
-  dim: "#b4c0cc",
-  muted: "#8b98a5",
-  accent: "#22d3ee",
-  accent2: "#c084fc",
-  success: "#4ade80",
-  warning: "#fbbf24",
-  danger: "#fb7185",
-  glass: "rgba(18, 22, 27, 0.55)",
-  glassStrong: "rgba(27, 33, 40, 0.72)",
-  glassBorder: "rgba(63, 74, 86, 0.6)",
-  accentSoft: "rgba(34, 211, 238, 0.14)",
+  bg: "#141414",
+  panel: "#1e1e1e",
+  raised: "#303030",
+  border: "#535353",
+  text: "#e8e8e8",
+  dim: "#b5b5b5",
+  muted: "#919191",
+  accent: "#87bfff",
+  accent2: "#c678dd",
+  success: "#98c379",
+  warning: "#e5c07b",
+  danger: "#f08a8a",
+  glass: "rgba(30, 30, 30, 0.55)",
+  glassStrong: "rgba(48, 48, 48, 0.72)",
+  glassBorder: "rgba(83, 83, 83, 0.6)",
+  accentSoft: "rgba(135, 191, 255, 0.14)",
 };
 export const fonts = {
   mono: 'ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace',
@@ -296,7 +296,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 16,
     borderLeftWidth: 2,
     borderColor: colors.danger,
-    backgroundColor: "rgba(251, 113, 133, 0.1)",
+    backgroundColor: "rgba(240, 138, 138, 0.1)",
     minWidth: 0,
   },
   noticeText: {

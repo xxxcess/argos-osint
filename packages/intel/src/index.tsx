@@ -34,8 +34,20 @@ import {
   fonts,
   glass,
   glow,
+  StatusTag,
+  toneColor,
+  type Tone,
   colors as c,
 } from "@argos/ui";
+const categoryTone: Record<string, Tone> = {
+  geopolitical: "accent",
+  economic: "success",
+  military: "danger",
+  information: "purple",
+  stability: "warning",
+  technology: "accent",
+};
+const toneFor = (category: string): Tone => categoryTone[category] ?? "accent";
 const categories = [
   "geopolitical",
   "economic",
@@ -347,7 +359,11 @@ function ArticleCard({
   return (
     <View
       testID={`article-card-${a.id}`}
-      style={[s.card, compact && { gap: 12, paddingVertical: 20 }]}
+      style={[
+        s.card,
+        { borderLeftColor: toneColor[toneFor(a.category)] },
+        compact && { gap: 12, paddingVertical: 20 },
+      ]}
     >
       {thumbnail && (
         <Image
@@ -365,10 +381,16 @@ function ArticleCard({
         />
       )}
       <View style={{ flex: 1, minWidth: 0, gap: 10 }}>
-        <Label>
-          {featured ? "Featured signal · " : ""}
-          {a.category} / {a.source_name || a.source_domain}
-        </Label>
+        <View style={s.tagRow}>
+          {featured ? <StatusTag tone="warning">Featured signal</StatusTag> : null}
+          <StatusTag tone={toneFor(a.category)}>
+            {a.category.toUpperCase()}
+          </StatusTag>
+          <StatusTag tone="accent">{a.published_at.slice(0, 10)}</StatusTag>
+          <StatusTag tone="purple">
+            {(a.source_name || a.source_domain).toUpperCase()}
+          </StatusTag>
+        </View>
         <Text
           accessibilityRole="header"
           style={[
@@ -490,12 +512,25 @@ function Focus({
             .map((claim) => (
               <View key={claim.id} style={{ gap: 8 }}>
                 <Copy>{claim.text}</Copy>
-                <Text style={s.small}>
-                  {claim.confidence == null
-                    ? "Unassessed"
-                    : `${Math.round(claim.confidence * 100)}%`}{" "}
-                  · {claim.admiralty} · {claim.classification}
-                </Text>
+                <View style={s.tagRow}>
+                  <StatusTag
+                    tone={
+                      claim.confidence == null
+                        ? "warning"
+                        : claim.confidence >= 0.7
+                          ? "success"
+                          : claim.confidence >= 0.4
+                            ? "accent"
+                            : "danger"
+                    }
+                  >
+                    {claim.confidence == null
+                      ? "Unassessed"
+                      : `${Math.round(claim.confidence * 100)}%`}
+                  </StatusTag>
+                  <StatusTag tone="purple">{claim.admiralty}</StatusTag>
+                  <StatusTag tone="accent">{claim.classification}</StatusTag>
+                </View>
                 <Button
                   onPress={() =>
                     onTopology(
@@ -699,7 +734,7 @@ function Focus({
         </Button>
         <Label>Focus Brief / {shown.category}</Label>
         {!narrow ? (
-          <Text style={s.small}>Evidence before assumption</Text>
+          <Text style={[s.small, s.telemetry]}>Evidence before assumption</Text>
         ) : null}
       </View>
       {detail.isError && <Notice>{detail.error.message}</Notice>}
@@ -714,14 +749,18 @@ function Focus({
       {narrow && (
         <View style={[s.row, { paddingVertical: 12, gap: 4 }]}>
           {["Extracted", "Reader", "Context"].map((t) => (
-            <Button
+            <View
               key={t}
-              variant="quiet"
-              active={t === tab}
-              onPress={() => setTab(t)}
+              style={t === tab ? (glow(c.accent) as object) : undefined}
             >
-              {t}
-            </Button>
+              <Button
+                variant="quiet"
+                active={t === tab}
+                onPress={() => setTab(t)}
+              >
+                {t}
+              </Button>
+            </View>
           ))}
         </View>
       )}
@@ -730,23 +769,23 @@ function Focus({
           flexDirection: narrow ? "column" : "row",
           alignItems: "stretch",
           gap: 1,
-          backgroundColor: c.border,
+          backgroundColor: c.glassBorder,
           borderWidth: 1,
-          borderColor: c.border,
+          borderColor: c.glassBorder,
         }}
       >
         {(!narrow || tab === "Extracted") && (
-          <View style={{ flex: 24, minWidth: 0, backgroundColor: c.bg }}>
+          <View style={{ flex: 24, minWidth: 0, backgroundColor: c.glass, ...(glass as object), borderWidth: 0 }}>
             {extracted}
           </View>
         )}
         {(!narrow || tab === "Reader") && (
-          <View style={{ flex: 48, minWidth: 0, backgroundColor: c.bg }}>
+          <View style={{ flex: 48, minWidth: 0, backgroundColor: c.glass, ...(glass as object), borderWidth: 0 }}>
             {reader}
           </View>
         )}
         {(!narrow || tab === "Context") && (
-          <View style={{ flex: 28, minWidth: 0, backgroundColor: c.bg }}>
+          <View style={{ flex: 28, minWidth: 0, backgroundColor: c.glass, ...(glass as object), borderWidth: 0 }}>
             {context}
           </View>
         )}
@@ -1034,6 +1073,8 @@ const s = StyleSheet.create({
     gap: 12,
     paddingVertical: 4,
   },
+  tagRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  telemetry: { textTransform: "uppercase", letterSpacing: 1 },
   topologyNode: {
     flexBasis: 280,
     flexGrow: 1,

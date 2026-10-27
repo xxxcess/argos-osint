@@ -28,17 +28,21 @@ Compiler optimization is not a correctness proof. Typecheck, Hooks/compiler diag
 
 ## Visual language
 
-**Dark Digitized HUD + Glassmorphism** for `apps/web-desktop`, `packages/ui` and `packages/intel`. The TUI keeps [theme.rs](../../../crates/argos-osint-bin/src/tui/theme.rs) ([TUI design](tui-design-spec.md#theme-data-and-interaction)); the web uses this system while preserving layout semantics (pane order, Focus Brief 24/48/28, tabs when narrow) and product contracts. Do not copy terminal cell measurements.
+**TUI palette + HUD/glass treatment** (Dark Digitized HUD + Glassmorphism) for `apps/web-desktop`, `packages/ui` and `packages/intel`. The palette is the core TUI palette in [theme.rs](../../../crates/argos-osint-bin/src/tui/theme.rs) ([TUI design](tui-design-spec.md#theme-data-and-interaction)); the web keeps those colors and adds the HUD/glass treatment while preserving layout semantics (pane order, Focus Brief 24/48/28, tabs when narrow) and product contracts. Do not copy terminal cell measurements.
 
 Authority: tokens, `glass`, `glow()`, `Tone`/`toneColor`, `StatusTag`, `Frame` and `Panel` in [packages/ui](../../../packages/ui/src/index.tsx); grid backdrop, glow focus ring and thin scrollbars in [style.css](../../../apps/web-desktop/app/style.css). Add or change values there, never as scattered hex in feature components.
 
-| Token group | Use |
-| --- | --- |
-| `colors` slate base/surfaces, text/dim/muted | Page, panels, hierarchy of text |
-| accent cyan `#22d3ee`, `accent2` purple, `accentSoft` | Active/selected/focus, links, secondary emphasis |
-| success, warning amber, danger crimson | Severity tones via `Tone`/`toneColor` |
-| `glass`, `glassStrong`, `glassBorder` | Translucent slate fills and muted borders |
-| `fonts.mono` / `fonts.body` | Telemetry labels, nav, metadata / prose |
+| Token | Value | Use |
+| --- | --- | --- |
+| bg / panel / raised | `#141414` / `#1e1e1e` / `#303030` | Page, panels, selected/raised rows |
+| border | `#535353` | Thin rules and borders |
+| text / dim / muted | `#e8e8e8` / `#b5b5b5` / `#919191` | Primary, secondary, quiet metadata |
+| accent (sky) / accent2 (violet) | `#87bfff` / `#c678dd` | Active/focus/links / secondary emphasis |
+| success / warning / danger | `#98c379` / `#e5c07b` / `#f08a8a` | Severity tones via `Tone`/`toneColor` |
+| `glass`, `glassStrong`, `glassBorder`, `accentSoft` | derived from TUI surface grays | Translucent fills, muted borders, soft accent wash |
+| `fonts.mono` / `fonts.body` | | Telemetry labels, nav, metadata / prose |
+
+Values mirror `theme.rs`; recheck it when changing the palette.
 
 Principles:
 - Translucent slate fills, muted borders and backdrop blur. Blur and other web-only style props are web-only: cast them at the web boundary so native/RN types stay valid, and keep a readable opaque-enough fill when blur is unsupported.
@@ -58,9 +62,11 @@ Principles:
 
 ## Current web components
 
-The shell uses a compact monospace ARGOS / INTEL wordmark, API connection status and Bulletin/Topology navigation. Bulletin uses a bounded reading width, labeled search, wrapping categories, scrollable retained days, a loaded-row count and flat article rows with thin separators. Focus Brief keeps its three-pane proportions and compact narrow-screen pane controls; section headings and dividers supply hierarchy without nested card decoration. Topology uses simple titled regions and recorded relationships. Connection and action failures use a warm text/edge treatment with an explicit recovery action.
+The shell uses a compact mono ARGOS / INTEL wordmark, API connection status and Bulletin/Topology navigation over the grid backdrop. Bulletin keeps a bounded reading width, labeled search, wrapping categories, scrollable retained days and a loaded-row count; article rows are glass cards with a left **tone stripe** and a `StatusTag`. Focus Brief keeps its three panes (tabs when narrow) as `Panel`s; Topology uses titled panels and recorded relationships. Connection and action failures use a danger-toned `Notice` with an explicit recovery action.
 
-`Button` has bordered/default and quiet variants; active selection uses accent fill/dark text and web `aria-pressed`. Hover/press use the selected surface, disabled controls remain unavailable, and browser focus uses an independent accent outline. `Panel` owns section-heading typography and spacing; `Notice` is an alert. Monospace is for navigation/metadata, sans-serif for headlines and article descriptions. No theme toggle, animation library or new remote-data ownership was introduced.
+- `Button`: glass default and quiet variants; active uses accent fill/dark text with `aria-pressed`; hover/press raise the surface; disabled stays unavailable; glow focus ring is independent of selection.
+- `Panel`: glass container with bracketed uppercase mono heading. `Frame`: bracketed HUD frame for grouped telemetry. `StatusTag`: toned bracketed label (always carries text). `Notice`: alert. `Label`/`Copy`: mono metadata / body prose.
+- Mono is for navigation/telemetry, body font for headlines and descriptions. No theme toggle, animation library or new remote-data ownership was introduced.
 
 ## Layout and interaction
 

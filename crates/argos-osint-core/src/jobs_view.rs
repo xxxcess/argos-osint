@@ -47,14 +47,14 @@ impl JobStatusFilter {
         }
     }
 
-    pub(crate) fn states(self) -> &'static [&'static str] {
+    pub fn states(self) -> &'static [&'static str] {
         match self {
             Self::All => &[],
             Self::Active => &["running", "queued", "retry_scheduled"],
             Self::Retrying => &["retry_scheduled"],
             Self::Failed => &["failed", "partial"],
-            Self::Completed => &["completed"],
-            Self::Stopped => &["cancelled", "superseded"],
+            Self::Completed => &["completed", "succeeded"],
+            Self::Stopped => &["cancelled", "paused", "superseded"],
         }
     }
 }
@@ -139,7 +139,7 @@ impl JobRow {
             "retry_scheduled" => "retry wait",
             "paused" => "paused",
             "waiting" => "waiting",
-            "completed" => "completed",
+            "completed" | "succeeded" => "completed",
             "partial" => "partial",
             "failed" => "failed",
             "cancelled" => "stopped",

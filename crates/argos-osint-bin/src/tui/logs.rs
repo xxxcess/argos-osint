@@ -156,6 +156,18 @@ impl LogsView {
         }
     }
 
+    /// A user changed the Logs filter. Old rows must not masquerade as the
+    /// new filter while an asynchronous read is still in flight.
+    pub fn invalidate_filter(&mut self) {
+        self.rows.clear();
+        self.sel = 0;
+        self.sel_id = None;
+        self.open.clear();
+        self.scroll = 0;
+        self.error = None;
+        self.loaded = false;
+    }
+
     /// Reload the bounded page. Selection is kept by event id unless live
     /// follow is on; a read failure keeps the last good rows and says so.
     pub fn reload(&mut self, store: &impl LogsSource) {

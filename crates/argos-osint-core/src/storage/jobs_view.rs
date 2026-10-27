@@ -346,7 +346,7 @@ pub async fn job_counts(db: &Surreal<Any>) -> Result<JobCounts> {
             "queued" => c.queued += 1,
             "retry_scheduled" => c.retrying += 1,
             "failed" | "partial" => c.failed += 1,
-            "completed" if r.recent => c.completed_recent += 1,
+            "completed" | "succeeded" if r.recent => c.completed_recent += 1,
             _ => {}
         }
     }

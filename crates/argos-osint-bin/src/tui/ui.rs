@@ -3756,10 +3756,25 @@ fn geometry_stamp(app: &App) -> String {
         (
             (
                 (
-                    app.logs.scroll,
-                    &app.logs.open,
-                    app.logs.rows.len(),
-                    app.logs.error.is_some()
+                    (
+                        app.logs.scroll,
+                        app.logs.sel,
+                        app.logs.level,
+                        &app.logs.app,
+                        &app.logs.job,
+                        &app.logs.search,
+                        app.logs.follow,
+                        app.logs.loaded,
+                    ),
+                    (
+                        app.logs.back_to_job.is_some(),
+                        app.logs
+                            .selected()
+                            .map(|r| (r.id.as_str(), !r.job_id.is_empty())),
+                        &app.logs.open,
+                        app.logs.rows.len(),
+                        app.logs.error.is_some(),
+                    ),
                 ),
                 app.scrolls.home,
                 app.scrolls.roles,
@@ -3767,14 +3782,29 @@ fn geometry_stamp(app: &App) -> String {
                 app.scrolls.popup
             ),
             (
-                app.jobs.scroll,
-                app.jobs.detail_open,
-                app.jobs.rows.len(),
-                app.jobs.error.is_some(),
-                app.jobs.status,
-                &app.jobs.app,
-                &app.jobs.search,
-                app.jobs.loaded,
+                (
+                    app.jobs.scroll,
+                    app.jobs.sel,
+                    app.jobs.detail_open,
+                    app.jobs.rows.len(),
+                    app.jobs.error.is_some(),
+                    app.jobs.status,
+                    &app.jobs.app,
+                    &app.jobs.search,
+                ),
+                (
+                    app.jobs.loaded,
+                    app.jobs.can_retry(),
+                    app.jobs.can_cancel(),
+                    app.jobs.selected().map(|j| {
+                        (
+                            j.id.as_str(),
+                            j.state.as_str(),
+                            j.cancel_requested,
+                            j.cancellable,
+                        )
+                    }),
+                ),
             ),
             (
                 app.profile

@@ -164,12 +164,26 @@ impl super::jobs::JobsSource for SurrealJobs {
 /// status line text. Plain worker threads only.
 #[cfg(feature = "surreal")]
 pub(crate) fn job_action(action: JobAction) -> Result<String> {
+    use argos_osint_core::events::{NewEvent, Severity};
     use argos_osint_core::job_registry::CancelRequest;
-    use argos_osint_core::storage::{jobs_view, runtime};
+    use argos_osint_core::storage::{event_log, jobs_view, runtime};
     match action {
         JobAction::Retry(id) => {
-            let n = runtime::blocking(|repo| async move {
-                jobs_view::retry_failed_tasks(repo.db(), &id).await
+            let job_id = id.clone();
+            let n = runtime::blocking(move |repo| async move {
+                let n = jobs_view::retry_failed_tasks(repo.db(), &id).await?;
+                if n > 0 {
+                    let event = NewEvent {
+                        severity: Some(Severity::Info),
+                        app: "jobs".into(),
+                        event_type: "jobs.retry".into(),
+                        message: format!("Retrying {n} failed task(s)"),
+                        job_id,
+                        ..Default::default()
+                    };
+                    let _ = event_log::record_event(repo.db(), &event).await;
+                }
+                Ok(n)
             })?;
             Ok(if n == 0 {
                 "Nothing to retry".into()
@@ -179,10 +193,22 @@ pub(crate) fn job_action(action: JobAction) -> Result<String> {
         }
         JobAction::Cancel(id) => {
             let job_id = id.clone();
-            let outcome =
-                runtime::blocking(
-                    |repo| async move { jobs_view::cancel_job(repo.db(), &id).await },
-                )?;
+            let log_job_id = id.clone();
+            let outcome = runtime::blocking(move |repo| async move {
+                let outcome = jobs_view::cancel_job(repo.db(), &id).await?;
+                if outcome == CancelRequest::Requested {
+                    let event = NewEvent {
+                        severity: Some(Severity::Info),
+                        app: "jobs".into(),
+                        event_type: "jobs.cancel".into(),
+                        message: "Stop requested · the job stops at its next safe point".into(),
+                        job_id: log_job_id,
+                        ..Default::default()
+                    };
+                    let _ = event_log::record_event(repo.db(), &event).await;
+                }
+                Ok(outcome)
+            })?;
             if outcome == CancelRequest::Requested {
                 argos_osint_core::job_registry::raise_local_cancel(&job_id);
             }
@@ -196,10 +222,19 @@ pub(crate) fn job_action(action: JobAction) -> Result<String> {
             })
         }
         JobAction::Clear(status) => {
-            let n =
-                runtime::blocking(
-                    |repo| async move { jobs_view::clear_jobs(repo.db(), status).await },
-                )?;
+            let label = status.label().to_lowercase();
+            let n = runtime::blocking(move |repo| async move {
+                let n = jobs_view::clear_jobs(repo.db(), status).await?;
+                let event = NewEvent {
+                    severity: Some(Severity::Info),
+                    app: "jobs".into(),
+                    event_type: "jobs.clear".into(),
+                    message: format!("Cleared {n} {label} job(s)"),
+                    ..Default::default()
+                };
+                let _ = event_log::record_event(repo.db(), &event).await;
+                Ok(n)
+            })?;
             Ok(format!("Cleared {n} jobs"))
         }
     }
@@ -405,11 +440,23 @@ pub(crate) fn prune_logs(_hours: i64) -> Result<usize> {
 }
 
 /// Logs "Clear log" on the repository (`argos_event` only). Plain worker
-/// threads only.
+/// threads only. Records the post-clear session event in the same worker
+/// call so the subsequent `reload_logs` snapshot sees it deterministically.
 #[cfg(feature = "surreal")]
 pub(crate) fn clear_logs() -> Result<usize> {
     use argos_osint_core::storage::{event_log, runtime};
-    runtime::blocking(|repo| async move { event_log::clear_events(repo.db()).await })
+    let cleared =
+        runtime::blocking(|repo| async move { event_log::clear_events(repo.db()).await })?;
+    let event = super::logs::session_event(
+        "info",
+        "Events cleared (jobs, results, and memories kept)",
+        "",
+    );
+    let _ =
+        runtime::blocking(
+            move |repo| async move { event_log::record_event(repo.db(), &event).await },
+        );
+    Ok(cleared)
 }
 
 #[cfg(not(feature = "surreal"))]

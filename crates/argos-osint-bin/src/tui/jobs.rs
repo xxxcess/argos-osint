@@ -92,6 +92,41 @@ impl JobsView {
         self.loaded = false;
     }
 
+    /// Optimistically prune non-service rows matching a history clear filter
+    /// so the table and detail pane reflect the action immediately while the
+    /// authoritative repository reload completes.
+    pub fn prune_status(&mut self, status: JobStatusFilter) {
+        let states = status.states();
+        if states.is_empty() {
+            return;
+        }
+        let selected_id = self.selected().map(|row| row.id.clone());
+        self.rows
+            .retain(|row| row.kind == "service" || !states.contains(&row.state.as_str()));
+        match status {
+            JobStatusFilter::Completed => self.counts.completed_recent = 0,
+            JobStatusFilter::Failed => self.counts.failed = 0,
+            _ => {}
+        }
+        if let Some(id) = selected_id {
+            if let Some(index) = self.rows.iter().position(|row| row.id == id) {
+                self.sel = index;
+            } else {
+                self.sel = self.sel.min(self.rows.len().saturating_sub(1));
+                self.detail = None;
+                self.detail_scroll = 0;
+                if self.rows.is_empty() {
+                    self.detail_open = false;
+                }
+            }
+        } else {
+            self.sel = 0;
+            self.detail = None;
+            self.detail_scroll = 0;
+        }
+        self.sel_id = self.rows.get(self.sel).map(|row| row.id.clone());
+    }
+
     /// Reload rows and the selected job's detail, keeping the selection by id.
     pub fn reload(&mut self, store: &impl JobsSource) {
         match store.list(&self.filter(), PAGE) {

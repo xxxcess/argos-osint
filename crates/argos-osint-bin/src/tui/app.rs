@@ -861,6 +861,7 @@ enum WorkEvent {
         outcome: Result<usize, String>,
     },
     DashboardLoaded {
+        generation: u64,
         module: Option<ModuleId>,
         key: String,
         outcome: Result<Box<DashboardSnapshot>, String>,
@@ -1331,8 +1332,11 @@ pub struct App {
     atlas_reading: bool,
     atlas_generation: u64,
     intel_reading: bool,
+    intel_brief_pending: bool,
     intel_related_limit: usize,
     dashboard_reading: bool,
+    dashboard_pending: bool,
+    dashboard_generation: u64,
     pending_job: Option<String>,
     jobs_clearing: bool,
     logs_clearing: bool,
@@ -1342,11 +1346,13 @@ pub struct App {
     threads_reading: bool,
     intel_list_reading: bool,
     atlas_articles_reading: bool,
+    atlas_articles_pending: bool,
     manual_reading: bool,
     manual_pending: bool,
     threads_pending: bool,
     recon_pending: bool,
     intel_list_pending: bool,
+    profile_pending: bool,
     brain_preview_reading: bool,
     brain_preview_target: Option<String>,
     brain_preview_for: Option<String>,
@@ -1782,8 +1788,11 @@ impl App {
             atlas_reading: false,
             atlas_generation: 0,
             intel_reading: false,
+            intel_brief_pending: false,
             intel_related_limit: 20,
             dashboard_reading: false,
+            dashboard_pending: false,
+            dashboard_generation: 0,
             pending_job: None,
             jobs_clearing: false,
             logs_clearing: false,
@@ -1793,11 +1802,13 @@ impl App {
             threads_reading: false,
             intel_list_reading: false,
             atlas_articles_reading: false,
+            atlas_articles_pending: false,
             manual_reading: false,
             manual_pending: false,
             threads_pending: false,
             recon_pending: false,
             intel_list_pending: false,
+            profile_pending: false,
             brain_preview_reading: false,
             brain_preview_target: None,
             brain_preview_for: None,
@@ -1925,9 +1936,14 @@ impl App {
     /// One visible Profile snapshot when its 20-second automatic refresh is due.
     /// The read is on the store's own connection, so it never blocks recording.
     pub(crate) fn reload_profile(&mut self) {
-        if !self.profile_analytics_visible() || !self.profile.due() || self.profile.loading {
+        if !self.profile_analytics_visible() || !self.profile.due() {
             return;
         }
+        if self.profile.loading {
+            self.profile_pending = true;
+            return;
+        }
+        self.profile_pending = false;
         self.profile.loading = true;
         let generation = self.profile.generation;
         let filters = self.profile.filters.clone();
@@ -1975,6 +1991,13 @@ impl App {
         super::profile::open_run_thread(self, outcome);
     }
 
+    fn reload_logs_filter(&mut self) {
+        self.logs.invalidate_filter();
+        self.dashboard_generation = self.dashboard_generation.wrapping_add(1);
+        self.layout.borrow_mut().view_stamp.clear();
+        self.reload_logs();
+    }
+
     pub(crate) fn reload_logs(&mut self) {
         if self.background_db.is_some() || surreal_brain::on() {
             self.request_dashboard_snapshot();
@@ -2002,6 +2025,7 @@ impl App {
     fn reload_jobs_filter(&mut self) {
         self.pending_job = None;
         self.jobs.invalidate_filter();
+        self.dashboard_generation = self.dashboard_generation.wrapping_add(1);
         self.layout.borrow_mut().view_stamp.clear();
         self.reload_jobs();
     }
@@ -2031,10 +2055,13 @@ impl App {
 
     fn request_dashboard_snapshot(&mut self) {
         if self.dashboard_reading {
+            self.dashboard_pending = true;
             return;
         }
         // Jobs, Logs and the header counts read only the repository.
         self.dashboard_reading = true;
+        self.dashboard_pending = false;
+        let generation = self.dashboard_generation;
         let module = self.module;
         let key = self.dashboard_read_key();
         let mut jobs = self.jobs.clone();
@@ -2056,6 +2083,7 @@ impl App {
                     .map_err(|e| e.to_string()),
             };
             let _ = tx.send(WorkEvent::DashboardLoaded {
+                generation,
                 module,
                 key,
                 outcome,
@@ -3118,16 +3146,28 @@ impl App {
         self.nvidia_key = secret.api_key.unwrap_or_default();
         self.nvidia_endpoint = secret.base_url;
         self.firecrawl_key = self.settings.provider_key("firecrawl");
+        self.firecrawl_fallback = self.settings.provider_fallback_key("firecrawl");
         self.hunter_key = self.settings.provider_key("hunter");
+        self.hunter_fallback = self.settings.provider_fallback_key("hunter");
         self.sociavault_key = self.settings.provider_key("sociavault");
+        self.sociavault_fallback = self.settings.provider_fallback_key("sociavault");
         self.newsapi_key = self.settings.provider_key("newsapi");
+        self.newsapi_fallback = self.settings.provider_fallback_key("newsapi");
         self.courtlistener_key = self.settings.provider_key("courtlistener");
+        self.courtlistener_fallback = self.settings.provider_fallback_key("courtlistener");
         self.gnews_key = self.settings.provider_key("gnews");
+        self.gnews_fallback = self.settings.provider_fallback_key("gnews");
         self.newsdata_key = self.settings.provider_key("newsdata");
+        self.newsdata_fallback = self.settings.provider_fallback_key("newsdata");
         self.currents_key = self.settings.provider_key("currents");
+        self.currents_fallback = self.settings.provider_fallback_key("currents");
         self.whoxy_key = self.settings.provider_key("whoxy");
+        self.whoxy_fallback = self.settings.provider_fallback_key("whoxy");
         self.catalog_cache.clear();
         self.model_catalog.clear();
+        self.catalog_for.clear();
+        self.profile.loaded_at = None;
+        self.reload_profile();
     }
 
     fn profile_config_key(&mut self, key: KeyEvent) -> bool {
@@ -4279,15 +4319,17 @@ impl App {
     fn refresh_intel_briefing(&mut self) {
         if self.background_db.is_some() || surreal_brain::on() {
             let db = self.background_db.clone();
-            if self.intel_reading
-                || self.module != Some(ModuleId::Intel)
-                || self.intel_page != IntelPage::Briefing
-            {
+            if self.module != Some(ModuleId::Intel) || self.intel_page != IntelPage::Briefing {
+                return;
+            }
+            if self.intel_reading {
+                self.intel_brief_pending = true;
                 return;
             }
             let Some(article) = self.intel_articles.get(self.intel_sel).cloned() else {
                 return;
             };
+            self.intel_brief_pending = false;
             self.intel_reading = true;
             let job = self.intel_brief_job.clone();
             let scope = self.related_scope;
@@ -4527,12 +4569,14 @@ impl App {
 
     fn request_atlas_articles(&mut self) {
         if self.atlas_articles_reading {
+            self.atlas_articles_pending = true;
             return;
         }
         if self.background_db.is_none() && !surreal_brain::on() {
             return;
         }
         let db = self.background_db.clone();
+        self.atlas_articles_pending = false;
         self.atlas_articles_reading = true;
         let run_id = self.atlas_news_run.clone();
         let tx = self.work_tx.clone();
@@ -5236,10 +5280,12 @@ impl App {
                 self.logs_clearing = false;
                 match outcome {
                     Ok(count) => {
-                        self.logs.open.clear();
-                        self.logs.scroll = 0;
+                        self.logs.invalidate_filter();
+                        self.logs.counts = Default::default();
                         self.logs.follow = true;
-                        self.push_log("info", "Events cleared (jobs, results, and memories kept)");
+                        self.dashboard_generation = self.dashboard_generation.wrapping_add(1);
+                        self.dashboards_at = None;
+                        self.layout.borrow_mut().view_stamp.clear();
                         self.status = format!("Cleared {count} events");
                         self.reload_logs();
                     }
@@ -5251,9 +5297,15 @@ impl App {
                 self.jobs_clearing = false;
                 self.jobs.scroll = 0;
                 self.jobs.detail_scroll = 0;
+                self.dashboard_generation = self.dashboard_generation.wrapping_add(1);
+                self.dashboards_at = None;
+                self.layout.borrow_mut().view_stamp.clear();
                 self.status =
                     outcome.unwrap_or_else(|error| format!("Jobs action failed: {error}"));
-                self.reload_jobs();
+                match self.module {
+                    Some(ModuleId::Logs) => self.reload_logs(),
+                    _ => self.reload_jobs(),
+                }
                 self.refresh_intel_briefing();
                 true
             }
@@ -5475,10 +5527,11 @@ impl App {
             }
             WorkEvent::AtlasArticlesLoaded { run_id, outcome } => {
                 self.atlas_articles_reading = false;
+                let pending = std::mem::take(&mut self.atlas_articles_pending);
                 if !self.atlas_news {
                     return false;
                 }
-                if run_id != self.atlas_news_run {
+                if pending || run_id != self.atlas_news_run {
                     self.request_atlas_articles();
                     return true;
                 }
@@ -5521,15 +5574,21 @@ impl App {
                 true
             }
             WorkEvent::DashboardLoaded {
+                generation,
                 module,
                 key,
                 outcome,
             } => {
                 self.dashboard_reading = false;
-                if module != self.module || key != self.dashboard_read_key() {
+                if std::mem::take(&mut self.dashboard_pending)
+                    || generation != self.dashboard_generation
+                    || module != self.module
+                    || key != self.dashboard_read_key()
+                {
                     self.request_dashboard_snapshot();
                     return true;
                 }
+                self.layout.borrow_mut().view_stamp.clear();
                 match outcome {
                     Ok(snapshot) => match *snapshot {
                         DashboardSnapshot::Logs(snapshot) => {
@@ -5571,6 +5630,7 @@ impl App {
             }
             WorkEvent::IntelBriefLoaded { key, outcome } => {
                 self.intel_reading = false;
+                let pending = std::mem::take(&mut self.intel_brief_pending);
                 let current = self.intel_articles.get(self.intel_sel).map(|a| {
                     (
                         a.run_id.clone(),
@@ -5583,7 +5643,7 @@ impl App {
                 if self.module != Some(ModuleId::Intel) || self.intel_page != IntelPage::Briefing {
                     return false;
                 }
-                if current.as_ref() != Some(&key) {
+                if pending || current.as_ref() != Some(&key) {
                     self.refresh_intel_briefing();
                     return true;
                 }
@@ -5604,8 +5664,8 @@ impl App {
             } => {
                 self.atlas_reading = false;
                 if generation != self.atlas_generation {
-                    if let Some(db) = self.background_db.clone() {
-                        self.request_atlas_snapshot(Some(db));
+                    if self.background_db.is_some() || surreal_brain::on() {
+                        self.request_atlas_snapshot(self.background_db.clone());
                     }
                     return true;
                 }
@@ -5753,10 +5813,15 @@ impl App {
                 options,
             } => {
                 self.profile.loading = false;
+                let pending = std::mem::take(&mut self.profile_pending);
                 // A read may finish after navigation. Retain the previous snapshot
                 // and its timestamp so returning to overdue analytics retries.
                 if !self.profile_analytics_visible() {
                     return false;
+                }
+                if pending {
+                    self.reload_profile();
+                    return true;
                 }
                 if generation != self.profile.generation || filters != self.profile.filters {
                     return true;
@@ -8305,22 +8370,27 @@ impl App {
                     return;
                 }
                 self.jobs_clearing = true;
+                self.jobs.prune_status(status);
+                self.dashboard_generation = self.dashboard_generation.wrapping_add(1);
+                self.layout.borrow_mut().view_stamp.clear();
                 self.spawn_job_action(surreal_brain::JobAction::Clear(status));
                 self.status = format!("Clearing {} job history…", status.label().to_lowercase());
                 return;
             }
             ButtonId::LogsLevel => {
                 self.logs.level = self.logs.level.next();
-                self.reload_logs();
+                self.reload_logs_filter();
                 Ok(format!("Level: {}", self.logs.level.label()))
             }
             ButtonId::LogsApp => {
                 self.logs.cycle_app();
-                self.reload_logs();
+                self.reload_logs_filter();
                 Ok("Logs filtered".into())
             }
             ButtonId::LogsFollow => {
                 self.logs.follow = !self.logs.follow;
+                self.dashboard_generation = self.dashboard_generation.wrapping_add(1);
+                self.layout.borrow_mut().view_stamp.clear();
                 self.reload_logs();
                 Ok(format!(
                     "Live follow {}",
@@ -9323,7 +9393,7 @@ impl App {
             self.load_intel();
         }
         if self.focus == Target::Field(FieldId::LogsSearch) {
-            self.reload_logs();
+            self.reload_logs_filter();
         }
         if self.focus == Target::Field(FieldId::JobsSearch) {
             self.reload_jobs_filter();
@@ -11424,8 +11494,11 @@ pub mod testkit {
             atlas_reading: false,
             atlas_generation: 0,
             intel_reading: false,
+            intel_brief_pending: false,
             intel_related_limit: 20,
             dashboard_reading: false,
+            dashboard_pending: false,
+            dashboard_generation: 0,
             pending_job: None,
             jobs_clearing: false,
             logs_clearing: false,
@@ -11435,11 +11508,13 @@ pub mod testkit {
             threads_reading: false,
             intel_list_reading: false,
             atlas_articles_reading: false,
+            atlas_articles_pending: false,
             manual_reading: false,
             manual_pending: false,
             threads_pending: false,
             recon_pending: false,
             intel_list_pending: false,
+            profile_pending: false,
             brain_preview_reading: false,
             brain_preview_target: None,
             brain_preview_for: None,
@@ -13720,6 +13795,7 @@ mod tests {
                     );
                 }
                 app.on_work_event(WorkEvent::DashboardLoaded {
+                    generation: 0,
                     module: Some(ModuleId::Jobs),
                     key: old_key,
                     outcome: Ok(Box::new(DashboardSnapshot::Jobs(Box::new(old_snapshot)))),
@@ -13735,7 +13811,10 @@ mod tests {
                 }];
                 current.loaded = true;
                 let key = app.dashboard_read_key();
+                let generation = app.dashboard_generation;
+                app.dashboard_pending = false;
                 app.on_work_event(WorkEvent::DashboardLoaded {
+                    generation,
                     module: Some(ModuleId::Jobs),
                     key,
                     outcome: Ok(Box::new(DashboardSnapshot::Jobs(Box::new(current)))),
@@ -13794,7 +13873,9 @@ mod tests {
         app.pending_job = Some(destination.clone());
         app.dashboard_reading = true;
         let key = app.dashboard_read_key();
+        let generation = app.dashboard_generation;
         app.on_work_event(WorkEvent::DashboardLoaded {
+            generation,
             module: Some(ModuleId::Jobs),
             key,
             outcome: Ok(Box::new(DashboardSnapshot::Jobs(Box::new(snapshot)))),
@@ -13802,6 +13883,146 @@ mod tests {
         assert_eq!(app.jobs.selected().unwrap().id, destination);
         assert_eq!(app.focus, Target::JobRow(app.jobs.sel));
         assert!(app.pending_job.is_none());
+    }
+
+    #[test]
+    fn clearing_jobs_by_status_updates_lists_and_logs_and_drops_stale_reads() {
+        use argos_osint_core::jobs_view::JobRow;
+        let mut app = app();
+        register(&app, "done-job", "recon", "Completed lookup");
+        app.store
+            .set_job_progress("done-job", "succeeded", "done", 1, Some(1), "")
+            .unwrap();
+        register(&app, "paused-job", "atlas", "Paused cycle");
+        app.store
+            .set_job_progress("paused-job", "paused", "paused", 2, Some(5), "")
+            .unwrap();
+        register(&app, "live-job", "recon", "Running lookup");
+        app.store
+            .set_job_progress("live-job", "running", "collect", 1, Some(3), "")
+            .unwrap();
+        app.select(ModuleId::Jobs.index());
+        assert_eq!(app.jobs.rows.len(), 3);
+
+        // Simulate an in-flight periodic dashboard read started before the user
+        // clicks "Clear completed".
+        app.background_db = Some(PathBuf::from("controlled-worker"));
+        app.dashboard_reading = true;
+        let stale_generation = app.dashboard_generation;
+        let stale_snapshot = app.jobs.clone();
+
+        click(&mut app, Target::Button(ButtonId::JobsClearCompleted));
+        assert!(
+            !app.jobs.rows.iter().any(|r| r.id == "done-job"),
+            "completed/succeeded job is pruned immediately from the table"
+        );
+        assert!(app.jobs.rows.iter().any(|r| r.id == "paused-job"));
+        assert!(app.jobs.rows.iter().any(|r| r.id == "live-job"));
+
+        // Click "Clear stopped" once the first clear settles: paused jobs are
+        // also pruned immediately.
+        settle(&mut app, |app| !app.jobs_clearing);
+        assert!(!app.jobs.rows.iter().any(|r| r.id == "done-job"));
+
+        // Even if a pre-clear snapshot arrives late with the current key, its
+        // older generation is rejected and cannot resurrect cleared rows.
+        let current_key = app.dashboard_read_key();
+        let mut stale_with_done = stale_snapshot;
+        stale_with_done.rows.push(JobRow {
+            id: "done-job".into(),
+            title: "Completed lookup".into(),
+            state: "completed".into(),
+            app: "recon".into(),
+            ..Default::default()
+        });
+        app.on_work_event(WorkEvent::DashboardLoaded {
+            generation: stale_generation,
+            module: Some(ModuleId::Jobs),
+            key: current_key,
+            outcome: Ok(Box::new(DashboardSnapshot::Jobs(Box::new(stale_with_done)))),
+        });
+        assert!(
+            !app.jobs.rows.iter().any(|r| r.id == "done-job"),
+            "stale pre-clear DashboardLoaded must not overwrite cleared Jobs view"
+        );
+        settle(&mut app, |app| !app.dashboard_reading);
+
+        // Now clear stopped jobs and verify Logs records the clear event.
+        click(&mut app, Target::Button(ButtonId::JobsClearStopped));
+        assert!(
+            !app.jobs.rows.iter().any(|r| r.id == "paused-job"),
+            "paused job is pruned immediately by Clear stopped"
+        );
+        settle(&mut app, |app| !app.jobs_clearing && !app.dashboard_reading);
+        assert_eq!(app.jobs.rows.len(), 1);
+        assert_eq!(app.jobs.rows[0].id, "live-job");
+
+        app.select(ModuleId::Logs.index());
+        settle(&mut app, |app| app.logs.loaded && !app.dashboard_reading);
+        assert!(
+            app.logs
+                .rows
+                .iter()
+                .any(|e| e.app == "jobs" && e.message.contains("Cleared")),
+            "Logs view shows the durable jobs.clear event: {:?}",
+            app.logs.rows
+        );
+    }
+
+    #[test]
+    fn logs_clear_and_filters_reject_stale_in_flight_snapshots() {
+        let mut app = app();
+        app.push_log("error", "Atlas fetch failed");
+        app.push_log("info", "Recon stage ready");
+        app.select(ModuleId::Logs.index());
+        assert_eq!(app.logs.rows.len(), 2);
+        let sample_row = app.logs.rows[0].clone();
+
+        // Simulate an in-flight read started before "Clear events" is clicked.
+        app.background_db = Some(PathBuf::from("controlled-worker"));
+        app.dashboard_reading = true;
+        let stale_gen = app.dashboard_generation;
+        let stale_key = app.dashboard_read_key();
+        let stale_logs = app.logs.clone();
+
+        click(&mut app, Target::Button(ButtonId::ClearLog));
+        settle(&mut app, |app| !app.logs_clearing);
+        assert!(app.logs.rows.is_empty() && !app.logs.loaded);
+        assert!(app.dashboard_pending);
+
+        // The pre-clear snapshot finishes with the same filter key; it must be
+        // dropped and trigger a fresh read instead of restoring cleared events.
+        app.on_work_event(WorkEvent::DashboardLoaded {
+            generation: stale_gen,
+            module: Some(ModuleId::Logs),
+            key: stale_key,
+            outcome: Ok(Box::new(DashboardSnapshot::Logs(Box::new(stale_logs)))),
+        });
+        assert!(
+            app.logs.rows.is_empty(),
+            "stale pre-clear Logs snapshot must not restore cleared rows"
+        );
+        settle(&mut app, |app| app.logs.loaded && !app.dashboard_reading);
+        assert_eq!(app.logs.rows.len(), 1);
+        assert!(app.logs.rows[0].message.contains("Events cleared"));
+
+        // Changing Logs level, app, or search invalidates old rows immediately
+        // while a read is in flight.
+        app.dashboard_reading = true;
+        let before_filter_gen = app.dashboard_generation;
+        let mut stale_page = app.logs.clone();
+        stale_page.rows = vec![sample_row];
+        click(&mut app, Target::Button(ButtonId::LogsLevel));
+        assert!(app.logs.rows.is_empty() && !app.logs.loaded);
+        assert!(app.dashboard_generation > before_filter_gen);
+        let key = app.dashboard_read_key();
+        app.on_work_event(WorkEvent::DashboardLoaded {
+            generation: before_filter_gen,
+            module: Some(ModuleId::Logs),
+            key,
+            outcome: Ok(Box::new(DashboardSnapshot::Logs(Box::new(stale_page)))),
+        });
+        assert!(app.logs.rows.is_empty());
     }
 
     #[test]

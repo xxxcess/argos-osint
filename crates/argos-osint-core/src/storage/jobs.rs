@@ -82,7 +82,15 @@ pub const STOP_BATCH: usize = 100;
 /// Jobs or tasks handled per reaper / cleanup transaction.
 pub const SWEEP_BATCH: i64 = 64;
 
-const TERMINAL: &[&str] = &["completed", "failed", "partial", "cancelled", "superseded"];
+const TERMINAL: &[&str] = &[
+    "completed",
+    "succeeded",
+    "failed",
+    "partial",
+    "cancelled",
+    "paused",
+    "superseded",
+];
 
 /// Candidate scan for a claim: queued rows of one pool in priority order. The
 /// index test runs this exact text under `EXPLAIN FULL`.
@@ -1417,7 +1425,8 @@ async fn tree_busy(tx: &Tx, root: &str) -> Result<bool, TxError> {
         tx,
         tx.query(
             "RETURN count(SELECT id FROM task WHERE root = $r AND state = 'running') \
-             + count(SELECT id FROM job WHERE root = $r AND kind = 'service')",
+             + count(SELECT id FROM job WHERE root = $r AND (kind = 'service' \
+               OR state IN ['running', 'queued', 'retry_scheduled', 'waiting', 'blocked']))",
         )
         .bind(("r", rid("job", root))),
     )
@@ -1431,7 +1440,9 @@ async fn purge_tree_in(tx: &Tx, root: &str, reason: &str, now: &str) -> Result<(
     run(
         tx,
         tx.query(
-            "DELETE attempt WHERE root = $r;
+            "LET $jids = (SELECT VALUE record::id(id) FROM job WHERE root = $r);
+             DELETE job_event WHERE job_id IN $jids;
+             DELETE attempt WHERE root = $r;
              DELETE stage_output WHERE root = $r;
              DELETE neighborhood_brief WHERE task.root = $r;
              DELETE task WHERE root = $r;

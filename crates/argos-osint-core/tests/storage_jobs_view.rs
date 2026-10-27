@@ -431,6 +431,72 @@ async fn jobs_pane_stop_and_clear_history_on_the_repository() {
     );
     assert!(view::get_job(&db, "done").await.unwrap().is_none());
     assert!(view::get_job(&db, "idle").await.unwrap().is_some());
+
+    // Multi-stage completed tree with a failed child, plus succeeded and paused
+    // roots, plus a root whose child job is still running (must not be cleared).
+    jobs::create_job(&db, &job("multi_done", None, 1), &[])
+        .await
+        .unwrap();
+    jobs::create_job(&db, &job("multi_child_fail", Some("multi_done"), 1), &[])
+        .await
+        .unwrap();
+    jobs::create_job(&db, &job("succeeded_root", None, 1), &[])
+        .await
+        .unwrap();
+    jobs::create_job(&db, &job("paused_root", None, 1), &[])
+        .await
+        .unwrap();
+    jobs::create_job(&db, &job("busy_root", None, 1), &[])
+        .await
+        .unwrap();
+    jobs::create_job(&db, &job("busy_child", Some("busy_root"), 1), &[])
+        .await
+        .unwrap();
+    db.query(
+        "UPDATE job:multi_done SET state = 'completed', finished_at = time::now();
+         UPDATE job:multi_child_fail SET state = 'failed', finished_at = time::now();
+         UPDATE job:succeeded_root SET state = 'succeeded', finished_at = time::now();
+         UPDATE job:paused_root SET state = 'paused', finished_at = time::now();
+         UPDATE job:busy_root SET state = 'completed', finished_at = time::now();
+         UPDATE job:busy_child SET state = 'running';
+         CREATE job_event SET job_id = 'multi_done', app = 'atlas', event_type = 'job.completed', severity = 'info', message = 'done', ts = time::now();
+         CREATE job_event SET job_id = 'multi_child_fail', app = 'atlas', event_type = 'job.failed', severity = 'error', message = 'child failed', ts = time::now();",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    // Completed filter clears both `completed` (even with a terminal `failed` child)
+    // and `succeeded` roots, removes their `job_event` rows, and skips `busy_root`
+    // because `busy_child` is still running.
+    assert_eq!(
+        view::clear_jobs(&db, JobStatusFilter::Completed)
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(view::get_job(&db, "multi_done").await.unwrap().is_none());
+    assert!(view::get_job(&db, "multi_child_fail")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(view::get_job(&db, "succeeded_root")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(view::get_job(&db, "busy_root").await.unwrap().is_some());
+    assert_eq!(count(&db, "job_event").await, 0);
+
+    // Stopped filter clears `paused` (and `cancelled` / `superseded`) roots.
+    assert_eq!(
+        view::clear_jobs(&db, JobStatusFilter::Stopped)
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(view::get_job(&db, "paused_root").await.unwrap().is_none());
+    assert!(view::get_job(&db, "run").await.unwrap().is_none());
 }
 
 #[tokio::test]

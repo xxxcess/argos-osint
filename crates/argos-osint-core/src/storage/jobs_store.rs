@@ -148,7 +148,10 @@ pub fn set_job_progress(
         error_summary.to_string(),
     );
     runtime::blocking(|repo| async move {
-        let terminal = matches!(state.as_str(), "succeeded" | "failed" | "cancelled");
+        let terminal = matches!(
+            state.as_str(),
+            "completed" | "partial" | "succeeded" | "failed" | "cancelled"
+        );
         repo.db()
             .query(
                 "UPDATE $j SET state = $state, phase = $phase, progress_done = $done, \

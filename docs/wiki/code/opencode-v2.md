@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | `coordinator` | `orchestrator`, `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#max` | Default entry point: conduct a concise task interview, lock scope/constraints, and dispatch the most efficient team from the catalog |
 | `orchestrator` | `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#medium` | Decompose multi-phase/multi-milestone work, own `.planning/`, and drive iterative exploration, implementation, Scribe checkpoints, and the 3-way verification gate |
-| `architect` | `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#medium` | Explore code/docs (`AUDIT_UNIT`), advise on contracts (`CONSULT`), write `file:line` phase specs, or coordinate single-phase work |
+| `architect` | `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#max` | Explore code/docs (`AUDIT_UNIT`), advise on contracts (`CONSULT`), write `file:line` phase specs, or coordinate single-phase work |
 | `coder` | `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#medium` | Delegate disjoint `EDIT_UNIT` edits, integrate worktree deltas, invoke `scribe` at checkpoints, run verification gates, and perform authorized commits |
 | `reviewer` | `architect` | `opencode/nemotron-3.5-super-vl-free#medium` | Audit integrated diffs for correctness, concurrency/performance, `argos-rust-style`, and React UI compliance (`APPROVE \| REJECT`) |
 | `tester` | `architect` | `opencode/nemotron-3.5-super-vl-free#medium` | Execute empirical host-native checks, TUI/UI screenshot verification, and adversarial stress tests in `INTEGRATION_ROOT` (`PASS \| FAIL \| BLOCKED \| PENDING`) |
@@ -34,8 +34,8 @@ Before spinning up subagents (unless `[skip-interview]` is passed or the prompt 
 
 Role models and reasoning variants live in `.opencode/opencode.json` at `agents.<role>.model`:
 
-- **Default Team Coordinator (`coordinator`)**: `opencode/glm-5.3-flash-free#max` for high-reasoning interactive interviewing, triage, and catalog dispatch.
-- **Orchestration & Implementation Coordinators (`orchestrator`, `architect`, `coder`)**: `opencode/glm-5.3-flash-free#medium`.
+- **Default Team Coordinator & Architecture (`coordinator`, `architect`)**: `opencode/glm-5.3-flash-free#max` for high-reasoning interactive interviewing, triage, architectural specifications, and contract consultations.
+- **Orchestration & Implementation Coordinators (`orchestrator`, `coder`)**: `opencode/glm-5.3-flash-free#medium`.
 - **Verification, Review, Forensic Audit & Documentation (`reviewer`, `tester`, `auditor`, `scribe`)**: Vision-capable `opencode/nemotron-3.5-super-vl-free#medium`.
 - **Fast `EDIT_UNIT` & Worker Overrides**: `opencode/mimo-v2.6-flash-free` in `.opencode/coder-worker.json` (provider defaults; no advertised reasoning variant).
 

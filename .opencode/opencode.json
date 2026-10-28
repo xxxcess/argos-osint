@@ -233,7 +233,7 @@
     },
     "architect": {
       "mode": "all",
-      "model": "opencode/glm-5.3-flash-free#medium",
+      "model": "opencode/glm-5.3-flash-free#max",
       "permissions": [
         {
           "action": "read",

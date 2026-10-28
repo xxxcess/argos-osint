@@ -206,6 +206,7 @@ export function Notice({ children }: { children: React.ReactNode }) {
     </View>
   );
 }
+export { ErrorBoundary } from "./ErrorBoundary";
 const s = StyleSheet.create({
   loading: {
     flexDirection: "row",

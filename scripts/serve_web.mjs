@@ -42,7 +42,9 @@ await collectHashes(root);
 export const csp = `default-src 'none'; script-src 'self' ${[...scriptHashes].join(" ")}; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; font-src 'self'; connect-src http://127.0.0.1:* http://localhost:*; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`;
 const server = createServer(async (req, res) => {
   const started = performance.now();
+  let finished = false;
   res.once("finish", () => {
+    finished = true;
     // Access logs deliberately exclude query strings, headers and bodies.
     let path = "[invalid path]";
     try {
@@ -51,6 +53,19 @@ const server = createServer(async (req, res) => {
     console.log(
       `${req.method} ${path} ${res.statusCode} ${Math.round(performance.now() - started)} ms`,
     );
+  });
+  res.once("close", () => {
+    if (!finished && !res.writableEnded) {
+      let path = "[invalid path]";
+      try {
+        path = new URL(req.url, `http://127.0.0.1:${port}`).pathname;
+      } catch {}
+      console.log(
+        `${req.method} ${path} ${res.statusCode} ABORTED ${Math.round(
+          performance.now() - started,
+        )} ms`,
+      );
+    }
   });
   const hosts = [
     `localhost:${port}`,

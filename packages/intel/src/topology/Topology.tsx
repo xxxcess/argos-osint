@@ -32,6 +32,7 @@ import {
   toneColor,
   type Tone,
   colors as c,
+  ErrorBoundary,
 } from "@argos/ui";
 import type { CanvasHandle, GLink, GNode } from "./ForceCanvas";
 
@@ -257,26 +258,28 @@ function GraphExplorer({
           style={[t.canvasBox, { height }]}
         >
           {client && box > 0 && nodes.length > 0 ? (
-            <Suspense fallback={<LoadingState label="Loading graph…" />}>
-              <ForceCanvas
-                ref={canvas}
-                nodes={gNodes}
-                links={gLinks}
-                width={box}
-                height={height}
-                kindColor={kindColor}
-                palette={{
-                  text: c.text,
-                  dim: c.dim,
-                  bg: c.bg,
-                  accent: c.accent,
-                }}
-                selectedId={selected?.id ?? null}
-                focusIds={focusIds}
-                reducedMotion={reduced}
-                onSelect={setSelectedId}
-              />
-            </Suspense>
+            <ErrorBoundary label="Topology graph" onRetry={reset}>
+              <Suspense fallback={<LoadingState label="Loading graph…" />}>
+                <ForceCanvas
+                  ref={canvas}
+                  nodes={gNodes}
+                  links={gLinks}
+                  width={box}
+                  height={height}
+                  kindColor={kindColor}
+                  palette={{
+                    text: c.text,
+                    dim: c.dim,
+                    bg: c.bg,
+                    accent: c.accent,
+                  }}
+                  selectedId={selected?.id ?? null}
+                  focusIds={focusIds}
+                  reducedMotion={reduced}
+                  onSelect={setSelectedId}
+                />
+              </Suspense>
+            </ErrorBoundary>
           ) : null}
           {nodes.length === 0 ? (
             <View style={t.overlay}>

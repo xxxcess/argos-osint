@@ -177,8 +177,9 @@ async function request<T>(
   path: string,
   body?: unknown,
   signal?: AbortSignal,
+  timeoutMs = 10000,
 ): Promise<T> {
-  const combined = combineSignals(signal, 10000);
+  const combined = combineSignals(signal, timeoutMs);
   let response: Response;
   try {
     response = await fetch(`${base}/api/v1/${path}`, {
@@ -189,48 +190,48 @@ async function request<T>(
       credentials: "omit",
       cache: "no-store",
     });
-  } finally {
-    combined.cleanup?.();
-  }
 
-  if (!response.ok) {
-    let payload: unknown = undefined;
-    let message = `HTTP ${response.status}`;
-    try {
-      const text = await response.text();
+    if (!response.ok) {
+      let payload: unknown = undefined;
+      let message = `HTTP ${response.status}`;
       try {
-        const json = JSON.parse(text);
-        payload = json;
-        if (json && typeof json === "object") {
-          if ("error" in json && typeof (json as { error: unknown }).error === "string") {
-            message = (json as { error: string }).error;
-          } else if ("message" in json && typeof (json as { message: unknown }).message === "string") {
-            message = (json as { message: string }).message;
+        const text = await response.text();
+        try {
+          const json = JSON.parse(text);
+          payload = json;
+          if (json && typeof json === "object") {
+            if ("error" in json && typeof (json as { error: unknown }).error === "string") {
+              message = (json as { error: string }).error;
+            } else if ("message" in json && typeof (json as { message: unknown }).message === "string") {
+              message = (json as { message: string }).message;
+            }
+          }
+        } catch {
+          if (text.trim().length > 0) {
+            message = text.trim();
+            payload = text;
           }
         }
       } catch {
-        if (text.trim().length > 0) {
-          message = text.trim();
-          payload = text;
-        }
+        // response reading failed, keep default message
       }
-    } catch {
-      // response reading failed, keep default message
+      throw new ApiError(response.status, message, payload);
     }
-    throw new ApiError(response.status, message, payload);
-  }
 
-  if (response.status === 204) {
-    return undefined as T;
-  }
-  const text = await response.text();
-  if (!text) {
-    return undefined as T;
-  }
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    return text as unknown as T;
+    if (response.status === 204) {
+      return undefined as T;
+    }
+    const text = await response.text();
+    if (!text) {
+      return undefined as T;
+    }
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return text as unknown as T;
+    }
+  } finally {
+    combined.cleanup?.();
   }
 }
 
@@ -313,22 +314,22 @@ export function useBackend() {
   if (!v) throw new Error("BackendProvider required");
   return v;
 }
-export function useRead<T>(path: string, enabled = true) {
+export function useRead<T>(path: string, enabled = true, timeoutMs = 10000) {
   const b = useBackend();
   return useQuery({
     queryKey: [b.base, b.instance, path],
-    queryFn: ({ signal }) => request<T>(b.base, path, undefined, signal),
+    queryFn: ({ signal }) => request<T>(b.base, path, undefined, signal, timeoutMs),
     enabled: b.connected && enabled,
     refetchInterval: 5000,
   });
 }
-export function useAction<T>(path: string) {
+export function useAction<T>(path: string, signal?: AbortSignal) {
   const b = useBackend(),
     client = useQueryClient();
   return useMutation({
     mutationFn: (body: unknown) => {
       if (!b.connected) throw new Error("API offline");
-      return request<T>(b.base, path, body);
+      return request<T>(b.base, path, body, signal);
     },
     onSuccess: () => {
       return client.invalidateQueries({ queryKey: [b.base, b.instance] });
@@ -372,7 +373,7 @@ export function useTopology(seed: Seed | null) {
     queryKey: [b.base, b.instance, "topology", stable],
     enabled: b.connected && !!seed,
     queryFn: ({ signal }) =>
-      request<Topology>(b.base, "topology", { seed }, signal),
+      request<Topology>(b.base, "topology", { seed }, signal, 30000),
   });
 }
 
@@ -393,6 +394,7 @@ export function useRelated(article: Article) {
           (pageParam ? "&" + new URLSearchParams({ cursor: pageParam }) : ""),
         undefined,
         signal,
+        30000,
       ),
     getNextPageParam: (last) => last.next_cursor || undefined,
     refetchInterval: 5000,

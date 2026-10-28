@@ -37,6 +37,7 @@ import {
   toneColor,
   type Tone,
   colors as c,
+  ErrorBoundary,
 } from "@argos/ui";
 import { Topology } from "./topology/Topology";
 const categoryTone: Record<string, Tone> = {
@@ -126,7 +127,9 @@ export function IntelApp() {
           <Text style={s.small}>Loopback only · local development</Text>
         </View>
       ) : (
-        <Workspace key={`${b.base}/${b.instance}`} />
+        <ErrorBoundary label="Workspace">
+          <Workspace key={`${b.base}/${b.instance}`} />
+        </ErrorBoundary>
       )}
     </View>
   );
@@ -450,7 +453,7 @@ function Focus({
   const { width } = useWindowDimensions();
   const narrow = width < 850;
   const [tab, setTab] = useState("Reader");
-  const detail = useRead<Brief>("articles/detail?" + keyFor(a));
+  const detail = useRead<Brief>("articles/detail?" + keyFor(a), true, 30000);
   const related = useRelated(a);
   const ensure = useAction<{ job_id: string }>("brief/ensure");
   const reload = useAction<{ job_id: string }>("brief/reload");

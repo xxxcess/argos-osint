@@ -94,12 +94,12 @@ test("shared guide, planning skill, and OpenCode catalog models are configured w
   const guide = readFileSync(join(root, "AGENTS.md"), "utf8");
   assert.ok(guide.length < readFileSync(join(root, "../AGENTS.md"), "utf8").length);
   assert.equal(config.agents.coordinator.model, "opencode/glm-5.3-flash-free#medium");
-  assert.equal(config.agents.orchestrator.model, "opencode/glm-5.3-flash-free#max");
-  assert.equal(config.agents.architect.model, "opencode/glm-5.3-flash-free#max");
+  assert.equal(config.agents.orchestrator.model, "opencode/glm-5.3-flash-free#medium");
+  assert.equal(config.agents.architect.model, "opencode/glm-5.3-flash-free#medium");
   assert.equal(config.agents.coder.model, config.agents.architect.model);
-  assert.equal(config.agents.reviewer.model, "opencode/nemotron-3.5-super-vl-free#xhigh");
-  assert.equal(config.agents.tester.model, "opencode/nemotron-3.5-super-vl-free#xhigh");
-  assert.equal(config.agents.auditor.model, "opencode/nemotron-3.5-super-vl-free#xhigh");
+  assert.equal(config.agents.reviewer.model, "opencode/nemotron-3.5-super-vl-free#medium");
+  assert.equal(config.agents.tester.model, "opencode/nemotron-3.5-super-vl-free#medium");
+  assert.equal(config.agents.auditor.model, "opencode/nemotron-3.5-super-vl-free#medium");
   assert.equal(JSON.parse(readFileSync(join(root, "coder-worker.json"), "utf8")).model, "opencode/mimo-v2.6-flash-free");
   for (const id of activeAgents) {
     assert.doesNotMatch(config.agents[id].model, /google|claude|anthropic/i);

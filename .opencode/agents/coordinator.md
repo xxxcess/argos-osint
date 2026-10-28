@@ -26,7 +26,7 @@ Select the smallest, most efficient team topology from `.opencode/opencode.json`
   - Dispatch `architect` (`CONSULT` / `AUDIT_UNIT`) only if `file:line` targets are unclear.
   - Dispatch `coder` to implement and format changes, run `scribe` (`DOC_REVIEW`) if docs/tags/contracts are affected, and run the verification gate (`reviewer` + `tester` + `auditor`) in `INTEGRATION_ROOT`.
 - **Tier 3 — Full Project Orchestration ($> 3$ files, multi-phase, cross-crate, or mixed Rust + React UI)**:
-  - Dispatch `orchestrator` (`opencode/glm-5.3-flash-free#max`) with the approved task prompt, `PLAN_ID`, and user constraints to run iterative milestone decomposition, parallel `architect` (`AUDIT_UNIT`) exploration, worktree-isolated `coder` (`EDIT_UNIT`) implementation, `scribe` checkpoints, and the 3-way verification gate (`reviewer` + `tester` + `auditor`).
+  - Dispatch `orchestrator` (`opencode/glm-5.3-flash-free#medium`) with the approved task prompt, `PLAN_ID`, and user constraints to run iterative milestone decomposition, parallel `architect` (`AUDIT_UNIT`) exploration, worktree-isolated `coder` (`EDIT_UNIT`) implementation, `scribe` checkpoints, and the 3-way verification gate (`reviewer` + `tester` + `auditor`).
 
 ## 3. Handoff, Supervision & Guardrails
 - Pass each subagent's configured model from `.opencode/opencode.json` (user overrides win).

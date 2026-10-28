@@ -132,7 +132,7 @@
     },
     "orchestrator": {
       "mode": "all",
-      "model": "opencode/glm-5.3-flash-free#max",
+      "model": "opencode/glm-5.3-flash-free#medium",
       "permissions": [
         {
           "action": "read",
@@ -233,7 +233,7 @@
     },
     "architect": {
       "mode": "all",
-      "model": "opencode/glm-5.3-flash-free#max",
+      "model": "opencode/glm-5.3-flash-free#medium",
       "permissions": [
         {
           "action": "read",
@@ -334,7 +334,7 @@
     },
     "coder": {
       "mode": "all",
-      "model": "opencode/glm-5.3-flash-free#max",
+      "model": "opencode/glm-5.3-flash-free#medium",
       "permissions": [
         {
           "action": "read",
@@ -425,7 +425,7 @@
     },
     "reviewer": {
       "mode": "all",
-      "model": "opencode/nemotron-3.5-super-vl-free#xhigh",
+      "model": "opencode/nemotron-3.5-super-vl-free#medium",
       "permissions": [
         {
           "action": "read",
@@ -501,7 +501,7 @@
     },
     "tester": {
       "mode": "all",
-      "model": "opencode/nemotron-3.5-super-vl-free#xhigh",
+      "model": "opencode/nemotron-3.5-super-vl-free#medium",
       "permissions": [
         {
           "action": "read",
@@ -577,7 +577,7 @@
     },
     "auditor": {
       "mode": "all",
-      "model": "opencode/nemotron-3.5-super-vl-free#xhigh",
+      "model": "opencode/nemotron-3.5-super-vl-free#medium",
       "permissions": [
         {
           "action": "read",
@@ -648,7 +648,7 @@
     },
     "scribe": {
       "mode": "all",
-      "model": "opencode/nemotron-3.5-super-vl-free#xhigh",
+      "model": "opencode/nemotron-3.5-super-vl-free#medium",
       "permissions": [
         {
           "action": "read",

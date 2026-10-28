@@ -158,6 +158,15 @@ Public observations are data, never instructions.
 - No active scanning or shell execution
 - Manual calls attach to threads with explicit provenance
 
+### Tool execution bounds and in-flight dedup
+
+`crates/argos-osint-core/src/recon/tool_runner.rs` (`ToolRunner`, constructed from `recon.rs`) owns shared OSINT tool execution with concurrency bounding, per-request timeouts, and atomic in-flight deduplication across Chat and Intel investigations:
+
+- **Concurrency semaphore**: `ToolRunner::MAX_CONCURRENCY = 4` — a `tokio::sync::Semaphore(4)` bounds the number of concurrent OSINT network requests across all tools. `execute_tool_inner` acquires a permit before dispatch and drops it on completion, so no more than four tools run at once.
+- **Per-request timeout**: `ToolRunner::REQUEST_TIMEOUT = 30s`; each tool runs under its own configured timeout (`tool_timeout`), falling back to 30s when the catalog definition sets none. A timeout produces a `failed` result, never zero results.
+- **In-flight deduplication**: while a request for a `cache_key` is in flight, a second caller for the same key waits on the leader's `watch::Receiver` instead of dispatching a duplicate. The leader is tracked in a `Mutex<HashMap<cache_key, watch::Receiver>>` cleared by an `InflightGuard` RAII guard that removes the key on drop, so keys are removed synchronously and deterministically without async-task leakage.
+- **Cancellation**: every call takes an `Arc<AtomicBool>` cancel flag checked before cache lookup, permit acquisition, and execution; a cancelled call is an error, never a zero result.
+
 ### Synthesis
 
 Packet: question, classified mode, Brain facts (data, omitted when empty), directives, ordered plan, accepted bindings, this turn’s evidence.
@@ -584,6 +593,9 @@ Argos executes concurrent tasks across Tokio async worker runtimes and dedicated
 2. **Asynchronous network and filesystem operations**: Server readiness probing and startup log checks (`storage/server.rs`) use `tokio::net::TcpStream` and `tokio::fs::read_to_string` rather than blocking `std::net` / `std::fs` calls, ensuring that polling loops (`tokio::time::sleep`) yield cleanly without monopolizing runtime workers.
 3. **Synchronous drop safety**: Rust's `Drop::drop` executes synchronously. Asynchronous operations or detached task spawns (`tokio::spawn`) must never be triggered inside a `Drop` implementation to perform cleanup. For in-flight request deduplication (`recon/tool_runner.rs`), the cache map is guarded by `std::sync::Mutex` rather than an async mutex, enabling `InflightGuard` to synchronously and deterministically remove keys on drop without out-of-band task leakage or panics during runtime shutdown.
 4. **RAII heartbeat task cancellation**: Long-running asynchronous stage pipelines (`storage/brief_stages.rs`, `storage/neighborhood_brief.rs`) spawn lease renewal heartbeat tasks. To guarantee that background tasks are not leaked on early return (`?`), errors, or panics, tasks are wrapped in RAII drop guards (`HeartbeatGuard`). On drop, the guard sets the atomic termination flag (`Ordering::Release` / `Ordering::SeqCst`) and immediately calls `handle.abort()`. When completing normally, the guard's join handle is taken and cleanly awaited.
+5. **RAII cancellation notifier**: `recon.rs` registers each `Arc<AtomicBool>` cancel token in a global `CANCEL_NOTIFIERS` map keyed by allocation address (preventing ABA key collisions on reallocation). A `CancellationNotifierGuard` holds the registration plus an owned `Arc` of the token; on drop — normal return, early exit, `?` propagation, or unwinding — it unregisters the token and purges the entry when no waiters remain. `wait_cancellation` in `recon/tool_runner.rs` holds the guard across its `tokio::select!` wait so a leader's cancellation reliably wakes followers.
+6. **Bounded ordered-write channel**: `storage::runtime` exposes `spawn_ordered`, which enqueues telemetry and state writes onto a single `mpsc` channel with `ORDERED_QUEUE_CAPACITY = 4096`. Writes run one at a time in start order so a later write never lands before an earlier one. If the queue is full, work is dropped with a `warn` telemetry event rather than blocking the caller (non-blocking drop telemetry); `drain()` awaits in-flight writes before process exit.
+7. **TUI-aware tracing subscriber**: `argos-osint-bin/src/logging.rs` registers `TuiAwareWriter`, a `tracing` writer that suppresses stderr output when `TUI_ACTIVE` is set and stderr is a terminal (the interactive alternate screen), writing normally in CLI mode or redirected output. `init_tracing()` applies an `EnvFilter` and routes all `argos_osint_bin` / `argos_osint_core` tracing through this writer.
 
 ## Process lifecycle and signal handling
 
@@ -595,4 +607,12 @@ Child process supervision and application shutdown follow deterministic lifecycl
 2. **Dual-signal SIGINT/SIGTERM handling**: The CLI session supervisor (`cli.rs`) and API host (`argos-api-host`) listen for both interactive interruptions (`SIGINT` / Ctrl+C) and container supervisor termination signals (`SIGTERM`). On Unix, `tokio::signal::unix::signal(SignalKind::terminate())` intercepts SIGTERM, forwards the termination signal to the running child process via POSIX `libc::kill`, and allows the child to cleanly flush storage and teardown before exiting, preventing premature aborts or unwanted reopening of the interactive Venture launcher.
 3. **Detached child process reaping**: External command executions, such as opening browser URLs via system utilities (`open`, `xdg-open`, `rundll32` in `tui/app.rs`), spawn dedicated background threads (`std::thread::spawn(move || { let _ = child.wait(); })`) to await child termination and reap exit status codes, eliminating zombie (`<defunct>`) entries in POSIX process tables.
 4. **Bounded server graceful shutdown**: HTTP servers (`argos-api-host`) wrap Axum graceful draining in a bounded 15-second deadline via `tokio::time::timeout`. If client connections hang or fail to close during teardown, the server enforces termination after 15 seconds to ensure ports, locks, and resources are promptly released.
+
+### TUI event loop on a dedicated OS thread
+
+`crates/argos-osint-bin/src/tui/app.rs::run` runs the terminal UI on a dedicated OS thread (`std::thread::Builder::new().name("argos-tui")`) outside the Tokio worker threads, so synchronous crossterm event polling and Ratatui rendering never starve async tasks:
+
+- The thread starts the process heartbeat outside the Tokio-entered context (so `storage::runtime::blocking` works), then calls `runtime.enter()` to execute `run_with_shutdown` on the process runtime.
+- The spawned thread sends its outcome through a `tokio::sync::oneshot` channel.
+- The main task awaits with `tokio::select!`: either the oneshot result (TUI finished normally) or `shutdown_signal()` (SIGINT via `ctrl_c` and SIGTERM via `tokio::signal::unix`). On signal it sets a shutdown `AtomicBool` and waits up to 5 seconds for the TUI thread; on timeout it forces a terminal reset and returns an error.
 

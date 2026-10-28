@@ -15,9 +15,9 @@
 | `auditor` | none | `opencode/nemotron-3.5-super-vl-free#medium` | Forensic integrity and anti-cheating leaf audit (`CLEAN \| INTEGRITY_VIOLATION` binary veto) |
 | `scribe` | none | `opencode/nemotron-3.5-super-vl-free#medium` | Review code deltas and maintain canonical documentation, tags, and diagrams |
 
-## Concise Interview & Dynamic Team Selection
+## Concise Interview, Customer Translation & Dynamic Team Selection
 
-Before spinning up subagents (unless `[skip-interview]` is passed or the prompt is a trivial one-step query/commit), `coordinator` runs a concise 1–3 question interview with `[Default]` recommendations and `(OPEN)` options to confirm scope/deliverables, restrictions/exclusions, and verification depth. Once the task prompt is approved, `coordinator` selects the leanest catalog topology:
+Before spinning up subagents (unless `[skip-interview]` is passed or the prompt is a trivial one-step query/commit), `coordinator` uses the interactive user ask tool (`question`) to run a concise 1–3 question interview with `[Default]` recommendations and `(OPEN)` options confirming scope/deliverables, restrictions/exclusions, and verification depth. Whenever subagents return `NEEDS_DECISION` or blockers during execution, `coordinator` translates the team's technical needs into a concise customer-facing question via the user ask tool. Once the task prompt is approved, `coordinator` selects the leanest catalog topology:
 
 1. **Tier 1 — Direct Specialist (1 subagent)**:
    - Plan/architecture spec $\to$ `architect`; diff review $\to$ `reviewer`; UI/TUI verification $\to$ `tester`; wiki maintenance $\to$ `scribe`; authorized commit $\to$ `coder`.

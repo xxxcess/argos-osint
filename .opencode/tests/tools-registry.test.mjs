@@ -36,6 +36,7 @@ test("coordinator is default GLM max agent and teamwork catalog roles enforce ne
   for (const child of ["orchestrator", "architect", "coder", "reviewer", "tester", "auditor", "scribe"]) {
     assert.equal(effect("coordinator", "subagent", child), "allow");
   }
+  assert.equal(effect("coordinator", "question", "*"), "allow");
   for (const parent of ["orchestrator", "architect", "coder"]) {
     for (const child of ["architect", "coder", "reviewer", "tester", "auditor", "scribe"]) {
       assert.equal(effect(parent, "subagent", child), "allow");
@@ -74,6 +75,8 @@ test("teamwork prompts enforce interview triage, leaf modes, and caller-owned co
   const reviewer = readFileSync(join(root, "agents/reviewer.md"), "utf8");
   const auditor = readFileSync(join(root, "agents/auditor.md"), "utf8");
   assert.match(coordinator, /Concise Pre-Execution Interview/);
+  assert.match(coordinator, /question/);
+  assert.match(coordinator, /Translating Team Needs/);
   assert.match(coordinator, /Dynamic Team Selection from Catalog/);
   assert.match(orchestrator, /INTEGRITY_VIOLATION/);
   assert.match(architect, /AUDIT_UNIT and CONSULT are leaf modes/);

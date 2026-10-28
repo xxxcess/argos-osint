@@ -42,6 +42,10 @@ Use the installed `opencode debug config` and initialized `/api/agent` catalog t
 
 References: [official V2 agents](https://opencode.ai/v2/docs/agents), [config](https://opencode.ai/v2/docs/config), [tools](https://opencode.ai/v2/docs/tools). Navigate through [the wiki](../../index.md), tags and scoped source searches. `/docs-review`, `/setup-wiki` and `/refresh-wiki` select Scribe and use the [maintenance workflow](../maintenance.md). The handoff plugin retains bounded idle/compaction summaries; source search has no graph gate.
 
+## Rust style
+
+Any Rust edit or review under `crates/` loads `argos-rust-style` (Google's Rust Style Guide, with Argos overrides). `argos-osint-core` and `argos-osint-api` follow the library rules; `argos-osint-bin` and `argos-api-host` follow the application rules. Tokio async and the existing crate layout stay in force. Architect passes the skill into Rust phases, coder passes it to Rust `EDIT_UNIT`s, and tester reviews diffs against it. The canonical file is `.opencode/skills/argos-rust-style/SKILL.md`; `.agents/skills/argos-rust-style` is the same skill. `cargo fmt` remains the formatter. Roles, models, and delegation permissions are unchanged.
+
 ## React UI skills
 
 React work uses [React UI rules](react-ui.md), including the [Argos look and feel](react-ui.md#argos-look--feel-reference). Stay on the Argos theme and design components creatively inside it. Topology graphs stay on the force-graph canvas. `argos-react-ui` covers design, accessibility and visual evidence; `argos-react-patterns` covers React Native composition, compiler-compatible hooks, Query state and rendering. All React roles retain the enabled Next Compiler and zero-warning Hooks/compiler lint baseline; platform persistence/request IDs stay behind the app adapter. Canonical files live in `.opencode/skills/`; `.agents/skills/` symlinks expose the same skills to other hosts. Existing plan/implementation skills route through the role prompts, which select these UI skills only for relevant work.

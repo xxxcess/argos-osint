@@ -20,7 +20,7 @@
    * The orchestrator dispatches `scribe` (`DOC_REVIEW` on `google/gemini-4-argon#low`) to initialize and track the durable `.planning/` docs framework via `planning-with-files` for long-term GitHub persistence.
 2. **Scoped Implementation (`EDIT_UNIT` — Precise Changes & Administrative Work):**
    * `coder` runs on `google/gemini-3.8-flash#medium` to handle precise changes in repo files or worktrees and general administrative work.
-   * `coder` records `INTEGRATION_ROOT` and assigns disjoint `EDIT_UNIT` children (`subagent.model: google/gemini-3.8-flash#medium`) using task-owned worktrees under `.agent-scratch/worktrees/` for precise source edits across crates, packages, and UI files.
+   * `coder` records `INTEGRATION_ROOT` and assigns disjoint `EDIT_UNIT` children (`subagent.model: google/gemini-3.8-flash#medium`) using task-owned worktrees under `.agent-scratch/worktrees/` for precise source edits across crates, packages, and UI files. Rust edits load `argos-rust-style`.
    * If code planning, review, or architecture questions arise during implementation, consult team member on `anthropic/claude-sonnet-5.5#low`.
    * `EDIT_UNIT` children edit and format only their assigned files, use `.agent-scratch/` for any temporary data, and never delegate, build, or test.
 3. **Documentation & `.planning/` Checkpoint (`DOC_REVIEW`):**

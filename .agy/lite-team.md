@@ -22,7 +22,7 @@ Fast-path 2-agent workflow (`coder` + `tester`) for scoped tasks ($\le 3$ files,
 
 2. **Implementation & Storage Boundaries:**
    * `coder` records `INTEGRATION_ROOT` and baseline dirty paths.
-   * Sequential edits across $\le 3$ files execute directly in `INTEGRATION_ROOT` or in a single isolated worktree under `.agent-scratch/worktrees/<task-id>`.
+   * Sequential edits across $\le 3$ files execute directly in `INTEGRATION_ROOT` or in a single isolated worktree under `.agent-scratch/worktrees/<task-id>`. Rust edits load `argos-rust-style`.
    * All temporary files, scratch directories, and intermediate outputs **must** use `.agent-scratch/` or `.agent-scratch/worktrees/`.
    * If the task requires recording durable planning notes or spec updates intended for long-term commit persistence to GitHub, store them in the appropriate `.planning/` directory (never in `.agent-scratch/`).
 

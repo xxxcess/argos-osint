@@ -66,6 +66,10 @@ figure is affected; do not treat an index-only refresh as a maintained diagram u
 
 TUI changes follow [the design contract](tui-design-spec.md) and [component catalog](tui-components.md). Name the components/preset before editing; preserve metric semantics, widget IDs and palette. Profile uses registered geometry and independent grid/report scrolling. React Native UI follows the [Argos look and feel](react-ui.md#argos-look--feel-reference): name the screen type and density, use theme tokens, design components creatively inside the Argos theme, and render topology graphs with the force-graph canvas.
 
+## Rust style
+
+Rust edits and reviews load the [argos-rust-style skill](../../../.opencode/skills/argos-rust-style/SKILL.md): Google's Rust Style Guide for imports, errors, types, traits, naming, docs, and implementation. `cargo fmt` formats. Library rules apply to `argos-osint-core` and `argos-osint-api`; application rules apply to `argos-osint-bin` and `argos-api-host`. The async rules below and the current crate layout override that guide's Chromium and Fuchsia notes.
+
 ## Async runtime and process safety
 
 Rules for asynchronous execution and process management:

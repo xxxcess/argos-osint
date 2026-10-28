@@ -15,6 +15,8 @@ Resume only your own child sessionID. Follow documented recovery on handoff fail
 
 Report completed checklist items and evidence after each implementation unit; include affected wiki/routes/tags/diagrams in the phase delta.
 
+For Rust EDIT_UNITs load `argos-rust-style` and pass it in the child prompt. Argos async and crate layout override that guide's Chromium and Fuchsia notes.
+
 Keep shared React Native primitives and the enabled React Compiler/Hooks checks. For React UI work load `argos-react-ui` and `argos-react-patterns`; pass the [Argos look and feel](docs/wiki/code/react-ui.md#argos-look--feel-reference), including creative component design inside the theme, and state/viewport acceptance to EDIT_UNITs. Preserve the leaf edit-only rule; tester owns verification.
 
 For build/test changes, inspect `docs/wiki/code/ci.md` and affected `.github/workflows/`; map acceptance to their actual commands (including targeted host-native embedded Rust commands `-p <crate>`, `--lib`, `--test <name>` for scoped phases and `scripts/local_matrix.sh --storage embedded` for full gates), preserve Code Architect ownership and distinguish local validation from hosted Actions.

@@ -13,6 +13,9 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use surrealdb::types::SurrealValue;
 
 use super::jobs::{self, rid, run, ClaimedTask, NewJob, NewTask};
@@ -283,6 +286,20 @@ async fn end(repo: &Repository, claimed: &ClaimedTask, state: &str, hash: &str) 
     Ok(done.value)
 }
 
+struct HeartbeatGuard {
+    stop: Arc<AtomicBool>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for HeartbeatGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Drain up to eight summary tasks for `owner` (the caller holds the
 /// scheduler election). `secret` loads at most once, after a first claim.
 pub async fn drain(
@@ -342,13 +359,54 @@ pub async fn drain(
         if let Some(load) = load.take() {
             secret = load();
         }
-        match upgrade(repo, secret.as_ref(), &req).await {
+        let lost = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let beat = {
+            let (repo, claimed) = (repo.clone(), claimed.clone());
+            let (lost, stop) = (lost.clone(), stop.clone());
+            let every = Duration::from_millis((lease_secs.max(1) as u64 * 1000 / 3).max(50));
+            tokio::spawn(async move {
+                while !stop.load(Ordering::SeqCst) {
+                    tokio::time::sleep(every).await;
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let renewed = jobs::renew_lease(repo.db(), &claimed, lease_secs, Utc::now())
+                        .await
+                        .map(|c| c.value)
+                        .unwrap_or(false);
+                    if !renewed {
+                        lost.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            })
+        };
+        let mut beat_guard = HeartbeatGuard {
+            stop: stop.clone(),
+            handle: Some(beat),
+        };
+        let upgrade_result = upgrade(repo, secret.as_ref(), &req).await;
+        stop.store(true, Ordering::SeqCst);
+        if let Some(h) = beat_guard.handle.take() {
+            h.abort();
+            let _ = h.await;
+        }
+        if lost.load(Ordering::SeqCst) {
+            out.push(outcome("lease_lost", false));
+            continue;
+        }
+        match upgrade_result {
             Ok((summary, tag)) => {
-                end(repo, &claimed, "completed", tag).await?;
-                out.push(outcome(tag, !summary.fallback));
+                let committed = end(repo, &claimed, "completed", tag).await?;
+                if committed {
+                    out.push(outcome(tag, !summary.fallback));
+                } else {
+                    out.push(outcome("lease_lost", false));
+                }
             }
             Err(_) => {
-                end(repo, &claimed, "failed", "").await?;
+                let _ = end(repo, &claimed, "failed", "").await;
                 out.push(outcome("failed", false));
             }
         }

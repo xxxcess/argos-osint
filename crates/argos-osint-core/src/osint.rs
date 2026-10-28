@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     net::IpAddr,
-    sync::{Arc, OnceLock},
+    sync::{atomic::AtomicBool, Arc, OnceLock},
     time::Duration,
 };
 use tokio::sync::{Mutex, Semaphore};
@@ -2815,9 +2815,27 @@ impl Executor {
     pub async fn run_configured(
         &self,
         id: &str,
+        inputs: Value,
+        user_agent: Option<&str>,
+        keys: &ProviderKeys,
+    ) -> Result<ToolResult> {
+        self.run_configured_with_cancel(
+            id,
+            inputs,
+            user_agent,
+            keys,
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .await
+    }
+
+    pub async fn run_configured_with_cancel(
+        &self,
+        id: &str,
         mut inputs: Value,
         user_agent: Option<&str>,
         keys: &ProviderKeys,
+        cancel: &Arc<AtomicBool>,
     ) -> Result<ToolResult> {
         let id = canonical_tool_id(id);
         let def = definition(id).ok_or_else(|| anyhow!("unknown tool {id}"))?;
@@ -2861,8 +2879,7 @@ impl Executor {
                     .no_redirect()
                     .timeout(holehe::REQUEST_TIMEOUT),
             )?;
-            let cancel = std::sync::atomic::AtomicBool::new(false);
-            let observation = holehe::lookup(&client, lookup_input, user_agent, &cancel).await?;
+            let observation = holehe::lookup(&client, lookup_input, user_agent, cancel).await?;
             let status = holehe::observation_status(&observation);
             return Ok(ToolResult {
                 tool_id: id.into(),

@@ -227,6 +227,7 @@ pub async fn run_claimed(
     .await;
     stop.store(true, Ordering::SeqCst);
     if let Some(h) = beat_guard.handle.take() {
+        h.abort();
         let _ = h.await;
     }
     if lost.load(Ordering::SeqCst) {

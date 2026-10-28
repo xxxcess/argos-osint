@@ -49,6 +49,6 @@ test-util = ["tokio/test-util"]
 [dev-dependencies]
 tempfile.workspace = true
 
-[target.'cfg(unix)'.dev-dependencies]
-# Thread CPU clock for test budgets that must ignore host scheduling delay.
+[target.'cfg(unix)'.dependencies]
+# Thread CPU clock for test budgets and non-blocking process status/signals.
 libc = "0.2"

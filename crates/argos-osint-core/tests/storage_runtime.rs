@@ -55,6 +55,18 @@ async fn one_entry_point_serves_async_and_plain_thread_callers() {
     .unwrap();
     assert_eq!(version, vec![1]);
 
+    // Bounded spawn_ordered preserves order and bounds under the shared runtime.
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for i in 0..100 {
+        let c = counter.clone();
+        let accepted = runtime::spawn_ordered(async move {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(accepted, "item {i} must be accepted within capacity");
+    }
+    runtime::drain().await;
+    assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 100);
+
     drop((a, b));
     if mode == Mode::Server {
         // The process-wide repository still holds its lease.

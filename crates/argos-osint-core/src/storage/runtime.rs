@@ -115,6 +115,11 @@ type Queued = (
     tokio::sync::oneshot::Sender<()>,
 );
 
+/// Bounded capacity for the ordered telemetry and state writes queue.
+/// A generous 4096-item buffer accommodates high-throughput bursts without
+/// blocking callers, while providing backpressure protection against unbounded memory growth.
+pub const ORDERED_QUEUE_CAPACITY: usize = 4096;
+
 /// Like [`spawn`], but writes started here run one at a time in the order
 /// they were started, so a later write (an attempt's finish, a job's
 /// phase) never lands before an earlier one (its start). [`drain`] waits
@@ -123,12 +128,12 @@ pub fn spawn_ordered<F>(work: F) -> bool
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    static QUEUE: OnceLock<tokio::sync::mpsc::UnboundedSender<Queued>> = OnceLock::new();
+    static QUEUE: OnceLock<tokio::sync::mpsc::Sender<Queued>> = OnceLock::new();
     let Some(entry) = ENTRY.get() else {
         return false;
     };
     let queue = QUEUE.get_or_init(|| {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Queued>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Queued>(ORDERED_QUEUE_CAPACITY);
         entry.handle.spawn(async move {
             while let Some((work, done)) = rx.recv().await {
                 work.await;
@@ -138,12 +143,22 @@ where
         tx
     });
     let (done, finished) = tokio::sync::oneshot::channel();
-    if queue.send((Box::pin(work), done)).is_err() {
-        return false;
+    match queue.try_send((Box::pin(work), done)) {
+        Ok(()) => spawn(async move {
+            let _ = finished.await;
+        }),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                capacity = ORDERED_QUEUE_CAPACITY,
+                "storage::runtime::spawn_ordered queue is full; dropping work to prevent memory growth"
+            );
+            false
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            tracing::warn!("storage::runtime::spawn_ordered channel is closed; dropping work");
+            false
+        }
     }
-    spawn(async move {
-        let _ = finished.await;
-    })
 }
 
 /// Wait for every write started by [`spawn`] (call before the process exits).

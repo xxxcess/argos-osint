@@ -175,7 +175,7 @@ pub fn raise_local_cancel(id: &str) -> bool {
     let live = live().lock().unwrap_or_else(|e| e.into_inner());
     match live.get(id) {
         Some(flag) => {
-            flag.store(true, Ordering::Relaxed);
+            crate::recon::cancel_with_notify(flag);
             true
         }
         None => false,
@@ -345,7 +345,7 @@ impl JobHandle {
             if let Ok(true) =
                 crate::storage::recon_jobs::set_job_progress(&repo, &id, &phase, done, total).await
             {
-                cancel.store(true, Ordering::Relaxed);
+                crate::recon::cancel_with_notify(&cancel);
             }
         });
     }

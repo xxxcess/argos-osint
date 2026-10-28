@@ -770,6 +770,7 @@ pub async fn run_claimed(
     };
     done.store(true, Ordering::Release);
     if let Some(h) = heartbeat_guard.handle.take() {
+        h.abort();
         let _ = h.await;
     }
     let _ = set_activity(repo, &claimed.id, "").await;

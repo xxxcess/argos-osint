@@ -21,3 +21,4 @@ serde_json.workspace = true
 url.workspace = true
 argos-osint-api = { path = "../argos-osint-api", default-features = false }
 clap.workspace = true
+tracing-subscriber.workspace = true

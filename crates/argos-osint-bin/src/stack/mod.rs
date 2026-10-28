@@ -612,7 +612,8 @@ async fn run(up: Up) -> Result<()> {
         }
     }
     if target == Target::Tui {
-        return crate::tui::run(crate::tui::App::boot()?).await;
+        let app = tokio::task::spawn_blocking(crate::tui::App::boot).await??;
+        return crate::tui::run(app).await;
     }
     if up.terminal == TerminalDisplay::Tui {
         presentation::require_terminal()?;

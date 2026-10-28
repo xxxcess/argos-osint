@@ -2,6 +2,7 @@
 //! library so integration tests can link the same code.
 
 pub mod cli;
+pub mod logging;
 #[cfg(test)]
 mod test_storage;
 pub mod tui;

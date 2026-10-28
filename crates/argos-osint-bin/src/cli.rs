@@ -378,6 +378,8 @@ pub async fn dispatch() -> Result<()> {
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
         let mut term_received = false;
+        const CHILD_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        const CHILD_REAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
         let status = loop {
             tokio::select! {
                 status = child.wait() => break status?,
@@ -399,8 +401,35 @@ pub async fn dispatch() -> Result<()> {
                     term_received = true;
                     #[cfg(unix)]
                     if let Some(pid) = child.id() {
-                        unsafe {
-                            libc::kill(pid as i32, libc::SIGTERM);
+                        if pid > 0 && pid <= i32::MAX as u32 {
+                            // SAFETY: pid is validated to be a non-zero, positive integer within pid_t range.
+                            unsafe {
+                                libc::kill(pid as i32, libc::SIGTERM);
+                            }
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    let _ = child.start_kill();
+
+                    // Bounded grace period waiting for child to exit gracefully.
+                    match tokio::time::timeout(CHILD_SHUTDOWN_TIMEOUT, child.wait()).await {
+                        Ok(status_res) => break status_res?,
+                        Err(_) => {
+                            #[cfg(unix)]
+                            if let Some(pid) = child.id() {
+                                if pid > 0 && pid <= i32::MAX as u32 {
+                                    // SAFETY: pid is validated to be a non-zero, positive integer within pid_t range.
+                                    unsafe {
+                                        libc::kill(pid as i32, libc::SIGKILL);
+                                    }
+                                }
+                            }
+                            let _ = child.kill().await;
+                            let status = match tokio::time::timeout(CHILD_REAP_TIMEOUT, child.wait()).await {
+                                Ok(Ok(st)) => st,
+                                _ => anyhow::bail!("timed out waiting to reap child process"),
+                            };
+                            break status;
                         }
                     }
                 }
@@ -435,7 +464,10 @@ async fn dispatch_command(command: Option<Command>) -> Result<()> {
         None => return Ok(()),
     };
     match command {
-        None => tui::run(App::boot()?).await,
+        None => {
+            let app = tokio::task::spawn_blocking(App::boot).await??;
+            tui::run(app).await
+        }
         Some(Command::Stack { command }) => crate::stack::dispatch(command).await,
         Some(Command::Remember {
             app,

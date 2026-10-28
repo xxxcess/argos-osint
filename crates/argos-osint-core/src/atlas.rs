@@ -1800,7 +1800,7 @@ impl SurrealCycleJob {
                 }
             }
             if stop {
-                cancel.store(true, Ordering::Relaxed);
+                crate::recon::cancel_with_notify(&cancel);
             }
         });
     }
@@ -2745,7 +2745,9 @@ where
                         result = &mut work => break result,
                         result = &mut native_work, if native_result.is_none() => { native_result = Some(result?); },
                         _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
-                            if cycle_paused(tracker,pause) { cancel.store(true,Ordering::Relaxed); }
+                            if cycle_paused(tracker, pause) {
+                                crate::recon::cancel_with_notify(&cancel);
+                            }
                         }
                     }
                 };

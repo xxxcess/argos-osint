@@ -8171,7 +8171,7 @@ impl App {
             ButtonId::CancelRun => {
                 if let Some(id) = &self.selected_thread {
                     if let Some(cancel) = self.running.get(id) {
-                        cancel.store(true, Ordering::Relaxed);
+                        recon::cancel_with_notify(cancel);
                     }
                 }
                 Ok("Cancellation requested".into())
@@ -8192,11 +8192,11 @@ impl App {
             ButtonId::OsintCancel => {
                 let mut cancelled = false;
                 if let Some(cancel) = &self.dataset_refresh_cancel {
-                    cancel.store(true, Ordering::Relaxed);
+                    recon::cancel_with_notify(cancel);
                     cancelled = true;
                 }
                 if let Some(cancel) = &self.osint_cancel {
-                    cancel.store(true, Ordering::Relaxed);
+                    recon::cancel_with_notify(cancel);
                     cancelled = true;
                 }
                 if cancelled {
@@ -9570,7 +9570,7 @@ impl App {
         if input == ":cancel" {
             if let Some(id) = &self.selected_thread {
                 if let Some(cancel) = self.running.get(id) {
-                    cancel.store(true, Ordering::Relaxed);
+                    recon::cancel_with_notify(cancel);
                 }
             }
             self.input.clear();
@@ -9589,9 +9589,7 @@ impl App {
             self.threads_deleting.insert(id.clone()),
             "This investigation is already being deleted"
         );
-        self.running
-            .remove(&id)
-            .inspect(|cancel| cancel.store(true, Ordering::Relaxed));
+        self.running.remove(&id).inspect(recon::cancel_with_notify);
         let tx = self.work_tx.clone();
         // Deleting the insights with the thread is not on SurrealDB yet:
         // the thread goes and its insights are kept.
@@ -10184,7 +10182,7 @@ impl App {
         if self.module == Some(ModuleId::Recon) {
             if let Some(id) = self.selected_thread.clone() {
                 if let Some(cancel) = self.running.get(&id) {
-                    cancel.store(true, Ordering::Relaxed);
+                    recon::cancel_with_notify(cancel);
                     self.status = "Cancellation requested".into();
                     self.push_log("info", "Recon cancellation requested");
                     return true;
@@ -10194,11 +10192,11 @@ impl App {
         if self.module == Some(ModuleId::Osint) {
             let mut cancelled = false;
             if let Some(cancel) = &self.dataset_refresh_cancel {
-                cancel.store(true, Ordering::Relaxed);
+                recon::cancel_with_notify(cancel);
                 cancelled = true;
             }
             if let Some(cancel) = &self.osint_cancel {
-                cancel.store(true, Ordering::Relaxed);
+                recon::cancel_with_notify(cancel);
                 cancelled = true;
             }
             if cancelled {
@@ -10899,12 +10897,78 @@ fn atlas_poll_wait(app: &App, fallback: Duration) -> Duration {
         .max(Duration::from_millis(1))
 }
 
+/// Run the terminal user interface on a dedicated OS thread outside Tokio worker threads.
+///
+/// Plain thread execution ensures that synchronous crossterm event polling and Ratatui
+/// rendering do not starve async runtime tasks. The job registry heartbeat is started
+/// before entering the runtime, and external POSIX termination signals are intercepted
+/// to trigger cooperative shutdown and clean terminal restoration.
 pub async fn run(app: App) -> Result<()> {
-    run_with_shutdown(
-        app,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        true,
-    )
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let runtime = tokio::runtime::Handle::current();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let stop = Arc::clone(&shutdown);
+    let (sender, mut receiver) = tokio::sync::oneshot::channel();
+
+    std::thread::Builder::new()
+        .name("argos-tui".into())
+        .spawn(move || {
+            let outcome = {
+                // Initialize process beat outside Tokio entered context so that
+                // storage::runtime::blocking succeeds without bailing.
+                let _beat =
+                    argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok();
+                let _entered = runtime.enter();
+                run_with_shutdown(app, stop, true)
+            };
+            let _ = sender.send(outcome);
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to spawn TUI thread: {e}"))?;
+
+    tokio::select! {
+        res = &mut receiver => {
+            match res {
+                Ok(outcome) => outcome,
+                Err(_) => Err(anyhow::anyhow!("TUI execution thread disconnected unexpectedly")),
+            }
+        }
+        _ = shutdown_signal() => {
+            shutdown.store(true, Ordering::Relaxed);
+            match tokio::time::timeout(Duration::from_secs(5), receiver).await {
+                Ok(Ok(outcome)) => outcome,
+                Ok(Err(_)) => Err(anyhow::anyhow!("TUI thread ended unexpectedly during shutdown")),
+                Err(_) => {
+                    let _ = crossterm::terminal::disable_raw_mode();
+                    let _ = crossterm::execute!(
+                        std::io::stdout(),
+                        crossterm::event::DisableMouseCapture,
+                        crossterm::terminal::LeaveAlternateScreen,
+                        crossterm::cursor::Show
+                    );
+                    Err(anyhow::anyhow!("TUI shutdown timed out; forced terminal reset"))
+                }
+            }
+        }
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        if let Ok(mut term) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// Run on a plain terminal thread while a stack supervisor owns the async API.
@@ -10921,14 +10985,17 @@ pub fn run_with_shutdown(
     struct Restore;
     impl Drop for Restore {
         fn drop(&mut self) {
+            crate::logging::TUI_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = crossterm::execute!(
                 std::io::stdout(),
                 crossterm::event::DisableMouseCapture,
-                crossterm::terminal::LeaveAlternateScreen
+                crossterm::terminal::LeaveAlternateScreen,
+                crossterm::cursor::Show
             );
         }
     }
+    crate::logging::TUI_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
     enable_raw_mode()?;
     let _restore = Restore;
     let mut stdout = std::io::stdout();
@@ -18991,7 +19058,6 @@ mod tests {
     #[test]
     fn topology_summary_rows_are_cached_per_key_and_keep_markup_characters() {
         use super::super::topology::{summary_rows, SummaryGen, SummaryRow};
-        use std::rc::Rc;
         let mut app = brief_fixture();
         app.topology_state
             .snapshot
@@ -19007,7 +19073,7 @@ mod tests {
         let st = &app.topology_state;
         let a = summary_rows(st, false, None, 40);
         let b = summary_rows(st, false, None, 40);
-        assert!(Rc::ptr_eq(&a, &b), "same key reuses the built rows");
+        assert!(Arc::ptr_eq(&a, &b), "same key reuses the built rows");
         let plain: String = a
             .iter()
             .filter_map(|r| match r {
@@ -19026,13 +19092,13 @@ mod tests {
             "{plain}"
         );
         // Each key component rebuilds.
-        assert!(!Rc::ptr_eq(&a, &summary_rows(st, false, None, 41)));
-        assert!(!Rc::ptr_eq(&a, &summary_rows(st, true, None, 41)));
+        assert!(!Arc::ptr_eq(&a, &summary_rows(st, false, None, 41)));
+        assert!(!Arc::ptr_eq(&a, &summary_rows(st, true, None, 41)));
         let c = summary_rows(st, false, None, 40);
         app.topology_state.summary.gen = SummaryGen::Pending;
         app.topology_state.summary.generation += 1;
         let d = summary_rows(&app.topology_state, false, None, 40);
-        assert!(!Rc::ptr_eq(&c, &d));
+        assert!(!Arc::ptr_eq(&c, &d));
         // A failure kind rebuilds; the message text is not part of the key.
         use argos_osint_core::brain_neighborhood_brief_exec::{FailureKind, GenerationFailure};
         app.topology_state.summary.gen = SummaryGen::Failed(GenerationFailure {
@@ -19040,26 +19106,26 @@ mod tests {
             message: "first".into(),
         });
         let f1 = summary_rows(&app.topology_state, false, None, 40);
-        assert!(!Rc::ptr_eq(&d, &f1));
+        assert!(!Arc::ptr_eq(&d, &f1));
         app.topology_state.summary.gen = SummaryGen::Failed(GenerationFailure {
             kind: FailureKind::Rejected,
             message: "first".into(),
         });
         let f2 = summary_rows(&app.topology_state, false, None, 40);
-        assert!(!Rc::ptr_eq(&f1, &f2), "a different kind rebuilds");
+        assert!(!Arc::ptr_eq(&f1, &f2), "a different kind rebuilds");
         app.topology_state.summary.gen = SummaryGen::Failed(GenerationFailure {
             kind: FailureKind::Rejected,
             message: "second".into(),
         });
         let f3 = summary_rows(&app.topology_state, false, None, 40);
-        assert!(Rc::ptr_eq(&f2, &f3), "same kind and generation reuse rows");
+        assert!(Arc::ptr_eq(&f2, &f3), "same kind and generation reuse rows");
         // Scrolling reuses the cache: no rebuild between wheel steps.
         render(&mut app, 120, 40);
         let before = summary_rows(&app.topology_state, false, None, 33);
         app.set_focus(Target::TopologySummary);
         key(&mut app, KeyCode::Down);
         let after = summary_rows(&app.topology_state, false, None, 33);
-        assert!(Rc::ptr_eq(&before, &after) || before.len() == after.len());
+        assert!(Arc::ptr_eq(&before, &after) || before.len() == after.len());
     }
 
     #[test]

@@ -7,7 +7,6 @@ use argos_osint_core::{
 };
 use std::{
     fs::File,
-    io::Write,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -15,7 +14,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
@@ -73,7 +72,7 @@ pub(super) struct Recorder {
 }
 
 impl Recorder {
-    pub async fn start(operation: &str, title: &str, mut file: Option<File>) -> Result<Self> {
+    pub async fn start(operation: &str, title: &str, file: Option<File>) -> Result<Self> {
         let job = JobHandle::begin(
             &argos_osint_core::paths::db_path(),
             JobSpec::new("system", operation, title),
@@ -100,26 +99,40 @@ impl Recorder {
         };
         let dropped = sink.dropped.clone();
         let job_id = sink.job_id.clone();
+        let mut async_file = file.map(tokio::fs::File::from_std);
+
         let writer = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                if let Some(file) = file.as_mut() {
-                    let _ = writeln!(file, "{}", event.message);
+                if let Some(ref mut f) = async_file {
+                    let mut line = Vec::with_capacity(event.message.len() + 1);
+                    line.extend_from_slice(event.message.as_bytes());
+                    line.push(b'\n');
+                    let _ = f.write_all(&line).await;
                 }
                 let _ = argos_osint_core::storage::event_log::record_event(repo.db(), &event).await;
             }
             let omitted = dropped.swap(0, Ordering::Relaxed);
             if omitted > 0 {
+                let message =
+                    format!("{omitted} traffic entries omitted while the log queue was full");
+                if let Some(ref mut f) = async_file {
+                    let mut line = Vec::with_capacity(message.len() + 1);
+                    line.extend_from_slice(message.as_bytes());
+                    line.push(b'\n');
+                    let _ = f.write_all(&line).await;
+                }
                 let event = NewEvent {
                     severity: Some(Severity::Warn),
                     app: "system".into(),
                     event_type: "service.overflow".into(),
                     job_id,
-                    message: format!(
-                        "{omitted} traffic entries omitted while the log queue was full"
-                    ),
+                    message,
                     ..Default::default()
                 };
                 let _ = argos_osint_core::storage::event_log::record_event(repo.db(), &event).await;
+            }
+            if let Some(ref mut f) = async_file {
+                let _ = f.flush().await;
             }
         });
         Ok(Self {

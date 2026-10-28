@@ -19,8 +19,24 @@ struct Args {
     )]
     origins: Vec<String>,
 }
+
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(
+            "warn,argos_api_host=info,argos_osint_api=info,argos_osint_core=warn",
+        )
+    });
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .try_init();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_tracing();
     let args = Args::parse();
     let origins = args
         .origins
@@ -65,7 +81,7 @@ async fn main() -> Result<()> {
         Duration::from_secs(15),
     )
     .await?;
-    drop(workers);
+    argos_osint_core::scheduler::WorkerPool::shutdown_all(workers);
     drop(beat);
     if tokio::time::timeout(Duration::from_secs(6), storage::runtime::drain())
         .await

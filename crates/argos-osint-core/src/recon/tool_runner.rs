@@ -147,6 +147,31 @@ impl ToolRunner {
         }
     }
 
+    pub fn new_with_shared(
+        db_path: impl AsRef<Path>,
+        settings: SettingsFile,
+        keys: ProviderKeys,
+        concurrency: Arc<Semaphore>,
+        inflight: Arc<Mutex<HashMap<String, watch::Receiver<Option<ToolResult>>>>>,
+    ) -> Self {
+        Self {
+            db_path: db_path.as_ref().to_path_buf(),
+            settings,
+            keys,
+            concurrency,
+            inflight,
+            attribution: ToolAttribution::recon(),
+        }
+    }
+
+    pub fn concurrency_semaphore(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.concurrency)
+    }
+
+    pub fn inflight_map(&self) -> Arc<Mutex<HashMap<String, watch::Receiver<Option<ToolResult>>>>> {
+        Arc::clone(&self.inflight)
+    }
+
     /// Replace the default attribution for calls that do not carry their own.
     pub fn with_attribution(mut self, attribution: ToolAttribution) -> Self {
         self.attribution = attribution;
@@ -370,7 +395,8 @@ impl ToolRunner {
         // Each tool runs under its own configured timeout, which stays below the
         // turn's outer deadline (spec §9 fix 6).
         let request_timeout = tool_timeout(def);
-        let exec_fut = executor.run_configured(canonical, inputs.clone(), ua, &self.keys);
+        let exec_fut =
+            executor.run_configured_with_cancel(canonical, inputs.clone(), ua, &self.keys, cancel);
         let mut timed_out = false;
         let result_outcome = tokio::select! {
             res = tokio::time::timeout(request_timeout, exec_fut) => match res {
@@ -704,8 +730,15 @@ impl ToolRunner {
 }
 
 async fn wait_cancellation(cancel: &Arc<AtomicBool>) {
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
+    let guard = super::register_cancellation_notifier(cancel);
     while !cancel.load(Ordering::Relaxed) {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::select! {
+            _ = guard.notified() => {},
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+        }
     }
 }
 

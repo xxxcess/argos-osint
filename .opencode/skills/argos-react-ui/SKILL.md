@@ -7,7 +7,7 @@ description: Create, update or review Argos React Native Web UI, layout, styling
 
 Read `docs/wiki/code/react-ui.md` for the design baseline and evidence workflow; follow `docs/wiki/code/intel-web.md` for product semantics. Paths are relative to the repository root.
 
-- Before editing, name the screen type and density intent (default or compact), then the nearest reusable primitive, layout constraints and acceptance. Apply the `theme.rs` palette with the HUD/glass treatment (tokens in `packages/ui`, see react-ui.md) while preserving layout semantics and product contracts; apply explicit user design direction within the product contracts. Follow `docs/wiki/code/react-ui.md#argos-look--feel-reference`.
+- Before editing, run the design process in `docs/wiki/code/react-ui.md#argos-look--feel-reference`: screen type, density (default or compact), nearest primitive, then type, space, accent, component treatment, and states. Stay on the Argos terminal desk plus HUD/glass. Design the component creatively inside that theme; do not switch palette, typeface, or brand.
 - Use React Native primitives and keep the Next React Compiler pipeline and Hooks/compiler lint enabled; fix diagnostics and verify compiled-build behavior.
 - Reuse `@argos/ui`; keep feature composition in `@argos/intel` and browser-only behavior in the web app. For component APIs, remote state or render performance also load `argos-react-patterns`.
 - Cover wide/narrow layouts, long content and relevant loading/empty/error/offline states. Preserve source attribution, evidence distinctions, image fallback and ready-gated actions.

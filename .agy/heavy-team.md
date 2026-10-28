@@ -28,7 +28,7 @@
    * `scribe` uses `google/gemini-4-argon#low` for long-term plan tracking in `.planning/`, and `google/gemini-3.8-flash#medium` for general administrative documentation updates, wiki docs, diagrams, and READMEs, returning `COMPLETE | NEEDS_DECISION | BLOCKED`.
 4. **Verification Gate (`VERIFY`):**
    * `coder` invokes `tester` (`subagent.model: google/gemini-4-argon#low`) to execute host-native verification gates in `INTEGRATION_ROOT` (Rust builds, clippy, and embedded storage mode tests referencing `.github/workflows/ci.yml` and `docs/wiki/code/ci.md`).
-   * For code review, architecture analysis, and React Native UI compliance review (`react-ui.md`, `theme.rs` HUD/glass palette, shared React Native primitives, zero-warning React Compiler/Hooks lint, and offline Playwright fixture screenshots), consult team member on `anthropic/claude-sonnet-5.5#low`.
+   * For code review, architecture analysis, and React Native UI compliance review (`react-ui.md` Argos look and feel, creative component design inside the theme, shared React Native primitives, zero-warning React Compiler/Hooks lint, and offline Playwright fixture screenshots), consult team member on `anthropic/claude-sonnet-5.5#low`.
    * Both verification results and review notes are saved to `.agent-scratch/` and returned (`PASS | FAIL | BLOCKED | PENDING`) to `coder`, which relays them to the orchestrator.
 5. **Acceptance & Cleanup:**
    * The orchestrator (`google/gemini-4-argon#low`) reviews diagnostics, verifies long-term plan tracking ledgers in `.planning/` for GitHub persistence, and instructs `coder` to execute `.agent-scratch/` and `.agent-scratch/worktrees/` cleanup.

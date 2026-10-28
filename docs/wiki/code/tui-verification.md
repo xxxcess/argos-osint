@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-This is the repo standard for agents changing terminal presentation or interaction. Read the [design contract](tui-design-spec.md) and affected [component APIs](tui-components.md) before editing. The [Profile implementation session](../../archive/tui-verification-session-2026-10-10.md) records how this procedure was established, including actual screenshots and defects found. The reusable skill is [argos-tui-verify](../../../.opencode/skills/argos-tui-verify/SKILL.md).
+This is the repo standard for agents changing terminal presentation or interaction. Read the [design contract](tui-design-spec.md) and affected [component APIs](tui-components.md) before editing. Keep the TUI simple. React Native component creativity belongs in the [Argos look and feel](react-ui.md#argos-look--feel-reference) and does not add terminal chrome. The [Profile implementation session](../../archive/tui-verification-session-2026-10-10.md) records how this procedure was established, including actual screenshots and defects found. The reusable skill is [argos-tui-verify](../../../.opencode/skills/argos-tui-verify/SKILL.md).
 
 ## Plan the contract
 

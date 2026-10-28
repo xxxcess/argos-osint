@@ -140,7 +140,7 @@ See the [web/API guide](docs/wiki/code/intel-web.md) for backend selection, stor
 
 ### Development checks
 
-Shared UI uses React Native primitives mapped to React Native Web. React Compiler is enabled for Next and the shared packages; lint includes Hooks/compiler diagnostics with zero warnings. Keep both integrations enabled. [React UI rules](docs/wiki/code/react-ui.md#react-native-and-compiler-baseline) describe the platform boundary and verification requirements.
+Shared UI uses React Native primitives mapped to React Native Web. React Compiler is enabled for Next and the shared packages; lint includes Hooks/compiler diagnostics with zero warnings. Keep both integrations enabled. [React UI rules](docs/wiki/code/react-ui.md#react-native-and-compiler-baseline) describe the platform boundary and verification requirements. Visual work follows the [Argos look and feel](docs/wiki/code/react-ui.md#argos-look--feel-reference): the terminal-desk theme, with room to design components creatively inside it. Topology graphs use the force-graph canvas.
 
 ```sh
 # Targeted local Rust checks & tests (fast iteration on the host machine; embedded storage mode)
@@ -185,7 +185,7 @@ Contributors working with agentic coding CLIs follow the shared repository stand
   - Users running the `/teamwork` command in Google Antigravity CLI should reference [.agy/howto.md](.agy/howto.md) to select the right workflow spec for their task scope:
     - **Lite Team ([.agy/lite-team.md](.agy/lite-team.md)):** Fast-path 2-agent workflow (`coder` + `tester`) for scoped fixes and single-module updates ($\le 3$ files, no breaking contract/schema changes).
     - **Heavy Team ([.agy/heavy-team.md](.agy/heavy-team.md)):** Full 4-agent orchestration (`architect`, `coder`, `tester`, `scribe`) with Phase 0 `.planning/` bootstrap, parallel `.agent-scratch/worktrees/` execution, and full host-native verification gates.
-    - **Scope-specific React Native UI `tester` (`anthropic/claude-sonnet-5.5#low`):** Both specs dispatch a dedicated `tester` agent on `anthropic/claude-sonnet-5.5#low` for React Native UI scope (`apps/web-desktop`, `packages/{ui,intel,api-client}`) to enforce repository design standards and conventions ([React UI rules](docs/wiki/code/react-ui.md), [conventions](docs/wiki/code/conventions.md), `theme.rs` HUD/glass palette, React Compiler/Hooks lint, and Playwright fixture screenshot review), alongside `google/argon#low` for Rust/system verification.
+    - **Scope-specific React Native UI `tester` (`anthropic/claude-sonnet-5.5#low`):** Both specs dispatch a dedicated `tester` agent on `anthropic/claude-sonnet-5.5#low` for React Native UI scope (`apps/web-desktop`, `packages/{ui,intel,api-client}`) to enforce repository design standards and conventions ([React UI rules](docs/wiki/code/react-ui.md), the [Argos look and feel](docs/wiki/code/react-ui.md#argos-look--feel-reference), [conventions](docs/wiki/code/conventions.md), React Compiler/Hooks lint, and Playwright fixture screenshot review), alongside `google/argon#low` for Rust/system verification.
 
 ## Figures
 

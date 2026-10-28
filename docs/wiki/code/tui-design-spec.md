@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-Read this contract and the relevant [component catalog](tui-components.md) entries before changing `crates/argos-osint-bin/src/tui/`. Profile's current presentation, 20-view inventory and acceptance matrix are specified in [profile-analytics-dashboard.md](profile-analytics-dashboard.md). That document supersedes the older 35-widget and focused-only accordion presentation; telemetry/history and [metric semantics](profile-dashboard-and-search.md#metric-dictionary) remain authoritative.
+Read this contract and the relevant [component catalog](tui-components.md) entries before changing `crates/argos-osint-bin/src/tui/`. Keep the terminal UI simple: no new chrome, motion, or density modes. React Native presentation follows the [Argos look and feel](react-ui.md#argos-look--feel-reference), where component design may vary inside the theme. That latitude does not transfer here. Profile's current presentation, 20-view inventory and acceptance matrix are specified in [profile-analytics-dashboard.md](profile-analytics-dashboard.md). That document supersedes the older 35-widget and focused-only accordion presentation; telemetry/history and [metric semantics](profile-dashboard-and-search.md#metric-dictionary) remain authoritative.
 
 Name the selected components and layout preset before editing. Extend shared components where necessary, preserve theme tokens and the 20 primary IDs, and use the same rectangles for drawing, focus and pointer targets. Child prompts carry components/preset, exact owned files, read-only references and viewport/interaction/data checks.
 

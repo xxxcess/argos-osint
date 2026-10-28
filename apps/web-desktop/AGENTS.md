@@ -8,7 +8,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 <!-- END:nextjs-agent-rules -->
 
-For React UI changes, load `argos-react-ui` and, for components/state/performance, `argos-react-patterns`. Follow [shared UI rules](../../docs/wiki/code/react-ui.md) and preserve the generated Next guidance above.
+For React UI changes, load `argos-react-ui` and, for components/state/performance, `argos-react-patterns`. Follow [shared UI rules](../../docs/wiki/code/react-ui.md) and the [Argos look and feel](../../docs/wiki/code/react-ui.md#argos-look--feel-reference). Design components creatively inside the Argos theme. Preserve the generated Next guidance above.
 
 Keep the React Native Web alias/shared transpilation and React Compiler enabled in Next. `pnpm lint` enforces Hooks/compiler diagnostics with zero warnings; fix violations without disabling rules or adding blanket compiler opt-outs.
 

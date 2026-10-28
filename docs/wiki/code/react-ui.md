@@ -6,19 +6,26 @@ Apply to React UI work in `apps/web-desktop`, `packages/ui`, `packages/intel` an
 
 ## Argos Look & Feel (reference)
 
-Source of feel: Argos OSINT terminal workspace — professional, sparse, evidence-oriented. Name the screen type and density intent (default or compact) before building UI. React Native topology graphs use the force-graph canvas in [ForceCanvas.tsx](../../../packages/intel/src/topology/ForceCanvas.tsx) (`react-force-graph-2d`); keep the accessible list twin. Do not add another graph library or a custom layout. The TUI keeps its existing topology view.
+Direction is the Argos OSINT terminal desk — professional, sparse, evidence-first — plus the HUD/glass treatment below. Stay inside that theme. Component layout, grouping, and treatment may be original when they use the shared tokens, type, accent, and density. A generic card-on-white layout, a new palette, or a second brand is out of theme. Name the screen type and density (default or compact) before building. Adapted from the [frontend design skill](https://codegen.com/skills/frontend-design/skill.md); this baseline decides the theme, and component design may vary inside it.
 
-| Principle | React Native guidance | TUI note (keep simple) |
+1. **Direction.** Design on the terminal desk. Change the theme only when the user asks.
+2. **Type.** `fonts.mono` for telemetry, nav, and metadata; `fonts.body` for prose. Hold the existing scale. No extra face.
+3. **Space.** One base unit (~8–12px). Derive padding and gaps from it. Default lists and cards keep a visible gap. Compact or zero-gap only for launchers, command palettes, headline lists, and category bullets.
+4. **Color.** Neutral surfaces, one accent for titles, primary actions, active navigation, and focus. Select is a separate token. Semantic colors only for state. No decorative gradient.
+5. **Components.** Accent titles and thin frames are the theme signature. Compose or add components freely inside that signature: new groupings, frames, meters, and stripes are fine when they carry information. Extend a shared primitive first; add one when the screen needs a form the set does not have. Bold key values at normal size.
+6. **States.** Hover, focus, active, selected, disabled, loading, empty, and error are designed with the layout. Contrast and focus order come first. Motion stays light; `prefers-reduced-motion` must still show state. Use real labels and data, not placeholder copy.
+
+Scroll long content; do not squeeze charts, tables, or critical rows. Ellipsize labels. React Native topology graphs use [ForceCanvas.tsx](../../../packages/intel/src/topology/ForceCanvas.tsx) (`react-force-graph-2d`) plus the accessible list twin. Do not add another graph library. The TUI keeps its existing topology view and does not gain new chrome, motion, or density modes.
+
+| Principle | React Native | TUI (keep simple) |
 | --- | --- | --- |
-| Accent hierarchy | Accent for titles, primary buttons, focus rings | ACCENT titles + focus border + `• focused` |
-| Thin separation | Subtle borders or light elevation, consistent padding | Thin terminal borders, 1-cell padding |
-| Controlled density | Default spaced lists; compact only for launchers/palettes/headlines | Same rule; do not add more modes |
-| Focus vs selection | Distinct visual states | ACCENT/bold = activation; SELECT = keyboard focus |
+| Accent hierarchy | Titles, primary buttons, focus rings | ACCENT titles + focus border + `• focused` |
+| Thin separation | Subtle border or light elevation, one padding unit | Thin borders, 1-cell padding |
+| Controlled density | Spaced by default; compact only for launchers/palettes/headlines | Same rule; no new modes |
+| Focus vs selection | Distinct states; focus never hides other content | ACCENT/bold = activation; SELECT = keyboard focus |
 | Scroll over squeeze | Min sizes + scroll; ellipsize labels | Charts ≥11 rows, tables ≥9; scroll |
-| Tokens only | Shared theme; no one-off colors | `theme.rs` remains authoritative |
-| Topology graphs | Force graph (`react-force-graph-2d` via `ForceCanvas`) | Existing topology canvas; do not add a force-graph port |
-
-TUI should not become more complex. Prefer extending existing shared components and the current token set.
+| Theme, with room to compose | Tokens for color, type, space, and radius; component layout may be original | `theme.rs` remains authoritative |
+| Topology graphs | `react-force-graph-2d` via `ForceCanvas` | Existing canvas; no force-graph port |
 
 ## Ownership and stack
 
@@ -122,4 +129,4 @@ Report changed paths, checks actually run, inspected states/viewports and remain
 
 ## Sources and adaptation
 
-Inspired by Vercel's [React Native skills](https://github.com/vercel-labs/agent-skills/tree/main/skills/react-native-skills), [React best practices](https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices), [composition patterns](https://github.com/vercel-labs/agent-skills/tree/main/skills/composition-patterns) and [web design guidelines](https://github.com/vercel-labs/agent-skills/tree/main/skills/web-design-guidelines), reviewed 2026-10-26. Compiler setup follows the [official React installation guide](https://react.dev/learn/react-compiler/installation), [Hooks/compiler lint reference](https://react.dev/reference/eslint-plugin-react-hooks) and [Next integration](https://nextjs.org/docs/app/api-reference/config/next-config-js/reactCompiler). These are original repo-specific instructions, not vendored upstream rule files. Retained ideas: accessible interaction, RN-safe rendering, explicit composition, focused state ownership and measured performance. Native-only packages/navigation, server caching/actions, Vercel deployment and wholesale upstream rule installation are outside this guidance. Routine work uses these local rules offline; refresh upstream deliberately when maintaining the skills.
+Inspired by Vercel's [React Native skills](https://github.com/vercel-labs/agent-skills/tree/main/skills/react-native-skills), [React best practices](https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices), [composition patterns](https://github.com/vercel-labs/agent-skills/tree/main/skills/composition-patterns) and [web design guidelines](https://github.com/vercel-labs/agent-skills/tree/main/skills/web-design-guidelines), reviewed 2026-10-26. Compiler setup follows the [official React installation guide](https://react.dev/learn/react-compiler/installation), [Hooks/compiler lint reference](https://react.dev/reference/eslint-plugin-react-hooks) and [Next integration](https://nextjs.org/docs/app/api-reference/config/next-config-js/reactCompiler). These are original repo-specific instructions, not vendored upstream rule files. The [frontend design skill](https://codegen.com/skills/frontend-design/skill.md) (reviewed 2026-10-28) supplies the decision order — direction, type, space, restrained color, a theme signature, designed states — and defers to this baseline. Component composition may vary inside the Argos theme. Retained ideas: accessible interaction, RN-safe rendering, explicit composition, focused state ownership and measured performance. Native-only packages/navigation, server caching/actions, Vercel deployment and wholesale upstream rule installation are outside this guidance. Routine work uses these local rules offline; refresh upstream deliberately when maintaining the skills.

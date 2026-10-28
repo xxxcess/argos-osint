@@ -5,7 +5,7 @@ description: Implement and verify Argos terminal components, layout, focus and m
 
 Use `docs/wiki/code/tui-verification.md` as the maintained procedure, with `docs/wiki/code/tui-design-spec.md` and affected `docs/wiki/code/tui-components.md` entries (Profile: `docs/wiki/code/profile-analytics-dashboard.md`).
 
-Before edits, identify components, shared consumers, owned files, data/metric contracts and acceptance. Preserve shared draw/focus/pointer geometry, IDs, theme tokens, navigation/state restoration and keyboard/mouse parity. Fixtures cover affected viewport thresholds, overflow and missing/low-N/stale/empty/loading states.
+Before edits, identify components, shared consumers, owned files, data/metric contracts and acceptance. Preserve shared draw/focus/pointer geometry, IDs, theme tokens, navigation/state restoration and keyboard/mouse parity. Do not add chrome, motion, or density modes. React Native component creativity in the Argos theme does not apply to the TUI. Fixtures cover affected viewport thresholds, overflow and missing/low-N/stale/empty/loading states.
 
 EDIT_UNIT children edit/format only. Tester runs the embedded gate in the combined integration tree per `.opencode/AGENTS.md`, then captures fresh TestBackend output:
 

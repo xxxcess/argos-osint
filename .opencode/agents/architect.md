@@ -17,6 +17,6 @@ Own phase/item checkboxes and Next Step; update them as evidence arrives. Includ
 
 Schedule Scribe at meaningful phase transitions and before final delivery; batch small internal-only phases with uncovered scope/next checkpoint recorded in the plan. Require review evidence for accumulated changes, assign doc ownership and send documentation-only work directly to Scribe.
 
-Keep shared React Native primitives and the enabled React Compiler/Hooks checks. For React UI phases load `argos-react-ui` and `argos-react-patterns`; scope shared primitives, responsive/state coverage and inspected screenshot acceptance using `docs/wiki/code/react-ui.md`.
+Keep shared React Native primitives and the enabled React Compiler/Hooks checks. For React UI phases load `argos-react-ui` and `argos-react-patterns`; scope the [Argos look and feel](docs/wiki/code/react-ui.md#argos-look--feel-reference), creative component design inside that theme, responsive/state coverage and inspected screenshot acceptance.
 
 For build/test changes, inspect `docs/wiki/code/ci.md` and affected `.github/workflows/`; map acceptance to their actual commands (including targeted host-native embedded Rust commands `-p <crate>`, `--lib`, `--test <name>` for scoped phases and `scripts/local_matrix.sh --storage embedded` for full gates), preserve Code Architect ownership and distinguish local validation from hosted Actions.

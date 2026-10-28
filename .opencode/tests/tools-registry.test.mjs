@@ -53,6 +53,11 @@ test("coordinator is default GLM max agent and teamwork catalog roles enforce ne
     assert.equal(effect(id, "edit", "*"), "deny");
     assert.equal(effect(id, "edit", "**/.planning/**"), "allow");
   }
+  assert.equal(effect("coordinator", "edit", ".opencode/**"), "allow");
+  assert.equal(effect("coordinator", "edit", "**/.opencode/**"), "allow");
+  for (const id of ["orchestrator", "architect", "reviewer", "tester", "auditor"]) {
+    assert.equal(rules(id).some((rule) => rule.action === "edit" && rule.effect === "allow" && /opencode/.test(rule.resource)), false);
+  }
 });
 
 test("commands map to catalog specialists and verify uses the embedded integration gate", () => {
@@ -97,9 +102,9 @@ test("shared guide, planning skill, and OpenCode catalog models are configured w
   const guide = readFileSync(join(root, "AGENTS.md"), "utf8");
   assert.ok(guide.length < readFileSync(join(root, "../AGENTS.md"), "utf8").length);
   assert.equal(config.agents.coordinator.model, "opencode/glm-5.3-flash-free#max");
-  assert.equal(config.agents.orchestrator.model, "opencode/glm-5.3-flash-free#medium");
+  assert.equal(config.agents.orchestrator.model, "opencode/big-pickle");
   assert.equal(config.agents.architect.model, "opencode/glm-5.3-flash-free#max");
-  assert.equal(config.agents.coder.model, "opencode/glm-5.3-flash-free#medium");
+  assert.equal(config.agents.coder.model, "opencode/big-pickle");
   assert.equal(config.agents.reviewer.model, "opencode/nemotron-3.5-super-vl-free#medium");
   assert.equal(config.agents.tester.model, "opencode/nemotron-3.5-super-vl-free#medium");
   assert.equal(config.agents.auditor.model, "opencode/nemotron-3.5-super-vl-free#medium");

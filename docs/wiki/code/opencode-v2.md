@@ -7,9 +7,9 @@
 | Caller | Permitted children | Configured model | Purpose |
 | --- | --- | --- | --- |
 | `coordinator` | `orchestrator`, `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#max` | Default entry point: conduct a concise task interview, lock scope/constraints, and dispatch the most efficient team from the catalog |
-| `orchestrator` | `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#medium` | Decompose multi-phase/multi-milestone work, own `.planning/`, and drive iterative exploration, implementation, Scribe checkpoints, and the 3-way verification gate |
+| `orchestrator` | `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/big-pickle` | Decompose multi-phase/multi-milestone work, own `.planning/`, and drive iterative exploration, implementation, Scribe checkpoints, and the 3-way verification gate |
 | `architect` | `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#max` | Explore code/docs (`AUDIT_UNIT`), advise on contracts (`CONSULT`), write `file:line` phase specs, or coordinate single-phase work |
-| `coder` | `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#medium` | Delegate disjoint `EDIT_UNIT` edits, integrate worktree deltas, invoke `scribe` at checkpoints, run verification gates, and perform authorized commits |
+| `coder` | `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/big-pickle` | Delegate disjoint `EDIT_UNIT` edits, integrate worktree deltas, invoke `scribe` at checkpoints, run verification gates, and perform authorized commits |
 | `reviewer` | `architect` | `opencode/nemotron-3.5-super-vl-free#medium` | Audit integrated diffs for correctness, concurrency/performance, `argos-rust-style`, and React UI compliance (`APPROVE \| REJECT`) |
 | `tester` | `architect` | `opencode/nemotron-3.5-super-vl-free#medium` | Execute empirical host-native checks, TUI/UI screenshot verification, and adversarial stress tests in `INTEGRATION_ROOT` (`PASS \| FAIL \| BLOCKED \| PENDING`) |
 | `auditor` | none | `opencode/nemotron-3.5-super-vl-free#medium` | Forensic integrity and anti-cheating leaf audit (`CLEAN \| INTEGRITY_VIOLATION` binary veto) |
@@ -35,16 +35,16 @@ Before spinning up subagents (unless `[skip-interview]` is passed or the prompt 
 Role models and reasoning variants live in `.opencode/opencode.json` at `agents.<role>.model`:
 
 - **Default Team Coordinator & Architecture (`coordinator`, `architect`)**: `opencode/glm-5.3-flash-free#max` for high-reasoning interactive interviewing, triage, architectural specifications, and contract consultations.
-- **Orchestration & Implementation Coordinators (`orchestrator`, `coder`)**: `opencode/glm-5.3-flash-free#medium`.
+- **Orchestration & Implementation Coordinators (`orchestrator`, `coder`)**: `opencode/big-pickle` (active, free, no reasoning variants; use the model ID verbatim and never append a `#variant` suffix).
 - **Verification, Review, Forensic Audit & Documentation (`reviewer`, `tester`, `auditor`, `scribe`)**: Vision-capable `opencode/nemotron-3.5-super-vl-free#medium`.
 - **Fast `EDIT_UNIT` & Worker Overrides**: `opencode/mimo-v2.6-flash-free` in `.opencode/coder-worker.json` (provider defaults; no advertised reasoning variant).
 
 Set exploration and editing child defaults independently:
 
-- `.opencode/architect-worker.json`: `architect`'s and `orchestrator`'s `AUDIT_UNIT` exploration children (`opencode/glm-5.3-flash-free#medium`).
+- `.opencode/architect-worker.json`: `architect`'s and `orchestrator`'s `AUDIT_UNIT` exploration children (`opencode/big-pickle`).
 - `.opencode/coder-worker.json`: `EDIT_UNIT` coders, `tester`, and `architect` `CONSULT` spawned by `coder` (`opencode/mimo-v2.6-flash-free`); excludes `scribe`, `reviewer`, and `auditor`.
 
-Each file contains `{"model": "provider/model#variant"}`. The caller reads it and supplies `subagent.model` on every new/resumed worker call. An explicit user task override wins. For `scribe`, `reviewer`, and `auditor`, callers read and explicitly pass `agents.<role>.model` from `.opencode/opencode.json`. The child keeps its role prompt/permissions; only its model changes. Unavailable models/variants are reported without silent substitution.
+Each file contains `{"model": "provider/model#variant"}` (omit the `#variant` suffix for models without variants, such as `opencode/big-pickle`). The caller reads it and supplies `subagent.model` on every new/resumed worker call. An explicit user task override wins. For `scribe`, `reviewer`, and `auditor`, callers read and explicitly pass `agents.<role>.model` from `.opencode/opencode.json`. The child keeps its role prompt/permissions; only its model changes. Unavailable models/variants are reported without silent substitution.
 
 ## Delegation and continuation
 
@@ -56,7 +56,7 @@ If continuation returns unknown/foreign-session errors, confirm the old worker i
 
 ## Permissions and tooling
 
-All roles may read/search, use shell and web tools, and load relevant skills. `coordinator`, `orchestrator`, `architect`, `reviewer`, `tester`, and `auditor` edit tools allow only `.planning/**` evidence; `coder` may edit source. `scribe` edit tools permit `docs/**`, `README.md` files, and `.planning/**`; its role prohibits source/test/config/agent-instruction edits, builds, commits and delegation. It reports required changes outside documentation to `coder`. Shell access supports repo commands and is not a filesystem sandbox. Code Mode is enabled so configured MCP discovery tools and worktree/session utilities remain available; nested tools still enforce their own permissions. Browser tools remain denied. Delegation is restricted to the table above. `.opencode/AGENTS.md` is a concise shared guide loaded by `instructions` for all models, alongside root `AGENTS.md`. The project registers the installed `~/.agents/skills/planning-with-files` skill without changing global settings.
+All roles may read/search, use shell and web tools, and load relevant skills. `orchestrator`, `architect`, `reviewer`, `tester`, and `auditor` edit tools allow only `.planning/**` evidence; `coordinator` additionally maintains the project's own OpenCode setup under `.opencode/**`, while source, tests, and docs outside those scopes stay denied; `coder` may edit source. `scribe` edit tools permit `docs/**`, `README.md` files, and `.planning/**`; its role prohibits source/test/config/agent-instruction edits, builds, commits and delegation. It reports required changes outside documentation to `coder`. Shell access supports repo commands and is not a filesystem sandbox. Code Mode is enabled so configured MCP discovery tools and worktree/session utilities remain available; nested tools still enforce their own permissions. Browser tools remain denied. Delegation is restricted to the table above. `.opencode/AGENTS.md` is a concise shared guide loaded by `instructions` for all models, alongside root `AGENTS.md`. The project registers the installed `~/.agents/skills/planning-with-files` skill without changing global settings.
 
 Use the installed `opencode debug config` and initialized `/api/agent` catalog to inspect effective models, prompts and permissions.
 

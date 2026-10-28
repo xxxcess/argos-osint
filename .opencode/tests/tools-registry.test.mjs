@@ -19,9 +19,9 @@ function effect(agent, action, resource) {
 
 const activeAgents = ["coordinator", "orchestrator", "architect", "coder", "reviewer", "tester", "auditor", "scribe"];
 
-test("coordinator is default GLM medium agent and teamwork catalog roles enforce nested handoffs and write boundaries", () => {
+test("coordinator is default GLM max agent and teamwork catalog roles enforce nested handoffs and write boundaries", () => {
   assert.equal(config.default_agent, "coordinator");
-  assert.equal(config.model, "opencode/glm-5.3-flash-free#medium");
+  assert.equal(config.model, "opencode/glm-5.3-flash-free#max");
   assert.equal(config.experimental.subagent_depth, 4);
   assert.equal(config.subagent_depth, undefined);
   for (const id of ["build", "plan", "general", "explore"]) assert.equal(config.agents[id].disabled, true);
@@ -93,7 +93,7 @@ test("shared guide, planning skill, and OpenCode catalog models are configured w
   assert.ok(config.skills.includes("~/.agents/skills/planning-with-files"));
   const guide = readFileSync(join(root, "AGENTS.md"), "utf8");
   assert.ok(guide.length < readFileSync(join(root, "../AGENTS.md"), "utf8").length);
-  assert.equal(config.agents.coordinator.model, "opencode/glm-5.3-flash-free#medium");
+  assert.equal(config.agents.coordinator.model, "opencode/glm-5.3-flash-free#max");
   assert.equal(config.agents.orchestrator.model, "opencode/glm-5.3-flash-free#medium");
   assert.equal(config.agents.architect.model, "opencode/glm-5.3-flash-free#medium");
   assert.equal(config.agents.coder.model, config.agents.architect.model);

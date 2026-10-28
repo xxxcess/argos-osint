@@ -2,11 +2,11 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-`coordinator` (Team Coordinator) is the default entry-point agent (`opencode/glm-5.3-flash-free#medium`). All active catalog archetypes (`coordinator`, `orchestrator`, `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe`) use `mode: all`, so they can run as primary agents or children. Legacy `build`, `plan`, `general`, and `explore` agents are disabled; ECC agent definitions are replaced. `/ecc-plan` selects `architect`, `/ecc-review` selects `reviewer`, `/ecc-verify` selects `tester`, and `/docs-review`, `/setup-wiki`, and `/refresh-wiki` select `scribe`.
+`coordinator` (Team Coordinator) is the default entry-point agent (`opencode/glm-5.3-flash-free#max`). All active catalog archetypes (`coordinator`, `orchestrator`, `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe`) use `mode: all`, so they can run as primary agents or children. Legacy `build`, `plan`, `general`, and `explore` agents are disabled; ECC agent definitions are replaced. `/ecc-plan` selects `architect`, `/ecc-review` selects `reviewer`, `/ecc-verify` selects `tester`, and `/docs-review`, `/setup-wiki`, and `/refresh-wiki` select `scribe`.
 
 | Caller | Permitted children | Configured model | Purpose |
 | --- | --- | --- | --- |
-| `coordinator` | `orchestrator`, `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#medium` | Default entry point: conduct a concise task interview, lock scope/constraints, and dispatch the most efficient team from the catalog |
+| `coordinator` | `orchestrator`, `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#max` | Default entry point: conduct a concise task interview, lock scope/constraints, and dispatch the most efficient team from the catalog |
 | `orchestrator` | `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#medium` | Decompose multi-phase/multi-milestone work, own `.planning/`, and drive iterative exploration, implementation, Scribe checkpoints, and the 3-way verification gate |
 | `architect` | `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#medium` | Explore code/docs (`AUDIT_UNIT`), advise on contracts (`CONSULT`), write `file:line` phase specs, or coordinate single-phase work |
 | `coder` | `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode/glm-5.3-flash-free#medium` | Delegate disjoint `EDIT_UNIT` edits, integrate worktree deltas, invoke `scribe` at checkpoints, run verification gates, and perform authorized commits |
@@ -34,7 +34,7 @@ Before spinning up subagents (unless `[skip-interview]` is passed or the prompt 
 
 Role models and reasoning variants live in `.opencode/opencode.json` at `agents.<role>.model`:
 
-- **Default Team Coordinator (`coordinator`)**: `opencode/glm-5.3-flash-free#medium` for fast, low-latency interactive interviewing, triage, and catalog dispatch.
+- **Default Team Coordinator (`coordinator`)**: `opencode/glm-5.3-flash-free#max` for high-reasoning interactive interviewing, triage, and catalog dispatch.
 - **Orchestration & Implementation Coordinators (`orchestrator`, `architect`, `coder`)**: `opencode/glm-5.3-flash-free#medium`.
 - **Verification, Review, Forensic Audit & Documentation (`reviewer`, `tester`, `auditor`, `scribe`)**: Vision-capable `opencode/nemotron-3.5-super-vl-free#medium`.
 - **Fast `EDIT_UNIT` & Worker Overrides**: `opencode/mimo-v2.6-flash-free` in `.opencode/coder-worker.json` (provider defaults; no advertised reasoning variant).

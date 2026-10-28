@@ -64,7 +64,7 @@ an editor's assigned file set. Reviewers flag stale concepts or diagrams as inco
 work. Report updated docs/figures and actual validation, or a concrete reason no
 figure is affected; do not treat an index-only refresh as a maintained diagram update.
 
-TUI changes follow [the design contract](tui-design-spec.md) and [component catalog](tui-components.md). Name the components/preset before editing; preserve metric semantics, widget IDs and palette. Profile uses registered geometry and independent grid/report scrolling.
+TUI changes follow [the design contract](tui-design-spec.md) and [component catalog](tui-components.md). Name the components/preset before editing; preserve metric semantics, widget IDs and palette. Profile uses registered geometry and independent grid/report scrolling. React Native UI follows the [Argos look and feel](react-ui.md#argos-look--feel-reference): name the screen type and density, use theme tokens, and render topology graphs with the force-graph canvas.
 
 ## Async runtime and process safety
 

@@ -4,6 +4,22 @@
 
 Apply to React UI work in `apps/web-desktop`, `packages/ui`, `packages/intel` and UI-facing changes in `packages/api-client`. The web theme is the **Dark Digitized HUD + Glassmorphism** system below; the TUI keeps its own `theme.rs`, and web work preserves layout semantics and product contracts. This is the shared design baseline for creation, updates and reviews; task-specific design direction can change it deliberately. Rust terminal UI follows its own [design contract](tui-design-spec.md).
 
+## Argos Look & Feel (reference)
+
+Source of feel: Argos OSINT terminal workspace — professional, sparse, evidence-oriented. Name the screen type and density intent (default or compact) before building UI. React Native topology graphs use the force-graph canvas in [ForceCanvas.tsx](../../../packages/intel/src/topology/ForceCanvas.tsx) (`react-force-graph-2d`); keep the accessible list twin. Do not add another graph library or a custom layout. The TUI keeps its existing topology view.
+
+| Principle | React Native guidance | TUI note (keep simple) |
+| --- | --- | --- |
+| Accent hierarchy | Accent for titles, primary buttons, focus rings | ACCENT titles + focus border + `• focused` |
+| Thin separation | Subtle borders or light elevation, consistent padding | Thin terminal borders, 1-cell padding |
+| Controlled density | Default spaced lists; compact only for launchers/palettes/headlines | Same rule; do not add more modes |
+| Focus vs selection | Distinct visual states | ACCENT/bold = activation; SELECT = keyboard focus |
+| Scroll over squeeze | Min sizes + scroll; ellipsize labels | Charts ≥11 rows, tables ≥9; scroll |
+| Tokens only | Shared theme; no one-off colors | `theme.rs` remains authoritative |
+| Topology graphs | Force graph (`react-force-graph-2d` via `ForceCanvas`) | Existing topology canvas; do not add a force-graph port |
+
+TUI should not become more complex. Prefer extending existing shared components and the current token set.
+
 ## Ownership and stack
 
 | Concern | Authority |
@@ -48,13 +64,13 @@ Principles:
 - Translucent slate fills, muted borders and backdrop blur. Blur and other web-only style props are web-only: cast them at the web boundary so native/RN types stay valid, and keep a readable opaque-enough fill when blur is unsupported.
 - Cyber accents with restrained glow: `glow()` on active, focused or critical elements only, never on every surface.
 - Bracketed uppercase mono telemetry labels (e.g. `[ STATUS ]`) for headings/metadata via `StatusTag`/`Frame`/`Panel`; prose stays in body font at a comfortable width.
-- Thin rules, high density, compact controls; responsive grid that wraps (md:flex-row-like) rather than shrinking text.
+- Thin rules and consistent padding. Default list and card spacing stays comfortable; compact or zero-gap only for launchers, command palettes, headline lists, and category bullets. Responsive grid wraps (md:flex-row-like) rather than shrinking text.
 - Contrast meets WCAG AA for text and essential controls against the glass fill over the backdrop. Honor `prefers-reduced-motion`; no motion needed to understand state.
 
 ## UI/UX guidance
 
 - **State clarity:** active, selected, focus, hover, disabled, loading, empty, error and offline are distinct. **Glow is never the sole state indicator**; pair it with text, fill, border weight, `aria-pressed`/role state or icon.
-- **Density:** pack telemetry tightly, but keep touch targets usable and body text readable; one hierarchy per screen, panels only for meaningful groups.
+- **Density:** default spacing leaves a visible gap between records. Compact spacing is only for launchers, command palettes, headline lists, and category bullets. Keep touch targets usable and body text readable; one hierarchy per screen, panels only for meaningful groups.
 - **Tone usage:** danger = failure/blocking, warning = degraded/partial/stale, accent = active/informational, success = verified/healthy. Use `Tone`/`toneColor`, include a text label, and do not use tone to imply corroboration or confidence the data does not carry.
 - **Do:** reuse `Panel`/`Frame`/`StatusTag`; keep focus-visible glow ring; test 1440/768/390/320px; preserve error recovery actions.
 - **Don't:** stack nested glass cards, blur large scrolling lists needlessly, use glow/purple as decoration, tiny mono for essential actions or long text, or change contracts for style.
@@ -70,7 +86,7 @@ The shell uses a compact mono ARGOS / INTEL wordmark, API connection status and 
 
 ## Canvas visualizations
 
-Canvas content is invisible to assistive tech and tests. Every canvas needs an **accessible list/text twin** that carries the same entities, relationships, selection and filters, plus a summary label on the canvas. Pass tokens (`colors`, `toneColor`, palette) into draw code as props rather than hard-coding hex; keep kind/state distinguishable beyond color. Load canvas libraries lazily and client-only, hand them cloned data, and honor reduced motion (no animated transitions, no drag, pre-settled layout). Offer zoom/fit/reset/pause controls as real buttons. See the [topology contract](intel-web.md#interactive-topology-graph).
+Canvas content is invisible to assistive tech and tests. Every canvas needs an **accessible list/text twin** that carries the same entities, relationships, selection and filters, plus a summary label on the canvas. React Native topology graphs use the force-graph canvas (`react-force-graph-2d` in `ForceCanvas`); do not replace it with another chart library or a hand-rolled layout. Pass tokens (`colors`, `toneColor`, palette) into draw code as props rather than hard-coding hex; keep kind/state distinguishable beyond color. Load canvas libraries lazily and client-only, hand them cloned data, and honor reduced motion (no animated transitions, no drag, pre-settled layout). Offer zoom/fit/reset/pause controls as real buttons. See the [topology contract](intel-web.md#interactive-topology-graph).
 
 ## Layout and interaction
 

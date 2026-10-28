@@ -6,17 +6,18 @@ Fast-path 2-agent workflow (`coder` + `tester`) for scoped tasks ($\le 3$ files,
 
 | Caller | Permitted Children | Assigned `subagent.model` | Purpose | 
 | ----- | ----- | ----- | ----- | 
-| `coder` (Rust/System) | `coder`, `tester`, `architect` (`CONSULT`) | `google/gemini-3.8-flash#high` | Implement & format Rust/script changes (`crates/**`, `scripts/**`, `Cargo.*`), invoke `tester` (`google/argon#low`) | 
-| `coder` (React Native) | `coder`, `tester`, `architect` (`CONSULT`) | `anthropic/claude-sonnet-5.5#low` | Implement & format React/React Native changes (`apps/**`, `packages/**`, `ui/**`, `**/*.tsx`, `**/*.ts`), invoke `tester` (`anthropic/claude-sonnet-5.5#low`) | 
-| `tester` (Rust/System) | `architect` (`CONSULT`) | `google/argon#low` | Run host-native targeted Rust/system verification gates in `INTEGRATION_ROOT` and return `PASS / FAIL / BLOCKED / PENDING` | 
-| `tester` (React Native UI) | `architect` (`CONSULT`) | `anthropic/claude-sonnet-5.5#low` | Run React Native UI verification gates in `INTEGRATION_ROOT`, enforce repo UI design standards and conventions (`docs/wiki/code/react-ui.md`, `docs/wiki/code/conventions.md`, `theme.rs` HUD/glass palette, React Compiler/Hooks lint, Playwright fixture screenshots), and return `PASS / FAIL / BLOCKED / PENDING` | 
-| `architect` (`CONSULT`) | `none` | `google/argon#low` | Optional read-only leaf consultation if `coder` or `tester` hits an unexpected contract ambiguity | 
+| `coordinator` / `coder` (Orchestration) | `coder`, `tester`, `architect` (`CONSULT`) | `google/gemini-4-argon#low` *(alias: `google/argon#low`)* | General team orchestration for efficient work completion, dispatching agents, and tracking scoped task progress (`experimental.subagent_depth: 2`) | 
+| `coder` (Implementation & Admin) | `tester`, `architect` (`CONSULT`) | `google/gemini-3.8-flash#medium` | Precise changes in repo files or worktrees (`crates/**`, `apps/**`, `packages/**`, `scripts/**`), code formatting, and general administrative work not requiring heavy reasoning | 
+| `tester` (Verification) | `architect` (`CONSULT`) | `google/gemini-4-argon#low` *(alias: `google/argon#low`)* | Run host-native targeted Rust/system and UI verification gates in `INTEGRATION_ROOT` and return `PASS / FAIL / BLOCKED / PENDING` | 
+| `architect` (`CONSULT`) | `none` | `anthropic/claude-sonnet-5.5#low` | Consult team member for code planning, code review, architecture, and analysis (e.g. contract design, UI design standards/glass palette review, type safety) | 
 
 ## Fast-Path Execution Sequence
 
 1. **Scope Check & Model Selection:**
-   * If the task touches **Rust/Backend/Scripts**, `coder` runs on `google/gemini-3.8-flash#high` and pairs with `tester` on `google/argon#low`.
-   * If the task touches **React/React Native UI**, both `coder` and its dedicated `tester` agent run on `anthropic/claude-sonnet-5.5#low`, loading `.agents/skills/argos-react-ui` and `.agents/skills/argos-react-patterns` and enforcing [React UI rules](../docs/wiki/code/react-ui.md) and [repo conventions](../docs/wiki/code/conventions.md).
+   * **General Team Orchestration & Plan Tracking:** Use `google/gemini-4-argon#low` (alias: `google/argon#low`) for general team orchestration for efficient work completion and tracking scoped plan progress.
+   * **Precise File Edits & Administrative Work:** `coder` runs on `google/gemini-3.8-flash#medium` for precise changes in repo files or worktrees (across Rust, scripts, and React Native UI) and general administrative work not requiring heavy reasoning.
+   * **Code Planning, Review, Architecture & Analysis Consultation:** Consult a team member with `anthropic/claude-sonnet-5.5#low` (`architect` / `CONSULT`) whenever code planning, architecture guidance, technical analysis, or code review (such as auditing diffs or enforcing [React UI rules](../docs/wiki/code/react-ui.md), [repo conventions](../docs/wiki/code/conventions.md), `theme.rs` HUD/glass palette, and React Compiler rules) is required.
+   * **Host-Native Verification:** `tester` runs on `google/gemini-4-argon#low` to execute targeted verification gates in `INTEGRATION_ROOT`.
    * If scope expands beyond $3$ files, alters shared contracts, or requires full multi-phase `.planning/` lifecycle management, stop and escalate to `./heavy-team.md`.
 
 2. **Implementation & Storage Boundaries:**
@@ -25,7 +26,7 @@ Fast-path 2-agent workflow (`coder` + `tester`) for scoped tasks ($\le 3$ files,
    * All temporary files, scratch directories, and intermediate outputs **must** use `.agent-scratch/` or `.agent-scratch/worktrees/`.
    * If the task requires recording durable planning notes or spec updates intended for long-term commit persistence to GitHub, store them in the appropriate `.planning/` directory (never in `.agent-scratch/`).
 
-3. **Verification (`VERIFY`):** `coder` formats all modified files and dispatches the scope-appropriate `tester` (`google/argon#low` for Rust/system work; a separate `tester` on `anthropic/claude-sonnet-5.5#low` for React Native UI work). For React Native UI scope, `tester` validates strict adherence to repository UI design standards and conventions (`docs/wiki/code/react-ui.md`, `theme.rs` HUD/glass palette, shared React Native primitives, zero-warning React Compiler/Hooks lint, and Playwright fixture screenshot inspection). `tester` executes the targeted verification gate in `INTEGRATION_ROOT`, writes any temporary verification logs to `.agent-scratch/`, and returns exit codes and diagnostics.
+3. **Verification (`VERIFY`):** `coder` formats all modified files and dispatches `tester` (`google/gemini-4-argon#low`). For code review, design inspection, or React Native UI verification against repo UI design standards and conventions (`docs/wiki/code/react-ui.md`, `theme.rs` HUD/glass palette, shared React Native primitives, zero-warning React Compiler/Hooks lint, and Playwright fixture screenshot inspection), consult team member on `anthropic/claude-sonnet-5.5#low`. `tester` executes the targeted verification gate in `INTEGRATION_ROOT`, writes any temporary verification logs to `.agent-scratch/`, and returns exit codes and diagnostics.
 
 4. **Fix Loop & Cleanup:** If `tester` reports `FAIL`, `coder` applies targeted fixes and resumes `tester` via its parent-owned `sessionID`. Once `PASS` is achieved, `coder` cleans up `.agent-scratch/` and `.agent-scratch/worktrees/`.
 
@@ -33,7 +34,7 @@ Fast-path 2-agent workflow (`coder` + `tester`) for scoped tasks ($\le 3$ files,
 
 ```text
 MODE: VERIFY | EDIT_UNIT | CONSULT
-SUBAGENT_MODEL: google/argon#low | google/gemini-3.8-flash#high | anthropic/claude-sonnet-5.5#low
+SUBAGENT_MODEL: google/gemini-4-argon#low | google/gemini-3.8-flash#medium | anthropic/claude-sonnet-5.5#low
 INTEGRATION_ROOT / BASE_REVISION:
 WORKTREE / SCRATCH_DIR: .agent-scratch/ or .agent-scratch/worktrees/<task-id>
 PLAN_DIR (if persistent GitHub commit required): .planning/

@@ -17,12 +17,26 @@ When given a task item or specification, evaluate its scope against this matrix 
 | **Contracts & Schemas** | No breaking API, trait, or SurrealDB schema changes | New traits, wire budgets, database migrations, or cross-module contracts |
 | **Long-Term GitHub Persistence (`.planning/`)** | Minimal or no new `.planning/` scaffolding required (uses existing `.planning/` context if applicable) | Requires durable `.planning/` tracking (`planning-with-files` owned by `scribe`) for long-term GitHub commit persistence |
 | **Temporary Files & Worktrees (`.agent-scratch/`)** | All temporary files/dirs in `.agent-scratch/` or a single worktree in `.agent-scratch/worktrees/` | Disjoint parallel `EDIT_UNIT` worktrees in `.agent-scratch/worktrees/` and scratch files in `.agent-scratch/` |
-| **Primary Coordinator** | `coder` (`google/gemini-3.8-flash#high` or `anthropic/claude-sonnet-5.5#low`) | `architect` (`google/argon#low`) |
-| **Verification (`tester`)** | Separate `tester` by scope: `google/argon#low` (Rust/System) or `anthropic/claude-sonnet-5.5#low` (React Native UI, enforcing repo UI design standards & conventions) | Separate `tester` by scope: `google/argon#low` (Rust/System) and `anthropic/claude-sonnet-5.5#low` (React Native UI, enforcing `react-ui.md`, `theme.rs` HUD/glass palette, & conventions) |
+| **Team Orchestration & Coordination** | Fast-path team orchestration for efficient work completion (`google/gemini-4-argon#low` / `google/argon#low`) | Long-term team coordination and general team orchestration (`architect` on `google/gemini-4-argon#low` / `google/argon#low`) |
+| **Precise Edits & Administrative Work** | `coder` (`google/gemini-3.8-flash#medium`) for precise changes in repo files or worktrees & general admin | `coder` (`google/gemini-3.8-flash#medium`) for precise changes in repo files or worktrees & general admin |
+| **Code Planning, Review & Architecture** | Consult team member with `anthropic/claude-sonnet-5.5#low` (`architect` / `CONSULT`) | Consult team member with `anthropic/claude-sonnet-5.5#low` (`architect` / `CONSULT`) |
+| **Verification (`tester`)** | Host-native verification gate (`google/gemini-4-argon#low`); consult `anthropic/claude-sonnet-5.5#low` for code/UI review | Host-native verification gate (`google/gemini-4-argon#low`); consult `anthropic/claude-sonnet-5.5#low` for code/UI review |
 
 ---
 
-## 2. Directory, Persistence & Platform Build Conventions (Mandatory for Both Teams)
+## 2. Model Selection Matrix for Antigravity Teamwork Teams
+
+Every agent in `/teamwork` must be configured with one of the three designated models according to its role and cognitive requirement:
+
+| Model | Subagent Model Identifier | Intended Responsibilities & Selection Rules |
+| --- | --- | --- |
+| **Gemini 4 Argon Low** | `google/gemini-4-argon#low`<br>*(alias: `google/argon#low`)* | **Long-term team coordination, plan tracking, and general team orchestration for efficient work completion.**<br>• **Team Orchestration:** Primary coordinator / orchestrator (`architect` in heavy team, fast-path coordinator in lite team) driving efficient team completion and subagent workflows.<br>• **Long-Term Team Coordination:** Managing phase handoffs between team members and supervising multi-phase tasks.<br>• **Plan Tracking:** Durable roadmap and phase progress tracking within the `.planning/` framework for GitHub persistence.<br>• **Host Verification:** Driving host-native test and build verification gates (`tester`). |
+| **Gemini 3.8 Flash Medium** | `google/gemini-3.8-flash#medium` | **General administrative work & precise changes in repo files or worktrees.**<br>• **Precise Code & File Changes:** Assigned to `coder` and `EDIT_UNIT` workers making exact, targeted modifications in repository files or isolated worktrees (`.agent-scratch/worktrees/`).<br>• **General Administrative Work:** Executing routine administrative chores, non-reasoning file movements, code formatting, and mechanical documentation upkeep that does not require heavy reasoning. |
+| **Claude Sonnet 5.5 Low** | `anthropic/claude-sonnet-5.5#low` | **Code planning, review, architecture, and analysis.**<br>• **Consultation Specialist:** Consult team member with this model whenever deep reasoning or analytical rigor is required.<br>• **Code Planning & Architecture:** Defining pre-implementation technical specifications, trait/type design, cross-crate contract boundaries, and system architectures.<br>• **Code Review:** Auditing code diffs, pull requests, and worktree deltas against repository conventions, type contracts, and React Native UI design standards (`theme.rs` HUD/glass palette, React Compiler compliance).<br>• **Technical Analysis:** Investigating complex contract ambiguities, architectural refactoring, and root-cause diagnostic analysis. |
+
+---
+
+## 3. Directory, Persistence & Platform Build Conventions (Mandatory for Both Teams)
 
 1. **Temporary Files & Directories (`.agent-scratch/` & `.agent-scratch/worktrees/`):**
    * Every temporary file, scratch patch, diagnostic log, isolated Cargo target cache (`CARGO_TARGET_DIR`), or temporary directory **must** be created strictly inside `.agent-scratch/` or `.agent-scratch/worktrees/`.

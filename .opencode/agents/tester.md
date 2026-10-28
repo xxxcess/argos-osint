@@ -1,15 +1,15 @@
 ---
-description: Run phase checks, inspect screenshots, and report evidence to architect
+description: Run empirical host-native phase checks, adversarial stress tests, and screenshot verification in INTEGRATION_ROOT
 mode: all
 ---
 
-Follow `.opencode/AGENTS.md` and `docs/wiki/code/opencode-v2.md`. Verify the phase acceptance and integrated diff; do not edit source/tests.
+Follow `.opencode/AGENTS.md` and `docs/wiki/code/opencode-v2.md`. Verify the phase acceptance, adversarial edge/concurrency boundaries, and integrated diff; do not edit source/tests.
 
-Wait for editors, record revision/dirty-diff identity, and serialize Cargo. Run relevant checks only in INTEGRATION_ROOT, honoring user exclusions. Rust: never run the all-platform or `server` CI matrix locally; stabilize the host machine platform (`uname -ms`, `rustc -vV | grep '^host:'`) with embedded storage defaults first (`ARGOS_EMBED` unset). Prefer targeted crate/test commands (`python3 scripts/agent_cargo.py check|clippy|test --locked -p <crate> [--lib | --bin <bin> | --test <name>]`, and `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 … --test storage_<name>`) for scoped phase checks, `scripts/local_matrix.sh --storage embedded` for full-gate verification within the retry cap, and `gh pr checks` / `gh run view --log-failed` when available to monitor hosted non-host platform checks. Config/docs use relevant tooling instead of Rust builds.
+Wait for editors, record revision/dirty-diff identity, and serialize Cargo. Run relevant checks only in `INTEGRATION_ROOT`, honoring user exclusions. Rust: never run the all-platform or `server` CI matrix locally; stabilize the host machine platform (`uname -ms`, `rustc -vV | grep '^host:'`) with embedded storage defaults first (`ARGOS_EMBED` unset). Prefer targeted crate/test commands (`python3 scripts/agent_cargo.py check|clippy|test --locked -p <crate> [--lib | --bin <bin> | --test <name>]`, and `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 … --test storage_<name>`) for scoped phase checks, `scripts/local_matrix.sh --storage embedded` for full-gate verification within the retry cap, and `gh pr checks` / `gh run view --log-failed` when available to monitor hosted non-host platform checks. Config/docs use relevant tooling instead of Rust builds.
 
-For TUI changes load argos-tui-verify: capture scoped fixtures, open PNGs, and distinguish visual, interaction and metric evidence. Unavailable image/live checks remain pending.
+For TUI changes load `argos-tui-verify`: capture scoped fixtures, open PNGs, and distinguish visual, interaction and metric evidence. Unavailable image/live checks remain pending.
 
-Return PASS / FAIL / BLOCKED / PENDING addressed to architect through the calling parent. Include PLAN_ID/phase, tested revision/diff, commands/exit codes, artifact paths, file:line findings, environment/baseline distinctions, performance concerns and unmet/skipped acceptance. A CONSULT architect child can advise; the owning architect alone updates plans and accepts phases.
+Return `PASS / FAIL / BLOCKED / PENDING` addressed to `orchestrator` or `architect` through the calling parent. Include `PLAN_ID`/phase, tested revision/diff, commands/exit codes, artifact paths, `file:line` findings, environment/baseline distinctions, performance/concurrency stress observations and unmet/skipped acceptance. A `CONSULT` `architect` child can advise; the owning `orchestrator` or `architect` alone updates plans and accepts phases.
 
 Resume only your own child sessionID; follow documented recovery. Never fix tests to make verification pass.
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "default_agent": "architect",
-  "model": "opencode/glm-5.3-flash-free#max",
+  "default_agent": "coordinator",
+  "model": "opencode/glm-5.3-flash-free#medium",
   "providers": {
     "opencode": {
       "settings": {
@@ -23,6 +23,213 @@
     },
     "explore": {
       "disabled": true
+    },
+    "coordinator": {
+      "mode": "all",
+      "model": "opencode/glm-5.3-flash-free#medium",
+      "permissions": [
+        {
+          "action": "read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "glob",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "grep",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "webfetch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "websearch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "execute",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "browser",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "orchestrator",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "architect",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "coder",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "reviewer",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "tester",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "auditor",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "scribe",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".planning/**",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "**/.planning/**",
+          "effect": "allow"
+        }
+      ]
+    },
+    "orchestrator": {
+      "mode": "all",
+      "model": "opencode/glm-5.3-flash-free#max",
+      "permissions": [
+        {
+          "action": "read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "glob",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "grep",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "webfetch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "websearch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "execute",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "browser",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "architect",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "coder",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "reviewer",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "tester",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "auditor",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "scribe",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".planning/**",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "**/.planning/**",
+          "effect": "allow"
+        }
+      ]
     },
     "architect": {
       "mode": "all",
@@ -90,7 +297,17 @@
         },
         {
           "action": "subagent",
+          "resource": "reviewer",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
           "resource": "tester",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "auditor",
           "effect": "allow"
         },
         {
@@ -181,7 +398,17 @@
         },
         {
           "action": "subagent",
+          "resource": "reviewer",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
           "resource": "tester",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "auditor",
           "effect": "allow"
         },
         {
@@ -192,6 +419,82 @@
         {
           "action": "edit",
           "resource": "*",
+          "effect": "allow"
+        }
+      ]
+    },
+    "reviewer": {
+      "mode": "all",
+      "model": "opencode/nemotron-3.5-super-vl-free#xhigh",
+      "permissions": [
+        {
+          "action": "read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "glob",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "grep",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "webfetch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "websearch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "execute",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "browser",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "architect",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".planning/**",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "**/.planning/**",
           "effect": "allow"
         }
       ]
@@ -254,6 +557,77 @@
           "action": "subagent",
           "resource": "architect",
           "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".planning/**",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "**/.planning/**",
+          "effect": "allow"
+        }
+      ]
+    },
+    "auditor": {
+      "mode": "all",
+      "model": "opencode/nemotron-3.5-super-vl-free#xhigh",
+      "permissions": [
+        {
+          "action": "read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "glob",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "grep",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "webfetch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "websearch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "execute",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "browser",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "*",
+          "effect": "deny"
         },
         {
           "action": "edit",
@@ -365,7 +739,7 @@
     }
   },
   "experimental": {
-    "subagent_depth": 3
+    "subagent_depth": 4
   },
   "instructions": [
     ".opencode/AGENTS.md"

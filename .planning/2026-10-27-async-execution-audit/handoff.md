@@ -22,23 +22,26 @@
 
 ## 2. Remaining Scope & Archetype Responsibilities
 
-Follow `.agy/heavy-team.md` and `.agy/howto.md` conventions. Refer to agents strictly by role archetype (`architect`, `architect (CONSULT)`, `coder`, `tester`, `scribe`). Store all scratch artifacts/worktrees under `.agent-scratch/` and durable planning updates under `.planning/2026-10-27-async-execution-audit/`.
+Follow `docs/wiki/code/opencode-v2.md` and `.opencode/AGENTS.md` conventions. Refer to agents strictly by role archetype (`coordinator`, `orchestrator`, `architect`, `coder`, `reviewer`, `tester`, `auditor`, `scribe`). Store all scratch artifacts/worktrees under `.agent-scratch/` and durable planning updates under `.planning/2026-10-27-async-execution-audit/`.
 
 ### Role Archetype Matrix
 
 | Archetype | Responsibilities in Remaining Phases |
 | --- | --- |
-| **`architect`** (Team Lead / Coordinator) | Coordinate phase transitions, manage `.planning/2026-10-27-async-execution-audit/` progress, dispatch `coder`, `tester`, `scribe`, and `architect (CONSULT)`, and enforce final cleanup of `.agent-scratch/`. |
-| **`architect (CONSULT)`** (Architecture & Code Review Specialist) | Audit Milestone 2 diffs against `argos-rust-style`, specify exact line targets for Milestone 3 (Web Client & API Server), and review React Native UI / ErrorBoundary changes against `docs/wiki/code/react-ui.md` (`argos-react-ui` & `argos-react-patterns`). |
-| **`coder`** (Implementation & Worktree Admin) | Implement Milestone 3 fixes in isolated worktrees (`.agent-scratch/worktrees/`) or `INTEGRATION_ROOT` and remediate any findings surfaced by `tester` or `architect (CONSULT)`. |
-| **`tester`** (Verification Gate) | Execute host-native Rust checks/tests (embedded SurrealDB mode) for Milestone 2 and full E2E Rust + Web verification gates for Milestone 4. |
-| **`scribe`** (Documentation & Plan Tracker) | Execute Milestone 5 (`docs/` and `docs/wiki/` updates, tag registry refresh, and `.planning/2026-10-27-async-execution-audit/` checklist completion). |
+| **`coordinator`** (Team Coordinator) | Entry-point liaison: confirm scope/exclusions (or fast-bypass with `[skip-interview]`), dispatch `orchestrator` for Milestones 2–5, and report verified completion. |
+| **`orchestrator`** (Project Orchestrator) | Drive Milestone 2 gate sign-off and Milestones 3–5 execution, manage `.planning/2026-10-27-async-execution-audit/`, and enforce the 3-way verification gate (`reviewer` + `tester` + `auditor`). |
+| **`architect`** (Architecture & Spec Specialist) | Provide `AUDIT_UNIT` / `CONSULT` specifications for Milestone 3 (Web Client & API Server) and advise on cross-crate or UI contracts. |
+| **`coder`** (Implementation & Worktree Admin) | Implement Milestone 3 fixes in isolated worktrees (`.agent-scratch/worktrees/`) or `INTEGRATION_ROOT` via `EDIT_UNIT` workers, and remediate any findings surfaced by the gate. |
+| **`reviewer`** (Code Quality & Style Reviewer) | Audit Milestone 2 and Milestone 3 diffs against `argos-rust-style`, `argos-react-ui`, `argos-react-patterns`, and concurrency/async contracts (`APPROVE \| REJECT`). |
+| **`tester`** (Empirical Verification Gate) | Execute host-native Rust checks/tests (embedded SurrealDB mode) for Milestone 2 and full E2E Rust + Web verification gates for Milestone 4 (`PASS \| FAIL \| BLOCKED \| PENDING`). |
+| **`auditor`** (Forensic Integrity Auditor) | Inspect git diffs, tests, and evidence for Milestones 2–4 to certify zero facade code, zero test weakening, and zero workspace pollution (`CLEAN \| INTEGRITY_VIOLATION`). |
+| **`scribe`** (Documentation & Wiki Maintainer) | Execute Milestone 5 (`docs/` and `docs/wiki/` updates, tag registry refresh, and `.planning/2026-10-27-async-execution-audit/` checklist completion). |
 
 ---
 
 ## 3. Step-by-Step Execution Plan for Next Team
 
-### Step 1: Milestone 2 Verification Gate (`tester` + `architect (CONSULT)`)
+### Step 1: Milestone 2 Verification Gate (`reviewer` + `tester` + `auditor`)
 1. **`tester`**: Run targeted verification on Milestone 2 crates in `INTEGRATION_ROOT`:
    ```bash
    python3 scripts/agent_cargo.py clippy --locked --workspace --all-targets -- -D warnings
@@ -47,9 +50,9 @@ Follow `.agy/heavy-team.md` and `.agy/howto.md` conventions. Refer to agents str
    python3 scripts/agent_cargo.py test --locked -p argos-osint-bin --test stack_cli
    python3 scripts/agent_cargo.py test --locked -p argos-api-host
    ```
-2. **`architect (CONSULT)`**: Audit Milestone 2 changes (`subscription.rs`, `storage/server.rs`, `storage/install.rs`, `cli.rs`, `main.rs`, `logging.rs`, `tui/app.rs`, `stack/traffic.rs`) for `argos-rust-style` compliance and process/signal safety.
+2. **`reviewer` & `auditor`**: Audit Milestone 2 changes (`subscription.rs`, `storage/server.rs`, `storage/install.rs`, `cli.rs`, `main.rs`, `logging.rs`, `tui/app.rs`, `stack/traffic.rs`) for `argos-rust-style` compliance, process/signal safety, and forensic integrity (`CLEAN`).
 
-### Step 2: Milestone 3 Implementation — Web Client Signals, Timeouts & Error Boundaries (`coder` + `architect (CONSULT)`)
+### Step 2: Milestone 3 Implementation — Web Client Signals, Timeouts & Error Boundaries (`architect` + `coder` + `reviewer` + `auditor`)
 > **Note**: `apps/web-desktop` is a static export (`output: "export"`). Do not add Next.js server routes or actions.
 
 1. **`coder`** — Edit `packages/api-client/src/index.tsx`:
@@ -62,9 +65,9 @@ Follow `.agy/heavy-team.md` and `.agy/howto.md` conventions. Refer to agents str
    - Wrap the lazy `<Suspense>` block around `ForceCanvas` in `packages/intel/src/topology/Topology.tsx` (and top-level `Workspace` if appropriate) so chunk load or canvas failures do not white-screen the app.
 3. **`coder`** — Disconnect Telemetry in `scripts/serve_web.mjs`:
    - Track whether `finish` fired; attach `res.once("close", ...)` to log aborted client requests when `!res.writableEnded`.
-4. **`architect (CONSULT)`**: Review all Milestone 3 diffs for React Compiler compatibility, `argos-react-ui` look-and-feel compliance, and signal cleanup safety.
+4. **`reviewer` & `auditor`**: Review all Milestone 3 diffs for React Compiler compatibility, `argos-react-ui` look-and-feel compliance, signal cleanup safety, and forensic authenticity.
 
-### Step 3: Milestone 4 — Full Host-Native E2E Verification (`tester`)
+### Step 3: Milestone 4 — Full Host-Native E2E Verification (`tester` + `auditor`)
 1. **`tester`** — Run Rust embedded verification:
    ```bash
    ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
@@ -84,10 +87,10 @@ Follow `.agy/heavy-team.md` and `.agy/howto.md` conventions. Refer to agents str
    scripts/local_matrix.sh --storage embedded
    ```
 
-### Step 4: Milestone 5 — Documentation & Wiki Refresh (`scribe` + `architect`)
+### Step 4: Milestone 5 — Documentation & Wiki Refresh (`scribe` + `orchestrator`)
 1. **`scribe`**: Verify and update documentation to reflect all M1–M3 contracts:
    - `docs/wiki/code/architecture.md`: Document persistent `ToolRunner` semaphore(4), `CancellationNotifierGuard` RAII pattern, bounded `storage::runtime` channel (4,096), `TuiAwareWriter` tracing subscriber, and dedicated OS thread for `tui::run`.
    - `docs/wiki/code/conventions.md`: Document `spawn_blocking` offload requirements, concurrent child pipe I/O (`tokio::select!`), non-blocking `libc::kill(pid, 0)` probing, and `SIGTERM` $\to$ `SIGKILL` escalation.
    - `docs/wiki/code/intel-web.md`: Document full-body `AbortSignal` lifecycle, configurable 10s/30s client timeouts, `ErrorBoundary` wrapping around lazy topology canvas, and `serve_web.mjs` disconnect logging.
    - `docs/wiki/tags.md`: Verify `@tag:async-runtime`, `@tag:process-lifecycle`, `@tag:api-timeouts`, and `@tag:abort-signal` cross-references across `docs/` and `crates/`.
-2. **`scribe` & `architect`**: Mark all phases complete in `.planning/2026-10-27-async-execution-audit/task_plan.md` and `progress.md`, prune `.agent-scratch/` temporary files/worktrees, and commit with a Conventional Commit message validated via `node scripts/release_check.mjs message --file <path>`.
+2. **`scribe` & `orchestrator`**: Mark all phases complete in `.planning/2026-10-27-async-execution-audit/task_plan.md` and `progress.md`, prune `.agent-scratch/` temporary files/worktrees, and commit via `coder` with a Conventional Commit message validated by `node scripts/release_check.mjs message --file <path>`.

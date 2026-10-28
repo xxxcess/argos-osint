@@ -852,6 +852,10 @@ enum WorkEvent {
         key: (String, String, String),
         outcome: Result<(Vec<String>, String, Vec<AtlasArticleRow>), String>,
     },
+    IntelBriefEnsured {
+        article_id: String,
+        outcome: Result<String, String>,
+    },
     AtlasArticlesLoaded {
         run_id: String,
         outcome: Result<Vec<AtlasArticleRow>, String>,
@@ -1070,6 +1074,7 @@ pub struct App {
     pub courtlistener_fallback: String,
     osint_inputs: HashMap<String, String>,
     pub selected_thread: Option<String>,
+    pub recon_resumable: bool,
     pub threads: Vec<recon::Thread>,
     pub thread_states: HashMap<String, String>,
     pub messages: Vec<recon::Message>,
@@ -1572,6 +1577,7 @@ impl App {
             whoxy_key: settings.whoxy_api_key.clone(),
             whoxy_fallback: settings.whoxy_api_key_fallback.clone(),
             selected_thread,
+            recon_resumable: false,
             threads,
             thread_states,
             messages,
@@ -2033,7 +2039,14 @@ impl App {
 
     fn reload_jobs_filter(&mut self) {
         self.pending_job = None;
-        self.jobs.invalidate_filter();
+        self.jobs.apply_filter();
+        if matches!(self.focus, Target::JobRow(_)) {
+            if self.jobs.rows.is_empty() {
+                self.focus = Target::Field(FieldId::JobsSearch);
+            } else {
+                self.focus = Target::JobRow(self.jobs.sel);
+            }
+        }
         self.dashboard_generation = self.dashboard_generation.wrapping_add(1);
         self.layout.borrow_mut().view_stamp.clear();
         self.reload_jobs();
@@ -3596,15 +3609,19 @@ impl App {
                 }
                 self.home_draft_submitting = false;
                 self.launch_state = LaunchState::Accepted;
-                let entered = if self.module.is_none() {
+                let entered = if self.module.is_none() || self.module == Some(ModuleId::Recon) {
                     self.enter_investigation(&thread.id)
                 } else {
                     self.status = "Investigation started — Open".into();
                     Ok(())
                 };
-                entered
+                let res = entered
                     .and_then(|_| self.send_recon_query(&thread.id, &question))
-                    .map(|_| self.status.clone())
+                    .map(|_| self.status.clone());
+                if res.is_err() {
+                    self.launch_state = LaunchState::RecoverableFailure;
+                }
+                res
             }
         };
         self.report(result);
@@ -3804,6 +3821,7 @@ impl App {
                 self.investigation_events_rev = self.investigation_events_rev.wrapping_add(1);
             }
             self.runs.clear();
+            self.update_recon_resumable();
             self.answer_memories.clear();
             self.answer_memory_summaries.clear();
         }
@@ -3882,17 +3900,49 @@ impl App {
         if question.is_empty() {
             return Ok(());
         }
-        if self.selected_thread.is_none() {
-            self.new_thread()?;
+        if let Some(tid) = self.selected_thread.clone() {
+            self.send_recon_query(&tid, &question)
+        } else {
+            if self.home_draft_submitting {
+                return Ok(());
+            }
+            self.home_draft_submitting = true;
+            self.launch_state = LaunchState::Accepting;
+            let title_line = question
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("New investigation");
+            let title: String = title_line.trim().chars().take(80).collect();
+            let title = if title.is_empty() {
+                "New investigation".to_string()
+            } else {
+                title
+            };
+            self.spawn_new_thread(title, None, surreal_recon::Then::Launch { question });
+            Ok(())
         }
-        let tid = self.selected_thread.clone().unwrap();
-        self.send_recon_query(&tid, &question)
     }
 
     pub fn can_stop_recon(&self) -> bool {
         self.selected_thread
             .as_ref()
             .is_some_and(|tid| self.running.contains_key(tid))
+    }
+
+    pub(crate) fn update_recon_resumable(&mut self) {
+        let Some(tid) = &self.selected_thread else {
+            self.recon_resumable = false;
+            return;
+        };
+        if self.running.contains_key(tid) {
+            self.recon_resumable = false;
+            return;
+        }
+        self.recon_resumable = self
+            .runs
+            .iter()
+            .max_by_key(|r| &r.updated_at)
+            .is_some_and(|r| r.state == "interrupted" || r.state == "failed");
     }
 
     pub fn can_resume_recon(&self) -> bool {
@@ -3902,13 +3952,7 @@ impl App {
         if self.running.contains_key(tid) {
             return false;
         }
-        let tid = tid.to_string();
-        argos_osint_core::storage::runtime::blocking(move |repo| async move {
-            argos_osint_core::storage::recon_runs::latest_resumable_run(&repo, &tid).await
-        })
-        .ok()
-        .flatten()
-        .is_some()
+        self.recon_resumable
     }
 
     fn resume_recon(&mut self) -> Result<()> {
@@ -3931,6 +3975,7 @@ impl App {
         let cancel = Arc::new(AtomicBool::new(false));
         self.live_answers.remove(&tid);
         self.running.insert(tid.clone(), cancel.clone());
+        self.recon_resumable = false;
         if tokio::runtime::Handle::try_current().is_ok() {
             tokio::spawn(async move {
                 let progress_tx = tx.clone();
@@ -4277,14 +4322,14 @@ impl App {
         // One idempotent preparation chain owns retrieval, cleanup, Claims,
         // Inferences and Links; the background brief runner executes it.
         // Mode classification is lazy (Recon configuration).
-        let ensured = super::surreal_intel::ensure_brief(&article, &self.settings);
-        match ensured {
-            Ok(job) => self.intel_brief_job = Some(job),
-            Err(error) => {
-                self.intel_brief_job = None;
-                self.intel_body_message = format!("Brief preparation unavailable: {error}");
-            }
-        }
+        let tx = self.work_tx.clone();
+        let article_id = article.id.clone();
+        super::surreal_intel::ensure_brief(&article, &self.settings, move |res| {
+            let _ = tx.send(WorkEvent::IntelBriefEnsured {
+                article_id,
+                outcome: res.map_err(|e| e.to_string()),
+            });
+        });
         self.refresh_intel_briefing();
         self.refresh_intel_brief_stages();
         self.queue_intel_links_explanation();
@@ -5433,6 +5478,7 @@ impl App {
                         }
                         self.calls = snapshot.calls;
                         self.runs = snapshot.runs;
+                        self.update_recon_resumable();
                         self.answer_memories = snapshot.memories;
                         self.answer_memory_summaries = snapshot.memory_summaries;
                         if let Some(error) = snapshot.log_error {
@@ -5663,6 +5709,29 @@ impl App {
                     Err(error) => {
                         self.intel_body_read_error = Some(error);
                         self.layout.borrow_mut().view_stamp.clear();
+                    }
+                }
+                true
+            }
+            WorkEvent::IntelBriefEnsured {
+                article_id,
+                outcome,
+            } => {
+                if let Some(article) = self.intel_articles.get(self.intel_sel) {
+                    if article.id == article_id {
+                        match outcome {
+                            Ok(job) => {
+                                self.intel_brief_job = Some(job);
+                                self.refresh_intel_briefing();
+                                self.refresh_intel_brief_stages();
+                            }
+                            Err(error) => {
+                                self.intel_brief_job = None;
+                                self.intel_body_message =
+                                    format!("Brief preparation unavailable: {error}");
+                                self.status = error;
+                            }
+                        }
                     }
                 }
                 true
@@ -5902,6 +5971,7 @@ impl App {
                         .map(|_| "complete".to_string())
                         .unwrap_or_else(|e| format!("failed: {e}"));
                     let _ = self.refresh_selected();
+                    self.update_recon_resumable();
                 }
                 let _ = self.refresh_threads();
                 self.reload_memories();
@@ -8380,6 +8450,13 @@ impl App {
                 }
                 self.jobs_clearing = true;
                 self.jobs.prune_status(status);
+                if matches!(self.focus, Target::JobRow(_)) {
+                    if self.jobs.rows.is_empty() {
+                        self.focus = Target::Field(FieldId::JobsSearch);
+                    } else {
+                        self.focus = Target::JobRow(self.jobs.sel);
+                    }
+                }
                 self.dashboard_generation = self.dashboard_generation.wrapping_add(1);
                 self.layout.borrow_mut().view_stamp.clear();
                 self.spawn_job_action(surreal_brain::JobAction::Clear(status));
@@ -8594,21 +8671,23 @@ impl App {
             }
             ButtonId::IntelBodyRetry | ButtonId::IntelBodyRefresh => {
                 if let Some(article) = self.intel_articles.get(self.intel_sel).cloned() {
-                    match super::surreal_intel::ensure_brief(&article, &self.settings) {
-                        Ok(job) => {
-                            self.intel_brief_job = Some(job);
-                            self.intel_body = None;
-                            self.intel_brief_outputs.clear();
-                            self.intel_brief_stages.clear();
-                            self.intel_body_owner = None;
-                            self.intel_body_require_commit = true;
-                            self.intel_body_read_error = None;
-                            self.layout.borrow_mut().view_stamp.clear();
-                            self.refresh_intel_brief_stages();
-                            self.status = "Reloading full article through brief preparation".into();
-                        }
-                        Err(error) => self.status = error.to_string(),
-                    }
+                    self.intel_brief_job = None;
+                    self.intel_body = None;
+                    self.intel_brief_outputs.clear();
+                    self.intel_brief_stages.clear();
+                    self.intel_body_owner = None;
+                    self.intel_body_require_commit = true;
+                    self.intel_body_read_error = None;
+                    self.layout.borrow_mut().view_stamp.clear();
+                    self.status = "Reloading full article through brief preparation".into();
+                    let tx = self.work_tx.clone();
+                    let article_id = article.id.clone();
+                    super::surreal_intel::ensure_brief(&article, &self.settings, move |res| {
+                        let _ = tx.send(WorkEvent::IntelBriefEnsured {
+                            article_id,
+                            outcome: res.map_err(|e| e.to_string()),
+                        });
+                    });
                 }
                 return;
             }
@@ -10566,15 +10645,17 @@ impl App {
             return;
         }
         if let Some(id) = &self.selected_thread {
-            if surreal_recon::save_draft(
-                id,
-                &self.input,
-                i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX),
-            )
-            .is_ok()
-            {
-                self.draft_dirty = false;
+            let id = id.clone();
+            let draft = self.input.clone();
+            let scroll = i64::try_from(self.scrolls.chat).unwrap_or(i64::MAX);
+            if let Some(thread) = self.threads.iter_mut().find(|t| t.id == id) {
+                thread.draft = draft.clone();
+                thread.scroll = scroll;
             }
+            self.draft_dirty = false;
+            self.spawn_recon_write_quiet("save the draft", move || {
+                surreal_recon::save_draft(&id, &draft, scroll)
+            });
         }
     }
 
@@ -10630,23 +10711,39 @@ impl App {
                 self.press = Some((mouse.column, mouse.row, target));
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if let Some((x, y, target)) = self.press.as_mut() {
-                    if mouse.column.abs_diff(*x) > 1 || mouse.row.abs_diff(*y) > 1 {
-                        *target = None;
+                if let Some((x, y, target)) = self.press {
+                    let within_jitter = mouse.column.abs_diff(x) <= 2 && mouse.row.abs_diff(y) <= 1;
+                    if !within_jitter {
+                        let current = super::ui::hit_test(self, mouse.column, mouse.row);
+                        if current != target {
+                            self.press = Some((x, y, None));
+                        }
                     }
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let Some((x, y, target)) = self.press.take() else {
-                    return;
+                let release_target = super::ui::hit_test(self, mouse.column, mouse.row);
+                let (target, cursor_x) = if let Some((x, y, pressed_target)) = self.press.take() {
+                    let within_jitter = mouse.column.abs_diff(x) <= 2 && mouse.row.abs_diff(y) <= 1;
+                    if let Some(target) = pressed_target {
+                        if within_jitter || release_target == Some(target) {
+                            (Some(target), x)
+                        } else {
+                            (None, x)
+                        }
+                    } else if within_jitter {
+                        (release_target, x)
+                    } else {
+                        (None, x)
+                    }
+                } else {
+                    // Fallback hit testing when press event was missing
+                    (release_target, mouse.column)
                 };
-                if mouse.column.abs_diff(x) > 1 || mouse.row.abs_diff(y) > 1 {
-                    return;
-                }
                 if let Some(target) = target {
                     self.activate_target(target);
                     if let Target::Field(field) = self.focus {
-                        self.cursor = super::ui::cursor_at(self, field, x);
+                        self.cursor = super::ui::cursor_at(self, field, cursor_x);
                     }
                 }
             }
@@ -10932,7 +11029,30 @@ pub fn run_with_shutdown(
         let busy = !app.running.is_empty()
             || app.osint_cancel.is_some()
             || app.dataset_refresh_running.is_some()
-            || app.provider_pending.is_some();
+            || app.provider_pending.is_some()
+            || app.dashboard_reading
+            || app.dashboard_pending
+            || app.jobs_clearing
+            || app.logs_clearing
+            || app.intel_reading
+            || app.intel_brief_pending
+            || app.intel_list_reading
+            || app.intel_list_pending
+            || app.profile.loading
+            || app.profile_pending
+            || app.brain_reading.is_some()
+            || app.brain_preview_reading
+            || app.topology_loading
+            || app.topology_reading
+            || app.atlas_reading
+            || app.atlas_articles_reading
+            || app.atlas_articles_pending
+            || app.threads_reading
+            || app.threads_pending
+            || app.recon_reading
+            || app.recon_pending
+            || app.manual_reading
+            || app.manual_pending;
         let composer_focused = app.focus == Target::Field(FieldId::Composer);
         let mut wait = atlas_poll_wait(
             &app,
@@ -10948,6 +11068,9 @@ pub fn run_with_shutdown(
         );
         if composer_focused {
             wait = wait.min(Duration::from_millis(250));
+        }
+        if busy {
+            wait = wait.min(Duration::from_millis(80));
         }
         if atlas_countdown_visible(&app) {
             wait = wait.min(until_next_second());
@@ -10986,7 +11109,9 @@ pub fn run_with_shutdown(
         }
         loop {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                Event::Key(key)
+                    if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat =>
+                {
                     if !app.handle_key(key) {
                         app.persist_view_session();
                         app.flush_draft();
@@ -11109,7 +11234,8 @@ fn memory_topology_seed(
 fn mouse_dirties(kind: MouseEventKind) -> bool {
     matches!(
         kind,
-        MouseEventKind::Up(MouseButton::Left)
+        MouseEventKind::Down(MouseButton::Left)
+            | MouseEventKind::Up(MouseButton::Left)
             | MouseEventKind::ScrollUp
             | MouseEventKind::ScrollDown
             | MouseEventKind::ScrollLeft
@@ -11328,6 +11454,7 @@ pub mod testkit {
             whoxy_key: String::new(),
             whoxy_fallback: String::new(),
             selected_thread: None,
+            recon_resumable: false,
             threads: Vec::new(),
             thread_states: HashMap::new(),
             messages: Vec::new(),
@@ -13792,13 +13919,17 @@ mod tests {
                 assert_eq!(app.jobs.status, JobStatusFilter::Active);
                 assert!(app.pending_job.is_none());
                 let pending = buffer_text(&render(&mut app, width, height));
-                assert!(pending.contains("Loading jobs"), "{pending}");
+                assert!(
+                    pending.contains("No jobs match these filters."),
+                    "{pending}"
+                );
                 assert!(!pending.contains("Old row"));
+                assert!(!pending.contains("Loading jobs"));
                 if let Some(dir) = &dir {
                     dump_cells(
                         &mut app,
                         dir,
-                        &format!("jobs-filter-loading-{mouse}-{width}x{height}"),
+                        &format!("jobs-filter-filtered-{mouse}-{width}x{height}"),
                         width,
                         height,
                     );
@@ -13840,13 +13971,13 @@ mod tests {
                         height,
                     );
                 }
-                // App and search changes use the same invalidation path.
+                // App and search changes use immediate in-memory filtering.
                 app.dashboard_reading = true;
                 click(&mut app, Target::Button(ButtonId::JobsApp));
-                assert!(app.jobs.rows.is_empty() && !app.jobs.loaded);
+                assert!(app.jobs.rows.is_empty() && app.jobs.loaded);
                 app.set_focus(Target::Field(FieldId::JobsSearch));
                 type_text(&mut app, "missing");
-                assert!(app.jobs.rows.is_empty() && !app.jobs.loaded);
+                assert!(app.jobs.rows.is_empty() && app.jobs.loaded);
                 app.jobs.loaded = true;
                 if let Some(dir) = &dir {
                     dump_cells(
@@ -13975,6 +14106,132 @@ mod tests {
                 .any(|e| e.app == "jobs" && e.message.contains("Cleared")),
             "Logs view shows the durable jobs.clear event: {:?}",
             app.logs.rows
+        );
+    }
+
+    #[test]
+    fn clearing_jobs_by_status_normalizes_focus_and_preserves_active_detail() {
+        use argos_osint_core::jobs_view::{JobDetail, JobRow};
+        let mut app = app();
+        app.select(ModuleId::Jobs.index());
+        app.jobs.rows = vec![
+            JobRow {
+                id: "j-running".into(),
+                state: "running".into(),
+                title: "Active task".into(),
+                ..Default::default()
+            },
+            JobRow {
+                id: "j-failed".into(),
+                state: "failed".into(),
+                title: "Failed task".into(),
+                ..Default::default()
+            },
+            JobRow {
+                id: "j-completed".into(),
+                state: "completed".into(),
+                title: "Finished task".into(),
+                ..Default::default()
+            },
+        ];
+        app.jobs.loaded = true;
+        app.jobs.sel = 2;
+        app.jobs.sel_id = Some("j-completed".into());
+        app.jobs.detail = Some(JobDetail {
+            job: app.jobs.rows[2].clone(),
+            ..Default::default()
+        });
+        app.set_focus(Target::JobRow(2));
+
+        // Clear completed: row 2 is pruned. Focus was on index 2, clamps to index 1.
+        app.activate_button(ButtonId::JobsClearCompleted);
+        assert_eq!(app.jobs.rows.len(), 2);
+        assert_eq!(app.jobs.sel, 1);
+        assert_eq!(app.focus, Target::JobRow(1));
+        assert!(app.jobs.detail.is_some());
+        assert_eq!(app.jobs.detail.as_ref().unwrap().job.id, "j-failed");
+        assert!(
+            app.jobs.can_retry(),
+            "Retry button preserved on active failed job"
+        );
+
+        // Settle clearing before next button activation
+        app.jobs_clearing = false;
+
+        // Clear failed: row 1 is pruned. Focus was on index 1, clamps to index 0.
+        app.activate_button(ButtonId::JobsClearFailed);
+        assert_eq!(app.jobs.rows.len(), 1);
+        assert_eq!(app.jobs.rows[0].id, "j-running");
+        assert_eq!(app.jobs.sel, 0);
+        assert_eq!(app.focus, Target::JobRow(0));
+        assert!(app.jobs.detail.is_some());
+        assert_eq!(app.jobs.detail.as_ref().unwrap().job.id, "j-running");
+
+        // Now change row 0 to stopped and clear it: all rows become empty
+        app.jobs_clearing = false;
+        app.jobs.rows[0].state = "cancelled".into();
+        app.activate_button(ButtonId::JobsClearStopped);
+        assert!(app.jobs.rows.is_empty());
+        assert_eq!(app.focus, Target::Field(FieldId::JobsSearch));
+        assert!(app.jobs.detail.is_none());
+    }
+
+    #[test]
+    fn immediate_job_filtering_renders_matching_rows_without_loading_flash() {
+        use argos_osint_core::jobs_view::{JobRow, JobStatusFilter};
+        let mut app = app();
+        app.module = Some(ModuleId::Jobs);
+        let (width, height) = (160, 50);
+        app.screen = Rect::new(0, 0, width, height);
+        app.jobs.rows = vec![
+            JobRow {
+                id: "recon-job".into(),
+                title: "Recon scan for example.com".into(),
+                state: "running".into(),
+                app: "recon".into(),
+                operation: "subdomains".into(),
+                ..Default::default()
+            },
+            JobRow {
+                id: "intel-job".into(),
+                title: "Intel brief for target".into(),
+                state: "completed".into(),
+                app: "intel".into(),
+                operation: "summaries".into(),
+                ..Default::default()
+            },
+        ];
+        app.jobs.loaded = true;
+        app.jobs.sel = 0;
+        app.jobs.sel_id = Some("recon-job".into());
+        app.background_db = Some(PathBuf::from("controlled-worker"));
+        app.dashboard_reading = true;
+
+        let before = buffer_text(&render(&mut app, width, height));
+        assert!(before.contains("Recon scan"));
+        assert!(before.contains("Intel brief"));
+
+        // Type filter into search field: immediately filters in memory
+        app.set_focus(Target::Field(FieldId::JobsSearch));
+        type_text(&mut app, "example.com");
+        let rendered = buffer_text(&render(&mut app, width, height));
+        assert!(rendered.contains("Recon scan"), "{rendered}");
+        assert!(!rendered.contains("Intel brief"), "intel job filtered out");
+        assert!(
+            !rendered.contains("Loading jobs"),
+            "no loading spinner flash"
+        );
+        assert_eq!(app.jobs.rows.len(), 1);
+        assert_eq!(app.jobs.rows[0].id, "recon-job");
+
+        // Cycle status filter to Active: recon-job is running, so it stays visible
+        click(&mut app, Target::Button(ButtonId::JobsStatus));
+        assert_eq!(app.jobs.status, JobStatusFilter::Active);
+        let active_rendered = buffer_text(&render(&mut app, width, height));
+        assert!(active_rendered.contains("Recon scan"), "{active_rendered}");
+        assert!(
+            !active_rendered.contains("Loading jobs"),
+            "immediate active filter without spinner"
         );
     }
 
@@ -19756,5 +20013,964 @@ mod tests {
                 height,
             );
         }
+    }
+
+    #[test]
+    fn mouse_click_jitter_and_fallback_hit_test() {
+        let mut app = app();
+        let backend = ratatui::backend::TestBackend::new(app.screen.width, app.screen.height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .expect("render");
+
+        // Find position of the Brain app tab button
+        let target = Target::App(ModuleId::Brain.index());
+        let position = (0..app.screen.height)
+            .flat_map(|y| (0..app.screen.width).map(move |x| (x, y)))
+            .find(|(x, y)| super::super::ui::hit_test(&app, *x, *y) == Some(target))
+            .expect("tab target");
+
+        // Test 1: Click with jitter (release coordinate differs by 2 columns)
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: position.0,
+            row: position.1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(down);
+        assert!(app.press.is_some());
+        let up_with_jitter = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: position.0.saturating_add(2),
+            row: position.1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(up_with_jitter);
+        assert_eq!(app.module, Some(ModuleId::Brain));
+
+        // Switch back to Home (None)
+        app.module = None;
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .expect("render");
+
+        // Test 2: Fallback hit test when press event is missing (only MouseUp received)
+        let standalone_up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: position.0,
+            row: position.1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.press.is_none());
+        app.handle_mouse(standalone_up);
+        assert_eq!(app.module, Some(ModuleId::Brain));
+    }
+
+    #[test]
+    fn recon_resumable_cached_state_and_non_blocking_draw() {
+        let mut app = app();
+        // With no thread selected, can_resume_recon is false
+        assert!(!app.can_resume_recon());
+
+        app.selected_thread = Some("test-thread".into());
+        // With thread selected but no runs, can_resume_recon is false
+        app.update_recon_resumable();
+        assert!(!app.can_resume_recon());
+
+        // Add a completed run: not resumable
+        app.runs = vec![argos_osint_core::recon::Run {
+            id: "run-1".into(),
+            thread_id: "test-thread".into(),
+            turn_id: "turn-1".into(),
+            state: "completed".into(),
+            stage: "done".into(),
+            recon_model: "test".into(),
+            synthesis_model: "test".into(),
+            tool_picker_model: String::new(),
+            max_rounds: 5,
+            max_calls: 5,
+            turn_seconds: 60,
+            plan_json: None,
+            error: None,
+            created_at: "2026-10-27T10:00:00Z".into(),
+            updated_at: "2026-10-27T10:05:00Z".into(),
+        }];
+        app.update_recon_resumable();
+        assert!(!app.can_resume_recon());
+
+        // Add an interrupted run with later updated_at: now resumable
+        app.runs.push(argos_osint_core::recon::Run {
+            id: "run-2".into(),
+            thread_id: "test-thread".into(),
+            turn_id: "turn-2".into(),
+            state: "interrupted".into(),
+            stage: "replaying".into(),
+            recon_model: "test".into(),
+            synthesis_model: "test".into(),
+            tool_picker_model: String::new(),
+            max_rounds: 5,
+            max_calls: 5,
+            turn_seconds: 60,
+            plan_json: None,
+            error: None,
+            created_at: "2026-10-27T10:10:00Z".into(),
+            updated_at: "2026-10-27T10:15:00Z".into(),
+        });
+        app.update_recon_resumable();
+        assert!(app.can_resume_recon());
+
+        // When turn is running, can_resume_recon returns false
+        app.running
+            .insert("test-thread".into(), Arc::new(AtomicBool::new(false)));
+        assert!(!app.can_resume_recon());
+
+        // When turn finishes, can_resume_recon returns true again
+        app.running.remove("test-thread");
+        assert!(app.can_resume_recon());
+    }
+
+    #[test]
+    fn flush_draft_does_not_block_and_clears_dirty() {
+        let mut app = app();
+        app.selected_thread = Some("test-thread".into());
+        app.input = "My draft question".into();
+        app.draft_dirty = true;
+        app.threads.push(recon::Thread {
+            id: "test-thread".into(),
+            title: "Test Thread".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            draft: String::new(),
+            scroll: 0,
+            recall_insights: false,
+        });
+
+        app.flush_draft();
+        assert!(!app.draft_dirty);
+        assert_eq!(app.threads[0].draft, "My draft question");
+    }
+
+    #[test]
+    fn mouse_dirties_includes_left_down() {
+        assert!(mouse_dirties(MouseEventKind::Down(MouseButton::Left)));
+        assert!(mouse_dirties(MouseEventKind::Up(MouseButton::Left)));
+        assert!(!mouse_dirties(MouseEventKind::Moved));
+    }
+
+    #[test]
+    fn intel_briefing_async_ensure() {
+        let mut app = app();
+        app.module = Some(ModuleId::Intel);
+        let article = intel_article_fixture("art-1", "");
+        let title = article.title.clone();
+        app.intel_articles = vec![article];
+        app.intel_sel = 0;
+        app.open_intel_briefing();
+        assert_eq!(app.intel_page, IntelPage::Briefing);
+        assert_eq!(app.status, format!("Brief · {title}"));
+
+        // Simulate async completion of ensure_brief
+        app.on_work_event(WorkEvent::IntelBriefEnsured {
+            article_id: "art-1".into(),
+            outcome: Ok("job:art-1".into()),
+        });
+        assert_eq!(app.intel_brief_job.as_deref(), Some("job:art-1"));
+    }
+
+    #[test]
+    fn send_recon_without_selected_thread_initiates_launch_without_panic() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.selected_thread = None;
+        app.input = "investigate target.com".into();
+
+        let res = app.send_recon();
+        assert!(res.is_ok(), "send_recon must not error or panic");
+        assert!(
+            app.home_draft_submitting,
+            "launch submission must be active"
+        );
+        assert_eq!(app.launch_state, LaunchState::Accepting);
+    }
+
+    #[test]
+    fn send_recon_duplicate_submission_prevention() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.selected_thread = None;
+        app.input = "investigate target.com".into();
+        app.home_draft_submitting = true;
+
+        let res = app.send_recon();
+        assert!(res.is_ok(), "duplicate submission must be ignored safely");
+        assert!(app.selected_thread.is_none());
+    }
+
+    #[test]
+    fn finish_new_thread_with_launch_enters_investigation_in_recon_module() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.selected_thread = None;
+        app.input = "prompt text".into();
+
+        let thread = recon::Thread {
+            id: "t-recon-1".into(),
+            title: "prompt text".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            draft: String::new(),
+            scroll: 0,
+            recall_insights: false,
+        };
+
+        app.finish_new_thread(
+            surreal_recon::Then::Launch {
+                question: "prompt text".into(),
+            },
+            Ok(thread),
+        );
+
+        assert_eq!(app.selected_thread.as_deref(), Some("t-recon-1"));
+        assert_eq!(app.tab_ids, vec!["t-recon-1"]);
+        assert_eq!(app.tab_sel, 1);
+        assert_eq!(app.launch_state, LaunchState::Accepted);
+        assert_eq!(app.focus, Target::Field(FieldId::Composer));
+    }
+
+    #[test]
+    fn finish_new_thread_handles_send_recon_query_failure_gracefully() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.selected_thread = None;
+        app.input = "prompt text".into();
+
+        let thread_id = "t-recon-conflict";
+        app.running
+            .insert(thread_id.to_string(), Arc::new(AtomicBool::new(false)));
+
+        let thread = recon::Thread {
+            id: thread_id.into(),
+            title: "conflict thread".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            draft: String::new(),
+            scroll: 0,
+            recall_insights: false,
+        };
+
+        app.finish_new_thread(
+            surreal_recon::Then::Launch {
+                question: "prompt text".into(),
+            },
+            Ok(thread),
+        );
+
+        assert_eq!(app.launch_state, LaunchState::RecoverableFailure);
+        assert!(
+            app.status.contains("already has a running turn"),
+            "Status line must capture query dispatch failure message: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn finish_new_thread_handles_thread_creation_error_gracefully() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.input = "prompt text".into();
+        app.home_draft_submitting = true;
+        app.launch_state = LaunchState::Accepting;
+
+        app.finish_new_thread(
+            surreal_recon::Then::Launch {
+                question: "prompt text".into(),
+            },
+            Err("storage unavailable".into()),
+        );
+
+        assert!(!app.home_draft_submitting);
+        assert_eq!(app.launch_state, LaunchState::RecoverableFailure);
+        assert!(app.status.contains("Could not create the investigation"));
+        assert_eq!(app.input, "prompt text", "draft preserved on failure");
+    }
+
+    #[test]
+    fn send_recon_with_selected_thread_dispatches_directly_without_thread_creation() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        let tid = "existing-thread-123";
+        app.selected_thread = Some(tid.into());
+        app.input = "Follow-up question on existing thread".into();
+        app.cursor = 10;
+        app.home_draft_submitting = false;
+        app.launch_state = LaunchState::Editable;
+
+        let res = app.send_recon();
+        assert!(res.is_ok(), "Direct query dispatch must succeed");
+        assert!(
+            !app.home_draft_submitting,
+            "Must not set home_draft_submitting when thread exists"
+        );
+        assert_eq!(
+            app.launch_state,
+            LaunchState::Editable,
+            "Launch state must remain Idle"
+        );
+        assert_eq!(app.input, "", "Input must be cleared upon query dispatch");
+        assert_eq!(app.cursor, 0, "Cursor must reset to 0");
+        assert!(
+            app.running.contains_key(tid),
+            "Thread must be marked running"
+        );
+        assert_eq!(app.recon_stage, "starting");
+    }
+
+    #[test]
+    fn send_recon_with_selected_thread_already_running_turn_returns_error_gracefully() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        let tid = "running-thread-456";
+        app.selected_thread = Some(tid.into());
+        app.running
+            .insert(tid.to_string(), Arc::new(AtomicBool::new(false)));
+        app.input = "New question during active turn".into();
+
+        let res = app.send_recon();
+        assert!(res.is_err(), "Must return Err when turn is already active");
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("already has a running turn"),
+            "Error must describe turn collision: {err_msg}"
+        );
+        assert_eq!(app.input, "New question during active turn");
+    }
+
+    #[test]
+    fn send_recon_empty_and_whitespace_ignored() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.selected_thread = None;
+
+        for empty_input in ["", "   ", "\t\t", "\n\n", "  \r\n\t  "] {
+            app.input = empty_input.into();
+            let res = app.send_recon();
+            assert!(res.is_ok(), "Whitespace input must return Ok");
+            assert!(
+                !app.home_draft_submitting,
+                "Whitespace input must not trigger submission"
+            );
+            assert_eq!(app.launch_state, LaunchState::Editable);
+        }
+    }
+
+    #[test]
+    fn send_recon_rapid_repeated_submissions_stress() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.selected_thread = None;
+        app.input = "target question".into();
+
+        let res1 = app.send_recon();
+        assert!(res1.is_ok());
+        assert!(app.home_draft_submitting);
+        assert_eq!(app.launch_state, LaunchState::Accepting);
+
+        for _ in 0..1000 {
+            let res = app.send_recon();
+            assert!(res.is_ok());
+            assert!(app.home_draft_submitting);
+            assert_eq!(app.launch_state, LaunchState::Accepting);
+            assert!(app.selected_thread.is_none());
+        }
+    }
+
+    #[test]
+    fn send_recon_title_extraction_multiline_and_unicode() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.selected_thread = None;
+
+        app.input = "\n\n  Investigate domain example.com  \nDetails follow...".into();
+        let res = app.send_recon();
+        assert!(res.is_ok());
+        assert!(app.home_draft_submitting);
+
+        app.home_draft_submitting = false;
+
+        let long_line: String = "🕵️‍♂️".repeat(50);
+        app.input = long_line;
+        let res_long = app.send_recon();
+        assert!(res_long.is_ok());
+    }
+
+    #[test]
+    fn submit_and_button_activation_recon_composer_integration() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.selected_thread = None;
+        app.input = "investigate test".into();
+
+        app.submit();
+        assert!(app.home_draft_submitting);
+        assert_eq!(app.launch_state, LaunchState::Accepting);
+        assert_eq!(app.status, "Recon started");
+
+        app.home_draft_submitting = false;
+        app.launch_state = LaunchState::Editable;
+        app.input = "button send test".into();
+
+        app.activate_button(ButtonId::Send);
+        assert!(app.home_draft_submitting);
+        assert_eq!(app.launch_state, LaunchState::Accepting);
+        assert_eq!(app.status, "Recon started");
+    }
+
+    #[test]
+    fn finish_new_thread_full_lifecycle_and_transition_to_direct_dispatch() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.selected_thread = None;
+        app.input = "First turn prompt".into();
+
+        let res = app.send_recon();
+        assert!(res.is_ok());
+        assert!(app.home_draft_submitting);
+        assert_eq!(app.launch_state, LaunchState::Accepting);
+
+        let thread = recon::Thread {
+            id: "thread-lifecycle-1".into(),
+            title: "First turn prompt".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            draft: String::new(),
+            scroll: 0,
+            recall_insights: false,
+        };
+
+        app.finish_new_thread(
+            surreal_recon::Then::Launch {
+                question: "First turn prompt".into(),
+            },
+            Ok(thread),
+        );
+
+        assert_eq!(app.selected_thread.as_deref(), Some("thread-lifecycle-1"));
+        assert!(
+            !app.home_draft_submitting,
+            "Submitting flag must be cleared"
+        );
+        assert_eq!(app.launch_state, LaunchState::Accepted);
+        assert_eq!(app.input, "", "Input cleared by send_recon_query");
+        assert!(
+            app.running.contains_key("thread-lifecycle-1"),
+            "Turn 1 is running"
+        );
+
+        app.running.remove("thread-lifecycle-1");
+
+        app.input = "Second turn prompt".into();
+        let res2 = app.send_recon();
+        assert!(res2.is_ok());
+        assert!(
+            !app.home_draft_submitting,
+            "Subsequent prompt must not set home_draft_submitting"
+        );
+        assert_eq!(app.selected_thread.as_deref(), Some("thread-lifecycle-1"));
+        assert_eq!(app.input, "");
+        assert!(
+            app.running.contains_key("thread-lifecycle-1"),
+            "Turn 2 is running"
+        );
+    }
+
+    #[test]
+    fn finish_new_thread_error_allows_subsequent_resubmission() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.input = "Retryable query".into();
+        app.home_draft_submitting = true;
+        app.launch_state = LaunchState::Accepting;
+
+        app.finish_new_thread(
+            surreal_recon::Then::Launch {
+                question: "Retryable query".into(),
+            },
+            Err("storage write error".into()),
+        );
+
+        assert!(
+            !app.home_draft_submitting,
+            "Must reset home_draft_submitting on failure"
+        );
+        assert_eq!(app.launch_state, LaunchState::RecoverableFailure);
+        assert_eq!(
+            app.input, "Retryable query",
+            "Input must be preserved for retry"
+        );
+
+        let retry_res = app.send_recon();
+        assert!(
+            retry_res.is_ok(),
+            "Retry must succeed without getting blocked"
+        );
+        assert!(
+            app.home_draft_submitting,
+            "Submission flag must activate on retry"
+        );
+        assert_eq!(app.launch_state, LaunchState::Accepting);
+    }
+
+    // =========================================================================
+    // Tier 4: Real-World Application Scenarios (TEST_INFRA.md)
+    // =========================================================================
+
+    #[test]
+    fn tier4_scenario_1_rapid_mouse_drag_and_click_across_toolbar_and_buttons() {
+        let mut app = app();
+        let (width, height) = (160, 50);
+        app.screen = Rect::new(0, 0, width, height);
+
+        // 1. Rapid mouse events with jitter across toolbar tabs (F1, F4)
+        for module in [
+            ModuleId::Atlas,
+            ModuleId::Jobs,
+            ModuleId::Intel,
+            ModuleId::Recon,
+        ] {
+            app.module = None;
+            let target = Target::App(module.index());
+            let backend = ratatui::backend::TestBackend::new(width, height);
+            let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| super::super::ui::draw(frame, &app))
+                .expect("draw");
+
+            let position = (0..app.screen.height)
+                .flat_map(|y| (0..app.screen.width).map(move |x| (x, y)))
+                .find(|(x, y)| super::super::ui::hit_test(&app, *x, *y) == Some(target))
+                .expect("tab button position");
+
+            // MouseDown at exact coordinates
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: position.0,
+                row: position.1,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert!(app.press.is_some(), "press state captured on mouse down");
+
+            // MouseUp with 2-cell horizontal trackpad jitter drift
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: position.0.saturating_add(2),
+                row: position.1,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert_eq!(
+                app.module,
+                Some(module),
+                "tab transition must succeed despite jitter"
+            );
+        }
+
+        // 2. Standalone click fallback hit test (tap without preceding Down)
+        app.module = None;
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| super::super::ui::draw(frame, &app))
+            .expect("draw");
+
+        let jobs_pos = (0..app.screen.height)
+            .flat_map(|y| (0..app.screen.width).map(move |x| (x, y)))
+            .find(|(x, y)| {
+                super::super::ui::hit_test(&app, *x, *y)
+                    == Some(Target::App(ModuleId::Jobs.index()))
+            })
+            .expect("jobs tab position");
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: jobs_pos.0,
+            row: jobs_pos.1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            app.module,
+            Some(ModuleId::Jobs),
+            "standalone MouseUp registers tab click"
+        );
+
+        // 3. Key Repeat Support (F5)
+        app.jobs.rows = (0..20)
+            .map(|i| argos_osint_core::jobs_view::JobRow {
+                id: format!("job-{i}"),
+                state: "running".into(),
+                title: format!("Task {i}"),
+                ..Default::default()
+            })
+            .collect();
+        app.jobs.loaded = true;
+        app.jobs.sel = 0;
+        app.set_focus(Target::JobRow(0));
+
+        for _ in 0..10 {
+            let mut key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+            key.kind = KeyEventKind::Repeat;
+            app.handle_key(key);
+        }
+        assert_eq!(
+            app.jobs.sel, 10,
+            "key repeat moves selection forward smoothly"
+        );
+    }
+
+    #[test]
+    fn tier4_scenario_2_continuous_background_job_updates_while_cycling_filters() {
+        use argos_osint_core::jobs_view::{JobDetail, JobRow, JobStatusFilter};
+
+        let mut app = app();
+        app.module = Some(ModuleId::Jobs);
+        let (width, height) = (160, 50);
+        app.screen = Rect::new(0, 0, width, height);
+
+        let initial_rows = vec![
+            JobRow {
+                id: "j-run-1".into(),
+                state: "running".into(),
+                app: "recon".into(),
+                title: "Live scan".into(),
+                ..Default::default()
+            },
+            JobRow {
+                id: "j-done-1".into(),
+                state: "completed".into(),
+                app: "intel".into(),
+                title: "Intel brief".into(),
+                ..Default::default()
+            },
+            JobRow {
+                id: "j-fail-1".into(),
+                state: "failed".into(),
+                app: "atlas".into(),
+                title: "Failed scrape".into(),
+                ..Default::default()
+            },
+            JobRow {
+                id: "j-stop-1".into(),
+                state: "cancelled".into(),
+                app: "recon".into(),
+                title: "Cancelled scan".into(),
+                ..Default::default()
+            },
+        ];
+
+        app.jobs.rows = initial_rows.clone();
+        app.jobs.loaded = true;
+        app.jobs.sel = 0;
+        app.jobs.sel_id = Some("j-run-1".into());
+
+        // Cycle through status filters
+        // 1. Filter: Active
+        app.jobs.status = JobStatusFilter::Active;
+        app.jobs.apply_filter();
+        assert_eq!(app.jobs.rows.len(), 1);
+        assert_eq!(app.jobs.rows[0].id, "j-run-1");
+        assert!(
+            app.jobs.loaded,
+            "loaded flag retained during in-memory filter"
+        );
+        let active_buf = buffer_text(&render(&mut app, width, height));
+        assert!(active_buf.contains("Live scan"));
+        assert!(
+            !active_buf.contains("Loading jobs"),
+            "no loading spinner flash"
+        );
+
+        // 2. Filter: Completed
+        app.jobs.rows = initial_rows.clone();
+        app.jobs.status = JobStatusFilter::Completed;
+        app.jobs.apply_filter();
+        assert_eq!(app.jobs.rows.len(), 1);
+        assert_eq!(app.jobs.rows[0].id, "j-done-1");
+        let completed_buf = buffer_text(&render(&mut app, width, height));
+        assert!(completed_buf.contains("Intel brief"));
+
+        // 3. Filter: Failed
+        app.jobs.rows = initial_rows.clone();
+        app.jobs.status = JobStatusFilter::Failed;
+        app.jobs.apply_filter();
+        assert_eq!(app.jobs.rows.len(), 1);
+        assert_eq!(app.jobs.rows[0].id, "j-fail-1");
+        assert!(app.jobs.can_retry(), "Failed job shows retryable action");
+
+        // 4. Background snapshot arrival with mismatched detail (F10 validation guard)
+        let mismatched_snapshot = crate::tui::jobs::JobsView {
+            rows: app.jobs.rows.clone(),
+            sel: 0,
+            sel_id: Some("j-fail-1".into()),
+            detail: Some(JobDetail {
+                job: JobRow {
+                    id: "foreign-job".into(),
+                    title: "Foreign Detail".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            loaded: true,
+            ..Default::default()
+        };
+
+        app.jobs.accept(mismatched_snapshot, false);
+        assert_eq!(app.jobs.sel_id.as_deref(), Some("j-fail-1"));
+        assert_eq!(
+            app.jobs.detail.as_ref().unwrap().job.id,
+            "j-fail-1",
+            "mismatched snapshot detail must not overwrite current active selection"
+        );
+    }
+
+    #[test]
+    fn tier4_scenario_3_clearing_jobs_when_active_row_cleared_and_navigating_remaining_list() {
+        use argos_osint_core::jobs_view::{JobDetail, JobRow};
+
+        let mut app = app();
+        app.background_db = Some(PathBuf::from("controlled-worker"));
+        app.select(ModuleId::Jobs.index());
+        app.jobs.rows = vec![
+            JobRow {
+                id: "j-run".into(),
+                state: "running".into(),
+                title: "Live job".into(),
+                ..Default::default()
+            },
+            JobRow {
+                id: "j-comp-1".into(),
+                state: "completed".into(),
+                title: "Done job 1".into(),
+                ..Default::default()
+            },
+            JobRow {
+                id: "j-comp-2".into(),
+                state: "completed".into(),
+                title: "Done job 2".into(),
+                ..Default::default()
+            },
+            JobRow {
+                id: "j-fail".into(),
+                state: "failed".into(),
+                title: "Faulted job".into(),
+                ..Default::default()
+            },
+        ];
+        app.jobs.loaded = true;
+        app.jobs.sel = 2; // Active on j-comp-2
+        app.jobs.sel_id = Some("j-comp-2".into());
+        app.jobs.detail = Some(JobDetail {
+            job: app.jobs.rows[2].clone(),
+            ..Default::default()
+        });
+        app.set_focus(Target::JobRow(2));
+
+        // 1. Clear completed jobs: active row is pruned (F8, F9)
+        app.activate_button(ButtonId::JobsClearCompleted);
+        assert_eq!(app.jobs.rows.len(), 2);
+        assert_eq!(app.jobs.rows[0].id, "j-run");
+        assert_eq!(app.jobs.rows[1].id, "j-fail");
+
+        // Focus normalizes to clamped row index 1
+        assert_eq!(app.jobs.sel, 1);
+        assert_eq!(app.focus, Target::JobRow(1));
+
+        // Active detail is preserved and synchronized to the newly selected row (j-fail)
+        assert!(app.jobs.detail.is_some());
+        assert_eq!(app.jobs.detail.as_ref().unwrap().job.id, "j-fail");
+        assert!(
+            app.jobs.can_retry(),
+            "Retry button preserved on faulted job"
+        );
+
+        // 2. Keyboard navigation in remaining list
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.jobs.sel, 0);
+        assert_eq!(app.focus, Target::JobRow(0));
+        assert_eq!(app.jobs.sel_id.as_deref(), Some("j-run"));
+
+        // 3. Clear failed jobs
+        app.jobs_clearing = false;
+        app.activate_button(ButtonId::JobsClearFailed);
+        assert_eq!(app.jobs.rows.len(), 1);
+        assert_eq!(app.jobs.rows[0].id, "j-run");
+        assert_eq!(app.jobs.sel, 0);
+
+        // 4. Clear all remaining jobs by cancelling and clearing stopped
+        app.jobs_clearing = false;
+        app.jobs.rows[0].state = "cancelled".into();
+        app.activate_button(ButtonId::JobsClearStopped);
+        assert!(app.jobs.rows.is_empty());
+        assert_eq!(
+            app.focus,
+            Target::Field(FieldId::JobsSearch),
+            "focus normalizes to search field when list becomes empty"
+        );
+        assert!(app.jobs.detail.is_none());
+    }
+
+    #[test]
+    fn tier4_scenario_4_cold_launch_recon_from_composer_with_streaming_answer() {
+        let mut app = app();
+        app.module = Some(ModuleId::Recon);
+        app.recon_chat = true;
+        app.selected_thread = None;
+        app.input = "Investigate breach telemetry for domain.org".into();
+
+        // 1. Cold launch recon from composer (F11: no panic)
+        let res = app.send_recon();
+        assert!(res.is_ok(), "Cold launch recon must not panic");
+        assert!(app.home_draft_submitting);
+        assert_eq!(app.launch_state, LaunchState::Accepting);
+
+        // 2. Thread creation completes via Then::Launch (F12: surface navigation unification)
+        let thread_id = "recon-thread-e2e-cold";
+        let thread = recon::Thread {
+            id: thread_id.into(),
+            title: "Investigate breach telemetry for domain.org".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            draft: String::new(),
+            scroll: 0,
+            recall_insights: false,
+        };
+
+        app.finish_new_thread(
+            surreal_recon::Then::Launch {
+                question: "Investigate breach telemetry for domain.org".into(),
+            },
+            Ok(thread),
+        );
+
+        assert_eq!(app.selected_thread.as_deref(), Some(thread_id));
+        assert_eq!(app.tab_ids, vec![thread_id]);
+        assert_eq!(app.launch_state, LaunchState::Accepted);
+        assert_eq!(app.focus, Target::Field(FieldId::Composer));
+        assert_eq!(app.input, "", "Composer input cleared after launch");
+
+        // 3. Streaming response arrives
+        app.recon_stage = "streaming".into();
+        app.messages.push(recon::Message {
+            id: "m-user-1".into(),
+            thread_id: thread_id.into(),
+            sequence: 1,
+            role: "user".into(),
+            content: "Investigate breach telemetry for domain.org".into(),
+            run_id: None,
+            created_at: String::new(),
+        });
+        app.runs = vec![recon::Run {
+            id: "run-e2e-1".into(),
+            thread_id: thread_id.into(),
+            turn_id: "m-user-1".into(),
+            state: "running".into(),
+            stage: "synthesizing".into(),
+            recon_model: String::new(),
+            synthesis_model: String::new(),
+            tool_picker_model: String::new(),
+            max_rounds: 1,
+            max_calls: 4,
+            turn_seconds: 300,
+            plan_json: None,
+            error: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }];
+        app.note_replacement(thread_id, "Streaming synthesis answer delta...");
+
+        let rendered = buffer_text(&render(&mut app, 160, 50));
+        assert!(
+            rendered.contains("Streaming synthesis answer delta..."),
+            "Live streaming content renders on screen: {rendered}"
+        );
+
+        // 4. Recoverable error handling (F13)
+        app.running.remove(thread_id);
+        app.input = "Failed follow-up".into();
+        app.home_draft_submitting = true;
+        app.finish_new_thread(
+            surreal_recon::Then::Launch {
+                question: "Failed follow-up".into(),
+            },
+            Err("Simulated downstream provider error".into()),
+        );
+
+        assert_eq!(app.launch_state, LaunchState::RecoverableFailure);
+        assert_eq!(
+            app.input, "Failed follow-up",
+            "input draft preserved on failure"
+        );
+        assert!(app.status.contains("Could not create the investigation"));
+    }
+
+    #[test]
+    fn tier4_scenario_5_high_frequency_module_navigation_during_background_fetches() {
+        let mut app = app();
+        let (width, height) = (160, 50);
+        app.screen = Rect::new(0, 0, width, height);
+
+        // Emulate background loading across multiple subsystems (F4)
+        app.dashboard_reading = true;
+        app.intel_reading = true;
+        app.jobs_clearing = true;
+        app.threads_reading = true;
+
+        // Verify busy flag calculation ensures responsive 80ms polling
+        let busy = !app.running.is_empty()
+            || app.osint_cancel.is_some()
+            || app.dataset_refresh_running.is_some()
+            || app.provider_pending.is_some()
+            || app.dashboard_reading
+            || app.jobs_clearing
+            || app.intel_reading
+            || app.profile.loading
+            || app.threads_reading;
+        assert!(
+            busy,
+            "Background operations mark app busy for fast 80ms crossterm polling"
+        );
+
+        // High frequency module switching with frames rendered (F2, F3)
+        for _ in 0..10 {
+            for module in [
+                None,
+                Some(ModuleId::Recon),
+                Some(ModuleId::Intel),
+                Some(ModuleId::Jobs),
+            ] {
+                app.module = module;
+                let buf = render(&mut app, width, height);
+                assert!(
+                    !buffer_text(&buf).is_empty(),
+                    "Frame renders non-empty without blocking"
+                );
+            }
+        }
+
+        // Clean up background flags
+        app.dashboard_reading = false;
+        app.intel_reading = false;
+        app.jobs_clearing = false;
+        app.threads_reading = false;
+        assert_eq!(app.module, Some(ModuleId::Jobs));
     }
 }

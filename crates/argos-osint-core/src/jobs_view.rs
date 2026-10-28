@@ -70,6 +70,63 @@ pub struct JobFilter {
     pub since: String,
 }
 
+impl JobFilter {
+    /// Tests whether an in-memory [`JobRow`] matches this filter.
+    pub fn matches(&self, row: &JobRow) -> bool {
+        let states = self.status.states();
+        if !states.is_empty() && !states.contains(&row.state.as_str()) {
+            return false;
+        }
+
+        let app_filter = self.app.trim().to_lowercase();
+        if !app_filter.is_empty() {
+            let row_app = row.app.to_lowercase();
+            if row_app != app_filter
+                && !row_app.contains(&app_filter)
+                && !app_filter.contains(&row_app)
+            {
+                return false;
+            }
+        }
+
+        let op_filter = self.operation.trim().to_lowercase();
+        if !op_filter.is_empty() {
+            let row_op = row.operation.to_lowercase();
+            if row_op != op_filter && !row_op.contains(&op_filter) {
+                return false;
+            }
+        }
+
+        let text = self.text.trim().to_lowercase();
+        if !text.is_empty() {
+            let matched = row.id.to_lowercase().contains(&text)
+                || row.title.to_lowercase().contains(&text)
+                || row.operation.to_lowercase().contains(&text)
+                || row.error_summary.to_lowercase().contains(&text)
+                || row.resource_ref.to_lowercase().contains(&text)
+                || row.state_label().to_lowercase().contains(&text);
+            if !matched {
+                return false;
+            }
+        }
+
+        let since_trim = self.since.trim();
+        if !since_trim.is_empty() {
+            if let (Some(filter_since), Some(row_created)) =
+                (parse(since_trim), parse(&row.created_at))
+            {
+                if row_created < filter_since {
+                    return false;
+                }
+            } else if !row.created_at.is_empty() && row.created_at.as_str() < since_trim {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
 /// One row of the Jobs table (and the head of the detail panel).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobRow {
@@ -425,8 +482,196 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     fn now() -> String {
         chrono::Utc::now().to_rfc3339()
+    }
+
+    #[test]
+    fn test_job_filter_matches_status() {
+        let mut row = JobRow {
+            state: "running".into(),
+            ..Default::default()
+        };
+
+        // All matches any state
+        let all = JobFilter {
+            status: JobStatusFilter::All,
+            ..Default::default()
+        };
+        assert!(all.matches(&row));
+
+        // Active matches running, queued, retry_scheduled
+        let active = JobFilter {
+            status: JobStatusFilter::Active,
+            ..Default::default()
+        };
+        assert!(active.matches(&row));
+        row.state = "queued".into();
+        assert!(active.matches(&row));
+        row.state = "retry_scheduled".into();
+        assert!(active.matches(&row));
+        row.state = "completed".into();
+        assert!(!active.matches(&row));
+
+        // Retrying matches retry_scheduled
+        let retrying = JobFilter {
+            status: JobStatusFilter::Retrying,
+            ..Default::default()
+        };
+        assert!(!retrying.matches(&row));
+        row.state = "retry_scheduled".into();
+        assert!(retrying.matches(&row));
+
+        // Failed matches failed and partial
+        let failed = JobFilter {
+            status: JobStatusFilter::Failed,
+            ..Default::default()
+        };
+        assert!(!failed.matches(&row));
+        row.state = "failed".into();
+        assert!(failed.matches(&row));
+        row.state = "partial".into();
+        assert!(failed.matches(&row));
+
+        // Completed matches completed and succeeded
+        let completed = JobFilter {
+            status: JobStatusFilter::Completed,
+            ..Default::default()
+        };
+        assert!(!completed.matches(&row));
+        row.state = "completed".into();
+        assert!(completed.matches(&row));
+        row.state = "succeeded".into();
+        assert!(completed.matches(&row));
+
+        // Stopped matches cancelled, paused, superseded
+        let stopped = JobFilter {
+            status: JobStatusFilter::Stopped,
+            ..Default::default()
+        };
+        assert!(!stopped.matches(&row));
+        row.state = "cancelled".into();
+        assert!(stopped.matches(&row));
+        row.state = "paused".into();
+        assert!(stopped.matches(&row));
+        row.state = "superseded".into();
+        assert!(stopped.matches(&row));
+    }
+
+    #[test]
+    fn test_job_filter_matches_app_and_operation() {
+        let row = JobRow {
+            app: "intel".into(),
+            operation: "summaries".into(),
+            ..Default::default()
+        };
+
+        let filter_app = JobFilter {
+            app: "intel".into(),
+            ..Default::default()
+        };
+        assert!(filter_app.matches(&row));
+
+        let filter_app_case = JobFilter {
+            app: "INTEL".into(),
+            ..Default::default()
+        };
+        assert!(filter_app_case.matches(&row));
+
+        let filter_other_app = JobFilter {
+            app: "recon".into(),
+            ..Default::default()
+        };
+        assert!(!filter_other_app.matches(&row));
+
+        let filter_op = JobFilter {
+            operation: "summaries".into(),
+            ..Default::default()
+        };
+        assert!(filter_op.matches(&row));
+
+        let filter_other_op = JobFilter {
+            operation: "index".into(),
+            ..Default::default()
+        };
+        assert!(!filter_other_op.matches(&row));
+    }
+
+    #[test]
+    fn test_job_filter_matches_text() {
+        let row = JobRow {
+            id: "job-12345".into(),
+            title: "Investigation of target example.com".into(),
+            operation: "lookup".into(),
+            error_summary: "Connection timeout to host".into(),
+            state: "failed".into(),
+            ..Default::default()
+        };
+
+        // Match by id
+        let f_id = JobFilter {
+            text: "12345".into(),
+            ..Default::default()
+        };
+        assert!(f_id.matches(&row));
+
+        // Match by title
+        let f_title = JobFilter {
+            text: "target EXAMPLE".into(),
+            ..Default::default()
+        };
+        assert!(f_title.matches(&row));
+
+        // Match by error summary
+        let f_err = JobFilter {
+            text: "timeout".into(),
+            ..Default::default()
+        };
+        assert!(f_err.matches(&row));
+
+        // Match by state label
+        let f_state = JobFilter {
+            text: "failed".into(),
+            ..Default::default()
+        };
+        assert!(f_state.matches(&row));
+
+        // Unmatched text
+        let f_miss = JobFilter {
+            text: "completely_unrelated".into(),
+            ..Default::default()
+        };
+        assert!(!f_miss.matches(&row));
+    }
+
+    #[test]
+    fn test_job_filter_matches_since() {
+        let row = JobRow {
+            created_at: "2026-10-27T12:00:00Z".into(),
+            ..Default::default()
+        };
+
+        // Earlier bound passes
+        let f_earlier = JobFilter {
+            since: "2026-10-27T10:00:00Z".into(),
+            ..Default::default()
+        };
+        assert!(f_earlier.matches(&row));
+
+        // Same time passes
+        let f_same = JobFilter {
+            since: "2026-10-27T12:00:00Z".into(),
+            ..Default::default()
+        };
+        assert!(f_same.matches(&row));
+
+        // Later bound fails
+        let f_later = JobFilter {
+            since: "2026-10-27T14:00:00Z".into(),
+            ..Default::default()
+        };
+        assert!(!f_later.matches(&row));
     }
 }

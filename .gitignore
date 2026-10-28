@@ -12,6 +12,7 @@ findings.md
 progress.md
 .agent-scratch/
 .agent_scratch/
+.agents/teamwork/
 .planning/**/tui/
 # Host selection and ad hoc task working memory are local. See docs/wiki/code/planning-artifacts.md.
 /.planning/.active_plan

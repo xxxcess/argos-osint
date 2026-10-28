@@ -238,12 +238,11 @@ mod imp {
     pub(crate) fn ui_state_set(key: &str, value: &str) -> Result<()> {
         let (key, value) = (key.to_string(), value.to_string());
         std::thread::spawn(move || {
-            runtime::blocking(|repo| async move {
+            let _ = runtime::blocking(|repo| async move {
                 argos_osint_core::storage::pipeline_inputs::app_state_set(&repo, &key, &value).await
-            })
-        })
-        .join()
-        .map_err(|_| anyhow::anyhow!("UI state worker panicked"))?
+            });
+        });
+        Ok(())
     }
 }
 

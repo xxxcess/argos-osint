@@ -40,6 +40,7 @@ Role models and reasoning variants live in `.opencode/opencode.json` at `agents.
 - **Orchestration (`orchestrator`)**: `opencode-go/glm-5.3-flash#low`.
 - **Implementation coordination (`rust-coder`, `react-coder`)**: `opencode-go/kimi-k2.7-code`.
 - **Review, Forensic Audit & Documentation (`reviewer`, `auditor`, `scribe`)**: `opencode-go/glm-5.3-flash#low`.
+`opencode-go/glm-5.3-flash` (like `glm-5.3`) exposes effort tiers `low | high | max` only — there is no `medium`; requests for GLM 'medium' map to `#high`, the middle tier.
 - **Verification (`tester`)**: `opencode-go/gemini-4-argon#low`.
 - **Fast `EDIT_UNIT` & Worker Overrides**: `opencode-go/kimi-k2.7-code` (no reasoning variants; verbatim ID) in `.opencode/coder-rust-worker.json` and `.opencode/coder-react-worker.json`.
 

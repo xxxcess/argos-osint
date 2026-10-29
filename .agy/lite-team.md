@@ -2,12 +2,13 @@
 
 [How-To Guide](./howto.md) · [Heavy Team](./heavy-team.md)
 
-Fast-path 2-agent workflow (`coder` + `tester`) for scoped tasks ($\le 3$ files, single module, no breaking contract/schema migrations). `coder` acts as the primary coordinator (`experimental.subagent_depth: 2`).
+Fast-path stack-split coder workflow (`rust-coder` / `react-coder` + `tester`) for scoped tasks ($\le 3$ files, single module, no breaking contract/schema migrations). The owning stack coder acts as the primary coordinator (`experimental.subagent_depth: 2`).
 
 | Caller | Permitted Children | Assigned `subagent.model` | Purpose | 
 | ----- | ----- | ----- | ----- | 
-| `coordinator` / `coder` (Orchestration) | `coder`, `tester`, `architect` (`CONSULT`) | `google/gemini-4-argon#low` *(alias: `google/argon#low`)* | General team orchestration for efficient work completion, dispatching agents, and tracking scoped task progress (`experimental.subagent_depth: 2`) | 
-| `coder` (Implementation & Admin) | `tester`, `architect` (`CONSULT`) | `google/gemini-3.8-flash#medium` | Precise changes in repo files or worktrees (`crates/**`, `apps/**`, `packages/**`, `scripts/**`), code formatting, and general administrative work not requiring heavy reasoning | 
+| `coordinator` / `rust-coder` / `react-coder` (Orchestration) | `rust-coder`, `react-coder`, `tester`, `architect` (`CONSULT`) | `google/gemini-4-argon#low` *(alias: `google/argon#low`)* | General team orchestration for efficient work completion, dispatching agents, and tracking scoped task progress (`experimental.subagent_depth: 2`) | 
+| `rust-coder` (Rust Implementation & Admin) | `tester`, `architect` (`CONSULT`) | Coder: `opencode-go/kimi-k2.7-code`; spawned `EDIT_UNIT` children: `opencode-go/kimi-k2.7-code` (no reasoning variants; verbatim ID) | Precise changes in `crates/**`, `scripts/**`, Rust formatting, and general administrative work not requiring heavy reasoning | 
+| `react-coder` (React Implementation & Admin) | `tester`, `architect` (`CONSULT`) | Coder: `opencode-go/kimi-k2.7-code`; spawned `EDIT_UNIT` children: `opencode-go/kimi-k2.7-code` (no reasoning variants; verbatim ID) | Precise UI changes in `apps/**`, `packages/**`, and general administrative work not requiring heavy reasoning | 
 | `tester` (Verification) | `architect` (`CONSULT`) | `google/gemini-4-argon#low` *(alias: `google/argon#low`)* | Run host-native targeted Rust/system and UI verification gates in `INTEGRATION_ROOT` and return `PASS / FAIL / BLOCKED / PENDING` | 
 | `architect` (`CONSULT`) | `none` | `anthropic/claude-sonnet-5.5#low` | Consult team member for code planning, code review, architecture, and analysis (e.g. contract design, UI design standards/glass palette review, type safety) | 
 
@@ -15,26 +16,26 @@ Fast-path 2-agent workflow (`coder` + `tester`) for scoped tasks ($\le 3$ files,
 
 1. **Scope Check & Model Selection:**
    * **General Team Orchestration & Plan Tracking:** Use `google/gemini-4-argon#low` (alias: `google/argon#low`) for general team orchestration for efficient work completion and tracking scoped plan progress.
-   * **Precise File Edits & Administrative Work:** `coder` runs on `google/gemini-3.8-flash#medium` for precise changes in repo files or worktrees (across Rust, scripts, and React Native UI) and general administrative work not requiring heavy reasoning.
+   * **Precise File Edits & Administrative Work:** `rust-coder` and `react-coder` run on `opencode-go/kimi-k2.7-code` for precise changes in their stack's repo files or worktrees (Rust/scripts and React Native UI, respectively) and general administrative work not requiring heavy reasoning. Their spawned `EDIT_UNIT` children run on `opencode-go/kimi-k2.7-code` (no reasoning variants; verbatim ID).
    * **Code Planning, Review, Architecture & Analysis Consultation:** Consult a team member with `anthropic/claude-sonnet-5.5#low` (`architect` / `CONSULT`) whenever code planning, architecture guidance, technical analysis, or code review (such as auditing diffs or enforcing [React UI rules](../docs/wiki/code/react-ui.md), the [Argos look and feel](../docs/wiki/code/react-ui.md#argos-look--feel-reference), [repo conventions](../docs/wiki/code/conventions.md), and React Compiler rules) is required. Component design may be original inside the Argos theme.
    * **Host-Native Verification:** `tester` runs on `google/gemini-4-argon#low` to execute targeted verification gates in `INTEGRATION_ROOT`.
    * If scope expands beyond $3$ files, alters shared contracts, or requires full multi-phase `.planning/` lifecycle management, stop and escalate to `./heavy-team.md`.
 
 2. **Implementation & Storage Boundaries:**
-   * `coder` records `INTEGRATION_ROOT` and baseline dirty paths.
-   * Sequential edits across $\le 3$ files execute directly in `INTEGRATION_ROOT` or in a single isolated worktree under `.agent-scratch/worktrees/<task-id>`. Rust edits load `argos-rust-style`.
+   * The owning stack coder (`rust-coder` or `react-coder`) records `INTEGRATION_ROOT` and baseline dirty paths.
+   * Sequential edits across $\le 3$ files execute directly in `INTEGRATION_ROOT` or in a single isolated worktree under `.agent-scratch/worktrees/<task-id>`. Rust edits load `argos-rust-style`; React UI edits load `argos-react-ui` + `argos-react-patterns`.
    * All temporary files, scratch directories, and intermediate outputs **must** use `.agent-scratch/` or `.agent-scratch/worktrees/`.
    * If the task requires recording durable planning notes or spec updates intended for long-term commit persistence to GitHub, store them in the appropriate `.planning/` directory (never in `.agent-scratch/`).
 
-3. **Verification (`VERIFY`):** `coder` formats all modified files and dispatches `tester` (`google/gemini-4-argon#low`). For code review, design inspection, or React Native UI verification against repo UI design standards and conventions (`docs/wiki/code/react-ui.md` Argos look and feel, creative component design inside the theme, shared React Native primitives, zero-warning React Compiler/Hooks lint, and Playwright fixture screenshot inspection), consult team member on `anthropic/claude-sonnet-5.5#low`. `tester` executes the targeted verification gate in `INTEGRATION_ROOT`, writes any temporary verification logs to `.agent-scratch/`, and returns exit codes and diagnostics.
+3. **Verification (`VERIFY`):** The owning stack coder formats all modified files and dispatches `tester` (`google/gemini-4-argon#low`). For code review, design inspection, or React Native UI verification against repo UI design standards and conventions (`docs/wiki/code/react-ui.md` Argos look and feel, creative component design inside the theme, shared React Native primitives, zero-warning React Compiler/Hooks lint, and Playwright fixture screenshot inspection), consult team member on `anthropic/claude-sonnet-5.5#low`. `tester` executes the targeted verification gate in `INTEGRATION_ROOT`, writes any temporary verification logs to `.agent-scratch/`, and returns exit codes and diagnostics.
 
-4. **Fix Loop & Cleanup:** If `tester` reports `FAIL`, `coder` applies targeted fixes and resumes `tester` via its parent-owned `sessionID`. Once `PASS` is achieved, `coder` cleans up `.agent-scratch/` and `.agent-scratch/worktrees/`.
+4. **Fix Loop & Cleanup:** If `tester` reports `FAIL`, the owning stack coder applies targeted fixes and resumes `tester` via its parent-owned `sessionID`. Once `PASS` is achieved, the owning stack coder cleans up `.agent-scratch/` and `.agent-scratch/worktrees/`.
 
-## Handoff Envelope (`coder` → `tester` / `CONSULT`)
+## Handoff Envelope (`rust-coder`/`react-coder` → `tester` / `CONSULT`)
 
 ```text
 MODE: VERIFY | EDIT_UNIT | CONSULT
-SUBAGENT_MODEL: google/gemini-4-argon#low | google/gemini-3.8-flash#medium | anthropic/claude-sonnet-5.5#low
+SUBAGENT_MODEL: google/gemini-4-argon#low | opencode-go/kimi-k2.7-code (coder) | opencode-go/kimi-k2.7-code (EDIT_UNIT child; verbatim ID) | anthropic/claude-sonnet-5.5#low
 INTEGRATION_ROOT / BASE_REVISION:
 WORKTREE / SCRATCH_DIR: .agent-scratch/ or .agent-scratch/worktrees/<task-id>
 PLAN_DIR (if persistent GitHub commit required): .planning/

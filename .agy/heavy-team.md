@@ -2,13 +2,14 @@
 
 [How-To Guide](./howto.md) · [Lite Team](./lite-team.md)
 
-`architect` is the default primary coordinator (`experimental.subagent_depth: 3`). `architect`, `coder`, `tester`, and `scribe` can run as primary agents or children (`mode: all`).
+`architect` is the default primary coordinator (`experimental.subagent_depth: 3`). `architect`, `rust-coder`, `react-coder`, `tester`, and `scribe` can run as primary agents or children (`mode: all`).
 
 | Caller | Permitted Children | Assigned `subagent.model` | Purpose |
 | --- | --- | --- | --- |
-| `orchestrator` / `architect` (Team Lead) | `architect` (`CONSULT`), `coder`, `tester`, `scribe` | `google/gemini-4-argon#low` *(alias: `google/argon#low`)* | Long-term team coordination, plan tracking, and general team orchestration for efficient work completion (`experimental.subagent_depth: 3`) |
+| `orchestrator` / `architect` (Team Lead) | `architect` (`CONSULT`), `rust-coder`, `react-coder`, `tester`, `scribe` | `google/gemini-4-argon#low` *(alias: `google/argon#low`)* | Long-term team coordination, plan tracking, and general team orchestration for efficient work completion (`experimental.subagent_depth: 3`) |
 | `architect` / `consultant` (`CONSULT` / Analysis) | `none` | `anthropic/claude-sonnet-5.5#low` | Consult team member for code planning, code review, architecture, and analysis (explore code/docs, define technical spec/contracts, audit diffs, review UI conventions) |
-| `coder` (Implementation & Admin) | `coder`, `architect` (`CONSULT`), `tester`, `scribe` | `google/gemini-3.8-flash#medium` | Precise changes in repo files or worktrees (`crates/**`, `apps/**`, `packages/**`, `scripts/**`), manage `.agent-scratch/worktrees/`, format files, and handle general administrative tasks |
+| `rust-coder` (Rust Implementation & Admin) | `rust-coder`, `architect` (`CONSULT`), `tester`, `scribe` | Coder: `opencode-go/kimi-k2.7-code`; spawned `EDIT_UNIT` children: `opencode-go/kimi-k2.7-code` (no reasoning variants; verbatim ID) | Precise changes in repo files or worktrees (`crates/**`, `scripts/**`), manage `.agent-scratch/worktrees/`, format files, and handle general administrative tasks |
+| `react-coder` (React Implementation & Admin) | `react-coder`, `architect` (`CONSULT`), `tester`, `scribe` | Coder: `opencode-go/kimi-k2.7-code`; spawned `EDIT_UNIT` children: `opencode-go/kimi-k2.7-code` (no reasoning variants; verbatim ID) | Precise UI changes in repo files or worktrees (`apps/**`, `packages/**`), manage `.agent-scratch/worktrees/`, format files, and handle general administrative tasks |
 | `tester` (Verification) | `architect` (`CONSULT`) | `google/gemini-4-argon#low` *(alias: `google/argon#low`)* | Run host-native Rust/CI and UI verification gates in `INTEGRATION_ROOT`, consult `anthropic/claude-sonnet-5.5#low` for code review/analysis |
 | `scribe` (Plan Tracking & Docs) | `none` | `google/gemini-4-argon#low` *(alias: `google/argon#low`)* / `google/gemini-3.8-flash#medium` | Long-term plan tracking in `.planning/` (`google/gemini-4-argon#low`); general administrative doc formatting and chore updates (`google/gemini-3.8-flash#medium`) |
 
@@ -19,25 +20,25 @@
    * For code planning, architecture, and analysis, the team consults a team member with `anthropic/claude-sonnet-5.5#low` (`architect` / `CONSULT` / `AUDIT_UNIT`) to explore the repo, define exact file targets, verify contract boundaries, and produce the technical specification.
    * The orchestrator dispatches `scribe` (`DOC_REVIEW` on `google/gemini-4-argon#low`) to initialize and track the durable `.planning/` docs framework via `planning-with-files` for long-term GitHub persistence.
 2. **Scoped Implementation (`EDIT_UNIT` — Precise Changes & Administrative Work):**
-   * `coder` runs on `google/gemini-3.8-flash#medium` to handle precise changes in repo files or worktrees and general administrative work.
-   * `coder` records `INTEGRATION_ROOT` and assigns disjoint `EDIT_UNIT` children (`subagent.model: google/gemini-3.8-flash#medium`) using task-owned worktrees under `.agent-scratch/worktrees/` for precise source edits across crates, packages, and UI files. Rust edits load `argos-rust-style`.
+   * `rust-coder` and `react-coder` run on `opencode-go/kimi-k2.7-code` to handle precise changes in their stack's repo files or worktrees and general administrative work.
+   * The owning stack coder records `INTEGRATION_ROOT` and assigns disjoint same-type `EDIT_UNIT` children (`subagent.model: opencode-go/kimi-k2.7-code`, no reasoning variants; verbatim ID) using its worker override (`.opencode/coder-rust-worker.json` or `.opencode/coder-react-worker.json`) and task-owned worktrees under `.agent-scratch/worktrees/` for precise source edits across crates, packages, and UI files. Rust edits load `argos-rust-style`.
    * If code planning, review, or architecture questions arise during implementation, consult team member on `anthropic/claude-sonnet-5.5#low`.
    * `EDIT_UNIT` children edit and format only their assigned files, use `.agent-scratch/` for any temporary data, and never delegate, build, or test.
 3. **Documentation & `.planning/` Checkpoint (`DOC_REVIEW`):**
-   * Once deltas are integrated and formatted in `INTEGRATION_ROOT`, `coder` dispatches `scribe`.
+   * Once deltas are integrated and formatted in `INTEGRATION_ROOT`, the owning stack coder (`rust-coder` or `react-coder`) dispatches `scribe`.
    * `scribe` uses `google/gemini-4-argon#low` for long-term plan tracking in `.planning/`, and `google/gemini-3.8-flash#medium` for general administrative documentation updates, wiki docs, diagrams, and READMEs, returning `COMPLETE | NEEDS_DECISION | BLOCKED`.
 4. **Verification Gate (`VERIFY`):**
-   * `coder` invokes `tester` (`subagent.model: google/gemini-4-argon#low`) to execute host-native verification gates in `INTEGRATION_ROOT` (Rust builds, clippy, and embedded storage mode tests referencing `.github/workflows/ci.yml` and `docs/wiki/code/ci.md`).
+   * The owning stack coder invokes `tester` (`subagent.model: google/gemini-4-argon#low`) to execute host-native verification gates in `INTEGRATION_ROOT` (Rust builds, clippy, and embedded storage mode tests referencing `.github/workflows/ci.yml` and `docs/wiki/code/ci.md`).
    * For code review, architecture analysis, and React Native UI compliance review (`react-ui.md` Argos look and feel, creative component design inside the theme, shared React Native primitives, zero-warning React Compiler/Hooks lint, and offline Playwright fixture screenshots), consult team member on `anthropic/claude-sonnet-5.5#low`.
-   * Both verification results and review notes are saved to `.agent-scratch/` and returned (`PASS | FAIL | BLOCKED | PENDING`) to `coder`, which relays them to the orchestrator.
+   * Both verification results and review notes are saved to `.agent-scratch/` and returned (`PASS | FAIL | BLOCKED | PENDING`) to the owning stack coder, which relays them to the orchestrator.
 5. **Acceptance & Cleanup:**
-   * The orchestrator (`google/gemini-4-argon#low`) reviews diagnostics, verifies long-term plan tracking ledgers in `.planning/` for GitHub persistence, and instructs `coder` to execute `.agent-scratch/` and `.agent-scratch/worktrees/` cleanup.
+   * The orchestrator (`google/gemini-4-argon#low`) reviews diagnostics, verifies long-term plan tracking ledgers in `.planning/` for GitHub persistence, and instructs the owning stack coders to execute `.agent-scratch/` and `.agent-scratch/worktrees/` cleanup.
 
 ## Storage, Persistence & Cleanup Conventions
 
 * **Temporary Files & Directories (`.agent-scratch/` & `.agent-scratch/worktrees/`):** All temporary files, scratch directories, patch files, runtime diagnostics, and isolated feature worktrees **must** use either `.agent-scratch/` or `.agent-scratch/worktrees/`. Never write temporary files outside `.agent-scratch/`, and never stage or commit `.agent-scratch/` paths to GitHub.
 * **Long-Term GitHub Commit Persistence (`.planning/`):** All durable planning documents, phase specifications, architectural decisions, and status ledgers intended for long-term repository persistence and GitHub commits **must** be placed in the appropriate `.planning/` directory owned by `scribe` (`planning-with-files`).
-* **Write Boundaries:** `architect` and `tester` edit only local planning/verification evidence in `.agent-scratch/`. `coder` edits source, tests, and fixtures. `scribe` edits only `.planning/` docs, repo docs, and READMEs (never source, tests, or configs). Browser tools are denied.
+* **Write Boundaries:** `architect` and `tester` edit only local planning/verification evidence in `.agent-scratch/`. `rust-coder`/`react-coder` edit source, tests, and fixtures for their stack. `scribe` edits only `.planning/` docs, repo docs, and READMEs (never source, tests, or configs). Browser tools are denied.
 * **Worktree Isolation:** Create parallel feature worktrees from the agreed baseline (`git worktree add --detach .agent-scratch/worktrees/<unit-id> <base>`). Isolate parallel Rust checks with `CARGO_TARGET_DIR=.agent-scratch/target-<unit-id>` and `CARGO_BUILD_JOBS=2`. Never run `tester` inside feature worktrees.
 * **Workflow Cleanup:** Retain task worktrees under `.agent-scratch/worktrees/` only until verified and integrated. Upon phase completion, remove clean integrated worktrees without force (`git worktree remove`), run `git worktree prune`, delete temporary build/patch artifacts, and keep only essential diagnostic logs in `.agent-scratch/`.
 
@@ -47,7 +48,7 @@ Every subagent call must include this compact envelope:
 
 ```text
 MODE: PHASE | EDIT_UNIT | AUDIT_UNIT | CONSULT | VERIFY | DOC_REVIEW
-SUBAGENT_MODEL: google/gemini-4-argon#low | google/gemini-3.8-flash#medium | anthropic/claude-sonnet-5.5#low
+SUBAGENT_MODEL: google/gemini-4-argon#low | opencode-go/kimi-k2.7-code (coder) | opencode-go/kimi-k2.7-code (EDIT_UNIT child; verbatim ID) | anthropic/claude-sonnet-5.5#low
 PLAN_ID / absolute PLAN_DIR (.planning) / PHASE:
 INTEGRATION_ROOT / absolute WORKTREE (.agent-scratch/worktrees/...) / BASE_REVISION:
 OWNED_FILES: exact paths (read-only references listed separately)

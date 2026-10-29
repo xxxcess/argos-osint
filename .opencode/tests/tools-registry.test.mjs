@@ -17,11 +17,15 @@ function effect(agent, action, resource) {
   return matched[matched.length - 1].effect;
 }
 
-const activeAgents = ["coordinator", "orchestrator", "architect", "coder", "reviewer", "tester", "auditor", "scribe"];
+function workerModel(name) {
+  return JSON.parse(readFileSync(join(root, name), "utf8")).model;
+}
 
-test("coordinator is default GLM max agent and teamwork catalog roles enforce nested handoffs and write boundaries", () => {
+const activeAgents = ["coordinator", "orchestrator", "architect", "rust-coder", "react-coder", "reviewer", "tester", "auditor", "scribe"];
+
+test("coordinator is default go-provider GLM agent and teamwork catalog roles enforce nested handoffs and write boundaries", () => {
   assert.equal(config.default_agent, "coordinator");
-  assert.equal(config.model, "opencode/glm-5.3-flash-free#max");
+  assert.equal(config.model, "opencode-go/glm-5.3-flash#low");
   assert.equal(config.experimental.subagent_depth, 4);
   assert.equal(config.subagent_depth, undefined);
   for (const id of ["build", "plan", "general", "explore"]) assert.equal(config.agents[id].disabled, true);
@@ -33,22 +37,22 @@ test("coordinator is default GLM max agent and teamwork catalog roles enforce ne
     assert.equal(effect(id, "subagent", "*"), "deny");
     assert.equal(effect(id, "skill", "*"), "allow");
   }
-  for (const child of ["orchestrator", "architect", "coder", "reviewer", "tester", "auditor", "scribe"]) {
+  for (const child of ["orchestrator", "architect", "rust-coder", "react-coder", "reviewer", "tester", "auditor", "scribe"]) {
     assert.equal(effect("coordinator", "subagent", child), "allow");
   }
   assert.equal(effect("coordinator", "question", "*"), "allow");
-  for (const parent of ["orchestrator", "architect", "coder"]) {
-    for (const child of ["architect", "coder", "reviewer", "tester", "auditor", "scribe"]) {
+  for (const parent of ["orchestrator", "architect", "rust-coder", "react-coder"]) {
+    for (const child of ["architect", "rust-coder", "react-coder", "reviewer", "tester", "auditor", "scribe"]) {
       assert.equal(effect(parent, "subagent", child), "allow");
     }
   }
-  for (const parent of ["architect", "coder"]) {
-    const worker = JSON.parse(readFileSync(join(root, `${parent}-worker.json`), "utf8"));
-    assert.match(worker.model, /^[^/]+\/[^/]+$/);
+  for (const parent of ["architect", "rust-coder", "react-coder"]) {
+    const file = parent === "architect" ? "architect-worker.json" : `coder-${parent.replace(/-coder$/, "")}-worker.json`;
+    assert.match(workerModel(file), /^[^/]+\/[^/]+(#[^/]+)?$/);
   }
   assert.equal(effect("tester", "subagent", "architect"), "allow");
   assert.equal(effect("reviewer", "subagent", "architect"), "allow");
-  assert.equal(effect("coder", "edit", "*"), "allow");
+  for (const id of ["rust-coder", "react-coder"]) assert.equal(effect(id, "edit", "*"), "allow");
   for (const id of ["coordinator", "orchestrator", "architect", "reviewer", "tester", "auditor"]) {
     assert.equal(effect(id, "edit", "*"), "deny");
     assert.equal(effect(id, "edit", "**/.planning/**"), "allow");
@@ -58,6 +62,8 @@ test("coordinator is default GLM max agent and teamwork catalog roles enforce ne
   for (const id of ["orchestrator", "architect", "reviewer", "tester", "auditor"]) {
     assert.equal(rules(id).some((rule) => rule.action === "edit" && rule.effect === "allow" && /opencode/.test(rule.resource)), false);
   }
+  assert.equal(effect("tester", "edit", ".agent-scratch/**"), "allow");
+  assert.equal(effect("tester", "edit", "**/.agent-scratch/**"), "allow");
 });
 
 test("commands map to catalog specialists and verify uses the embedded integration gate", () => {
@@ -76,7 +82,6 @@ test("teamwork prompts enforce interview triage, leaf modes, and caller-owned co
   const coordinator = readFileSync(join(root, "agents/coordinator.md"), "utf8");
   const orchestrator = readFileSync(join(root, "agents/orchestrator.md"), "utf8");
   const architect = readFileSync(join(root, "agents/architect.md"), "utf8");
-  const coder = readFileSync(join(root, "agents/coder.md"), "utf8");
   const reviewer = readFileSync(join(root, "agents/reviewer.md"), "utf8");
   const auditor = readFileSync(join(root, "agents/auditor.md"), "utf8");
   assert.match(coordinator, /Concise Pre-Execution Interview/);
@@ -85,38 +90,47 @@ test("teamwork prompts enforce interview triage, leaf modes, and caller-owned co
   assert.match(coordinator, /Dynamic Team Selection from Catalog/);
   assert.match(orchestrator, /INTEGRITY_VIOLATION/);
   assert.match(architect, /AUDIT_UNIT and CONSULT are leaf modes/);
-  assert.match(coder, /EDIT_UNIT/);
-  assert.match(coder, /Do not delegate, build or test/);
+  const rustCoder = readFileSync(join(root, "agents/rust-coder.md"), "utf8");
+  const reactCoder = readFileSync(join(root, "agents/react-coder.md"), "utf8");
+  assert.match(rustCoder, /EDIT_UNIT/);
+  assert.match(rustCoder, /Do not delegate, build or test/);
+  assert.match(reactCoder, /EDIT_UNIT/);
+  assert.match(reactCoder, /Do not delegate, build or test/);
   assert.match(reviewer, /APPROVE \| REJECT/);
   assert.match(auditor, /CLEAN/);
   assert.match(auditor, /INTEGRITY_VIOLATION/);
   assert.match(auditor, /do not delegate/i);
-  for (const id of ["coordinator", "orchestrator", "architect", "coder", "reviewer", "tester"]) {
+  for (const id of ["coordinator", "orchestrator", "architect", "reviewer", "tester", "rust-coder", "react-coder"]) {
     assert.match(readFileSync(join(root, "agents", `${id}.md`), "utf8"), /Resume only your own child sessionID/);
   }
 });
 
-test("shared guide, planning skill, and OpenCode catalog models are configured without Google/Claude refs", () => {
+test("shared guide, planning skill, and OpenCode catalog models are configured without external provider refs", () => {
   assert.deepEqual(config.instructions, [".opencode/AGENTS.md"]);
   assert.ok(config.skills.includes("~/.agents/skills/planning-with-files"));
   const guide = readFileSync(join(root, "AGENTS.md"), "utf8");
   assert.ok(guide.length < readFileSync(join(root, "../AGENTS.md"), "utf8").length);
-  assert.equal(config.agents.coordinator.model, "opencode/glm-5.3-flash-free#max");
-  assert.equal(config.agents.orchestrator.model, "opencode/big-pickle");
-  assert.equal(config.agents.architect.model, "opencode/glm-5.3-flash-free#max");
-  assert.equal(config.agents.coder.model, "opencode/big-pickle");
-  assert.equal(config.agents.reviewer.model, "opencode/nemotron-3.5-super-vl-free#medium");
-  assert.equal(config.agents.tester.model, "opencode/nemotron-3.5-super-vl-free#medium");
-  assert.equal(config.agents.auditor.model, "opencode/nemotron-3.5-super-vl-free#medium");
-  assert.equal(JSON.parse(readFileSync(join(root, "coder-worker.json"), "utf8")).model, "opencode/mimo-v2.6-flash-free");
+  assert.equal(config.agents.coordinator.model, "opencode-go/glm-5.3-flash#low");
+  assert.equal(config.agents.orchestrator.model, "opencode-go/glm-5.3-flash#low");
+  assert.equal(config.agents.architect.model, "opencode-go/kimi-k2.7-code");
+  assert.equal(config.agents["rust-coder"].model, "opencode-go/kimi-k2.7-code");
+  assert.equal(config.agents["react-coder"].model, "opencode-go/kimi-k2.7-code");
+  assert.equal(config.agents.reviewer.model, "opencode-go/glm-5.3-flash#low");
+  assert.equal(config.agents.tester.model, "opencode-go/glm-5.3-flash#high");
+  assert.equal(config.agents.auditor.model, "opencode-go/glm-5.3-flash#low");
+  assert.equal(config.agents.scribe.model, "opencode-go/glm-5.3-flash#low");
+  assert.equal(workerModel("architect-worker.json"), "opencode/big-pickle");
+  assert.equal(workerModel("coder-rust-worker.json"), "opencode-go/kimi-k2.7-code");
+  assert.equal(workerModel("coder-react-worker.json"), "opencode-go/kimi-k2.7-code");
   for (const id of activeAgents) {
-    assert.doesNotMatch(config.agents[id].model, /google|claude|anthropic/i);
-    assert.doesNotMatch(readFileSync(join(root, "agents", `${id}.md`), "utf8"), /google\/|anthropic\/|claude-/i);
+    assert.match(config.agents[id].model, /^opencode(-go)?\//);
+    assert.doesNotMatch(config.agents[id].model, /-free/);
+    assert.doesNotMatch(readFileSync(join(root, "agents", `${id}.md`), "utf8"), /google\/|openai\/|openrouter\/|anthropic\/|zenmux\//i);
   }
 });
 
 test("Scribe and Auditor preserve leaf non-delegation and strict edit scopes", () => {
-  assert.equal(config.agents.scribe.model, config.agents.tester.model);
+  assert.equal(config.agents.scribe.model, config.agents.auditor.model);
   assert.equal(effect("scribe", "edit", "*"), "deny");
   for (const resource of ["docs/**", "**/docs/**", "README.md", "**/README.md", "**/.planning/**"]) {
     assert.equal(effect("scribe", "edit", resource), "allow");
@@ -127,10 +141,12 @@ test("Scribe and Auditor preserve leaf non-delegation and strict edit scopes", (
   for (const name of ["setup-wiki", "refresh-wiki", "docs-review"]) {
     assert.match(readFileSync(join(root, `commands/${name}.md`), "utf8"), /agent: scribe/);
   }
-  const coder = readFileSync(join(root, "agents/coder.md"), "utf8");
-  assert.match(coder, /agents\.<role>\.model/);
-  assert.match(coder, /documentation updates before verification/);
-  assert.match(coder, /Re-run `scribe` after fixes/);
+  for (const id of ["rust-coder", "react-coder"]) {
+    const coderDoc = readFileSync(join(root, `agents/${id}.md`), "utf8");
+    assert.match(coderDoc, /agents\.<role>\.model/);
+    assert.match(coderDoc, /documentation updates before verification/);
+    assert.match(coderDoc, /Re-run `scribe` after fixes/);
+  }
   const scribe = readFileSync(join(root, "agents/scribe.md"), "utf8");
   assert.match(scribe, /do not delegate/i);
   assert.match(scribe, /no-op review/i);

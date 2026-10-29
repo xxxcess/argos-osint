@@ -56,3 +56,14 @@ The user authorized the original web workflow addition and this follow-up CI upd
 ## Supplemental process checks
 
 Launcher/stack lifecycle changes also run `python3 scripts/test_web_stack.py --terminal-captures .agent-scratch/stack-review` after building `argos` and `argos-api-host` through the isolated Cargo wrapper and exporting the web app. `--tui-only --tui-web-profile installed` narrows this to Venture back/value restoration, TUI return, same-parent storage reuse, shared API/Web TUI and terminal cleanup. These PTY/process checks are local supplemental evidence; the workflows above do not execute this script. Keep actual hosted results separate.
+
+The composer-launch regression `python3 scripts/test_web_stack.py --composer-smoke`
+runs the same PTY harness in its own temp `ARGOS_HOME`: `storage init --mode
+embedded`, then `stack up --tui`, submit a recon prompt from the Home composer,
+assert the investigation surface replaces the Home launcher, and then hold a
+bounded 45 s window in which no `stack overflow`/`fatal runtime error` may
+appear and the child must stay alive. It finishes with clean `ARGOS_EXIT=0` and
+termios restored. It needs only `argos` built (no
+`argos-api-host`) and is POSIX-only (skips elsewhere). Like the stack lifecycle
+checks, it is local supplemental evidence that the workflows do not execute;
+keep actual hosted results separate.

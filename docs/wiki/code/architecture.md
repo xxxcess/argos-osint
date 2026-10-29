@@ -608,6 +608,29 @@ Child process supervision and application shutdown follow deterministic lifecycl
 3. **Detached child process reaping**: External command executions, such as opening browser URLs via system utilities (`open`, `xdg-open`, `rundll32` in `tui/app.rs`), spawn dedicated background threads (`std::thread::spawn(move || { let _ = child.wait(); })`) to await child termination and reap exit status codes, eliminating zombie (`<defunct>`) entries in POSIX process tables.
 4. **Bounded server graceful shutdown**: HTTP servers (`argos-api-host`) wrap Axum graceful draining in a bounded 15-second deadline via `tokio::time::timeout`. If client connections hang or fail to close during teardown, the server enforces termination after 15 seconds to ensure ports, locks, and resources are promptly released.
 
+### Shared Tokio runtime and worker stack
+
+`crates/argos-osint-bin/src/main.rs` no longer uses `#[tokio::main]`. A plain `fn main()` calls `logging::init_tracing()`, then builds the shared multi-thread runtime explicitly
+(`Builder::new_multi_thread().enable_all().thread_stack_size(8 MiB)`, the
+`WORKER_STACK_BYTES` constant, guarded by a compile-time `assert!` at the
+≥8 MiB floor; a failed build prints `argos: {err:#}` and exits 1) and runs
+`block_on(serve())`. `serve()` keeps the previous
+order: `paths::ensure_home` plus
+`storage::runtime::init` (`Err` ⇒ `argos: {err:#}` + exit 1) →
+`cli::dispatch().await` → a 5 s `DRAIN_TIMEOUT` storage drain with a warning
+on timeout → `Err` ⇒ stderr + exit 1. That one runtime hosts CLI dispatch,
+the TUI and the single storage handle; `argos-api-host` builds its own
+runtime unchanged.
+
+**Why 8 MiB.** lldb showed ~2.08 MB of SurrealDB embedded-engine poll frames
+(`App::send_recon_query` → `recon::Service::ask` → `orchestrate::run_turn` →
+`derive_directives` → `nlp::prepare_mode` → `nlp::surreal_put` →
+`storage::nlp_cache::put` → `Transaction::commit`) for one ordinary
+`nlp_cache` UPSERT on the default 2 MiB Tokio worker stack, aborting the
+process (SIGABRT) when a recon investigation is launched from the Home
+composer. 8 MiB keeps every deep storage call (recon, Atlas, NLP cache) on
+the same worker stack instead of localizing the fix to one write path.
+
 ### TUI event loop on a dedicated OS thread
 
 `crates/argos-osint-bin/src/tui/app.rs::run` runs the terminal UI on a dedicated OS thread (`std::thread::Builder::new().name("argos-tui")`) outside the Tokio worker threads, so synchronous crossterm event polling and Ratatui rendering never starve async tasks:

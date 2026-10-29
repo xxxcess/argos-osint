@@ -3860,6 +3860,12 @@ impl App {
             !self.running.contains_key(tid),
             "This thread already has a running turn"
         );
+        // A turn must be scheduled on the shared runtime to ever finish, so a
+        // missing handle has to fail loudly here — before registering the turn
+        // or clearing the input — instead of parking the composer forever.
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+            anyhow::anyhow!("Background runtime is unavailable; the question was not sent")
+        })?;
         if self.selected_thread.as_deref() == Some(tid) {
             self.input.clear();
             self.cursor = 0;
@@ -3875,23 +3881,21 @@ impl App {
         self.running.insert(tid_owned.clone(), cancel.clone());
         self.recon_stage = "starting".into();
         let question_owned = question.to_string();
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::spawn(async move {
-                let progress_tx = tx.clone();
-                let thread_id = tid_owned.clone();
-                let outcome = service
-                    .ask(&tid_owned, &question_owned, cancel, move |event| {
-                        let _ = progress_tx.send(work_event(&thread_id, event));
-                    })
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(WorkEvent::ReconDone {
-                    thread_id: tid_owned,
-                    outcome,
-                });
+        handle.spawn(async move {
+            let progress_tx = tx.clone();
+            let thread_id = tid_owned.clone();
+            let outcome = service
+                .ask(&tid_owned, &question_owned, cancel, move |event| {
+                    let _ = progress_tx.send(work_event(&thread_id, event));
+                })
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::ReconDone {
+                thread_id: tid_owned,
+                outcome,
             });
-        }
+        });
         Ok(())
     }
 
@@ -11792,6 +11796,17 @@ mod tests {
     fn app() -> App {
         crate::test_storage::ensure();
         testkit::app(100, 34)
+    }
+
+    /// Drive a composer flow inside the ambient Tokio handle, as the real
+    /// event loop does, so tests exercise the actual spawn branch instead of
+    /// a skipped scheduling.
+    fn in_runtime(flow: impl FnOnce()) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("composer-flow runtime")
+            .block_on(async { flow() });
     }
 
     fn click(app: &mut App, target: Target) {
@@ -20277,34 +20292,36 @@ mod tests {
 
     #[test]
     fn finish_new_thread_with_launch_enters_investigation_in_recon_module() {
-        let mut app = app();
-        app.module = Some(ModuleId::Recon);
-        app.recon_chat = true;
-        app.selected_thread = None;
-        app.input = "prompt text".into();
+        in_runtime(|| {
+            let mut app = app();
+            app.module = Some(ModuleId::Recon);
+            app.recon_chat = true;
+            app.selected_thread = None;
+            app.input = "prompt text".into();
 
-        let thread = recon::Thread {
-            id: "t-recon-1".into(),
-            title: "prompt text".into(),
-            created_at: String::new(),
-            updated_at: String::new(),
-            draft: String::new(),
-            scroll: 0,
-            recall_insights: false,
-        };
+            let thread = recon::Thread {
+                id: "t-recon-1".into(),
+                title: "prompt text".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
+                draft: String::new(),
+                scroll: 0,
+                recall_insights: false,
+            };
 
-        app.finish_new_thread(
-            surreal_recon::Then::Launch {
-                question: "prompt text".into(),
-            },
-            Ok(thread),
-        );
+            app.finish_new_thread(
+                surreal_recon::Then::Launch {
+                    question: "prompt text".into(),
+                },
+                Ok(thread),
+            );
 
-        assert_eq!(app.selected_thread.as_deref(), Some("t-recon-1"));
-        assert_eq!(app.tab_ids, vec!["t-recon-1"]);
-        assert_eq!(app.tab_sel, 1);
-        assert_eq!(app.launch_state, LaunchState::Accepted);
-        assert_eq!(app.focus, Target::Field(FieldId::Composer));
+            assert_eq!(app.selected_thread.as_deref(), Some("t-recon-1"));
+            assert_eq!(app.tab_ids, vec!["t-recon-1"]);
+            assert_eq!(app.tab_sel, 1);
+            assert_eq!(app.launch_state, LaunchState::Accepted);
+            assert_eq!(app.focus, Target::Field(FieldId::Composer));
+        });
     }
 
     #[test]
@@ -20367,34 +20384,36 @@ mod tests {
 
     #[test]
     fn send_recon_with_selected_thread_dispatches_directly_without_thread_creation() {
-        let mut app = app();
-        app.module = Some(ModuleId::Recon);
-        app.recon_chat = true;
-        let tid = "existing-thread-123";
-        app.selected_thread = Some(tid.into());
-        app.input = "Follow-up question on existing thread".into();
-        app.cursor = 10;
-        app.home_draft_submitting = false;
-        app.launch_state = LaunchState::Editable;
+        in_runtime(|| {
+            let mut app = app();
+            app.module = Some(ModuleId::Recon);
+            app.recon_chat = true;
+            let tid = "existing-thread-123";
+            app.selected_thread = Some(tid.into());
+            app.input = "Follow-up question on existing thread".into();
+            app.cursor = 10;
+            app.home_draft_submitting = false;
+            app.launch_state = LaunchState::Editable;
 
-        let res = app.send_recon();
-        assert!(res.is_ok(), "Direct query dispatch must succeed");
-        assert!(
-            !app.home_draft_submitting,
-            "Must not set home_draft_submitting when thread exists"
-        );
-        assert_eq!(
-            app.launch_state,
-            LaunchState::Editable,
-            "Launch state must remain Idle"
-        );
-        assert_eq!(app.input, "", "Input must be cleared upon query dispatch");
-        assert_eq!(app.cursor, 0, "Cursor must reset to 0");
-        assert!(
-            app.running.contains_key(tid),
-            "Thread must be marked running"
-        );
-        assert_eq!(app.recon_stage, "starting");
+            let res = app.send_recon();
+            assert!(res.is_ok(), "Direct query dispatch must succeed");
+            assert!(
+                !app.home_draft_submitting,
+                "Must not set home_draft_submitting when thread exists"
+            );
+            assert_eq!(
+                app.launch_state,
+                LaunchState::Editable,
+                "Launch state must remain Idle"
+            );
+            assert_eq!(app.input, "", "Input must be cleared upon query dispatch");
+            assert_eq!(app.cursor, 0, "Cursor must reset to 0");
+            assert!(
+                app.running.contains_key(tid),
+                "Thread must be marked running"
+            );
+            assert_eq!(app.recon_stage, "starting");
+        });
     }
 
     #[test]
@@ -20504,61 +20523,63 @@ mod tests {
 
     #[test]
     fn finish_new_thread_full_lifecycle_and_transition_to_direct_dispatch() {
-        let mut app = app();
-        app.module = Some(ModuleId::Recon);
-        app.recon_chat = true;
-        app.selected_thread = None;
-        app.input = "First turn prompt".into();
+        in_runtime(|| {
+            let mut app = app();
+            app.module = Some(ModuleId::Recon);
+            app.recon_chat = true;
+            app.selected_thread = None;
+            app.input = "First turn prompt".into();
 
-        let res = app.send_recon();
-        assert!(res.is_ok());
-        assert!(app.home_draft_submitting);
-        assert_eq!(app.launch_state, LaunchState::Accepting);
+            let res = app.send_recon();
+            assert!(res.is_ok());
+            assert!(app.home_draft_submitting);
+            assert_eq!(app.launch_state, LaunchState::Accepting);
 
-        let thread = recon::Thread {
-            id: "thread-lifecycle-1".into(),
-            title: "First turn prompt".into(),
-            created_at: String::new(),
-            updated_at: String::new(),
-            draft: String::new(),
-            scroll: 0,
-            recall_insights: false,
-        };
+            let thread = recon::Thread {
+                id: "thread-lifecycle-1".into(),
+                title: "First turn prompt".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
+                draft: String::new(),
+                scroll: 0,
+                recall_insights: false,
+            };
 
-        app.finish_new_thread(
-            surreal_recon::Then::Launch {
-                question: "First turn prompt".into(),
-            },
-            Ok(thread),
-        );
+            app.finish_new_thread(
+                surreal_recon::Then::Launch {
+                    question: "First turn prompt".into(),
+                },
+                Ok(thread),
+            );
 
-        assert_eq!(app.selected_thread.as_deref(), Some("thread-lifecycle-1"));
-        assert!(
-            !app.home_draft_submitting,
-            "Submitting flag must be cleared"
-        );
-        assert_eq!(app.launch_state, LaunchState::Accepted);
-        assert_eq!(app.input, "", "Input cleared by send_recon_query");
-        assert!(
-            app.running.contains_key("thread-lifecycle-1"),
-            "Turn 1 is running"
-        );
+            assert_eq!(app.selected_thread.as_deref(), Some("thread-lifecycle-1"));
+            assert!(
+                !app.home_draft_submitting,
+                "Submitting flag must be cleared"
+            );
+            assert_eq!(app.launch_state, LaunchState::Accepted);
+            assert_eq!(app.input, "", "Input cleared by send_recon_query");
+            assert!(
+                app.running.contains_key("thread-lifecycle-1"),
+                "Turn 1 is running"
+            );
 
-        app.running.remove("thread-lifecycle-1");
+            app.running.remove("thread-lifecycle-1");
 
-        app.input = "Second turn prompt".into();
-        let res2 = app.send_recon();
-        assert!(res2.is_ok());
-        assert!(
-            !app.home_draft_submitting,
-            "Subsequent prompt must not set home_draft_submitting"
-        );
-        assert_eq!(app.selected_thread.as_deref(), Some("thread-lifecycle-1"));
-        assert_eq!(app.input, "");
-        assert!(
-            app.running.contains_key("thread-lifecycle-1"),
-            "Turn 2 is running"
-        );
+            app.input = "Second turn prompt".into();
+            let res2 = app.send_recon();
+            assert!(res2.is_ok());
+            assert!(
+                !app.home_draft_submitting,
+                "Subsequent prompt must not set home_draft_submitting"
+            );
+            assert_eq!(app.selected_thread.as_deref(), Some("thread-lifecycle-1"));
+            assert_eq!(app.input, "");
+            assert!(
+                app.running.contains_key("thread-lifecycle-1"),
+                "Turn 2 is running"
+            );
+        });
     }
 
     #[test]
@@ -20896,96 +20917,146 @@ mod tests {
 
     #[test]
     fn tier4_scenario_4_cold_launch_recon_from_composer_with_streaming_answer() {
+        // The composer launch path requires the ambient Tokio handle the real
+        // event loop provides (the silent no-op gate is gone), so the scenario
+        // now runs inside a small runtime; every assertion is unchanged.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("composer-launch scenario runtime");
+        runtime.block_on(async {
+            let mut app = app();
+            app.module = Some(ModuleId::Recon);
+            app.recon_chat = true;
+            app.selected_thread = None;
+            app.input = "Investigate breach telemetry for domain.org".into();
+
+            // 1. Cold launch recon from composer (F11: no panic)
+            let res = app.send_recon();
+            assert!(res.is_ok(), "Cold launch recon must not panic");
+            assert!(app.home_draft_submitting);
+            assert_eq!(app.launch_state, LaunchState::Accepting);
+
+            // 2. Thread creation completes via Then::Launch (F12: surface navigation unification)
+            let thread_id = "recon-thread-e2e-cold";
+            let thread = recon::Thread {
+                id: thread_id.into(),
+                title: "Investigate breach telemetry for domain.org".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
+                draft: String::new(),
+                scroll: 0,
+                recall_insights: false,
+            };
+
+            app.finish_new_thread(
+                surreal_recon::Then::Launch {
+                    question: "Investigate breach telemetry for domain.org".into(),
+                },
+                Ok(thread),
+            );
+
+            assert_eq!(app.selected_thread.as_deref(), Some(thread_id));
+            assert_eq!(app.tab_ids, vec![thread_id]);
+            assert_eq!(app.launch_state, LaunchState::Accepted);
+            assert_eq!(app.focus, Target::Field(FieldId::Composer));
+            assert_eq!(app.input, "", "Composer input cleared after launch");
+
+            // 3. Streaming response arrives
+            app.recon_stage = "streaming".into();
+            app.messages.push(recon::Message {
+                id: "m-user-1".into(),
+                thread_id: thread_id.into(),
+                sequence: 1,
+                role: "user".into(),
+                content: "Investigate breach telemetry for domain.org".into(),
+                run_id: None,
+                created_at: String::new(),
+            });
+            app.runs = vec![recon::Run {
+                id: "run-e2e-1".into(),
+                thread_id: thread_id.into(),
+                turn_id: "m-user-1".into(),
+                state: "running".into(),
+                stage: "synthesizing".into(),
+                recon_model: String::new(),
+                synthesis_model: String::new(),
+                tool_picker_model: String::new(),
+                max_rounds: 1,
+                max_calls: 4,
+                turn_seconds: 300,
+                plan_json: None,
+                error: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            }];
+            app.note_replacement(thread_id, "Streaming synthesis answer delta...");
+
+            let rendered = buffer_text(&render(&mut app, 160, 50));
+            assert!(
+                rendered.contains("Streaming synthesis answer delta..."),
+                "Live streaming content renders on screen: {rendered}"
+            );
+
+            // 4. Recoverable error handling (F13)
+            app.running.remove(thread_id);
+            app.input = "Failed follow-up".into();
+            app.home_draft_submitting = true;
+            app.finish_new_thread(
+                surreal_recon::Then::Launch {
+                    question: "Failed follow-up".into(),
+                },
+                Err("Simulated downstream provider error".into()),
+            );
+
+            assert_eq!(app.launch_state, LaunchState::RecoverableFailure);
+            assert_eq!(
+                app.input, "Failed follow-up",
+                "input draft preserved on failure"
+            );
+            assert!(app.status.contains("Could not create the investigation"));
+        });
+    }
+
+    #[test]
+    fn tier4_scenario_4_composer_send_without_runtime_fails_loudly_and_keeps_state() {
+        // No ambient runtime (plain `#[test]` thread): the turn would never be
+        // scheduled, so the send must fail with a user-legible error and must
+        // not half-apply the start state.
         let mut app = app();
         app.module = Some(ModuleId::Recon);
         app.recon_chat = true;
-        app.selected_thread = None;
-        app.input = "Investigate breach telemetry for domain.org".into();
+        app.selected_thread = Some("recon-thread-cold".into());
+        app.input = "Investigate example.com infrastructure".into();
+        let chat_follow_before = app.chat_follow;
 
-        // 1. Cold launch recon from composer (F11: no panic)
-        let res = app.send_recon();
-        assert!(res.is_ok(), "Cold launch recon must not panic");
-        assert!(app.home_draft_submitting);
-        assert_eq!(app.launch_state, LaunchState::Accepting);
+        let err = app
+            .send_recon_query(
+                "recon-thread-cold",
+                "Investigate example.com infrastructure",
+            )
+            .expect_err(
+                "a send without the ambient runtime must fail instead of parking the composer",
+            );
 
-        // 2. Thread creation completes via Then::Launch (F12: surface navigation unification)
-        let thread_id = "recon-thread-e2e-cold";
-        let thread = recon::Thread {
-            id: thread_id.into(),
-            title: "Investigate breach telemetry for domain.org".into(),
-            created_at: String::new(),
-            updated_at: String::new(),
-            draft: String::new(),
-            scroll: 0,
-            recall_insights: false,
-        };
-
-        app.finish_new_thread(
-            surreal_recon::Then::Launch {
-                question: "Investigate breach telemetry for domain.org".into(),
-            },
-            Ok(thread),
-        );
-
-        assert_eq!(app.selected_thread.as_deref(), Some(thread_id));
-        assert_eq!(app.tab_ids, vec![thread_id]);
-        assert_eq!(app.launch_state, LaunchState::Accepted);
-        assert_eq!(app.focus, Target::Field(FieldId::Composer));
-        assert_eq!(app.input, "", "Composer input cleared after launch");
-
-        // 3. Streaming response arrives
-        app.recon_stage = "streaming".into();
-        app.messages.push(recon::Message {
-            id: "m-user-1".into(),
-            thread_id: thread_id.into(),
-            sequence: 1,
-            role: "user".into(),
-            content: "Investigate breach telemetry for domain.org".into(),
-            run_id: None,
-            created_at: String::new(),
-        });
-        app.runs = vec![recon::Run {
-            id: "run-e2e-1".into(),
-            thread_id: thread_id.into(),
-            turn_id: "m-user-1".into(),
-            state: "running".into(),
-            stage: "synthesizing".into(),
-            recon_model: String::new(),
-            synthesis_model: String::new(),
-            tool_picker_model: String::new(),
-            max_rounds: 1,
-            max_calls: 4,
-            turn_seconds: 300,
-            plan_json: None,
-            error: None,
-            created_at: String::new(),
-            updated_at: String::new(),
-        }];
-        app.note_replacement(thread_id, "Streaming synthesis answer delta...");
-
-        let rendered = buffer_text(&render(&mut app, 160, 50));
         assert!(
-            rendered.contains("Streaming synthesis answer delta..."),
-            "Live streaming content renders on screen: {rendered}"
+            app.running.is_empty(),
+            "failed start must not register the turn: {err:#}"
         );
-
-        // 4. Recoverable error handling (F13)
-        app.running.remove(thread_id);
-        app.input = "Failed follow-up".into();
-        app.home_draft_submitting = true;
-        app.finish_new_thread(
-            surreal_recon::Then::Launch {
-                question: "Failed follow-up".into(),
-            },
-            Err("Simulated downstream provider error".into()),
-        );
-
-        assert_eq!(app.launch_state, LaunchState::RecoverableFailure);
         assert_eq!(
-            app.input, "Failed follow-up",
-            "input draft preserved on failure"
+            app.input, "Investigate example.com infrastructure",
+            "failed start must not half-clear the composer input"
         );
-        assert!(app.status.contains("Could not create the investigation"));
+        assert_eq!(app.chat_follow, chat_follow_before, "start state untouched");
+        assert_ne!(
+            app.recon_stage, "starting",
+            "stage untouched on failed start"
+        );
+        assert!(
+            err.to_string()
+                .contains("Background runtime is unavailable"),
+            "error must stay user-legible, got: {err:#}"
+        );
     }
 
     #[test]

@@ -159,6 +159,23 @@ let height = components::editor_height(&app.composer, width, 1, 8);
 let frozen = TranscriptBlock { revision, width, content: rendered_lines };
 ```
 
+## Composer launch: fail-closed scheduling
+
+`App::send_recon_query` resolves the ambient Tokio handle —
+`tokio::runtime::Handle::try_current().map_err(...)?` — *before* registering
+`self.running`, setting `recon_stage`, or clearing the composer input/draft,
+and only then calls `handle.spawn(...)`. A missing handle returns
+`Err("Background runtime is unavailable; the question was not sent")`, which
+`finish_new_thread`'s `Then::Launch` maps to `LaunchState::RecoverableFailure`
+plus `report()` — a user-legible "Could not create the investigation" error —
+while preserving the draft and leaving no half-started turn behind.
+
+A launch that cannot be scheduled therefore never leaves the composer stuck in
+`LaunchState::Accepting`: the turn is either spawned on the shared runtime or
+rejected loudly with composer state untouched. Previously the send returned
+`Ok(())` with the turn registered but never scheduled — a permanently
+"Accepting" composer.
+
 ## Application presets
 
 Intel Bulletin previews and Focus Brief prose use the full text width. Short previews remain vertically centered and overflowing previews retain normal scrolling. Article media is displayed by the React Native Intel feed, not the terminal.

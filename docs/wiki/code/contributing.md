@@ -35,6 +35,9 @@ ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
 
 # 6. Full embedded storage contract suite (when broad storage/schema contracts change)
 python3 scripts/test_surreal.py --mode embedded --no-fail-fast
+
+# 7. Composer-launch PTY regression (POSIX only; only `argos` must be built)
+python3 scripts/test_web_stack.py --composer-smoke
 ```
 
 ### Full local embedded gate & GitHub CI monitoring

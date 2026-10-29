@@ -49,14 +49,150 @@ def eventually(check, process=None, seconds=30):
     raise AssertionError("deadline exceeded")
 
 
+def composer_smoke(binary):
+    """Composer-launch regression: a recon prompt must not abort the runtime.
+
+    Boots `stack up --tui` under the same PTY+kernel harness as the TUI branch,
+    in its own temp ARGOS_HOME. Submitting a recon prompt from the Home
+    composer used to kill the process (SIGABRT): lldb showed the embedded
+    SurrealDB commit reached through `nlp_cache::put` during
+    `derive_directives` consuming ~2.1 MB inside one poll on the default 2 MiB
+    Tokio worker stack. The rebuilt binary gives workers an explicit 8 MiB
+    stack and the composer fails closed when no runtime handles exist.
+    """
+    if os.name != "posix":
+        print("SKIP: composer smoke needs a PTY; normal stack tests still run")
+        return
+    assert binary.is_file(), f"build argos first: {binary}"
+    import fcntl
+    import pty
+    import select
+    import struct
+    import termios
+    import threading
+
+    with tempfile.TemporaryDirectory(prefix="argos-composer-crash-") as tmp:
+        env = {**os.environ, "ARGOS_HOME": tmp, "TERM": "xterm-256color"}
+        env.pop("ARGOS_EMBED", None)
+        env.pop("ARGOS_STORAGE_MODE", None)
+        init = subprocess.run(
+            [str(binary), "storage", "init", "--mode", "embedded"],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=120,
+        )
+        assert init.returncode == 0, ("storage init", init.stdout, init.stderr)
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 160, 0, 0))
+        before = termios.tcgetattr(slave)
+        capture = bytearray()
+        done = threading.Event()
+
+        def terminal_text(start=0):
+            return re.sub(
+                rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\\\))",
+                b"",
+                bytes(capture[start:]),
+            )
+
+        def sees(label, start=0):
+            return label in terminal_text(start)
+
+        def read_terminal():
+            while not done.is_set():
+                if select.select([master], [], [], 0.1)[0]:
+                    try:
+                        capture.extend(os.read(master, 65536))
+                    except OSError:
+                        return
+
+        def terminal_session():
+            os.setsid()
+            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+        keeper = (
+            "import subprocess,sys,signal;"
+            "signal.signal(signal.SIGINT, lambda *_: None);"
+            "p=subprocess.Popen(sys.argv[1:]); code=p.wait();"
+            "print('ARGOS_EXIT='+str(code), flush=True);"
+            "sys.stdin.readline(); sys.exit(code)"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", keeper, str(binary), "stack", "up", "--tui"],
+            cwd=ROOT, env=env, stdin=slave, stdout=slave, stderr=slave,
+            preexec_fn=terminal_session,
+        )
+        reader = threading.Thread(target=read_terminal, daemon=True)
+        reader.start()
+        try:
+            # Start from the Home composer, not the first-run session prompt.
+            eventually(lambda: sees(b"Recon") and sees(b"Intel"), process, seconds=90)
+            if sees(b"Open last app view session") or sees(b"Resume"):
+                os.write(master, b"n")
+                time.sleep(1.0)
+            mark = len(capture)
+            # Type a recon prompt into the Home composer and submit it.
+            os.write(master, b"Investigate example.com infrastructure\r")
+            eventually(lambda: sees(b"Investigation started", mark), process, seconds=60)
+            # The investigation surface replaced the Home launcher.
+            eventually(lambda: sees(b"transcript", mark), process, seconds=60)
+            # Bounded wait: while the turn runs, no abort signature may appear
+            # and the child must stay alive.
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise AssertionError(
+                        f"composer launch ended the TUI: {process.returncode} "
+                        f"(visible tail: {terminal_text(mark).decode('utf-8', 'replace')[-400:]})"
+                    )
+                text = terminal_text(mark)
+                for signature in (b"stack overflow", b"fatal runtime error"):
+                    assert signature not in text, (
+                        f"composer launch aborted the runtime: {signature.decode()}"
+                    )
+                time.sleep(0.5)
+            assert process.poll() is None, "composer-launched TUI died during the bounded wait"
+            assert not sees(b"stack overflow", mark) and not sees(b"fatal runtime error", mark)
+            assert not sees(b"Could not create the investigation", mark), (
+                "composer send surfaced a recoverable failure instead of starting the turn"
+            )
+            # Same quit gesture as the existing TUI branch: Ctrl-Q twice, retry
+            # briefly in case a startup redraw consumed input.
+            quit_mark = len(capture)
+            for _ in range(8):
+                os.write(master, b"\x11\x11")
+                time.sleep(0.25)
+                if b"ARGOS_EXIT=" in capture:
+                    break
+            eventually(lambda: sees(b"ARGOS_EXIT=0", quit_mark), process, seconds=30)
+            assert (
+                termios.tcgetattr(slave)[3] & (termios.ICANON | termios.ECHO)
+            ) == (before[3] & (termios.ICANON | termios.ECHO)), "terminal mode was not restored"
+            os.write(master, b"\n")
+            assert process.wait(timeout=10) == 0
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            done.set()
+            reader.join(timeout=2)
+            os.close(master)
+            os.close(slave)
+    print("PASS: composer-launched recon opens the investigation surface with no runtime abort, a live TUI and a clean exit")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--argos", type=Path, default=ROOT / "target/agents/debug/argos")
     parser.add_argument("--terminal-captures", type=Path, help="retain PTY lifecycle output for review")
     parser.add_argument("--tui-only", action="store_true", help="run just embedded API/Web terminal-display checks")
     parser.add_argument("--tui-web-profile", choices=("dev", "installed"), default="dev", help="Web profile for terminal-display checks; installed avoids another dev server's workspace lock")
+    parser.add_argument("--composer-smoke", action="store_true", help="regression: a TUI composer launch must not abort the Tokio worker runtime")
     args = parser.parse_args()
     binary = args.argos.resolve()
+    if args.composer_smoke:
+        composer_smoke(binary)
+        return
     host = binary.with_name("argos-api-host" + (".exe" if os.name == "nt" else ""))
     assert binary.is_file() and host.is_file(), "build argos and argos-api-host first"
     with tempfile.TemporaryDirectory(prefix="argos-web-stack-") as tmp:

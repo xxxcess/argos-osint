@@ -52,13 +52,11 @@ test("coordinator is default go-provider GLM agent and teamwork catalog roles en
   }
   assert.equal(effect("tester", "subagent", "architect"), "allow");
   assert.equal(effect("reviewer", "subagent", "architect"), "allow");
-  for (const id of ["rust-coder", "react-coder"]) assert.equal(effect(id, "edit", "*"), "allow");
-  for (const id of ["coordinator", "orchestrator", "architect", "reviewer", "tester", "auditor"]) {
+  for (const id of ["coordinator", "rust-coder", "react-coder"]) assert.equal(effect(id, "edit", "*"), "allow");
+  for (const id of ["orchestrator", "architect", "reviewer", "tester", "auditor"]) {
     assert.equal(effect(id, "edit", "*"), "deny");
     assert.equal(effect(id, "edit", "**/.planning/**"), "allow");
   }
-  assert.equal(effect("coordinator", "edit", ".opencode/**"), "allow");
-  assert.equal(effect("coordinator", "edit", "**/.opencode/**"), "allow");
   for (const id of ["orchestrator", "architect", "reviewer", "tester", "auditor"]) {
     assert.equal(rules(id).some((rule) => rule.action === "edit" && rule.effect === "allow" && /opencode/.test(rule.resource)), false);
   }

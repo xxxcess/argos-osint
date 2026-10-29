@@ -126,26 +126,6 @@
         {
           "action": "edit",
           "resource": "*",
-          "effect": "deny"
-        },
-        {
-          "action": "edit",
-          "resource": ".planning/**",
-          "effect": "allow"
-        },
-        {
-          "action": "edit",
-          "resource": "**/.planning/**",
-          "effect": "allow"
-        },
-        {
-          "action": "edit",
-          "resource": ".opencode/**",
-          "effect": "allow"
-        },
-        {
-          "action": "edit",
-          "resource": "**/.opencode/**",
           "effect": "allow"
         }
       ]

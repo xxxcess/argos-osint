@@ -28,6 +28,7 @@ select {
 }
 a {
   color: #87bfff;
+  text-decoration: underline;
 }
 input,
 select {

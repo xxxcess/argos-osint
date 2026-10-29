@@ -364,24 +364,12 @@ function GraphExplorer({
             const on = n.id === selected?.id;
             return (
               <View role="listitem" key={n.id}>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Select node ${n.label}, ${n.kind}`}
-                  aria-pressed={on}
+                <NodeListRow
+                  node={n}
+                  dotColor={kindColor[n.kind] ?? c.accent}
+                  on={on}
                   onPress={() => setSelectedId(n.id)}
-                  style={[t.item, on && t.itemOn]}
-                >
-                  <View
-                    style={[
-                      t.dot,
-                      { backgroundColor: kindColor[n.kind] ?? c.accent },
-                    ]}
-                  />
-                  <Text style={t.itemText} numberOfLines={2}>
-                    {n.label}
-                  </Text>
-                  <Text style={t.itemKind}>{n.kind}</Text>
-                </Pressable>
+                />
               </View>
             );
           })}
@@ -548,6 +536,42 @@ function DegreeBar({
   );
 }
 
+function NodeListRow({
+  node,
+  dotColor,
+  on,
+  onPress,
+}: {
+  node: TNode;
+  dotColor: string;
+  on: boolean;
+  onPress: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`Select node ${node.label}, ${node.kind}`}
+      aria-pressed={on}
+      onPress={onPress}
+      onHoverIn={() => setHovered(true)}
+      onHoverOut={() => setHovered(false)}
+      style={({ pressed }) => [
+        t.item,
+        !on && (hovered || pressed) && t.itemHover,
+        !on && pressed && t.itemPressed,
+        on && t.itemOn,
+      ]}
+    >
+      <View style={[t.dot, { backgroundColor: dotColor }]} />
+      <Text style={t.itemText} numberOfLines={2}>
+        {node.label}
+      </Text>
+      <Text style={t.itemKind}>{node.kind}</Text>
+    </Pressable>
+  );
+}
+
 const t = StyleSheet.create({
   controls: { flexDirection: "row", flexWrap: "wrap", gap: 8, minWidth: 0 },
   layout: { gap: 12, minWidth: 0 },
@@ -587,8 +611,12 @@ const t = StyleSheet.create({
     paddingHorizontal: 8,
     borderLeftWidth: 3,
     borderLeftColor: "transparent",
+    minHeight: 40,
+    minWidth: 0,
   },
   itemOn: { borderLeftColor: c.accent, backgroundColor: c.accentSoft },
+  itemHover: { backgroundColor: c.glassStrong },
+  itemPressed: { backgroundColor: c.glassStrong, borderLeftColor: c.border },
   dot: { width: 10, height: 10, borderRadius: 5 },
   itemText: { flex: 1, minWidth: 0, color: c.text, fontSize: 14 },
   itemKind: { fontFamily: fonts.mono, fontSize: 11, color: c.muted },

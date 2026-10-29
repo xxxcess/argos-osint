@@ -148,7 +148,7 @@ export function Button({
   active?: boolean;
   disabled?: boolean;
   label?: string;
-  variant?: "default" | "quiet";
+  variant?: "default" | "quiet" | "primary";
 }) {
   const [hovered, setHovered] = useState(false);
   return (
@@ -164,7 +164,11 @@ export function Button({
       style={({ pressed }) => [
         s.button,
         variant === "quiet" && s.quiet,
-        !disabled && (hovered || pressed) && s.hovered,
+        variant === "primary" && s.primary,
+        !disabled && hovered && !pressed && variant === "primary" && s.primaryHover,
+        !disabled && hovered && !pressed && variant !== "primary" && s.hovered,
+        !disabled && pressed && variant === "primary" && s.primaryPressed,
+        !disabled && pressed && variant !== "primary" && s.pressed,
         active && s.active,
         disabled && s.disabled,
       ]}
@@ -173,7 +177,9 @@ export function Button({
         style={[
           s.buttonText,
           variant === "quiet" && s.quietText,
+          variant === "primary" && s.primaryText,
           active && s.activeText,
+          disabled && s.disabledText,
         ]}
       >
         {children}
@@ -246,7 +252,7 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 2,
     backgroundColor: colors.glass,
-    borderColor: colors.glassBorder,
+    borderColor: colors.border,
   },
   buttonText: {
     textTransform: "uppercase",
@@ -257,11 +263,30 @@ const s = StyleSheet.create({
     lineHeight: 19,
     flexShrink: 1,
   },
-  quiet: { borderColor: "transparent" },
+  quiet: { borderColor: colors.border, backgroundColor: "transparent" },
   quietText: { color: colors.dim },
+  primary: {
+    borderColor: colors.accent,
+    backgroundColor: colors.accentSoft,
+  },
+  primaryText: { color: colors.accent },
   hovered: {
     backgroundColor: colors.accentSoft,
     borderColor: colors.accent,
+  },
+  primaryHover: {
+    backgroundColor: colors.accentSoft,
+    borderColor: colors.accent,
+    ...(glow(colors.accent) as object),
+  },
+  pressed: {
+    borderColor: colors.accent,
+    backgroundColor: colors.glassStrong,
+  },
+  primaryPressed: {
+    borderColor: colors.accent,
+    backgroundColor: colors.glassStrong,
+    color: colors.accent,
   },
   active: {
     borderColor: colors.accent,
@@ -269,7 +294,11 @@ const s = StyleSheet.create({
     ...(glow(colors.accent) as object),
   },
   activeText: { color: colors.bg, fontWeight: "700" },
-  disabled: { opacity: 0.45 },
+  disabled: {
+    backgroundColor: "transparent",
+    borderColor: colors.glassBorder,
+  },
+  disabledText: { color: colors.muted },
   panel: { ...(glass as object), padding: 20, gap: 16, minWidth: 0 },
   frame: { padding: 16, gap: 12, minWidth: 0 },
   tag: {

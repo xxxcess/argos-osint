@@ -10,6 +10,7 @@ import {
   Linking,
   useWindowDimensions,
   StyleSheet,
+  Pressable,
 } from "react-native";
 import {
   useBackend,
@@ -110,6 +111,7 @@ export function IntelApp() {
             />
           </View>
           <Button
+            variant="primary"
             disabled={b.connecting}
             onPress={() => {
               try {
@@ -341,6 +343,7 @@ function Workspace() {
             ) : null}
             {list.hasNextPage && (
               <Button
+                variant="primary"
                 disabled={list.isFetchingNextPage}
                 onPress={() => {
                   void list.fetchNextPage({ cancelRefetch: false });
@@ -438,6 +441,46 @@ function uniqueById<T extends { id: string }>(rows: T[]): T[] {
     seen.add(row.id);
     return true;
   });
+}
+
+function RelatedLead({
+  article,
+  basis,
+  tentative,
+  onPress,
+}: {
+  article: Article;
+  basis: string[];
+  tentative: boolean;
+  onPress: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`Open Focus Brief for related lead: ${article.title}`}
+      onPress={onPress}
+      onHoverIn={() => setHovered(true)}
+      onHoverOut={() => setHovered(false)}
+      style={({ pressed }) => [
+        s.lead,
+        (hovered || pressed) && s.leadHover,
+      ]}
+    >
+      <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
+        <Text style={s.leadTitle} numberOfLines={2}>
+          {article.title}
+        </Text>
+        <Text style={s.leadBasis}>
+          {basis.join(" · ")}
+          {tentative ? " · tentative" : ""}
+        </Text>
+      </View>
+      <Text style={s.leadChevron} aria-hidden={true}>
+        ›
+      </Text>
+    </Pressable>
+  );
 }
 function Focus({
   article: a,
@@ -652,6 +695,7 @@ function Focus({
         <EmptyState title="Brief status unavailable" />
       )}
       <Button
+        variant="primary"
         disabled={ensure.isPending}
         onPress={() => ensure.mutate({ run: a.run_id, id: a.id })}
       >
@@ -699,15 +743,13 @@ function Focus({
       {related.data?.pages
         .flatMap((p) => p.rows)
         .map((r) => (
-          <View key={r.article.run_id + r.article.id} style={{ gap: 8 }}>
-            <Button onPress={() => onArticle(r.article)}>
-              {r.article.title}
-            </Button>
-            <Copy>
-              {r.basis.join(" · ")}
-              {r.tentative ? " · tentative" : ""}
-            </Copy>
-          </View>
+          <RelatedLead
+            key={r.article.run_id + r.article.id}
+            article={r.article}
+            basis={r.basis}
+            tentative={r.tentative}
+            onPress={() => onArticle(r.article)}
+          />
         ))}
       {related.isSuccess &&
       related.data.pages.flatMap((p) => p.rows).length === 0 ? (
@@ -766,18 +808,14 @@ function Focus({
       {narrow && (
         <View style={[s.row, { paddingVertical: 12, gap: 4 }]}>
           {["Extracted", "Reader", "Context"].map((t) => (
-            <View
+            <Button
               key={t}
-              style={t === tab ? (glow(c.accent) as object) : undefined}
+              variant="quiet"
+              active={t === tab}
+              onPress={() => setTab(t)}
             >
-              <Button
-                variant="quiet"
-                active={t === tab}
-                onPress={() => setTab(t)}
-              >
-                {t}
-              </Button>
-            </View>
+              {t}
+            </Button>
           ))}
         </View>
       )}
@@ -1041,5 +1079,42 @@ const s = StyleSheet.create({
     borderLeftWidth: 3,
     borderLeftColor: c.accent2,
     borderRadius: 2,
+  },
+  lead: {
+    ...(glass as object),
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    minHeight: 40,
+    borderRadius: 2,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    minWidth: 0,
+    borderWidth: 1,
+    borderColor: c.glassBorder,
+  },
+  leadHover: {
+    backgroundColor: c.accentSoft,
+    borderColor: c.accent,
+  },
+  leadTitle: {
+    fontFamily: fonts.body,
+    fontSize: 14,
+    lineHeight: 22,
+    color: c.text,
+    fontWeight: "600",
+  },
+  leadBasis: {
+    fontFamily: fonts.mono,
+    fontSize: 11,
+    lineHeight: 18,
+    color: c.muted,
+  },
+  leadChevron: {
+    fontFamily: fonts.mono,
+    fontSize: 16,
+    color: c.accent,
+    alignSelf: "center",
+    marginLeft: "auto",
   },
 });

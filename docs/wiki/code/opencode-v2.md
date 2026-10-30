@@ -77,6 +77,29 @@ React work uses [React UI rules](react-ui.md), including the [Argos look and fee
 
 `/react-ui-review <scope>` selects `tester` for a read-only review (default: current UI delta). Frontend verification uses the pinned Node/pnpm, offline Playwright fixtures and inspected screenshots; shell Playwright does not require enabling the denied browser tool. Missing image/tool evidence remains pending.
 
+## React test workflow
+
+This project uses Vitest with React Testing Library and MSW for unit testing shared React UI components across `packages/ui`, `packages/intel`, and `packages/api-client`. The test workflow is:
+
+- **Tier 1 — Direct Specialist**: Single test file or small contract change. Coder implements test patterns, Scribe updates affected docs, verification gate (`reviewer: APPROVE`, `tester: PASS`, `auditor: CLEAN`).
+- **Tier 2 — Fast-Path Squad**: ≤3 test files in a single package. React coder writes real-component tests importing from `@argos/ui`, `@argos/intel`, or `@argos/api-client`. Scribe documents testing patterns, gate validates INTEGRATION_ROOT.
+- **Tier 3 — Full Project Orchestration**: Multi-package or cross-crate test changes. Orchestrator dispatches parallel architects, coders manage disjoint EDIT_UNIT worktrees, Scribe updates affected docs at checkpoints, and gates each milestone on `reviewer: APPROVE`, `tester: PASS`, and `auditor: CLEAN`.
+
+Key testing requirements:
+
+- **Real-component pattern**: Tests must import and render actual shared components (e.g., `import { Button } from "@argos/ui"`). Stub or mock renderings are prohibited; the test verifies token bindings, styling, and behavior against the live design system.
+- **`act()` wrappers**: All user-event interactions (hover, press, focus, keyboard) must wrap DOM mutations in `act()` to flush React's update queue. Tests lacking `act()` wrappers fail the verification gate.
+- **Focus vs selection**: Tests must distinguish `hover` (accent border + `accentSoft`, no glow) from `active`/`selection` (full accent surface + glow). Hover must never hide sibling content.
+- **Density modes**: Default spacing is the theme default; `compact` is reserved for launchers, palettes, headline lists, and category bullets. Tests must verify both modes against token values.
+- **Token bindings**: Computed style assertions must reference `colors` tokens (glass, glassStrong, accentSoft, border, accent, etc.) rather than hard-coded hex values.
+- **Offline fixtures**: Test fixtures must be kept offline; no live-provider data or secrets in evidence. MSW is used for network mocking; React Query test isolates are documented as flaky (3/7 App integration tests).
+- **Visual regression**: Playwright snapshots capture full-page screenshots at 1440×1000px; changed components require PNG inspection.
+- **Tagging**: New and modified test files should carry the `@tag:testing` tag in source comments, linking back to this workflow section.
+
+### Tester role
+
+The `tester` role executes empirical host-native checks first (`--storage embedded`), then offline `pnpm test:e2e` cases. Tester reports `PASS / FAIL / BLOCKED / PENDING` with tested revision, dirty-diff identity, command exit codes, skipped checks, screenshot inspection and outstanding acceptance.
+
 ## Phase handoff and completion
 
 Every dispatch carries this compact envelope; children start with fresh context:

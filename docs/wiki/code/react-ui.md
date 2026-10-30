@@ -124,6 +124,28 @@ Keep category/day/search, article occurrence identity, source attribution and to
 
 Select the pinned Node with `nvm use` (load nvm in the shell if necessary); use the root pinned pnpm. For frontend code changes run `pnpm typecheck`, `pnpm lint` (including Hooks/compiler diagnostics, zero warnings), `pnpm build` (compiler enabled), `pnpm check:web-build`, then relevant offline `pnpm test:e2e` cases against the export. For compiler/dependency/launcher changes, also run `ARGOS_WEB_PROFILE=dev pnpm test:e2e` to force development compilation and check browser console/hydration behavior; static export success alone does not prove dev startup. Launcher changes additionally use the [process smoke](intel-web.md#verification). Respect the configured port/server ownership; preserve an existing user dev server. No Rust gate is needed for guidance-only changes; Rust changes follow the contributor workflow.
 
+## React component testing (real-component pattern)
+
+This project uses Vitest with React Testing Library and MSW for unit testing shared React UI components. Key testing patterns include:
+
+- **Real-component imports**: Tests import actual components from `@argos/ui`, `@argos/intel`, and `@argos/api-client` rather than rendering stubs or mocks. This ensures token bindings, styling, and behavior are verified against the shared design system.
+
+- **`act()` wrappers**: Keyboard and user-interaction tests wrap DOM mutations in `act()` to flush React's update queue, matching the [act() wrappers](#act wrappers) contract. Example patterns appear in `Button.focus-select` and `focus-select` test suites.
+
+- **Focus vs selection distinction**: Tests verify that `hover` uses accent border + `accentSoft` ground without glow, while `active`/`selection` applies full accent surface + glow. Hover must never hide sibling content. See the [`focus-select.test.tsx`](../../../packages/ui/__tests__/focus-select.test.tsx) suite for the full contract.
+
+- **Density modes**: Default spacing is the theme default; `compact` is reserved for launchers, palettes, headline lists, and category bullets. `LoadingState` and `EmptyState` both expose density token checks. See [`density-modes.test.tsx`](../../../packages/ui/__tests__/density-modes.test.tsx).
+
+- **Token bindings**: Tests verify that computed styles resolve to the correct token values from `colors` (glass, glassStrong, accentSoft, border, accent, success, warning, danger). The [`sheetProp`/`paint`](../../../vitest.test-support.tsx) helpers resolve real rendered styles against jdom's computed style.
+
+- **Error boundary**: Uses `HttpResponse.error()` pattern for fetch error simulation; test fixtures are kept offline with no live-provider data or secrets.
+
+- **Visual regression infra**: Playwright config + snapshots capture full-page screenshots at 1440×1000px for changed components; inspect PNGs for regression detection.
+
+### Test file tagging
+
+New and modified test files should carry the `@tag:testing` tag in their source comments, linking back to this testing section. Files importing real components from `@argos/ui`, `@argos/intel`, or `@argos/api-client` are the primary anchors for this tag.
+
 For visual/interaction changes, use the existing HTTP fixtures and a proportional state/viewport matrix. Capture affected screens with Playwright `page.screenshot({ path: …, fullPage: true })` into the named plan or `.agent-scratch/`, then **open and inspect the PNGs**. A screenshot file or passing E2E assertion is not visual approval. Check keyboard/focus, action outcomes and console/hydration errors separately. Add behavior assertions only for changed behavior or meaningful regressions. Keep fixtures offline; no live-provider data or secrets in evidence.
 
 Report changed paths, checks actually run, inspected states/viewports and remaining gaps. Reviews list actionable `file:line` findings with impact and suggested correction; distinguish existing issues from regressions. If browser/image tooling is unavailable, record visual evidence as pending. OpenCode can run Playwright through its allowed shell without changing browser permissions; do not claim native-device verification from web captures.

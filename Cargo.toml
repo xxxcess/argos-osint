@@ -54,3 +54,22 @@ opt-level = 3
 # biggest compile; skip -g for it in dev/test builds (local and CI).
 [profile.dev.package.surrealdb-librocksdb-sys]
 debug = false
+
+# cargo-mutants configuration for mutation testing
+[workspace.metadata.cargo-mutants]
+# Only run on the core crate for faster iteration
+packages = ["argos-osint-core"]
+# Use embedded storage mode for tests
+env = { ARGOS_SURREAL_MODE = "embedded", ARGOS_SURREAL_REQUIRED = "1" }
+# Timeout per mutant (seconds)
+timeout = 120
+# Number of jobs (0 = auto)
+jobs = 0
+# Exclude test files from mutation
+exclude = [
+    "tests/**",
+    "examples/**",
+    "benches/**",
+]
+# Only mutate source files in src/
+filter = "crates/argos-osint-core/src/**/*.rs"

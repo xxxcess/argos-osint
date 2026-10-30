@@ -2,8 +2,8 @@
 //!
 //! Ports the scheduler election, task claim, lease renewal, lease reaper,
 //! cleanup, stop, finalize, brief-chain and stage/neighborhood publication
-//! fences. Each SQLite `BEGIN IMMEDIATE` boundary becomes a [`run_tx`]
-//! transaction that writes a guard record first (see `tx`):
+//! fences. Each serialized write boundary becomes a [`run_tx`] transaction
+//! that writes a guard record first (see `tx`):
 //!
 //! | Guard | Serializes |
 //! |---|---|
@@ -355,10 +355,10 @@ pub struct Election {
     pub epoch: i64,
 }
 
-/// Take or renew the single scheduler lease. SQLite ran the read and the
-/// conditional write as separate autocommit statements; here they share one
-/// transaction on `scheduler_lease:singleton`, so concurrent candidates
-/// conflict and the loser re-reads the winner. Server ownership is separate.
+/// Take or renew the single scheduler lease. The read and the conditional
+/// write share one transaction on `scheduler_lease:singleton`, so
+/// concurrent candidates conflict and the loser re-reads the winner.
+/// Server ownership is separate.
 pub async fn try_elect(
     db: &Surreal<Any>,
     owner: &str,
@@ -1425,8 +1425,8 @@ async fn tree_busy(tx: &Tx, root: &str) -> Result<bool, TxError> {
         tx,
         tx.query(
             "RETURN count(SELECT id FROM task WHERE root = $r AND state = 'running') \
-             + count(SELECT id FROM job WHERE root = $r AND (kind = 'service' \
-               OR state IN ['running', 'queued', 'retry_scheduled', 'waiting', 'blocked']))",
+             + count(SELECT id FROM job WHERE root = $r \
+               AND state IN ['running', 'queued', 'retry_scheduled', 'waiting', 'blocked'])",
         )
         .bind(("r", rid("job", root))),
     )
@@ -1500,7 +1500,9 @@ pub async fn cleanup_batch(
 }
 
 /// Delete terminal root job trees in `states` (Completed, Stopped, Failed
-/// history), batch by batch, skipping trees with running work or services.
+/// history), batch by batch, skipping trees with running work. Terminal
+/// service roots clear like any other history tree; a tree whose service
+/// worker is still in an active state is protected by that state.
 pub async fn clear_jobs_by_status(
     db: &Surreal<Any>,
     states: &[&str],
@@ -1524,7 +1526,7 @@ pub async fn clear_jobs_by_status(
                     &tx,
                     tx.query(
                         "SELECT VALUE record::id(id) FROM job WHERE parent = NONE \
-                         AND kind != 'service' AND state IN $states \
+                         AND state IN $states \
                          ORDER BY created_at, id LIMIT $n START $skip",
                     )
                     .bind(("states", states))

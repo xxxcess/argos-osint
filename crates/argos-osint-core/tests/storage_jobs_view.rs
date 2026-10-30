@@ -198,7 +198,7 @@ async fn grouped_page_metadata_matches_single_job_details() {
 }
 
 #[tokio::test]
-async fn jobs_view_lists_details_and_retries_like_sqlite() {
+async fn jobs_view_lists_details_and_retries_from_surrealdb() {
     let Some(server) = Server::start() else {
         return;
     };
@@ -500,6 +500,68 @@ async fn jobs_pane_stop_and_clear_history_on_the_repository() {
 }
 
 #[tokio::test]
+async fn clear_jobs_failed_removes_failed_service_and_keeps_running_service() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = server.root("argos", "jobs_clear_services").await;
+    // A failed (orphaned) service root, a running service root, and a failed
+    // task root. Only the failed trees may clear; the running service worker
+    // is protected by its own active state.
+    let mut failed_service = job("failed_service", None, 1);
+    failed_service.kind = "service";
+    failed_service.operation = "api_server";
+    jobs::create_job(&db, &failed_service, &[]).await.unwrap();
+    let mut running_service = job("running_service", None, 2);
+    running_service.kind = "service";
+    running_service.operation = "web_server";
+    jobs::create_job(&db, &running_service, &[]).await.unwrap();
+    jobs::create_job(&db, &job("failed_task", None, 1), &[])
+        .await
+        .unwrap();
+    db.query(
+        "UPDATE job:failed_service SET state = 'failed', finished_at = time::now();
+         UPDATE job:running_service SET state = 'running';
+         UPDATE job:failed_task SET state = 'failed', finished_at = time::now();",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    assert_eq!(
+        view::clear_jobs(&db, JobStatusFilter::Failed)
+            .await
+            .unwrap(),
+        2,
+        "the failed service root and the failed task root both clear"
+    );
+    assert!(view::get_job(&db, "failed_service")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(view::get_job(&db, "failed_task").await.unwrap().is_none());
+    let running = view::get_job(&db, "running_service")
+        .await
+        .unwrap()
+        .expect("running service worker survives Clear failed");
+    assert!(running.is_service());
+    assert_eq!(running.state, "running");
+
+    // The running service is equally safe from the other history filters.
+    for status in [JobStatusFilter::Completed, JobStatusFilter::Stopped] {
+        view::clear_jobs(&db, status).await.unwrap();
+        assert!(
+            view::get_job(&db, "running_service")
+                .await
+                .unwrap()
+                .is_some(),
+            "running service worker survives {status:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn jobs_record_dashboard_metadata_on_create_and_finish() {
     let Some(server) = Server::start() else {
         return;
@@ -584,6 +646,20 @@ async fn retention_sweep_deletes_expired_trees_only() {
     jobs::create_job(&db, &job("fresh", None, 1), &[])
         .await
         .unwrap();
+    // Fixture repair: the expired trees (roots and children) must have
+    // terminal states so the retention sweep exercises deletion; the sweeper
+    // skips busy trees by design (`tree_busy` counts any active job in the
+    // tree). Default `create_job` uses `state='running'`.
+    db.query(
+        "UPDATE job:old0 SET state = 'completed', finished_at = time::now(); \
+         UPDATE job:oldkid SET state = 'completed', finished_at = time::now(); \
+         UPDATE job:old1 SET state = 'completed', finished_at = time::now(); \
+         UPDATE job:old2 SET state = 'completed', finished_at = time::now();",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
     assert_eq!(view::sweep_expired(&db, Utc::now(), 64).await.unwrap(), 3);
     assert_eq!(view::sweep_expired(&db, Utc::now(), 64).await.unwrap(), 0);
     assert_eq!(count(&db, "job").await, 1);

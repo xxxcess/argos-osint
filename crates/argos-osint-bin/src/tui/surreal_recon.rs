@@ -3,7 +3,7 @@
 //! Under a storage config ([`on`]) the thread list, the open thread's
 //! messages, calls and runs, drafts, selection, rename, delete, recall and
 //! tool toggles go through `recon::backend::ReconStore` on the repository
-//! and never touch the SQLite store. Every function blocks on
+//! and never touch the legacy store. Every function blocks on
 //! `storage::runtime::blocking`, so callers are plain worker threads that
 //! report back by `WorkEvent`, never async code or the draw loop (the one
 //! exception is [`boot`], before the event loop starts).
@@ -114,7 +114,7 @@ mod imp {
 
     /// The open thread, with its investigation trace. Finished tool results
     /// not yet in `logged` are formatted and recorded in the repository's
-    /// event log (`argos_event`) after the reads, like the SQLite worker.
+    /// event log (`argos_event`) after the reads, like the legacy worker.
     pub(crate) fn snapshot(
         id: &str,
         logged: &std::collections::HashSet<String>,

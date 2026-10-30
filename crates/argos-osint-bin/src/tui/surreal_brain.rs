@@ -1,6 +1,6 @@
 //! The TUI Brain on SurrealDB. Under a storage config the Brain list,
 //! preview, delete and the Brain topology run only on the repository
-//! (never mixed with the SQLite store), through `storage::runtime::blocking`. Callers are the
+//! (never mixed with the legacy store), through `storage::runtime::blocking`. Callers are the
 //! Brain's plain worker threads, never async code or the draw loop.
 
 use anyhow::Result;
@@ -12,12 +12,12 @@ pub(crate) fn on() -> bool {
     use argos_osint_core::storage::home;
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        // The TUI unit tests drive the SQLite store directly.
+        // The TUI unit tests drive the legacy store directly.
         if cfg!(test) {
             return false;
         }
         // An unreadable config is configured: its errors surface on the
-        // SurrealDB path rather than silently falling back to SQLite.
+        // SurrealDB path rather than silently falling back to the legacy store.
         argos_osint_core::paths::ensure_home()
             .and_then(|h| home::load_config(&home::Layout::new(h)))
             .map_or(true, |config| config.is_some())
@@ -280,7 +280,7 @@ pub(crate) fn load_jobs(_jobs: &mut super::jobs::JobsView, _pending: Option<&str
 const SWEEP_BATCHES: usize = 64;
 
 /// SurrealDB job retention: one sweep now, then hourly, on its own plain
-/// thread for the life of the TUI (the SQLite `clear_old_jobs` never runs
+/// thread for the life of the TUI (the legacy `clear_old_jobs` never runs
 /// under a storage config).
 #[cfg(feature = "surreal")]
 pub(crate) fn spawn_job_sweeper() {
@@ -440,23 +440,39 @@ pub(crate) fn prune_logs(_hours: i64) -> Result<usize> {
 }
 
 /// Logs "Clear log" on the repository (`argos_event` only). Plain worker
-/// threads only. Records the post-clear session event in the same worker
-/// call so the subsequent `reload_logs` snapshot sees it deterministically.
+/// threads only. The clear runs ON the ordered write queue, so every
+/// `record_log` line enqueued before the click lands before the delete and
+/// cannot re-materialize after it; the post-clear session event joins the
+/// same closure, so the subsequent `reload_logs` snapshot sees the final
+/// state deterministically.
 #[cfg(feature = "surreal")]
 pub(crate) fn clear_logs() -> Result<usize> {
+    use anyhow::bail;
     use argos_osint_core::storage::{event_log, runtime};
-    let cleared =
-        runtime::blocking(|repo| async move { event_log::clear_events(repo.db()).await })?;
-    let event = super::logs::session_event(
-        "info",
-        "Events cleared (jobs, results, and memories kept)",
-        "",
-    );
-    let _ =
-        runtime::blocking(
-            move |repo| async move { event_log::record_event(repo.db(), &event).await },
-        );
-    Ok(cleared)
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Result<usize>>();
+    if !runtime::spawn_ordered(async move {
+        let outcome = async {
+            let repo = runtime::repository().await?;
+            let cleared = event_log::clear_events(repo.db()).await?;
+            let event = super::logs::session_event(
+                "info",
+                "Events cleared (jobs, results, and memories kept)",
+                "",
+            );
+            let _ = event_log::record_event(repo.db(), &event).await;
+            Ok(cleared)
+        }
+        .await;
+        let _ = done_tx.send(outcome);
+    }) {
+        bail!("storage runtime is not initialized");
+    }
+    // The caller is the clear's plain worker thread, so it may block here
+    // until the clear's turn comes on the queue.
+    match done_rx.blocking_recv() {
+        Ok(outcome) => outcome,
+        Err(_) => bail!("Events cleanup did not report its result"),
+    }
 }
 
 #[cfg(not(feature = "surreal"))]

@@ -573,7 +573,7 @@ async fn storage_command(command: StorageCommand) -> Result<()> {
 }
 
 /// Under a configured storage mode, the Brain commands run on the SurrealDB
-/// repository only, never mixed with SQLite. Returns the command back
+/// repository only, never mixed with a legacy store. Returns the command back
 /// when it is not a Brain command or no storage mode is configured, and
 /// None when it ran here.
 #[cfg(feature = "surreal")]
@@ -642,7 +642,7 @@ async fn surreal_brain(command: Option<Command>) -> Result<Option<Option<Command
 }
 
 /// The Recon store for this command: the repository under a storage
-/// config, otherwise SQLite (never both).
+/// config, otherwise the legacy store (never both).
 async fn recon_store() -> Result<ReconStore> {
     paths::ensure_home()?;
     let _ = argos_osint_core::config_commit::recover_at_startup();
@@ -1201,8 +1201,8 @@ fn reject_collection_maintenance(
     Ok(run.id.clone())
 }
 
-/// [`reject_collection_maintenance`] on the selected store (SQLite or
-/// SurrealDB), so `atlas repair` never opens SQLite under SurrealDB.
+/// [`reject_collection_maintenance`] on the selected store (the legacy store or
+/// SurrealDB), so `atlas repair` never opens the legacy store under SurrealDB.
 async fn reject_collection_maintenance_store(
     store: &argos_osint_core::atlas_store::AtlasStore,
     run_id: &str,

@@ -23,7 +23,7 @@ pub const PAGE: usize = 500;
 /// Retention shown in the dashboard and applied by pruning.
 pub const RETENTION_HOURS: i64 = argos_osint_core::events::DEFAULT_RETENTION_HOURS;
 
-/// Where the Logs pane reads events: the SQLite `Store`, or the
+/// Where the Logs pane reads events: the legacy `Store`, or the
 /// repository's `argos_event` under a storage config
 /// (`surreal_brain::SurrealLogs`). Never both.
 pub trait LogsSource {

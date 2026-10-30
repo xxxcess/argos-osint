@@ -840,6 +840,16 @@ enum WorkEvent {
         memory_id: String,
         outcome: Result<bool, String>,
     },
+    /// A Brain write on the repository finished (`surreal_brain`): a save
+    /// (`InsightSaved`) or a pin toggle (`MemoryPinned`) from a control strip.
+    /// The completion event reloads the Brain list — no dirty-flag indirection,
+    /// like `ReconWritten` → `refresh_threads`.
+    InsightSaved {
+        outcome: Result<argos_osint_core::brain::Memory, String>,
+    },
+    MemoryPinned {
+        outcome: Result<bool, String>,
+    },
     ReconLoaded {
         thread_id: String,
         outcome: Result<Box<super::db_reads::ReconSnapshot>, String>,
@@ -1339,9 +1349,15 @@ pub struct App {
     intel_reading: bool,
     intel_brief_pending: bool,
     intel_related_limit: usize,
-    dashboard_reading: bool,
-    dashboard_pending: bool,
+    /// In-flight Jobs/Logs/counts read carrying its generation token, the
+    /// Brain `brain_reading` shape. `None` means no read is in flight.
+    dashboard_reading: Option<u64>,
     dashboard_generation: u64,
+    /// The Logs view may be stale (filter/module change, new event) and due
+    /// for a fresh `request_dashboard_snapshot`; cleared on success.
+    logs_dirty: bool,
+    /// The Jobs view counterpart of `logs_dirty`.
+    jobs_dirty: bool,
     pending_job: Option<String>,
     jobs_clearing: bool,
     logs_clearing: bool,
@@ -1357,7 +1373,11 @@ pub struct App {
     threads_pending: bool,
     recon_pending: bool,
     intel_list_pending: bool,
-    profile_pending: bool,
+    /// In-flight Profile read carrying its generation token (Brain shape).
+    profile_reading: Option<u64>,
+    /// The Profile analytics are stale (filter change, navigation) and due
+    /// for a fresh read; cleared when a current snapshot is accepted.
+    pub profile_dirty: bool,
     brain_preview_reading: bool,
     brain_preview_target: Option<String>,
     brain_preview_for: Option<String>,
@@ -1381,6 +1401,19 @@ pub struct App {
     provider_rx: UnboundedReceiver<ProviderEvent>,
     work_tx: UnboundedSender<WorkEvent>,
     work_rx: UnboundedReceiver<WorkEvent>,
+}
+
+/// The error text for a worker body caught by the panic guard, kept
+/// user-legible (`&str`/`String` payloads carry their message). The guard
+/// exists so a panicking storage read still sends its completion event and
+/// the loading tokens clear; it is scoped to the TUI worker threads only.
+fn worker_panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    let detail = panic
+        .downcast_ref::<&str>()
+        .map(|text| text.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into());
+    format!("Worker panicked: {detail}")
 }
 
 fn atlas_log_level(text: &str) -> &'static str {
@@ -1463,8 +1496,8 @@ impl App {
         true
     }
 
-    /// UI session state: the repository under a storage config, else the
-    /// SQLite `app_state` table.
+    /// UI session state: the SurrealDB repository under a storage config,
+    /// else the process-local in-memory store.
     fn ui_state_get(&self, key: &str) -> Result<Option<String>> {
         {
             surreal_recon::ui_state_get(key)
@@ -1481,12 +1514,11 @@ impl App {
         paths::ensure_home()?;
         // Finish any configuration commit a previous process left half applied.
         let _ = argos_osint_core::config_commit::recover_at_startup();
-        // Under a storage config the TUI never opens the SQLite file: the
-        // legacy store is an empty in-memory one that only SQLite-only
-        // views (not reachable on SurrealDB) would read.
+        // The TUI opens no database file directly: the fallback store is an
+        // empty in-memory one, and durable state lives in the SurrealDB
+        // repository.
         let store = Store::memory()?;
-        // Under a storage config Recon reads only the repository (once,
-        // before the event loop); the SQLite Recon tables are not touched.
+        // Recon reads only the repository (once, before the event loop).
         let surreal_boot = Some(surreal_recon::boot()?);
         let threads = surreal_boot
             .as_ref()
@@ -1796,8 +1828,8 @@ impl App {
             memory_total,
             memory_error: None,
             memories_loaded: false,
-            // Under a storage config no worker opens the SQLite file; the
-            // legacy-only paths fall back to the empty in-memory store.
+            // Under a storage config no worker opens a local database file;
+            // the legacy-only paths fall back to the empty in-memory store.
             background_db: (!surreal_recon::on()).then(paths::db_path),
             atlas_deleting: None,
             atlas_reading: false,
@@ -1805,9 +1837,10 @@ impl App {
             intel_reading: false,
             intel_brief_pending: false,
             intel_related_limit: 20,
-            dashboard_reading: false,
-            dashboard_pending: false,
+            dashboard_reading: None,
             dashboard_generation: 0,
+            logs_dirty: false,
+            jobs_dirty: false,
             pending_job: None,
             jobs_clearing: false,
             logs_clearing: false,
@@ -1823,7 +1856,8 @@ impl App {
             threads_pending: false,
             recon_pending: false,
             intel_list_pending: false,
-            profile_pending: false,
+            profile_reading: None,
+            profile_dirty: false,
             brain_preview_reading: false,
             brain_preview_target: None,
             brain_preview_for: None,
@@ -1894,7 +1928,8 @@ impl App {
         let detail = detail.into();
         let event = super::logs::session_event(level, &text, &detail);
         // Under a storage config the line goes to the repository's
-        // `argos_event` (ordered, off the UI thread); SQLite is not written.
+        // `argos_event` (ordered, off the UI thread); no local store is
+        // written.
         let recorded = surreal_brain::record_log(event);
         #[cfg(test)]
         crate::test_storage::drain();
@@ -1902,6 +1937,9 @@ impl App {
             self.logs.counts.error += 1;
         }
         if self.module == Some(ModuleId::Logs) {
+            // A new durable event makes the on-screen Logs page stale; the
+            // next dashboard tick re-reads it (follow keeps the newest line).
+            self.logs_dirty = true;
             self.dashboards_at = None;
         }
     }
@@ -1928,9 +1966,30 @@ impl App {
             self.refresh_intel_brief_stages();
         }
         match self.module {
-            Some(ModuleId::Logs) => self.reload_logs(),
-            Some(ModuleId::Jobs) => self.reload_jobs(),
-            Some(ModuleId::System) => self.reload_profile(),
+            // Jobs and Logs re-read only while their view is dirty (Brain's
+            // `brain_dirty` gate): entering the module, a filter change or a
+            // new durable event marks it; a successful snapshot clears it.
+            Some(ModuleId::Logs) => {
+                if self.logs_dirty && self.dashboard_reading.is_none() {
+                    self.reload_logs();
+                }
+            }
+            Some(ModuleId::Jobs) => {
+                // Deliberate bounded self-heal: job rows mutate out-of-band
+                // (job registry progress/lifecycle has no completion event
+                // into the TUI), so while parked on Jobs the tick marks the
+                // view dirty at this ≤1s cadence. Everything else still
+                // reloads only through its dirty/event path.
+                self.jobs_dirty = true;
+                if self.dashboard_reading.is_none() {
+                    self.reload_jobs();
+                }
+            }
+            Some(ModuleId::System) => {
+                if self.profile_dirty && self.profile_reading.is_none() {
+                    self.reload_profile();
+                }
+            }
             _ => {
                 if self.background_db.is_some() || surreal_brain::on() {
                     self.request_dashboard_snapshot();
@@ -1948,29 +2007,49 @@ impl App {
             && self.overlay == Overlay::None
     }
 
+    /// A Profile control action (filter change, clear filters, manual
+    /// refresh) made its own snapshot stale: schedule the reload right away,
+    /// like `ReconWritten` does for recon. The dirty flag keeps retrying on
+    /// the tick when a read is already in flight; the throttle reset keeps an
+    /// explicit action from waiting out the dashboard cadence.
+    pub(crate) fn refresh_profile_now(&mut self) {
+        self.profile_dirty = true;
+        self.dashboards_at = None;
+        self.reload_profile();
+    }
+
     /// One visible Profile snapshot when its 20-second automatic refresh is due.
     /// The read is on the store's own connection, so it never blocks recording.
     pub(crate) fn reload_profile(&mut self) {
         if !self.profile_analytics_visible() || !self.profile.due() {
             return;
         }
-        if self.profile.loading {
-            self.profile_pending = true;
+        // A read already in flight is left alone (the Brain guard shape): its
+        // completion clears the token, and `profile_dirty` plus this tick
+        // re-read when the outcome was stale.
+        if self.profile_reading.is_some() {
             return;
         }
-        self.profile_pending = false;
-        self.profile.loading = true;
+        self.profile_dirty = true;
         let generation = self.profile.generation;
+        self.profile_reading = Some(generation);
         let filters = self.profile.filters.clone();
         let tx = self.work_tx.clone();
         // Under a storage config the snapshot and its filter options come
-        // from the repository on this worker (never the SQLite store);
-        // `ProfileLoaded` drops a stale generation or filter set.
+        // from the repository on this worker;
+        // `ProfileLoaded` drops a stale generation or filter set. The body is
+        // panic-guarded (the approved fix plan) so the completion event is
+        // sent even when the storage read panics; the loading token can never
+        // be left dangling by a silent worker death.
         std::thread::spawn(move || {
-            let (outcome, options) = match surreal_profile::dashboard(&filters) {
-                Ok((snapshot, options)) => (Ok(Box::new(snapshot)), options),
-                Err(err) => (Err(format!("{err:#}")), Vec::new()),
-            };
+            let (outcome, options) =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    surreal_profile::dashboard(&filters)
+                })) {
+                    Ok(Ok((snapshot, options))) => (Ok(Box::new(snapshot)), options),
+                    Ok(Err(err)) => (Err(format!("{err:#}")), Vec::new()),
+                    Err(panic) => (Err(worker_panic_message(panic)), Vec::new()),
+                };
             let _ = tx.send(WorkEvent::ProfileLoaded {
                 generation,
                 filters,
@@ -2014,6 +2093,9 @@ impl App {
     }
 
     pub(crate) fn reload_logs(&mut self) {
+        // Any caller wants the Logs view fresh: mark it dirty so the tick
+        // keeps retrying until a current snapshot is accepted.
+        self.logs_dirty = true;
         if self.background_db.is_some() || surreal_brain::on() {
             self.request_dashboard_snapshot();
             return;
@@ -2031,8 +2113,8 @@ impl App {
         }
     }
 
-    /// Jobs reads run off the UI thread: on a background SQLite reader, or
-    /// on the SurrealDB repository under a storage config (never both).
+    /// Jobs reads run off the UI thread: on a background reader, or on the
+    /// SurrealDB repository under a storage config (never both).
     fn jobs_async(&self) -> bool {
         self.background_db.is_some() || surreal_brain::on()
     }
@@ -2053,6 +2135,9 @@ impl App {
     }
 
     pub(crate) fn reload_jobs(&mut self) {
+        // Any caller wants the Jobs view fresh: mark it dirty so the tick
+        // keeps retrying until a current snapshot is accepted.
+        self.jobs_dirty = true;
         if self.jobs_async() {
             self.request_dashboard_snapshot();
             return;
@@ -2076,34 +2161,45 @@ impl App {
     }
 
     fn request_dashboard_snapshot(&mut self) {
-        if self.dashboard_reading {
-            self.dashboard_pending = true;
+        if self.dashboard_reading.is_some() {
+            // The caller wants data newer than the read in flight, so that
+            // read is invalidated: bumping the generation token makes its
+            // late completion re-request (this replaces the old
+            // `dashboard_pending` flag, which leaked the loading state when
+            // the re-request could not spawn).
+            self.dashboard_generation = self.dashboard_generation.wrapping_add(1);
             return;
         }
         // Jobs, Logs and the header counts read only the repository.
-        self.dashboard_reading = true;
-        self.dashboard_pending = false;
         let generation = self.dashboard_generation;
+        self.dashboard_reading = Some(generation);
         let module = self.module;
         let key = self.dashboard_read_key();
         let mut jobs = self.jobs.clone();
         let mut logs = self.logs.clone();
         let pending_job = self.pending_job.clone();
         let tx = self.work_tx.clone();
+        // The body is panic-guarded (the approved fix plan) so the completion
+        // event is sent even when the storage read panics; the reading token
+        // can never be left dangling by a silent worker death.
         std::thread::spawn(move || {
-            let outcome = match module {
-                Some(ModuleId::Jobs) => {
-                    surreal_brain::load_jobs(&mut jobs, pending_job.as_deref());
-                    Ok(Box::new(DashboardSnapshot::Jobs(Box::new(jobs))))
-                }
-                Some(ModuleId::Logs) => {
-                    surreal_brain::load_logs(&mut logs);
-                    Ok(Box::new(DashboardSnapshot::Logs(Box::new(logs))))
-                }
-                _ => surreal_brain::log_counts()
-                    .map(|counts| Box::new(DashboardSnapshot::Counts(counts)))
-                    .map_err(|e| e.to_string()),
-            };
+            let outcome =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match module {
+                    Some(ModuleId::Jobs) => {
+                        surreal_brain::load_jobs(&mut jobs, pending_job.as_deref());
+                        Ok(Box::new(DashboardSnapshot::Jobs(Box::new(jobs))))
+                    }
+                    Some(ModuleId::Logs) => {
+                        surreal_brain::load_logs(&mut logs);
+                        Ok(Box::new(DashboardSnapshot::Logs(Box::new(logs))))
+                    }
+                    _ => surreal_brain::log_counts()
+                        .map(|counts| Box::new(DashboardSnapshot::Counts(counts)))
+                        .map_err(|e| e.to_string()),
+                })) {
+                    Ok(outcome) => outcome,
+                    Err(panic) => Err(worker_panic_message(panic)),
+                };
             let _ = tx.send(WorkEvent::DashboardLoaded {
                 generation,
                 module,
@@ -2507,7 +2603,7 @@ impl App {
         self.switch_tab(prev)
     }
 
-    /// Loads session tabs from SQLite app_state
+    /// Loads session tabs from stored UI state
     pub fn load_session_tabs(&mut self) {
         if let Ok(Some(json)) = self.ui_state_get("recon_session_tabs") {
             if !json.is_empty() {
@@ -2533,7 +2629,7 @@ impl App {
         }
     }
 
-    /// Saves session tabs to SQLite app_state
+    /// Saves session tabs to stored UI state
     pub fn save_session_tabs(&self) {
         let state = SessionTabsState {
             open_thread_ids: self.tab_ids.clone(),
@@ -2545,7 +2641,7 @@ impl App {
         }
     }
 
-    /// Loads Home draft from SQLite app_state
+    /// Loads Home draft from stored UI state
     pub fn load_home_draft(&mut self) {
         if let Ok(Some(json)) = self.ui_state_get("home_recon_draft") {
             if !json.is_empty() {
@@ -3257,6 +3353,7 @@ impl App {
         if self.module == Some(ModuleId::System) {
             // A fresh Profile entry reads one snapshot immediately.
             self.profile.loaded_at = None;
+            self.profile_dirty = true; // Trigger reload on module entry
         }
         if self.module == Some(ModuleId::System) && self.overlay == Overlay::Configs {
             self.overlay = Overlay::None;
@@ -3512,7 +3609,7 @@ impl App {
     }
 
     /// A Recon thread: from the repository's thread list under a storage
-    /// config (no store read on the UI thread), otherwise from SQLite.
+    /// config (no store read on the UI thread).
     fn recon_thread(&self, id: &str) -> Option<recon::Thread> {
         self.threads.iter().find(|t| t.id == id).cloned()
     }
@@ -3650,7 +3747,7 @@ impl App {
             return;
         };
         // Under a storage config the preview reads the repository; there is
-        // no SQLite path to open.
+        // no local database path to open.
         let db = self.background_db.clone();
         if db.is_none() && !surreal_brain::on() {
             return;
@@ -4402,7 +4499,7 @@ impl App {
             let tx = self.work_tx.clone();
             std::thread::spawn(move || {
                 // Under a storage config the snapshot reads only the
-                // repository; no SQLite store (file or in-memory) is opened.
+                // repository; no local store (file or in-memory) is opened.
                 let _ = db;
                 {
                     #[cfg(feature = "surreal")]
@@ -4809,8 +4906,8 @@ impl App {
             }
         }
         {
-            // The run cache above is the repository's run list; never ask
-            // the SQLite store.
+            // The run cache above is the repository's run list; no other
+            // store is consulted.
             let _ = run_id;
             None
         }
@@ -5455,6 +5552,29 @@ impl App {
                 }
                 true
             }
+            WorkEvent::InsightSaved { outcome } => {
+                match outcome {
+                    Ok(memory) => {
+                        self.brain_insight.clear();
+                        self.brain_list_mode = BrainListMode::List;
+                        self.reload_memories_selecting(Some(memory.id.clone()));
+                        self.set_focus(Target::Memory(self.memory_sel));
+                        self.status = "Insight saved with source".into();
+                    }
+                    Err(error) => self.status = format!("Could not save the insight: {error}"),
+                }
+                true
+            }
+            WorkEvent::MemoryPinned { outcome } => {
+                match outcome {
+                    Ok(_) => {
+                        self.reload_memories();
+                        self.status = "Memory pin updated".into();
+                    }
+                    Err(error) => self.status = format!("Could not update the pin: {error}"),
+                }
+                true
+            }
             WorkEvent::ReconLoaded { thread_id, outcome } => {
                 self.recon_reading = false;
                 // Logging already committed on the worker, even if its view
@@ -5638,9 +5758,11 @@ impl App {
                 key,
                 outcome,
             } => {
-                self.dashboard_reading = false;
-                if std::mem::take(&mut self.dashboard_pending)
-                    || generation != self.dashboard_generation
+                // Clear the in-flight token FIRST (the Brain
+                // `on_brain_loaded` order): the re-request below must be
+                // able to spawn instead of leaking the loading state.
+                self.dashboard_reading = None;
+                if generation != self.dashboard_generation
                     || module != self.module
                     || key != self.dashboard_read_key()
                 {
@@ -5651,6 +5773,7 @@ impl App {
                 match outcome {
                     Ok(snapshot) => match *snapshot {
                         DashboardSnapshot::Logs(snapshot) => {
+                            self.logs_dirty = false;
                             self.logs.accept(*snapshot);
                             let (room, width) =
                                 super::logs::list_geometry(super::ui::body_rect(self));
@@ -5663,6 +5786,7 @@ impl App {
                             };
                         }
                         DashboardSnapshot::Jobs(snapshot) => {
+                            self.jobs_dirty = false;
                             let select_snapshot = self.pending_job.take().is_some();
                             if select_snapshot {
                                 self.jobs.status = snapshot.status;
@@ -5680,8 +5804,17 @@ impl App {
                         DashboardSnapshot::Counts(counts) => self.logs.counts = counts,
                     },
                     Err(error) => match self.module {
-                        Some(ModuleId::Logs) => self.logs.error = Some(error),
-                        Some(ModuleId::Jobs) => self.jobs.error = Some(error),
+                        // `loaded` flips true on error so the render contract
+                        // (`!loaded && error.is_none()`) can never fall back
+                        // to a stuck spinner once the error is dismissed.
+                        Some(ModuleId::Logs) => {
+                            self.logs.error = Some(error);
+                            self.logs.loaded = true;
+                        }
+                        Some(ModuleId::Jobs) => {
+                            self.jobs.error = Some(error);
+                            self.jobs.loaded = true;
+                        }
                         _ => {}
                     },
                 }
@@ -5894,20 +6027,20 @@ impl App {
                 outcome,
                 options,
             } => {
-                self.profile.loading = false;
-                let pending = std::mem::take(&mut self.profile_pending);
+                // Clear the in-flight token FIRST (the Brain
+                // `on_brain_loaded` order), before any staleness decision.
+                self.profile_reading = None;
                 // A read may finish after navigation. Retain the previous snapshot
                 // and its timestamp so returning to overdue analytics retries.
                 if !self.profile_analytics_visible() {
                     return false;
                 }
-                if pending {
-                    self.reload_profile();
-                    return true;
-                }
                 if generation != self.profile.generation || filters != self.profile.filters {
+                    // Stale: do not re-request inline. `profile_dirty` stays
+                    // set and the next dashboard tick re-reads.
                     return true;
                 }
+                self.profile_dirty = false;
                 self.profile.loaded_at = Some(Instant::now());
                 self.profile.options = options;
                 match outcome {
@@ -6771,21 +6904,42 @@ impl App {
 
     fn save_insight(&mut self) -> Result<String> {
         let (category, text) = argos_osint_core::brain::parse_typed_memory(&self.brain_insight);
-        let memory = self.store.add_user_claim(
-            &text,
-            category,
-            MemorySource {
-                app: self.brain_app.trim().into(),
-                conversation_id: self.brain_conversation.trim().into(),
-                message_id: None,
-                reference: None,
-            },
-        )?;
-        self.reload_memories_selecting(Some(memory.id.clone()));
-        self.brain_insight.clear();
-        self.brain_list_mode = BrainListMode::List;
-        self.set_focus(Target::Memory(self.memory_sel));
-        Ok("Insight saved with source".into())
+        anyhow::ensure!(!text.trim().is_empty(), "write the insight first");
+        let source = MemorySource {
+            app: self.brain_app.trim().into(),
+            conversation_id: self.brain_conversation.trim().into(),
+            message_id: None,
+            reference: None,
+        };
+        let tx = self.work_tx.clone();
+        // The Brain write runs on a plain worker: the TUI event loop sits
+        // inside an entered Tokio context where `storage::runtime` calls
+        // cannot run (the recon-write pattern: the completion event
+        // `InsightSaved` does the reload).
+        std::thread::spawn(move || {
+            let outcome = Store::memory()
+                .and_then(|store| store.add_user_claim(&text, category, source))
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkEvent::InsightSaved { outcome });
+        });
+        self.status = "Saving insight…".into();
+        Ok(self.status.clone())
+    }
+
+    /// Toggle the selected memory's pin on a plain worker; `MemoryPinned`
+    /// reloads the Brain list on completion.
+    fn spawn_pin_toggle(&mut self, memory: argos_osint_core::brain::Memory) -> Result<String> {
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = Store::memory()
+                .and_then(|store| {
+                    store.update_memory(&memory.id, &memory.text, &memory.category, !memory.pinned)
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkEvent::MemoryPinned { outcome });
+        });
+        self.status = "Updating pin…".into();
+        Ok(self.status.clone())
     }
 
     /// Memories for the list plus the total, honoring Find. Errors are returned,
@@ -6882,14 +7036,21 @@ impl App {
         let generation = self.brain_generation;
         self.brain_reading = Some(generation);
         let tx = self.work_tx.clone();
+        // The body is panic-guarded for parity with the Profile/dashboard
+        // workers: a panicking read still sends its completion event so the
+        // reading token clears (minimal-risk: the same single list read).
         std::thread::spawn(move || {
-            let outcome = if surreal_brain::on() {
-                surreal_brain::list()
-            } else {
-                let _ = &db;
-                Ok(Vec::new())
-            }
-            .map_err(|e| e.to_string());
+            let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if surreal_brain::on() {
+                    surreal_brain::list()
+                } else {
+                    let _ = &db;
+                    Ok(Vec::new())
+                }
+            })) {
+                Ok(list) => list.map_err(|e| e.to_string()),
+                Err(panic) => Err(worker_panic_message(panic)),
+            };
             let _ = tx.send(WorkEvent::BrainLoaded {
                 generation,
                 outcome,
@@ -6932,7 +7093,7 @@ impl App {
     }
 
     fn filter_memory_cache(&mut self) {
-        // SurrealDB homes have no SQLite worker path. Their snapshot still
+        // SurrealDB homes have no local worker path. Their snapshot still
         // lives in `brain_cache`, and Find filters that cache.
         if self.background_db.is_none() && !surreal_brain::on() {
             self.reload_memories();
@@ -7009,8 +7170,7 @@ impl App {
             }
         } else if surreal_brain::on() {
             // The memory check reads the repository on a plain worker
-            // thread (never the SQLite store); `MemoryGraphChecked` opens
-            // the mapper.
+            // thread; `MemoryGraphChecked` opens the mapper.
             let tx = self.work_tx.clone();
             self.status = "Opening topology…".into();
             std::thread::spawn(move || {
@@ -7847,6 +8007,12 @@ impl App {
         self.brain_reading.is_some()
     }
 
+    /// A Profile analytics read is in flight (drives the refreshing/loading
+    /// hints on the Overview status strip and report widgets).
+    pub(crate) fn profile_refreshing(&self) -> bool {
+        self.profile_reading.is_some()
+    }
+
     pub(crate) fn intel_bulletin_loading(&self) -> bool {
         self.intel_list_reading
     }
@@ -7907,7 +8073,7 @@ impl App {
 
     fn more_related_articles(&mut self) -> Result<String> {
         // Under SurrealDB the worker snapshot reads the repository; never
-        // page from the in-memory SQLite store.
+        // page from a local in-memory store.
 
         self.intel_related_limit = self
             .intel_related
@@ -8141,12 +8307,7 @@ impl App {
                     self.status = "Actor groups are read-only".into();
                     return;
                 }
-                self.store
-                    .update_memory(&memory.id, &memory.text, &memory.category, !memory.pinned)
-                    .map(|_| {
-                        self.reload_memories();
-                        "Memory pin updated".into()
-                    })
+                self.spawn_pin_toggle(memory.clone())
             }
             ButtonId::Delete => {
                 let Some(memory) = self.memories.get(self.memory_sel) else {
@@ -8157,14 +8318,10 @@ impl App {
                     self.status = "Actor groups are read-only".into();
                     return;
                 }
-                if self.background_db.is_some() {
-                    self.request_memory_delete(memory.id.clone())
-                } else {
-                    self.store.delete_memory(&memory.id).map(|_| {
-                        self.reload_memories();
-                        "Memory deleted".into()
-                    })
-                }
+                // Both modes delete through the spawned worker of
+                // `request_memory_delete`: a direct store call from the TUI
+                // event loop bail in the entered Tokio context.
+                self.request_memory_delete(memory.id.clone())
             }
             ButtonId::NewThread => self.new_thread().map(|_| "New investigation".into()),
             ButtonId::DeleteThread => {
@@ -8454,6 +8611,10 @@ impl App {
                 }
                 self.jobs_clearing = true;
                 self.jobs.prune_status(status);
+                // The clear's own completion (`JobsCleared`) reloads, but a
+                // late or failed snapshot retry must not depend on module
+                // re-entry: mark the view dirty for the tick as well.
+                self.jobs_dirty = true;
                 if matches!(self.focus, Target::JobRow(_)) {
                     if self.jobs.rows.is_empty() {
                         self.focus = Target::Field(FieldId::JobsSearch);
@@ -9330,6 +9491,12 @@ impl App {
                 };
                 self.overlay = Overlay::None;
                 self.scrolls.popup = 0;
+                // Add: if on System/Overview, trigger profile reload
+                if self.module == Some(ModuleId::System)
+                    && self.profile.tab == super::profile::SystemTab::Overview
+                {
+                    self.profile_dirty = true;
+                }
                 if let Some(target) = restore {
                     self.set_focus(target);
                 }
@@ -9617,8 +9784,8 @@ impl App {
             self.memories_deleting.insert(id.clone()),
             "This memory is already being deleted"
         );
-        // Only the SQLite branch needs the database path; under SurrealDB
-        // there may be none, so it must not be required up front.
+        // Only the local-store branch needs the database path; under
+        // SurrealDB there may be none, so it must not be required up front.
         let db = self.background_db.clone();
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
@@ -9627,7 +9794,9 @@ impl App {
             } else if let Some(db) = db {
                 Store::open_light(&db).and_then(|store| store.delete_memory(&id))
             } else {
-                Err(anyhow::anyhow!("no memory store is configured"))
+                // The process store handle: on a plain worker the storage
+                // runtime call is allowed (never on the TUI event loop).
+                Store::memory().and_then(|store| store.delete_memory(&id))
             }
             .map_err(|e| e.to_string());
             let _ = tx.send(WorkEvent::MemoryDeleted {
@@ -11017,7 +11186,7 @@ pub fn run_with_shutdown(
     // Process liveness for the job registry: jobs left running by a process
     // that exited become interrupted; cross-process Cancel reaches this one.
     // Under a storage config the beat writes `process:[owner]` on the
-    // repository and no SQLite job registry is opened.
+    // repository and no local job registry is opened.
     let _beat = argos_osint_core::job_registry::start_process_beat(&paths::db_path()).ok();
     // One-time retention cleanup is separate from the elected, resumable
     // backfill pool. Neither belongs to startup or the terminal event loop.
@@ -11031,7 +11200,7 @@ pub fn run_with_shutdown(
     std::thread::spawn(move || {
         let outcome = (|| -> Result<()> {
             // Under a storage config events (and telemetry) are pruned on
-            // the repository and SQLite is not opened here.
+            // the repository and no local store is opened here.
             if surreal_jobs {
                 surreal_brain::prune_logs(super::logs::RETENTION_HOURS)?;
                 return Ok(());
@@ -11101,16 +11270,14 @@ pub fn run_with_shutdown(
             || app.osint_cancel.is_some()
             || app.dataset_refresh_running.is_some()
             || app.provider_pending.is_some()
-            || app.dashboard_reading
-            || app.dashboard_pending
+            || app.dashboard_reading.is_some()
             || app.jobs_clearing
             || app.logs_clearing
             || app.intel_reading
             || app.intel_brief_pending
             || app.intel_list_reading
             || app.intel_list_pending
-            || app.profile.loading
-            || app.profile_pending
+            || app.profile_reading.is_some()
             || app.brain_reading.is_some()
             || app.brain_preview_reading
             || app.topology_loading
@@ -11275,7 +11442,8 @@ fn flush_streams(app: &mut App) -> bool {
 /// Topology seed for a stored memory of the given kind (legacy untyped memories
 /// are Claims).
 /// The memory check's result as the topology seed, or the status line for
-/// a missing or unreadable memory. Shared by the SQLite and SurrealDB paths.
+/// a missing or unreadable memory. Shared by the in-memory and repository
+/// paths.
 fn memory_graph_seed(
     id: String,
     outcome: Result<Option<argos_osint_core::memory_metadata::MemoryKind>, String>,
@@ -11465,7 +11633,7 @@ impl TopologySummaryJob {
 
 /// Under a storage config every topology seed is read only from the
 /// repository (`storage::topology`), on a plain worker thread through
-/// `storage::runtime::blocking`; it never falls back to the SQLite store.
+/// `storage::runtime::blocking`; it never falls back to a local store.
 /// The repository refuses the retained Intel display seeds with an error.
 fn surreal_topology(surreal: bool, _seed: &argos_osint_core::brain_topology::TopologySeed) -> bool {
     surreal
@@ -11703,9 +11871,10 @@ pub mod testkit {
             intel_reading: false,
             intel_brief_pending: false,
             intel_related_limit: 20,
-            dashboard_reading: false,
-            dashboard_pending: false,
+            dashboard_reading: None,
             dashboard_generation: 0,
+            logs_dirty: false,
+            jobs_dirty: false,
             pending_job: None,
             jobs_clearing: false,
             logs_clearing: false,
@@ -11721,7 +11890,8 @@ pub mod testkit {
             threads_pending: false,
             recon_pending: false,
             intel_list_pending: false,
-            profile_pending: false,
+            profile_reading: None,
+            profile_dirty: false,
             brain_preview_reading: false,
             brain_preview_target: None,
             brain_preview_for: None,
@@ -11918,6 +12088,7 @@ mod tests {
         click(&mut app, Target::Field(FieldId::BrainInsight));
         type_text(&mut app, "project: Atlas launch");
         click(&mut app, Target::Button(ButtonId::Add));
+        settle(&mut app, |app| app.memories.len() == 1);
         assert_eq!(app.brain_list_mode, BrainListMode::List);
         assert_eq!(app.memories[0].source.conversation_id, "thread-1");
         let listed = super::super::ui::focus_order(&app);
@@ -12093,6 +12264,7 @@ mod tests {
             app.brain_insight.clear();
             type_text(&mut app, text);
             click(&mut app, Target::Button(ButtonId::Add));
+            settle(&mut app, |app| app.brain_insight.is_empty());
         }
         assert_eq!(app.memories.len(), 3);
         click(&mut app, Target::Memory(1));
@@ -13451,7 +13623,7 @@ mod tests {
                 app.select(ModuleId::System.index());
                 app.profile.snapshot = None;
                 app.profile.error = None;
-                app.profile.loading = true;
+                app.profile_reading = Some(app.profile.generation);
             }
             "atlas-map" => {
                 app.select(ModuleId::Atlas.index());
@@ -13987,7 +14159,7 @@ mod tests {
                 app.jobs.loaded = true;
                 app.pending_job = Some("old-cohort".into());
                 app.background_db = Some(PathBuf::from("controlled-worker"));
-                app.dashboard_reading = true;
+                app.dashboard_reading = Some(app.dashboard_generation);
                 let old_key = app.dashboard_read_key();
                 let old_snapshot = app.jobs.clone();
                 let before = buffer_text(&render(&mut app, width, height));
@@ -14034,7 +14206,6 @@ mod tests {
                 current.loaded = true;
                 let key = app.dashboard_read_key();
                 let generation = app.dashboard_generation;
-                app.dashboard_pending = false;
                 app.on_work_event(WorkEvent::DashboardLoaded {
                     generation,
                     module: Some(ModuleId::Jobs),
@@ -14054,7 +14225,7 @@ mod tests {
                     );
                 }
                 // App and search changes use immediate in-memory filtering.
-                app.dashboard_reading = true;
+                app.dashboard_reading = Some(app.dashboard_generation);
                 click(&mut app, Target::Button(ButtonId::JobsApp));
                 assert!(app.jobs.rows.is_empty() && app.jobs.loaded);
                 app.set_focus(Target::Field(FieldId::JobsSearch));
@@ -14093,7 +14264,7 @@ mod tests {
         assert!(snapshot.focus_job(&app.store, &destination));
         app.background_db = Some(PathBuf::from("controlled-worker"));
         app.pending_job = Some(destination.clone());
-        app.dashboard_reading = true;
+        app.dashboard_reading = Some(app.dashboard_generation);
         let key = app.dashboard_read_key();
         let generation = app.dashboard_generation;
         app.on_work_event(WorkEvent::DashboardLoaded {
@@ -14123,23 +14294,61 @@ mod tests {
         app.store
             .set_job_progress("live-job", "running", "collect", 1, Some(3), "")
             .unwrap();
+        // An orphaned service worker (`kind = 'service'`, failed) sits in the
+        // same durable jobs list; it must clear with the failed history.
+        app.store
+            .register_job(
+                &argos_osint_core::tasks::NewJob {
+                    id: "failed-service".into(),
+                    kind: "service".into(),
+                    owner_scope: String::new(),
+                    input_revision: String::new(),
+                    deadline_at: String::new(),
+                },
+                &argos_osint_core::tasks::JobMeta {
+                    app: "system".into(),
+                    operation: "api_server".into(),
+                    title: "Orphaned API service".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        app.store
+            .set_job_progress(
+                "failed-service",
+                "failed",
+                "orphaned",
+                0,
+                None,
+                "owner exited",
+            )
+            .unwrap();
         app.select(ModuleId::Jobs.index());
-        assert_eq!(app.jobs.rows.len(), 3);
+        assert_eq!(app.jobs.rows.len(), 4);
+        assert!(app.jobs.rows.iter().any(|r| r.id == "failed-service"));
 
         // Simulate an in-flight periodic dashboard read started before the user
         // clicks "Clear completed".
         app.background_db = Some(PathBuf::from("controlled-worker"));
-        app.dashboard_reading = true;
+        app.dashboard_reading = Some(app.dashboard_generation);
         let stale_generation = app.dashboard_generation;
         let stale_snapshot = app.jobs.clone();
 
         click(&mut app, Target::Button(ButtonId::JobsClearCompleted));
+        assert!(
+            app.jobs_dirty,
+            "the clear schedules its own view refresh, no module re-entry"
+        );
         assert!(
             !app.jobs.rows.iter().any(|r| r.id == "done-job"),
             "completed/succeeded job is pruned immediately from the table"
         );
         assert!(app.jobs.rows.iter().any(|r| r.id == "paused-job"));
         assert!(app.jobs.rows.iter().any(|r| r.id == "live-job"));
+        assert!(
+            app.jobs.rows.iter().any(|r| r.id == "failed-service"),
+            "failed service row survives Clear completed (filter != Failed)"
+        );
 
         // Click "Clear stopped" once the first clear settles: paused jobs are
         // also pruned immediately.
@@ -14167,7 +14376,7 @@ mod tests {
             !app.jobs.rows.iter().any(|r| r.id == "done-job"),
             "stale pre-clear DashboardLoaded must not overwrite cleared Jobs view"
         );
-        settle(&mut app, |app| !app.dashboard_reading);
+        settle(&mut app, |app| app.dashboard_reading.is_none());
 
         // Now clear stopped jobs and verify Logs records the clear event.
         click(&mut app, Target::Button(ButtonId::JobsClearStopped));
@@ -14175,12 +14384,37 @@ mod tests {
             !app.jobs.rows.iter().any(|r| r.id == "paused-job"),
             "paused job is pruned immediately by Clear stopped"
         );
-        settle(&mut app, |app| !app.jobs_clearing && !app.dashboard_reading);
+        settle(&mut app, |app| {
+            !app.jobs_clearing && app.dashboard_reading.is_none()
+        });
+        assert_eq!(app.jobs.rows.len(), 2);
+        assert_eq!(app.jobs.rows[0].id, "live-job");
+        assert!(
+            app.jobs.rows.iter().any(|r| r.id == "failed-service"),
+            "failed service row survives Clear stopped (filter != Failed)"
+        );
+
+        // Clear failed: the failed service worker disappears with the rest
+        // of the failed history, and the post-clear reload keeps it gone.
+        click(&mut app, Target::Button(ButtonId::JobsClearFailed));
+        assert!(
+            !app.jobs.rows.iter().any(|r| r.id == "failed-service"),
+            "failed service job is pruned immediately by Clear failed"
+        );
+        settle(&mut app, |app| {
+            !app.jobs_clearing && app.dashboard_reading.is_none()
+        });
+        assert!(
+            !app.jobs.rows.iter().any(|r| r.id == "failed-service"),
+            "post-clear reload must not resurrect the cleared service job"
+        );
         assert_eq!(app.jobs.rows.len(), 1);
         assert_eq!(app.jobs.rows[0].id, "live-job");
 
         app.select(ModuleId::Logs.index());
-        settle(&mut app, |app| app.logs.loaded && !app.dashboard_reading);
+        settle(&mut app, |app| {
+            app.logs.loaded && app.dashboard_reading.is_none()
+        });
         assert!(
             app.logs
                 .rows
@@ -14197,6 +14431,15 @@ mod tests {
         let mut app = app();
         app.select(ModuleId::Jobs.index());
         app.jobs.rows = vec![
+            JobRow {
+                id: "j-svc-failed".into(),
+                kind: "service".into(),
+                operation: "api_server".into(),
+                title: "Orphaned API service".into(),
+                app: "system".into(),
+                state: "failed".into(),
+                ..Default::default()
+            },
             JobRow {
                 id: "j-running".into(),
                 state: "running".into(),
@@ -14217,19 +14460,22 @@ mod tests {
             },
         ];
         app.jobs.loaded = true;
-        app.jobs.sel = 2;
+        app.jobs.sel = 3;
         app.jobs.sel_id = Some("j-completed".into());
         app.jobs.detail = Some(JobDetail {
-            job: app.jobs.rows[2].clone(),
+            job: app.jobs.rows[3].clone(),
             ..Default::default()
         });
-        app.set_focus(Target::JobRow(2));
+        app.set_focus(Target::JobRow(3));
 
-        // Clear completed: row 2 is pruned. Focus was on index 2, clamps to index 1.
+        // Clear completed: row 3 is pruned. Focus was on index 3, clamps to
+        // index 2 (the failed task). The failed service row survives because
+        // the clear filter is Completed, not Failed.
         app.activate_button(ButtonId::JobsClearCompleted);
-        assert_eq!(app.jobs.rows.len(), 2);
-        assert_eq!(app.jobs.sel, 1);
-        assert_eq!(app.focus, Target::JobRow(1));
+        assert_eq!(app.jobs.rows.len(), 3);
+        assert!(app.jobs.rows.iter().any(|r| r.id == "j-svc-failed"));
+        assert_eq!(app.jobs.sel, 2);
+        assert_eq!(app.focus, Target::JobRow(2));
         assert!(app.jobs.detail.is_some());
         assert_eq!(app.jobs.detail.as_ref().unwrap().job.id, "j-failed");
         assert!(
@@ -14240,9 +14486,14 @@ mod tests {
         // Settle clearing before next button activation
         app.jobs_clearing = false;
 
-        // Clear failed: row 1 is pruned. Focus was on index 1, clamps to index 0.
+        // Clear failed: the failed task AND the failed service row are
+        // pruned. Focus was on index 2, clamps to index 0.
         app.activate_button(ButtonId::JobsClearFailed);
         assert_eq!(app.jobs.rows.len(), 1);
+        assert!(
+            !app.jobs.rows.iter().any(|r| r.id == "j-svc-failed"),
+            "failed service job is cleared by Clear failed"
+        );
         assert_eq!(app.jobs.rows[0].id, "j-running");
         assert_eq!(app.jobs.sel, 0);
         assert_eq!(app.focus, Target::JobRow(0));
@@ -14287,7 +14538,7 @@ mod tests {
         app.jobs.sel = 0;
         app.jobs.sel_id = Some("recon-job".into());
         app.background_db = Some(PathBuf::from("controlled-worker"));
-        app.dashboard_reading = true;
+        app.dashboard_reading = Some(app.dashboard_generation);
 
         let before = buffer_text(&render(&mut app, width, height));
         assert!(before.contains("Recon scan"));
@@ -14328,7 +14579,7 @@ mod tests {
 
         // Simulate an in-flight read started before "Clear events" is clicked.
         app.background_db = Some(PathBuf::from("controlled-worker"));
-        app.dashboard_reading = true;
+        app.dashboard_reading = Some(app.dashboard_generation);
         let stale_gen = app.dashboard_generation;
         let stale_key = app.dashboard_read_key();
         let stale_logs = app.logs.clone();
@@ -14336,7 +14587,11 @@ mod tests {
         click(&mut app, Target::Button(ButtonId::ClearLog));
         settle(&mut app, |app| !app.logs_clearing);
         assert!(app.logs.rows.is_empty() && !app.logs.loaded);
-        assert!(app.dashboard_pending);
+        // The pre-clear read is still in flight and now invalidated: the
+        // re-read is queued through the generation token (the old
+        // `dashboard_pending` flag folded into the stale check).
+        assert!(app.dashboard_reading.is_some());
+        assert!(app.dashboard_generation > stale_gen);
 
         // The pre-clear snapshot finishes with the same filter key; it must be
         // dropped and trigger a fresh read instead of restoring cleared events.
@@ -14350,13 +14605,15 @@ mod tests {
             app.logs.rows.is_empty(),
             "stale pre-clear Logs snapshot must not restore cleared rows"
         );
-        settle(&mut app, |app| app.logs.loaded && !app.dashboard_reading);
+        settle(&mut app, |app| {
+            app.logs.loaded && app.dashboard_reading.is_none()
+        });
         assert_eq!(app.logs.rows.len(), 1);
         assert!(app.logs.rows[0].message.contains("Events cleared"));
 
         // Changing Logs level, app, or search invalidates old rows immediately
         // while a read is in flight.
-        app.dashboard_reading = true;
+        app.dashboard_reading = Some(app.dashboard_generation);
         let before_filter_gen = app.dashboard_generation;
         let mut stale_page = app.logs.clone();
         stale_page.rows = vec![sample_row];
@@ -14371,6 +14628,104 @@ mod tests {
             outcome: Ok(Box::new(DashboardSnapshot::Logs(Box::new(stale_page)))),
         });
         assert!(app.logs.rows.is_empty());
+    }
+
+    /// Clearing events must not resurrect lines that were queued before the
+    /// click (the ordered write queue drains them into the clear), and a
+    /// durable line after the clear must mark Logs dirty while the module is
+    /// open — no revisit required.
+    #[test]
+    fn logs_clear_drains_queued_lines_and_late_writes_mark_dirty() {
+        let mut app = app();
+        app.push_log("error", "pre-clear failure");
+        app.select(ModuleId::Logs.index());
+        // Async mode, like the TUI under a storage config.
+        app.background_db = Some(PathBuf::from("controlled-worker"));
+        click(&mut app, Target::Button(ButtonId::ClearLog));
+        settle(&mut app, |app| {
+            !app.logs_clearing
+                && app.dashboard_reading.is_none()
+                && !app.logs_dirty
+                && app.logs.loaded
+        });
+        assert_eq!(
+            app.logs.rows.len(),
+            1,
+            "only the post-clear session event remains"
+        );
+        assert!(app.logs.rows[0].message.contains("Events cleared"));
+        assert!(
+            !app.logs
+                .rows
+                .iter()
+                .any(|row| row.message.contains("pre-clear")),
+            "a line recorded before the clear cannot re-materialize"
+        );
+        assert!(!app.logs_dirty, "the accepted snapshot cleared the flag");
+
+        // A line logged after the clear (e.g. the user's next action) lands
+        // through the same module path: it sets `logs_dirty` so the next tick
+        // re-reads — the earlier defect kept the list frozen until re-entry.
+        app.push_log("error", "post-clear failure");
+        assert!(
+            app.logs_dirty,
+            "a durable line enqueued with the Logs module open marks it dirty"
+        );
+        app.dashboards_at = None;
+        settle(&mut app, |app| !app.logs_dirty && app.logs.rows.len() >= 2);
+    }
+
+    /// The Profile clear-filters control schedules its own reload like recon
+    /// writes do: dirty flag, immediate tick eligibility and `due()`.
+    #[test]
+    fn profile_clear_filters_schedules_its_own_reload() {
+        let mut app = app();
+        app.module = Some(ModuleId::System);
+        app.profile.tab = crate::tui::profile::SystemTab::Overview;
+        assert!(!app.profile_dirty);
+        app.profile.set_filter("provider", "openai");
+        crate::tui::profile::activate(&mut app, Target::ProfileAction(2));
+        assert!(
+            app.profile_dirty,
+            "clear filters must mark the analytics view dirty"
+        );
+        assert_eq!(
+            app.profile.filters.provider, "",
+            "filters are cleared synchronously"
+        );
+        assert!(
+            !app.profile.due() || app.profile_reading.is_some(),
+            "the control started a fresh read instead of only invalidating"
+        );
+        // The completion event clears the flag without module re-entry.
+        settle(&mut app, |app| {
+            !app.profile_dirty && app.profile_reading.is_none()
+        });
+        assert!(app.profile.snapshot.is_some());
+    }
+
+    /// The Jobs ambient self-heal: a parked tick marks Jobs dirty even with
+    /// no completion event at all (a deliberate ≤1s cadence with the reload
+    /// still gated on in-flight reads).
+    #[test]
+    fn parked_jobs_tick_self_heals_rows_without_events() {
+        let mut app = app();
+        app.module = Some(ModuleId::Jobs);
+        app.jobs_dirty = false;
+        app.dashboards_at = None;
+        app.tick_dashboards();
+        assert!(
+            app.jobs_dirty,
+            "the parked Jobs tick marks the view dirty for ambient progress"
+        );
+        // A read in flight still owns the view: the tick only marks dirty and
+        // never reloads over an active read.
+        app.jobs_dirty = false;
+        app.dashboard_reading = Some(app.dashboard_generation);
+        app.dashboards_at = None;
+        app.tick_dashboards();
+        assert!(app.dashboard_reading == Some(app.dashboard_generation));
+        assert!(app.jobs_dirty, "dirty survives, retire happens on accept");
     }
 
     #[test]
@@ -17499,17 +17854,17 @@ mod tests {
             app.overlay = overlay;
             app.reload_profile();
             assert!(
-                !app.profile.loading,
+                app.profile_reading.is_none(),
                 "hidden analytics must not start a read"
             );
-            app.profile.loading = true;
+            app.profile_reading = Some(app.profile.generation);
             assert!(!app.on_work_event(WorkEvent::ProfileLoaded {
                 generation: app.profile.generation,
                 filters: app.profile.filters.clone(),
                 outcome: Ok(Box::default()),
                 options: Vec::new(),
             }));
-            assert!(!app.profile.loading);
+            assert!(app.profile_reading.is_none());
             assert_eq!(app.profile.snapshot, previous);
             assert_eq!(app.profile.loaded_at, Some(at));
         }
@@ -17616,7 +17971,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.profile.filters.category, "web");
         let before = app.profile.snapshot.clone();
-        app.profile.loading = true;
+        app.profile_reading = Some(0);
         app.on_work_event(WorkEvent::ProfileLoaded {
             generation: 0,
             filters: Default::default(),
@@ -17624,7 +17979,7 @@ mod tests {
             options: Vec::new(),
         });
         assert_eq!(app.profile.snapshot, before);
-        assert!(!app.profile.loading);
+        assert!(app.profile_reading.is_none());
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         assert!(app.profile.filters.category.is_empty());
         assert_eq!(
@@ -17862,12 +18217,12 @@ mod tests {
             dump_cells(&mut app, &dir, "profile-empty-160x50", 160, 50);
         }
         app.profile.snapshot = None;
-        app.profile.loading = true;
+        app.profile_reading = Some(app.profile.generation);
         assert!(buffer_text(&render(&mut app, 80, 24)).contains("Loading"));
         if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
             dump_cells(&mut app, &dir, "profile-loading-80x24", 80, 24);
         }
-        app.profile.loading = false;
+        app.profile_reading = None;
         app.profile.tab = super::super::profile::SystemTab::System;
         if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
             dump_cells(&mut app, &dir, "profile-system-80x24", 80, 24);
@@ -19626,7 +19981,8 @@ mod tests {
         let mut app = app();
         app.module = Some(ModuleId::System);
         app.profile.generation = 2;
-        app.profile.loading = true;
+        // The in-flight read started at generation 1; its late event is stale.
+        app.profile_reading = Some(1);
         let filters = app.profile.filters.clone();
         assert!(app.on_work_event(WorkEvent::ProfileLoaded {
             generation: 1,
@@ -19634,7 +19990,7 @@ mod tests {
             outcome: Err("stale".into()),
             options: vec![("provider".into(), vec!["x".into()])],
         }));
-        assert!(!app.profile.loading);
+        assert!(app.profile_reading.is_none());
         assert!(app.profile.error.is_none());
         assert!(app.profile.options.is_empty());
         assert!(app.profile.loaded_at.is_none());
@@ -20838,6 +21194,15 @@ mod tests {
         app.select(ModuleId::Jobs.index());
         app.jobs.rows = vec![
             JobRow {
+                id: "j-svc-fail".into(),
+                kind: "service".into(),
+                operation: "api_server".into(),
+                title: "Orphaned API service".into(),
+                app: "system".into(),
+                state: "failed".into(),
+                ..Default::default()
+            },
+            JobRow {
                 id: "j-run".into(),
                 state: "running".into(),
                 title: "Live job".into(),
@@ -20863,23 +21228,25 @@ mod tests {
             },
         ];
         app.jobs.loaded = true;
-        app.jobs.sel = 2; // Active on j-comp-2
+        app.jobs.sel = 3; // Active on j-comp-2
         app.jobs.sel_id = Some("j-comp-2".into());
         app.jobs.detail = Some(JobDetail {
-            job: app.jobs.rows[2].clone(),
+            job: app.jobs.rows[3].clone(),
             ..Default::default()
         });
-        app.set_focus(Target::JobRow(2));
+        app.set_focus(Target::JobRow(3));
 
-        // 1. Clear completed jobs: active row is pruned (F8, F9)
+        // 1. Clear completed jobs: active row is pruned (F8, F9). The failed
+        // service row survives: the filter is Completed, not Failed.
         app.activate_button(ButtonId::JobsClearCompleted);
-        assert_eq!(app.jobs.rows.len(), 2);
-        assert_eq!(app.jobs.rows[0].id, "j-run");
-        assert_eq!(app.jobs.rows[1].id, "j-fail");
+        assert_eq!(app.jobs.rows.len(), 3);
+        assert_eq!(app.jobs.rows[0].id, "j-svc-fail");
+        assert_eq!(app.jobs.rows[1].id, "j-run");
+        assert_eq!(app.jobs.rows[2].id, "j-fail");
 
-        // Focus normalizes to clamped row index 1
-        assert_eq!(app.jobs.sel, 1);
-        assert_eq!(app.focus, Target::JobRow(1));
+        // Focus normalizes to clamped row index 2
+        assert_eq!(app.jobs.sel, 2);
+        assert_eq!(app.focus, Target::JobRow(2));
 
         // Active detail is preserved and synchronized to the newly selected row (j-fail)
         assert!(app.jobs.detail.is_some());
@@ -20891,16 +21258,21 @@ mod tests {
 
         // 2. Keyboard navigation in remaining list
         app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        assert_eq!(app.jobs.sel, 0);
-        assert_eq!(app.focus, Target::JobRow(0));
+        assert_eq!(app.jobs.sel, 1);
+        assert_eq!(app.focus, Target::JobRow(1));
         assert_eq!(app.jobs.sel_id.as_deref(), Some("j-run"));
 
-        // 3. Clear failed jobs
+        // 3. Clear failed jobs: the faulted task and the failed service
+        // worker both disappear.
         app.jobs_clearing = false;
         app.activate_button(ButtonId::JobsClearFailed);
         assert_eq!(app.jobs.rows.len(), 1);
         assert_eq!(app.jobs.rows[0].id, "j-run");
         assert_eq!(app.jobs.sel, 0);
+        assert!(
+            !app.jobs.rows.iter().any(|r| r.id == "j-svc-fail"),
+            "failed service job is cleared by the Clear failed keyboard flow"
+        );
 
         // 4. Clear all remaining jobs by cancelling and clearing stopped
         app.jobs_clearing = false;
@@ -21066,7 +21438,7 @@ mod tests {
         app.screen = Rect::new(0, 0, width, height);
 
         // Emulate background loading across multiple subsystems (F4)
-        app.dashboard_reading = true;
+        app.dashboard_reading = Some(app.dashboard_generation);
         app.intel_reading = true;
         app.jobs_clearing = true;
         app.threads_reading = true;
@@ -21076,10 +21448,10 @@ mod tests {
             || app.osint_cancel.is_some()
             || app.dataset_refresh_running.is_some()
             || app.provider_pending.is_some()
-            || app.dashboard_reading
+            || app.dashboard_reading.is_some()
             || app.jobs_clearing
             || app.intel_reading
-            || app.profile.loading
+            || app.profile_reading.is_some()
             || app.threads_reading;
         assert!(
             busy,
@@ -21104,7 +21476,7 @@ mod tests {
         }
 
         // Clean up background flags
-        app.dashboard_reading = false;
+        app.dashboard_reading = None;
         app.intel_reading = false;
         app.jobs_clearing = false;
         app.threads_reading = false;

@@ -15,9 +15,9 @@ use super::logs::local_time;
 use super::theme;
 use super::ui::{contains, draw_button_state, draw_field, fit, inset, pane, ACTION_H, FIELD_H};
 
-/// Where the Jobs pane reads: the SQLite store, or the SurrealDB repository
-/// under a storage config (see `surreal_brain::SurrealJobs`). One pane never
-/// mixes the two.
+/// Where the Jobs pane reads: the SurrealDB repository under a storage
+/// config (see `surreal_brain::SurrealJobs`), or the process-local
+/// in-memory store. One pane never mixes the two.
 pub trait JobsSource {
     fn list(&self, filter: &JobFilter, limit: usize) -> anyhow::Result<Vec<JobRow>>;
     fn counts(&self) -> anyhow::Result<JobCounts>;
@@ -131,9 +131,11 @@ impl JobsView {
         }
     }
 
-    /// Optimistically prune non-service rows matching a history clear filter
-    /// so the table and detail pane reflect the action immediately while the
-    /// authoritative repository reload completes.
+    /// Optimistically prune rows matching a history clear filter so the
+    /// table and detail pane reflect the action immediately while the
+    /// authoritative repository reload completes. Service rows clear like
+    /// any other row when they hold a matching terminal state; running
+    /// service workers are retained by their own state.
     pub fn prune_status(&mut self, status: JobStatusFilter) {
         let states = status.states();
         if states.is_empty() {
@@ -141,7 +143,7 @@ impl JobsView {
         }
         let selected_id = self.selected().map(|row| row.id.clone());
         self.rows
-            .retain(|row| row.kind == "service" || !states.contains(&row.state.as_str()));
+            .retain(|row| !states.contains(&row.state.as_str()));
         match status {
             JobStatusFilter::Completed => self.counts.completed_recent = 0,
             JobStatusFilter::Failed => self.counts.failed = 0,
@@ -667,7 +669,7 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
     }
     if job.is_service() {
         lines.push(
-            "Long-lived service · stays available while Argos runs, including when idle.".into(),
+            "Long-lived service · stays listed while running or idle; terminal service jobs clear with history.".into(),
         );
         lines.push(
             "Elapsed is service age; individual tasks and attempts below show actual work.".into(),
@@ -1137,6 +1139,63 @@ mod tests {
             view.can_retry(),
             "Retry button preserved on active remaining failed job"
         );
+    }
+
+    #[test]
+    fn test_prune_status_clears_terminal_service_rows() {
+        use super::*;
+        use argos_osint_core::jobs_view::{JobRow, JobStatusFilter};
+
+        let service = |id: &str, state: &str| JobRow {
+            id: id.into(),
+            kind: "service".into(),
+            state: state.into(),
+            ..Default::default()
+        };
+        let mut view = JobsView {
+            rows: vec![
+                service("svc-run", "running"),
+                service("svc-failed", "failed"),
+                service("svc-done", "completed"),
+                service("svc-stopped", "cancelled"),
+                JobRow {
+                    id: "task-done".into(),
+                    state: "completed".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        // A running service worker survives every clear filter; terminal
+        // service rows clear exactly like task rows in the same state.
+        view.prune_status(JobStatusFilter::Completed);
+        assert!(!view.rows.iter().any(|r| r.id == "svc-done"));
+        assert!(!view.rows.iter().any(|r| r.id == "task-done"));
+        for kept in ["svc-run", "svc-failed", "svc-stopped"] {
+            assert!(
+                view.rows.iter().any(|r| r.id == kept),
+                "{kept} survives Clear completed"
+            );
+        }
+
+        view.prune_status(JobStatusFilter::Failed);
+        assert!(
+            !view.rows.iter().any(|r| r.id == "svc-failed"),
+            "failed service row is cleared by Clear failed"
+        );
+        assert!(view.rows.iter().any(|r| r.id == "svc-run"));
+        assert!(view.rows.iter().any(|r| r.id == "svc-stopped"));
+
+        view.prune_status(JobStatusFilter::Stopped);
+        assert!(
+            !view.rows.iter().any(|r| r.id == "svc-stopped"),
+            "stopped service row is cleared by Clear stopped"
+        );
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].id, "svc-run");
+        assert_eq!(view.sel, 0);
+        assert_eq!(view.sel_id.as_deref(), Some("svc-run"));
     }
 
     #[test]

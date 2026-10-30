@@ -1,5 +1,5 @@
 //! Jobs dashboard read model and Retry on SurrealDB (`crate::jobs_view`
-//! parity). Returns the same `JobRow` / `JobDetail` types as SQLite.
+//! parity). Returns the same `JobRow` / `JobDetail` types as the legacy store.
 //!
 //! Dashboard metadata (app, title, provider, model, tool, refs, error text,
 //! durable timing, attempt caps) lives on `job` / `task` / `attempt` and is
@@ -657,8 +657,8 @@ pub async fn retry_failed_tasks(db: &Surreal<Any>, id: &str) -> Result<usize> {
 }
 
 /// `clear_jobs_by_status`: delete terminal visible root trees in the
-/// Completed / Stopped / Failed history (running work and services stay).
-/// Returns the number of jobs cleared.
+/// Completed / Stopped / Failed history (running work stays; service roots
+/// in the cleared terminal states are removed). Returns the number of jobs cleared.
 pub async fn clear_jobs(
     db: &Surreal<Any>,
     status: crate::jobs_view::JobStatusFilter,

@@ -15,9 +15,6 @@
     "build": {
       "disabled": true
     },
-    "plan": {
-      "disabled": true
-    },
     "coordinator": {
       "mode": "all",
       "model": "nvidia/z-ai/glm-5.3-flash#thinking",
@@ -232,7 +229,7 @@
     },
     "architect": {
       "mode": "all",
-      "model": "nvidia/z-ai/glm-5.3-flash#thinking",
+      "model": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free#high",
       "permissions": [
         {
           "action": "read",
@@ -338,7 +335,7 @@
     },
     "rust-coder": {
       "mode": "all",
-      "model": "nvidia/z-ai/glm-5.3-flash#thinking",
+      "model": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free#high",
       "permissions": [
         {
           "action": "read",
@@ -434,7 +431,7 @@
     },
     "react-coder": {
       "mode": "all",
-      "model": "opencode-go/kimi/k3.1-pro#low",
+      "model": "openrouter/nvidia/nemotron-3.5-super-vl:free#high",
       "permissions": [
         {
           "action": "read",
@@ -692,7 +689,7 @@
     },
     "auditor": {
       "mode": "all",
-      "model": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free#high",
+      "model": "openrouter/nvidia/nemotron-3.5-lightning:free#thinking",
       "permissions": [
         {
           "action": "read",
@@ -763,7 +760,7 @@
     },
     "scribe": {
       "mode": "all",
-      "model": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free#high",
+      "model": "openrouter/nvidia/nemotron-3.5-lightning:free#thinking",
       "permissions": [
         {
           "action": "read",

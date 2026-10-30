@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "argos-osint-bin"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argos-osint-api",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "argos-osint-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",

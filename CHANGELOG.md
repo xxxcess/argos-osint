@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/xxxcess/argos-osint/compare/v0.2.0...v0.2.1) (2026-10-26)
+
+
+### Performance Improvements
+
+* **core:** implement the rust performance audit ([#58](https://github.com/xxxcess/argos-osint/issues/58)) ([1c847e8](https://github.com/xxxcess/argos-osint/commit/1c847e89357f49ee23942f48a11d1a6af7b6bc9a))
+
 ## [0.2.0](https://github.com/xxxcess/argos-osint/compare/v0.1.0...v0.2.0) (2026-10-24)
 
 

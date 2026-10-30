@@ -57,6 +57,21 @@ The no-argument CLI owns a persistent Venture session. Closing its TUI or stoppi
 
 Jobs filter changes are cohort transitions: clear old rows/detail/selection/scroll and pending owner navigation, then show loading until a snapshot for the new key arrives. Reject old keys; keep data during same-filter background refresh. Status/app/search and loaded state participate in action geometry invalidation. Keyboard and mouse filters use the same transition; zero matching rows are a successful empty result, not a loading placeholder.
 
+**Jobs clear actions** (`Clear completed/stopped/failed`): the control strip buttons
+optimistically prune the local `JobsView`, set `jobs_dirty = true`, bump the
+dashboard generation, and dispatch `spawn_job_action(JobAction::Clear(status))` on
+a worker. The `JobsCleared` completion event reloads authoritatively. A bounded
+self-heal in `tick_dashboards` marks `jobs_dirty` on every tick while parked on
+Jobs (job registry progress has no TUI completion event); the reload remains
+gated on `dashboard_reading.is_none()`. Duplicate clear clicks are rejected while
+`jobs_clearing` is true.
+
+**Logs clear action** (`Clear events`): `clear_logs` runs on the ordered write
+queue (`runtime::spawn_ordered`) with a oneshot channel back to the worker.
+Pre-clear queued `record_log` lines drain before the delete; the post-clear
+session event joins the same closure so the subsequent `reload_logs` snapshot
+sees the final state deterministically. No re-materialization race.
+
 ## Other application presets
 
 The shared data/render separation, geometry, scrolling and measured input apply throughout Argos. Keep orchestration and navigation; a daemon/IPC rewrite is outside UI work.
@@ -68,9 +83,9 @@ The shared data/render separation, geometry, scrolling and measured input apply 
 | Recon | Transcript + 30% context at ≥110 columns; compact context page; measured composer | `ui.rs::draw_recon_chat`, `draw_recon_context`, `composer_height`; `recon_parts.rs` |
 | Intel | Three columns ≥132, two at 100–131, tabbed below 100 or short height; borderless center stack with bordered Full Article followed by Related; brief Jobs in context | `ui.rs::intel_briefing_areas`, `draw_intel_briefing`, `draw_clipped_md_pane` |
 | Atlas | Dashboard/table presets; compact Origins/Coverage/Headlines pages; preserve map | Atlas layout/draw functions; `atlas_table.rs`, `map.rs` |
-| Brain | Claims/Actor-name browse projection; Enter on a memory opens the topology mapper at one hop (no detail view); topology Graph first: canvas left 65% / inspector right 35% at ≥132×32, 70%/30% at 100–131×≥32, Graph/Details/Controls pages below; minimum 60×18 | `topology.rs`, `topology_layout.rs`, `ui.rs::draw_brain` |
+| Brain | Claims/Actor-name browse projection; Enter on a memory opens the topology mapper at one hop (no detail view); topology Graph first: canvas left 65% / inspector right 35% at ≥132×32, 70%/30% at 100–131×≥32, Graph/Details/Controls pages below; minimum 60×18. List control strip (Create/Pin/Delete/kind/Find) uses the **recon write pattern**: every action spawns a plain worker thread, sends a completion event (`InsightSaved`/`MemoryPinned`/`MemoryDeleted`), and the handler reloads the list directly — no tick, no intermediate dirty flag. Workers use `Store::memory()` to avoid the TUI thread's entered Tokio context. | `topology.rs`, `topology_layout.rs`, `ui.rs::draw_brain`, `app.rs::save_insight/spawn_pin_toggle/request_memory_delete` |
 | Tools / Models | List + editor; compact pages; registered role list | `ui.rs::draw_osint`, `draw_providers`; `model_roles.rs` |
-| Jobs / Logs / System | Scrollable tables/details and reachable Host/Paths/Configs actions | `jobs.rs`, `logs.rs`, `profile.rs::draw_system_tab`, `profile_config.rs` |
+| Jobs / Logs / System | Scrollable tables/details and reachable Host/Paths/Configs actions. Jobs: clear actions + self-heal tick; Logs: ordered-queue clear with oneshot sync; System/Profile: `refresh_profile_now()` for control actions. | `jobs.rs`, `logs.rs`, `profile.rs::draw_system_tab`, `profile_config.rs`, `app.rs::refresh_profile_now/tick_dashboards` |
 
 Retain session state and app identities (`Osint/Providers/System`). Completed transcript Markdown uses revision/width caches rather than database reads during drawing. Overlays own the top input scope; bracketed paste stays with the current editor.
 

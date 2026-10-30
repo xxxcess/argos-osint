@@ -202,7 +202,7 @@ pub struct JobHandle {
     cancel: Arc<AtomicBool>,
     finished: bool,
     /// The row lives in the repository's `job` table (SurrealDB selected);
-    /// no SQLite connection is opened for it.
+    /// no legacy store connection is opened for it.
     surreal: bool,
 }
 

@@ -415,7 +415,7 @@ pub async fn process_run(
         return Ok(coverage);
     }
     let store = AtlasStore::open(db_path).await?;
-    let sqlite_db = crate::recon::backend::sqlite_path(db_path);
+    let legacy_db = crate::recon::backend::legacy_side_store_path(db_path);
     let publishers_enabled = store.tool_enabled(rsp::TOOL_ID).await?;
     let articles = store.list_articles(run_id).await?;
     if articles.is_empty() {
@@ -454,7 +454,7 @@ pub async fn process_run(
         None
     } else {
         let lookup = tokio::select! {
-            result=rsp::warm_with_store_json_for_db(stored.as_deref(),user_agent,sqlite_db.map(std::path::Path::to_path_buf))=>Some(result),
+            result=rsp::warm_with_store_json_for_db(stored.as_deref(),user_agent,legacy_db.map(std::path::Path::to_path_buf))=>Some(result),
             _=wait_cancelled(cancel.clone())=>None,
         };
         match lookup {
@@ -517,7 +517,7 @@ pub async fn process_run(
                     None
                 },
                 cancel.clone(),
-                sqlite_db.as_deref(),
+                legacy_db.as_deref(),
             )
             .await
         };
@@ -858,7 +858,7 @@ async fn inventory_index(
         match rsp::warm_with_store_json_for_db(
             stored.as_deref(),
             user_agent,
-            crate::recon::backend::sqlite_path(db).map(std::path::Path::to_path_buf),
+            crate::recon::backend::legacy_side_store_path(db).map(std::path::Path::to_path_buf),
         )
         .await
         {
@@ -929,7 +929,7 @@ async fn inventory_worker(
     let Some(first) = receiver.recv().await else {
         return Ok(());
     };
-    let sqlite_db = crate::recon::backend::sqlite_path(&db);
+    let legacy_db = crate::recon::backend::legacy_side_store_path(&db);
     let enabled = store.tool_enabled(rsp::TOOL_ID).await?;
     let entity_job = metadata_job(
         &db,
@@ -956,7 +956,7 @@ async fn inventory_worker(
             break;
         }
         if let Some(article) = next.take() {
-            let native = collect_inner(&article, None, cancel.clone(), sqlite_db.as_deref());
+            let native = collect_inner(&article, None, cancel.clone(), legacy_db.as_deref());
             tokio::pin!(native);
             let mut metadata = loop {
                 tokio::select! {
@@ -1098,6 +1098,6 @@ fn metadata_job(
     _title: &str,
     _cancel: Arc<AtomicBool>,
 ) -> Option<crate::job_registry::JobHandle> {
-    // Job tracking lived in SQLite; under SurrealDB Atlas runs untracked.
+    // Job tracking lived in the legacy store; under SurrealDB Atlas runs untracked.
     None
 }

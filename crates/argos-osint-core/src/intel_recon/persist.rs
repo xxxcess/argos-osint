@@ -3,7 +3,7 @@
 //!
 //! Each method runs on SurrealDB (`storage::article_body`,
 //! `storage::recon_jobs`) when the process selected it, and on the legacy
-//! SQLite connection otherwise. The retired report-job worker paths
+//! legacy store connection otherwise. The retired report-job worker paths
 //! (`report_execution_enabled()` was hard-coded false) are gone.
 
 use anyhow::Result;

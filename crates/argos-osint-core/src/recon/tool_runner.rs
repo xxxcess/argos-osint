@@ -487,7 +487,7 @@ impl ToolRunner {
 
         // 8. NewsAPI quota charge
         if !result.cached && canonical.starts_with("newsapi_") {
-            // One store: the SQLite `Store` or the repository, never both.
+            // One store: the legacy `Store` or the repository, never both.
             if let Ok(store) = ReconStore::open(&self.db_path).await {
                 let bucket = if osint::key_exhausted(&self.keys.newsapi)
                     && !self.keys.newsapi_fallback.trim().is_empty()

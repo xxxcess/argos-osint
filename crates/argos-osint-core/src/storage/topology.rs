@@ -1,8 +1,8 @@
 //! Brain topology on the async repository (migration phase 5):
 //! `Store::topology_snapshot` for the Claim, Actor, Inference, Actor-group,
 //! Article, Topic, Source and Link/Related seeds, walked breadth-first to
-//! depth 3 with the SQLite node, edge, receipt and admission rules. Admission,
-//! findings and the deterministic neighbourhood brief reuse the SQLite code
+//! depth 3 with the legacy store node, edge, receipt and admission rules. Admission,
+//! findings and the deterministic neighbourhood brief reuse the legacy store code
 //! (`brain_topology::admit`, `brain_neighborhood_brief::build`).
 //!
 //! The retained Intel display seeds read the repository's brief
@@ -2042,8 +2042,8 @@ async fn group_root(
 
 /// The TUI memory check before a Brain memory opens the topology mapper:
 /// `Store::get_memory` plus `brain_kinds::memory_kind` on SurrealDB. `None`
-/// when the memory does not exist (whatever its lifecycle, as SQLite); a
-/// missing or unknown `memory_kind` reads as a Claim, as SQLite's legacy
+/// when the memory does not exist (whatever its lifecycle, as the legacy store); a
+/// missing or unknown `memory_kind` reads as a Claim, as the legacy store's
 /// untyped rows do.
 pub async fn memory_seed_kind(repo: &Repository, id: &str) -> Result<Option<MemoryKind>> {
     let mut r = stmt(
@@ -2256,7 +2256,7 @@ async fn snapshot_in(
             name,
         } => {
             // Provisional only: the native-mention and canonical actor
-            // resolution of the SQLite seed are not ported.
+            // resolution of the legacy store seed are not ported.
             if let Some(article) = q.article_node(run_id, article_id, revision).await? {
                 let mut n = node(seed.key(), TopologyNodeKind::Entity, name.clone());
                 n.status = "retained source · provisional".into();

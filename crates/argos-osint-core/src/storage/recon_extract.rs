@@ -9,7 +9,7 @@
 //! completed evidence they cite), skips claims the user deleted from this
 //! run (tombstones), and queues memory-index outbox work for every memory
 //! the claims resolve to, new or reused. `memories_changed` is bumped only
-//! when a memory was written, as on SQLite.
+//! when a memory was written, as on the legacy store.
 //!
 //! [`recall_for_turn`] is a STOPGAP for `orchestrate::recall_for_turn`: it
 //! ranks active memories with SurrealDB full-text search (BM25 over
@@ -44,7 +44,7 @@ DEFINE INDEX IF NOT EXISTS memory_text_search ON memory FIELDS text
 DEFINE INDEX IF NOT EXISTS insight_claim_entity_predicate ON insight_claim
   FIELDS entity_id, predicate;";
 
-/// Most claims one answer contributes (as on SQLite).
+/// Most claims one answer contributes (as on the legacy store).
 pub const MAX_CLAIMS: usize = 5;
 /// Most memories one Recon turn recalls.
 pub const RECALL_LIMIT: usize = 5;
@@ -62,7 +62,7 @@ pub struct Persisted {
     /// work queued unless its current revision is already indexed.
     pub touched: Vec<String>,
     /// Subject actor memories the claims created or changed (index work is
-    /// queued for them too; SQLite indexes them outside `touched`).
+    /// queued for them too; the legacy store indexes them outside `touched`).
     pub actors: Vec<String>,
     /// Outbox rows queued (claim memories plus changed actors).
     pub queued: usize,
@@ -88,7 +88,7 @@ fn field(v: &Value, k: &str) -> String {
         .to_string()
 }
 
-/// Parse and validate claims as SQLite does: lowercased identity, every
+/// Parse and validate claims as the legacy store does: lowercased identity, every
 /// part present and at least one cited evidence id that completed.
 fn parse(evidence: &[(String, ToolResult)], claims: &[Value]) -> Result<Vec<Claim>> {
     let mut out = Vec::new();
@@ -415,7 +415,7 @@ pub async fn recall_for_turn_with(
 
 /// [`recall_for_turn_with`] capped at `limit` hits within `tokens`: the
 /// candidate pool the Recon admission policy filters before the
-/// [`RECALL_LIMIT`] cap, as SQLite's `recall_sqlite` does.
+/// [`RECALL_LIMIT`] cap, as the legacy store's recall function does.
 pub async fn recall_candidates_for_turn(
     repo: &Repository,
     thread_id: &str,

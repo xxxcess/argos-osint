@@ -452,7 +452,7 @@ pub fn is_forbidden_key(key: &str) -> bool {
 ///
 /// Under a storage config (SurrealDB selected) the event goes to the
 /// repository instead (`storage::telemetry::record`, started on the process
-/// runtime without waiting) and SQLite is never opened: the two stores are
+/// runtime without waiting) and the legacy store is never opened: the two stores are
 /// never both written.
 pub fn record(_db_path: &Path, event: &TelemetryEvent) -> anyhow::Result<()> {
     let event = event.clone();
@@ -505,7 +505,7 @@ impl Measured {
 /// rollup boundary. Rate limited; records when it last ran.
 ///
 /// Under a storage config the prune runs on the repository
-/// (`storage::telemetry::prune`, started without waiting) and SQLite is
+/// (`storage::telemetry::prune`, started without waiting) and the legacy store is
 /// never opened.
 pub fn prune(_db_path: &Path, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
     crate::storage::runtime::spawn(async move {

@@ -39,7 +39,7 @@ pub async fn graph_summary(repo: &Repository, memory_id: &str) -> Result<Option<
 
 /// `Store::save_graph_summary`: store the synthesis explanation for one
 /// memory (`focus` is the directive id). Returns false when the memory is
-/// already gone. An empty summary is an error, as on SQLite.
+/// already gone. An empty summary is an error, as on the legacy store.
 pub async fn save_graph_summary(
     repo: &Repository,
     memory_id: &str,

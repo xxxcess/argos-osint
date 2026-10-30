@@ -3,7 +3,7 @@
 //!
 //! The chain itself is `jobs::ensure_chain` (one `intel_brief` job, four
 //! tasks with their dependencies) and stages commit through the fenced
-//! `jobs::commit_stage`. This module keeps what the SQLite chain stores in
+//! `jobs::commit_stage`. This module keeps what the legacy store chain stores in
 //! its own tables: the captured stage inputs (`brief_stage_input`, the root
 //! tasks' `input_ref` and every task's role snapshot), per-item checkpoints
 //! (`brief_checkpoint`), fidelity receipts (`brief_receipt`), the live
@@ -820,7 +820,7 @@ pub async fn stage_meta(repo: &Repository, task: &str) -> Result<Option<(i64, St
 
 /// Production stage backend for the SurrealDB drainer: the configured
 /// provider routes of [`RuntimeBackend`](crate::intel_recon::brief_stages::RuntimeBackend)
-/// without its SQLite file (no telemetry rows), with the body and related
+/// without its legacy store file (no telemetry rows), with the body and related
 /// reads served by the repository.
 ///
 /// Body acquisition, cleanup and the retrieval-attempt ledger use BodyDb::Surreal.

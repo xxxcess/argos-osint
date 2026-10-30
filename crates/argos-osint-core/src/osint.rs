@@ -1627,7 +1627,7 @@ pub(crate) fn no_results(id: &str, value: &Value) -> bool {
 fn note_telemetry(event: crate::telemetry::TelemetryEvent) {
     let path = crate::paths::db_path();
     // Under SurrealDB `telemetry::record` writes to the repository, so the
-    // SQLite file is neither needed nor created.
+    // legacy side-store file is neither needed nor created.
     if !path.exists() && !crate::recon::backend::surreal_selected() {
         return;
     }

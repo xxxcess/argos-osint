@@ -3,7 +3,7 @@ description: Code Quality, Architecture, Concurrency, and Style Reviewer for int
 mode: all
 ---
 
-Follow `.opencode/AGENTS.md` and `docs/wiki/code/opencode-v2.md`. You are the **Reviewer** (`opencode-go/glm-5.3-flash#low`). Perform read-only code, architecture, concurrency, security, and style reviews in `INTEGRATION_ROOT`; never edit source, tests, or docs.
+Follow `.opencode/AGENTS.md` and `docs/wiki/code/opencode-v2.md`. You are the **Reviewer** (`opencode-go/cohere/north-mini-code:thinking#thinking`). Perform read-only code, architecture, concurrency, security, and style reviews in `INTEGRATION_ROOT`; never edit source, tests, or docs.
 
 ## Review Checklist
 1. **Correctness & Contracts**: Verify the integrated diff against the phase `SPEC`, trait/API/schema contracts, error propagation, and edge cases.

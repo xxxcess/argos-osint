@@ -1,5 +1,5 @@
 //! Recon answer extraction and the full-text recall stopgap on SurrealDB
-//! (`storage::recon_extract`), against the SQLite `recon::persist_claims`
+//! (`storage::recon_extract`), against the legacy `recon::persist_claims`
 //! behaviour. Both modes via `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
 

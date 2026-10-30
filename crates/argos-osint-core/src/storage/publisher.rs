@@ -45,7 +45,7 @@ pub struct Change {
 }
 
 /// What one write did: the outbox changes to enqueue, and whether it changed
-/// memories (bumps `memories_changed`, matching SQLite's conditional bump).
+/// memories (bumps `memories_changed`, matching the legacy store's conditional bump).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wrote {
     pub changes: Vec<Change>,

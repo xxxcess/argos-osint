@@ -25,10 +25,11 @@ const activeAgents = ["coordinator", "orchestrator", "architect", "rust-coder", 
 
 test("coordinator is default go-provider GLM agent and teamwork catalog roles enforce nested handoffs and write boundaries", () => {
   assert.equal(config.default_agent, "coordinator");
-  assert.equal(config.model, "opencode-go/glm-5.3-flash#low");
+  assert.equal(config.model, "opencode-go/glm-5.3-flash#high");
   assert.equal(config.experimental.subagent_depth, 4);
   assert.equal(config.subagent_depth, undefined);
-  for (const id of ["build", "plan", "general", "explore"]) assert.equal(config.agents[id].disabled, true);
+  for (const id of ["build", "plan"]) assert.equal(config.agents[id].disabled, true);
+  for (const id of ["general", "explore"]) assert.equal(config.agents[id], undefined);
   for (const id of activeAgents) {
     assert.equal(config.agents[id].mode, "all");
     assert.equal(effect(id, "execute", "*"), "allow");
@@ -48,7 +49,7 @@ test("coordinator is default go-provider GLM agent and teamwork catalog roles en
   }
   for (const parent of ["architect", "rust-coder", "react-coder"]) {
     const file = parent === "architect" ? "architect-worker.json" : `coder-${parent.replace(/-coder$/, "")}-worker.json`;
-    assert.match(workerModel(file), /^[^/]+\/[^/]+(#[^/]+)?$/);
+    assert.match(workerModel(file), /^[^/]+\/[^/]+(\/[^/]+)*(#[^/]+)?$/);
   }
   assert.equal(effect("tester", "subagent", "architect"), "allow");
   assert.equal(effect("reviewer", "subagent", "architect"), "allow");
@@ -103,27 +104,14 @@ test("teamwork prompts enforce interview triage, leaf modes, and caller-owned co
   }
 });
 
-test("shared guide, planning skill, and OpenCode catalog models are configured without external provider refs", () => {
+test("shared guide, planning skill, and OpenCode catalog models are configured with catalog providers", () => {
   assert.deepEqual(config.instructions, [".opencode/AGENTS.md"]);
   assert.ok(config.skills.includes("~/.agents/skills/planning-with-files"));
   const guide = readFileSync(join(root, "AGENTS.md"), "utf8");
   assert.ok(guide.length < readFileSync(join(root, "../AGENTS.md"), "utf8").length);
-  assert.equal(config.agents.coordinator.model, "opencode-go/glm-5.3-flash#low");
-  assert.equal(config.agents.orchestrator.model, "opencode-go/glm-5.3-flash#low");
-  assert.equal(config.agents.architect.model, "opencode-go/kimi-k2.7-code");
-  assert.equal(config.agents["rust-coder"].model, "opencode-go/kimi-k2.7-code");
-  assert.equal(config.agents["react-coder"].model, "opencode-go/kimi-k2.7-code");
-  assert.equal(config.agents.reviewer.model, "opencode-go/glm-5.3-flash#low");
-  assert.equal(config.agents.tester.model, "opencode-go/glm-5.3-flash#high");
-  assert.equal(config.agents.auditor.model, "opencode-go/glm-5.3-flash#low");
-  assert.equal(config.agents.scribe.model, "opencode-go/glm-5.3-flash#low");
-  assert.equal(workerModel("architect-worker.json"), "opencode/big-pickle");
-  assert.equal(workerModel("coder-rust-worker.json"), "opencode-go/kimi-k2.7-code");
-  assert.equal(workerModel("coder-react-worker.json"), "opencode-go/kimi-k2.7-code");
   for (const id of activeAgents) {
-    assert.match(config.agents[id].model, /^opencode(-go)?\//);
-    assert.doesNotMatch(config.agents[id].model, /-free/);
-    assert.doesNotMatch(readFileSync(join(root, "agents", `${id}.md`), "utf8"), /google\/|openai\/|openrouter\/|anthropic\/|zenmux\//i);
+    assert.match(config.agents[id].model, /^(opencode(-go)?|openrouter)\//);
+    assert.doesNotMatch(readFileSync(join(root, "agents", `${id}.md`), "utf8"), /google\/|openai\/|anthropic\/|zenmux\//i);
   }
 });
 

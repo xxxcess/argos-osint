@@ -1,6 +1,6 @@
 //! The TUI Profile screen on SurrealDB. Under a storage config ([`on`]) the
 //! dashboard snapshot, its filter options and the attention actions' run
-//! lookups read only the repository (never mixed with the SQLite store),
+//! lookups read only the repository (never mixed with the legacy store),
 //! through `storage::runtime::blocking`. Callers are plain worker threads
 //! that report back by `WorkEvent` (the Jobs worker pattern), never async
 //! code or the draw loop.

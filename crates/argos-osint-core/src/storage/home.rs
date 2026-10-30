@@ -322,7 +322,7 @@ pub struct HomeStore {
 /// The entry point for consumers: open this home's store in its configured
 /// mode (starting or adopting the server, or taking the embedded lock),
 /// always through the schema-bootstrapping [`super::open::open`]. An
-/// uninitialized home is an error; it never falls back to SQLite.
+/// uninitialized home is an error; it never falls back to a legacy store.
 pub async fn open_home(layout: &Layout) -> anyhow::Result<HomeStore> {
     let config = load_config(layout)?.ok_or_else(|| {
         anyhow::anyhow!(

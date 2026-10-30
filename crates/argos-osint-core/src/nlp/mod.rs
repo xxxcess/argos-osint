@@ -420,7 +420,7 @@ impl Service {
         rx.await.unwrap_or(terminal)
     }
 
-    /// Bounded local maintenance, called outside the SQLite transaction. Busy
+    /// Bounded local maintenance, called outside the legacy store transaction. Busy
     /// or failed parsing is retried later rather than caching a false success.
     pub(crate) fn actor_names(&self, names: Vec<String>) -> Option<Vec<String>> {
         if !cfg!(feature = "nlp") {
@@ -866,7 +866,7 @@ async fn surreal_get(source: &Source, context: &ParseContext) -> Option<Annotati
     }
 }
 
-/// SurrealDB feature-cache write (best effort, as on SQLite).
+/// SurrealDB feature-cache write (best effort, as on the legacy store).
 async fn surreal_put(source: &Source, context: &ParseContext, annotation: &Annotation) {
     #[cfg(feature = "surreal")]
     if let Ok(repo) = crate::storage::runtime::repository().await {
@@ -894,7 +894,7 @@ fn artifact_pages(value: &mut serde_json::Value) -> Vec<&mut serde_json::Value> 
 }
 
 /// [`expanded_observations`] for async callers: under SurrealDB the
-/// artifacts are read from the repository, otherwise from SQLite.
+/// artifacts are read from the repository, otherwise from the legacy store.
 pub async fn expanded_observations_async(value: &serde_json::Value) -> serde_json::Value {
     #[allow(unused_mut)]
     let mut out = value.clone();

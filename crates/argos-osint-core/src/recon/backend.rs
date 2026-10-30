@@ -1,14 +1,14 @@
 //! Recon storage dispatch (migration phase 5, Recon switch step 3).
 //!
-//! Core Recon callers talk to [`ReconStore`]: SQLite (`Store`) unless the
-//! process selected SurrealDB (`storage::runtime::configured`), in which
-//! case every call goes to the repository and SQLite is never opened. The
-//! two stores never both serve a process.
+//! Core Recon callers talk to [`ReconStore`]: the legacy store (`Store`)
+//! unless the process selected SurrealDB (`storage::runtime::configured`), in
+//! which case every call goes to the repository and the legacy store is never
+//! opened. The two stores never both serve a process.
 //!
-//! The SQLite store is not `Sync`, so it sits behind a mutex that is only
+//! The legacy store is not `Sync`, so it sits behind a mutex that is only
 //! held inside one synchronous call; futures that hold a [`ReconStore`]
 //! stay `Send`. Operations with no SurrealDB port fail with
-//! "… is not on SurrealDB yet" instead of silently touching SQLite.
+//! "… is not on SurrealDB yet" instead of silently using a legacy store.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -36,10 +36,10 @@ pub fn surreal_selected() -> bool {
     }
 }
 
-/// The SQLite path for SQLite-only side stores (telemetry, model attempts,
+/// Returns the optional legacy side-store path (telemetry, model attempts,
 /// job registry, summarization cache): `None` under SurrealDB, so those
-/// writers are skipped rather than reopening SQLite.
-pub fn sqlite_path(db_path: &Path) -> Option<&Path> {
+/// writers are skipped rather than using a legacy store.
+pub fn legacy_side_store_path(db_path: &Path) -> Option<&Path> {
     (!surreal_selected()).then_some(db_path)
 }
 
@@ -49,7 +49,7 @@ pub enum ReconStore {
     Surreal(crate::storage::repo::Repository),
 }
 
-/// Error for an operation that is still SQLite-only.
+/// Error for an operation that is not yet ported from the legacy store.
 pub fn not_ported(op: &str) -> anyhow::Error {
     anyhow!("{op} is not on SurrealDB yet")
 }
@@ -480,7 +480,7 @@ impl ReconStore {
         }
     }
     /// Charge one NewsAPI request to today's quota bucket (`atlas::charge_quota`
-    /// on SQLite, `storage::atlas::quota_bump` on SurrealDB). Returns the new
+    /// on the legacy store, `storage::atlas::quota_bump` on SurrealDB). Returns the new
     /// count for the day.
     pub async fn charge_quota(&self, bucket: &str) -> Result<u32> {
         let day = crate::atlas::utc_day();
@@ -497,7 +497,7 @@ impl ReconStore {
     }
     /// A retryable (`queued`/`failed`) extraction job: its run and
     /// contract. SurrealDB answers are mined after the answer
-    /// ([`SURREAL_MINED`]); the shared pre-answer refresh is SQLite-only.
+    /// ([`SURREAL_MINED`]); the shared pre-answer refresh is legacy-store-only.
     pub async fn retryable_extraction(&self, answer_id: &str) -> Result<Option<(String, String)>> {
         dispatch!(self, r => {
             let state = crate::storage::recon_exec::extraction_state(r, answer_id).await?;

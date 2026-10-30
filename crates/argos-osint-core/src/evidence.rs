@@ -1,6 +1,6 @@
 //! Scoped evidence passages for hybrid retrieval (spec §10).
 //!
-//! SQLite remains authoritative. Passages are rebuildable projections with
+//! SurrealDB is authoritative. Passages are rebuildable projections with
 //! stable source identity, revision/hash, offsets and provenance.
 //!
 //! Vector ranking uses **exact** cosine scores by default (Lance brute-force).

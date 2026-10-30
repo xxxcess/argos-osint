@@ -1,15 +1,15 @@
 //! Atlas storage dispatch (SurrealDB migration, Atlas switch).
 //!
 //! Atlas callers (`atlas`, `atlas_metadata`, `atlas_insights`,
-//! `atlas_memory`) talk to [`AtlasStore`]: SQLite (`Store`) unless the
+//! `atlas_memory`) talk to [`AtlasStore`]: the legacy store (`Store`) unless the
 //! process selected SurrealDB (`storage::runtime::configured`), in which
-//! case every call goes to the repository and SQLite is never opened. The
+//! case every call goes to the repository and the legacy store is never opened. The
 //! two stores never both serve a process.
 //!
-//! The SQLite store is not `Sync`, so it sits behind a mutex held only
+//! The legacy store is not `Sync`, so it sits behind a mutex held only
 //! inside one synchronous call; futures that hold an [`AtlasStore`] stay
 //! `Send`. Operations with no SurrealDB port fail with "… is not on
-//! SurrealDB yet" instead of silently touching SQLite.
+//! SurrealDB yet" instead of silently using a legacy store.
 
 use std::path::Path;
 
@@ -26,7 +26,7 @@ pub enum AtlasStore {
     Surreal(crate::storage::repo::Repository),
 }
 
-/// Error for an operation that is still SQLite-only.
+/// Error for an operation that is still legacy-store-only.
 pub fn not_ported(op: &str) -> anyhow::Error {
     anyhow!("{op} is not on SurrealDB yet")
 }
@@ -191,7 +191,7 @@ impl AtlasStore {
                 .await
                 .map_err(tx("atlas save metadata"))?;
             if saved {
-                // SQLite refreshes the rating inside the save transaction.
+                // the legacy store refreshes the rating inside the save transaction.
                 crate::intel_recon::persist_article_rating_surreal(r, &metadata.article_id)
                     .await?;
             }

@@ -1,6 +1,6 @@
 //! Investigation harness storage on SurrealDB (`storage::investigation`,
 //! `investigation::engine` through `ReconStore`): the same writes give the
-//! same rows as SQLite. Run through `python3 scripts/test_surreal.py --mode both`.
+//! same rows as the legacy store. Run through `python3 scripts/test_surreal.py --mode both`.
 #![cfg(feature = "surreal")]
 
 mod support;

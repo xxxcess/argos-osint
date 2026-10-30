@@ -231,7 +231,7 @@ impl Store {
         crate::storage::brain_store::add_memory(text, category, pinned, source)
     }
 
-    /// Recall: Jaccard on SQLite (SurrealDB serves vector recall),
+    /// Recall: Jaccard on the legacy store (SurrealDB serves vector recall),
     /// then passage-level [`crate::evidence::hybrid_passage_candidates`] for long
     /// memories so Brain/Recon share the same hybrid path (spec follow-up).
     /// Falls back to Jaccard alone when embedding is off or the index fails; an
@@ -252,7 +252,7 @@ impl Store {
         crate::storage::brain_store::find_similar_memory(text, threshold)
     }
 
-    /// Brings the Lance index in line with SQLite. Small missing/mismatched indexes
+    /// Brings the Lance index in line with the legacy store. Small missing/mismatched indexes
     /// rebuild inline; larger ones enqueue an automatic generation rebuild via
     /// `argos_index_changes` so foreground recall is never blocked on a 3,000-row
     /// sync barrier. Incremental id reconciliation still runs when the serving
@@ -300,7 +300,7 @@ impl Store {
         crate::storage::store_bridge::try_index_upsert(ids)
     }
 
-    /// Typed removal of vectors whose memories are gone from SQLite.
+    /// Typed removal of vectors whose memories are gone from the legacy store.
     pub fn try_index_remove_missing(&self, ids: &[String]) -> crate::tasks::IndexOutcome {
         crate::storage::store_bridge::try_index_remove_missing(ids)
     }

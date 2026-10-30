@@ -1,11 +1,11 @@
-//! NLP annotation cache on the repository: the SurrealDB side of SQLite's
+//! NLP annotation cache on the repository: the SurrealDB side of the legacy store's
 //! `nlp_features` (`nlp::cache::{get, put}`), plus the artifact reads and
 //! the source-ref selection update `nlp::record_view` and
 //! `nlp::expanded_observations` need. Artifacts and source refs themselves
 //! live in `pipeline_inputs` (`nlp_artifact`, `nlp_source_ref`).
 //!
 //! Record keys: `nlp_feature` by feature key. The cache is bounded like
-//! SQLite's: entries past [`MAX_BYTES`] are evicted oldest `last_access`
+//! legacy store's: entries past [`MAX_BYTES`] are evicted oldest `last_access`
 //! first.
 
 use anyhow::Result;
@@ -16,7 +16,7 @@ use super::repo::Repository;
 use crate::nlp::cache::{feature_key, hash};
 use crate::nlp::{Annotation, ParseContext, Source, Status};
 
-/// Byte cap of the feature cache (as SQLite: 256 MiB).
+/// Byte cap of the feature cache (as the legacy store: 256 MiB).
 pub const MAX_BYTES: i64 = 256 * 1024 * 1024;
 
 /// Feature cache schema (idempotent). Register as `("nlp_cache", SCHEMA)`
@@ -170,7 +170,7 @@ pub async fn artifact_text(repo: &Repository, h: &str, max_len: usize) -> Result
 }
 
 /// `nlp::record_view`: register the historical derived prose for an owner
-/// and record the prepared selection on its source ref (SQLite's
+/// and record the prepared selection on its source ref (the legacy store's
 /// `json_set(metadata_json,'$.selection',…)`).
 pub async fn record_view(
     repo: &Repository,

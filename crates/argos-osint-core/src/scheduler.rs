@@ -1,4 +1,4 @@
-//! Elected single-owner scheduler for a shared SQLite state root (spec §4).
+//! Elected single-owner scheduler over the shared SurrealDB state root (spec §4).
 //!
 //! One process holds the `argos_scheduler_lease` row. Others observe only.
 //! Worker pools are separated by kind: LLM, network collect, local index.
@@ -259,7 +259,7 @@ impl WorkerPool {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         // Under SurrealDB the index pool is the repository's; only the Atlas
-        // memory-phase refresh runs here, never reopening SQLite.
+        // memory-phase refresh runs here, never reopening the legacy store.
         #[cfg(feature = "surreal")]
         crate::storage::runtime::spawn(async move {
             while !flag.load(Ordering::Relaxed) {
@@ -322,7 +322,7 @@ impl WorkerPool {
     /// Spawn the default local pools (index + summary) for one state root.
     pub fn spawn_default(db_path: std::path::PathBuf) -> Vec<WorkerPool> {
         let owner = process_owner();
-        // Under a storage config nothing may open SQLite: each pool below
+        // Under a storage config nothing may open the legacy store: each pool below
         // has a repository drainer.
         #[cfg(feature = "surreal")]
         return vec![
@@ -470,7 +470,7 @@ impl WorkerPool {
 
     /// Dedicated Intel brief stage runner: a bounded two-slot drainer
     /// dispatches ready stages onto separate Tokio tasks. The multi-thread
-    /// runtime keeps lease heartbeats independent of blocking SQLite work.
+    /// runtime keeps lease heartbeats independent of blocking legacy-store work.
     pub fn spawn_intel_brief_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
         let db = db_path.clone();
         Self::spawn_intel_brief_drainer_with(
@@ -513,7 +513,7 @@ impl WorkerPool {
                 let config = crate::intel_recon::brief_stages::ExecConfig::default();
                 while !flag.load(Ordering::Acquire) {
                     // SurrealDB: elect on the repository's scheduler lease and
-                    // drain the repository's brief chains; never the SQLite file.
+                    // drain the repository's brief chains; never the legacy store file.
                     let (drain_owner, drain_flag, drain_config) =
                         (owner.clone(), flag.clone(), config.clone());
                     report_drainer(
@@ -582,7 +582,7 @@ impl WorkerPool {
                 while !flag.load(Ordering::Acquire) {
                     // SurrealDB: elect on the repository's scheduler lease and
                     // drive the shared refresh tasks there (startup recovery
-                    // included); never the SQLite file.
+                    // included); never the legacy store file.
                     let (drain_owner, drain_flag) = (owner.clone(), flag.clone());
                     report_drainer(
                         &db_path,
@@ -601,7 +601,7 @@ impl WorkerPool {
                             if !elected {
                                 return Ok(());
                             }
-                            // Same fence as the SQLite pools' sweep.
+                            // Same fence as the legacy store pools' sweep.
                             let _ =
                                 crate::storage::refresh::retire_atlas_insight_work(repo.db()).await;
                             let auth = crate::secrets::AuthFile::load().unwrap_or_default();

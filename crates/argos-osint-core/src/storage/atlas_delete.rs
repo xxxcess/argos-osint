@@ -10,7 +10,7 @@
 //! Article placeholder nodes and memory nodes left without edges are
 //! removed in the same transaction.
 //!
-//! Still with the caller (SQLite-only or not yet ported; see
+//! Still with the caller (legacy-store-only or not yet ported; see
 //! `.planning/2026-10-22-surrealdb/acceptance.md`): the NLP cache and
 //! `nlp_source_refs`, `brain_backfill_receipts` (step 4), the job retention
 //! sweep (`jobs::cleanup_batch`, its own idempotent transaction) and
@@ -533,7 +533,7 @@ pub async fn delete_article(
             let mut ids = reconcile_deleted_articles_in(&tx).await?;
             ids.extend(reconcile_lifecycle_in(&tx).await?);
             drop_orphan_nodes_in(&tx, &run_id, Some(&article_id), &[]).await?;
-            // `nlp::cache::remove_owner(conn, "article", id)` of the SQLite path.
+            // `nlp::cache::remove_owner(conn, "article", id)` of the legacy store path.
             super::insight::remove_nlp_owner_in(&tx, "article", &article_id).await?;
             Ok((ids, ()))
         })

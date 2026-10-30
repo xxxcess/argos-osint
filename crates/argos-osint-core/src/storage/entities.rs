@@ -4,7 +4,7 @@
 //!
 //! Record keys: `recon_entity` by entity id; `brain_backfill_receipt` by
 //! `codec::encode([source, unit_id])`; `brain_actor_dedup_receipt` by the
-//! sorted `left:right` pair key, as SQLite. `recon_entity`'s
+//! sorted `left:right` pair key, as the legacy store. `recon_entity`'s
 //! `(kind, namespace, canonical)` is unique, and [`ensure_recon_entity_in`]
 //! ignores a row that would collide on it or on the id (`INSERT OR IGNORE`).
 
@@ -143,7 +143,7 @@ pub async fn backfill_receipts(
     Ok(rows.into_iter().map(|r| (r.unit_id, r.revision)).collect())
 }
 
-/// The sorted pair key SQLite uses.
+/// The sorted pair key the legacy store uses.
 pub fn pair_key(a: &str, b: &str) -> String {
     let mut pair = [a, b];
     pair.sort();

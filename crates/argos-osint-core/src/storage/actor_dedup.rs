@@ -2,9 +2,9 @@
 //! repository): local spelling repair, candidate pairs with their sampled
 //! source context, durable pair leases on `brain_actor_dedup_receipt`, and
 //! the assessed merge. The prompt, decision adapter, pair generation and
-//! input hash are shared with SQLite, so a pair hashes the same on both.
+//! input hash are shared with the legacy store, so a pair hashes the same on both.
 //!
-//! SQLite's repair also deletes pre-upgrade debris (mentions and index
+//! the legacy store's repair also deletes pre-upgrade debris (mentions and index
 //! receipts of deleted articles); a SurrealDB store starts empty and its
 //! delete paths remove those rows, so there is none to repair.
 
@@ -169,7 +169,7 @@ pub async fn merge_in(
     Ok(changed)
 }
 
-/// The sampled identity context of one actor family (SQLite `context`).
+/// The sampled identity context of one actor family (legacy store `context`).
 async fn context_in(tx: &Tx, id: &str) -> Result<Value, TxError> {
     let root = resolve_in(tx, id).await?;
     let Some(a) = actor_in(tx, &root).await? else {

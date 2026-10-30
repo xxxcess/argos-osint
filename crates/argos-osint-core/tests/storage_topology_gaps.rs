@@ -34,7 +34,7 @@ fn thread(id: &str) -> Thread {
 }
 
 #[tokio::test]
-async fn memory_seed_kind_matches_the_sqlite_memory_check() {
+async fn memory_seed_kind_matches_the_legacy_memory_check() {
     let Some(server) = Server::start() else {
         return;
     };
@@ -73,7 +73,7 @@ async fn memory_seed_kind_matches_the_sqlite_memory_check() {
     assert_eq!(kind(ids[1].clone()).await, Some(MemoryKind::Link));
     assert_eq!(kind(ids[2].clone()).await, Some(MemoryKind::Related));
     assert_eq!(kind(ids[3].clone()).await, Some(MemoryKind::Actor));
-    // An unknown kind reads as a Claim, like SQLite's untyped rows.
+    // An unknown kind reads as a Claim, like the legacy store's untyped rows.
     assert_eq!(kind(ids[4].clone()).await, Some(MemoryKind::Claim));
     // A missing memory is "no longer exists", not an error.
     assert_eq!(kind("missing".into()).await, None);

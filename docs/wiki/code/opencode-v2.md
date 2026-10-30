@@ -2,19 +2,19 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-`coordinator` (Team Coordinator) is the default entry-point agent (`opencode-go/glm-5.3-flash#low`). All active catalog archetypes (`coordinator`, `orchestrator`, `architect`, `rust-coder`, `react-coder`, `reviewer`, `tester`, `auditor`, `scribe`) use `mode: all`, so they can run as primary agents or children. Legacy `build`, `plan`, `general`, and `explore` agents are disabled; ECC agent definitions are replaced. `/ecc-plan` selects `architect`, `/ecc-review` selects `reviewer`, `/ecc-verify` selects `tester`, and `/docs-review`, `/setup-wiki`, and `/refresh-wiki` select `scribe`.
+`coordinator` (Team Coordinator) is the default entry-point agent (`opencode-go/glm-5.3-flash#high`). All active catalog archetypes (`coordinator`, `orchestrator`, `architect`, `rust-coder`, `react-coder`, `reviewer`, `tester`, `auditor`, `scribe`) use `mode: all`, so they can run as primary agents or children. Legacy `build` and `plan` agents are disabled and the old `general`/`explore` stubs were removed; ECC agent definitions are replaced. `/ecc-plan` selects `architect`, `/ecc-review` selects `reviewer`, `/ecc-verify` selects `tester`, and `/docs-review`, `/setup-wiki`, and `/refresh-wiki` select `scribe`.
 
 | Caller | Permitted children | Configured model | Purpose |
 | --- | --- | --- | --- |
-| `coordinator` | `orchestrator`, `architect`, `rust-coder`, `react-coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode-go/glm-5.3-flash#low` | Default entry point: conduct a concise task interview, lock scope/constraints, and dispatch the most efficient team from the catalog |
-| `orchestrator` | `architect`, `rust-coder`, `react-coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode-go/glm-5.3-flash#low` | Decompose multi-phase/multi-milestone work, own `.planning/`, and drive iterative exploration, implementation, Scribe checkpoints, and the 3-way verification gate |
-| `architect` | `architect`, `rust-coder`, `react-coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode-go/kimi-k2.7-code` | Explore code/docs (`AUDIT_UNIT`), advise on contracts (`CONSULT`), write `file:line` phase specs, or coordinate single-phase work |
-| `rust-coder` | `architect`, `rust-coder`, `react-coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode-go/kimi-k2.7-code` | Delegate disjoint stack-split `EDIT_UNIT` edits, integrate worktree deltas, invoke `scribe` at checkpoints, run verification gates, and perform authorized commits |
-| `react-coder` | `architect`, `rust-coder`, `react-coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode-go/kimi-k2.7-code` | Delegate disjoint stack-split `EDIT_UNIT` edits, integrate worktree deltas, invoke `scribe` at checkpoints, run verification gates, and perform authorized commits |
-| `reviewer` | `architect` | `opencode-go/glm-5.3-flash#low` | Audit integrated diffs for correctness, concurrency/performance, `argos-rust-style`, and React UI compliance (`APPROVE \| REJECT`) |
-| `tester` | `architect` | `opencode-go/gemini-4-argon#low` | Execute empirical host-native checks, TUI/UI screenshot verification, and adversarial stress tests in `INTEGRATION_ROOT` (`PASS \| FAIL \| BLOCKED \| PENDING`) |
-| `auditor` | none | `opencode-go/glm-5.3-flash#low` | Forensic integrity and anti-cheating leaf audit (`CLEAN \| INTEGRITY_VIOLATION` binary veto) |
-| `scribe` | none | `opencode-go/glm-5.3-flash#low` | Review code deltas and maintain canonical documentation, tags, and diagrams |
+| `coordinator` | `orchestrator`, `architect`, `rust-coder`, `react-coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode-go/glm-5.3-flash#high` | Default entry point: conduct a concise task interview, lock scope/constraints, and dispatch the most efficient team from the catalog |
+| `orchestrator` | `architect`, `rust-coder`, `react-coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode-go/glm-5.3-flash#high` | Decompose multi-phase/multi-milestone work, own `.planning/`, and drive iterative exploration, implementation, Scribe checkpoints, and the 3-way verification gate |
+| `architect` | `architect`, `rust-coder`, `react-coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode-go/kimi-k3.1-pro#high` | Explore code/docs (`AUDIT_UNIT`), advise on contracts (`CONSULT`), write `file:line` phase specs, or coordinate single-phase work |
+| `rust-coder` | `architect`, `rust-coder`, `react-coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode-go/glm-5.3#high` | Delegate disjoint stack-split `EDIT_UNIT` edits, integrate worktree deltas, invoke `scribe` at checkpoints, run verification gates, and perform authorized commits |
+| `react-coder` | `architect`, `rust-coder`, `react-coder`, `reviewer`, `tester`, `auditor`, `scribe` | `opencode-go/glm-5.3#high` | Delegate disjoint stack-split `EDIT_UNIT` edits, integrate worktree deltas, invoke `scribe` at checkpoints, run verification gates, and perform authorized commits |
+| `reviewer` | `architect` | `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free#high` | Audit integrated diffs for correctness, concurrency/performance, `argos-rust-style`, and React UI compliance (`APPROVE \| REJECT`) |
+| `tester` | `architect` | `openrouter/nemotron-3.5-super-VL-free#max` | Execute empirical host-native checks, TUI/UI screenshot verification, and adversarial stress tests in `INTEGRATION_ROOT` (`PASS \| FAIL \| BLOCKED \| PENDING`) |
+| `auditor` | none | `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free#high` | Forensic integrity and anti-cheating leaf audit (`CLEAN \| INTEGRITY_VIOLATION` binary veto) |
+| `scribe` | none | `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free#high` | Review code deltas and maintain canonical documentation, tags, and diagrams |
 
 ## Concise Interview, Customer Translation & Dynamic Team Selection
 
@@ -35,19 +35,19 @@ Before spinning up subagents (unless `[skip-interview]` is passed or the prompt 
 
 Role models and reasoning variants live in `.opencode/opencode.json` at `agents.<role>.model`:
 
-- **Default Team Coordinator (`coordinator`)**: `opencode-go/glm-5.3-flash#low` for high-reasoning interactive interviewing and triage.
-- **Architecture (`architect`)**: `opencode-go/kimi-k2.7-code` for architectural specifications and contract consultations.
-- **Orchestration (`orchestrator`)**: `opencode-go/glm-5.3-flash#low`.
-- **Implementation coordination (`rust-coder`, `react-coder`)**: `opencode-go/kimi-k2.7-code`.
-- **Review, Forensic Audit & Documentation (`reviewer`, `auditor`, `scribe`)**: `opencode-go/glm-5.3-flash#low`.
+- **Default Team Coordinator (`coordinator`)**: `opencode-go/glm-5.3-flash#high` for high-reasoning interactive interviewing and triage.
+- **Architecture (`architect`)**: `opencode-go/kimi-k3.1-pro#high` for architectural specifications and contract consultations.
+- **Orchestration (`orchestrator`)**: `opencode-go/glm-5.3-flash#high`.
+- **Implementation coordination (`rust-coder`, `react-coder`)**: `opencode-go/glm-5.3#high`.
+- **Review, Forensic Audit & Documentation (`reviewer`, `auditor`, `scribe`)**: `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free#high`. **Caveat**: repo evidence (`docs/archive/brief-request-mode-test-report.md`) shows the OpenRouter `:free` endpoint returning 404s for this model — treat as a known availability risk.
 `opencode-go/glm-5.3-flash` (like `glm-5.3`) exposes effort tiers `low | high | max` only — there is no `medium`; requests for GLM 'medium' map to `#high`, the middle tier.
-- **Verification (`tester`)**: `opencode-go/gemini-4-argon#low`.
-- **Fast `EDIT_UNIT` & Worker Overrides**: `opencode-go/kimi-k2.7-code` (no reasoning variants; verbatim ID) in `.opencode/coder-rust-worker.json` and `.opencode/coder-react-worker.json`.
+- **Verification (`tester`)**: `openrouter/nemotron-3.5-super-VL-free#max`.
+- **Fast `EDIT_UNIT` & Worker Overrides**: `opencode-go/glm-5.3-flash#high` in `.opencode/coder-rust-worker.json` and `.opencode/coder-react-worker.json`; `opencode/big-pickle` (no variant) in `.opencode/architect-worker.json`.
 
 Set exploration and editing child defaults independently:
 
 - `.opencode/architect-worker.json`: `architect`'s and `orchestrator`'s `AUDIT_UNIT` exploration children (`opencode/big-pickle`).
-- `.opencode/coder-rust-worker.json` and `.opencode/coder-react-worker.json`: `EDIT_UNIT` coders, `tester`, and `architect` `CONSULT` spawned by each stack coder (both `opencode-go/kimi-k2.7-code`, no reasoning variants; verbatim ID); excludes `scribe`, `reviewer`, and `auditor`.
+- `.opencode/coder-rust-worker.json` and `.opencode/coder-react-worker.json`: `EDIT_UNIT` coders, `tester`, and `architect` `CONSULT` spawned by each stack coder (both `opencode-go/glm-5.3-flash#high`; verbatim ID); excludes `scribe`, `reviewer`, and `auditor`. Rust/react-coder spawned `EDIT_UNIT` children use the `glm-5.3-flash#high` worker overrides from these two files.
 
 Each file contains `{"model": "provider/model#variant"}` (omit the `#variant` suffix for models without variants, such as `opencode/big-pickle`). The caller reads it and supplies `subagent.model` on every new/resumed worker call. An explicit user task override wins. For `scribe`, `reviewer`, and `auditor`, callers read and explicitly pass `agents.<role>.model` from `.opencode/opencode.json`. The child keeps its role prompt/permissions; only its model changes. Unavailable models/variants are reported without silent substitution.
 

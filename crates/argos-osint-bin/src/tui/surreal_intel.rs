@@ -1,6 +1,6 @@
 //! The TUI Intel list and brief chain on SurrealDB. Under a storage config
 //! (`surreal_brain::on`) the bulletin list, the brief chain admission and
-//! its stage views read the repository and never the SQLite store. Reads
+//! its stage views read the repository and never the legacy store. Reads
 //! block on `storage::runtime::blocking`, so callers are worker threads;
 //! [`ensure_brief`] hops to its own thread so the UI thread may call it.
 

@@ -10,7 +10,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
-use super::backend::{sqlite_path, ReconStore};
+use super::backend::{legacy_side_store_path, ReconStore};
 use super::{
     brain_resources::{self, BrainResourceSummary},
     investigation, picker, AnswerContext, CreditHold, EntityView, HypothesisView, Plan, PlanCall,
@@ -69,7 +69,7 @@ impl StageClock {
         self.recorded = true;
         let elapsed = self.started.elapsed_ms();
         // The attempt ordinal is read from the repository, so the whole
-        // write runs there; SQLite is never opened.
+        // write runs there; the legacy store is never opened.
         let (run_id, mode, stage) = (self.run_id.clone(), self.mode.clone(), self.stage.clone());
         crate::storage::runtime::spawn(async move {
             let Ok(repo) = crate::storage::runtime::repository().await else {
@@ -2795,7 +2795,7 @@ pub(crate) async fn recall_for_turn(
     // SurrealDB: vector recall (DISKANN, lexical top-up; the full-text
     // stopgap without a served embedding generation) over the same 20
     // candidates, admission policy, five-memory cap, thin-Brain test and
-    // resource summary as SQLite, and the same recall_query telemetry row.
+    // resource summary as the legacy store, and the same recall_query telemetry row.
     let Some(repo) = store.repository() else {
         anyhow::bail!("SurrealDB storage is not configured");
     };
@@ -2910,9 +2910,9 @@ pub(crate) async fn previous_synthesis(store: &ReconStore, thread_id: &str) -> R
             .into(),
     };
     {
-        // `storage::summary_flush::cache_get`; SQLite is never opened here.
+        // `storage::summary_flush::cache_get`; the legacy store is never opened here.
         if let Ok(Some(hit)) = crate::summarization::cache_get_selected(&req, || {
-            anyhow::bail!("SQLite is not opened under SurrealDB")
+            anyhow::bail!("the legacy store is not opened under SurrealDB")
         })
         .await
         {
@@ -3909,7 +3909,7 @@ async fn model_json(
         cancel,
         None,
         None,
-        db_path.as_deref().and_then(sqlite_path),
+        db_path.as_deref().and_then(legacy_side_store_path),
         true,
     )
     .await;

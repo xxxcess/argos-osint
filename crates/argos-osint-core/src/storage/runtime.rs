@@ -47,9 +47,9 @@ pub fn init(layout: Layout) -> Result<()> {
 
 /// Whether the process selected SurrealDB: [`init`] ran and the home has a
 /// storage config (an unreadable config counts as configured, so a broken
-/// file fails loudly instead of silently falling back to SQLite). Cached
+/// file fails loudly instead of silently falling back to the legacy store). Cached
 /// after the first call. Without [`init`] (core tests, embedders) this is
-/// `false` and callers stay on SQLite.
+/// `false` and callers stay on the legacy store.
 pub fn configured() -> bool {
     static CONFIGURED: OnceLock<bool> = OnceLock::new();
     let Some(entry) = ENTRY.get() else {

@@ -1,5 +1,5 @@
 //! Canonical Brain publication of a completed intel brief kind on SurrealDB
-//! (SQLite `brief_canonical::publish_stage_on`).
+//! (legacy store `brief_canonical::publish_stage_on`).
 //!
 //! Claims and Inferences publish an article insight snapshot through the
 //! shared canonical publisher ([`super::insight::publish_snapshot_on`] with

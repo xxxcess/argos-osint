@@ -793,7 +793,7 @@ pub async fn publish_atlas_insights(
                 )
                 .await?;
             }
-            // SQLite bumps only for a retag, a created or repaired claim, an
+            // the legacy store bumps only for a retag, a created or repaired claim, an
             // updated brief, or a brief at all.
             let changed = retagged > 0
                 || receipt.created + receipt.repaired > 0
@@ -859,7 +859,7 @@ pub async fn advance_generation(
 /// `publish_snapshot_on`: lane-independent canonical publication inside the
 /// caller's transaction. `None` when the generation or input key moved on.
 /// `validate` stands in for `validate_live_evidence`, whose owner and
-/// source tables (articles, recon runs, intel reports) are still SQLite.
+/// source tables (articles, recon runs, intel reports) are withheld.
 pub async fn publish_snapshot_on(
     tx: &Tx,
     snapshot: &EvidenceSnapshot,

@@ -22,7 +22,7 @@ use crate::{
     secrets::AuthFile,
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use backend::{sqlite_path, ReconStore};
+use backend::{legacy_side_store_path, ReconStore};
 use chrono::Utc;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -1914,7 +1914,7 @@ fn recon_finish(outcome: &Result<Run>, cancel: &AtomicBool) -> crate::job_regist
     }
 }
 
-/// The registry row of one Recon question: the SQLite job registry, or the
+/// The registry row of one Recon question: the legacy store job registry, or the
 /// repository's `job` table under SurrealDB (never both).
 enum ReconJob {
     #[cfg(feature = "surreal")]
@@ -2325,7 +2325,8 @@ impl Service {
         let auth = self.auth.clone();
         let settings = self.settings.clone();
         Some(tokio::spawn(async move {
-            let title = investigation_title(&auth, &settings, &question, sqlite_path(&db)).await;
+            let title =
+                investigation_title(&auth, &settings, &question, legacy_side_store_path(&db)).await;
             let Ok(store) = ReconStore::open(&db).await else {
                 return;
             };
@@ -2900,8 +2901,9 @@ impl Service {
         let _ = (max_calls, opening);
         progress(TurnEvent::Stage("assessing source claims".into()));
         let assessed = {
-            // The claim assessment pipeline is still SQLite-only: synthesize
-            // from the active SurrealDB output, else withhold inferences.
+            // The claim assessment pipeline is withheld under SurrealDB: synthesize
+            // from the active repository output, else withhold the assessed pipeline
+            // output (readiness gap documented by the withheld `PipelineOutput`).
             let store = ReconStore::open(&self.db_path).await?;
             #[cfg(feature = "surreal")]
             let active = match store.repository() {
@@ -2943,7 +2945,7 @@ impl Service {
                 cancel,
                 progress,
                 &run.id,
-                sqlite_path(&self.db_path),
+                legacy_side_store_path(&self.db_path),
             )
             .await?
         } else {

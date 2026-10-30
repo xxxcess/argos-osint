@@ -477,8 +477,8 @@ struct CycleTelemetry {
 impl CycleTelemetry {
     fn new(db: &Path, run_id: &str, mode: &str, started_at: String) -> Self {
         // Continue the occurrence numbering so a resumed cycle appends.
-        // SQLite only without a storage config: under SurrealDB the count
-        // starts at 0 rather than reopening SQLite.
+        // Legacy store only without a storage config: under SurrealDB the count
+        // starts at 0 rather than reopening the legacy store.
         // [`CycleTelemetry::open`] continues the numbering from the store.
         let candidates = 0;
         Self {
@@ -499,7 +499,7 @@ impl CycleTelemetry {
     async fn open(db: &Path, run_id: &str, mode: &str, started_at: String) -> Self {
         let mut tel = Self::new(db, run_id, mode, started_at);
         #[cfg(feature = "surreal")]
-        if crate::recon::backend::sqlite_path(db).is_none() && !run_id.is_empty() {
+        if crate::recon::backend::legacy_side_store_path(db).is_none() && !run_id.is_empty() {
             let mut seqs = std::collections::HashMap::new();
             if let Ok(repo) = crate::storage::runtime::repository().await {
                 tel.candidates = crate::storage::telemetry::count_ids_with_prefix(
@@ -1895,7 +1895,7 @@ impl AtlasJob {
     fn start(&mut self, run_id: &str) {
         self.run_id = run_id.to_string();
         // Under SurrealDB the registry rows live in the repository; never
-        // reopen SQLite there.
+        // reopen the legacy store there.
         #[cfg(feature = "surreal")]
         {
             self.surreal = Some(SurrealCycleJob::begin(run_id));

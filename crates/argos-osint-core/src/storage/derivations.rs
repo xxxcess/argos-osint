@@ -10,7 +10,7 @@
 //! snapshot readiness and assessed links. Index work and `memories_changed`
 //! join the same transaction through the outbox.
 //!
-//! Differences from SQLite, by design or pending:
+//! Differences from the legacy store, by design or pending (legacy store differences):
 //! - The caller passes the live Recon opt-in in [`DerivationContext`]
 //!   (`save_insights`, already rechecked) and the owner run's thread;
 //!   `recon_runs` is not on SurrealDB.
@@ -740,7 +740,7 @@ async fn bind_item_in(
     let mut touched = Vec::new();
     if item.kind == "claim" {
         // `INSERT OR IGNORE INTO recon_entities`, so the subject's label
-        // comes from the stored entity, as on SQLite.
+        // comes from the stored entity, as on the legacy store.
         if let Some(e) = output.entities.iter().find(|e| e.id == item.subject) {
             super::entities::ensure_recon_entity_in(
                 tx,

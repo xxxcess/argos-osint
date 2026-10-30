@@ -1,7 +1,7 @@
 //! Brain browse associations on the async repository (migration phase 4a):
 //! `Store::brain_browse_memories` (Actor-group claim, thread and article
 //! counts), `claim_associations`, `actor_group_associations` and
-//! `article_origins_for_memory`, with the SQLite shapes and rules.
+//! `article_origins_for_memory`, with the legacy store shapes and rules.
 //!
 //! One read loads the association inputs (redirects, typed claim actors,
 //! actor refs, mentions, Link endpoints, insight sources, live derivation
@@ -445,7 +445,7 @@ pub async fn actor_groups_scoped(
     let Some(cycle) = cycle else {
         return Ok(all);
     };
-    // One read of the inputs for every group (SQLite rereads per group).
+    // One read of the inputs for every group (the legacy store rereads per group).
     let inputs = inputs(repo).await?;
     let context = context(repo, &inputs).await?;
     Ok(all

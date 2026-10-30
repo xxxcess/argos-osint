@@ -10,6 +10,17 @@ The [design contract](tui-design-spec.md) preserves the palette in `theme.rs`. P
 
 Jobs status/app/search changes immediately invalidate the previous displayed cohort, selected detail, scroll and pending owner navigation, then load the current filter asynchronously. The next frame shows Loading jobs rather than rows for the previous filter. Stale snapshot keys are rejected; same-filter refresh retains matching data. Action geometry includes filter labels so wrapping and click/Tab targets stay current.
 
+**Clear completed/stopped/failed** buttons (`ButtonId::JobsClearCompleted/Stopped/Failed`,
+`app.rs:8600-8630`) perform an optimistic `prune_status` on the local `JobsView`,
+set `jobs_dirty = true`, bump the dashboard generation, and dispatch
+`spawn_job_action(JobAction::Clear(status))` on a worker. The `JobsCleared`
+completion event (`app.rs:5425-5440`) calls `reload_jobs()` for the authoritative
+snapshot. A bounded self-heal in `tick_dashboards` (`app.rs:1977-1986`) marks
+`jobs_dirty = true` on every tick while parked on Jobs (since job registry
+progress has no completion event into the TUI); the reload is still gated on
+`dashboard_reading.is_none()` so an in-flight read is never overwritten. Duplicate
+clear clicks are rejected while `jobs_clearing` is true.
+
 Server traffic uses existing Jobs service rows and Jobs → View logs navigation. Running API/Web service rows sort ahead of ordinary work within the selected filters, keeping them visible on crowded bounded pages; other service rows retain their normal ordering. Work-count headers exclude services. Renderers consume the normal `JobRow` / `EventRow` snapshots; API and frontend producers attach redacted events through a bounded queue rather than writing terminal escape sequences into the app. The repository limits the ID page before loading correlated event/task/attempt details.
 
 ## AnalyticsCard and Dashboard preset
@@ -85,7 +96,32 @@ Intel Focus Brief keeps its center stack borderless and uses the shared clipped 
 
 The brief **Jobs** pane shows the dependency chain summary followed by one spaced record per stage (Full article, Claims, Inferences, Links). Active stages spin; Full Article and Claims may run together, then Inferences joins both and Links follows. Running rows name their activity: retrieving / cleaning, waiting for model, validating, or checking fidelity. Queued rows name their blocker; failed rows show a short reason. A **Publication / Index** footer follows: Pending, Published · Index pending / Indexed / Not indexed · reason / Index failed · reason, with historical reports excluded from precedence. Global Jobs shows the same `Stage · row` labels in stage order, and each committed stage logs `intel_brief.stage`. Content panes show completed checkpoints as soon as they commit, and they never inherit a parent failure: validated artifacts read "Validated · not published". Links render as **Potential corroboration**. Captures: `intel_sequential_stage_screens` at 160×50, 120×40, 100×32, 80×24, 60×18 and 40×12; images are in `docs/screens/intel-sequential/`. The [claim context verification](../../screenshots/intel-claim-context-2026-10-16/README.md) records fresh Actors-first, Inference-entry and staged-publication review.
 
-## Brain Memory Topology and GraphCanvas
+## Brain Memory List and Topology
+
+The Brain list (`ModuleId::Brain`, `BrainListMode::List`) renders memories with
+a control strip: Create, Pin/Unpin, Delete, kind cycle, Find. Its refresh
+channel mirrors the **recon investigation pattern**: every mutating control
+spawns a plain worker thread, sends a completion event, and the event handler
+reloads the list directly — no tick, no intermediate dirty flag.
+
+- **Create**: `save_insight` (`app.rs:6905-6927`) → `std::thread::spawn` →
+  `WorkEvent::InsightSaved` → handler (`app.rs:5555-5566`) calls
+  `reload_memories_selecting(Some(new_id))`.
+- **Pin/Unpin**: `spawn_pin_toggle` (`app.rs:6931-6943`) →
+  `WorkEvent::MemoryPinned` → handler (`app.rs:5568-5576`) calls
+  `reload_memories()`.
+- **Delete**: `request_memory_delete` (`app.rs:9783-9809`) →
+  `WorkEvent::MemoryDeleted` → handler calls `reload_memories()`.
+
+All three workers use `Store::memory()` (process handle) so they run outside the
+TUI thread's entered Tokio context where `storage::runtime::blocking` would bail.
+This is the same reason the recon list and its CRUD controls work.
+
+The list reload path (`reload_memories` → `reload_memories_selecting` →
+`request_memory_snapshot` → `BrainLoaded`) uses a generation token and
+`brain_dirty`/`brain_reading` guard identical to the dashboard pattern:
+a read in flight is left alone; a stale completion re-requests; the dirty flag
+is cleared only on accepted generation match.
 
 `topology_layout::TopologyLayoutResult` computes pure geometry for the **Graph first** preset (dimensions refer to its available body):
 - **Desktop (≥132×32)**: GraphCanvas left 65%, TopologyInspector right 35%.
@@ -130,6 +166,10 @@ for (target, rect) in targets.iter().zip(action_rects(area, &labels)) {
     registry.register(*target, rect);
 }
 ```
+
+## Profile control actions and `refresh_profile_now()`
+
+Profile analytics (System → Overview) has a control strip: period/app filters, **Clear filters (c)**, Configs, manual Refresh. The **Clear filters** action (`Target::ProfileAction(2)`, `profile.rs:4183-4186`) and other control actions (`ProfileAction(4)` manual refresh, ProfileChoice commits, custom-period Enter) now call `refresh_profile_now()` (`app.rs:2015-2019`), which sets `profile_dirty = true`, clears the dashboard throttle (`dashboards_at = None`), and invokes `reload_profile()` immediately — mirroring the recon write pattern where the control schedules its own reload instead of relying on the tick. The dirty flag keeps retrying on the tick when a read is already in flight; the throttle reset keeps an explicit action from waiting out the dashboard cadence. Popup-based filter changes also reload via generation checks (`app.rs:5975-6010`).
 
 ## Measured text
 

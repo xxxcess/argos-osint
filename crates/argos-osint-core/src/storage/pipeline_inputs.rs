@@ -9,7 +9,7 @@
 //! Gaps: `article_input` has no tool evidence (`osint_calls` and
 //! `intel_evidence` are not on SurrealDB), and `recon_input` takes evidence
 //! the caller built from tool results (`evidence_from_tools` still reads the
-//! SQLite NLP cache); its texts are retained here as artifacts. SQLite's
+//! legacy store NLP cache); its texts are retained here as artifacts. The legacy store's
 //! "newest rowid" source ref is the newest `registered_at`.
 
 use anyhow::{ensure, Result};

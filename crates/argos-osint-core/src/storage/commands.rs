@@ -2,7 +2,7 @@
 //!
 //! Reset is the only wipe, and only on explicit request: it never runs on a
 //! connection failure or ordinary startup, and it never falls back to
-//! creating SQLite. It needs exclusive ownership (no other live client
+//! creating the legacy store. It needs exclusive ownership (no other live client
 //! lease in server mode; `embedded.lock` in embedded mode). It removes the
 //! application data (the SurrealDB database, old `argos.db` with its
 //! WAL/SHM/journal sidecars, and `memory_lancedb/`) and keeps config,
@@ -195,7 +195,7 @@ fn remove_path(path: &std::path::Path) -> Result<()> {
     }
 }
 
-/// Old SQLite/LanceDB application data under the home.
+/// Old legacy store / LanceDB application data under the home.
 pub fn legacy_paths(layout: &Layout) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = [
         "argos.db",

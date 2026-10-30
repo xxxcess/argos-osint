@@ -111,6 +111,10 @@ Only explicitly ignored fixture tests need `--ignored`. A filter matching zero t
 | Shared overlays | `dump_overhaul_screens` | `palette-*`, `help-*`, `record-*`, `overlay-*` |
 | Profile analytics | `analytics_viewports_and_data_states` | `profile-recon-*`, `profile-report-*`, `profile-small-sample-*` |
 | Profile data states/System | `analytics_viewports_and_data_states` | `profile-empty-*`, `profile-stale-*`, `profile-loading-*`, `profile-system-*` |
+| Jobs clear + self-heal | `clearing_jobs_by_status_updates_lists_and_logs_and_drops_stale_reads`, `parked_jobs_tick_self_heals_rows_without_events` | (state assertions; no PNGs required) |
+| Logs clear + queue race | `logs_clear_drains_queued_lines_and_late_writes_mark_dirty` | (state assertions; no PNGs required) |
+| Brain worker CRUD | `brain_background_delivery_preserves_input_selection_and_last_good_data` (extended with `settle` for async create) | (state assertions; no PNGs required) |
+| Profile clear-filters | `profile_clear_filters_schedules_its_own_reload` | (state assertions; no PNGs required) |
 
 For generic app entry views (`app-<index>-*`), resolve the index from `ModuleId` rather than guessing. The selected screenshots retain the real application shell. Filters never crop the terminal buffer.
 

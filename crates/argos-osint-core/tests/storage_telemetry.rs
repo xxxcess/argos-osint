@@ -1,5 +1,5 @@
 //! Telemetry and event-log writes on SurrealDB (`storage::telemetry`,
-//! `storage::event_log`): the same writes give the same rows as SQLite.
+//! `storage::event_log`): the same writes give the same rows as the legacy store.
 //! Run through `python3 scripts/test_surreal.py --mode both`.
 #![cfg(feature = "surreal")]
 

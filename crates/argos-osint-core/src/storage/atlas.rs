@@ -454,7 +454,7 @@ pub async fn quota_bump(db: &Surreal<Any>, provider: &str, day: &str) -> Result<
 }
 
 /// `argos_atlas_checkpoints` insert-or-keep: the first payload for a
-/// `(run, revision)` wins, as in SQLite. Returns whether it was new.
+/// `(run, revision)` wins, as in the legacy store. Returns whether it was new.
 pub async fn save_checkpoint(
     db: &Surreal<Any>,
     run_id: &str,

@@ -1,0 +1,26 @@
+[package]
+name = "argos-osint-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["embedded", "nlp"]
+embedded = ["argos-osint-core/embedded"]
+server = ["argos-osint-core/server"]
+nlp = ["argos-osint-core/nlp"]
+
+[dependencies]
+anyhow.workspace = true
+argos-osint-core = { path = "../argos-osint-core", default-features = false }
+axum = "0.8.8"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }
+chrono.workspace = true

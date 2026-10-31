@@ -3,13 +3,13 @@
 //! `Store::atlas_metadata`, `atlas_save_metadata` and
 //! `atlas_set_classification`.
 //!
-//! Record keys: metadata by `[run_id, article_id]`, mentions by their SQLite
-//! primary key, related pairs by `[run_id, left_id, right_id]`. SQLite's
+//! Record keys: metadata by `[run_id, article_id]`, mentions by their legacy store
+//! primary key, related pairs by `[run_id, left_id, right_id]`. The legacy store's
 //! `ON DELETE CASCADE` from `atlas_articles` is the `atlas_article_cascade`
 //! event, so every article delete (step 3) drops these rows in its own
 //! transaction.
 //!
-//! Not ported here: `persist_article_rating` (it reads the SQLite confidence
+//! Not ported here: `persist_article_rating` (it reads the legacy store confidence
 //! inputs); see `.planning/2026-10-22-surrealdb/acceptance.md`.
 
 use surrealdb::engine::any::Any;
@@ -388,7 +388,7 @@ pub async fn set_classification(
                 )
                 .await?;
             }
-            // SQLite stores the captured hash on the row.
+            // the legacy store stores the captured hash on the row.
             let mut row = metadata.clone();
             row.input_hash = hash;
             let json = serde_json::to_string(&metadata).map_err(json_err)?;

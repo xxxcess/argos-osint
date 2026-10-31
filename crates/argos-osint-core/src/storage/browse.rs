@@ -1,6 +1,6 @@
 //! Brain browse and single-memory operations on the async repository, for
 //! the TUI's Brain screens: `Store::get_memory`, `delete_memory` and
-//! `brain_browse` (Claims plus Actor groups), with the same shapes as SQLite.
+//! `brain_browse` (Claims plus Actor groups), with the same shapes as the legacy store.
 //!
 //! Every SurrealDB memory has a `memory_kind` (default `claim`), so there is
 //! no legacy, untyped insight-backed claim fallback. Actor-group counts and

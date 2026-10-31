@@ -3,7 +3,7 @@
 //!
 //! Same contract as [`super::brain_store`]: when the process selected
 //! SurrealDB ([`on`]) the frozen `Store` methods dispatch here instead of the
-//! SQLite connection. Every function blocks on [`runtime::blocking`], so the
+//! legacy store connection. Every function blocks on [`runtime::blocking`], so the
 //! callers must be plain threads, never async code.
 
 use std::collections::HashMap;
@@ -471,7 +471,7 @@ pub fn atlas_stored_claims(run_id: &str) -> Result<Vec<AtlasStoredClaim>> {
 }
 
 /// `Store::atlas_claims_for_article`: the article's legacy source claims
-/// with their memory text. The provenance-snapshot rows the SQLite path
+/// with their memory text. The provenance-snapshot rows the legacy store path
 /// tries first (`insight_persist::article_claim_rows`) are served by
 /// `storage::insight_views` on SurrealDB and are not consulted here.
 pub fn atlas_claims_for_article(run_id: &str, article_id: &str) -> Result<Vec<AtlasArticleClaim>> {

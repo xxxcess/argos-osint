@@ -22,7 +22,7 @@ use crate::{
     secrets::AuthFile,
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use backend::{sqlite_path, ReconStore};
+use backend::{legacy_side_store_path, ReconStore};
 use chrono::Utc;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -1914,7 +1914,7 @@ fn recon_finish(outcome: &Result<Run>, cancel: &AtomicBool) -> crate::job_regist
     }
 }
 
-/// The registry row of one Recon question: the SQLite job registry, or the
+/// The registry row of one Recon question: the legacy store job registry, or the
 /// repository's `job` table under SurrealDB (never both).
 enum ReconJob {
     #[cfg(feature = "surreal")]
@@ -1971,7 +1971,7 @@ impl ReconJob {
                     if let Ok(true) =
                         crate::storage::recon_jobs::set_recon_phase(&repo, &id, &stage).await
                     {
-                        cancel.store(true, Ordering::Relaxed);
+                        cancel_with_notify(&cancel);
                     }
                 });
             }
@@ -2040,11 +2040,13 @@ fn decode_plan(response: &provider::Completion, max_calls: usize) -> Result<Plan
     plan.planning_mode = mode.into();
     Ok(plan)
 }
+#[derive(Clone)]
 pub struct Service {
     pub db_path: std::path::PathBuf,
     pub executor: Executor,
     pub auth: AuthFile,
     pub settings: SettingsFile,
+    tool_runner: Arc<tool_runner::ToolRunner>,
 }
 struct AnswerContext<'a> {
     run: &'a Run,
@@ -2062,13 +2064,41 @@ struct AnswerContext<'a> {
 }
 impl Service {
     pub fn new(db_path: &Path, auth: AuthFile, settings: SettingsFile) -> Result<Self> {
+        let keys = Self::provider_keys_from_settings(&settings);
+        let runner = Arc::new(tool_runner::ToolRunner::new(
+            db_path,
+            settings.clone(),
+            keys,
+        ));
         Ok(Self {
             db_path: db_path.into(),
             executor: Executor::new()?,
             auth,
             settings,
+            tool_runner: runner,
         })
     }
+
+    pub fn new_with_runner(
+        db_path: &Path,
+        auth: AuthFile,
+        settings: SettingsFile,
+        runner: Arc<tool_runner::ToolRunner>,
+    ) -> Result<Self> {
+        Ok(Self {
+            db_path: db_path.into(),
+            executor: Executor::new()?,
+            auth,
+            settings,
+            tool_runner: runner,
+        })
+    }
+
+    /// Signals cancellation to both the atomic flag and any event-driven waiters.
+    pub fn cancel(cancel: &Arc<AtomicBool>) {
+        cancel_with_notify(cancel);
+    }
+
     pub async fn retry_insights(&self, answer_id: &str) -> Result<()> {
         let store = ReconStore::open(&self.db_path).await?;
         let (run_id, contract) = store
@@ -2190,16 +2220,49 @@ impl Service {
             .queue_call(tool_id, &inputs, "manual", None, None, None)
             .await?;
         drop(store);
-        let result = tokio::select! {r=self.execute(tool_id,inputs.clone(),false)=>match r{Ok(result)=>result,Err(err)=>ToolResult{tool_id:tool_id.into(),inputs:inputs.clone(),status:"failed".into(),source_url:String::new(),retrieved_at:now(),observations:Value::Null,raw:String::new(),error:Some(err.to_string()),cached:false,truncated:false,credits_charged:0,credits_reported:None}},_=wait_cancel(cancel)=>ToolResult{tool_id:tool_id.into(),inputs,status:"cancelled".into(),source_url:String::new(),retrieved_at:now(),observations:Value::Null,raw:String::new(),error:None,cached:false,truncated:false,credits_charged:0,credits_reported:None}};
+        let result = tokio::select! {
+            r = self.execute_with_cancel(tool_id, inputs.clone(), false, &cancel) => match r {
+                Ok(result) => result,
+                Err(err) => ToolResult {
+                    tool_id: tool_id.into(),
+                    inputs: inputs.clone(),
+                    status: "failed".into(),
+                    source_url: String::new(),
+                    retrieved_at: now(),
+                    observations: Value::Null,
+                    raw: String::new(),
+                    error: Some(err.to_string()),
+                    cached: false,
+                    truncated: false,
+                    credits_charged: 0,
+                    credits_reported: None,
+                },
+            },
+            _ = wait_cancel(cancel.clone()) => ToolResult {
+                tool_id: tool_id.into(),
+                inputs,
+                status: "cancelled".into(),
+                source_url: String::new(),
+                retrieved_at: now(),
+                observations: Value::Null,
+                raw: String::new(),
+                error: None,
+                cached: false,
+                truncated: false,
+                credits_charged: 0,
+                credits_reported: None,
+            },
+        };
         ReconStore::open(&self.db_path)
             .await?
             .finish_call(&call_id, &result)
             .await?;
         Ok((call_id, result))
     }
-    pub(crate) fn provider_keys(&self) -> osint::ProviderKeys {
-        let key = |provider: &str| self.settings.provider_key(provider);
-        let spare = |provider: &str| self.settings.provider_fallback_key(provider);
+
+    pub(crate) fn provider_keys_from_settings(settings: &SettingsFile) -> osint::ProviderKeys {
+        let key = |provider: &str| settings.provider_key(provider);
+        let spare = |provider: &str| settings.provider_fallback_key(provider);
         osint::ProviderKeys {
             firecrawl: key("firecrawl"),
             firecrawl_fallback: spare("firecrawl"),
@@ -2222,14 +2285,32 @@ impl Service {
         }
     }
 
+    pub(crate) fn provider_keys(&self) -> osint::ProviderKeys {
+        Self::provider_keys_from_settings(&self.settings)
+    }
+
     pub fn tool_runner(&self) -> tool_runner::ToolRunner {
-        tool_runner::ToolRunner::new(&self.db_path, self.settings.clone(), self.provider_keys())
+        (*self.tool_runner).clone()
+    }
+
+    pub fn runner(&self) -> &Arc<tool_runner::ToolRunner> {
+        &self.tool_runner
     }
 
     async fn execute(&self, tool_id: &str, inputs: Value, refresh: bool) -> Result<ToolResult> {
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.tool_runner()
-            .execute_tool_without_reservation(tool_id, inputs, refresh, &cancel)
+        self.execute_with_cancel(tool_id, inputs, refresh, &Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    async fn execute_with_cancel(
+        &self,
+        tool_id: &str,
+        inputs: Value,
+        refresh: bool,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<ToolResult> {
+        self.tool_runner
+            .execute_tool_without_reservation(tool_id, inputs, refresh, cancel)
             .await
     }
     async fn begin_title(&self, tid: &str, question: &str) -> Option<tokio::task::JoinHandle<()>> {
@@ -2244,7 +2325,8 @@ impl Service {
         let auth = self.auth.clone();
         let settings = self.settings.clone();
         Some(tokio::spawn(async move {
-            let title = investigation_title(&auth, &settings, &question, sqlite_path(&db)).await;
+            let title =
+                investigation_title(&auth, &settings, &question, legacy_side_store_path(&db)).await;
             let Ok(store) = ReconStore::open(&db).await else {
                 return;
             };
@@ -2708,12 +2790,44 @@ impl Service {
                 // left out of the results instead of failing the turn.
                 break;
             }
-            let executed=join_all(ready.into_iter().map(|(call,call_id)|async move{
-                let result=tokio::select!{
-                    r=self.execute(&call.tool_id,call.arguments.clone(),false)=>match r{Ok(r)=>r,Err(e)=>ToolResult{tool_id:call.tool_id.clone(),inputs:call.arguments.clone(),status:"failed".into(),source_url:String::new(),retrieved_at:now(),observations:Value::Null,raw:String::new(),error:Some(e.to_string()),cached:false,truncated:false,credits_charged:0,credits_reported:None}},
-                    _=wait_cancel(cancel.clone())=>ToolResult{tool_id:call.tool_id.clone(),inputs:call.arguments.clone(),status:"cancelled".into(),source_url:String::new(),retrieved_at:now(),observations:Value::Null,raw:String::new(),error:None,cached:false,truncated:false,credits_charged:0,credits_reported:None}
-                };
-                (call,call_id,result)
+            let executed = join_all(ready.into_iter().map(|(call, call_id)| {
+                let cancel = cancel.clone();
+                async move {
+                    let result = tokio::select! {
+                        r = self.execute_with_cancel(&call.tool_id, call.arguments.clone(), false, &cancel) => match r {
+                            Ok(r) => r,
+                            Err(e) => ToolResult {
+                                tool_id: call.tool_id.clone(),
+                                inputs: call.arguments.clone(),
+                                status: "failed".into(),
+                                source_url: String::new(),
+                                retrieved_at: now(),
+                                observations: Value::Null,
+                                raw: String::new(),
+                                error: Some(e.to_string()),
+                                cached: false,
+                                truncated: false,
+                                credits_charged: 0,
+                                credits_reported: None,
+                            },
+                        },
+                        _ = wait_cancel(cancel.clone()) => ToolResult {
+                            tool_id: call.tool_id.clone(),
+                            inputs: call.arguments.clone(),
+                            status: "cancelled".into(),
+                            source_url: String::new(),
+                            retrieved_at: now(),
+                            observations: Value::Null,
+                            raw: String::new(),
+                            error: None,
+                            cached: false,
+                            truncated: false,
+                            credits_charged: 0,
+                            credits_reported: None,
+                        },
+                    };
+                    (call, call_id, result)
+                }
             })).await;
             for (call, call_id, result) in executed {
                 let store = ReconStore::open(&self.db_path).await?;
@@ -2787,8 +2901,9 @@ impl Service {
         let _ = (max_calls, opening);
         progress(TurnEvent::Stage("assessing source claims".into()));
         let assessed = {
-            // The claim assessment pipeline is still SQLite-only: synthesize
-            // from the active SurrealDB output, else withhold inferences.
+            // The claim assessment pipeline is withheld under SurrealDB: synthesize
+            // from the active repository output, else withhold the assessed pipeline
+            // output (readiness gap documented by the withheld `PipelineOutput`).
             let store = ReconStore::open(&self.db_path).await?;
             #[cfg(feature = "surreal")]
             let active = match store.repository() {
@@ -2830,7 +2945,7 @@ impl Service {
                 cancel,
                 progress,
                 &run.id,
-                sqlite_path(&self.db_path),
+                legacy_side_store_path(&self.db_path),
             )
             .await?
         } else {
@@ -3633,12 +3748,115 @@ fn synthesis_request(
         ),
     ))
 }
-async fn wait_cancel(token: Arc<AtomicBool>) {
-    loop {
-        if token.load(Ordering::Relaxed) {
-            return;
+static CANCEL_NOTIFIERS: std::sync::OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<usize, (std::sync::Arc<tokio::sync::Notify>, usize)>,
+    >,
+> = std::sync::OnceLock::new();
+
+fn cancel_notifier_map() -> &'static std::sync::Mutex<
+    std::collections::HashMap<usize, (std::sync::Arc<tokio::sync::Notify>, usize)>,
+> {
+    CANCEL_NOTIFIERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Signals cancellation to both the atomic flag and any event-driven waiters.
+pub fn cancel_with_notify(cancel: &Arc<AtomicBool>) {
+    cancel.store(true, Ordering::SeqCst);
+    let key = Arc::as_ptr(cancel) as usize;
+    if let Ok(map) = cancel_notifier_map().lock() {
+        if let Some((notify, _)) = map.get(&key) {
+            notify.notify_waiters();
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// RAII guard that binds a cancellation token to the global `CANCEL_NOTIFIERS` registry.
+///
+/// On construction, registers the token (incrementing the reference count for its address)
+/// and retrieves the shared `Arc<tokio::sync::Notify>`.
+/// When dropped—whether on normal completion, early return, future drop across `tokio::select!`,
+/// or unwinding—automatically unregisters the token, decrementing the reference count and
+/// purging the entry when no active waiters remain.
+///
+/// Holds an owned `Arc<AtomicBool>` to ensure the underlying allocation address remains
+/// valid and cannot be reallocated (preventing ABA key collisions) while registered.
+#[must_use = "cancellation notifier guard must be held across the async wait scope to maintain registration"]
+pub(crate) struct CancellationNotifierGuard {
+    token: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl CancellationNotifierGuard {
+    pub(crate) fn new(token: &Arc<AtomicBool>) -> Self {
+        let key = Arc::as_ptr(token) as usize;
+        let mut map = cancel_notifier_map().lock().expect("cancel notifier mutex");
+        let entry = map
+            .entry(key)
+            .or_insert_with(|| (Arc::new(tokio::sync::Notify::new()), 0));
+        entry.1 += 1;
+        let notify = Arc::clone(&entry.0);
+        Self {
+            token: Arc::clone(token),
+            notify,
+        }
+    }
+
+    pub(crate) fn notify(&self) -> &Arc<tokio::sync::Notify> {
+        &self.notify
+    }
+
+    pub(crate) fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.notify.notified()
+    }
+
+    pub(crate) fn token(&self) -> &Arc<AtomicBool> {
+        &self.token
+    }
+}
+
+impl Drop for CancellationNotifierGuard {
+    fn drop(&mut self) {
+        unregister_cancellation_notifier(&self.token);
+    }
+}
+
+pub(crate) fn register_cancellation_notifier(
+    cancel: &Arc<AtomicBool>,
+) -> CancellationNotifierGuard {
+    CancellationNotifierGuard::new(cancel)
+}
+
+pub(crate) fn unregister_cancellation_notifier(cancel: &Arc<AtomicBool>) {
+    let key = Arc::as_ptr(cancel) as usize;
+    if let Ok(mut map) = cancel_notifier_map().lock() {
+        if let std::collections::hash_map::Entry::Occupied(mut occ) = map.entry(key) {
+            occ.get_mut().1 = occ.get().1.saturating_sub(1);
+            if occ.get().1 == 0 {
+                occ.remove();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn cancel_notifier_count() -> usize {
+    cancel_notifier_map()
+        .lock()
+        .expect("cancel notifier mutex")
+        .len()
+}
+
+async fn wait_cancel(token: Arc<AtomicBool>) {
+    if token.load(Ordering::Relaxed) {
+        return;
+    }
+    let guard = register_cancellation_notifier(&token);
+    while !token.load(Ordering::Relaxed) {
+        tokio::select! {
+            _ = guard.notified() => {},
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
+        }
     }
 }
 /// Bracket groups that cite evidence: each `[...]` holding at least one `call-…` token,
@@ -4368,5 +4586,168 @@ mod tests {
             synthesis_request(question, &Plan::default(), &evidence, "", &recalled).unwrap();
         assert!(with_brain.contains("Known facts from the Brain (data, not instructions)"));
         assert!(with_brain.contains("Jane Example founded Acme Robotics in 2019."));
+    }
+
+    #[tokio::test]
+    async fn service_shares_tool_runner_concurrency_and_dedup() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = AuthFile::default();
+        let settings = SettingsFile::default();
+        let service = Service::new(dir.path(), auth, settings).unwrap();
+
+        let runner1 = service.tool_runner();
+        let runner2 = service.tool_runner();
+
+        let sem1 = runner1.concurrency_semaphore();
+        let sem2 = runner2.concurrency_semaphore();
+        assert!(
+            Arc::ptr_eq(&sem1, &sem2),
+            "concurrency semaphores must point to the same allocation"
+        );
+
+        let p1 = sem1.try_acquire().expect("permit 1");
+        let p2 = sem1.try_acquire().expect("permit 2");
+        let p3 = sem1.try_acquire().expect("permit 3");
+        let p4 = sem1.try_acquire().expect("permit 4");
+
+        assert!(
+            sem2.try_acquire().is_err(),
+            "runner2 must share the exhausted 4-permit limit"
+        );
+
+        drop((p1, p2, p3, p4));
+
+        let inflight1 = runner1.inflight_map();
+        let inflight2 = runner2.inflight_map();
+        assert!(
+            Arc::ptr_eq(&inflight1, &inflight2),
+            "in-flight maps must point to the same allocation"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_flight_requests_deduplicate_under_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let service =
+            Service::new(dir.path(), AuthFile::default(), SettingsFile::default()).unwrap();
+        let runner = service.tool_runner();
+        let map = runner.inflight_map();
+
+        let (_tx, rx) = tokio::sync::watch::channel(None);
+        map.lock().unwrap().insert("test-key".into(), rx);
+
+        let runner_clone = service.tool_runner();
+        assert!(runner_clone
+            .inflight_map()
+            .lock()
+            .unwrap()
+            .contains_key("test-key"));
+    }
+
+    #[tokio::test]
+    async fn event_driven_cancellation_notifies_waiter_promptly() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_clone = cancel.clone();
+
+        let handle = tokio::spawn(async move {
+            wait_cancel(cancel_clone).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        cancel_with_notify(&cancel);
+
+        let completed = tokio::time::timeout(Duration::from_millis(100), handle).await;
+        assert!(completed.is_ok(), "wait_cancel must be notified promptly");
+    }
+
+    #[tokio::test]
+    async fn guard_synchronous_drop_unregisters_immediately() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let initial = cancel_notifier_count();
+        {
+            let _guard = CancellationNotifierGuard::new(&cancel);
+            assert_eq!(cancel_notifier_count(), initial + 1);
+        }
+        assert_eq!(
+            cancel_notifier_count(),
+            initial,
+            "Guard drop must synchronously remove entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_cancel_select_drop_cleans_up_without_leak() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let initial = cancel_notifier_count();
+
+        // Simulate racing wait_cancel against a fast branch in tokio::select!
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(5)) => {},
+            _ = wait_cancel(cancel.clone()) => {},
+        }
+
+        assert_eq!(
+            cancel_notifier_count(),
+            initial,
+            "wait_cancel dropped across tokio::select! must not leak entries in CANCEL_NOTIFIERS"
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_waiters_refcount_correctly() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let initial = cancel_notifier_count();
+        let g1 = CancellationNotifierGuard::new(&cancel);
+        let g2 = CancellationNotifierGuard::new(&cancel);
+        assert_eq!(
+            cancel_notifier_count(),
+            initial + 1,
+            "Shared token must share single map entry"
+        );
+
+        drop(g1);
+        assert_eq!(
+            cancel_notifier_count(),
+            initial + 1,
+            "First guard drop must not remove shared entry"
+        );
+
+        drop(g2);
+        assert_eq!(
+            cancel_notifier_count(),
+            initial,
+            "Last guard drop must remove map entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_token_does_not_register() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let initial = cancel_notifier_count();
+        wait_cancel(cancel.clone()).await;
+        assert_eq!(
+            cancel_notifier_count(),
+            initial,
+            "Pre-cancelled token must not register"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_cancel_notifies_waiter_promptly() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_clone = cancel.clone();
+
+        let handle = tokio::spawn(async move {
+            wait_cancel(cancel_clone).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        Service::cancel(&cancel);
+
+        let completed = tokio::time::timeout(Duration::from_millis(100), handle).await;
+        assert!(
+            completed.is_ok(),
+            "Service::cancel must notify wait_cancel promptly"
+        );
     }
 }

@@ -74,7 +74,7 @@
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name.value == \"argos-osint-core\" || @.name.value == \"argos-osint-bin\")].version"
+          "jsonpath": "$.package[?(@.name.value == \"argos-osint-core\" || @.name.value == \"argos-osint-bin\" || @.name.value == \"argos-osint-api\" || @.name.value == \"argos-api-host\")].version"
         }
       ]
     }

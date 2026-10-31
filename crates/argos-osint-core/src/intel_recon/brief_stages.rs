@@ -1809,8 +1809,8 @@ async fn apply_fidelity(
 
 /// The reads and writes a running stage makes: its context and article,
 /// earlier stage outputs, the article's actors, per-item checkpoints,
-/// fidelity receipts and the live activity label. [`SqliteStages`] is the
-/// SQLite store; `storage::brief_stages` is the repository.
+/// fidelity receipts and the live activity label. [`LegacyStoreStages`] is the
+/// legacy store; `storage::brief_stages` is the repository.
 pub trait StageStore: Send + Sync {
     /// The stage context and the article as currently stored (the caller
     /// applies the captured metadata snapshot).
@@ -1863,13 +1863,13 @@ pub struct RuntimeBackend {
 }
 
 impl RuntimeBackend {
-    /// SQLite telemetry file, or `None` for a backend built without one
-    /// (the SurrealDB drainer), so nothing opens SQLite there.
+    /// legacy store telemetry file, or `None` for a backend built without one
+    /// (the SurrealDB drainer), so nothing opens the legacy store there.
     fn telemetry(&self) -> Option<&Path> {
         Some(self.db_path.as_path()).filter(|p| !p.as_os_str().is_empty())
     }
 
-    /// Model-activity sink writing to the SQLite activity table, or `None`
+    /// Model-activity sink writing to the legacy store activity table, or `None`
     /// without a telemetry file.
     fn sink(
         &self,

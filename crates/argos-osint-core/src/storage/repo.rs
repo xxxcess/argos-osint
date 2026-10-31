@@ -3,7 +3,7 @@
 //! A [`Repository`] is a cheap-to-clone handle on one bootstrapped store.
 //! Every constructor goes through `ensure_schema`. Consumers get one from
 //! [`super::runtime::repository`] (the single process entry point) and call
-//! the storage modules with [`Repository::db`]. The SQLite `Store` stays
+//! the storage modules with [`Repository::db`]. The legacy `Store` stays
 //! untouched beside it until phase 5.
 
 use std::sync::Arc;

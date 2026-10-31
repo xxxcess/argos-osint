@@ -234,7 +234,7 @@ pub fn activity_sink(
             }
             _ => None,
         };
-        // Stage activity labels were a SQLite-only side channel.
+        // Stage activity labels were a legacy-store-only side channel.
         let _ = (label, &db, &task);
     })
 }

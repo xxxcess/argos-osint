@@ -2031,7 +2031,7 @@ pub fn validate_inference(
 }
 
 /// Typed progress observer for insight stages: maps execution events to a
-/// short durable activity label, deduplicated and throttled so SQLite is never
+/// short durable activity label, deduplicated and throttled so the legacy store is never
 /// written per token.
 pub(super) fn activity_sink(
     db_path: &std::path::Path,

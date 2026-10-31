@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-This is the repo standard for agents changing terminal presentation or interaction. Read the [design contract](tui-design-spec.md) and affected [component APIs](tui-components.md) before editing. The [Profile implementation session](../../archive/tui-verification-session-2026-10-10.md) records how this procedure was established, including actual screenshots and defects found. The reusable skill is [argos-tui-verify](../../../.opencode/skills/argos-tui-verify/SKILL.md).
+This is the repo standard for agents changing terminal presentation or interaction. Read the [design contract](tui-design-spec.md) and affected [component APIs](tui-components.md) before editing. Keep the TUI simple. React Native component creativity belongs in the [Argos look and feel](react-ui.md#argos-look--feel-reference) and does not add terminal chrome. The [Profile implementation session](../../archive/tui-verification-session-2026-10-10.md) records how this procedure was established, including actual screenshots and defects found. The reusable skill is [argos-tui-verify](../../../.opencode/skills/argos-tui-verify/SKILL.md).
 
 ## Plan the contract
 
@@ -62,8 +62,8 @@ The parent runs these in order with `ARGOS_EMBED` unset:
 
 ```sh
 env -u ARGOS_EMBED cargo fmt --all --check
-env -u ARGOS_EMBED python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked --no-default-features -- -D warnings
-env -u ARGOS_EMBED ARGOS_HOME=/private/tmp/argos-tui-check python3 scripts/agent_cargo.py test --workspace --locked --no-default-features
+env -u ARGOS_EMBED python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked -- -D warnings
+env -u ARGOS_EMBED ARGOS_HOME=/private/tmp/argos-tui-check python3 scripts/agent_cargo.py test --workspace --locked
 ```
 
 The wrapper and fixture capture reserve `target/agents` for agent artifacts; the user’s normal `cargo run` continues using `target/debug`. Capture manifests record `CARGO_TARGET_DIR` and the explicit Cargo target argument. Do not override the target directory or delete a lock file. See [agent Cargo isolation](contributing.md#build-and-test).
@@ -87,7 +87,7 @@ uv pip install --python .agent-scratch/tui-review-env/bin/python Pillow
 
 Substitute the selected plan name for `<PLAN_ID>`. Dependency downloads may require host approval. DejaVu Sans Mono on Linux or Courier New on macOS is required; missing fonts are reported. No system Python mutation or Cargo dependency is needed.
 
-The capture tool runs the selected binary test with locked dependencies, no default features, `ARGOS_EMBED` removed and temporary `ARGOS_HOME`. It requires a new directory under `.planning/`, preventing stale dumps from appearing fresh. It validates dimensions/cell fields, renders PNGs and writes a gallery/manifest with command, result, source fingerprint, environment, renderer/font versions and artifact hashes. Review remains **pending**. It does not run the full workspace gate or certify actions/metrics. Incomplete runs remain visible; failed diagnostic logs stay in `.agent-scratch/`. Successful capture removes its log and temporary state.
+The capture tool runs the selected library test filter with workspace feature unification matching the gate, locked dependencies, the default embedded features, `ARGOS_EMBED` removed and temporary `ARGOS_HOME`. Other library tests are filtered out. It requires a new directory under `.planning/`, preventing stale dumps from appearing fresh. It validates dimensions/cell fields, renders PNGs and writes a gallery/manifest with command, result, source fingerprint, environment, renderer/font versions and artifact hashes. Review remains **pending**. It does not run the full workspace gate or certify actions/metrics. Incomplete runs remain visible; failed diagnostic logs stay in `.agent-scratch/`. Successful capture removes its log and temporary state.
 
 For another module, extend a deterministic test to emit the same cell format into `ARGOS_SCREEN_DIR`, then select it:
 
@@ -105,12 +105,16 @@ Only explicitly ignored fixture tests need `--ignored`. A filter matching zero t
 | Surface | Test | Example include patterns |
 | --- | --- | --- |
 | Tools | `dump_overhaul_screens` | `tools-page-*` |
-| Intel article imagery | `dump_overhaul_screens` | `intel-image-*`, `intel-brief-image-*` |
+| Intel text-only article media contract | `intel_article_images_do_not_change_terminal_layout` | `intel-text-bulletin-*`, `intel-text-reader-*` |
 | Recon transcript/history | `dump_overhaul_screens` | `recon-transcript-*`, `recon-history-*` |
 | Profile Configs | `dump_overhaul_screens` | `configs-draft-*`, `configs-error-*` |
 | Shared overlays | `dump_overhaul_screens` | `palette-*`, `help-*`, `record-*`, `overlay-*` |
 | Profile analytics | `analytics_viewports_and_data_states` | `profile-recon-*`, `profile-report-*`, `profile-small-sample-*` |
 | Profile data states/System | `analytics_viewports_and_data_states` | `profile-empty-*`, `profile-stale-*`, `profile-loading-*`, `profile-system-*` |
+| Jobs clear + self-heal | `clearing_jobs_by_status_updates_lists_and_logs_and_drops_stale_reads`, `parked_jobs_tick_self_heals_rows_without_events` | (state assertions; no PNGs required) |
+| Logs clear + queue race | `logs_clear_drains_queued_lines_and_late_writes_mark_dirty` | (state assertions; no PNGs required) |
+| Brain worker CRUD | `brain_background_delivery_preserves_input_selection_and_last_good_data` (extended with `settle` for async create) | (state assertions; no PNGs required) |
+| Profile clear-filters | `profile_clear_filters_schedules_its_own_reload` | (state assertions; no PNGs required) |
 
 For generic app entry views (`app-<index>-*`), resolve the index from `ModuleId` rather than guessing. The selected screenshots retain the real application shell. Filters never crop the terminal buffer.
 

@@ -10,6 +10,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -386,30 +387,65 @@ async fn end(repo: &Repository, claimed: &ClaimedTask, ok: bool, out: &str) -> R
     Ok(done.value)
 }
 
+struct HeartbeatGuard {
+    stop: Arc<AtomicBool>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for HeartbeatGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// `drain_scope_tasks` on the repository: up to four tasks while not
 /// stopped (the caller holds the scheduler election). A failure is retried
 /// up to three attempts.
 pub async fn drain(repo: &Repository, owner: &str, stop: &AtomicBool) -> Result<usize> {
     let mut drained = 0usize;
+    let lease_secs = crate::scheduler::DEFAULT_LEASE_SECS;
     while !stop.load(Ordering::Acquire) && drained < 4 {
         let now = Utc::now();
         let op_key = format!(
             "scope-claim-{owner}-{}-{drained}",
             now.timestamp_nanos_opt().unwrap_or(0)
         );
-        let Some(claimed) = jobs::claim_next(
-            repo.db(),
-            POOL,
-            owner,
-            crate::scheduler::DEFAULT_LEASE_SECS,
-            now,
-            &op_key,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("scope claim: {e}"))?
-        .value
+        let Some(claimed) = jobs::claim_next(repo.db(), POOL, owner, lease_secs, now, &op_key)
+            .await
+            .map_err(|e| anyhow::anyhow!("scope claim: {e}"))?
+            .value
         else {
             break;
+        };
+        let lost = Arc::new(AtomicBool::new(false));
+        let beat_stop = Arc::new(AtomicBool::new(false));
+        let beat = {
+            let (repo, claimed) = (repo.clone(), claimed.clone());
+            let (lost, beat_stop) = (lost.clone(), beat_stop.clone());
+            let every = Duration::from_millis((lease_secs.max(1) as u64 * 1000 / 3).max(50));
+            tokio::spawn(async move {
+                while !beat_stop.load(Ordering::SeqCst) {
+                    tokio::time::sleep(every).await;
+                    if beat_stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let renewed = jobs::renew_lease(repo.db(), &claimed, lease_secs, Utc::now())
+                        .await
+                        .map(|c| c.value)
+                        .unwrap_or(false);
+                    if !renewed {
+                        lost.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            })
+        };
+        let mut beat_guard = HeartbeatGuard {
+            stop: beat_stop.clone(),
+            handle: Some(beat),
         };
         let result = async {
             let mut r = repo
@@ -430,6 +466,15 @@ pub async fn drain(repo: &Repository, owner: &str, stop: &AtomicBool) -> Result<
             serde_json::to_string(&analysis).context("serialize analysis result")
         }
         .await;
+        beat_stop.store(true, Ordering::SeqCst);
+        if let Some(h) = beat_guard.handle.take() {
+            h.abort();
+            let _ = h.await;
+        }
+        if lost.load(Ordering::SeqCst) {
+            drained += 1;
+            continue;
+        }
         match result {
             Ok(out) => end(repo, &claimed, true, &out).await?,
             Err(_) => end(repo, &claimed, false, "").await?,

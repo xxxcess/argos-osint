@@ -11,10 +11,11 @@
 //! Credentials go to the child through `SURREAL_USER`/`SURREAL_PASS`, never
 //! argv, and are never logged.
 
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use tokio::net::TcpStream;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -77,13 +78,30 @@ pub fn resolve_binary(layout: &Layout) -> Result<PathBuf> {
 
 /// Is `pid` a live process? (Informational pids only; never ownership.)
 pub fn pid_alive(pid: u32) -> bool {
-    // `ps -p` also sees processes of other users (`kill -0` reports EPERM).
-    Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "pid="])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    // POSIX kill(0, sig) signals the entire caller process group, and negative pids
+    // signal process groups. Strictly reject non-positive or overflowing PIDs.
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: `libc::kill` with signal 0 checks for process existence without sending
+        // a signal. Passing a valid positive PID does not dereference pointers and cannot
+        // cause undefined memory behavior.
+        let res = unsafe { libc::kill(pid as i32, 0) };
+        if res == 0 {
+            return true;
+        }
+        let err = std::io::Error::last_os_error();
+        // EPERM means the process exists but is owned by another user.
+        // ESRCH means the process does not exist.
+        err.raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 /// Take `server.lock`, waiting up to a bound for the current holder.
@@ -113,7 +131,7 @@ async fn signed_in(port: u16, creds: &Credentials) -> Result<Surreal<Any>> {
 
 /// Check one recorded server; `Ok(true)` only if every probe passes.
 pub async fn probe(info: &ServerInfo, creds: &Credentials) -> bool {
-    if !pid_alive(info.pid) || TcpStream::connect(("127.0.0.1", info.port)).is_err() {
+    if !pid_alive(info.pid) || TcpStream::connect(("127.0.0.1", info.port)).await.is_err() {
         return false;
     }
     let check = async {
@@ -166,8 +184,10 @@ fn free_port() -> Result<u16> {
     Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
 }
 
-fn log_text(layout: &Layout) -> String {
-    std::fs::read_to_string(layout.server_log()).unwrap_or_default()
+async fn log_text(layout: &Layout) -> String {
+    tokio::fs::read_to_string(layout.server_log())
+        .await
+        .unwrap_or_default()
 }
 
 /// Spawn the server on `port` and wait until it listens. `Ok(None)`: the
@@ -208,8 +228,8 @@ async fn spawn_on(
     let ready = format!("Started web server on 127.0.0.1:{port}");
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
+        let log = log_text(layout).await;
         if let Some(status) = child.try_wait()? {
-            let log = log_text(layout);
             if log.contains("Address already in use") {
                 return Ok(None);
             }
@@ -218,7 +238,7 @@ async fn spawn_on(
                 layout.server_log().display()
             );
         }
-        if log_text(layout).contains(&ready) && TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        if log.contains(&ready) && TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
             // Reap it in the background so it never lingers as a zombie of
             // a long-lived parent; it keeps running after we exit.
             std::thread::spawn(move || {
@@ -284,7 +304,7 @@ pub async fn ensure_started(layout: &Layout) -> Result<ServerInfo> {
     let (instance_id, version) = match ready.await {
         Ok(v) => v,
         Err(e) => {
-            terminate(pid);
+            let _ = stop_server_process(pid).await;
             return Err(e.context("storage server health check"));
         }
     };
@@ -299,12 +319,70 @@ pub async fn ensure_started(layout: &Layout) -> Result<ServerInfo> {
     Ok(info)
 }
 
+const TERM_GRACE_PERIOD: Duration = Duration::from_secs(8);
+const KILL_GRACE_PERIOD: Duration = Duration::from_secs(5);
+
+fn send_signal(pid: u32, sig: i32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        if pid == 0 || pid > i32::MAX as u32 {
+            bail!("invalid PID {pid} for signal delivery");
+        }
+        // SAFETY: pid is validated to be a non-zero, valid positive integer within POSIX pid_t range.
+        let res = unsafe { libc::kill(pid as i32, sig) };
+        if res == 0 {
+            Ok(())
+        } else {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                Ok(())
+            } else {
+                Err(err.into())
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, sig);
+        bail!("signals not supported on non-unix");
+    }
+}
+
 fn terminate(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    #[cfg(unix)]
+    let _ = send_signal(pid, libc::SIGTERM);
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+fn kill_force(pid: u32) {
+    #[cfg(unix)]
+    let _ = send_signal(pid, libc::SIGKILL);
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+async fn stop_server_process(pid: u32) -> Result<()> {
+    terminate(pid);
+    let term_deadline = Instant::now() + TERM_GRACE_PERIOD;
+    let mut escalated = false;
+    while pid_alive(pid) {
+        let now = Instant::now();
+        if !escalated && now >= term_deadline {
+            tracing::warn!(
+                pid,
+                "storage server did not exit within 8s; escalating to SIGKILL"
+            );
+            kill_force(pid);
+            escalated = true;
+            continue;
+        }
+        if escalated && now >= term_deadline + KILL_GRACE_PERIOD {
+            bail!("storage server PID {pid} did not stop even after SIGKILL");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
 }
 
 /// One live client's lease (`clients/<pid>`), removed on drop.
@@ -389,15 +467,8 @@ pub async fn stop(layout: &Layout, force: bool) -> Result<bool> {
     let Some(info) = discover_locked(layout, &creds).await? else {
         return Ok(false);
     };
-    terminate(info.pid);
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while pid_alive(info.pid) {
-        if Instant::now() >= deadline {
-            bail!("storage server PID {} did not stop", info.pid);
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    std::fs::remove_file(layout.server_json()).ok();
+    stop_server_process(info.pid).await?;
+    let _ = std::fs::remove_file(layout.server_json());
     Ok(true)
 }
 
@@ -405,4 +476,44 @@ pub async fn stop(layout: &Layout, force: bool) -> Result<bool> {
 pub async fn release(layout: &Layout, lease: Lease) -> Result<bool> {
     drop(lease);
     stop(layout, false).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pid_alive_bounds_and_current_process() {
+        assert!(!pid_alive(0), "pid 0 must never be reported as alive");
+        assert!(
+            !pid_alive(u32::MAX),
+            "overflowing pid must not be reported as alive"
+        );
+        assert!(
+            !pid_alive(i32::MAX as u32 + 1),
+            "pid exceeding i32::MAX must not be reported as alive"
+        );
+        assert!(
+            pid_alive(std::process::id()),
+            "current process must be reported as alive"
+        );
+        #[cfg(unix)]
+        {
+            // PID 1 (init or launchd) is always alive and owned by root.
+            assert!(
+                pid_alive(1),
+                "pid 1 must be reported as alive even when owned by another user"
+            );
+        }
+    }
+
+    #[test]
+    fn send_signal_rejects_invalid_pids() {
+        #[cfg(unix)]
+        {
+            assert!(send_signal(0, libc::SIGTERM).is_err());
+            assert!(send_signal(u32::MAX, libc::SIGTERM).is_err());
+            assert!(send_signal(i32::MAX as u32 + 1, libc::SIGTERM).is_err());
+        }
+    }
 }

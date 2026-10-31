@@ -1,6 +1,6 @@
 //! The full Recon `delete_thread` cascade on SurrealDB
 //! (`storage::recon::delete_thread`) over the thread, messages, runs,
-//! calls, evidence, executor rows and cache, against the SQLite `Store`
+//! calls, evidence, executor rows and cache, against the legacy store
 //! behaviour (insights kept). Both modes via `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
 

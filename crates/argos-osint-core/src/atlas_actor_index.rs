@@ -39,7 +39,7 @@ fn checksum(revision: &str, coverage: &str) -> String {
     ))
 }
 
-/// Phase 6 on the selected store: SQLite runs [`index_run`]; SurrealDB runs
+/// Phase 6 on the selected store: the legacy store runs [`index_run`]; SurrealDB runs
 /// [`surreal::index_run`] on the repository.
 pub async fn index_run_store(
     store: &crate::atlas_store::AtlasStore,

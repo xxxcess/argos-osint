@@ -5,19 +5,19 @@
 //! `brain_topology_query`).
 //!
 //! Record keys: `intel_brief_publication` by article id (one current
-//! publication per article, as SQLite's primary key), `intel_brief_run` by
+//! publication per article, as the legacy store's primary key), `intel_brief_run` by
 //! job id. A publication only replaces one of an equal or older generation;
 //! on replacement the shared fields move to the new job and only the
 //! publishing stage's list (claims, inferences or leads) is replaced, so
 //! earlier completed stages stay canonical while later ones run, exactly as
-//! the SQLite upsert does. The JSON lists are stored as strings.
+//! the legacy store upsert does. The JSON lists are stored as strings.
 //!
 //! Canonical binding: `intel_brief_index_state` (by article id, the
 //! `intel-brief-canonical:{article}` app_state key) and
 //! `intel_brief_stage_receipt` (by `[job_id, operation]`, the
 //! `intel-brief-canonical-stage:{job}:{operation}` key) hold the
 //! `brief_canonical::IndexState` JSON; [`retained_canonical_state`] is the
-//! SQLite `retained_canonical_state`. Links-stage leads
+//! legacy store `retained_canonical_state`. Links-stage leads
 //! (`intel_inference_article_leads`) live in `intel_inference_article_lead`,
 //! replaced per article by [`replace_leads_in`].
 //!
@@ -401,7 +401,7 @@ async fn put_state(
     Ok(())
 }
 
-/// SQLite `retained_canonical_state`: the article's index state when it is
+/// legacy store `retained_canonical_state`: the article's index state when it is
 /// `indexed` for exactly `job_id`, else that job's `kind` stage receipt
 /// (earlier completed kinds stay canonical while later stages run or fail).
 pub async fn retained_canonical_state(

@@ -493,7 +493,7 @@ pub enum ModelExecEvent {
     },
 }
 
-/// Durable operation record in SQLite.
+/// Durable operation record in the legacy store.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReconModelOperation {
     pub id: String,
@@ -508,7 +508,7 @@ pub struct ReconModelOperation {
     pub updated_at: String,
 }
 
-/// Durable attempt record in SQLite.
+/// Durable attempt record in the legacy store.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReconModelAttempt {
     pub id: String,
@@ -1482,8 +1482,8 @@ where
         secrets
             .iter()
             .map(|secret| {
-                // The capability cache is SQLite-only: never open it under SurrealDB.
-                let cache = db_path.and_then(super::backend::sqlite_path);
+                // The capability cache is on the legacy store only: skipped under SurrealDB.
+                let cache = db_path.and_then(super::backend::legacy_side_store_path);
                 crate::provider_capabilities::admit(secret, cache)
             })
             .collect(),
@@ -2041,8 +2041,8 @@ where
         secrets
             .iter()
             .map(|secret| {
-                // The capability cache is SQLite-only: never open it under SurrealDB.
-                let cache = db_path.and_then(super::backend::sqlite_path);
+                // The capability cache is on the legacy store only: skipped under SurrealDB.
+                let cache = db_path.and_then(super::backend::legacy_side_store_path);
                 crate::provider_capabilities::admit(secret, cache)
             })
             .collect(),

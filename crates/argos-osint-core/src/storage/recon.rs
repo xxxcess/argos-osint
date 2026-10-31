@@ -1,10 +1,10 @@
 //! Recon threads and messages on SurrealDB (migration phase 4a): the
 //! `recon_thread`, `recon_message` and `recon_message_memory` tables, plus
 //! the Brain edge tables `brain_memory_endpoint` and `brain_memory_actor_ref`
-//! that Brain browse needs. These are the SurrealDB side of the SQLite
+//! that Brain browse needs. These are the SurrealDB side of the legacy store
 //! tables with the same names (plural).
 //!
-//! SQLite's foreign keys become field assertions (a child row needs its
+//! the legacy store's foreign keys become field assertions (a child row needs its
 //! parent) and its `ON DELETE CASCADE`s become DELETE events, as in
 //! `atlas_metadata`:
 //!
@@ -19,7 +19,7 @@
 //!
 //! `recon_runs`, `osint_calls`, `recon_thread_entities` and the
 //! investigation tables are not ported yet. `delete_thread` runs the
-//! SQLite cascade keeping insights; `delete_thread_with_insights` also
+//! legacy store cascade keeping insights; `delete_thread_with_insights` also
 //! removes the insights the thread alone sourced.
 
 use std::collections::HashMap;
@@ -218,7 +218,7 @@ struct LinkRow {
 }
 
 /// Per message of the thread, the memories it cited in order. A memory
-/// that is gone reads as "no longer stored", as in SQLite.
+/// that is gone reads as "no longer stored", as in the legacy store.
 pub async fn answer_memories(
     repo: &Repository,
     thread_id: &str,
@@ -335,7 +335,7 @@ pub async fn put_actor_ref(
 /// the `last_thread` pointer are deleted; its calls are detached, and
 /// detached Recon calls no insight source or derivation cites are
 /// deleted. Manual calls and the tool cache (keyed by tool inputs, not
-/// thread) stay, as in SQLite. Returns false when unknown or already
+/// thread) stay, as in the legacy store. Returns false when unknown or already
 /// deleted.
 pub async fn delete_thread(repo: &Repository, id: &str) -> Result<bool> {
     let id = id.to_string();

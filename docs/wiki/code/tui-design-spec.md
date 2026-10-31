@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-Read this contract and the relevant [component catalog](tui-components.md) entries before changing `crates/argos-osint-bin/src/tui/`. Profile's current presentation, 20-view inventory and acceptance matrix are specified in [profile-analytics-dashboard.md](profile-analytics-dashboard.md). That document supersedes the older 35-widget and focused-only accordion presentation; telemetry/history and [metric semantics](profile-dashboard-and-search.md#metric-dictionary) remain authoritative.
+Read this contract and the relevant [component catalog](tui-components.md) entries before changing `crates/argos-osint-bin/src/tui/`. Keep the terminal UI simple: no new chrome, motion, or density modes. React Native presentation follows the [Argos look and feel](react-ui.md#argos-look--feel-reference), where component design may vary inside the theme. That latitude does not transfer here. Profile's current presentation, 20-view inventory and acceptance matrix are specified in [profile-analytics-dashboard.md](profile-analytics-dashboard.md). That document supersedes the older 35-widget and focused-only accordion presentation; telemetry/history and [metric semantics](profile-dashboard-and-search.md#metric-dictionary) remain authoritative.
 
 Name the selected components and layout preset before editing. Extend shared components where necessary, preserve theme tokens and the 20 primary IDs, and use the same rectangles for drawing, focus and pointer targets. Child prompts carry components/preset, exact owned files, read-only references and viewport/interaction/data checks.
 
@@ -37,10 +37,11 @@ separation; every other consumer retains spaced records. Keep wrapped
 and expanded content together; gaps never count as records or activate adjacent
 items. Shared list geometry governs capacity, reveal and pointer mapping, without
 trailing overflow. Small panes retain gaps and scroll; charts and horizontal
-navigation retain their existing geometry. Full article displays current-job
-committed Body or usable current body content immediately. Messages and orphan
-legacy running rows cannot establish retrieval activity. Read failures retain
-cached content; Reload invalidates the old presentation.
+navigation retain their existing geometry. The Focus Brief reader shows the
+stored article description. Retrieval of the full body continues for extraction
+and stays off that pane. Messages and orphan legacy running rows cannot
+establish retrieval activity. Read failures retain cached content; Reload
+invalidates the old presentation.
 
 `theme.rs` remains authoritative: preserve all RGB/semantic tokens, the stable `SERIES` mapping and map colors/heat ramp. Use thin terminal borders, one-cell horizontal padding, ACCENT titles, normal-size bold KPI values, ACCENT navigation fill/dark text and ACCENT focus border with `• focused`. Selected table rows use SELECT/TEXT.
 
@@ -50,6 +51,27 @@ Metric contracts distinguish attempts from operations, remote sends from cache h
 
 Tab/Shift+Tab follow top-left→bottom-right and reveal focus; arrows select rows/buckets; Enter expands and detail-row Enter opens owners. PgUp/PgDn/wheel scroll content then page consistently; `v` switches detail chart/table; Esc restores previous focus/scroll. Keep `f` filters, `r` refresh, `?` help, Configs and global shortcuts reachable with keyboard/mouse parity. Picker text and editor keys retain their input owners.
 
+## Venture return and Jobs filters
+
+The no-argument CLI owns a persistent Venture session. Closing its TUI or stopping its owned stack restores the terminal/services and returns to Venture; direct `stack up` commands keep their one-shot behavior. Esc in Venture returns one question and preserves valid values, with incompatible later branch answers invalidated. At the root choice Esc exits. See [Venture navigation](../../diagrams/venture-navigation.html). Each selected session runs in a child process; process exit releases its repository and maintenance workers before the parent menu reopens.
+
+Jobs filter changes are cohort transitions: clear old rows/detail/selection/scroll and pending owner navigation, then show loading until a snapshot for the new key arrives. Reject old keys; keep data during same-filter background refresh. Status/app/search and loaded state participate in action geometry invalidation. Keyboard and mouse filters use the same transition; zero matching rows are a successful empty result, not a loading placeholder.
+
+**Jobs clear actions** (`Clear completed/stopped/failed`): the control strip buttons
+optimistically prune the local `JobsView`, set `jobs_dirty = true`, bump the
+dashboard generation, and dispatch `spawn_job_action(JobAction::Clear(status))` on
+a worker. The `JobsCleared` completion event reloads authoritatively. A bounded
+self-heal in `tick_dashboards` marks `jobs_dirty` on every tick while parked on
+Jobs (job registry progress has no TUI completion event); the reload remains
+gated on `dashboard_reading.is_none()`. Duplicate clear clicks are rejected while
+`jobs_clearing` is true.
+
+**Logs clear action** (`Clear events`): `clear_logs` runs on the ordered write
+queue (`runtime::spawn_ordered`) with a oneshot channel back to the worker.
+Pre-clear queued `record_log` lines drain before the delete; the post-clear
+session event joins the same closure so the subsequent `reload_logs` snapshot
+sees the final state deterministically. No re-materialization race.
+
 ## Other application presets
 
 The shared data/render separation, geometry, scrolling and measured input apply throughout Argos. Keep orchestration and navigation; a daemon/IPC rewrite is outside UI work.
@@ -57,12 +79,13 @@ The shared data/render separation, geometry, scrolling and measured input apply 
 | Screen | Preset / retained behavior | TUI entry points |
 | --- | --- | --- |
 | Home | Measured launcher; shrink logo by height; nine apps and composer reachable | `ui.rs::home_layout_metrics`, `draw_home` |
+| Service launcher | Centered ARGOS VENTURE composition; core wordmark strokes and shared theme; numbered choice cards, editable ports/URL, settings review; final terminal display; 40×14 minimum | `welcome/terminal.rs::Question`, `wordmark.rs` |
 | Recon | Transcript + 30% context at ≥110 columns; compact context page; measured composer | `ui.rs::draw_recon_chat`, `draw_recon_context`, `composer_height`; `recon_parts.rs` |
 | Intel | Three columns ≥132, two at 100–131, tabbed below 100 or short height; borderless center stack with bordered Full Article followed by Related; brief Jobs in context | `ui.rs::intel_briefing_areas`, `draw_intel_briefing`, `draw_clipped_md_pane` |
 | Atlas | Dashboard/table presets; compact Origins/Coverage/Headlines pages; preserve map | Atlas layout/draw functions; `atlas_table.rs`, `map.rs` |
-| Brain | Claims/Actor-name browse projection; Enter on a memory opens the topology mapper at one hop (no detail view); topology Graph first: canvas left 65% / inspector right 35% at ≥132×32, 70%/30% at 100–131×≥32, Graph/Details/Controls pages below; minimum 60×18 | `topology.rs`, `topology_layout.rs`, `ui.rs::draw_brain` |
+| Brain | Claims/Actor-name browse projection; Enter on a memory opens the topology mapper at one hop (no detail view); topology Graph first: canvas left 65% / inspector right 35% at ≥132×32, 70%/30% at 100–131×≥32, Graph/Details/Controls pages below; minimum 60×18. List control strip (Create/Pin/Delete/kind/Find) uses the **recon write pattern**: every action spawns a plain worker thread, sends a completion event (`InsightSaved`/`MemoryPinned`/`MemoryDeleted`), and the handler reloads the list directly — no tick, no intermediate dirty flag. Workers use `Store::memory()` to avoid the TUI thread's entered Tokio context. | `topology.rs`, `topology_layout.rs`, `ui.rs::draw_brain`, `app.rs::save_insight/spawn_pin_toggle/request_memory_delete` |
 | Tools / Models | List + editor; compact pages; registered role list | `ui.rs::draw_osint`, `draw_providers`; `model_roles.rs` |
-| Jobs / Logs / System | Scrollable tables/details and reachable Host/Paths/Configs actions | `jobs.rs`, `logs.rs`, `profile.rs::draw_system_tab`, `profile_config.rs` |
+| Jobs / Logs / System | Scrollable tables/details and reachable Host/Paths/Configs actions. Jobs: clear actions + self-heal tick; Logs: ordered-queue clear with oneshot sync; System/Profile: `refresh_profile_now()` for control actions. | `jobs.rs`, `logs.rs`, `profile.rs::draw_system_tab`, `profile_config.rs`, `app.rs::refresh_profile_now/tick_dashboards` |
 
 Retain session state and app identities (`Osint/Providers/System`). Completed transcript Markdown uses revision/width caches rather than database reads during drawing. Overlays own the top input scope; bracketed paste stays with the current editor.
 
@@ -85,10 +108,12 @@ Profile has Overview / System / Configs. Overview retains Summary / Intel / Reco
 
 Report datasets are bounded DetailTable sections with sticky headers, virtual capacity of 10 logical records on tall screens and 3 on short screens. Spaced data extent is `2*N-1`, plus title/header/footer/gutter, clipped to the viewport. Each section keeps its own row/offset; Tab reveals subsequent sections, wheel/PgUp/PgDn scroll the table then its card at a boundary. Full record prose remains reachable through Enter. Report selection, sort, chart/table mode and dashboard restoration remain separate state.
 
-Intel imagery uses the Ratatui image adapter with protocol detection once outside draw, a half-block fallback, contain fit, bounded background fetch/decode/encoding and article-ID + URL identity. Missing/invalid/failed images collapse. Image and Visit article site actions open the article HTTP(S) URL. Tools categories toggle independently of search; Documentation and Test response have independent scrolling, with Catalog / Documentation / Test compact pages. Ctrl+K groups Recently used (8 stable IDs), Current app shortcuts and Universal; headings are not selectable.
+Intel terminal Bulletin and Focus Brief are text-only. They do not fetch/decode article images, probe terminal graphics capabilities or reserve image columns. Article image URLs remain metadata for the React Native client. Visit article site opens the article HTTP(S) URL. Tools categories toggle independently of search; Documentation and Test response have independent scrolling, with Catalog / Documentation / Test compact pages. Ctrl+K groups Recently used (8 stable IDs), Current app shortcuts and Universal; headings are not selectable.
 
-In the brief focus reader the article image occupies the left column inside the brief article section, vertically centered beside the brief content, and collapses when the reader is too narrow to give it at least 14 columns.
+The brief focus reader uses the full inner width for prose and preserves its source action and scroll behavior.
 
 Recon uses a SURFACE user band with ACCENT edge, quiet Markdown synthesis and expandable evidence activity. Failed activities keep a short reason visible. Transcript offsets are usize, Unicode padding uses terminal cells, completed Markdown keeps revision/width caches, and cached block/local-row anchors preserve history during updates. Jump to latest resumes follow; previous/next-turn commands select user-query boundaries.
 
 Acceptance and reproducible capture: [tui-verification.md](tui-verification.md), tests `dump_overhaul_screens` and `analytics_viewports_and_data_states`. Scope capture to affected apps/pages and states using the verification guide; shared layout changes cover affected consumers at all six viewport sizes including 40×20. Full shell/theme/navigation changes use both suites. Capture into a fresh plan directory and inspect the selected actual PNGs. Live graphics/browser checks are recorded separately from TestBackend evidence.
+
+Intel Focus Brief keeps Inferences as the final middle-column section, after Related. Its measured records, keyboard/page/wheel navigation, mouse targets and topology return use the center stack and Reader compact page; confidence, Actors and Claims stay in Extracted. React Native uses the same final Reader placement after its source link.

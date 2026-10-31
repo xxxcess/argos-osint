@@ -1,0 +1,22 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Venture navigation</title><style>body{margin:32px;background:#f5f5f5;color:#2d3142;font-family:system-ui,sans-serif}main{max-width:1100px;margin:auto}svg{width:100%;height:auto}</style><main><h1>Venture navigation</h1><p>Validated back history and process-owned session cleanup.</p><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 490" role="img" aria-labelledby="title desc">
+<title id="title">Venture navigation and session ownership</title><desc id="desc">Venture remembers validated question values. Escape moves to the preceding question, or exits at the service root. A selected session runs in a child process; exiting releases its repository and returns to Venture.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<rect width="1000" height="490" fill="#f5f5f5"/>
+<style>text{font-family:system-ui,sans-serif;fill:#2d3142}.head{font-size:22px;font-weight:600}.label{font-size:17px}.note{font-size:14px}.line{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#arrow)}</style>
+<text x="40" y="42" class="head">ARGOS VENTURE · Session boundary</text>
+<path d="M40 70H960" stroke="#4f5d75"/>
+<text x="40" y="115" class="label">Service root</text><text x="330" y="115" class="label">Validated settings</text><text x="705" y="115" class="label">Terminal display</text>
+<path d="M160 108H305M490 108H680" class="line"/>
+<text x="40" y="145" class="note">Esc exits Venture</text><text x="330" y="145" class="note">Storage · ports · profile</text><text x="705" y="145" class="note">TUI or service logs</text>
+<path d="M680 180H330M305 180H165" class="line"/>
+<text x="330" y="207" class="note">Esc restores previous question and saved value</text>
+<text x="330" y="230" class="note">Changed branches discard incompatible later answers</text>
+<path d="M830 155V280" class="line"/>
+<text x="510" y="308" class="label">Child session owns core / API / web</text>
+<text x="510" y="336" class="note">Direct stack commands use this same lifecycle</text>
+<text x="510" y="360" class="note">Stop owned services; preserve an adopted API</text>
+<path d="M500 330H105V160" class="line"/>
+<text x="130" y="390" class="note">Process exit releases repository, workers and terminal guards</text>
+<text x="130" y="416" class="note">Parent waits, then opens a fresh service root</text>
+<path d="M40 445H960" stroke="#4f5d75"/><text x="40" y="472" class="note">Ctrl+Q / Ctrl+C cancels the wizard · Keyboard and mouse share choice geometry</text>
+</svg></main></html>

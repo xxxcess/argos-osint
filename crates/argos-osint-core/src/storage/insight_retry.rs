@@ -1,7 +1,7 @@
 //! Retry admission for insight refreshes on SurrealDB: the counterpart of
 //! `insight_persist::validate_retry` (live evidence plus the owner's desired
 //! generation) and of the `exhausted` checkpoint check `retry_extraction`
-//! and `owner_progress` use, so a SurrealDB retry never reopens SQLite.
+//! and `owner_progress` use, so a SurrealDB retry never reopens the legacy store.
 //!
 //! No new tables: reads `insight_owner_state` (through
 //! `insight::desired_generation`), the live-evidence tables (through

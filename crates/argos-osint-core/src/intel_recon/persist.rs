@@ -3,7 +3,7 @@
 //!
 //! Each method runs on SurrealDB (`storage::article_body`,
 //! `storage::recon_jobs`) when the process selected it, and on the legacy
-//! SQLite connection otherwise. The retired report-job worker paths
+//! legacy store connection otherwise. The retired report-job worker paths
 //! (`report_execution_enabled()` was hard-coded false) are gone.
 
 use anyhow::Result;
@@ -30,7 +30,7 @@ fn uuid_lite() -> u64 {
     N.fetch_add(1, Ordering::Relaxed)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct ArticleBodyRow {
     pub id: String,
     pub article_id: String,

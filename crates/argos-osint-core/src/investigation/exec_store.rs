@@ -2,8 +2,8 @@
 //! `insight_assessment::assess`) reads and writes between model calls:
 //! stage checkpoints, refresh execution progress, the dispatch fence and
 //! memory evidence for recall admission. On a SurrealDB run it is
-//! `storage::pipeline_exec` and the SQLite file is never opened; otherwise
-//! the SQLite tables. One store per run, never both.
+//! `storage::pipeline_exec` and the legacy store file is never opened; otherwise
+//! the legacy store tables. One store per run, never both.
 //!
 //! On SurrealDB, stage and activity events go to the repository's event log
 //! (`argos_event`, `storage::pipeline_exec::record_task_event`).
@@ -22,7 +22,7 @@ pub(crate) enum ExecStore {
 pub(crate) type Saved = (String, String, String);
 
 impl ExecStore {
-    /// SurrealDB when selected, else the SQLite file at `db_path`.
+    /// SurrealDB when selected, else the legacy store file at `db_path`.
     pub(crate) async fn open(_db_path: &Path) -> Result<Self> {
         Ok(Self::Surreal(crate::storage::runtime::repository().await?))
     }
@@ -139,7 +139,7 @@ impl ExecStore {
         windows: Option<usize>,
         withheld: Option<usize>,
     ) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
-        let sqlite = match self {
+        let legacy_store = match self {
             #[cfg(feature = "surreal")]
             Self::Surreal(_) => None,
         };
@@ -148,7 +148,7 @@ impl ExecStore {
             Self::Surreal(r) => Some(r.clone()),
         };
         async move {
-            if let Some(done) = sqlite {
+            if let Some(done) = legacy_store {
                 return done;
             }
             #[cfg(feature = "surreal")]
@@ -249,7 +249,7 @@ impl ExecStore {
 }
 
 /// Record a model-execution activity label (and its log message on
-/// SQLite) for `task_id`, best effort; never blocks the caller.
+/// the legacy store) for `task_id`, best effort; never blocks the caller.
 pub(crate) fn record_activity(
     _db_path: &Path,
     task_id: &str,

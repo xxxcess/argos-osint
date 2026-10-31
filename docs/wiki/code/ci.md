@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-Three workflows live in `.github/workflows/` (owned by Code Architect; code changes don't touch `.github`).
+Four workflows live in `.github/workflows/` (owned by Code Architect; CI changes are scoped separately from product edits).
 
 ![CI matrix](../../img/ci-matrix.svg)
 
@@ -26,7 +26,7 @@ Storage tests are selected by `ARGOS_SURREAL_MODE`; with no mode and no `ARGOS_S
 
 Cache: `Swatinem/rust-cache` keyed per OS × storage, covering `target/agents` (where `scripts/agent_cargo.py` builds).
 
-**Local rule:** agents run only `scripts/local_matrix.sh --storage embedded`. Server mode is CI-only.
+**Local vs. hosted rule:** never run the all-platform or `server` storage stack from `.github/workflows/ci.yml` locally. Agents must **stabilize the local host machine build and embedded storage tests first** (`uname -ms`, `rustc -vV | grep '^host:'`), preferring targeted crate/test commands (`python3 scripts/agent_cargo.py check|clippy|test --locked -p <crate> [--lib | --test <name>]`, or `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 python3 scripts/agent_cargo.py test --locked -p argos-osint-core --test storage_<name>`) during iteration before running `scripts/local_matrix.sh --storage embedded` ([contributor workflow](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration)). Once local builds are stable and changes are pushed, monitor GitHub Actions checks/runs for issues on other platforms and `server` storage mode when CLI access is available (`gh pr checks`, `gh run list --branch "$(git branch --show-current)"`, `gh run view <run-id> --log-failed`).
 
 ## `commit-policy.yml`
 
@@ -35,3 +35,45 @@ On PRs (including title/body edits) and pushes to `main`: `node scripts/release_
 ## `release-please.yml`
 
 On pushes to `main` (or manual dispatch): Release Please opens/updates the release PR and tags from Conventional Commits (`release-please-config.json`, `.release-please-manifest.json`). Uses a GitHub App token or `RELEASE_PLEASE_TOKEN` so release PRs trigger CI; see [versioning.md](versioning.md).
+
+## `intel-web.yml` — local web client checks
+
+The web workflow runs on matching web/config/build-check changes on `main` and pull requests (including PR pushes), plus manual dispatch. Node comes from `.node-version`; pnpm is pinned to 12.15.0. The first-party checkout/setup/artifact actions are pinned to their verified v7 commit SHAs. Existing Rust, commit-policy and release workflows are unchanged. Agents start here and inspect the affected workflow files before selecting checks; workflow edits remain Code Architect-owned.
+
+| Check | Enforced behavior |
+| --- | --- |
+| Frozen install and peer check | Reproducible lockfile and compatible dependency peers |
+| `pnpm typecheck` / `pnpm lint` | Type checking and recommended Hooks/compiler diagnostics with zero warnings |
+| `pnpm build` | Static export using the enabled strict React Compiler pipeline; no API needed |
+| `pnpm check:web-build` | Built Next configuration retains strict compiler options and RN Web/shared transpilation; exported **app page** chunks contain compiler memoization (framework runtime alone is insufficient) |
+| Offline Playwright | The same Chromium fixtures run against the static export and the Next development server; both exercise RN Web UI, compilation, hydration, connection/actions and responsive layout. Static-host CSP/header assertions apply to export only. |
+| Retained evidence | Export/dev test results and screenshots use separate directories under `test-results/`; HTML reports use `playwright-report/export` and `playwright-report/dev`. Uploaded with `always()` and seven-day retention. |
+
+The evidence upload ignores absent files when an earlier step fails; it does not turn a missing build/test into a pass. Captures are review evidence, not automatic visual approval. No public deployment, live provider keys, secrets or native builds are involved. Path filters mean a docs-only PR does not run this job; configure required checks with that behavior in mind rather than assuming a workflow run for every PR.
+
+The user authorized the original web workflow addition and this follow-up CI update under Code Architect ownership. Workflow/action validation, the real build guard (including rejection cases), peer/type/lint/build/browser commands and artifact generation are checked locally. Hosted Actions execution requires publication and is not claimed as local evidence.
+
+## Supplemental process checks
+
+Launcher/stack lifecycle changes also run `python3 scripts/test_web_stack.py --terminal-captures .agent-scratch/stack-review` after building `argos` and `argos-api-host` through the isolated Cargo wrapper and exporting the web app. `--tui-only --tui-web-profile installed` narrows this to Venture back/value restoration, TUI return, same-parent storage reuse, shared API/Web TUI and terminal cleanup. These PTY/process checks are local supplemental evidence; the workflows above do not execute this script. Keep actual hosted results separate.
+
+The composer-launch regression `python3 scripts/test_web_stack.py --composer-smoke`
+runs the same PTY harness in its own temp `ARGOS_HOME`: `storage init --mode
+embedded`, then `stack up --tui`, submit a recon prompt from the Home composer,
+assert the investigation surface replaces the Home launcher, and then hold a
+bounded 45 s window in which no `stack overflow`/`fatal runtime error` may
+appear and the child must stay alive. It finishes with clean `ARGOS_EXIT=0` and
+termios restored. It needs only `argos` built (no
+`argos-api-host`) and is POSIX-only (skips elsewhere). Like the stack lifecycle
+checks, it is local supplemental evidence that the workflows do not execute;
+keep actual hosted results separate.
+
+## Scoped mutation diagnostics
+
+[mutation.yml](../../../.github/workflows/mutation.yml) is a manually dispatched Linux embedded diagnostic gate, separate from the platform/storage matrix. Run it after ordinary checks pass with `gh workflow run mutation.yml --ref <branch>`. It pins cargo-mutants 27.1.0 and uses [.cargo/mutants.toml](../../../.cargo/mutants.toml) to restrict mutation sites to NLP selection, provider attempt/request policy and Atlas classification, with the core library and property integration tests as the oracle. Default features remain embedded/nlp; no live providers or server storage are used.
+
+The runner keeps the unmutated baseline check, fails on missed or timed-out mutations and retains outcome/log artifacts for seven days, including failure evidence. The 120-minute workflow limit bounds this expensive diagnostic; a timeout is incomplete evidence, not a passing baseline. Configuration and local smoke results do not establish a hosted mutation result. Review survivors before changing tests; equivalent mutants require a documented rationale rather than silently weakening the gate.
+
+## Rust mutation execution restriction
+
+Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Local mutation execution is deliberately skipped, not passed; ordinary targeted checks and the embedded gate remain required.

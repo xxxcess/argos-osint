@@ -16,3 +16,4 @@ EDIT_UNIT: implement assigned files and required tests/docs; read supporting ref
 Resume only your own child sessionID. Follow documented recovery on handoff failures; never silently substitute direct work.
 
 Report completed checklist items and evidence after each implementation unit; include affected wiki/routes/tags/diagrams in the phase delta.
+Rust mutation policy: until further notice, do not run Rust mutation tests or baselines locally. Use GitHub Actions `mutation.yml`; report local execution as intentionally skipped. Ordinary Rust checks and embedded tests remain required.

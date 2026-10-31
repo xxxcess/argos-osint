@@ -60,7 +60,7 @@ async fn recon_entities_insert_or_ignore_and_label_falls_back_to_canonical() {
 }
 
 #[tokio::test]
-async fn backfill_and_dedup_receipts_upsert_by_their_sqlite_keys() {
+async fn backfill_and_dedup_receipts_upsert_by_their_legacy_keys() {
     let Some(server) = Server::start() else {
         return;
     };

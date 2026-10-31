@@ -197,6 +197,24 @@ pub async fn run_claimed(
             }
         })
     };
+    struct HeartbeatGuard {
+        stop: Arc<AtomicBool>,
+        handle: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl Drop for HeartbeatGuard {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(handle) = self.handle.take() {
+                handle.abort();
+            }
+        }
+    }
+
+    let mut beat_guard = HeartbeatGuard {
+        stop: stop.clone(),
+        handle: Some(beat),
+    };
     let operation_id = format!("{}:e{}:topology", claimed.id, claimed.lease_epoch);
     let result = generate(
         runtime,
@@ -208,7 +226,10 @@ pub async fn run_claimed(
     )
     .await;
     stop.store(true, Ordering::SeqCst);
-    let _ = beat.await;
+    if let Some(h) = beat_guard.handle.take() {
+        h.abort();
+        let _ = h.await;
+    }
     if lost.load(Ordering::SeqCst) {
         return Ok(lease_lost());
     }

@@ -2,7 +2,7 @@
 //! embedded mode.
 //!
 //! SurrealDB uses snapshot isolation with optimistic conflict detection, so an
-//! invariant that SQLite protected with `BEGIN IMMEDIATE` is protected here by
+//! invariant that the legacy store protected with `BEGIN IMMEDIATE` is protected here by
 //! *guard records*: every transaction that must serialize against another one
 //! writes the same guard record first, so at most one of them commits. The
 //! loser sees a write conflict (normalized by [`super::error`]) and

@@ -2,18 +2,18 @@
 //!
 //! [`record`] writes one `telemetry_event` (keyed by the event id) and, the
 //! first time that id is seen, folds it into `telemetry_hourly` and
-//! `telemetry_daily` in the same transaction, exactly like SQLite: a replayed
+//! `telemetry_daily` in the same transaction, exactly like the legacy store: a replayed
 //! id rewrites the row and never counts twice. The tables are defined by
 //! `storage::profile_view::SCHEMA`, which the Profile views read.
 //!
 //! Under a storage config, `crate::telemetry::record` routes here (through
-//! [`crate::storage::runtime::spawn`]) and never opens SQLite.
+//! [`crate::storage::runtime::spawn`]) and never opens the legacy store.
 //!
-//! [`SCHEMA`] adds `telemetry_meta` (keyed by the meta key, like SQLite's
+//! [`SCHEMA`] adds `telemetry_meta` (keyed by the meta key, like the legacy store's
 //! primary key): the `observed_since` marker and the prune marker
 //! `raw_pruned_at`. [`prune`] is `crate::telemetry::prune`: raw events past
 //! 90 days and rollups past 365 days, at most once per 15 minutes.
-//! There is no telemetry backfill to port: the SQLite store has no
+//! There is no telemetry backfill to port: the legacy store has no
 //! backfill of telemetry rows, and SurrealDB starts empty (clean reset).
 
 use anyhow::Result;

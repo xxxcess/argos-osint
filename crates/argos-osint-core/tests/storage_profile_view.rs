@@ -1,5 +1,5 @@
 //! Profile read model on SurrealDB (`storage::profile_view`): the same rows
-//! in SQLite and SurrealDB give the same snapshot for every period/filter.
+//! in the legacy store and SurrealDB give the same snapshot for every period/filter.
 //! Run through `python3 scripts/test_surreal.py --mode both`.
 #![cfg(feature = "surreal")]
 

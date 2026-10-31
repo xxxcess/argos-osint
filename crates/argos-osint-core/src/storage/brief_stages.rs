@@ -3,7 +3,7 @@
 //!
 //! The chain itself is `jobs::ensure_chain` (one `intel_brief` job, four
 //! tasks with their dependencies) and stages commit through the fenced
-//! `jobs::commit_stage`. This module keeps what the SQLite chain stores in
+//! `jobs::commit_stage`. This module keeps what the legacy store chain stores in
 //! its own tables: the captured stage inputs (`brief_stage_input`, the root
 //! tasks' `input_ref` and every task's role snapshot), per-item checkpoints
 //! (`brief_checkpoint`), fidelity receipts (`brief_receipt`), the live
@@ -716,6 +716,25 @@ pub async fn run_claimed(
             }
         })
     };
+    struct HeartbeatGuard {
+        done: Arc<AtomicBool>,
+        handle: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl Drop for HeartbeatGuard {
+        fn drop(&mut self) {
+            self.done.store(true, Ordering::Release);
+            if let Some(handle) = self.handle.take() {
+                handle.abort();
+            }
+        }
+    }
+
+    let mut heartbeat_guard = HeartbeatGuard {
+        done: done.clone(),
+        handle: Some(heartbeat),
+    };
+
     let stages = SurrealStages::new(repo);
     let watch = cancel.clone();
     let result = tokio::select! {
@@ -750,7 +769,10 @@ pub async fn run_claimed(
         }
     };
     done.store(true, Ordering::Release);
-    let _ = heartbeat.await;
+    if let Some(h) = heartbeat_guard.handle.take() {
+        h.abort();
+        let _ = h.await;
+    }
     let _ = set_activity(repo, &claimed.id, "").await;
     Ok(outcome)
 }
@@ -798,12 +820,10 @@ pub async fn stage_meta(repo: &Repository, task: &str) -> Result<Option<(i64, St
 
 /// Production stage backend for the SurrealDB drainer: the configured
 /// provider routes of [`RuntimeBackend`](crate::intel_recon::brief_stages::RuntimeBackend)
-/// without its SQLite file (no telemetry rows), with the body and related
+/// without its legacy store file (no telemetry rows), with the body and related
 /// reads served by the repository.
 ///
-/// Gap: article body acquisition (retrieval routes, cleanup and the
-/// retrieval-attempt ledger) is not ported. A body stage reuses a clean
-/// artifact already stored in the repository and otherwise fails visibly.
+/// Body acquisition, cleanup and the retrieval-attempt ledger use BodyDb::Surreal.
 pub struct SurrealRuntimeBackend {
     inner: crate::intel_recon::brief_stages::RuntimeBackend,
     repo: Repository,

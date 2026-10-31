@@ -675,9 +675,9 @@ where
     let json_bytes = serde_json::to_vec_pretty(&catalog)?;
     let sha256_hex = to_hex(&Sha256::digest(&json_bytes));
 
-    if let Some(active) = dataset::load_active_manifest(DATASET_NAME) {
+    if let Some(active) = dataset::load_active_manifest_async(DATASET_NAME).await {
         if active.active_version == sha256_hex {
-            dataset::update_last_checked(DATASET_NAME)?;
+            dataset::update_last_checked_async(DATASET_NAME).await?;
             on_phase("Templates already up to date");
             return Ok(active);
         }
@@ -699,7 +699,8 @@ where
     };
 
     let activated =
-        dataset::store_and_activate(DATASET_NAME, "templates.json", &json_bytes, manifest)?;
+        dataset::store_and_activate_async(DATASET_NAME, "templates.json", json_bytes, manifest)
+            .await?;
     reload_active_snapshot();
     drop(lease);
     on_phase("Templates activated successfully");

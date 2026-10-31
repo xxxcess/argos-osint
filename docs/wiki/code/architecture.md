@@ -5,7 +5,7 @@
 | Crate | Owns |
 | --- | --- |
 | `argos-osint-core` | Store, OSINT registry/executor, provider routing, Recon |
-| `argos-osint-bin` | CLI and ratatui TUI |
+| `argos-osint-bin` | CLI, ratatui TUI and local stack supervisor; optional shared-process API for TUI display |
 
 Home launches Intel, Atlas, Brain, Recon. Tools / Models / Profile configure Argos (`Osint`, `Providers`, `System`). Jobs and Logs watch background work.
 
@@ -157,6 +157,15 @@ Public observations are data, never instructions.
 - Per-host rate, process concurrency, timeouts, bounded retries/bodies, cache, redirect host policy
 - No active scanning or shell execution
 - Manual calls attach to threads with explicit provenance
+
+### Tool execution bounds and in-flight dedup
+
+`crates/argos-osint-core/src/recon/tool_runner.rs` (`ToolRunner`, constructed from `recon.rs`) owns shared OSINT tool execution with concurrency bounding, per-request timeouts, and atomic in-flight deduplication across Chat and Intel investigations:
+
+- **Concurrency semaphore**: `ToolRunner::MAX_CONCURRENCY = 4` — a `tokio::sync::Semaphore(4)` bounds the number of concurrent OSINT network requests across all tools. `execute_tool_inner` acquires a permit before dispatch and drops it on completion, so no more than four tools run at once.
+- **Per-request timeout**: `ToolRunner::REQUEST_TIMEOUT = 30s`; each tool runs under its own configured timeout (`tool_timeout`), falling back to 30s when the catalog definition sets none. A timeout produces a `failed` result, never zero results.
+- **In-flight deduplication**: while a request for a `cache_key` is in flight, a second caller for the same key waits on the leader's `watch::Receiver` instead of dispatching a duplicate. The leader is tracked in a `Mutex<HashMap<cache_key, watch::Receiver>>` cleared by an `InflightGuard` RAII guard that removes the key on drop, so keys are removed synchronously and deterministically without async-task leakage.
+- **Cancellation**: every call takes an `Arc<AtomicBool>` cancel flag checked before cache lookup, permit acquisition, and execution; a cancelled call is an error, never a zero result.
 
 ### Synthesis
 
@@ -558,7 +567,7 @@ A Focus Brief visit, body-ready event, recovery or **Reload** calls `ensure_inte
 - **Fidelity.** Claims go to Evidence Curator extraction-fidelity decisions; inferences go to Claim Assessor support decisions in batches (≤12 items; native Jev or constrained chat fallback). Receipts are cached by content, policy and route. Inference support checks include the cited support and counterevidence plus every Classifier-selected counterevidence sentence for that claim, even when generation omits a counter-citation. Those original spans remain in provenance. Items not judged faithful are withheld; a citation existing is never support.
 - **Publication.** Claims, Inferences and Links each publish after their fenced stage completion. `storage/brief_stages.rs::commit` first commits the stage output through `jobs::commit_stage`, then updates the brief projection and requests canonical publication through `storage/brief_publish.rs`. The combined display snapshot (`intel_brief_publication`) advances after each completed kind; canonical Brain publication uses the shared `storage::insight::publish_snapshot_on` and a kind-scoped derivation writer. Claims do not wait for Body, Inferences or Links. The Inferences commit writes only Inferences; the Links commit writes only tentative Brain Related article leads. Untouched kinds carry forward without rewriting or re-enqueuing their memories. Historical reports never take precedence. Evidence provenance, live owner checks, generation fencing, stable canonical IDs and transactional rollback remain shared with the insight-refresh lane. Complete retained acquisition and resolvable assessed original passages gate inference publication; the complete local article is retained, but model evidence coverage is explicitly selective. Links retain their exact candidate revision, interpretation and verification gap and never become assessed corroboration. A later stage failure preserves earlier successful publications. A canonical failure rolls back the canonical publication transaction and is reported in the **Publication / Index** footer; it does not turn completed extraction into failure. Published means canonical rows committed; Indexed requires acknowledgment of their current revisions, with pending, disabled and failed index work reported separately. Cached completed artifacts can revalidate publication on a later visit without repeating extraction.
 
-Operational job retention is 72 hours from immutable creation time, across every state, app and kind. Required article/run/thread/memory ownership is typed; deletion retires entire job trees and revokes leases. Startup cleanup runs before recovery; periodic five-minute sweeps use the same bounded cleanup service. Jobs exposes explicit global Completed, Stopped (cancelled/superseded) and Failed (failed/partial) history clearing; services and trees with running descendants are excluded. Manual clearing uses the same retirement fences and preserves published data and pending canonical index work. Stop job handles supported running, queued and retry-scheduled work; durable task cancellation revokes leases and queued work cannot dispatch. Stopped brief chains stay stopped on an ordinary visit; Reload admits a fresh generation. Compact retirement markers prevent late callbacks, retries and stable-ID registration from recreating expired work. Completed report bundles, Brain data and aggregate telemetry survive; pending index consistency work is rebound under fresh service generations. Logs for removed rows display “Job history expired.” See [job lifecycle](../../diagrams/jobs-lifecycle.html).
+Operational job retention is 72 hours from immutable creation time, across every state, app and kind. Required article/run/thread/memory ownership is typed; deletion retires entire job trees and revokes leases. Startup cleanup runs before recovery; periodic five-minute sweeps use the same bounded cleanup service. Jobs exposes explicit global Completed, Stopped (cancelled/superseded) and Failed (failed/partial) history clearing; service roots and trees with running tasks or active services are excluded from retention cleanup. Explicit history clearing additionally preserves active task-job descendants, including taskless ones. Manual clearing uses the same retirement fences and preserves published data and pending canonical index work. Stop job handles supported running, queued and retry-scheduled work; durable task cancellation revokes leases and queued work cannot dispatch. Stopped brief chains stay stopped on an ordinary visit; Reload admits a fresh generation. Compact retirement markers prevent late callbacks, retries and stable-ID registration from recreating expired work. Completed report bundles, Brain data and aggregate telemetry survive; pending index consistency work is rebound under fresh service generations. Logs for removed rows display “Job history expired.” See [job lifecycle](../../diagrams/jobs-lifecycle.html).
 
 `insight_owner_state`, `insight_snapshot`, `insight_derivation`, `insight_derivation_evidence` and `insight_derivation_link` add provenance to the existing Brain database. Before active mutation, publication verifies desired generation, immutable artifact/body/tool/memory revisions and the task lease owner, epoch, state and expiry. Canonical memories, sources, premise lineage, typed links, active head and index outbox commit together. User edits remain canonical; deleted items retain historical provenance with deleted status. Qualified v2 identities separate modality, polarity, attribution and time; legacy identities remain readable.
 
@@ -569,3 +578,64 @@ Related article eligibility requires **at least two distinct overlapping entity 
 Recon Recall is stored per transcript and defaults off. Captured extraction requests do not grant publication authority: the canonical derivation writer rechecks the live, non-deleted thread through the owning run inside its publication transaction. Both the captured save/recall flags and live opt-in must permit Recon Brain memory/index writes. Legacy claim extraction checks before dispatch and again under its persistence transaction. Transcript-local assessed snapshots and answers remain available while off; earlier opted-in memories remain stored. Article brief publication is independent.
 
 Summary flush and local index worker rows describe long-lived elected services, including idle time, rather than finite requests. Both worker loops refresh service heartbeats periodically while elected; task attempts report actual work and failures separately.
+
+## Local Intel HTTP boundary
+
+The [local web/API contract](intel-web.md) adds a UI-independent Intel service, an unauthenticated loopback HTTP adapter and a separate API host over the existing repository. The CLI stack supervisor waits for storage-backed readiness before starting the web application; the TUI continues to access core/storage directly. See the [web lifecycle figure](../../diagrams/intel-web.html) for startup, disconnect and owned/adopted shutdown paths. Public hosting and native application packaging remain deferred.
+
+## Async runtime safety
+
+`@tag:async-runtime`
+
+Argos executes concurrent tasks across Tokio async worker runtimes and dedicated background thread pools. To ensure responsiveness and prevent worker starvation, components adhere to strict async runtime safety rules:
+
+1. **Non-blocking Tokio execution**: Synchronous delays (`std::thread::sleep`), blocking I/O, and CPU-intensive operations are prohibited on Tokio worker threads. Hardware CPU delta sampling is offloaded to the blocking thread pool via `tokio::task::spawn_blocking` in `hardware::profile_fresh_async()` and `hardware::profile_cached_async()`. Synchronous NLP parsing and channel timeouts (`rx.recv_timeout`) in actor deduplication maintenance (`storage/actor_dedup.rs`) are similarly wrapped in `tokio::task::spawn_blocking`.
+2. **Asynchronous network and filesystem operations**: Server readiness probing and startup log checks (`storage/server.rs`) use `tokio::net::TcpStream` and `tokio::fs::read_to_string` rather than blocking `std::net` / `std::fs` calls, ensuring that polling loops (`tokio::time::sleep`) yield cleanly without monopolizing runtime workers.
+3. **Synchronous drop safety**: Rust's `Drop::drop` executes synchronously. Asynchronous operations or detached task spawns (`tokio::spawn`) must never be triggered inside a `Drop` implementation to perform cleanup. For in-flight request deduplication (`recon/tool_runner.rs`), the cache map is guarded by `std::sync::Mutex` rather than an async mutex, enabling `InflightGuard` to synchronously and deterministically remove keys on drop without out-of-band task leakage or panics during runtime shutdown.
+4. **RAII heartbeat task cancellation**: Long-running asynchronous stage pipelines (`storage/brief_stages.rs`, `storage/neighborhood_brief.rs`) spawn lease renewal heartbeat tasks. To guarantee that background tasks are not leaked on early return (`?`), errors, or panics, tasks are wrapped in RAII drop guards (`HeartbeatGuard`). On drop, the guard sets the atomic termination flag (`Ordering::Release` / `Ordering::SeqCst`) and immediately calls `handle.abort()`. When completing normally, the guard's join handle is taken and cleanly awaited.
+5. **RAII cancellation notifier**: `recon.rs` registers each `Arc<AtomicBool>` cancel token in a global `CANCEL_NOTIFIERS` map keyed by allocation address (preventing ABA key collisions on reallocation). A `CancellationNotifierGuard` holds the registration plus an owned `Arc` of the token; on drop — normal return, early exit, `?` propagation, or unwinding — it unregisters the token and purges the entry when no waiters remain. `wait_cancellation` in `recon/tool_runner.rs` holds the guard across its `tokio::select!` wait so a leader's cancellation reliably wakes followers.
+6. **Bounded ordered-write channel**: `storage::runtime` exposes `spawn_ordered`, which enqueues telemetry and state writes onto a single `mpsc` channel with `ORDERED_QUEUE_CAPACITY = 4096`. Writes run one at a time in start order so a later write never lands before an earlier one. If the queue is full, work is dropped with a `warn` telemetry event rather than blocking the caller (non-blocking drop telemetry); `drain()` awaits in-flight writes before process exit. `argos-osint-bin/src/main.rs` bounds shutdown with a 5-second `DRAIN_TIMEOUT` around `storage::runtime::drain()`, so stuck background writes cannot block process exit; on timeout a warning is logged and shutdown proceeds.
+7. **TUI-aware tracing subscriber**: `argos-osint-bin/src/logging.rs` registers `TuiAwareWriter`, a `tracing` writer that suppresses stderr output when `TUI_ACTIVE` is set and stderr is a terminal (the interactive alternate screen), writing normally in CLI mode or redirected output. `init_tracing()` applies an `EnvFilter` and routes all `argos_osint_bin` / `argos_osint_core` tracing through this writer.
+
+## Process lifecycle and signal handling
+
+`@tag:process-lifecycle`
+
+Child process supervision and application shutdown follow deterministic lifecycle guarantees across CLI, TUI, and server hosts:
+
+1. **Child process drop termination**: All managed subprocess commands spawned via Tokio (`cli.rs:dispatch`, `stack/node.rs:NodeEnvironment::command`) configure `.kill_on_drop(true)` on `tokio::process::Command`. If a parent future is dropped, cancelled, or aborted, the operating system kernel immediately signals `SIGKILL` to the child process, preventing orphaned background workers from consuming CPU, memory, or port locks.
+2. **Dual-signal SIGINT/SIGTERM handling**: The CLI session supervisor (`cli.rs`) and API host (`argos-api-host`) listen for both interactive interruptions (`SIGINT` / Ctrl+C) and container supervisor termination signals (`SIGTERM`). On Unix, `tokio::signal::unix::signal(SignalKind::terminate())` intercepts SIGTERM, forwards the termination signal to the running child process via POSIX `libc::kill`, and allows the child to cleanly flush storage and teardown before exiting, preventing premature aborts or unwanted reopening of the interactive Venture launcher.
+3. **Detached child process reaping**: External command executions, such as opening browser URLs via system utilities (`open`, `xdg-open`, `rundll32` in `tui/app.rs`), spawn dedicated background threads (`std::thread::spawn(move || { let _ = child.wait(); })`) to await child termination and reap exit status codes, eliminating zombie (`<defunct>`) entries in POSIX process tables.
+4. **Bounded server graceful shutdown**: HTTP servers (`argos-api-host`) wrap Axum graceful draining in a bounded 15-second deadline via `tokio::time::timeout`. If client connections hang or fail to close during teardown, the server enforces termination after 15 seconds to ensure ports, locks, and resources are promptly released.
+
+### Shared Tokio runtime and worker stack
+
+`crates/argos-osint-bin/src/main.rs` no longer uses `#[tokio::main]`. A plain `fn main()` calls `logging::init_tracing()`, then builds the shared multi-thread runtime explicitly
+(`Builder::new_multi_thread().enable_all().thread_stack_size(8 MiB)`, the
+`WORKER_STACK_BYTES` constant, guarded by a compile-time `assert!` at the
+≥8 MiB floor; a failed build prints `argos: {err:#}` and exits 1) and runs
+`block_on(serve())`. `serve()` keeps the previous
+order: `paths::ensure_home` plus
+`storage::runtime::init` (`Err` ⇒ `argos: {err:#}` + exit 1) →
+`cli::dispatch().await` → a 5 s `DRAIN_TIMEOUT` storage drain with a warning
+on timeout → `Err` ⇒ stderr + exit 1. That one runtime hosts CLI dispatch,
+the TUI and the single storage handle; `argos-api-host` builds its own
+runtime unchanged.
+
+**Why 8 MiB.** lldb showed ~2.08 MB of SurrealDB embedded-engine poll frames
+(`App::send_recon_query` → `recon::Service::ask` → `orchestrate::run_turn` →
+`derive_directives` → `nlp::prepare_mode` → `nlp::surreal_put` →
+`storage::nlp_cache::put` → `Transaction::commit`) for one ordinary
+`nlp_cache` UPSERT on the default 2 MiB Tokio worker stack, aborting the
+process (SIGABRT) when a recon investigation is launched from the Home
+composer. 8 MiB keeps every deep storage call (recon, Atlas, NLP cache) on
+the same worker stack instead of localizing the fix to one write path.
+
+### TUI event loop on a dedicated OS thread
+
+`crates/argos-osint-bin/src/tui/app.rs::run` runs the terminal UI on a dedicated OS thread (`std::thread::Builder::new().name("argos-tui")`) outside the Tokio worker threads, so synchronous crossterm event polling and Ratatui rendering never starve async tasks:
+
+- The thread starts the process heartbeat outside the Tokio-entered context (so `storage::runtime::blocking` works), then calls `runtime.enter()` to execute `run_with_shutdown` on the process runtime.
+- The spawned thread sends its outcome through a `tokio::sync::oneshot` channel.
+- The main task awaits with `tokio::select!`: either the oneshot result (TUI finished normally) or `shutdown_signal()` (SIGINT via `ctrl_c` and SIGTERM via `tokio::signal::unix`). On signal it sets a shutdown `AtomicBool` and waits up to 5 seconds for the TUI thread; on timeout it forces a terminal reset and returns an error.
+

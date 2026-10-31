@@ -3,7 +3,7 @@
 //! `sync_claim_actor_payload` and `brain_backfill::bind_claim_subject` that
 //! insight publication needs.
 //!
-//! `bind_in` follows the SQLite order: scoped external reference, then the
+//! `bind_in` follows the legacy store order: scoped external reference, then the
 //! sole source-scoped alias match, then the deterministic provisional actor.
 //! Trusted identifiers are refused (publication never passes any); the
 //! backfill receipt is `storage::entities::put_backfill_receipt_in`.

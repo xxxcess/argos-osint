@@ -105,6 +105,15 @@ pub fn load_active_manifest(name: &str) -> Option<DatasetManifest> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Asynchronous version of [`load_active_manifest`] offloading disk read
+/// to Tokio's blocking thread pool.
+pub async fn load_active_manifest_async(name: impl Into<String>) -> Option<DatasetManifest> {
+    let name = name.into();
+    tokio::task::spawn_blocking(move || load_active_manifest(&name))
+        .await
+        .ok()?
+}
+
 /// Query dataset status.
 pub fn get_status(name: &str) -> DatasetStatus {
     match load_active_manifest(name) {
@@ -151,6 +160,19 @@ pub fn read_active_data(
     let bytes = fs::read(&file_path)
         .with_context(|| format!("failed to read active dataset file {}", file_path.display()))?;
     Ok(Some((manifest, bytes)))
+}
+
+/// Asynchronous version of [`read_active_data`] offloading disk read
+/// to Tokio's blocking thread pool.
+pub async fn read_active_data_async(
+    name: impl Into<String>,
+    data_filename: impl Into<String>,
+) -> Result<Option<(DatasetManifest, Vec<u8>)>> {
+    let name = name.into();
+    let data_filename = data_filename.into();
+    tokio::task::spawn_blocking(move || read_active_data(&name, &data_filename))
+        .await
+        .context("spawn_blocking failed for read_active_data")?
 }
 
 /// Store an immutable snapshot version and atomically activate it.
@@ -203,6 +225,23 @@ pub fn store_and_activate(
     Ok(manifest)
 }
 
+/// Asynchronous version of [`store_and_activate`] offloading all directory
+/// creation, payload writes, and atomic manifest renames to Tokio's blocking thread pool.
+pub async fn store_and_activate_async(
+    name: impl Into<String>,
+    data_filename: impl Into<String>,
+    data_bytes: Vec<u8>,
+    manifest: DatasetManifest,
+) -> Result<DatasetManifest> {
+    let name = name.into();
+    let data_filename = data_filename.into();
+    tokio::task::spawn_blocking(move || {
+        store_and_activate(&name, &data_filename, &data_bytes, manifest)
+    })
+    .await
+    .context("spawn_blocking failed for store_and_activate")?
+}
+
 /// Update only `last_checked` timestamp of the active manifest when an upstream check reveals no change.
 pub fn update_last_checked(name: &str) -> Result<()> {
     let mut manifest = match load_active_manifest(name) {
@@ -219,6 +258,15 @@ pub fn update_last_checked(name: &str) -> Result<()> {
     fs::write(&temp_manifest_path, &manifest_bytes)?;
     fs::rename(&temp_manifest_path, active_manifest_path(name))?;
     Ok(())
+}
+
+/// Asynchronous version of [`update_last_checked`] offloading disk writes
+/// to Tokio's blocking thread pool.
+pub async fn update_last_checked_async(name: impl Into<String>) -> Result<()> {
+    let name = name.into();
+    tokio::task::spawn_blocking(move || update_last_checked(&name))
+        .await
+        .context("spawn_blocking failed for update_last_checked")?
 }
 
 /// Import a dataset from a local file path.

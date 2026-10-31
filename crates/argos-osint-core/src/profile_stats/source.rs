@@ -1,7 +1,7 @@
 //! Where the Profile aggregation reads its rows from.
 //!
 //! [`ProfileSource`] is every read `profile_stats` performs, one method per
-//! durable query. The SQLite [`Connection`] runs the original SQL; the
+//! durable query. The legacy store [`Connection`] runs the original SQL; the
 //! in-memory [`ProfileTables`] answers the same questions over rows another
 //! store loaded (SurrealDB: `storage::profile_view`). `None` means the table
 //! does not exist, which the aggregation renders as unavailable, never zero.
@@ -282,7 +282,7 @@ fn sql_list(values: &[&str]) -> String {
 }
 
 /// Profile input rows held in memory. Each `None` is a table the store does
-/// not have; the answers match the SQLite queries row for row.
+/// not have; the answers match the legacy store queries row for row.
 #[derive(Clone, Debug, Default)]
 pub struct ProfileTables {
     pub telemetry_events: Option<Vec<TelemetryRow>>,

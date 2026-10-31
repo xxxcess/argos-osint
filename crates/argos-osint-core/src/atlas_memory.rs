@@ -6,7 +6,7 @@
 //! 1. Phase 4 checkpoints the validated extraction ([`save_checkpoint`]) so a
 //!    crash or retry never reruns a successful LLM extraction.
 //! 2. The checkpoint is published (memories, claim/source links, durable index
-//!    outbox, receipt) in one SQLite transaction ([`publish_checkpoint`]).
+//!    outbox, receipt) in one legacy store transaction ([`publish_checkpoint`]).
 //! 3. Phase 5 drives the run's own outbox work and verifies exact coverage
 //!    ([`index_and_verify`]); unrelated index backlog never blocks it.
 //! 4. Extraction, publication and indexing keep independent states
@@ -466,7 +466,7 @@ fn checkpoint_of(run_id: &str, input: CheckpointInput<'_>) -> Checkpoint {
 }
 
 /// Publish a checkpoint through the transactional publisher. Indexing happens
-/// afterwards in phase 5 (never inside the SQLite transaction).
+/// afterwards in phase 5 (never inside the legacy store transaction).
 pub fn publish_checkpoint(
     store: &Store,
     checkpoint: &Checkpoint,
@@ -808,7 +808,7 @@ pub fn spawn_repair(db_path: std::path::PathBuf, restart: bool) -> bool {
     if REPAIR_RUNNING.swap(true, Ordering::SeqCst) {
         return false;
     }
-    // Under SurrealDB the repair runs on the process runtime, never SQLite.
+    // Under SurrealDB the repair runs on the process runtime, never the legacy store.
     let spawned = crate::storage::runtime::spawn(async move {
         if let Ok(store) = AtlasStore::open(&db_path).await {
             if let Err(e) = run_repair_job_store(&store, 16, restart).await {
@@ -825,12 +825,12 @@ pub fn spawn_repair(db_path: std::path::PathBuf, restart: bool) -> bool {
 
 /// Compatibility entry point: retire obsolete work without startup publication.
 pub fn spawn_startup_reconciliation(_db_path: std::path::PathBuf) -> bool {
-    // The retired Atlas insight work lives in SQLite's task tables only.
+    // The retired Atlas insight work lives in the legacy store's task tables only.
     false
 }
 
 // ---------------------------------------------------------------------------
-// Selected-store entry points. SQLite delegates to the functions above;
+// Selected-store entry points. the legacy store delegates to the functions above;
 // SurrealDB runs the same steps against the repository (publication through
 // `storage::insight::publish_atlas_insights`, reconstruction through
 // `storage::provenance::legacy_receipt`).
@@ -872,7 +872,7 @@ pub async fn load_checkpoint_store(store: &AtlasStore, run_id: &str) -> Result<O
 }
 
 /// [`publish_checkpoint`] on the selected store. Under SurrealDB the brief
-/// summary flush (SQLite summarization queue) is not enqueued.
+/// summary flush (legacy store summarization queue) is not enqueued.
 pub async fn publish_checkpoint_store(
     store: &AtlasStore,
     checkpoint: &Checkpoint,
@@ -1034,7 +1034,7 @@ pub async fn repair_status_store(store: &AtlasStore, run_id: &str) -> Result<Opt
 }
 
 /// [`repair_run`] on the selected store: the CLI and the repair job use
-/// this, so SurrealDB never reopens SQLite.
+/// this, so SurrealDB never reopens the legacy store.
 pub async fn repair_run_store(
     store: &AtlasStore,
     run_id: &str,
@@ -1158,7 +1158,7 @@ async fn save_progress_store(store: &AtlasStore, progress: &RepairProgress) -> R
 
 /// [`repair_page`] on the selected store. Under SurrealDB the keyset page
 /// is taken from `list_runs` (historical contracts, `(started_at, id)`
-/// ascending); SQLite's `retire_atlas_insight_work` and job registration
+/// ascending); the legacy store's `retire_atlas_insight_work` and job registration
 /// have no SurrealDB counterpart here.
 pub async fn repair_page_store(
     store: &AtlasStore,

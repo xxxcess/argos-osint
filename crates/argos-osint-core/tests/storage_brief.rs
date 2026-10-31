@@ -1,5 +1,5 @@
 //! Intel brief publications and the retained Intel display seeds on
-//! SurrealDB (`storage::brief`, `storage::topology`), against the SQLite
+//! SurrealDB (`storage::brief`, `storage::topology`), against the legacy store
 //! `brief_pipeline::publish` upsert and the `brain_topology_query` retained
 //! seed fence. Both modes via `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]

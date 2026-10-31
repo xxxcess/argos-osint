@@ -6,13 +6,47 @@ Detailed agent rules, loaded before editing or running checks.
 
 ## Build and test
 
-Rust 1.95.0 pinned. Agents always build through `python3 scripts/agent_cargo.py … --locked` (artifacts in `target/agents`; `target/debug` is the user's), with `ARGOS_EMBED` unset. `cargo fmt` runs directly.
+Rust 1.95.0 pinned. Agents always build through `python3 scripts/agent_cargo.py … --locked` (artifacts in `target/agents`; `target/debug` is the user's), with `ARGOS_EMBED` unset. `cargo fmt` runs directly. Local Rust builds and tests target the **host machine's native platform** (`uname -ms`, `rustc -vV | grep '^host:'`) and **embedded storage mode** (`--storage embedded`, default features `embedded,nlp`).
+
+### Targeted local Rust builds and tests (fast iteration)
+
+Use package (`-p`) and target (`--lib`, `--bin`, `--test`) flags to scope compilation and test execution to the crates and binaries touched before running the full embedded matrix:
+
+```sh
+# 1. Detect host platform and CPU count (build for the local host target only)
+uname -ms && rustc -vV | grep '^host:' && (sysctl -n hw.ncpu 2>/dev/null || nproc)
+
+# 2. Scoped compile check and Clippy by crate (argos-osint-core | argos-osint-bin | argos-osint-api | argos-api-host)
+python3 scripts/agent_cargo.py check --locked -p argos-osint-core
+python3 scripts/agent_cargo.py clippy --locked -p argos-osint-core --all-targets -- -D warnings
+
+# 3. Scoped unit tests (--lib / --bin) with optional test name filter
+python3 scripts/agent_cargo.py test --locked -p argos-osint-core --lib <filter>
+python3 scripts/agent_cargo.py test --locked -p argos-osint-bin --bin argos <filter>
+python3 scripts/agent_cargo.py test --locked -p argos-api-host <filter>
+
+# 4. Scoped integration test binary (--test <name>)
+python3 scripts/agent_cargo.py test --locked -p argos-osint-api --test api_contract
+python3 scripts/agent_cargo.py test --locked -p argos-osint-bin --test stack_cli
+
+# 5. Scoped embedded storage contract test (single storage_* binary instead of all 60+ binaries)
+ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
+  python3 scripts/agent_cargo.py test --locked -p argos-osint-core --test storage_jobs <filter> -- --nocapture
+
+# 6. Full embedded storage contract suite (when broad storage/schema contracts change)
+python3 scripts/test_surreal.py --mode embedded --no-fail-fast
+
+# 7. Composer-launch PTY regression (POSIX only; only `argos` must be built)
+python3 scripts/test_web_stack.py --composer-smoke
+```
+
+### Full local embedded gate & GitHub CI monitoring
 
 ```sh
 scripts/local_matrix.sh --storage embedded   # fmt → clippy -D warnings → cargo test --workspace → test_surreal.py --mode embedded
 ```
 
-That is the only leg agents run locally; the `server` leg runs in CI only ([docs/wiki/code/ci.md](ci.md)). Serialize Cargo jobs sharing `target/agents`; never delete locks or kill unrelated Cargo processes (diagnose with `lsof -nP target/debug/.cargo-lock`). MiniLM tests are `#[ignore]` and need `ARGOS_EMBED=1`.
+Never attempt to run the full multi-platform / server-mode CI matrix (`ci.yml` across `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-14`, `macos-15-intel` and `--storage server`) locally. Agents must **get the local host-platform embedded build and tests to a stable, passing state first**, then rely on hosted GitHub Actions for non-host platforms and `server` storage mode ([docs/wiki/code/ci.md](ci.md)). When git/GitHub CLI access is available, monitor hosted PR/branch checks (`gh pr checks`, `gh run list --branch "$(git branch --show-current)"`, `gh run view <run-id> --log-failed`) to diagnose and fix issues on other platforms. Serialize Cargo jobs sharing `target/agents`; never delete locks or kill unrelated Cargo processes (diagnose with `lsof -nP target/debug/.cargo-lock`). MiniLM tests are `#[ignore]` and need `ARGOS_EMBED=1`.
 
 ## Storage facts
 

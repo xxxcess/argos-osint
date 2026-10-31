@@ -4,6 +4,25 @@
 
 The [design contract](tui-design-spec.md) preserves the palette in `theme.rs`. Profile follows the [20-view dashboard contract](profile-analytics-dashboard.md) and retains metric semantics/history in [profile-dashboard-and-search.md](profile-dashboard-and-search.md). Components render immutable data; storage reads belong to background refresh/detail delivery.
 
+## Service launcher
+
+`welcome/terminal.rs` presents **ARGOS VENTURE** using the core wordmark glyph style and shared `wordmark::paint_logo` stroke palette. It reuses `theme::panel`, semantic text/focus styles and Ratatui cell measurements. The measured composition, question card, choices, editable value, settings summary and controls are centered. Small terminals use a compact text title. Each question owns one choice list or text editor and a scrollable settings summary. The same measured choice rows drive mouse activation and rendering; click commits on mouse-up within one cell of press. Keyboard selection, validation, Unicode cursor/editing, paste, cancellation, resize and below-minimum behavior are covered by focused launcher tests. It opens no datastore; the resulting selection dispatches the existing stack commands after restoring the terminal. Esc revisits the previous question with a validated remembered value; branch changes discard incompatible later answers. Root Esc or explicit quit leaves Venture. A Venture-owned session returns to its service menu after TUI/stack cleanup; explicit stack commands do not create this parent loop. See [navigation flow](../../diagrams/venture-navigation.html). Venture starts each selected session in a child process and waits for exit before reopening the menu. This releases the process-scoped repository and background workers, so another session can open embedded storage. Explicit `stack up` commands retain their direct lifecycle.
+
+Jobs status/app/search changes immediately invalidate the previous displayed cohort, selected detail, scroll and pending owner navigation, then load the current filter asynchronously. The next frame shows Loading jobs rather than rows for the previous filter. Stale snapshot keys are rejected; same-filter refresh retains matching data. Action geometry includes filter labels so wrapping and click/Tab targets stay current.
+
+**Clear completed/stopped/failed** buttons (`ButtonId::JobsClearCompleted/Stopped/Failed`,
+`app.rs:8600-8630`) perform an optimistic `prune_status` on the local `JobsView`,
+set `jobs_dirty = true`, bump the dashboard generation, and dispatch
+`spawn_job_action(JobAction::Clear(status))` on a worker. The `JobsCleared`
+completion event (`app.rs:5425-5440`) calls `reload_jobs()` for the authoritative
+snapshot. A bounded self-heal in `tick_dashboards` (`app.rs:1977-1986`) marks
+`jobs_dirty = true` on every tick while parked on Jobs (since job registry
+progress has no completion event into the TUI); the reload is still gated on
+`dashboard_reading.is_none()` so an in-flight read is never overwritten. Duplicate
+clear clicks are rejected while `jobs_clearing` is true.
+
+Server traffic uses existing Jobs service rows and Jobs → View logs navigation. Running API/Web service rows sort ahead of ordinary work within the selected filters, keeping them visible on crowded bounded pages; other service rows retain their normal ordering. Work-count headers exclude services. Renderers consume the normal `JobRow` / `EventRow` snapshots; API and frontend producers attach redacted events through a bounded queue rather than writing terminal escape sequences into the app. The repository limits the ID page before loading correlated event/task/attempt details.
+
 ## AnalyticsCard and Dashboard preset
 
 `profile_layout::LayoutResult::new(area, page, count, offset)` is the pure shared geometry result for the **Dashboard** preset: tabs, section navigation, controls, KPI cards, visible analytic panels, scroll extent and status. Drawing, focus registration and pointer routing consume those same rectangles. `PanelRect` includes visible `rect`, virtual `height` and `source_offset`, preserving panel geometry while cropping scrolled rows. `profile_components::{kpi, panel, table_row, clipped}` composes reusable Profile KPI/chart/table panels; general text/editor/transcript primitives stay in `components`.
@@ -73,11 +92,36 @@ assigns body/stages/outputs together and clears obsolete retrieval tracking.
 Read failures preserve cached content. Navigation rejects mismatched owners;
 Reload invalidates previous-generation content. Drawing performs no reads.
 
-Intel Focus Brief keeps its center stack borderless and uses the shared clipped border, padding, independent scroll limits and See more geometry for the **Full article** card in all states. Its six-row virtual minimum reserves two borders, a readable content row and the three-row See more action without overlap. Confidence keeps its ANSI Shadow badge with three fields: Source, Information, Brief rating. Actors from immutable metadata appear above Claims and remain visible without claims and during refresh. Claim and Inference records use measured whole-record targets to open their exact topology, with the same order for drawing, focus and pointer actions. The context column contains Tags, Country and brief Jobs. Historical article reports remain stored; their execution and Full Assessment Recon controls are removed. Jobs action geometry includes global **Clear completed**, **Clear stopped** and **Clear failed**, plus selected **Stop job** for supported running/queued/retry work, with matching keyboard and pointer routes. The Jobs ActionBar uses one-row controls on short bodies to retain table/detail space; wider/taller layouts retain bordered buttons. Service detail explains long-lived availability and distinguishes service age from task work.
+Intel Focus Brief keeps its center stack borderless and uses the shared clipped border, padding, independent scroll limits and See more geometry for the **summary** card, which shows the stored description rather than the retrieved article body. Its six-row virtual minimum reserves two borders, a readable content row and the three-row See more action without overlap. Confidence keeps its ANSI Shadow badge with three fields: Source, Information, Brief rating. Actors from immutable metadata appear above Claims and remain visible without claims and during refresh. Inferences are the last section in the middle Reader stack, after Related; compact layouts reveal them on the Reader page. They use the center scroll offset while Actors and Claims keep their independent left-column offset. Claim and Inference records use measured whole-record targets to open their exact topology, with the same order for drawing, focus and pointer actions. The context column contains Tags, Country and brief Jobs. Historical article reports remain stored; their execution and Full Assessment Recon controls are removed. Jobs action geometry includes global **Clear completed**, **Clear stopped** and **Clear failed**, plus selected **Stop job** for supported running/queued/retry work, with matching keyboard and pointer routes. The Jobs ActionBar uses one-row controls on short bodies to retain table/detail space; wider/taller layouts retain bordered buttons. Service detail explains long-lived availability and distinguishes service age from task work. See [column order](../../diagrams/intel-focus-layout.html).
 
 The brief **Jobs** pane shows the dependency chain summary followed by one spaced record per stage (Full article, Claims, Inferences, Links). Active stages spin; Full Article and Claims may run together, then Inferences joins both and Links follows. Running rows name their activity: retrieving / cleaning, waiting for model, validating, or checking fidelity. Queued rows name their blocker; failed rows show a short reason. A **Publication / Index** footer follows: Pending, Published · Index pending / Indexed / Not indexed · reason / Index failed · reason, with historical reports excluded from precedence. Global Jobs shows the same `Stage · row` labels in stage order, and each committed stage logs `intel_brief.stage`. Content panes show completed checkpoints as soon as they commit, and they never inherit a parent failure: validated artifacts read "Validated · not published". Links render as **Potential corroboration**. Captures: `intel_sequential_stage_screens` at 160×50, 120×40, 100×32, 80×24, 60×18 and 40×12; images are in `docs/screens/intel-sequential/`. The [claim context verification](../../screenshots/intel-claim-context-2026-10-16/README.md) records fresh Actors-first, Inference-entry and staged-publication review.
 
-## Brain Memory Topology and GraphCanvas
+## Brain Memory List and Topology
+
+The Brain list (`ModuleId::Brain`, `BrainListMode::List`) renders memories with
+a control strip: Create, Pin/Unpin, Delete, kind cycle, Find. Its refresh
+channel mirrors the **recon investigation pattern**: every mutating control
+spawns a plain worker thread, sends a completion event, and the event handler
+reloads the list directly — no tick, no intermediate dirty flag.
+
+- **Create**: `save_insight` (`app.rs:6905-6927`) → `std::thread::spawn` →
+  `WorkEvent::InsightSaved` → handler (`app.rs:5555-5566`) calls
+  `reload_memories_selecting(Some(new_id))`.
+- **Pin/Unpin**: `spawn_pin_toggle` (`app.rs:6931-6943`) →
+  `WorkEvent::MemoryPinned` → handler (`app.rs:5568-5576`) calls
+  `reload_memories()`.
+- **Delete**: `request_memory_delete` (`app.rs:9783-9809`) →
+  `WorkEvent::MemoryDeleted` → handler calls `reload_memories()`.
+
+All three workers use `Store::memory()` (process handle) so they run outside the
+TUI thread's entered Tokio context where `storage::runtime::blocking` would bail.
+This is the same reason the recon list and its CRUD controls work.
+
+The list reload path (`reload_memories` → `reload_memories_selecting` →
+`request_memory_snapshot` → `BrainLoaded`) uses a generation token and
+`brain_dirty`/`brain_reading` guard identical to the dashboard pattern:
+a read in flight is left alone; a stale completion re-requests; the dirty flag
+is cleared only on accepted generation match.
 
 `topology_layout::TopologyLayoutResult` computes pure geometry for the **Graph first** preset (dimensions refer to its available body):
 - **Desktop (≥132×32)**: GraphCanvas left 65%, TopologyInspector right 35%.
@@ -123,6 +167,10 @@ for (target, rect) in targets.iter().zip(action_rects(area, &labels)) {
 }
 ```
 
+## Profile control actions and `refresh_profile_now()`
+
+Profile analytics (System → Overview) has a control strip: period/app filters, **Clear filters (c)**, Configs, manual Refresh. The **Clear filters** action (`Target::ProfileAction(2)`, `profile.rs:4183-4186`) and other control actions (`ProfileAction(4)` manual refresh, ProfileChoice commits, custom-period Enter) now call `refresh_profile_now()` (`app.rs:2015-2019`), which sets `profile_dirty = true`, clears the dashboard throttle (`dashboards_at = None`), and invokes `reload_profile()` immediately — mirroring the recon write pattern where the control schedules its own reload instead of relying on the tick. The dirty flag keeps retrying on the tick when a read is already in flight; the throttle reset keeps an explicit action from waiting out the dashboard cadence. Popup-based filter changes also reload via generation checks (`app.rs:5975-6010`).
+
 ## Measured text
 
 `components::measured_lines(lines, width)` freezes cell and grapheme aware wrapped lines before scrolling. Labels and editor sizing use the same terminal cell measurement. Bracketed paste stays with the current editor.
@@ -151,21 +199,28 @@ let height = components::editor_height(&app.composer, width, 1, 8);
 let frozen = TranscriptBlock { revision, width, content: rendered_lines };
 ```
 
+## Composer launch: fail-closed scheduling
+
+`App::send_recon_query` resolves the ambient Tokio handle —
+`tokio::runtime::Handle::try_current().map_err(...)?` — *before* registering
+`self.running`, setting `recon_stage`, or clearing the composer input/draft,
+and only then calls `handle.spawn(...)`. A missing handle returns
+`Err("Background runtime is unavailable; the question was not sent")`, which
+`finish_new_thread`'s `Then::Launch` maps to `LaunchState::RecoverableFailure`
+plus `report()` — a user-legible "Could not create the investigation" error —
+while preserving the draft and leaving no half-started turn behind.
+
+A launch that cannot be scheduled therefore never leaves the composer stuck in
+`LaunchState::Accepting`: the turn is either spawned on the shared runtime or
+rejected loudly with composer state untouched. Previously the send returned
+`Ok(())` with the turn registered but never scheduled — a permanently
+"Accepting" composer.
+
 ## Application presets
 
-Intel article imagery preserves decoded source pixels within the bounded decoder limits.
-Background encoding performs one Lanczos contain resize at the terminal's pixel dimensions;
-the encoded image is centered horizontally and vertically inside its registered area.
-In the brief focus reader the encoded image occupies the left column inside the brief
-article section, beside the brief content; image and content are vertically centered
-within the section. The column is sized adaptively from the reader width (14–40 columns,
-keeping at least 24 columns of brief text) and height (5–12 rows), and collapses when
-the reader is too narrow.
-Bulletin preview text is vertically centered when shorter than its viewport and scrolls
-normally when overflowing. Native graphics preserve photographic detail; half-block
-fallback is inherently limited to two color samples per terminal cell.
+Intel Bulletin previews and Focus Brief prose use the full text width. Short previews remain vertically centered and overflowing previews retain normal scrolling. Article media is displayed by the React Native Intel feed, not the terminal.
 
-Home shrinks its logo and uses two launcher columns on short screens. Recon uses a transcript and 30% context column at 110 cells; compact screens expose Transcript/Investigation pages. Intel uses three columns at 132 cells, two at 100–131, and Extracted/Reader/Context pages on smaller or short screens. Its center stack is borderless, with bordered Full Article and Related cards in every state. Atlas exposes compact Origins/Coverage/Headlines pages. Brain Claims support Split/Graph/Related/Summary expansion; Actor groups use Graph/Related, 65%/35% at ≥100×28 and compact pages otherwise. Tools and Models expose list/editor pages; the model role list registers its rows. System exposes Host/Paths pages on short screens.
+Home shrinks its logo and uses two launcher columns on short screens. Recon uses a transcript and 30% context column at 110 cells; compact screens expose Transcript/Investigation pages. Intel uses three columns at 132 cells, two at 100–131, and Extracted/Reader/Context pages on smaller or short screens. Its center stack is borderless, with bordered summary and Related cards in every state. The summary card shows the stored description. Atlas exposes compact Origins/Coverage/Headlines pages. Brain Claims support Split/Graph/Related/Summary expansion; Actor groups use Graph/Related, 65%/35% at ≥100×28 and compact pages otherwise. Tools and Models expose list/editor pages; the model role list registers its rows. System exposes Host/Paths pages on short screens.
 
 
 ## Shared navigation and portable configuration
@@ -176,7 +231,7 @@ Profile has Overview / System / Configs. Overview retains Summary / Intel / Reco
 
 Report datasets are bounded DetailTable sections with sticky headers, virtual capacity of 10 logical records on tall screens and 3 on short screens. Spaced data extent is `2*N-1`, plus title/header/footer/gutter, clipped to the viewport. Each section keeps its own row/offset; Tab reveals subsequent sections, wheel/PgUp/PgDn scroll the table then its card at a boundary. Full record prose remains reachable through Enter. Report selection, sort, chart/table mode and dashboard restoration remain separate state.
 
-Intel imagery uses the Ratatui image adapter with protocol detection once outside draw, a half-block fallback, contain fit, bounded background fetch/decode/encoding and article-ID + URL identity. Missing/invalid/failed images collapse. Image and Visit article site actions open the article HTTP(S) URL. Tools categories toggle independently of search; Documentation and Test response have independent scrolling, with Catalog / Documentation / Test compact pages. Ctrl+K groups Recently used (8 stable IDs), Current app shortcuts and Universal; headings are not selectable.
+Intel terminal Bulletin and Focus Brief are text-only. They do not fetch/decode article images, probe terminal graphics capabilities or reserve image columns. Article image URLs remain metadata for the React Native client. Visit article site opens the article HTTP(S) URL. Tools categories toggle independently of search; Documentation and Test response have independent scrolling, with Catalog / Documentation / Test compact pages. Ctrl+K groups Recently used (8 stable IDs), Current app shortcuts and Universal; headings are not selectable.
 
 Recon uses a SURFACE user band with ACCENT edge, quiet Markdown synthesis and expandable evidence activity. Failed activities keep a short reason visible. Transcript offsets are usize, Unicode padding uses terminal cells, completed Markdown keeps revision/width caches, and cached block/local-row anchors preserve history during updates. Jump to latest resumes follow; previous/next-turn commands select user-query boundaries.
 
@@ -184,7 +239,7 @@ Acceptance and reproducible capture: [tui-verification.md](tui-verification.md),
 
 ## Related article rows
 
-`related_articles::ArticleRelatedView` supplies immutable bounded Related pages for Intel Focus Brief. It sits beneath Full Article in the middle column, with independent cursor/scroll, a focused border, wrapped titles, clipped geometry and anchored See more. Scope remains All retained cycles / This cycle. Drawing, focus, reveal and pointer targets share the center-stack layout. Stale or missing authoritative article revisions cannot open another row.
+`related_articles::ArticleRelatedView` supplies immutable bounded Related pages for Intel Focus Brief. It sits beneath the summary card in the middle column, with independent cursor/scroll, a focused border, wrapped titles, clipped geometry and anchored See more. Scope remains All retained cycles / This cycle. Drawing, focus, reveal and pointer targets share the center-stack layout. Stale or missing authoritative article revisions cannot open another row.
 
 Brain has no detail view: Enter on a memory (or actor group) opens its Memory Topology at one hop, and Back returns to the list with selection and scroll intact. Intel extracted claims and actors retain measured per-record targets and source identity. Actor totals remain local; a single-member AI summary is never shown for a group.
 

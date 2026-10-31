@@ -1,6 +1,6 @@
 //! Atlas run bookkeeping on SurrealDB (`atlas_store::AtlasStore`,
 //! `storage::atlas::save_with_receipt`, `storage::atlas_work`): the same
-//! calls give the same results on SQLite and SurrealDB.
+//! calls give the same results on the legacy store and SurrealDB.
 //! Run through `python3 scripts/test_surreal.py --mode both`.
 #![cfg(feature = "surreal")]
 

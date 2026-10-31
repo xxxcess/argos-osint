@@ -2,7 +2,7 @@
 //!
 //! When the process selected SurrealDB ([`brain_store::on`]), the `Store`
 //! methods in `crate::jobs_view` and `crate::atlas_metadata` dispatch here
-//! instead of touching the SQLite connection. Every function blocks on
+//! instead of touching the legacy store connection. Every function blocks on
 //! [`runtime::blocking`], so callers must be plain threads, never async code.
 //! Reads and writes reuse `storage::jobs_view`, `storage::jobs`,
 //! `storage::event_log` and `storage::atlas_metadata`.
@@ -148,7 +148,10 @@ pub fn set_job_progress(
         error_summary.to_string(),
     );
     runtime::blocking(|repo| async move {
-        let terminal = matches!(state.as_str(), "succeeded" | "failed" | "cancelled");
+        let terminal = matches!(
+            state.as_str(),
+            "completed" | "partial" | "succeeded" | "failed" | "cancelled"
+        );
         repo.db()
             .query(
                 "UPDATE $j SET state = $state, phase = $phase, progress_done = $done, \

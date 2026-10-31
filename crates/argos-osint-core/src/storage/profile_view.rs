@@ -2,7 +2,7 @@
 //!
 //! [`snapshot`] loads the Profile input rows into
 //! [`ProfileTables`](crate::profile_stats::ProfileTables) and runs the same
-//! aggregation as SQLite, so all 20 views (Intel 4, Recon 5, Atlas 3,
+//! aggregation as the legacy store, so all 20 views (Intel 4, Recon 5, Atlas 3,
 //! Models 4, Tools 4), the KPIs, Needs attention, retention and the status
 //! strip come out identical for identical rows.
 //!

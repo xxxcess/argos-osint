@@ -7,12 +7,13 @@
 //! `bin/surreal-3.3.4` atomically (temp file, fsync, rename). Ordinary
 //! startup never calls this.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 
 use super::home::{Layout, SERVER_VERSION};
 
@@ -128,23 +129,64 @@ pub fn install_archive(layout: &Layout, archive: &Path, expected: &str) -> Resul
 pub async fn install(layout: &Layout, from: Option<&Path>) -> Result<PathBuf> {
     let (asset, sha) = host_pin()?;
     if let Some(archive) = from {
-        return install_archive(layout, archive, sha);
+        let layout_clone = layout.clone();
+        let archive_buf = archive.to_path_buf();
+        let expected = sha.to_string();
+        return tokio::task::spawn_blocking(move || {
+            install_archive(&layout_clone, &archive_buf, &expected)
+        })
+        .await
+        .context("spawn_blocking failed for install_archive")?;
     }
     let url = download_url(asset);
     let bin_dir = layout.home.join("bin");
-    std::fs::create_dir_all(&bin_dir)?;
-    let mut tmp = tempfile::NamedTempFile::new_in(&bin_dir)?;
-    let mut resp = reqwest::Client::builder()
-        .https_only(true)
-        .build()?
-        .get(&url)
-        .send()
-        .await?
-        .error_for_status()
-        .with_context(|| format!("download {url}"))?;
-    while let Some(chunk) = resp.chunk().await? {
-        tmp.write_all(&chunk)?;
+    tokio::fs::create_dir_all(&bin_dir)
+        .await
+        .with_context(|| format!("create {}", bin_dir.display()))?;
+
+    let bin_dir_clone = bin_dir.clone();
+    let tmp_path = tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+        let tmp = tempfile::Builder::new()
+            .prefix(".surreal-download-")
+            .suffix(".tgz")
+            .tempfile_in(&bin_dir_clone)?;
+        let (_, path) = tmp.keep()?;
+        Ok(path)
+    })
+    .await
+    .context("spawn_blocking failed to create download tempfile")??;
+
+    let download_result = async {
+        let mut file = tokio::fs::File::create(&tmp_path).await?;
+        let mut resp = reqwest::Client::builder()
+            .https_only(true)
+            .build()?
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()
+            .with_context(|| format!("download {url}"))?;
+        while let Some(chunk) = resp.chunk().await? {
+            file.write_all(&chunk).await?;
+        }
+        file.sync_all().await?;
+        Ok::<(), anyhow::Error>(())
     }
-    tmp.as_file().sync_all()?;
-    install_archive(layout, tmp.path(), sha)
+    .await;
+
+    if let Err(e) = download_result {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(e);
+    }
+
+    let layout_clone = layout.clone();
+    let path_clone = tmp_path.clone();
+    let expected = sha.to_string();
+    let result =
+        tokio::task::spawn_blocking(move || install_archive(&layout_clone, &path_clone, &expected))
+            .await
+            .context("spawn_blocking failed for install_archive")?;
+
+    let _ = tokio::fs::remove_file(&tmp_path).await;
+    result
 }

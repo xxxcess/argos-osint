@@ -3,7 +3,7 @@
 //!
 //! [`ensure_schema`] applies every storage module's schema, in dependency
 //! order, in one transaction, and records the schema version on
-//! `storage_meta:schema`. As in SQLite (`user_version`), a database written
+//! `storage_meta:schema`. As in the legacy store (`user_version`), a database written
 //! by a newer build is refused and the transaction rolls back. Every definition
 //! is `IF NOT EXISTS`, so a re-run (or a concurrent bootstrap, which retries
 //! on conflict) is a no-op. There is no in-place migration ladder: the

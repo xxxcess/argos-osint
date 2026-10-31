@@ -1,6 +1,6 @@
 //! Intel storage on SurrealDB (P3): `intel_investigation`,
 //! `intel_link_explanation`, `intel_report_result`, `article_refresh_intent`
-//! and `article_refresh_retirement`, the SurrealDB side of the SQLite tables
+//! and `article_refresh_retirement`, the SurrealDB side of the legacy store tables
 //! of the same names (plural).
 //!
 //! Record keys: `intel_investigation` by id (unique `article_id` index),

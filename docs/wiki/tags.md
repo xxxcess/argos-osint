@@ -14,6 +14,13 @@ Tags connect a documented concern to its implementation across directory boundar
 | `@tag:osint-providers` | [Providers](code/core.md#providers-and-tool-adapters) | [providers.rs](../../crates/argos-osint-core/src/osint/providers.rs) |
 | `@tag:surreal-storage` | [Storage](code/storage.md) | [storage/mod.rs](../../crates/argos-osint-core/src/storage/mod.rs) |
 | `@tag:tui-components` | [Interfaces](code/interfaces.md) | [components.rs](../../crates/argos-osint-bin/src/tui/components.rs) |
+| `@tag:async-runtime` | [Architecture](code/architecture.md#async-runtime-safety) | [hardware.rs](../../crates/argos-osint-core/src/hardware.rs) |
+| `@tag:process-lifecycle` | [Architecture](code/architecture.md#process-lifecycle-and-signal-handling) | [cli.rs](../../crates/argos-osint-bin/src/cli.rs) |
+| `@tag:api-timeouts` | [Intel web](code/intel-web.md#api-contract) | [lib.rs](../../crates/argos-osint-api/src/lib.rs) |
+| `@tag:abort-signal` | [Intel web](code/intel-web.md#async-presentation) | [index.tsx](../../packages/api-client/src/index.tsx) |
+| `@tag:testing` | [Testing](code/react-ui.md#react-component-testing-real-component-pattern) | [UI tests](../../packages/ui/__tests__/) / [Intel tests](../../packages/intel/__tests__/) |
+| `@tag:look-and-feel` | [Look & Feel](code/react-ui.md#argos-look--feel-reference) | [UI primitives](../../packages/ui/src/index.tsx) |
+| `@tag:react-ui` | [React UI](code/react-ui.md) | [UI primitives](../../packages/ui/src/index.tsx) / [Intel screens](../../packages/intel/src/index.tsx) |
 
 From the repo root:
 

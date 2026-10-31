@@ -8,9 +8,13 @@ How to run the terminal UI and CLI. Product tour in the [README](../../../README
 
 ```sh
 cargo run -p argos-osint-bin
+# Or skip the service menu:
+cargo run -p argos-osint-bin -- stack up --tui
 ```
 
-Opens on **Home**. `↑↓` + Enter open an app. Keys `1`–`9` jump Intel → Profile. Esc or Home returns Home. `?` opens shortcuts.
+With no arguments, Argos opens its centered **ARGOS VENTURE** Ratatui service launcher: **TUI**, **API Server**, or **Web**. Select with ↑/↓, Tab or a number and press Enter, or click a choice. The wizard asks for storage mode, ports and the selected service's options; Ctrl+U clears a field, PgUp/PgDn review settings, and Esc cancels. The final choice starts the stack with either the normal TUI or server logs visible. API/Web prerequisites are in the [stack guide](../code/intel-web.md#running-locally). Web opens the ready URL through the default browser; `--no-open` disables this. Explicit CLI commands bypass the wizard, and redirected input retains text prompts.
+
+The TUI opens on **Home**. `↑↓` + Enter open an app. Keys `1`–`9` jump Intel → Profile. Esc or Home returns Home. `?` opens shortcuts.
 
 [![TUI shell](../../diagrams/tui-shell.svg)](../../diagrams/tui-shell.html)
 
@@ -24,6 +28,8 @@ Opens on **Home**. `↑↓` + Enter open an app. Keys `1`–`9` jump Intel → P
 | Ctrl+Q | Quit (confirm within one second if work is pending) |
 
 A click commits on mouse-up only if the pointer stays within one cell of the press. Dragging across Home does not launch an app.
+
+With an API/Web stack and **TUI** terminal display, open **Jobs**, select **Rust API server** and activate **View logs** (`l`) for API traffic. Web stacks also list **Next.js web server** (development) or **Static web server** (built export). These service jobs use the shared embedded repository and show access logs/server output through the Rust Logs app. Operational Jobs/Logs are not part of the React Native Intel client.
 
 ### Recon
 
@@ -51,14 +57,16 @@ Turn flow, bindings, and citations: [architecture.md](../code/architecture.md).
 Atlas headline board: tabs, day filter, search, hero story.
 
 - Enter → Focus Brief: extracted facts, article reader, Related and brief Jobs.
-- Left: Confidence, Actors, Claims, Inferences and Links. Activate a Claim or Inference record to map its exact Brain topology.
-- Middle: preview/image, Visit/Reload, bordered Full Article, then bordered Related.
+- Left: Confidence, Actors, Claims and Links. Activate a Claim or Inference record to map its exact Brain topology.
+- Middle: full-width text preview, Visit/Reload, bordered Full Article, then bordered Related.
 - Right: Tags, Country and brief preparation Jobs. Compact pages expose Extracted, Reader and Context.
 - Related has its own cursor and scroll; focus reveals its panel. Wheel and PageUp/PageDown scroll its rows before the middle stack. See more stays anchored.
 
-Intel Focus Brief shows Confidence above Claims: an Admiralty badge with Source, Information and Brief rating. The deterministic rating averages unique supported claims and inferences, collapses copied support roots and penalizes explicit refutations; it is a support score, not a truth probability. Source-only B6 is 60 provisional, F6 is N/A, empty completed assessment is N/A and all-refuted is 0. Pending/failed replacements retain the previous rating with a label. Actors from stored title/description mentions are visible before claims and during refresh. Scroll the extracted column to reach every Actor; Related is beneath Full Article in the reader. Full article has a clipped border in loading, empty, error and long-text states, with independent scrolling and See more. Tags/Country/Jobs remain visible in the context column.
+Intel Focus Brief shows Confidence above Claims: an Admiralty badge with Source, Information and Brief rating. The deterministic rating averages unique supported claims and inferences, collapses copied support roots and penalizes explicit refutations; it is a support score, not a truth probability. Source-only B6 is 60 provisional, F6 is N/A, empty completed assessment is N/A and all-refuted is 0. Pending/failed replacements retain the previous rating with a label. Actors from stored title/description mentions are visible before claims and during refresh. Scroll the extracted column to reach every Actor; Related is beneath the summary in the reader; Inferences is the final middle-column section after Related. In React Native, Inferences finishes the Reader pane after the source link. The summary pane shows the stored description, with independent scrolling and See more. The full retrieved article body is not drawn there. Tags/Country/Jobs remain visible in the context column.
 
 Visiting a brief starts Full article and Claims independently. Inferences then use actor-mention sentences selected by Classifier for each claim, rather than article chunks. Each claim receives its own analysis request with associated actors and selected evidence; unsupported outlooks are withheld. Claims publish and queue indexing as soon as extraction completes, Inferences publish next, and Links publish last, each updating only that kind. A later failure leaves earlier results available. Jobs distinguishes extraction progress, publication, current-revision indexing and failure reasons. Article Recon reports are retired: no mode classification, report launch, BLUF or full-report selector. Independent Recon investigations remain available. Historical report artifacts are retained, and validated cached brief artifacts republish on the next normal visit without repeating extraction stages.
+
+The React Native Intel app also starts or attaches brief preparation when you open a Focus Brief, including a Related article. Polling and refresh do not repeatedly submit the same visit. If admission fails, an alert appears above the brief; use **Ensure / resume brief** in Context to retry. Opening an unchanged article reattaches existing work; **Reload article / new generation** remains explicit.
 
 In Intel, Ctrl+K → **Open extraction job** shows stage, completed/total windows and assessment batches, provider route/attempt, withheld items and the exact failure. Ctrl+K → **Retry extraction**, or the extraction job's **Retry extraction** button, admits one retry epoch for recoverable unfinished work and keeps completed compatible checkpoints. Visiting again or restarting does not retry exhausted work. A relevant model-route change admits replacement work using the captured old routes for comparison. Qualified items can publish while optional assessments remain withheld; missing mandatory coverage or all-withheld model failure keeps the previous snapshot. **Published** means Brain rows committed. **Indexed** means their current revisions were acknowledged; pending/disabled index work stays separate. Use **Retry index** on the failed index job in Jobs; reindexing cannot create insights that never published.
 
@@ -224,24 +232,22 @@ Persistence: [architecture.md](../code/architecture.md#persistence).
 
 
 Profile opens Overview; its upper buttons select Overview, System or Configs. `x` and the Configs palette command select the Configs page. Export precedes the multiline Import editor: Verify shows a redacted change summary, then Save and apply commits that exact revision. Enter in JSON inserts a newline. Tools has category groups and compact Catalog / Documentation / Test pages; search reveals matches without changing saved expansion. Intel's Visit article site action opens the article URL. Ctrl+K lists recent commands and current-app shortcuts above universal actions. Recon exposes Jump to latest and previous/next-turn commands through the palette.
-## Intel article image quality
+## Intel article images
 
-Argos queries terminal graphics capabilities at startup. Direct-session fallback
-detection selects Kitty graphics for Kitty/Ghostty and inline iTerm images for
-iTerm2/VS Code. Direct iTerm2 sessions prefer its native inline-image protocol
-even when Kitty support is advertised, because the adapter's Kitty renderer
-requires Unicode image placements. In VS Code enable `terminal.integrated.enableImages` (see
-[terminal image support](https://code.visualstudio.com/docs/terminal/advanced#_image-support)).
-Multiplexed sessions rely on capability queries rather than outer-terminal names.
-When pixel-size queries are unavailable, native rendering uses the adapter's
-default cell aspect ratio. Apple Terminal and unknown terminals retain the
-portable half-block fallback, whose resolution is limited to terminal cells.
-For photographic detail use a terminal that supports native image graphics.
+The core terminal TUI displays article text without downloading or rendering images. Use **Visit article site** to open the original article in your browser.
 
-Images retain their source resolution during decoding and use a single high-quality
-contain resize for display. Bulletin imagery and short article previews are
-vertically centered; briefing imagery is horizontally centered in the reader column.
+The React Native Intel category feed displays available article images to the left of the headline, description and source information. Thumbnails stay on the left at compact widths. Missing, unsafe or failed image sources collapse so article text and **Open Focus Brief** remain usable. The web static host permits HTTPS images.
 
 Local NLP is configured in `config.toml` with `[nlp] mode = "auto"` (default), `"off"`, `"annotate"`, or `"select"`. It is not part of portable Profile configuration. See [nlp-preprocessing.md](nlp-preprocessing.md) for evidence and fallback behavior.
 
 Related article eligibility requires **at least two distinct overlapping entity mentions** in the exact source/candidate headline or description. Repetitions and aliases of one normalized name count once; country/category fields do not count as mentions. Atlas ingest persists Related associations; Intel Related reflects those retained pairs and rechecks current revisions. Brain Actor Articles instead counts direct retained actor mentions, observed links and claim origins, without requiring a second article or a two-entity pair. A browse visit adds no name-only or canonical-actor suggestions. Original claim Sources preserve provenance independently. Investigation entity associations require Recall on; later disabling Recall preserves earlier receipts. The local match receipt is `shared-headline-entities-v4-possessive`; changing this policy invalidates only Related matching and the dependent Links shortlist, preserving compatible Body/Claims/Inferences and fidelity checkpoints.
+
+## Local Intel web workspace
+
+The [web/API guide](../code/intel-web.md#running-locally) covers `argos stack up --web`, API-only `--server`, static export builds, connection settings and safe shutdown. `argos` and `argos stack up --tui` continue to open the terminal directly. The web application is local development only; public deployment and native clients remain later phases in the [living specification](../../argos-intel-living-spec.md).
+
+## Async Intel and Venture navigation
+
+The React Native Web Intel client distinguishes loading, refresh, pagination and empty/error states. Scroll toward the end of a Bulletin category to load another retained cursor page; manual load/retry remains available. Category/day/search changes keep their own data. A zero count means no matching items after a successful read; numeric zero confidence remains a value.
+
+In the no-argument ARGOS VENTURE launcher, Esc returns to the previous option and restores its entered value. Esc at the service choice exits. Closing a launched TUI or stopping a Venture-owned session returns to the service menu after cleanup. If a service launch fails, Venture surfaces the failure notice in the wizard summary area rather than silently cycling, while `stack up` and `stack down` automatically detect and recover abandoned supervisor state by reaping orphaned child processes and cleaning up stale locks. Direct `argos stack up` commands still exit to their caller. Jobs status/app/search changes immediately replace old-filter rows with a loading state, followed by the current matching rows or a verified empty result.

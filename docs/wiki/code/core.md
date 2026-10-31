@@ -16,6 +16,8 @@ All paths below belong to [argos-osint-core/src](../../../crates/argos-osint-cor
 
 [intel_recon/](../../../crates/argos-osint-core/src/intel_recon) owns article analysis; [brief_pipeline.rs](../../../crates/argos-osint-core/src/intel_recon/brief_pipeline.rs) coordinates brief work, with contract and pipeline tests nearby. Read [job concepts](../concepts/glossary.md#intel-brief-jobs-and-historical-reports) and the [brief chain](../../diagrams/intel-brief-chain.html). Follow persistence into [storage/brief.rs](../../../crates/argos-osint-core/src/storage/brief.rs) and [brief_publish.rs](../../../crates/argos-osint-core/src/storage/brief_publish.rs).
 
+The UI-independent [Intel service](../../../crates/argos-osint-core/src/intel_service.rs) supplies the [local web API](intel-web.md); it reuses repository brief, Related and topology contracts without exporting terminal state.
+
 ## Atlas
 
 `@tag:atlas-collection`

@@ -1,5 +1,5 @@
 //! Recon runs, tool calls, answer evidence and the tool cache on SurrealDB
-//! (`storage::recon_runs`), against the SQLite `Store` behaviour. Both
+//! (`storage::recon_runs`), against the legacy store behaviour. Both
 //! modes via `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
 
@@ -30,7 +30,7 @@ fn result(status: &str, retrieved_at: &str) -> ToolResult {
 }
 
 #[tokio::test]
-async fn runs_follow_the_sqlite_state_machine() {
+async fn runs_follow_the_legacy_state_machine() {
     let Some(server) = Server::start() else {
         return;
     };
@@ -137,7 +137,7 @@ async fn runs_follow_the_sqlite_state_machine() {
 }
 
 #[tokio::test]
-async fn calls_evidence_and_cache_match_the_sqlite_store() {
+async fn calls_evidence_and_cache_match_the_legacy_store() {
     let Some(server) = Server::start() else {
         return;
     };

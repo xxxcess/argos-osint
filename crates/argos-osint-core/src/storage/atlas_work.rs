@@ -3,7 +3,7 @@
 //! `atlas_get_unit_manifests`, `atlas_get_all_unit_manifests`).
 //!
 //! Record key: `codec::encode([run_id, unit_id])`. A save replaces the
-//! whole manifest, like SQLite's `INSERT OR REPLACE`. The manifest is kept
+//! whole manifest, like the legacy store's `INSERT OR REPLACE`. The manifest is kept
 //! as its JSON (`manifest_json`) beside the indexed `run_id` and `stage`.
 
 use anyhow::{bail, Result};

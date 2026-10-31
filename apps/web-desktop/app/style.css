@@ -1,0 +1,71 @@
+/* Keep browser surfaces aligned with @argos/ui and the core TUI theme. */
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  height: 100%;
+  min-height: 100%;
+  background-color: #141414;
+  background-image:
+    linear-gradient(rgba(135, 191, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(135, 191, 255, 0.04) 1px, transparent 1px),
+    radial-gradient(ellipse at top, #1e242b 0%, #141414 60%);
+  background-size: 32px 32px, 32px 32px, 100% 100%;
+  background-attachment: fixed;
+  color: #e8e8e8;
+  font-family: Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+body {
+  color-scheme: dark;
+}
+button,
+input,
+select {
+  font: inherit;
+}
+a {
+  color: #87bfff;
+  text-decoration: underline;
+}
+input,
+select {
+  background: rgba(18, 22, 27, 0.7);
+  border: 1px solid #535353;
+  border-radius: 2px;
+  color: #e8e8e8;
+  min-width: 0;
+}
+:focus-visible {
+  outline: 2px solid #87bfff;
+  outline-offset: -2px;
+}
+::selection {
+  background: #87bfff;
+  color: #141414;
+}
+
+/* Keep static-export markup identical across initial browser widths. */
+@media (max-width: 599px) {
+  #workspace-description,
+  #workspace-route {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [role="progressbar"] svg {
+    animation: none !important;
+  }
+}
+
+/* HUD scrollbars and glow on keyboard focus. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #535353 transparent;
+}
+:focus-visible {
+  box-shadow: 0 0 0 1px #87bfff, 0 0 12px rgba(135, 191, 255, 0.45);
+}

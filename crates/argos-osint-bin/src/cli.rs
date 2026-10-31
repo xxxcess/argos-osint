@@ -23,6 +23,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Start and manage a local application stack.
+    Stack {
+        #[command(subcommand)]
+        command: crate::stack::StackCommand,
+    },
     /// Save a sourced insight for recall by another chat app.
     Remember {
         #[arg(long)]
@@ -316,13 +321,154 @@ enum AtlasCommand {
 
 pub async fn dispatch() -> Result<()> {
     let command = Cli::parse().command;
+    if command.is_some() {
+        return dispatch_command(command).await;
+    }
+    // Venture owns the session; child TUI/stack guards restore the terminal
+    // and stop owned services before the next menu is presented.
+    let mut notice = None;
+    loop {
+        let current_notice = notice.clone();
+        let Some(selection) = tokio::task::spawn_blocking(move || {
+            crate::welcome::run_with_notice(current_notice.as_deref())
+        })
+        .await??
+        else {
+            return Ok(());
+        };
+        notice = None;
+        Cli::try_parse_from(&selection.args)?;
+        if let Some(args) = selection.storage_init {
+            let status = tokio::process::Command::new(std::env::current_exe()?)
+                .args(args)
+                .kill_on_drop(true)
+                .status()
+                .await?;
+            if !status.success() {
+                notice = Some(format!("Storage setup failed ({status})"));
+                continue;
+            }
+        }
+        // Each session owns its repository and background workers. Waiting for
+        // process exit releases embedded storage before Venture can launch again.
+        let started = std::time::Instant::now();
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
+            .args(selection.args.iter().skip(1))
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let last_err: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let last_err_clone = Arc::clone(&last_err);
+        if let Some(err_reader) = child.stderr.take() {
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut reader = tokio::io::BufReader::new(err_reader).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    eprintln!("{line}");
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        if let Ok(mut guard) = last_err_clone.lock() {
+                            *guard = Some(trimmed.to_string());
+                        }
+                    }
+                }
+            });
+        }
+        #[cfg(unix)]
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        let mut term_received = false;
+        const CHILD_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        const CHILD_REAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+        let status = loop {
+            tokio::select! {
+                status = child.wait() => break status?,
+                signal = tokio::signal::ctrl_c() => {
+                    // The foreground child receives the same terminal signal.
+                    // Let its supervisor finish cleanup before reopening Venture.
+                    signal?;
+                }
+                _ = async {
+                    #[cfg(unix)]
+                    if let Some(ref mut term) = sigterm {
+                        term.recv().await;
+                        return;
+                    }
+                    std::future::pending::<()>().await;
+                } => {
+                    // When container supervisors or process managers send SIGTERM,
+                    // forward the signal to the child so it triggers clean teardown.
+                    term_received = true;
+                    #[cfg(unix)]
+                    if let Some(pid) = child.id() {
+                        if pid > 0 && pid <= i32::MAX as u32 {
+                            // SAFETY: pid is validated to be a non-zero, positive integer within pid_t range.
+                            unsafe {
+                                libc::kill(pid as i32, libc::SIGTERM);
+                            }
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    let _ = child.start_kill();
+
+                    // Bounded grace period waiting for child to exit gracefully.
+                    match tokio::time::timeout(CHILD_SHUTDOWN_TIMEOUT, child.wait()).await {
+                        Ok(status_res) => break status_res?,
+                        Err(_) => {
+                            #[cfg(unix)]
+                            if let Some(pid) = child.id() {
+                                if pid > 0 && pid <= i32::MAX as u32 {
+                                    // SAFETY: pid is validated to be a non-zero, positive integer within pid_t range.
+                                    unsafe {
+                                        libc::kill(pid as i32, libc::SIGKILL);
+                                    }
+                                }
+                            }
+                            let _ = child.kill().await;
+                            let status = match tokio::time::timeout(CHILD_REAP_TIMEOUT, child.wait()).await {
+                                Ok(Ok(st)) => st,
+                                _ => anyhow::bail!("timed out waiting to reap child process"),
+                            };
+                            break status;
+                        }
+                    }
+                }
+            }
+        };
+        if term_received {
+            return Ok(());
+        }
+        if !status.success() {
+            eprintln!("Session ended: {status}");
+            let detail = last_err.lock().ok().and_then(|g| g.clone());
+            let elapsed = started.elapsed();
+            if let Some(msg) = detail {
+                if elapsed < std::time::Duration::from_secs(3) {
+                    notice = Some(format!("Launch failed: {msg}"));
+                } else {
+                    notice = Some(format!("Session error: {msg}"));
+                }
+            } else if elapsed < std::time::Duration::from_secs(3) {
+                notice = Some(format!("Service launch failed ({status})"));
+            } else {
+                notice = Some(format!("Session ended with failure ({status})"));
+            }
+        }
+    }
+}
+
+async fn dispatch_command(command: Option<Command>) -> Result<()> {
     #[cfg(feature = "surreal")]
     let command = match surreal_brain(command).await? {
         Some(command) => command,
         None => return Ok(()),
     };
     match command {
-        None => tui::run(App::boot()?).await,
+        None => {
+            let app = tokio::task::spawn_blocking(App::boot).await??;
+            tui::run(app).await
+        }
+        Some(Command::Stack { command }) => crate::stack::dispatch(command).await,
         Some(Command::Remember {
             app,
             conversation,
@@ -427,7 +573,7 @@ async fn storage_command(command: StorageCommand) -> Result<()> {
 }
 
 /// Under a configured storage mode, the Brain commands run on the SurrealDB
-/// repository only, never mixed with SQLite. Returns the command back
+/// repository only, never mixed with a legacy store. Returns the command back
 /// when it is not a Brain command or no storage mode is configured, and
 /// None when it ran here.
 #[cfg(feature = "surreal")]
@@ -496,7 +642,7 @@ async fn surreal_brain(command: Option<Command>) -> Result<Option<Option<Command
 }
 
 /// The Recon store for this command: the repository under a storage
-/// config, otherwise SQLite (never both).
+/// config, otherwise the legacy store (never both).
 async fn recon_store() -> Result<ReconStore> {
     paths::ensure_home()?;
     let _ = argos_osint_core::config_commit::recover_at_startup();
@@ -1055,8 +1201,8 @@ fn reject_collection_maintenance(
     Ok(run.id.clone())
 }
 
-/// [`reject_collection_maintenance`] on the selected store (SQLite or
-/// SurrealDB), so `atlas repair` never opens SQLite under SurrealDB.
+/// [`reject_collection_maintenance`] on the selected store (the legacy store or
+/// SurrealDB), so `atlas repair` never opens the legacy store under SurrealDB.
 async fn reject_collection_maintenance_store(
     store: &argos_osint_core::atlas_store::AtlasStore,
     run_id: &str,

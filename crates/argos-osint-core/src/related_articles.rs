@@ -372,7 +372,7 @@ async fn build_surreal(
 
 /// `Store::related_articles` on the selected Atlas store: under SurrealDB
 /// the pairs come from `storage::atlas_metadata::related_pairs` and the
-/// articles and metadata from the repository; otherwise SQLite.
+/// articles and metadata from the repository; otherwise the legacy store.
 pub async fn related_articles_on(
     store: &crate::atlas_store::AtlasStore,
     run_id: &str,
@@ -401,7 +401,7 @@ async fn related_surreal(
     let mut pairs = crate::storage::atlas_metadata::related_pairs(repo.db(), run_id, article_id)
         .await
         .map_err(|e| anyhow::anyhow!("atlas related pairs: {e}"))?;
-    // SQLite joins the counterpart article; pairs whose counterpart is gone drop out.
+    // legacy store joins the counterpart article; pairs whose counterpart is gone drop out.
     let other = |p: &crate::storage::atlas_metadata::RelatedPairRow| {
         if p.left_id == article_id {
             p.right_id.clone()

@@ -1,0 +1,78 @@
+name: Intel web
+
+on:
+  push:
+    branches: [main]
+    paths: &web_paths
+      - 'apps/web-desktop/**'
+      - 'packages/**'
+      - 'tests/web/**'
+      - 'crates/argos-osint-bin/src/stack/**'
+      - 'scripts/test_web_stack.py'
+      - 'scripts/serve_web.mjs'
+      - 'scripts/check_web_build.mjs'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.node-version'
+      - '.nvmrc'
+      - 'tsconfig.json'
+      - 'eslint.config.mjs'
+      - 'playwright.config.ts'
+      - '.github/workflows/intel-web.yml'
+  pull_request:
+    paths: *web_paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install pinned pnpm
+        run: npm install --global pnpm@12.15.0
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check peer dependency compatibility
+        run: pnpm peers check
+      - name: Check types and Hooks/compiler lint
+        run: |
+          pnpm typecheck
+          pnpm lint
+      - name: Build static export without API
+        run: pnpm build
+      - name: Verify compiled RN Web export
+        run: pnpm check:web-build
+      - name: Install test browser
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run offline browser contracts
+        env:
+          ARGOS_WEB_CAPTURE_DIR: test-results/export-ui
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/export
+        run: pnpm test:e2e --reporter=list,html --output=test-results/export
+      - name: Run development browser contracts
+        env:
+          ARGOS_WEB_PROFILE: dev
+          ARGOS_WEB_CAPTURE_DIR: test-results/dev-ui
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/dev
+        run: pnpm test:e2e --reporter=list,html --output=test-results/dev
+      - name: Retain browser verification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: intel-web-verification
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,6 +1,6 @@
 //! Insight reads on the async repository, for the CLI and TUI
 //! (`argos insights`, the `insight_metadata` of `argos recall`). Same JSON
-//! shapes as the SQLite `Store::search_insights`, `insight_for_memory` and
+//! shapes as the legacy store `Store::search_insights`, `insight_for_memory` and
 //! `brain_query::insight_metadata`.
 //!
 //! SurrealDB has no `recon_entities` table, so an insight's entity is its

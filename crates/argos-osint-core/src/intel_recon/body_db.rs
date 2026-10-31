@@ -1,6 +1,6 @@
-//! Where article body acquisition keeps its state: the legacy SQLite file
+//! Where article body acquisition keeps its state: the legacy legacy store file
 //! or the SurrealDB repository. `body` drives one fallback chain against
-//! either; each call opens (SQLite) or borrows (SurrealDB) its handle so the
+//! either; each call opens (the legacy store) or borrows (SurrealDB) its handle so the
 //! fetch future stays `Send`.
 
 use anyhow::Result;

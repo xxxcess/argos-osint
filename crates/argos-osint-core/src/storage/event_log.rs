@@ -15,13 +15,13 @@
 //! a database has no counter record yet it is seeded to the highest stored `seq`
 //! (read with ORDER BY/LIMIT, because `math::max` of no rows is -Infinity on
 //! a server). Messages and details are redacted and bounded
-//! before they are stored, as in SQLite. `investigation_event` is keyed by
+//! before they are stored, as in the legacy store. `investigation_event` is keyed by
 //! the event id; a rewrite of an existing id only updates its status, summary
-//! and payload, like SQLite's `ON CONFLICT(id) DO UPDATE`.
+//! and payload, like the legacy store's `ON CONFLICT(id) DO UPDATE`.
 //!
 //! The Logs pane reads only this table under a storage config: the page
 //! ([`list_events`], whose job filter covers the job and its descendant
-//! jobs like SQLite's recursive `argos_jobs.parent_id` walk), one event
+//! jobs like the legacy store's recursive `argos_jobs.parent_id` walk), one event
 //! ([`get_event`]), the header counts ([`event_counts`]), the app filter
 //! ([`event_apps`]), the retention prune ([`prune_events`]) and Clear log
 //! ([`clear_events`]). Prune and clear touch only `argos_event`.
@@ -41,7 +41,7 @@ use crate::events::{
 use crate::investigation::{InvestigationEvent, InvestigationSurface};
 use crate::jobs_view::EventCounts;
 
-/// Deepest job nesting the Logs job filter follows (SQLite's recursive CTE
+/// Deepest job nesting the Logs job filter follows (the legacy store's recursive CTE
 /// has no bound; real trees are two or three levels).
 const MAX_JOB_DEPTH: usize = 16;
 
@@ -272,7 +272,7 @@ pub async fn list_events(
 
 /// The job id and every descendant job id (breadth-first over
 /// `job.parent`). An unknown job is just itself, so events recorded for a
-/// job that was already cleared still match, as in SQLite.
+/// job that was already cleared still match, as in the legacy store.
 pub async fn job_tree(db: &Surreal<Any>, root: &str) -> Result<Vec<String>> {
     let mut all = vec![root.to_string()];
     let mut frontier = vec![root.to_string()];

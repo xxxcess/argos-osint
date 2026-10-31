@@ -1,5 +1,5 @@
 //! Recon threads, messages and Brain edge tables on SurrealDB (migration
-//! phase 4a): the delete cascades that replace SQLite's foreign keys, the
+//! phase 4a): the delete cascades that replace the legacy store's foreign keys, the
 //! parent assertions, and `answer_memories`. Both modes via
 //! `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
@@ -224,7 +224,7 @@ async fn thread_delete_cascades_and_leaves_no_orphans() {
 }
 
 #[tokio::test]
-async fn recon_threads_and_messages_match_the_sqlite_store() {
+async fn recon_threads_and_messages_match_the_legacy_store() {
     use argos_osint_core::storage::recon_threads as rt;
     let Some(server) = Server::start() else {
         return;

@@ -146,34 +146,7 @@ fn test_adversarial_job_filter_fuzz_and_boundaries() {
         }
     }
 
-    // 1.2 App Filter Edge Cases & Case Insensitivity
     row.state = "running".into();
-    row.app = "Intel".into();
-    for (app_query, should_match) in [
-        ("intel", true),
-        ("INTEL", true),
-        ("InTeL", true),
-        ("  intel  ", true),
-        ("int", true),
-        ("te", true),
-        ("intelligence", true), // row.app is contained in filter
-        ("recon", false),
-        ("atlas", false),
-        ("", true),    // empty filter matches all
-        ("   ", true), // whitespace filter matches all
-    ] {
-        let filter = JobFilter {
-            app: app_query.into(),
-            ..Default::default()
-        };
-        assert_eq!(
-            filter.matches(&row),
-            should_match,
-            "App query '{app_query}' matching against row app '{}' expected {should_match}",
-            row.app
-        );
-    }
-
     // 1.3 Operation Filter Edge Cases
     row.operation = "deep_port_scan".into();
     for (op_query, should_match) in [
@@ -566,4 +539,29 @@ fn test_adversarial_cross_cutting_concurrency_rendering() {
         elapsed.as_millis() < 3000,
         "Rendering must remain under 3s budget"
     );
+}
+
+#[rstest::rstest]
+#[case("intel", true)]
+#[case("INTEL", true)]
+#[case("InTeL", true)]
+#[case("  intel  ", true)]
+#[case("int", true)]
+#[case("te", true)]
+#[case("intelligence", true)]
+#[case("recon", false)]
+#[case("atlas", false)]
+#[case("", true)]
+#[case("   ", true)]
+fn app_filter_case_and_substring_contract(#[case] query: &str, #[case] expected: bool) {
+    let row = JobRow {
+        app: "Intel".into(),
+        state: "running".into(),
+        ..Default::default()
+    };
+    let filter = JobFilter {
+        app: query.into(),
+        ..Default::default()
+    };
+    assert_eq!(filter.matches(&row), expected, "app query {query:?}");
 }

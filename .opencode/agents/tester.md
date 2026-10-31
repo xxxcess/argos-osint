@@ -22,3 +22,5 @@ Keep shared React Native primitives and the enabled React Compiler/Hooks checks.
 When compiler configuration or dependency pins change, verify emitted/shared-package compiler transformations alongside lint/build/browser behavior; a config flag alone is insufficient evidence.
 
 For build/test changes, inspect `docs/wiki/code/ci.md` and affected `.github/workflows/`; map acceptance to their actual commands, preserve Code Architect ownership and distinguish local validation from hosted Actions.
+
+Rust mutation policy: until further notice, do not run Rust mutation tests or baselines locally. Use GitHub Actions `mutation.yml`; report local execution as intentionally skipped. Ordinary Rust checks and embedded tests remain required.

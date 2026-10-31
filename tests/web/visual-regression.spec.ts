@@ -1,70 +1,67 @@
+// @tag:testing — deterministic export screenshots with observable UI assertions.
 import { test, expect } from "@playwright/test";
 
-const CAPTURE = process.env.ARGOS_WEB_CAPTURE_DIR || ".agent-scratch/visual-regression";
-const VIEWPORTS: Array<{ name: string; width: number; height: number }> = [
-  { name: "1440x1000", width: 1440, height: 1000 },
-  { name: "768x1000", width: 768, height: 1000 },
-  { name: "390x844", width: 390, height: 844 },
-  { name: "320x800", width: 320, height: 800 },
-];
-
-// Visual regression baseline comparison with diff thresholds
-for (const vp of VIEWPORTS) {
-  test(`UI theme tokens @ ${vp.name} - full page screenshot`, async ({ page }) => {
-    await page.setViewportSize({ width: vp.width, height: vp.height });
-    await page.goto("/");
-    // Capture full page screenshot for visual regression baseline
-    await expect(page).toHaveScreenshot(`${vp.name}-fullpage.png`, {
-      fullPage: true,
-      thresholds: {
-        // 0.1% pixel diff tolerance for baseline establishment
-        actualThreshold: 0.1,
-        // 0.2% structural diff tolerance
-        threshold: 0.2,
-      },
+const article = {
+  id: "visual-article",
+  run_id: "visual-run",
+  title: "Harbor negotiations enter a new phase",
+  description: "Officials discuss regional shipping access.",
+  source_name: "Fixture Wire",
+  source_domain: "example.test",
+  published_at: "2026-10-25T12:00:00Z",
+  category: "geopolitical",
+  image_url: "",
+  url: "https://example.test/news",
+  author: "Fixture reporter",
+};
+for (const width of [1440, 768, 390, 320]) {
+  test(`Bulletin visual contract at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.route("http://127.0.0.1:8080/api/v1/**", async (route) => {
+      const url = new URL(route.request().url());
+      const path = url.pathname.replace("/api/v1/", "");
+      let body: unknown;
+      if (path === "health/ready")
+        body = {
+          service: "argos-intel",
+          api_version: 1,
+          ready: true,
+          storage: true,
+          instance_id: "visual-instance",
+        };
+      else if (path === "days") body = { days: ["2026-10-25"] };
+      else if (path === "articles")
+        body = {
+          rows: [article],
+          next_cursor: null,
+          revision: "visual-revision",
+        };
+      else throw new Error(`Unexpected visual fixture request: ${path}`);
+      await route.fulfill({ json: body });
     });
-  });
-
-  test(`UI density modes @ ${vp.name} - compact vs default`, async ({ page }) => {
-    await page.setViewportSize({ width: vp.width, height: vp.height });
     await page.goto("/");
-    // Capture loading state screenshot
-    await expect(page.getByRole("progressbar", { name: /Loading/ })).toHaveScreenshot(
-      `${vp.name}-loading.png`,
-      { fullPage: true }
-    );
-    // Capture empty state screenshot
-    await expect(page.getByText(/No items/)).toHaveScreenshot(
-      `${vp.name}-empty.png`,
-      { fullPage: true }
-    );
-  });
-
-  test(`UI focus/select states @ ${vp.name} - button states`, async ({ page }) => {
-    await page.setViewportSize({ width: vp.width, height: vp.height });
-    await page.goto("/");
-    // Capture primary button screenshot
-    await expect(page.getByRole("button", { name: /Open Focus Brief →/ })).toHaveScreenshot(
-      `${vp.name}-primary-button.png`,
-      { fullPage: true }
-    );
-    // Capture quiet button screenshot
-    await expect(page.getByRole("button", { name: /Quiet/ })).toHaveScreenshot(
-      `${vp.name}-quiet-button.png`,
-      { fullPage: true }
-    );
-  });
-
-  test(`UI theme compliance @ ${vp.name} - color consistency`, async ({ page }) => {
-    await page.setViewportSize({ width: vp.width, height: vp.height });
-    await page.goto("/");
-    // Verify accent color is present in the UI
-    const accentElements = page.locator(".accent, [style*='87bfff']");
-    await expect(accentElements.first).toBeVisible();
-    // Capture header screenshot
-    await expect(page.getByTestId("masthead")).toHaveScreenshot(
-      `${vp.name}-header.png`,
-      { fullPage: true }
-    );
+    await expect(page.getByText(article.title)).toBeVisible();
+    await expect(page.getByText("● API connected")).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await expect(page).toHaveScreenshot(`bulletin-${width}.png`, {
+      fullPage: true,
+      animations: "disabled",
+      maxDiffPixelRatio: 0.001,
+      threshold: 0.2,
+    });
+    await page.getByRole("button", { name: "Topology", exact: true }).focus();
+    await expect(
+      page.getByRole("button", { name: "Topology", exact: true }),
+    ).toBeFocused();
+    await expect(page).toHaveScreenshot(`bulletin-focus-${width}.png`, {
+      fullPage: true,
+      animations: "disabled",
+      maxDiffPixelRatio: 0.001,
+      threshold: 0.2,
+    });
   });
 }

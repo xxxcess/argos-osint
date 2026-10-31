@@ -15,4 +15,4 @@ Read `docs/wiki/code/react-ui.md` for the design baseline and evidence workflow;
 - For reviews, inspect the requested scope (or current UI delta if unspecified) and return concrete `file:line` findings with impact/correction. Report checks and unverified visual evidence separately. Do not turn a review request into unrelated edits.
 
 This skill adapts selected Vercel ideas; provenance and exclusions are in the design baseline. No upstream fetch or dependency installation is required to use it.
-- Topology graphs use the force-graph canvas (`ForceCanvas` / `react-force-graph-2d`) with an accessible list twin and tokens passed into draw code; load it lazily client-only and honor reduced motion (see react-ui.md#canvas-visualizations). Do not add another graph renderer.
+- Topology graphs use the force-graph canvas (`ForceCanvas` / `react-force-graph-3d`) with an accessible list twin and tokens passed into draw code; load it lazily client-only and honor reduced motion (see react-ui.md#canvas-visualizations). Do not add another graph renderer.

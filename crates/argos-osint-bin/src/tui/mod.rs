@@ -36,3 +36,10 @@ pub use app::testkit;
 pub use app::{run, App};
 #[doc(hidden)]
 pub use ui::draw;
+
+#[cfg(test)]
+mod jobs_tests;
+#[cfg(test)]
+mod logs_tests;
+#[cfg(test)]
+mod tool_catalog_tests;

@@ -1,6 +1,5 @@
 "use client";
 import React, { Component } from "react";
-import { View } from "react-native";
 import { Button, Copy, Panel } from "./index";
 
 interface Props {
@@ -50,6 +49,6 @@ export class ErrorBoundary extends Component<Props, State> {
       );
     }
     // `resetKey` changes on retry, remounting the wrapped children cleanly.
-    return <View key={this.state.resetKey}>{this.props.children}</View>;
+    return <React.Fragment key={this.state.resetKey}>{this.props.children}</React.Fragment>;
   }
 }

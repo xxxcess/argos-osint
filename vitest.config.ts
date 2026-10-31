@@ -15,11 +15,11 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
+    // Keep jsdom workers bounded alongside the embedded Rust build.
+    maxWorkers: 2,
+    minWorkers: 1,
     setupFiles: ["./vitest.setup.tsx"],
-    include: [
-      "packages/**/*.test.{ts,tsx}",
-      "apps/**/*.test.{ts,tsx}",
-    ],
+    include: ["packages/**/*.test.{ts,tsx}", "apps/**/*.test.{ts,tsx}"],
     coverage: {
       provider: "v8",
       reporter: ["text", "json", "html"],

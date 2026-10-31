@@ -16,3 +16,5 @@ Inspect `git status`, `git diff`, test files, and verification artifacts in `INT
 Return a binary verdict:
 - `CLEAN`: All implementation diffs, tests, and evidence are authentic and complete.
 - `INTEGRITY_VIOLATION`: One or more forensic violations detected (acts as an immediate binary veto on phase completion). List each violation with exact `file:line` citations, git diff evidence, and required remediation.
+
+Rust mutation policy: until further notice, do not run Rust mutation tests or baselines locally. Use GitHub Actions `mutation.yml`; report local execution as intentionally skipped. Ordinary Rust checks and embedded tests remain required.

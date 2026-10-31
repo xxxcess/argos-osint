@@ -23,9 +23,12 @@ function workerModel(name) {
 
 const activeAgents = ["coordinator", "orchestrator", "architect", "rust-coder", "react-coder", "reviewer", "tester", "auditor", "scribe"];
 
-test("coordinator is default go-provider GLM agent and teamwork catalog roles enforce nested handoffs and write boundaries", () => {
+test("coordinator is the default agent with the approved model and teamwork catalog roles enforce nested handoffs and write boundaries", () => {
   assert.equal(config.default_agent, "coordinator");
-  assert.equal(config.model, "opencode-go/glm-5.3-flash#high");
+  const approvedModel = "nvidia/minimaxai/minimax-m3.1-flash#thinking";
+  assert.equal(config.model, approvedModel);
+  assert.equal(config.agents.coordinator.model, approvedModel);
+  assert.equal(config.agents.orchestrator.model, approvedModel);
   assert.equal(config.experimental.subagent_depth, 4);
   assert.equal(config.subagent_depth, undefined);
   for (const id of ["build", "plan"]) assert.equal(config.agents[id].disabled, true);
@@ -110,7 +113,7 @@ test("shared guide, planning skill, and OpenCode catalog models are configured w
   const guide = readFileSync(join(root, "AGENTS.md"), "utf8");
   assert.ok(guide.length < readFileSync(join(root, "../AGENTS.md"), "utf8").length);
   for (const id of activeAgents) {
-    assert.match(config.agents[id].model, /^(opencode(-go)?|openrouter)\//);
+    assert.match(config.agents[id].model, /^(opencode(-go)?|openrouter|nvidia|openai)\//);
     assert.doesNotMatch(readFileSync(join(root, "agents", `${id}.md`), "utf8"), /google\/|openai\/|anthropic\/|zenmux\//i);
   }
 });

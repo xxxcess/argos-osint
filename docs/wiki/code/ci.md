@@ -67,3 +67,13 @@ termios restored. It needs only `argos` built (no
 `argos-api-host`) and is POSIX-only (skips elsewhere). Like the stack lifecycle
 checks, it is local supplemental evidence that the workflows do not execute;
 keep actual hosted results separate.
+
+## Scoped mutation diagnostics
+
+[mutation.yml](../../../.github/workflows/mutation.yml) is a manually dispatched Linux embedded diagnostic gate, separate from the platform/storage matrix. Run it after ordinary checks pass with `gh workflow run mutation.yml --ref <branch>`. It pins cargo-mutants 27.1.0 and uses [.cargo/mutants.toml](../../../.cargo/mutants.toml) to restrict mutation sites to NLP selection, provider attempt/request policy and Atlas classification, with the core library and property integration tests as the oracle. Default features remain embedded/nlp; no live providers or server storage are used.
+
+The runner keeps the unmutated baseline check, fails on missed or timed-out mutations and retains outcome/log artifacts for seven days, including failure evidence. The 120-minute workflow limit bounds this expensive diagnostic; a timeout is incomplete evidence, not a passing baseline. Configuration and local smoke results do not establish a hosted mutation result. Review survivors before changing tests; equivalent mutants require a documented rationale rather than silently weakening the gate.
+
+## Rust mutation execution restriction
+
+Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Local mutation execution is deliberately skipped, not passed; ordinary targeted checks and the embedded gate remain required.

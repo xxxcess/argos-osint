@@ -3,24 +3,30 @@ import React, { forwardRef, useImperativeHandle, useRef } from "react";
 /**
  * Shared test doubles for modules that jsdom cannot execute (canvas/d3).
  *
- * `ForceGraph2DMock` replaces `react-force-graph-2d` so the real `ForceCanvas`
+ * `ForceGraph3DMock` replaces `react-force-graph-3d` so the real `ForceCanvas`
  * wrapper in `packages/intel/src/topology/ForceCanvas.tsx` can be exercised:
  * it records every prop it receives and every imperative method call, and
  * renders a plain element as the canvas host.
  */
 
-export type ForceGraph2DHandler = {
-  zoom: (k?: number, ms?: number) => number | void;
+export type ForceGraph3DHandler = {
+  controls: () => { target: { x: number; y: number; z: number } };
+  cameraPosition: (
+    position?: { x: number; y: number; z: number },
+    lookAt?: { x: number; y: number; z: number },
+    ms?: number,
+  ) => { x: number; y: number; z: number };
   zoomToFit: (ms?: number, padding?: number) => void;
-  centerAt: (x?: number, y?: number, ms?: number) => void;
+
   pauseAnimation: () => void;
   resumeAnimation: () => void;
   d3ReheatSimulation: () => void;
 };
 type MutableRecord = {
+  controlTarget?: { x: number; y: number; z: number };
   zoomBy?: number[];
   zoomToFit?: [number | undefined, number | undefined][];
-  centerAt?: [number | undefined, number | undefined, number | undefined][];
+  cameraPosition?: unknown[][];
   pauseAnimation?: number;
   resumeAnimation?: number;
   d3ReheatSimulation?: number;
@@ -34,7 +40,7 @@ export const resetForceGraphRecording = () => {
   lastForceGraphProps = null;
 };
 
-export type ForceGraph2DMockProps = {
+export type ForceGraph3DMockProps = {
   graphData?: {
     nodes: unknown[];
     links: unknown[];
@@ -42,23 +48,21 @@ export type ForceGraph2DMockProps = {
   [extra: string]: unknown;
 };
 
-export const ForceGraph2DMock = forwardRef<
-  ForceGraph2DHandler,
-  ForceGraph2DMockProps
->(function ForceGraph2DMock(props, ref) {
+export const ForceGraph3DMock = forwardRef<
+  ForceGraph3DHandler,
+  ForceGraph3DMockProps
+>(function ForceGraph3DMock(props, ref) {
   lastForceGraphProps = props;
   const record: MutableRecord = useRef<MutableRecord>({}).current;
   if (!forceGraphInstances.includes(record)) forceGraphInstances.push(record);
   useImperativeHandle(ref, () => ({
-    zoom: (k?: number) => {
-      (record.zoomBy ??= []).push(k ?? 1);
-      return k ?? 1;
+    controls: () => ({ target: record.controlTarget ?? { x: 0, y: 0, z: 0 } }),
+    cameraPosition: (position, lookAt, ms) => {
+      (record.cameraPosition ??= []).push([position, lookAt, ms]);
+      return position ?? { x: 0, y: 0, z: 300 };
     },
     zoomToFit: (ms?: number, padding?: number) => {
       (record.zoomToFit ??= []).push([ms, padding]);
-    },
-    centerAt: (x?: number, y?: number, ms?: number) => {
-      (record.centerAt ??= []).push([x, y, ms]);
     },
     pauseAnimation: () => {
       record.pauseAnimation = (record.pauseAnimation ?? 0) + 1;

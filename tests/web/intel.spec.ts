@@ -156,7 +156,9 @@ async function fixtures(
         await route.fulfill({
           status: 503,
           json: { error: "Admission temporarily unavailable" },
-          headers: { "access-control-allow-origin": "http://127.0.0.1:3100" },
+          headers: {
+            "access-control-allow-origin": `http://127.0.0.1:${process.env.ARGOS_WEB_TEST_PORT || 3100}`,
+          },
         });
         return;
       }
@@ -171,7 +173,9 @@ async function fixtures(
     }
     await route.fulfill({
       json: body,
-      headers: { "access-control-allow-origin": "http://127.0.0.1:3100" },
+      headers: {
+        "access-control-allow-origin": `http://127.0.0.1:${process.env.ARGOS_WEB_TEST_PORT || 3100}`,
+      },
     });
   });
   return {
@@ -622,6 +626,10 @@ for (const width of [1440, 768, 390, 320]) {
       .click();
     await expect(page.getByText("Recorded actor")).toBeVisible();
     await expect(page.locator("canvas").first()).toBeVisible();
+    await page.screenshot({
+      path: `${captureDir}/topology-3d-1280.png`,
+      fullPage: true,
+    });
     await page.waitForTimeout(800);
     await noOverflow();
     await page.screenshot({
@@ -675,7 +683,9 @@ test("a blocked browser store still allows a session backend switch", async ({
   expect(nextApi.requests).toContain("health/ready");
 });
 
-const fixtureCors = { "access-control-allow-origin": "http://127.0.0.1:3100" };
+const fixtureCors = {
+  "access-control-allow-origin": `http://127.0.0.1:${process.env.ARGOS_WEB_TEST_PORT || 3100}`,
+};
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
@@ -1072,6 +1082,7 @@ for (const width of [1440, 390]) {
 test("topology graph explorer selects, filters and stays within 320px", async ({
   page,
 }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
   await fixtures(page);
   await page.route("**/api/v1/topology", async (route) => {
     await route.fulfill({
@@ -1125,6 +1136,12 @@ test("topology graph explorer selects, filters and stays within 320px", async ({
   await expect(page.getByText("Showing 3 of 3 nodes")).toBeVisible();
   await expect(page.getByText("Recorded actor")).toBeVisible();
   await expect(page.locator("canvas").first()).toBeVisible();
+  await page.locator("canvas").first().scrollIntoViewIfNeeded();
+  await page.getByRole("button", { name: "Fit", exact: true }).click();
+  await page
+    .locator("canvas")
+    .first()
+    .screenshot({ path: `${captureDir}/topology-3d-canvas-1280.png` });
   await page
     .getByRole("button", { name: "Select node Shipping claim, claim" })
     .click();
@@ -1152,4 +1169,17 @@ test("topology graph explorer selects, filters and stays within 320px", async ({
     () => document.documentElement.scrollWidth - window.innerWidth,
   );
   expect(overflow).toBeLessThanOrEqual(0);
+});
+
+test("desktop launcher returns to the retained intelligence bulletin", async ({
+  page,
+}) => {
+  await fixtures(page);
+  await page.goto("/");
+  await expect(page.getByText(a.title)).toBeVisible();
+  await page.getByRole("button", { name: "Desktop", exact: true }).click();
+  await page.getByRole("button", { name: "Launch Intel", exact: true }).click();
+  await expect(page.getByText(a.title)).toBeVisible();
+  await page.getByRole("textbox", { name: "Search articles" }).fill("missing");
+  await expect(page.getByText(a.title)).toHaveCount(0);
 });

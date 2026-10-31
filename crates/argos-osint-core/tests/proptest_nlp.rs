@@ -194,7 +194,7 @@ fn parse_context_default_valid() {
 }
 
 /// Create a minimal complete annotation for testing
-fn make_complete_annotation(source: &Source, prose: &str) -> Annotation {
+fn make_complete_annotation(_source: &Source, prose: &str) -> Annotation {
     Annotation {
         schema_version: 1,
         feature_key: hash(prose),
@@ -257,4 +257,33 @@ fn annotation_validate_accepts_valid() {
             Ok(())
         })
         .unwrap();
+}
+
+/// Selection never exceeds the JSON wire budget and retains only verbatim spans.
+#[test]
+fn selection_respects_wire_budget() {
+    use argos_osint_core::nlp::{select, SelectionError};
+    let mut runner = TestRunner::new(config());
+    runner
+        .run(&(any::<String>(), 0usize..4096), |(prose, budget)| {
+            let source = Source::derived("fixture", "1", &prose);
+            let annotation = make_complete_annotation(&source, &prose);
+            match select(&annotation, &source, "brief", "fixture", budget) {
+                Ok(selection) => {
+                    let text = selection
+                        .text(&source)
+                        .expect("selection references its source");
+                    prop_assert!(selection.serialized_bytes <= budget);
+                    prop_assert!(
+                        serde_json::to_string(&text).expect("JSON string").len() <= budget
+                    );
+                    for span in &selection.ranges {
+                        prop_assert!(span.slice(&prose).is_some());
+                    }
+                }
+                Err(error) => prop_assert_eq!(error, SelectionError::BudgetExceeded),
+            }
+            Ok(())
+        })
+        .expect("wire budget invariant");
 }

@@ -39,6 +39,7 @@ unicode-segmentation = "1.12"
 unicode-width = "0.2"
 
 [dev-dependencies]
+rstest = "0.26"
 argos-osint-core = { path = "../argos-osint-core", default-features = false, features = ["fixtures"] }
 tempfile.workspace = true
 

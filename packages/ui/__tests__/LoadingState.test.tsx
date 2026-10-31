@@ -1,7 +1,7 @@
 import React from "react";
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { LoadingState, colors } from "@argos/ui";
+import { LoadingState } from "@argos/ui";
 import { sheetProp } from "../../../vitest.test-support";
 
 describe("LoadingState (real @argos/ui component)", () => {

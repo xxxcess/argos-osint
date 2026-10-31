@@ -137,6 +137,7 @@ export function IntelApp() {
   );
 }
 function Workspace() {
+  const wide = useWindowDimensions().width >= 1000;
   const [category, setCategory] = useState(categories[0]);
   const [day, setDay] = useState("");
   const [search, setSearch] = useState("");
@@ -148,7 +149,9 @@ function Workspace() {
     return () => clearTimeout(timer);
   }, [search]);
   const [article, setArticle] = useState<Article | null>(null);
-  const [screen, setScreen] = useState<"bulletin" | "topology">("bulletin");
+  const [screen, setScreen] = useState<"desktop" | "bulletin" | "topology">(
+    "bulletin",
+  );
   const [seed, setSeed] = useState<Seed | null>(null);
   const days = useRead<{ days: string[] }>("days");
   const selectedDay = days.data?.days.includes(day)
@@ -174,9 +177,218 @@ function Workspace() {
   }
   return (
     <>
+      <ScrollView
+        testID="workspace-scroll"
+        style={{ flex: 1, minHeight: 0 }}
+        contentContainerStyle={{ flexGrow: 1 }}
+        scrollEventThrottle={100}
+        onScroll={({
+          nativeEvent: { contentOffset, contentSize, layoutMeasurement },
+        }) => {
+          if (
+            screen === "bulletin" &&
+            !article &&
+            contentOffset.y + layoutMeasurement.height >=
+              contentSize.height - 240
+          )
+            loadNextPage();
+        }}
+      >
+        {screen === "desktop" ? (
+          <View style={s.desktop}>
+            <Label>Argos / local intelligence desk</Label>
+            <Text accessibilityRole="header" style={s.title}>
+              Evidence starts here.
+            </Text>
+            <View style={s.launcher}>
+              <StatusTag tone="accent">INTEL</StatusTag>
+              <Copy>
+                Browse retained Atlas reporting, inspect extracted evidence and
+                explore its recorded relationships.
+              </Copy>
+              <Button variant="primary" onPress={() => setScreen("bulletin")}>
+                Launch Intel
+              </Button>
+            </View>
+            <Text style={s.small}>
+              Local API connected · retained evidence workspace
+            </Text>
+          </View>
+        ) : screen === "topology" ? (
+          <Topology
+            seed={seed}
+            onSeed={setSeed}
+            pageStyle={s.page}
+            titleStyle={s.title}
+          />
+        ) : article ? (
+          <Focus
+            key={`${article.run_id}/${article.id}`}
+            article={article}
+            onBack={() => setArticle(null)}
+            onArticle={setArticle}
+            onTopology={topology}
+          />
+        ) : (
+          <View style={[s.bulletinLayout, wide && { flexDirection: "row" }]}>
+            <View
+              style={[s.categoryRail, wide && { width: 200, flexShrink: 0 }]}
+            >
+              <Label>Collection channels</Label>
+              <Text style={s.small}>
+                Filter retained reporting by category.
+              </Text>
+              <View
+                style={[
+                  s.row,
+                  wide && { flexDirection: "column", alignItems: "stretch" },
+                ]}
+              >
+                {categories.map((cat) => (
+                  <Button
+                    key={cat}
+                    variant="quiet"
+                    active={category === cat}
+                    onPress={() => setCategory(cat)}
+                  >
+                    {cat[0].toUpperCase() + cat.slice(1)}
+                  </Button>
+                ))}
+              </View>
+            </View>
+            <View style={s.bulletinContent}>
+              <Label>01 / Atlas collection</Label>
+              <View
+                style={[
+                  s.row,
+                  {
+                    justifyContent: "space-between",
+                    alignItems: "flex-end",
+                    flexWrap: "wrap",
+                  },
+                ]}
+              >
+                <View
+                  style={{
+                    gap: 8,
+                    minWidth: 0,
+                    maxWidth: "100%",
+                    flexShrink: 1,
+                  }}
+                >
+                  <Text accessibilityRole="header" style={s.title}>
+                    Intelligence bulletin
+                  </Text>
+                  <Copy>Retained articles from Atlas.</Copy>
+                </View>
+              </View>
+              <View style={s.filters}>
+                <Label>Search articles</Label>
+                <TextInput
+                  accessibilityLabel="Search articles"
+                  placeholder="Headlines, sources, descriptions…"
+                  placeholderTextColor={c.muted}
+                  value={search}
+                  onChangeText={setSearch}
+                  style={s.input}
+                />
+              </View>
+              <FlatList
+                horizontal
+                data={days.data?.days || []}
+                keyExtractor={(day) => day}
+                style={{ flexGrow: 0, marginBottom: 8 }}
+                contentContainerStyle={{ gap: 8 }}
+                renderItem={({ item: d }) => (
+                  <Button
+                    variant="quiet"
+                    active={d === selectedDay}
+                    label={`Day ${d}`}
+                    onPress={() => setDay(d)}
+                  >
+                    {d}
+                  </Button>
+                )}
+              />
+              {(days.isError || list.isError) && (
+                <Notice>{String(days.error || list.error)}</Notice>
+              )}
+              {days.isPending ? (
+                <LoadingState label="Loading retained days…" />
+              ) : null}
+              {list.isPending && selectedDay ? (
+                <LoadingState label="Loading bulletin…" />
+              ) : null}
+              {days.isSuccess && !selectedDay ? (
+                <EmptyState title="No articles yet">
+                  Collect an Atlas cycle in Argos to populate this bulletin.
+                </EmptyState>
+              ) : null}
+              {list.isSuccess && selectedDay && articles.length === 0 ? (
+                <EmptyState title="No matching articles">
+                  No articles match this day, category and search.
+                </EmptyState>
+              ) : null}
+              <View style={s.listHeading}>
+                <Label>Signals / {category}</Label>
+                <Text accessibilityLiveRegion="polite" style={s.small}>
+                  {list.data || (days.isSuccess && days.data.days.length === 0)
+                    ? `${articles.length} loaded`
+                    : "—"}
+                </Text>
+              </View>
+              {list.isRefetching && !list.isFetchingNextPage ? (
+                <LoadingState label="Refreshing bulletin…" compact />
+              ) : null}
+              <FlatList
+                scrollEnabled={false}
+                data={articles}
+                keyExtractor={(a) => a.run_id + "/" + a.id}
+                renderItem={({ item, index }) => (
+                  <ArticleCard
+                    article={item}
+                    featured={index === 0}
+                    onPress={() => setArticle(item)}
+                  />
+                )}
+              />
+              {list.isFetchingNextPage ? (
+                <LoadingState label="Loading more articles…" />
+              ) : null}
+              {list.isFetchNextPageError ? (
+                <Notice>
+                  Could not load more articles. {list.error?.message}
+                </Notice>
+              ) : null}
+              {list.hasNextPage && (
+                <Button
+                  variant="primary"
+                  disabled={list.isFetchingNextPage}
+                  onPress={() => {
+                    void list.fetchNextPage({ cancelRefetch: false });
+                  }}
+                >
+                  {list.isFetchingNextPage
+                    ? "Loading…"
+                    : list.isFetchNextPageError
+                      ? "Retry loading articles"
+                      : "Load more articles"}
+                </Button>
+              )}
+            </View>
+          </View>
+        )}
+      </ScrollView>
       <View style={s.nav}>
         <View style={s.navInner}>
           <View style={s.row}>
+            <Button
+              variant="quiet"
+              active={screen === "desktop"}
+              onPress={() => setScreen("desktop")}
+            >
+              Desktop
+            </Button>
             <Button
               variant="quiet"
               active={screen === "bulletin"}
@@ -197,168 +409,6 @@ function Workspace() {
           </Text>
         </View>
       </View>
-      <ScrollView
-        testID="workspace-scroll"
-        style={{ flex: 1, minHeight: 0 }}
-        contentContainerStyle={{ flexGrow: 1 }}
-        scrollEventThrottle={100}
-        onScroll={({
-          nativeEvent: { contentOffset, contentSize, layoutMeasurement },
-        }) => {
-          if (
-            screen === "bulletin" &&
-            !article &&
-            contentOffset.y + layoutMeasurement.height >=
-              contentSize.height - 240
-          )
-            loadNextPage();
-        }}
-      >
-        {screen === "topology" ? (
-          <Topology
-            seed={seed}
-            onSeed={setSeed}
-            pageStyle={s.page}
-            titleStyle={s.title}
-          />
-        ) : article ? (
-          <Focus
-            key={`${article.run_id}/${article.id}`}
-            article={article}
-            onBack={() => setArticle(null)}
-            onArticle={setArticle}
-            onTopology={topology}
-          />
-        ) : (
-          <View style={s.page}>
-            <Label>01 / Atlas collection</Label>
-            <View
-              style={[
-                s.row,
-                {
-                  justifyContent: "space-between",
-                  alignItems: "flex-end",
-                  flexWrap: "wrap",
-                },
-              ]}
-            >
-              <View
-                style={{ gap: 8, minWidth: 0, maxWidth: "100%", flexShrink: 1 }}
-              >
-                <Text accessibilityRole="header" style={s.title}>
-                  Intelligence bulletin
-                </Text>
-                <Copy>Retained articles from Atlas.</Copy>
-              </View>
-            </View>
-            <View style={[s.row, { flexWrap: "wrap", marginTop: 12, gap: 4 }]}>
-              {categories.map((cat) => (
-                <Button
-                  key={cat}
-                  variant="quiet"
-                  active={category === cat}
-                  onPress={() => setCategory(cat)}
-                >
-                  {cat[0].toUpperCase() + cat.slice(1)}
-                </Button>
-              ))}
-            </View>
-            <View style={s.filters}>
-              <Label>Search articles</Label>
-              <TextInput
-                accessibilityLabel="Search articles"
-                placeholder="Headlines, sources, descriptions…"
-                placeholderTextColor={c.muted}
-                value={search}
-                onChangeText={setSearch}
-                style={s.input}
-              />
-            </View>
-            <FlatList
-              horizontal
-              data={days.data?.days || []}
-              keyExtractor={(day) => day}
-              style={{ flexGrow: 0, marginBottom: 8 }}
-              contentContainerStyle={{ gap: 8 }}
-              renderItem={({ item: d }) => (
-                <Button
-                  variant="quiet"
-                  active={d === selectedDay}
-                  label={`Day ${d}`}
-                  onPress={() => setDay(d)}
-                >
-                  {d}
-                </Button>
-              )}
-            />
-            {(days.isError || list.isError) && (
-              <Notice>{String(days.error || list.error)}</Notice>
-            )}
-            {days.isPending ? (
-              <LoadingState label="Loading retained days…" />
-            ) : null}
-            {list.isPending && selectedDay ? (
-              <LoadingState label="Loading bulletin…" />
-            ) : null}
-            {days.isSuccess && !selectedDay ? (
-              <EmptyState title="No articles yet">
-                Collect an Atlas cycle in Argos to populate this bulletin.
-              </EmptyState>
-            ) : null}
-            {list.isSuccess && selectedDay && articles.length === 0 ? (
-              <EmptyState title="No matching articles">
-                No articles match this day, category and search.
-              </EmptyState>
-            ) : null}
-            <View style={s.listHeading}>
-              <Label>Signals / {category}</Label>
-              <Text accessibilityLiveRegion="polite" style={s.small}>
-                {list.data || (days.isSuccess && days.data.days.length === 0)
-                  ? `${articles.length} loaded`
-                  : "—"}
-              </Text>
-            </View>
-            {list.isRefetching && !list.isFetchingNextPage ? (
-              <LoadingState label="Refreshing bulletin…" compact />
-            ) : null}
-            <FlatList
-              scrollEnabled={false}
-              data={articles}
-              keyExtractor={(a) => a.run_id + "/" + a.id}
-              renderItem={({ item, index }) => (
-                <ArticleCard
-                  article={item}
-                  featured={index === 0}
-                  onPress={() => setArticle(item)}
-                />
-              )}
-            />
-            {list.isFetchingNextPage ? (
-              <LoadingState label="Loading more articles…" />
-            ) : null}
-            {list.isFetchNextPageError ? (
-              <Notice>
-                Could not load more articles. {list.error?.message}
-              </Notice>
-            ) : null}
-            {list.hasNextPage && (
-              <Button
-                variant="primary"
-                disabled={list.isFetchingNextPage}
-                onPress={() => {
-                  void list.fetchNextPage({ cancelRefetch: false });
-                }}
-              >
-                {list.isFetchingNextPage
-                  ? "Loading…"
-                  : list.isFetchNextPageError
-                    ? "Retry loading articles"
-                    : "Load more articles"}
-              </Button>
-            )}
-          </View>
-        )}
-      </ScrollView>
     </>
   );
 }
@@ -462,10 +512,7 @@ function RelatedLead({
       onPress={onPress}
       onHoverIn={() => setHovered(true)}
       onHoverOut={() => setHovered(false)}
-      style={({ pressed }) => [
-        s.lead,
-        (hovered || pressed) && s.leadHover,
-      ]}
+      style={({ pressed }) => [s.lead, (hovered || pressed) && s.leadHover]}
     >
       <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
         <Text style={s.leadTitle} numberOfLines={2}>
@@ -899,6 +946,38 @@ function safeLink(raw: string) {
   }
 }
 const s = StyleSheet.create({
+  desktop: {
+    flex: 1,
+    minHeight: 420,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    gap: 24,
+  },
+  launcher: {
+    ...(glass as object),
+    borderWidth: 1,
+    borderColor: c.accent,
+    padding: 24,
+    gap: 20,
+    maxWidth: 440,
+    width: "100%",
+  },
+  bulletinLayout: {
+    width: "100%",
+    maxWidth: 1320,
+    alignSelf: "center",
+    padding: 20,
+    gap: 24,
+  },
+  categoryRail: {
+    gap: 12,
+    padding: 16,
+    backgroundColor: c.glass,
+    borderWidth: 1,
+    borderColor: c.glassBorder,
+  },
+  bulletinContent: { flex: 1, minWidth: 0, gap: 16 },
   shell: { height: "100%", minHeight: 0, backgroundColor: c.bg },
   masthead: {
     ...(glass as object),
@@ -944,7 +1023,7 @@ const s = StyleSheet.create({
     alignItems: "center",
   },
   nav: {
-    borderBottomWidth: 1,
+    borderTopWidth: 1,
     borderColor: c.glassBorder,
     backgroundColor: c.glass,
   },

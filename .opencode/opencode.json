@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "default_agent": "coordinator",
-  "model": "openrouter/nvidia/nemotron-3.5-lightning:free#thinking",
+  "model": "opencode/glm-5.3-flash-free#thinking",
   "providers": {
     "opencode": {
       "settings": {
@@ -12,12 +12,9 @@
     }
   },
   "agents": {
-    "build": {
-      "disabled": true
-    },
     "coordinator": {
       "mode": "all",
-      "model": "nvidia/z-ai/glm-5.3-flash#thinking",
+      "model": "openai/gpt-6.1-terra#high",
       "permissions": [
         {
           "action": "read",
@@ -123,7 +120,7 @@
     },
     "orchestrator": {
       "mode": "all",
-      "model": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free#high",
+      "model": "opencode/glm-5.3-flash-free#thinking",
       "permissions": [
         {
           "action": "read",
@@ -229,7 +226,7 @@
     },
     "architect": {
       "mode": "all",
-      "model": "openrouter/thinkingmachines/inkling:free#max",
+      "model": "openai/gpt-6.1-terra#max",
       "permissions": [
         {
           "action": "read",
@@ -335,7 +332,7 @@
     },
     "rust-coder": {
       "mode": "all",
-      "model": "openrouter/thinkingmachines/inkling:free#max",
+      "model": "openai/gpt-6.1-terra#high",
       "permissions": [
         {
           "action": "read",
@@ -431,7 +428,7 @@
     },
     "react-coder": {
       "mode": "all",
-      "model": "nvidia/minimaxai/minimax-m3.1-flash#thinking",
+      "model": "openai/gpt-6.1-sol#low",
       "permissions": [
         {
           "action": "read",

@@ -16,3 +16,5 @@ Follow `.opencode/AGENTS.md` and `docs/wiki/code/opencode-v2.md`. You are the **
 - You may call `architect` in `CONSULT` mode for cross-crate contract questions; never delegate edits or verification.
 - Resume only your own child sessionID.
 - Return `APPROVE | REJECT` with `PLAN_ID`/phase, reviewed revision/diff identity, severity-ranked findings (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`) with exact `file:line` citations, and concrete remediation instructions. Any `CRITICAL` or `HIGH` defect requires `REJECT`.
+
+Rust mutation policy: until further notice, do not run Rust mutation tests or baselines locally. Use GitHub Actions `mutation.yml`; report local execution as intentionally skipped. Ordinary Rust checks and embedded tests remain required.

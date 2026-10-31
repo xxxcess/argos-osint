@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor, act } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
@@ -18,7 +18,6 @@ import {
   type BackendSettings,
 } from "@argos/api-client";
 import { mswServer, testBase } from "../../../vitest.setup";
-import { act as reactAct } from "react";
 
 // In-memory persistence adapter standing in for the browser adapter
 // (localStorage lives in apps/web-desktop, not in @argos/api-client).

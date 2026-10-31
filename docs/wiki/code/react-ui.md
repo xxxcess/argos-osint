@@ -15,7 +15,7 @@ Direction is the Argos OSINT terminal desk — professional, sparse, evidence-fi
 5. **Components.** Accent titles and thin frames are the theme signature. Compose or add components freely inside that signature: new groupings, frames, meters, and stripes are fine when they carry information. Extend a shared primitive first; add one when the screen needs a form the set does not have. Bold key values at normal size.
 6. **States.** Hover, focus, active, selected, disabled, loading, empty, and error are designed with the layout. Contrast and focus order come first. Motion stays light; `prefers-reduced-motion` must still show state. Use real labels and data, not placeholder copy.
 
-Scroll long content; do not squeeze charts, tables, or critical rows. Ellipsize labels. React Native topology graphs use [ForceCanvas.tsx](../../../packages/intel/src/topology/ForceCanvas.tsx) (`react-force-graph-2d`) plus the accessible list twin. Do not add another graph library. The TUI keeps its existing topology view and does not gain new chrome, motion, or density modes.
+Scroll long content; do not squeeze charts, tables, or critical rows. Ellipsize labels. React Native topology graphs use [ForceCanvas.tsx](../../../packages/intel/src/topology/ForceCanvas.tsx) (`react-force-graph-3d`) plus the accessible list twin. Do not add another graph library. The TUI keeps its existing topology view and does not gain new chrome, motion, or density modes.
 
 | Principle | React Native | TUI (keep simple) |
 | --- | --- | --- |
@@ -25,7 +25,7 @@ Scroll long content; do not squeeze charts, tables, or critical rows. Ellipsize 
 | Focus vs selection | Distinct states; focus never hides other content | ACCENT/bold = activation; SELECT = keyboard focus |
 | Scroll over squeeze | Min sizes + scroll; ellipsize labels | Charts ≥11 rows, tables ≥9; scroll |
 | Theme, with room to compose | Tokens for color, type, space, and radius; component layout may be original | `theme.rs` remains authoritative |
-| Topology graphs | `react-force-graph-2d` via `ForceCanvas` | Existing canvas; no force-graph port |
+| Topology graphs | `react-force-graph-3d` via `ForceCanvas` | Existing canvas; no force-graph port |
 
 ## Ownership and stack
 
@@ -85,7 +85,7 @@ Principles:
 
 ## Current web components
 
-The shell uses a compact mono ARGOS / INTEL wordmark, API connection status and Bulletin/Topology navigation over the grid backdrop. Bulletin keeps a bounded reading width, labeled search, wrapping categories, scrollable retained days and a loaded-row count; article rows are glass cards with a left **tone stripe** and a `StatusTag`. Focus Brief keeps its three panes (tabs when narrow) as `Panel`s; Topology uses titled panels and recorded relationships. Connection and action failures use a danger-toned `Notice` with an explicit recovery action.
+The shell uses a compact mono ARGOS / INTEL wordmark, API connection status and a bottom Desktop/Bulletin/Topology taskbar over the grid backdrop. Desktop presents a centered Intel launcher; Bulletin stays the default entry and retains its category/day/search state when switching views. The category rail sits beside the feed at 1000px and wider and wraps above it on narrower screens. Bulletin keeps a bounded reading width, labeled search, wrapping categories, scrollable retained days and a loaded-row count; article rows are glass cards with a left **tone stripe** and a `StatusTag`. Focus Brief keeps its three panes (tabs when narrow) as `Panel`s; Topology uses titled panels and recorded relationships. Connection and action failures use a danger-toned `Notice` with an explicit recovery action.
 
 - `Button`: `default` is a framed neutral surface — `colors.border` over `colors.glass` — visually distinct from passive `Panel`/card glass; hover (`accentSoft` fill) is distinct from pressed (`glassStrong`) without motion, and `active`/`aria-pressed` uses accent fill with dark text. `quiet` keeps a persistent thin `colors.border` frame over transparent fill with dim text (no longer frameless). `primary` is the single decision action per surface — Connect/retry, Ensure/resume brief, Load more/Retry — with accent border, accent text, `accentSoft` fill and `glow(accent)` on hover. Disabled uses muted text (`colors.muted`), `glassBorder` border and `accessibilityState.disabled` rather than bare opacity. Selection and the focus-visible glow ring stay independent of each other.
 - Related-lead rows are interactive body-font rows (`RelatedLead` `Pressable`, minHeight 40) with a mono basis line and `›` chevron, not uppercase mono `Button` text; narrow Focus Brief tab state is owned by `Button` `active`, not a wrapper glow. Topology node-list rows are pressable at a 40px target with hover (`glassStrong`) and a neutral left tick on press; selection keeps an accent left border plus `accentSoft`.
@@ -94,7 +94,7 @@ The shell uses a compact mono ARGOS / INTEL wordmark, API connection status and 
 
 ## Canvas visualizations
 
-Canvas content is invisible to assistive tech and tests. Every canvas needs an **accessible list/text twin** that carries the same entities, relationships, selection and filters, plus a summary label on the canvas. React Native topology graphs use the force-graph canvas (`react-force-graph-2d` in `ForceCanvas`); do not replace it with another chart library or a hand-rolled layout. Pass tokens (`colors`, `toneColor`, palette) into draw code as props rather than hard-coding hex; keep kind/state distinguishable beyond color. Load canvas libraries lazily and client-only, hand them cloned data, and honor reduced motion (no animated transitions, no drag, pre-settled layout). Offer zoom/fit/reset/pause controls as real buttons. See the [topology contract](intel-web.md#interactive-topology-graph).
+Canvas content is invisible to assistive tech and tests. Every canvas needs an **accessible list/text twin** that carries the same entities, relationships, selection and filters, plus a summary label on the canvas. React Native topology graphs use the force-graph canvas (`react-force-graph-3d` in `ForceCanvas`); do not replace it with another chart library or a hand-rolled layout. Pass tokens (`colors`, `toneColor`, palette) into draw code as props rather than hard-coding hex; keep kind/state distinguishable beyond color. Load canvas libraries lazily and client-only, hand them cloned data, and honor reduced motion (no animated transitions, no drag, pre-settled layout). Offer zoom/fit/reset/pause controls as real buttons. See the [topology contract](intel-web.md#interactive-topology-graph).
 
 ## Layout and interaction
 
@@ -126,25 +126,17 @@ Select the pinned Node with `nvm use` (load nvm in the shell if necessary); use 
 
 ## React component testing (real-component pattern)
 
-This project uses Vitest with React Testing Library and MSW for unit testing shared React UI components. Key testing patterns include:
+@tag:testing
 
-- **Real-component imports**: Tests import actual components from `@argos/ui`, `@argos/intel`, and `@argos/api-client` rather than rendering stubs or mocks. This ensures token bindings, styling, and behavior are verified against the shared design system.
+Run `pnpm test` from the workspace root. [Vitest configuration](../../../vitest.config.ts) discovers package and app tests in jsdom and aliases React Native to React Native Web, as the web build does. [Setup](../../../vitest.setup.tsx) supplies the shared test environment. Use React Testing Library to render real components and MSW to intercept the HTTP boundary with offline fixtures.
 
-- **`act()` wrappers**: Keyboard and user-interaction tests wrap DOM mutations in `act()` to flush React's update queue, matching the [act() wrappers](#act wrappers) contract. Example patterns appear in `Button.focus-select` and `focus-select` test suites.
+- Assert user-visible loading, success, empty, error/retry and pending states. Isolate Query clients, handlers and settings between cases; preserve real query keys and request serialization.
+- Await Testing Library/user-event helpers, which already wrap React updates. Use React `act` for direct DOM events or imperative updates that those helpers do not wrap.
+- Compare rendered declarations against `@argos/ui` tokens. The [style helpers](../../../vitest.test-support.tsx) read RN Web atomic stylesheet declarations because jsdom cannot fully compute those styles. These assertions do not prove browser contrast, focus rings or visual layout.
+- Check hover, press, focus and selected states against each component's actual contract. Default and compact density remain restricted by the design baseline above; do not invent component variants solely for a test.
+- Use [offline browser tests](../../../tests/web) for real keyboard operation, responsive layout and screenshot comparison. Run `pnpm test:e2e` after the static build; review changed baselines deliberately and inspect affected PNGs at 1440, 768, 390 and 320px. Snapshot generation alone does not establish visual approval.
 
-- **Focus vs selection distinction**: Tests verify that `hover` uses accent border + `accentSoft` ground without glow, while `active`/`selection` applies full accent surface + glow. Hover must never hide sibling content. See the [`focus-select.test.tsx`](../../../packages/ui/__tests__/focus-select.test.tsx) suite for the full contract.
-
-- **Density modes**: Default spacing is the theme default; `compact` is reserved for launchers, palettes, headline lists, and category bullets. `LoadingState` and `EmptyState` both expose density token checks. See [`density-modes.test.tsx`](../../../packages/ui/__tests__/density-modes.test.tsx).
-
-- **Token bindings**: Tests verify that computed styles resolve to the correct token values from `colors` (glass, glassStrong, accentSoft, border, accent, success, warning, danger). The [`sheetProp`/`paint`](../../../vitest.test-support.tsx) helpers resolve real rendered styles against jdom's computed style.
-
-- **Error boundary**: Uses `HttpResponse.error()` pattern for fetch error simulation; test fixtures are kept offline with no live-provider data or secrets.
-
-- **Visual regression infra**: Playwright config + snapshots capture full-page screenshots at 1440×1000px for changed components; inspect PNGs for regression detection.
-
-### Test file tagging
-
-New and modified test files should carry the `@tag:testing` tag in their source comments, linking back to this testing section. Files importing real components from `@argos/ui`, `@argos/intel`, or `@argos/api-client` are the primary anchors for this tag.
+New or modified test source comments may use `@tag:testing` to connect this contract to executable checks. Keep test outcomes in task evidence, rather than recording volatile pass counts or flaky-test exceptions here.
 
 For visual/interaction changes, use the existing HTTP fixtures and a proportional state/viewport matrix. Capture affected screens with Playwright `page.screenshot({ path: …, fullPage: true })` into the named plan or `.agent-scratch/`, then **open and inspect the PNGs**. A screenshot file or passing E2E assertion is not visual approval. Check keyboard/focus, action outcomes and console/hydration errors separately. Add behavior assertions only for changed behavior or meaningful regressions. Keep fixtures offline; no live-provider data or secrets in evidence.
 

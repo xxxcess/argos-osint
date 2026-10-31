@@ -13,7 +13,7 @@ describe("Notice (real @argos/ui component)", () => {
   });
 
   it("paints the danger rule: 2px red left border on red-soft ground", () => {
-    const { container } = render(<Notice>Graph failed</Notice>);
+    render(<Notice>Graph failed</Notice>);
     const box = screen.getByRole("alert") as HTMLElement;
     expect(applied(box).borderLeftWidth).toBe("2px");
     expect(applied(box).borderLeftColor).toBe("rgb(240, 138, 138)"); // danger

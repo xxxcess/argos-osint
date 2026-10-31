@@ -1,0 +1,50 @@
+name: Scoped Rust mutation testing
+
+# Expensive diagnostic gate: dispatch after the ordinary embedded checks pass.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_TARGET_DIR: target/agents
+
+jobs:
+  mutation:
+    name: High-risk core modules / embedded
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Install embedded build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mutation-embedded
+          workspaces: . -> target/agents
+      - name: Install pinned mutation runner
+        run: cargo install cargo-mutants --version 27.1.0 --locked
+      - name: Check baseline and mutations
+        # .cargo/mutants.toml selects modules and isolated offline test targets.
+        # Keep the baseline: an already-broken suite cannot establish a mutation result.
+        run: cargo mutants
+      - name: Retain mutation outcomes and logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: core-mutation-results
+          path: .agent-scratch/mutants/
+          if-no-files-found: warn
+          retention-days: 7

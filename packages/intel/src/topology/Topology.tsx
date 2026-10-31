@@ -291,6 +291,17 @@ function GraphExplorer({
           ) : null}
         </View>
       </Frame>
+      <View style={t.controls} role="group" aria-label="Graph legend">
+        {kinds.map((kind) => (
+          <StatusTag key={kind} tone={kindTone(kind)}>
+            {kind}
+          </StatusTag>
+        ))}
+        <Copy>
+          Lines show recorded relationships. Select a node to inspect its
+          neighborhood.
+        </Copy>
+      </View>
       <Text style={t.count} accessibilityLiveRegion="polite">
         Showing {nodes.length} of {data.nodes.length} nodes · {links.length} of{" "}
         {edges.length} connections

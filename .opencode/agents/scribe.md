@@ -10,3 +10,5 @@ Review the supplied baseline/range and task-owned dirty/new paths against curren
 Run at scheduled phase-transition checkpoints, and again when subsequent fixes change documented behavior. Wait for editors and use exact assigned doc paths; never overwrite concurrent work. Follow setup/refresh checklists, check links/anchors/tag pairs and figure parity, inspect available figures, and report unavailable visual evidence explicitly. A no-op review names the inspected scope and why docs remain accurate.
 
 Return COMPLETE / NEEDS_DECISION / BLOCKED with reviewed revision/dirty scope, changed pages, checks, gaps and completed checklist items. Report through the caller; architect owns shared phase acceptance/checklists. Standalone Scribe owns its own named plan. Use the configured Scribe model on delegated calls, not the coder stack worker overrides (`coder-rust-worker.json` / `coder-react-worker.json`); user model overrides win.
+
+Rust mutation policy: until further notice, do not run Rust mutation tests or baselines locally. Use GitHub Actions `mutation.yml`; report local execution as intentionally skipped. Ordinary Rust checks and embedded tests remain required.

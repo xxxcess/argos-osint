@@ -21,7 +21,7 @@ describe("Panel (real @argos/ui component)", () => {
   });
 
   it("renders no header when no title is given, children only", () => {
-    const { container } = render(<Panel>Body only</Panel>);
+    const { container } = render(<Panel><Copy>Body only</Copy></Panel>);
     expect(container.firstElementChild!.textContent).toBe("Body only");
     expect(container.textContent).not.toMatch(/title/i);
   });

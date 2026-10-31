@@ -6,7 +6,7 @@ import React, {
   useMemo,
   useRef,
 } from "react";
-import ForceGraph2D from "react-force-graph-2d";
+import ForceGraph3D from "react-force-graph-3d";
 
 export type GNode = {
   id: string;
@@ -14,6 +14,7 @@ export type GNode = {
   kind: string;
   x?: number;
   y?: number;
+  z?: number;
 };
 export type GLink = {
   id: string;
@@ -41,14 +42,30 @@ type Props = {
   reducedMotion: boolean;
   onSelect: (id: string | null) => void;
 };
-type Graph2DMethods = {
-  zoom: (k?: number, ms?: number) => number | void;
+type Position = { x: number; y: number; z: number };
+type GraphMethods = {
+  controls: () => { target: Position };
+  cameraPosition: (
+    position?: Position,
+    lookAt?: Position,
+    ms?: number,
+  ) => Position;
   zoomToFit: (ms?: number, padding?: number) => void;
-  centerAt: (x?: number, y?: number, ms?: number) => void;
   pauseAnimation: () => void;
   resumeAnimation: () => void;
   d3ReheatSimulation: () => void;
 };
+
+// ForceGraph tooltips interpret strings as HTML; entity text is untrusted.
+export function escapeGraphLabel(value: string): string {
+  return value.replace(
+    /[&<>"']/g,
+    (char) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        char
+      ]!,
+  );
+}
 
 const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
   {
@@ -65,8 +82,8 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
   },
   ref,
 ) {
-  const graphRef = useRef<Graph2DMethods | undefined>(undefined);
-  // The library mutates nodes/links (x, y, link endpoints); always hand it clones.
+  const graphRef = useRef<GraphMethods | undefined>(undefined);
+  // D3 mutates endpoints and positions. Query cache objects never enter the engine.
   const data = useMemo(
     () => ({
       nodes: nodes.map((n) => ({ ...n })),
@@ -74,115 +91,99 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
     }),
     [nodes, links],
   );
+  const fittedData = useRef<typeof data | null>(null);
   const ms = reducedMotion ? 0 : 400;
   useImperativeHandle(
     ref,
     () => ({
-      zoomBy: (f) => {
-        const g = graphRef.current;
-        if (g) g.zoom((g.zoom() as number) * f, ms);
+      zoomBy: (factor) => {
+        const graph = graphRef.current;
+        if (!graph) return;
+        const position = graph.cameraPosition();
+        const target = graph.controls().target;
+        graph.cameraPosition(
+          {
+            x: target.x + (position.x - target.x) / factor,
+            y: target.y + (position.y - target.y) / factor,
+            z: target.z + (position.z - target.z) / factor,
+          },
+          { x: target.x, y: target.y, z: target.z },
+          ms,
+        );
       },
       fit: () => graphRef.current?.zoomToFit(ms, 40),
       reset: () => {
-        graphRef.current?.d3ReheatSimulation();
+        if (!reducedMotion) graphRef.current?.d3ReheatSimulation();
         graphRef.current?.zoomToFit(ms, 40);
       },
       pause: () => graphRef.current?.pauseAnimation(),
-      resume: () => graphRef.current?.resumeAnimation(),
+      resume: () => {
+        if (!reducedMotion) graphRef.current?.resumeAnimation();
+      },
     }),
-    [ms],
+    [ms, reducedMotion],
   );
   useEffect(() => {
     if (!selectedId) return;
-    const n = data.nodes.find((x) => x.id === selectedId);
-    if (n && n.x != null && n.y != null)
-      graphRef.current?.centerAt(n.x, n.y, ms);
+    const node = data.nodes.find((n) => n.id === selectedId);
+    if (node?.x == null || node.y == null || node.z == null) return;
+    const distance = Math.hypot(node.x, node.y, node.z);
+    const scale = distance > 0 ? 1 + 200 / distance : 1;
+    graphRef.current?.cameraPosition(
+      {
+        x: node.x * scale,
+        y: node.y * scale,
+        z: distance > 0 ? node.z * scale : 200,
+      },
+      { x: node.x, y: node.y, z: node.z },
+      ms,
+    );
   }, [selectedId, data, ms]);
-
   return (
-    <ForceGraph2D
+    <ForceGraph3D
       ref={graphRef as never}
       graphData={data}
       width={width}
       height={height}
-      backgroundColor="rgba(0,0,0,0)"
-      warmupTicks={reducedMotion ? 20 : 0}
-      cooldownTicks={reducedMotion ? 30 : 120}
-      d3AlphaDecay={reducedMotion ? 0.1 : 0.0228}
+      backgroundColor={palette.bg}
+      showNavInfo={false}
+      onEngineStop={() => {
+        if (fittedData.current === data) return;
+        fittedData.current = data;
+        graphRef.current?.zoomToFit(0, 60);
+      }}
+      linkWidth={1.5}
+      linkOpacity={0.85}
+      warmupTicks={reducedMotion ? 120 : 0}
+      cooldownTicks={reducedMotion ? 0 : 120}
       enableNodeDrag={!reducedMotion}
-      nodeLabel={(n) => `${(n as GNode).label} · ${(n as GNode).kind}`}
+      nodeLabel={(n) =>
+        escapeGraphLabel(`${(n as GNode).label} · ${(n as GNode).kind}`)
+      }
+      nodeColor={(n) =>
+        focusIds && !focusIds.has((n as GNode).id)
+          ? palette.dim
+          : (kindColor[(n as GNode).kind] ?? palette.accent)
+      }
+      nodeRelSize={1.5}
+      nodeVal={(n) => ((n as GNode).id === selectedId ? 4 : 2)}
+      nodeOpacity={0.9}
+      linkLabel={(l) => escapeGraphLabel((l as unknown as GLink).label)}
       linkColor={(l) => {
-        const link = l as unknown as {
+        const edge = l as unknown as {
           source: GNode | string;
           target: GNode | string;
         };
-        const sid =
-          typeof link.source === "object" ? link.source.id : link.source;
-        const tid =
-          typeof link.target === "object" ? link.target.id : link.target;
-        const lit = !focusIds || (focusIds.has(sid) && focusIds.has(tid));
-        return lit ? "rgba(181,181,181,0.55)" : "rgba(83,83,83,0.2)";
+        const source =
+          typeof edge.source === "object" ? edge.source.id : edge.source;
+        const target =
+          typeof edge.target === "object" ? edge.target.id : edge.target;
+        return !focusIds || (focusIds.has(source) && focusIds.has(target))
+          ? palette.dim
+          : palette.bg;
       }}
       linkDirectionalArrowLength={4}
       linkDirectionalArrowRelPos={1}
-      linkCanvasObjectMode={() => "after"}
-      linkCanvasObject={(l, ctx, scale) => {
-        if (scale < 1.6) return;
-        const link = l as unknown as {
-          label: string;
-          source: GNode;
-          target: GNode;
-        };
-        const { source: a, target: b } = link;
-        if (typeof a !== "object" || a.x == null || b.x == null) return;
-        if (focusIds && !(focusIds.has(a.id) && focusIds.has(b.id))) return;
-        ctx.font = `${10 / scale}px sans-serif`;
-        ctx.fillStyle = palette.dim;
-        ctx.textAlign = "center";
-        ctx.fillText(
-          link.label,
-          (a.x + b.x!) / 2,
-          ((a.y ?? 0) + (b.y ?? 0)) / 2,
-        );
-      }}
-      nodeCanvasObject={(n, ctx, scale) => {
-        const node = n as GNode;
-        const x = node.x ?? 0;
-        const y = node.y ?? 0;
-        const color = kindColor[node.kind] ?? palette.accent;
-        const dim = focusIds != null && !focusIds.has(node.id);
-        const selected = node.id === selectedId;
-        ctx.globalAlpha = dim ? 0.2 : 1;
-        if (selected) {
-          ctx.shadowColor = color;
-          ctx.shadowBlur = 16;
-          ctx.beginPath();
-          ctx.arc(x, y, 8, 0, 2 * Math.PI);
-          ctx.strokeStyle = palette.text;
-          ctx.lineWidth = 2 / scale;
-          ctx.stroke();
-        }
-        ctx.beginPath();
-        ctx.arc(x, y, 5, 0, 2 * Math.PI);
-        ctx.fillStyle = color;
-        ctx.fill();
-        ctx.shadowBlur = 0;
-        if (scale > 0.8 || selected) {
-          ctx.font = `${(selected ? 12 : 10) / scale}px sans-serif`;
-          ctx.textAlign = "center";
-          ctx.textBaseline = "top";
-          ctx.fillStyle = palette.text;
-          ctx.fillText(node.label, x, y + 8);
-        }
-        ctx.globalAlpha = 1;
-      }}
-      nodePointerAreaPaint={(n, color, ctx) => {
-        const node = n as GNode;
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.arc(node.x ?? 0, node.y ?? 0, 9, 0, 2 * Math.PI);
-        ctx.fill();
-      }}
       onNodeClick={(n) => onSelect((n as GNode).id)}
       onBackgroundClick={() => onSelect(null)}
     />

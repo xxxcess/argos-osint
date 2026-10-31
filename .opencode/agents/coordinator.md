@@ -34,3 +34,5 @@ Select the smallest, most efficient team topology from `.opencode/opencode.json`
 - Resume only your own child sessionID. Never reuse sibling, ancestor, or retired session IDs.
 - Enforce `auditor` binary veto (`INTEGRITY_VIOLATION` blocks completion immediately) and require `reviewer: APPROVE` + `tester: PASS` before reporting completion on code changes.
 - Preserve unrelated working-tree changes, keep scratch strictly in `.agent-scratch/`, and report final outcomes concisely with `file:line` references and actual verification evidence.
+
+Rust mutation policy: until further notice, do not run Rust mutation tests or baselines locally. Use GitHub Actions `mutation.yml`; report local execution as intentionally skipped. Ordinary Rust checks and embedded tests remain required.

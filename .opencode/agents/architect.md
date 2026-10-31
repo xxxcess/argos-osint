@@ -22,3 +22,5 @@ For any Rust phase load `argos-rust-style` and pass it to `coder`. Argos async a
 Keep shared React Native primitives and the enabled React Compiler/Hooks checks. For React UI phases load `argos-react-ui` and `argos-react-patterns`; scope the [Argos look and feel](docs/wiki/code/react-ui.md#argos-look--feel-reference), creative component design inside that theme, responsive/state coverage and inspected screenshot acceptance.
 
 For build/test changes, inspect `docs/wiki/code/ci.md` and affected `.github/workflows/`; map acceptance to their actual commands (including targeted host-native embedded Rust commands `-p <crate>`, `--lib`, `--test <name>` for scoped phases and `scripts/local_matrix.sh --storage embedded` for full gates), preserve Code Architect ownership and distinguish local validation from hosted Actions.
+
+Rust mutation policy: until further notice, do not run Rust mutation tests or baselines locally. Use GitHub Actions `mutation.yml`; report local execution as intentionally skipped. Ordinary Rust checks and embedded tests remain required.

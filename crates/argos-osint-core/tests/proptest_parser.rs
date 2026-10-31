@@ -8,6 +8,7 @@ use argos_osint_core::intel_recon::clean_body::{
     apply_removals, nlp_anchors, title_anchors, unwrap_soft_wraps,
 };
 use argos_osint_core::intel_recon::sentence_index::{metadata_wire, SentenceIndex};
+use argos_osint_core::intel_recon::IrrelevantRange;
 use proptest::prelude::*;
 use proptest::test_runner::TestRunner;
 
@@ -15,19 +16,18 @@ fn config() -> ProptestConfig {
     ProptestConfig::with_cases(256)
 }
 
-/// unwrap_soft_wraps preserves all non-newline characters
+/// Soft wraps preserve content and byte offsets, replacing line endings with spaces.
 #[test]
 fn unwrap_soft_wraps_preserves_chars() {
     let mut runner = TestRunner::new(config());
     runner
         .run(&any::<String>(), |text| {
             let (unwrapped, _joined) = unwrap_soft_wraps(&text);
-            let orig_chars: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
-            let unwrapped_chars: String = unwrapped
-                .chars()
-                .filter(|c| *c != '\n' && *c != '\r')
-                .collect();
+            let orig_chars: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+            let unwrapped_chars: String =
+                unwrapped.chars().filter(|c| !c.is_whitespace()).collect();
             prop_assert_eq!(unwrapped_chars, orig_chars);
+            prop_assert_eq!(unwrapped.len(), text.len());
             Ok(())
         })
         .unwrap();
@@ -80,10 +80,14 @@ fn apply_removals_full() {
     runner
         .run(&any::<String>(), |baseline| {
             let total_chars = baseline.chars().count();
-            let ranges = vec![];
-            let (clean, _spans) = apply_removals(&baseline, &ranges);
-            // With no ranges, it should return original
-            prop_assert_eq!(clean, baseline);
+            let ranges = vec![IrrelevantRange {
+                start: 0,
+                end: total_chars,
+                reason: "fixture".into(),
+            }];
+            let (clean, spans) = apply_removals(&baseline, &ranges);
+            prop_assert!(clean.is_empty());
+            prop_assert!(spans.is_empty());
             Ok(())
         })
         .unwrap();
@@ -228,15 +232,30 @@ fn wire_sentences_text_matches_span() {
         .unwrap();
 }
 
-/// apply_removals handles empty ranges gracefully
+/// Overlapping removals remove their union, including Unicode character offsets.
 #[test]
 fn apply_removals_overlapping_ranges() {
     let mut runner = TestRunner::new(config());
     runner
         .run(&any::<String>(), |baseline| {
-            let (clean, _spans) = apply_removals(&baseline, &[]);
-            prop_assert_eq!(clean, baseline);
+            let total = baseline.chars().count();
+            let middle = total / 2;
+            let ranges = [
+                IrrelevantRange {
+                    start: 0,
+                    end: middle,
+                    reason: "fixture".into(),
+                },
+                IrrelevantRange {
+                    start: middle / 2,
+                    end: total,
+                    reason: "fixture".into(),
+                },
+            ];
+            let (clean, spans) = apply_removals(&baseline, &ranges);
+            prop_assert!(clean.is_empty());
+            prop_assert!(spans.is_empty());
             Ok(())
         })
-        .unwrap();
+        .expect("overlapping character ranges remove their union");
 }

@@ -319,3 +319,7 @@ Use upstream documentation as the primary authority. Check the version relevant 
 - OpenCode workflow and handoffs: `docs/wiki/code/opencode-v2.md`
 
 When upstream guidance conflicts with repository-specific safety, reproducibility, CI, or resource constraints, follow the repository policy. Do not upgrade toolchain/dependencies just to use a newly documented feature.
+
+## Rust mutation execution restriction
+
+Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Local mutation execution is deliberately skipped, not passed; ordinary targeted checks and the embedded gate remain required.

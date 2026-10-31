@@ -1420,15 +1420,21 @@ pub struct CleanupCounts {
     pub jobs: usize,
 }
 
-async fn tree_busy(tx: &Tx, root: &str) -> Result<bool, TxError> {
+async fn tree_busy(tx: &Tx, root: &str, protect_active_jobs: bool) -> Result<bool, TxError> {
+    // Task jobs start as `running` even before a task is claimed. Only a
+    // running task proves that work is in flight; services have no task row
+    // and must instead be protected by their own active lifecycle state.
+    // Explicit history clearing also preserves active task-job descendants;
+    // retention expires idle task jobs in any state after the window.
     let mut res = run(
         tx,
         tx.query(
             "RETURN count(SELECT id FROM task WHERE root = $r AND state = 'running') \
-             + count(SELECT id FROM job WHERE root = $r \
+             + count(SELECT id FROM job WHERE root = $r AND (kind = 'service' OR $protect_active_jobs) \
                AND state IN ['running', 'queued', 'retry_scheduled', 'waiting', 'blocked'])",
         )
-        .bind(("r", rid("job", root))),
+        .bind(("r", rid("job", root)))
+        .bind(("protect_active_jobs", protect_active_jobs)),
     )
     .await?;
     let n: Option<i64> = take(&mut res, 0)?;
@@ -1487,7 +1493,7 @@ pub async fn cleanup_batch(
             let roots: Vec<String> = take(&mut res, 0)?;
             let mut counts = CleanupCounts::default();
             for root in roots {
-                if tree_busy(&tx, &root).await? {
+                if tree_busy(&tx, &root, false).await? {
                     continue;
                 }
                 purge_tree_in(&tx, &root, "retention", &now_s).await?;
@@ -1537,7 +1543,7 @@ pub async fn clear_jobs_by_status(
                 let roots: Vec<String> = take(&mut res, 0)?;
                 let (mut deleted, mut skipped) = (0usize, 0i64);
                 for root in &roots {
-                    if tree_busy(&tx, root).await? {
+                    if tree_busy(&tx, root, true).await? {
                         skipped += 1;
                         continue;
                     }

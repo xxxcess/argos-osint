@@ -330,3 +330,96 @@ async fn storage_api_contracts() {
         StatusCode::SERVICE_UNAVAILABLE
     );
 }
+
+// Each contract owns its datastore; no process-wide ARGOS_HOME mutation.
+async fn isolated_api() -> (tempfile::TempDir, Router) {
+    let dir = tempfile::tempdir().expect("isolated API directory");
+    let repo = Repository::connect(
+        &Target::Embedded {
+            path: dir.path().join("db"),
+        },
+        "argos",
+        "contracts",
+    )
+    .await
+    .expect("embedded contract repository");
+    let app = router(ApiState {
+        repo,
+        instance_id: "contract-instance".into(),
+        port: 8080,
+        origins: Arc::new(vec!["http://localhost:3000".into()]),
+    });
+    (dir, app)
+}
+
+#[tokio::test]
+async fn capabilities_advertise_only_supported_features() {
+    let (_dir, app) = isolated_api().await;
+    let (status, body) = call(&app, "GET", "/api/v1/capabilities", None, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["api_version"], 1);
+    assert_eq!(body["auth"], false);
+    assert_eq!(
+        body["features"],
+        json!(["bulletin", "brief", "related", "jobs", "topology"])
+    );
+}
+
+#[tokio::test]
+async fn missing_job_returns_public_error_without_internal_details() {
+    let (_dir, app) = isolated_api().await;
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/api/v1/jobs/detail?id=missing-job",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({"error": "Resource not found"}));
+}
+
+#[tokio::test]
+async fn fresh_repository_has_verified_empty_jobs() {
+    let (_dir, app) = isolated_api().await;
+    let (status, body) = call(&app, "GET", "/api/v1/jobs", None, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"rows": []}));
+}
+
+#[tokio::test]
+async fn retrying_missing_job_is_idempotent() {
+    let (_dir, app) = isolated_api().await;
+    for _ in 0..2 {
+        let (status, body) = call(
+            &app,
+            "POST",
+            "/api/v1/jobs/retry",
+            Some("http://localhost:3000"),
+            json!({"id": "missing-job"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({"requeued": 0}));
+    }
+    let (_, body) = call(&app, "GET", "/api/v1/jobs", None, Value::Null).await;
+    assert_eq!(body, json!({"rows": []}));
+}
+
+#[tokio::test]
+async fn untrusted_origin_cannot_retry_jobs() {
+    let (_dir, app) = isolated_api().await;
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/v1/jobs/retry",
+        Some("https://evil.test"),
+        json!({"id": "missing-job"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body["error"].is_string());
+    let (_, body) = call(&app, "GET", "/api/v1/jobs", None, Value::Null).await;
+    assert_eq!(body, json!({"rows": []}));
+}

@@ -8,7 +8,7 @@
     "@argos/ui": "workspace:*",
     "@tanstack/react-query": "5.104.5",
     "react": "19.2.3",
-    "react-force-graph-2d": "1.29.2",
+    "react-force-graph-3d": "1.29.2",
     "react-native": "0.86.3"
   }
 }

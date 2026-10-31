@@ -20,5 +20,9 @@ Theme is the evidence-first terminal desk plus HUD/glass. Design components crea
 - Name screen type and density before building. Default spacing; compact only for launchers, palettes, headlines, and category bullets.
 - Mono for telemetry/nav, body for prose. One spacing unit. Neutrals plus accent for titles, primary actions, and focus. Select stays a separate token.
 - Extend shared components, or add one when the screen needs it. States and contrast are part of the design.
-- Topology uses `ForceCanvas` (`react-force-graph-2d`) plus its list twin.
+- Topology uses `ForceCanvas` (`react-force-graph-3d`) plus its list twin.
 - TUI stays simpler: existing thin borders, ACCENT focus, SELECT for selection. No new chrome or density modes.
+
+## Rust mutation execution restriction
+
+Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Local mutation execution is deliberately skipped, not passed; ordinary targeted checks and the embedded gate remain required.

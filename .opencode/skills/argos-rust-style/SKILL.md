@@ -116,3 +116,7 @@ Prefer, in order: ordinary Rust, `macro_rules!`, other codegen, then `proc_macro
 | Public APIs | Docs, `non_exhaustive` where needed, `must_use` |
 | Impl | Pattern match over unwrap; context on asserts |
 | Argos | Async and process rules kept; crate layout unchanged |
+
+## Rust mutation execution restriction
+
+Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Local mutation execution is deliberately skipped, not passed; ordinary targeted checks and the embedded gate remain required.

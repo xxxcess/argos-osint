@@ -21,42 +21,60 @@ fn config() -> ProptestConfig {
     ProptestConfig::with_cases(256)
 }
 
-/// EvidenceConfidence score is always in [0, 255] when present (u8::MAX)
+/// All source/information combinations preserve grade bounds and unknown semantics.
 #[test]
-fn evidence_confidence_score_bounds() {
+fn initial_rating_bounds() {
+    use InformationCredibility::{
+        CannotBeJudged, Confirmed, DoubtfullyTrue, Improbable, PossiblyTrue, ProbablyTrue,
+    };
     let mut runner = TestRunner::new(config());
     runner
-        .run(&(any::<u8>(), any::<bool>()), |(score, provisional)| {
-            let mut conf = EvidenceConfidence::default();
-            conf.score = Some(score);
-            conf.provisional = provisional;
-            if let Some(s) = conf.score {
-                prop_assert!(s <= u8::MAX);
+        .run(&(0usize..6, 0usize..6), |(source, info)| {
+            let sources = [
+                SourceReliability::A,
+                SourceReliability::B,
+                SourceReliability::C,
+                SourceReliability::D,
+                SourceReliability::E,
+                SourceReliability::F,
+            ];
+            let infos = [
+                Confirmed,
+                ProbablyTrue,
+                PossiblyTrue,
+                DoubtfullyTrue,
+                Improbable,
+                CannotBeJudged,
+            ];
+            let (score, provisional) = initial_rating(sources[source], infos[info]);
+            prop_assert_eq!(provisional, info == 5);
+            prop_assert_eq!(score.is_none(), source == 5 && info == 5);
+            if let Some(score) = score {
+                prop_assert!(score <= 100);
+            }
+            if info == 5 {
+                prop_assert!(score.is_none_or(|score| score <= 60));
+            }
+            if source < 4 {
+                let (better, _) = initial_rating(sources[source], infos[info]);
+                let (worse, _) = initial_rating(sources[source + 1], infos[info]);
+                prop_assert!(better >= worse);
             }
             Ok(())
         })
-        .unwrap();
+        .expect("rating grade invariants");
 }
 
-/// initial_rating returns score in valid range or None
+/// Empty evidence cannot manufacture a confidence score.
 #[test]
-fn initial_rating_bounds() {
-    let mut runner = TestRunner::new(config());
-    runner
-        .run(
-            &(
-                proptest::strategy::Just(SourceReliability::A),
-                proptest::strategy::Just(InformationCredibility::Confirmed),
-            ),
-            |(source, info)| {
-                let (score, _provisional) = initial_rating(source, info);
-                if let Some(s) = score {
-                    prop_assert!(s <= 100);
-                }
-                Ok(())
-            },
-        )
-        .unwrap();
+fn empty_evidence_has_no_score() {
+    let output = argos_osint_core::investigation::insights::PipelineOutput::default();
+    for complete in [false, true] {
+        let confidence = EvidenceConfidence::estimate(&output, complete);
+        assert!(confidence.score.is_none());
+        assert_eq!(confidence.claims, 0);
+        assert_eq!(confidence.inferences, 0);
+    }
 }
 
 /// initial_rating with SourceReliability::B and InformationCredibility::Confirmed returns score
@@ -106,28 +124,29 @@ fn coverage_stats_eligible_tools() {
         .unwrap();
 }
 
-/// coverage_stats: two_tools_attempted is true when >= 2 attempted
+/// Counts must not manufacture a successful attempt-coverage receipt.
 #[test]
 fn coverage_stats_two_tools_attempted() {
     let mut runner = TestRunner::new(config());
     runner
         .run(
-            &proptest::collection::vec(any::<String>(), 0..5),
-            |tool_ids| {
+            &(
+                proptest::collection::vec(any::<String>(), 0..5),
+                any::<bool>(),
+            ),
+            |(tool_ids, receipt)| {
                 let record = CoverageRecord {
                     attempted_tools: tool_ids.clone(),
+                    two_tools_attempted: receipt,
                     ..CoverageRecord::default()
                 };
                 let stats = coverage_stats(&record);
-                let expected = tool_ids.len() >= 2;
-                // two_tools_attempted is derived from attempted_tools.len() >= 2
-                // but also depends on category matching in the actual implementation
-                // For empty category, it won't match, so we test the basic logic
                 prop_assert_eq!(stats.attempted_tools, tool_ids.len());
+                prop_assert_eq!(stats.two_tools_attempted, receipt);
                 Ok(())
             },
         )
-        .unwrap();
+        .expect("persisted attempt coverage is authoritative");
 }
 
 /// coverage_stats: two_tools_successful is true when >= 2 successful

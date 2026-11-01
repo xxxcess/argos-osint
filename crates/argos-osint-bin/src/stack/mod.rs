@@ -583,11 +583,8 @@ async fn run(up: Up) -> Result<()> {
                 println!("Stack already running: {}", state.api_url);
                 let port = state.web_port.unwrap_or(3000);
                 if target == Target::Web && !up.no_open {
-                    presentation::open_browser(
-                        &format!("http://localhost:{port}/?api={}", state.api_url),
-                        None,
-                    )
-                    .await;
+                    presentation::open_browser(&format!("http://localhost:{port}/home"), None)
+                        .await;
                 }
                 return Ok(());
             }
@@ -644,8 +641,8 @@ async fn run(up: Up) -> Result<()> {
     if let Some(root) = &root {
         if up.profile == Profile::Installed {
             anyhow::ensure!(
-                root.join("apps/web-desktop/out/index.html").is_file(),
-                "static bundle missing; run argos stack build --web"
+                root.join("apps/web-desktop/.next/BUILD_ID").is_file(),
+                "Next server build missing; run argos stack build --web"
             );
         }
     }
@@ -760,31 +757,6 @@ async fn run(up: Up) -> Result<()> {
         }
         let instance =
             instance.context("API did not reach storage-backed readiness; frontend not started")?;
-        if target == Target::Web {
-            let origin = loopback_url(&format!("http://localhost:{web_port}"))?
-                .origin()
-                .ascii_serialization();
-            let response = reqwest::Client::builder()
-                .no_proxy()
-                .timeout(Duration::from_secs(2))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()?
-                .get(format!(
-                    "{}/api/v1/health/ready",
-                    api_url.trim_end_matches('/')
-                ))
-                .header("Origin", &origin)
-                .send()
-                .await?;
-            anyhow::ensure!(
-                response.status().is_success()
-                    && response
-                        .headers()
-                        .get("access-control-allow-origin")
-                        .is_some_and(|v| v.as_bytes() == origin.as_bytes()),
-                "API does not allow web Origin {origin}; configure its --origins before launch"
-            );
-        }
         drop(web_reservation);
         if let Some(root) = &root {
             let mut cmd = environment
@@ -792,18 +764,13 @@ async fn run(up: Up) -> Result<()> {
                 .context("selected Node environment")?
                 .command("node");
             cmd.current_dir(root);
+            cmd.env("ARGOS_RUST_API_ORIGIN", &api_url);
+            cmd.current_dir(root.join("apps/web-desktop"));
+            cmd.arg(root.join("apps/web-desktop/server.mjs"))
+                .arg("--port")
+                .arg(web_port.to_string());
             if up.profile == Profile::Dev {
-                // Next's development Babel loader resolves next/babel from the
-                // process cwd, even when the app directory is an explicit arg.
-                cmd.current_dir(root.join("apps/web-desktop"));
-                cmd.arg(root.join("apps/web-desktop/node_modules/next/dist/bin/next"))
-                    .args(["dev", "--webpack", "-H", "127.0.0.1", "-p"])
-                    .arg(web_port.to_string())
-                    .arg(root.join("apps/web-desktop"));
-            } else {
-                cmd.arg(root.join("scripts/serve_web.mjs"))
-                    .arg("--port")
-                    .arg(web_port.to_string());
+                cmd.arg("--dev");
             }
             if up.terminal == TerminalDisplay::Tui {
                 let (log, file) = presentation::service_log()?;
@@ -822,7 +789,7 @@ async fn run(up: Up) -> Result<()> {
             } else {
                 frontend = Some(owned(&mut cmd)?);
             }
-            let url = format!("http://localhost:{web_port}/?api={api_url}");
+            let url = format!("http://localhost:{web_port}/home");
             println!("Web: {url}");
             presentation::wait_for_web(web_port, frontend.as_mut().unwrap()).await?;
             if !up.no_open {

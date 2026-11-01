@@ -21,7 +21,7 @@ Understand the product, then follow its implementation. This is the maintained e
 | [docs/diagrams/](diagrams.md) | Diagram catalog; HTML pages and matching SVG figures |
 | [Core crate](../crates/argos-osint-core) | Domain pipelines and storage; [module map](wiki/code/core.md) |
 | [API adapter](../crates/argos-osint-api) / [host](../crates/argos-api-host) | Local Intel HTTP service; [contract](wiki/code/intel-web.md) |
-| [Web app](../apps/web-desktop) / [shared packages](../packages) | Next static export, React Native primitives and typed Query client |
+| [Web app](../apps/web-desktop) / [shared packages](../packages) | Next server/stateless API relay, React Native primitives and typed Query client |
 | [Binary crate](../crates/argos-osint-bin) | CLI/TUI; [interface map](wiki/code/interfaces.md) |
 | [scripts/](../scripts) | Builds, storage tests, releases and TUI captures; [workflow](wiki/code/contributing.md) |
 | [.opencode/](../.opencode) | Role/command/skill configuration; [guide](wiki/code/opencode-v2.md) |

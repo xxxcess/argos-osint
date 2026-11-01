@@ -162,6 +162,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  3d-force-graph@1.80.1: 3d3a3cb7451348616ff1e327b8cb35d2b4cd0c9cac89190b1f35bb4c7a0b97f2
+
 importers:
 
   .:
@@ -250,6 +253,9 @@ importers:
       react-native-web:
         specifier: 0.21.4
         version: 0.21.4(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
+      ws:
+        specifier: 8.22.0
+        version: 8.22.0
     devDependencies:
       babel-plugin-react-compiler:
         specifier: 1.0.0
@@ -287,6 +293,9 @@ importers:
       react-native:
         specifier: 0.86.3
         version: 0.86.3(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.2.3)(supports-color@8.1.1)
+      three:
+        specifier: 0.186.1
+        version: 0.186.1
 
   packages/ui:
     dependencies:
@@ -3139,7 +3148,7 @@ packages:
 
 snapshots:
 
-  3d-force-graph@1.80.1:
+  3d-force-graph@1.80.1(patch_hash=3d3a3cb7451348616ff1e327b8cb35d2b4cd0c9cac89190b1f35bb4c7a0b97f2):
     dependencies:
       accessor-fn: 1.5.3
       kapsule: 1.16.3
@@ -5392,7 +5401,7 @@ snapshots:
 
   react-force-graph-3d@1.29.2(react@19.2.3):
     dependencies:
-      3d-force-graph: 1.80.1
+      3d-force-graph: 1.80.1(patch_hash=3d3a3cb7451348616ff1e327b8cb35d2b4cd0c9cac89190b1f35bb4c7a0b97f2)
       prop-types: 15.8.1
       react: 19.2.3
       react-kapsule: 2.6.0(react@19.2.3)

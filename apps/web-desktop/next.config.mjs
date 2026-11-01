@@ -5,11 +5,11 @@ const nativeWeb = require.resolve("react-native-web");
 
 /** @type {import('next').NextConfig} */
 export default {
-  output: "export",
   reactCompiler: {
     panicThreshold: "all_errors",
     environment: { enablePreserveExistingMemoizationGuarantees: true },
   },
+  // The pinned force-graph drag-cancel guard is applied via pnpm patchedDependencies.
   transpilePackages: [
     "@argos/ui",
     "@argos/intel",

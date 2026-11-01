@@ -1,6 +1,12 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  act,
+} from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
 import {
@@ -88,8 +94,8 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
     const p = lastForceGraphProps!;
     expect(p.width).toBe(480);
     expect(p.height).toBe(340);
-    expect(p.backgroundColor).toBe(palette.bg);
-    expect(p.warmupTicks).toBe(0);
+    expect(p.backgroundColor).toBe("rgba(0,0,0,0)");
+    expect(p.warmupTicks).toBe(120);
     expect(p.cooldownTicks).toBe(120);
     expect(p.enableNodeDrag).toBe(true);
   });
@@ -100,9 +106,15 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
     expect(p.warmupTicks).toBe(120);
     expect(p.cooldownTicks).toBe(0);
     expect(p.enableNodeDrag).toBe(false);
+    expect(p.enableNavigationControls).toBe(false);
+    expect(
+      (p.linkDirectionalParticles as (link: { id: string }) => number)({
+        id: "e1",
+      }),
+    ).toBe(0);
   });
 
-  it("focuses the camera on the selected node once it has coordinates", () => {
+  it("focuses the camera on the selected node once it has coordinates", async () => {
     render(
       <ForceCanvas
         nodes={
@@ -122,17 +134,82 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
       />,
     );
     const record = forceGraphInstances[0];
-    expect(record.cameraPosition).toHaveLength(1);
+    await waitFor(() =>
+      expect(record.cameraPosition?.length).toBeGreaterThanOrEqual(2),
+    );
     expect(record.cameraPosition![0][1]).toEqual(
       expect.objectContaining({ x: 5, y: 6, z: 7 }),
     );
-    expect(record.cameraPosition![0][2]).toBe(400);
+    expect(record.cameraPosition!.at(-1)![2]).toBe(700);
   });
 
-  it("fits the settled graph without animating the camera", () => {
+  function positionEngineNodes() {
+    const data = lastForceGraphProps!.graphData as {
+      nodes: { x?: number; y?: number }[];
+    };
+    data.nodes.forEach((node, index) =>
+      Object.assign(node, { x: index * 20, y: index * 10 }),
+    );
+  }
+  const frameTick = () =>
+    new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+  it("waits for the engine to position the selected node before fitting", () => {
     renderCanvas();
     (lastForceGraphProps!.onEngineStop as () => void)();
-    expect(forceGraphInstances[0].zoomToFit).toEqual([[0, 60]]);
+    expect(forceGraphInstances[0].cameraPosition).toBeUndefined();
+    positionEngineNodes();
+    (lastForceGraphProps!.onEngineStop as () => void)();
+    expect(forceGraphInstances[0].cameraPosition!.at(-1)).toEqual([
+      expect.any(Object),
+      { x: 20, y: 10, z: 0 },
+      700,
+    ]);
+  });
+
+  it("aligns the disabled controls target for an instant reduced-motion fit", () => {
+    renderCanvas(true);
+    const record = forceGraphInstances[0];
+    record.controlTarget = { x: 0, y: 0, z: 0 };
+    positionEngineNodes();
+    (lastForceGraphProps!.onEngineStop as () => void)();
+    expect(record.controlTarget).toEqual({ x: 20, y: 10, z: 0 });
+    expect(record.cameraPosition!.at(-1)![2]).toBe(0);
+  });
+
+  it("preserves manual zoom through rerenders, resizing, refreshes and repeated engine stops", async () => {
+    const { view, props, ref } = renderCanvas();
+    positionEngineNodes();
+    (lastForceGraphProps!.onEngineStop as () => void)();
+    ref.current!.zoomBy(2);
+    const record = forceGraphInstances[0];
+    const moves = () =>
+      record.cameraPosition!.filter(([position]) => position !== undefined)
+        .length;
+    const before = moves();
+    const fits = record.zoomToFit?.length ?? 0;
+    view.rerender(
+      <ForceCanvas
+        {...props}
+        ref={ref}
+        width={600}
+        focusIds={new Set(["n2", "n1"])}
+        nodes={props.nodes.map((n) => ({
+          ...n,
+          label: `${n.label} refreshed`,
+        }))}
+      />,
+    );
+    await act(frameTick);
+    (lastForceGraphProps!.onEngineStop as () => void)();
+    expect(moves()).toBe(before);
+    expect(record.zoomToFit?.length ?? 0).toBe(fits);
+    positionEngineNodes();
+    view.rerender(<ForceCanvas {...props} ref={ref} selectedId="n1" />);
+    positionEngineNodes();
+    (lastForceGraphProps!.onEngineStop as () => void)();
+    expect(moves()).toBe(before + 2);
   });
 
   it("zooms along the camera ray while retaining an off-origin orbit target", () => {
@@ -140,18 +217,11 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
     const record = forceGraphInstances[0];
     record.controlTarget = { x: 10, y: 20, z: 30 };
     ref.current!.zoomBy(2);
-    expect(record.cameraPosition![1]).toEqual([
+    expect(record.cameraPosition!.at(-1)).toEqual([
       { x: 5, y: 10, z: 165 },
       { x: 10, y: 20, z: 30 },
       400,
     ]);
-  });
-
-  it("does not reset the camera when the same graph settles again", () => {
-    renderCanvas();
-    (lastForceGraphProps!.onEngineStop as () => void)();
-    (lastForceGraphProps!.onEngineStop as () => void)();
-    expect(forceGraphInstances[0].zoomToFit).toHaveLength(1);
   });
 
   it("exposes zoom/fit/reset/pause/resume imperative controls", () => {
@@ -203,7 +273,7 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
     const linkColor = lastForceGraphProps!.linkColor as (l: unknown) => string;
     const edgeInFocus = { source: { id: "n1" }, target: { id: "n2" } };
     const edgeOutside = { source: { id: "n1" }, target: { id: "n3" } };
-    expect(linkColor(edgeInFocus)).toBe(palette.dim);
+    expect(linkColor(edgeInFocus)).toBe(palette.accent);
     expect(linkColor(edgeOutside)).toBe(palette.bg);
     // No focusIds means nothing is dimmed.
     const unset = { ...lastForceGraphProps!, focusIds: null };
@@ -216,6 +286,21 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
     expect(labelFn({ label: "Actor One", kind: "actor" })).toBe(
       "Actor One · actor",
     );
+  });
+
+  it("draws a visible labeled node instead of an empty overlay", () => {
+    renderCanvas();
+    expect(lastForceGraphProps!.extraRenderers).toHaveLength(1);
+    const node = (
+      lastForceGraphProps!.nodeThreeObject as (value: object) => {
+        children: { element?: HTMLElement }[];
+      }
+    )({ id: "n1", label: "<Actor One>", kind: "actor", role: "focus" });
+    const glyph = node.children[1].element!;
+    expect(glyph.textContent).toBe("<Actor One>");
+    expect(glyph.querySelector("svg")).toBeTruthy();
+    expect(glyph.querySelector("[data-tile=node]")).toBeTruthy();
+    expect(glyph.querySelector("actor")).toBeNull();
   });
 
   it("supplies kind colors and selection size to the 3D renderer", () => {
@@ -278,7 +363,11 @@ const connectedSettings: BackendSettings = {
 // Renders Topology and waits for the topology query to settle (needs data
 // before the node rows exist; the header renders while pending). Returns the
 // onSeed spy wired into the shell (the same instance the component got).
-async function startTopology(seed: Seed | null, onSeed = vi.fn()) {
+async function startTopology(
+  seed: string | null,
+  onSeed = vi.fn(),
+  payload = topologyPayload,
+) {
   mswServer.use(
     http.get(`${testBase}/api/v1/health/ready`, () =>
       HttpResponse.json({
@@ -289,9 +378,7 @@ async function startTopology(seed: Seed | null, onSeed = vi.fn()) {
         instance_id: "inst-1",
       }),
     ),
-    http.post(`${testBase}/api/v1/topology`, () =>
-      HttpResponse.json(topologyPayload),
-    ),
+    http.get(`${testBase}/api/v1/topology`, () => HttpResponse.json(payload)),
   );
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -321,9 +408,9 @@ describe("Topology list twin (real Topology)", () => {
   });
 
   it("renders the graph summary, node list rows and connection panels", async () => {
-    await startTopology({ kind: "actor" } as Seed);
+    await startTopology("n1");
     expect(
-      screen.getByText("Showing 3 of 3 nodes · 2 of 2 connections"),
+      screen.getByText("Showing 2 of 3 nodes · 1 of 2 connections"),
     ).toBeVisible();
     // List twin rows carry accessible selection labels and kind telemetry.
     expect(
@@ -336,13 +423,47 @@ describe("Topology list twin (real Topology)", () => {
     expect(screen.getByText(/Primary collection actor/)).toBeVisible();
     // Connections panel preserves recorded direction and meaning.
     expect(screen.getByText(/Actor One → asserts → Claim Two/)).toBeVisible();
+    expect(screen.queryByText(/Claim Two → cites → Circuit/)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Select node Circuit, hardware" }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "2nd DEG" }));
     expect(screen.getByText(/Claim Two → cites → Circuit/)).toBeVisible();
     // The canvas placeholder is gated client-side (no hidden canvas nodes).
     expect(screen.queryByTestId("force-graph-canvas")).toBeNull();
   });
 
+  it("omits topic nodes and their relationships from both graph and list", async () => {
+    await startTopology("n1", vi.fn(), {
+      ...topologyPayload,
+      nodes: [
+        ...topologyPayload.nodes,
+        {
+          id: "topic-only",
+          kind: "topic",
+          label: "Hidden topic",
+          detail: "Topic",
+          topology_seed: null,
+        },
+      ],
+      edges: [
+        ...topologyPayload.edges,
+        {
+          id: "topic-edge",
+          from: "n1",
+          to: "topic-only",
+          label: "categorized",
+        },
+      ],
+    });
+    expect(screen.queryByRole("button", { name: /Hidden topic/ })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Show topic nodes" }),
+    ).toBeNull();
+    expect(screen.queryByText(/categorized/)).toBeNull();
+  });
   it("syncs selection from the list twin into the details panel", async () => {
-    await startTopology({ kind: "actor" } as Seed);
+    await startTopology("n1");
     fireEvent.click(
       screen.getByRole("button", { name: "Select node Claim Two, claim" }),
     );
@@ -354,7 +475,7 @@ describe("Topology list twin (real Topology)", () => {
 
   it("navigates seeds from the details panel onto the parent shell", async () => {
     const onSeed = vi.fn();
-    await startTopology({ kind: "actor" } as Seed, onSeed);
+    await startTopology("n1", onSeed);
     fireEvent.click(screen.getByRole("button", { name: /Navigate this node/ }));
     await waitFor(() => {
       expect(onSeed).toHaveBeenCalledWith(
@@ -364,7 +485,7 @@ describe("Topology list twin (real Topology)", () => {
   });
 
   it("filters by kind via palette toggles, hiding hidden nodes and their edges", async () => {
-    await startTopology({ kind: "actor" } as Seed);
+    await startTopology("n1");
     // Always select a node that survives the filter first: the selected node
     // is part of the visible set by contract (Topology.tsx:178-184).
     fireEvent.click(
@@ -400,37 +521,8 @@ describe("Topology list twin (real Topology)", () => {
     expect(screen.getByText(/Actor One → asserts → Claim Two/)).toBeVisible();
   });
 
-  it("filters nodes by label from the palette text input", async () => {
-    await startTopology({ kind: "actor" } as Seed);
-    fireEvent.click(
-      screen.getByRole("button", { name: "Select node Claim Two, claim" }),
-    );
-    await waitFor(() =>
-      expect(screen.getByText(/Retained claim record/)).toBeVisible(),
-    );
-    fireEvent.change(screen.getByLabelText("Filter nodes by label"), {
-      target: { value: "Claim" },
-    });
-    // Non-matching rows (Actor One, Circuit) hide with their edges — but the
-    // selected node is exempt from its own filter.
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("button", {
-          name: "Select node Actor One, actor",
-        }),
-      ).toBeNull(),
-    );
-    expect(
-      screen.getByRole("button", { name: "Select node Claim Two, claim" }),
-    ).toBeVisible();
-    // "cites" disappears because its target node no longer matches.
-    await waitFor(() =>
-      expect(screen.queryByText(/Claim Two → cites/)).toBeNull(),
-    );
-  });
-
   it("scripts a reset back to unfiltered topology", async () => {
-    await startTopology({ kind: "actor" } as Seed);
+    await startTopology("n1");
     fireEvent.click(
       screen.getByRole("button", { name: "Select node Claim Two, claim" }),
     );
@@ -442,7 +534,7 @@ describe("Topology list twin (real Topology)", () => {
       expect(screen.queryByText(/Actor One → asserts/)).toBeNull(),
     );
     fireEvent.click(
-      screen.getAllByRole("button", { name: "Reset filters" })[0],
+      screen.getByRole("button", { name: "Show all node types" }),
     );
     await waitFor(() =>
       expect(screen.getByText(/Actor One → asserts → Claim Two/)).toBeVisible(),
@@ -451,5 +543,16 @@ describe("Topology list twin (real Topology)", () => {
     expect(
       screen.getByRole("button", { name: "Select node Claim Two, claim" }),
     ).toBeTruthy();
+  });
+
+  it("returns along the focus history on the topology page", async () => {
+    await startTopology("n1");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Select node Claim Two, claim" }),
+    );
+    fireEvent.keyDown(window, { key: "Backspace" });
+    await waitFor(() =>
+      expect(screen.getByText(/Primary collection actor/)).toBeVisible(),
+    );
   });
 });

@@ -11,7 +11,11 @@ const app = process.argv[2]
 const { config } = JSON.parse(
   await readFile(resolve(app, ".next/required-server-files.json"), "utf8"),
 );
-assert.equal(config.output, "export", "Expected a Next static export");
+assert.notEqual(
+  config.output,
+  "export",
+  "The Next API proxy needs a running server",
+);
 assert.equal(
   config.reactCompiler?.panicThreshold,
   "all_errors",
@@ -34,22 +38,32 @@ for (const name of [
     `Missing shared transpilation: ${name}`,
   );
 
-await readFile(resolve(app, "out/index.html"));
-const chunks = resolve(app, "out/_next/static/chunks/app");
+await readFile(resolve(app, ".next/server/app/api/v1/[...path]/route.js"));
+await readFile(resolve(app, "server.mjs"));
+await readFile(resolve(app, "live-relay.mjs"));
+const chunks = resolve(app, ".next/static/chunks/app");
 const pages = (await readdir(chunks)).filter((name) =>
-  /^page-.*\.js$/.test(name),
+  /^(page|layout)-.*\.js$/.test(name),
 );
 assert.ok(
   pages.length,
-  "No exported application page chunks found; run pnpm build first",
+  "No compiled application chunks found; run pnpm build first",
 );
 const sources = await Promise.all(
   pages.map((name) => readFile(resolve(chunks, name), "utf8")),
 );
 assert.ok(
   sources.some((source) => source.includes("react.memo_cache_sentinel")),
-  "No React Compiler memoization in exported app page chunks",
+  "No React Compiler memoization in compiled app chunks",
+);
+assert.ok(
+  sources.every(
+    (source) =>
+      !source.includes("ARGOS_RUST_API_ORIGIN") &&
+      !source.includes("http://127.0.0.1:8080"),
+  ),
+  "Rust server configuration leaked into the browser chunks",
 );
 console.log(
-  "Verified static export, RN Web/shared transpilation and compiled app memoization.",
+  "Verified Next API server, RN Web/shared transpilation and compiled app memoization.",
 );

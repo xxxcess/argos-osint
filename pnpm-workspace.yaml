@@ -4,3 +4,5 @@ packages:
 allowBuilds:
   esbuild: true
   msw: true
+patchedDependencies:
+  3d-force-graph@1.80.1: patches/3d-force-graph@1.80.1.patch

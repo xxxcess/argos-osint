@@ -1,22 +1,94 @@
-/* Keep browser surfaces aligned with @argos/ui and the core TUI theme. */
+/* Compact the complete browser UI while retaining a full-window shell. */
+html {
+  zoom: var(--intel-ui-scale, 0.75);
+}
+#intel-content-frame {
+  max-width: calc(1440px / var(--intel-ui-scale, 0.75));
+}
+/* Intel-only browser canvas; shared Argos/TUI tokens remain unchanged. */
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: #2e3850 transparent;
 }
 html,
 body {
   margin: 0;
   height: 100%;
   min-height: 100%;
-  background-color: #141414;
+  background-color: #0a0f1a;
   background-image:
-    linear-gradient(rgba(135, 191, 255, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(135, 191, 255, 0.04) 1px, transparent 1px),
-    radial-gradient(ellipse at top, #1e242b 0%, #141414 60%);
-  background-size: 32px 32px, 32px 32px, 100% 100%;
+    radial-gradient(ellipse at 15% 10%, #0f1a22 0%, transparent 45%),
+    radial-gradient(ellipse at 85% 90%, #0f1724 0%, transparent 50%);
   background-attachment: fixed;
-  color: #e8e8e8;
-  font-family: Arial, sans-serif;
+  color: #e6eaf2;
+  font-family:
+    var(--intel-body, Inter),
+    system-ui,
+    -apple-system,
+    sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+/* Resize layout synchronously, before RN's dimension subscription commits. */
+/* The graph engine retains its previous pixel width until RN onLayout runs.
+   Constrain its actual display boxes during that interval; onLayout still
+   updates the renderer buffer/camera through the ForceCanvas width contract. */
+#intel-topology-viewport > div:not(#intel-topology-neighborhood) {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+#intel-topology-graph .scene-container,
+#intel-topology-graph .scene-container canvas {
+  max-width: 100%;
+}
+@media (min-width: 1000px) {
+  #intel-workspace-scroll > div {
+    padding-left: 46px;
+    padding-right: 46px;
+  }
+}
+@media (max-width: 899px) {
+  #intel-topology-layout {
+    flex-direction: column;
+    width: 100%;
+    max-width: 100%;
+  }
+  #intel-topology-graph,
+  #intel-topology-side {
+    flex: none;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+}
+@media (max-width: 1099px) {
+  #intel-status-details [id^="intel-status-metric-"],
+  #intel-status-clock {
+    display: none;
+  }
+}
+@media (max-width: 599px) {
+  #intel-status-app-label {
+    font-size: 12px;
+  }
+}
+@media (min-width: 1100px) {
+  #intel-status-details [id^="intel-status-metric-"],
+  #intel-status-clock,
+  #intel-status-api {
+    font-size: 18px;
+  }
+}
+@media (min-width: 600px) {
+  #intel-status-api {
+    font-size: 18px;
+  }
+}
+@media (min-width: 1400px) {
+  #intel-status-details {
+    gap: 40px;
+  }
 }
 body {
   color-scheme: dark;
@@ -27,45 +99,225 @@ select {
   font: inherit;
 }
 a {
-  color: #87bfff;
+  color: #5fd39a;
   text-decoration: underline;
 }
 input,
 select {
-  background: rgba(18, 22, 27, 0.7);
-  border: 1px solid #535353;
-  border-radius: 2px;
-  color: #e8e8e8;
+  background: #111726;
+  border: 1px solid #2e3850;
+  border-radius: 8px;
+  color: #e6eaf2;
   min-width: 0;
 }
 :focus-visible {
-  outline: 2px solid #87bfff;
+  outline: 2px solid #7fe0b4;
   outline-offset: -2px;
+  box-shadow: 0 0 0 1px #7fe0b4;
 }
 ::selection {
-  background: #87bfff;
-  color: #141414;
+  background: #2e3850;
+  color: #e6eaf2;
 }
-
-/* Keep static-export markup identical across initial browser widths. */
-@media (max-width: 599px) {
-  #workspace-description,
-  #workspace-route {
-    display: none;
+/* Intel views only: browser motion/glow stays outside shared RN primitives. */
+#intel-home {
+  min-height: max(320px, calc(100vh - 128px));
+  min-height: max(320px, calc(100dvh - 128px));
+}
+#intel-bulletin {
+  animation: intel-enter 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+#intel-search-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+@keyframes intel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
-
+#intel-home [data-testid="intel-launcher-tile"] {
+  transition:
+    transform 120ms,
+    border-color 120ms,
+    box-shadow 120ms;
+}
+#intel-home [data-testid="intel-globe"] {
+  filter: drop-shadow(0 0 18px rgba(95, 211, 154, 0.35));
+  transition: filter 120ms;
+}
+#intel-home-launcher:is(:hover, :focus-visible)
+  [data-testid="intel-launcher-tile"] {
+  box-shadow: 0 0 18px rgba(95, 211, 154, 0.35);
+}
+#intel-home-launcher:is(:hover, :focus-visible) [data-testid="intel-globe"] {
+  filter: drop-shadow(0 0 24px rgba(95, 211, 154, 0.55));
+}
+#intel-categories [aria-pressed="true"] {
+  box-shadow: 0 0 18px rgba(95, 211, 154, 0.2);
+}
+[data-testid^="article-card-"] {
+  transition:
+    transform 120ms,
+    border-color 120ms;
+}
+[data-testid^="article-card-"]:hover {
+  transform: translateY(-1px);
+}
+#intel-bulletin input:focus-visible {
+  border-color: rgba(95, 211, 154, 0.35);
+}
+[data-testid="bulletin-skeleton"] {
+  background-image: linear-gradient(
+    100deg,
+    transparent 25%,
+    rgba(95, 211, 154, 0.06) 50%,
+    transparent 75%
+  );
+  background-size: 200% 100%;
+  animation: intel-skeleton 1.2s linear infinite;
+}
+@keyframes intel-skeleton {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   [role="progressbar"] svg {
     animation: none !important;
   }
+  #intel-bulletin,
+  [data-testid="bulletin-skeleton"] {
+    animation: none !important;
+  }
+  #intel-home [data-testid="intel-launcher-tile"],
+  [data-testid^="article-card-"] {
+    transition: none !important;
+    transform: none !important;
+  }
+  #intel-home [data-testid="intel-globe"] {
+    transition: none !important;
+  }
 }
 
-/* HUD scrollbars and glow on keyboard focus. */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: #535353 transparent;
+/* Topology remains a force-graph canvas; DOM tiles share its camera projection. */
+#intel-topology-grid {
+  background-image:
+    linear-gradient(rgba(63, 83, 119, 0.09) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(63, 83, 119, 0.09) 1px, transparent 1px),
+    radial-gradient(ellipse at 50% 45%, rgba(18, 29, 60, 0.35), transparent 70%);
+  background-size:
+    36px 36px,
+    36px 36px,
+    100% 100%;
 }
-:focus-visible {
-  box-shadow: 0 0 0 1px #87bfff, 0 0 12px rgba(135, 191, 255, 0.45);
+.intel-topology-edge-label {
+  padding: 3px 12px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #a9b1c1;
+  background: rgba(3, 10, 22, 0.94);
+  border: 1px solid #232c3d;
+  border-radius: 4px;
+  font:
+    9px var(--intel-mono, ui-monospace),
+    monospace;
+  pointer-events: none;
+}
+#intel-topology-side > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.intel-topology-node {
+  display: flex !important;
+}
+
+@media (max-width: 599px) {
+  .intel-topology-edge-label {
+    max-width: 112px;
+    padding: 3px 6px;
+  }
+}
+
+@media (max-width: 599px) {
+  .intel-topology-node [data-tile="node"] {
+    width: 28px !important;
+    height: 28px !important;
+  }
+  .intel-topology-node[data-role="focus"] [data-tile="node"] {
+    width: 40px !important;
+    height: 40px !important;
+  }
+  .intel-topology-node-label {
+    max-width: 70px !important;
+    font-size: 8px !important;
+    padding: 3px 4px !important;
+  }
+  /* Relationships remain in the parallel connection list at phone widths. */
+  .intel-topology-edge-label {
+    display: none;
+  }
+}
+
+@media (max-width: 599px) {
+  .intel-topology-node[data-role="focus"] .intel-topology-node-label {
+    max-width: 96px !important;
+  }
+}
+
+@keyframes intel-topology-focus {
+  0%,
+  100% {
+    box-shadow:
+      0 0 5px var(--topology-node-color),
+      0 0 18px color-mix(in srgb, var(--topology-node-color) 30%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 10px var(--topology-node-color),
+      0 0 36px color-mix(in srgb, var(--topology-node-color) 65%, transparent);
+  }
+}
+.intel-topology-node[data-role="focus"] [data-tile="node"] {
+  animation: intel-topology-focus 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .intel-topology-node[data-role="focus"] [data-tile="node"] {
+    animation: none;
+  }
+}
+
+@keyframes intel-topology-arrive {
+  from {
+    transform: scale(0.78);
+    opacity: 0.65;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.intel-topology-node[data-role="focus"] [data-tile="node"] {
+  animation:
+    intel-topology-arrive 0.7s ease-out both,
+    intel-topology-focus 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .intel-topology-node[data-role="focus"] [data-tile="node"] {
+    animation: none;
+  }
 }

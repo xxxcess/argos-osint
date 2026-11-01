@@ -4,6 +4,12 @@
 > Repository baseline: [`xxxcess/argos-osint` `main` @ `1c847e8`](https://github.com/xxxcess/argos-osint/commit/1c847e89357f49ee23942f48a11d1a6af7b6bc9a)  
 > **One-file, incrementally maintained implementation contract.** The original baseline audit is retained below. Current implementation and evidence are tracked in section 9; later native-platform milestones remain Planned.
 
+## Current web boundary (2026-11-01)
+
+The user-approved web architecture is **React Native UI → same-origin Next.js API → Rust API → DB/system**. Next is a running server, not a static export; only `ARGOS_RUST_API_ORIGIN` in its environment selects Rust. Browser query parameters/storage cannot configure that address. Home, Bulletin, Brief and Topology have real routes, with reload/history support. Next is stateless: REST carries snapshots/actions, and one same-origin WebSocket relays host metrics and selected-brief progress to Rust-owned subscriptions. Completed briefs do not poll; only the visible Bulletin feed has a slow minute refresh. The Rust address remains private for both transports. The topology page uses kind-colored icon tiles, inference nodes, labeled dashed links and neighborhood controls, with no Pause/Filters/zoom toolbar. Source images fit without cropping; bulletin metadata has spaced category/date labels and one whole-row action.
+
+The historical static-bundle and direct-to-Rust native packaging assumptions below are superseded by this boundary; native packaging remains planned and must preserve it. Current contracts and validation live in [Intel web](wiki/code/intel-web.md).
+
 ## 1. Delivery sequence
 
 | Phase | Target | Deliverable | Status |
@@ -21,7 +27,7 @@ This section describes `fix/focus-brief-admission-service-visibility` for review
 
 | Area | Included behavior / change | Review authority |
 | --- | --- | --- |
-| Local Intel web | Next static export with React Native Web primitives; Bulletin, category/day/search, Focus Brief, Related leads and bounded topology; Context + TanStack Query | [Web/API contract](wiki/code/intel-web.md), `apps/web-desktop`, `packages/{ui,intel,api-client}` |
+| Local Intel web | Next server and same-origin API with React Native Web primitives; Bulletin, category/day/search, Focus Brief, Related leads and bounded topology; Context + TanStack Query | [Web/API contract](wiki/code/intel-web.md), `apps/web-desktop`, `packages/{ui,intel,api-client}` |
 | Rust API and lifecycle | Core-owned Intel projections, versioned loopback API, storage-backed readiness, single-owner embedded operation, explicit initialization, owned/adopted service lifecycle | [Web/API contract](wiki/code/intel-web.md), `crates/{argos-osint-core,argos-osint-api,argos-api-host}` |
 | Launcher and observability | ARGOS VENTURE service menu; API-before-web startup, default-browser dispatch, `--terminal tui` / `--terminal logs`, shared in-process API/TUI repository, service jobs and sanitized traffic in Rust Jobs/Logs; pinned Node selected through nvm; Next dev launched from the app directory for Babel resolution | [Usage](wiki/concepts/usage.md), `crates/argos-osint-bin/src/{stack,welcome}` |
 | Intel/Brain corrections | Once-per-occurrence brief admission with retry, stored-description reader in web/TUI with matching TUI See more expansion; Inferences last in the middle Reader column in web/TUI, cached SurrealDB Brain claims/actors retained when filtering, actor deduplication and visible owned services | [Intel contract](wiki/code/intel-web.md), [TUI contract](wiki/code/tui-design-spec.md), `tui/app.rs`, `atlas_metadata.rs`, storage Jobs views |

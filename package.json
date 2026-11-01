@@ -13,7 +13,8 @@
     "lint": "eslint apps packages --max-warnings=0",
     "test:e2e": "playwright test",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:live": "node --test apps/web-desktop/__tests__/live-*.test.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",

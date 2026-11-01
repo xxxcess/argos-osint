@@ -3,8 +3,8 @@ import React, {
   createContext,
   useContext,
   useSyncExternalStore,
-  useMemo,
   useState,
+  useEffect,
 } from "react";
 import {
   QueryClient,
@@ -14,6 +14,21 @@ import {
   useQueryClient,
   useInfiniteQuery,
 } from "@tanstack/react-query";
+import type { LiveTransport, BriefProgress } from "./live";
+export { decodeLiveEvent } from "./live";
+export type {
+  LiveTransport,
+  LiveChannel,
+  LiveEvent,
+  BriefProgress,
+} from "./live";
+/** Telemetry from the Rust API host. Null means unavailable or warming up. */
+export interface HostMetrics {
+  cpu_percent: number | null;
+  memory_percent: number | null;
+  disk_percent: number | null;
+  network_kbps: number | null;
+}
 export interface Article {
   id: string;
   run_id: string;
@@ -30,13 +45,20 @@ export interface Article {
 export interface Brief {
   article: Article;
   source_revision?: string;
-  actors: { id: string; display_name: string; type_hint: string }[];
+  topology_seed?: Seed | null;
+  inferences?: { id: string; text: string; topology_seed?: Seed | null }[];
+  actors: {
+    id: string;
+    display_name: string;
+    type_hint: string;
+    topology_seed?: Seed | null;
+  }[];
   claims: {
     id: string;
     text: string;
     classification: string;
     confidence: number | null;
-    topology_seed?: Seed;
+    topology_seed?: Seed | null;
     admiralty: string;
   }[];
   body: { body_markdown: string } | null;
@@ -68,6 +90,7 @@ export interface Topology {
     kind: string;
     detail: string;
     topology_seed: Seed | null;
+    is_root?: boolean;
   }[];
   edges: { id: string; from: string; to: string; label: string }[];
   findings: { gaps: string[] };
@@ -80,7 +103,7 @@ interface Health {
   api_version: number;
   instance_id: string;
 }
-export const DEFAULT_BACKEND = "http://127.0.0.1:8080";
+export const DEFAULT_BACKEND = "";
 
 // Each app supplies its platform persistence and request-ID implementation.
 export interface BackendSettings {
@@ -96,6 +119,7 @@ interface Backend {
   setBase: (s: string) => void;
   instance: string;
   connected: boolean;
+  live?: LiveTransport;
   connecting: boolean;
   retry: () => void;
   createRequestId: () => string;
@@ -104,6 +128,7 @@ interface Backend {
 }
 const BackendContext = createContext<Backend | null>(null);
 export function safeBackend(raw: string) {
+  if (raw === "") return "";
   const u = new URL(raw);
   if (
     u.protocol !== "http:" ||
@@ -114,7 +139,7 @@ export function safeBackend(raw: string) {
     u.search ||
     u.hash
   )
-    throw new Error("Use a loopback HTTP origin, e.g. http://127.0.0.1:8080");
+    throw new Error("Use a loopback HTTP origin for the workspace");
   return u.origin;
 }
 export class ApiError extends Error {
@@ -134,7 +159,8 @@ function combineSignals(
   timeoutMs = 10000,
 ): { signal?: AbortSignal; cleanup?: () => void } {
   const timeoutSignal =
-    typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+    typeof AbortSignal !== "undefined" &&
+    typeof AbortSignal.timeout === "function"
       ? AbortSignal.timeout(timeoutMs)
       : undefined;
 
@@ -200,9 +226,15 @@ async function request<T>(
           const json = JSON.parse(text);
           payload = json;
           if (json && typeof json === "object") {
-            if ("error" in json && typeof (json as { error: unknown }).error === "string") {
+            if (
+              "error" in json &&
+              typeof (json as { error: unknown }).error === "string"
+            ) {
               message = (json as { error: string }).error;
-            } else if ("message" in json && typeof (json as { message: unknown }).message === "string") {
+            } else if (
+              "message" in json &&
+              typeof (json as { message: unknown }).message === "string"
+            ) {
               message = (json as { message: string }).message;
             }
           }
@@ -238,9 +270,11 @@ async function request<T>(
 export function BackendProvider({
   children,
   settings,
+  live,
 }: {
   children: React.ReactNode;
   settings: BackendSettings;
+  live?: LiveTransport;
 }) {
   const [client] = useState(
     () =>
@@ -253,7 +287,9 @@ export function BackendProvider({
   );
   return (
     <QueryClientProvider client={client}>
-      <Connection settings={settings}>{children}</Connection>
+      <Connection settings={settings} live={live}>
+        {children}
+      </Connection>
     </QueryClientProvider>
   );
 }
@@ -262,9 +298,11 @@ const READY_POLL_MS = 60_000;
 function Connection({
   children,
   settings,
+  live,
 }: {
   children: React.ReactNode;
   settings: BackendSettings;
+  live?: LiveTransport;
 }) {
   const base = useSyncExternalStore(
     settings.subscribe,
@@ -297,6 +335,7 @@ function Connection({
     setBase,
     instance,
     connected,
+    live,
     connecting: health.isFetching,
     createRequestId: settings.createRequestId,
     retry: () => {
@@ -318,11 +357,97 @@ export function useRead<T>(path: string, enabled = true, timeoutMs = 10000) {
   const b = useBackend();
   return useQuery({
     queryKey: [b.base, b.instance, path],
-    queryFn: ({ signal }) => request<T>(b.base, path, undefined, signal, timeoutMs),
+    queryFn: ({ signal }) =>
+      request<T>(b.base, path, undefined, signal, timeoutMs),
     enabled: b.connected && enabled,
-    refetchInterval: 5000,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
 }
+// @tag:host-metrics — normal backend/instance keys and readiness gating apply.
+export function useHostMetrics() {
+  const b = useBackend();
+  const client = useQueryClient();
+  const query = useQuery({
+    queryKey: [b.base, b.instance, "host/metrics"],
+    queryFn: ({ signal }) =>
+      request<HostMetrics>(b.base, "host/metrics", undefined, signal),
+    enabled: b.connected && !b.live,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+  useEffect(() => {
+    if (!b.connected || !b.live) return;
+    const key = [b.base, b.instance, "host/metrics"];
+    return b.live.subscribe({ type: "metrics" }, (event) => {
+      if (event.type === "metrics") client.setQueryData(key, event.data);
+      else if (
+        (event.type === "status" && !event.connected) ||
+        event.type === "error"
+      )
+        client.setQueryData<HostMetrics>(key, {
+          cpu_percent: null,
+          memory_percent: null,
+          disk_percent: null,
+          network_kbps: null,
+        });
+    });
+  }, [b.base, b.instance, b.connected, b.live, client]);
+  return query;
+}
+
+/** REST remains the brief snapshot. Push updates invalidate only this occurrence. */
+export function useBriefLive(article: Article, watch: string) {
+  const { run_id: run, id } = article;
+  const b = useBackend();
+  const client = useQueryClient();
+  const queryKey = [b.base, b.instance, "brief/live", run, id];
+  const progress = useQuery<{ connected: boolean; progress?: BriefProgress }>({
+    queryKey,
+    enabled: false,
+    queryFn: async () => ({ connected: false }),
+    staleTime: Infinity,
+  });
+  useEffect(() => {
+    if (!b.connected || !b.live) return;
+    const key = [b.base, b.instance, "brief/live", run, id];
+    return b.live.subscribe(
+      { type: "brief", run: run, id: id, watch },
+      (event) => {
+        if (event.type === "status")
+          client.setQueryData(
+            key,
+            (old: { progress?: BriefProgress } | undefined) => ({
+              ...old,
+              connected: event.connected,
+            }),
+          );
+        if (event.type === "brief") {
+          client.setQueryData(key, { connected: true, progress: event });
+          if (event.refresh)
+            void client.invalidateQueries({
+              queryKey: [
+                b.base,
+                b.instance,
+                `articles/detail?${keyFor({ run_id: run, id })}`,
+              ],
+              exact: true,
+            });
+        }
+        if (event.type === "error")
+          client.setQueryData(
+            key,
+            (old: { progress?: BriefProgress } | undefined) => ({
+              ...old,
+              connected: false,
+            }),
+          );
+      },
+    );
+  }, [b.base, b.instance, b.connected, b.live, run, id, watch, client]);
+  return progress.data;
+}
+
 export function useAction<T>(path: string, signal?: AbortSignal) {
   const b = useBackend(),
     client = useQueryClient();
@@ -331,18 +456,55 @@ export function useAction<T>(path: string, signal?: AbortSignal) {
       if (!b.connected) throw new Error("API offline");
       return request<T>(b.base, path, body, signal);
     },
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
+      // Resolving an existing identity is read-only; it changes no cached data.
+      if (path === "topology/resolve") return;
+      if (path === "brief/ensure" || path === "brief/reload") {
+        const source = variables as { run?: string; id?: string };
+        const detail = `articles/detail?${keyFor({ run_id: source.run || "", id: source.id || "" })}`;
+        return client.invalidateQueries({
+          predicate: ({ queryKey }) => {
+            if (queryKey[0] !== b.base || queryKey[1] !== b.instance)
+              return false;
+            return (
+              queryKey[2] === detail ||
+              queryKey[2] === "articles" ||
+              (queryKey[2] === "related" &&
+                queryKey[3] === source.run &&
+                queryKey[4] === source.id)
+            );
+          },
+        });
+      }
       return client.invalidateQueries({ queryKey: [b.base, b.instance] });
     },
   });
 }
-export function useArticles(category: string, day: string, search: string) {
+/** Specific categories supported by v1; "all" selects the server's global feed. */
+export const INTEL_CATEGORIES = [
+  "geopolitical",
+  "economic",
+  "military",
+  "information",
+  "stability",
+  "technology",
+] as const;
+// Native "all" uses this same stream: the server owns order and opaque cursors.
+export function useArticles(
+  category: string,
+  day: string,
+  search: string,
+  enabled = true,
+) {
   const b = useBackend();
   return useInfiniteQuery({
     queryKey: [b.base, b.instance, "articles", category, day, search],
     initialPageParam: "",
-    refetchInterval: 5000,
-    enabled: b.connected && !!day,
+    // A visible feed gets one slow freshness check; briefs never poll.
+    refetchInterval: enabled ? 60_000 : false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    enabled: b.connected && !!day && enabled,
     queryFn: ({ pageParam, signal }) =>
       request<{
         rows: Article[];
@@ -363,17 +525,22 @@ export function useArticles(category: string, day: string, search: string) {
     getNextPageParam: (last) => last.next_cursor || undefined,
   });
 }
-export function keyFor(a: Article) {
+export function keyFor(a: Pick<Article, "run_id" | "id">) {
   return new URLSearchParams({ run: a.run_id, id: a.id }).toString();
 }
-export function useTopology(seed: Seed | null) {
+export function useTopology(seed: string | null) {
   const b = useBackend();
-  const stable = useMemo(() => JSON.stringify(seed), [seed]);
   return useQuery({
-    queryKey: [b.base, b.instance, "topology", stable],
+    queryKey: [b.base, b.instance, "topology", seed],
     enabled: b.connected && !!seed,
     queryFn: ({ signal }) =>
-      request<Topology>(b.base, "topology", { seed }, signal, 30000),
+      request<Topology>(
+        b.base,
+        `topology?seed=${encodeURIComponent(seed || "")}`,
+        undefined,
+        signal,
+        30000,
+      ),
   });
 }
 
@@ -397,6 +564,7 @@ export function useRelated(article: Article) {
         30000,
       ),
     getNextPageParam: (last) => last.next_cursor || undefined,
-    refetchInterval: 5000,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
 }

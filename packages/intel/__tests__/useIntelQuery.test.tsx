@@ -113,26 +113,21 @@ describe("useBackend (real connection state)", () => {
       wrapper: providerWrapper(),
     });
     // The health fetch settles despite retry:false — busy flag clears.
-    await waitFor(
-      () => expect(result.current.connecting).toBe(false),
-      { timeout: 5000 },
-    );
+    await waitFor(() => expect(result.current.connecting).toBe(false), {
+      timeout: 5000,
+    });
     expect(result.current.connected).toBe(false);
   });
 
   it("surfaces the DEFAULT_BACKEND constant", () => {
-    expect(DEFAULT_BACKEND).toBe("http://127.0.0.1:8080");
+    expect(DEFAULT_BACKEND).toBe("");
   });
 });
 
 describe("safeBackend (real endpoint validation)", () => {
   it("normalizes an accepted loopback HTTP origin", () => {
-    expect(safeBackend("http://127.0.0.1:8080")).toBe(
-      "http://127.0.0.1:8080",
-    );
-    expect(safeBackend("http://localhost:7780/")).toBe(
-      "http://localhost:7780",
-    );
+    expect(safeBackend("http://127.0.0.1:8080")).toBe("http://127.0.0.1:8080");
+    expect(safeBackend("http://localhost:7780/")).toBe("http://localhost:7780");
   });
 
   it.each([
@@ -158,11 +153,12 @@ describe("useRead (real query over MSW)", () => {
       ),
     );
     const { result } = renderHook(
-      () =>
-        useRead<{ days: string[]; revision: string }>("dashboard/days"),
+      () => useRead<{ days: string[]; revision: string }>("dashboard/days"),
       { wrapper: providerWrapper() },
     );
-    await waitFor(() => expect(result.current.isSuccess).toBe(true), { timeout: 5000 });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true), {
+      timeout: 5000,
+    });
     expect(result.current.data?.days).toEqual(["2026-10-29"]);
   });
 
@@ -179,7 +175,9 @@ describe("useRead (real query over MSW)", () => {
       () => useRead<{ days: string[]; revision: string }>("dashboard/days"),
       { wrapper: providerWrapper() },
     );
-    await waitFor(() => expect(result.current.isError).toBe(true), { timeout: 5000 });
+    await waitFor(() => expect(result.current.isError).toBe(true), {
+      timeout: 5000,
+    });
     expect(result.current.error).toBeInstanceOf(ApiError);
     expect((result.current.error as ApiError).status).toBe(503);
     expect((result.current.error as ApiError).message).toBe("storage cyclic");
@@ -216,59 +214,69 @@ describe("useArticles (real paginated feed)", () => {
         },
       { wrapper: providerWrapper() },
     );
-    await waitFor(() => expect(result.current.isSuccess).toBe(true), { timeout: 5000 });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true), {
+      timeout: 5000,
+    });
     expect(result.current.data?.pages[0]?.rows).toEqual([articleRow]);
     expect(keyFor(articleRow)).toBe("run=run-9&id=a-1");
   });
 
-  it("paginates through the cursor until the feed is exhausted", { timeout: 20000 }, async () => {
-    const page2 = {
-      id: "a-2",
-      run_id: "run-9",
-      title: "Second page row",
-      description: "",
-      source_name: "OSINT Digest",
-      source_domain: "digest.example",
-      published_at: "2026-10-29T09:00:00Z",
-      category: "signals",
-      image_url: "",
-      url: "https://digest.example/second",
-      author: "Corps Analyst",
-    } as Article;
-    mswServer.use(
-      http.get(`${testBase}/api/v1/health/ready`, () =>
-        HttpResponse.json(readyHealth),
-      ),
-      http.get(`${testBase}/api/v1/dashboard/days`, () =>
-        HttpResponse.json(days),
-      ),
-      http.get(`${testBase}/api/v1/articles`, ({ request }) => {
-        const cursor = new URL(request.url).searchParams.get("cursor");
-        return HttpResponse.json(
-          cursor === null || cursor === ""
-            ? { rows: [articleRow], next_cursor: "c2", revision: "rev-1" }
-            : { rows: [page2], next_cursor: null, revision: "rev-1" },
-        );
-      }),
-    );
-    const { result } = renderHook(
-      () => useArticles("signals", "2026-10-29", ""),
-      { wrapper: providerWrapper() },
-    );
-    await waitFor(() => expect(result.current.isSuccess).toBe(true), { timeout: 5000 });
-    const initialPages = result.current.data?.pages?.length ?? 0;
-    await result.current.fetchNextPage();
-    // Wait for the pages array to grow (React Query updates cache async)
-    await waitFor(
-      () => expect((result.current.data?.pages?.length ?? 0)).toBeGreaterThan(initialPages),
-      { timeout: 3000 },
-    );
-    await waitFor(
-      () => expect(result.current.data?.pages).toHaveLength(2),
-      { timeout: 1500 },
-    );
-    expect(result.current.data?.pages[1]?.rows[0].id).toBe("a-2");
-  });
+  it(
+    "paginates through the cursor until the feed is exhausted",
+    { timeout: 20000 },
+    async () => {
+      const page2 = {
+        id: "a-2",
+        run_id: "run-9",
+        title: "Second page row",
+        description: "",
+        source_name: "OSINT Digest",
+        source_domain: "digest.example",
+        published_at: "2026-10-29T09:00:00Z",
+        category: "signals",
+        image_url: "",
+        url: "https://digest.example/second",
+        author: "Corps Analyst",
+      } as Article;
+      mswServer.use(
+        http.get(`${testBase}/api/v1/health/ready`, () =>
+          HttpResponse.json(readyHealth),
+        ),
+        http.get(`${testBase}/api/v1/dashboard/days`, () =>
+          HttpResponse.json(days),
+        ),
+        http.get(`${testBase}/api/v1/articles`, ({ request }) => {
+          const cursor = new URL(request.url).searchParams.get("cursor");
+          return HttpResponse.json(
+            cursor === null || cursor === ""
+              ? { rows: [articleRow], next_cursor: "c2", revision: "rev-1" }
+              : { rows: [page2], next_cursor: null, revision: "rev-1" },
+          );
+        }),
+      );
+      const { result } = renderHook(
+        () => useArticles("signals", "2026-10-29", ""),
+        { wrapper: providerWrapper() },
+      );
+      await waitFor(() => expect(result.current.isSuccess).toBe(true), {
+        timeout: 5000,
+      });
+      const initialPages = result.current.data?.pages?.length ?? 0;
+      await result.current.fetchNextPage();
+      // Wait for the pages array to grow (React Query updates cache async)
+      await waitFor(
+        () =>
+          expect(result.current.data?.pages?.length ?? 0).toBeGreaterThan(
+            initialPages,
+          ),
+        { timeout: 3000 },
+      );
+      await waitFor(() => expect(result.current.data?.pages).toHaveLength(2), {
+        timeout: 1500,
+      });
+      expect(result.current.data?.pages[1]?.rows[0].id).toBe("a-2");
+    },
+  );
 
   it("disables the query before a day is selected (enabled=!!day)", async () => {
     mswServer.use(
@@ -320,10 +328,9 @@ describe("useAction (real mutation over MSW)", () => {
           id: articleRow.id,
         })),
     );
-    await waitFor(
-      () => expect(result.current.action.isSuccess).toBe(true),
-      { timeout: 5000 },
-    );
+    await waitFor(() => expect(result.current.action.isSuccess).toBe(true), {
+      timeout: 5000,
+    });
     expect(result.current.action.data).toEqual({ status: "start_fetch" });
     expect(seenBodies).toEqual([{ run: "run-9", id: "a-1" }]);
   });
@@ -349,10 +356,9 @@ describe("useAction (real mutation over MSW)", () => {
       }),
       { wrapper: providerWrapper() },
     );
-    await waitFor(
-      () => expect(result.current.connected).toBe(false),
-      { timeout: 5000 },
-    );
+    await waitFor(() => expect(result.current.connected).toBe(false), {
+      timeout: 5000,
+    });
     await act(async () => {
       const outcome = await result.current.action.mutateAsync({}).then(
         () => null,
@@ -365,14 +371,14 @@ describe("useAction (real mutation over MSW)", () => {
 });
 
 describe("useTopology (real POST over MSW)", () => {
-  it("sends the seed as the POST body and returns the topology", async () => {
+  it("loads topology from one Brain memory ID in a GET query", async () => {
     const bodies: unknown[] = [];
     mswServer.use(
       http.get(`${testBase}/api/v1/health/ready`, () =>
         HttpResponse.json(readyHealth),
       ),
-      http.post(`${testBase}/api/v1/topology`, async ({ request }) => {
-        bodies.push(await request.json());
+      http.get(`${testBase}/api/v1/topology`, ({ request }) => {
+        bodies.push(new URL(request.url).searchParams.get("seed"));
         return HttpResponse.json({
           root_label: "Evidence topology",
           nodes: [
@@ -393,17 +399,16 @@ describe("useTopology (real POST over MSW)", () => {
     const { result } = renderHook(
       () => ({
         connected: useBackend().connected,
-        topo: useTopology({ kind: "actor", ref: "a-1" }),
+        topo: useTopology("a-1"),
       }),
       { wrapper: providerWrapper() },
     );
     await waitForConnected(() => result.current.connected);
-    await waitFor(
-      () => expect(result.current.topo.isSuccess).toBe(true),
-      { timeout: 5000 },
-    );
+    await waitFor(() => expect(result.current.topo.isSuccess).toBe(true), {
+      timeout: 5000,
+    });
     expect(result.current.topo.data?.root_label).toBe("Evidence topology");
-    expect(bodies[0]).toEqual({ seed: { kind: "actor", ref: "a-1" } });
+    expect(bodies[0]).toBe("a-1");
   });
 });
 
@@ -428,11 +433,10 @@ describe("useRelated (real graph page over MSW)", () => {
     const { result } = renderHook(() => useRelated(articleRow), {
       wrapper: providerWrapper(),
     });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true), { timeout: 5000 });
-    expect(result.current.data?.pages[0]?.rows[0]?.basis).toEqual([
-      "same day",
-    ]);
+    await waitFor(() => expect(result.current.isSuccess).toBe(true), {
+      timeout: 5000,
+    });
+    expect(result.current.data?.pages[0]?.rows[0]?.basis).toEqual(["same day"]);
     expect(result.current.data?.pages[0]?.rows[0]?.tentative).toBe(false);
   });
 });
-

@@ -1,8 +1,9 @@
+import { installLiveFixture } from "./live-fixture";
 import { test, expect, type Page } from "@playwright/test";
 
 const CAPTURE =
   process.env.ARGOS_WEB_CAPTURE_DIR || ".agent-scratch/tester-gate/screenshots";
-const API = "http://127.0.0.1:8080";
+const API = `http://127.0.0.1:${process.env.ARGOS_WEB_TEST_PORT || 3100}`;
 
 const article = {
   id: "a1",
@@ -19,6 +20,7 @@ const article = {
 };
 
 async function mockApi(page: Page) {
+  await installLiveFixture(page);
   await page.route(`${API}/api/v1/**`, async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname.replace("/api/v1/", "");
@@ -134,6 +136,10 @@ async function mockApi(page: Page) {
       });
       return;
     }
+    if (path === "topology/resolve") {
+      await route.fulfill({ json: { seed: "brain-memory-fixture" } });
+      return;
+    }
     if (path === "topology") {
       await route.fulfill({
         json: {
@@ -199,14 +205,13 @@ const VIEWPORTS: Array<{ name: string; width: number; height: number }> = [
 ];
 
 for (const vp of VIEWPORTS) {
-  test(`bulletin article card + quiet action @ ${vp.name}`, async ({
-    page,
-  }) => {
+  test(`bulletin pressable article card @ ${vp.name}`, async ({ page }) => {
     await page.setViewportSize({ width: vp.width, height: vp.height });
     await mockApi(page);
     await page.goto("/");
+    await page.getByRole("button", { name: "Open Intel", exact: true }).click();
     await expect(
-      page.getByRole("button", { name: "Open Focus Brief ↗" }).first(),
+      page.getByRole("button", { name: /^Open Focus Brief:/ }).first(),
     ).toBeVisible();
     await page.screenshot({
       path: `${CAPTURE}/${vp.name}-bulletin-quiet-action.png`,
@@ -220,12 +225,11 @@ for (const vp of VIEWPORTS) {
     await page.setViewportSize({ width: vp.width, height: vp.height });
     await mockApi(page);
     await page.goto("/");
+    await page.getByRole("button", { name: "Open Intel", exact: true }).click();
     await page
-      .getByRole("button", { name: "Open Focus Brief ↗" })
+      .getByRole("button", { name: /^Open Focus Brief:/ })
       .first()
       .click();
-    if (vp.width < 850)
-      await page.getByRole("button", { name: "Context", exact: true }).click();
     await expect(
       page.getByRole("button", { name: "Ensure / resume brief" }),
     ).toBeVisible();
@@ -239,9 +243,14 @@ for (const vp of VIEWPORTS) {
     await page.setViewportSize({ width: vp.width, height: vp.height });
     await mockApi(page);
     await page.goto("/");
-    await page.getByRole("button", { name: "Topology", exact: true }).click();
+    await page.getByRole("button", { name: "Open Intel", exact: true }).click();
+    await page
+      .getByRole("button", { name: /^Open Focus Brief:/ })
+      .first()
+      .click();
+    await page.getByRole("button", { name: "Launch 3D topology" }).click();
     await expect(
-      page.getByRole("heading", { name: "No topology selected" }),
+      page.getByRole("button", { name: "Return to Brief" }),
     ).toBeVisible();
     await page.screenshot({
       path: `${CAPTURE}/${vp.name}-topology-node-list.png`,
@@ -249,25 +258,26 @@ for (const vp of VIEWPORTS) {
     });
   });
 
-  test(`narrow tabs default-button vs panel affordance @ ${vp.name}`, async ({
+  test(`brief evidence and entity affordance @ ${vp.name}`, async ({
     page,
   }) => {
     await page.setViewportSize({ width: vp.width, height: vp.height });
     await mockApi(page);
     await page.goto("/");
+    await page.getByRole("button", { name: "Open Intel", exact: true }).click();
     await page
-      .getByRole("button", { name: "Open Focus Brief ↗" })
+      .getByRole("button", { name: /^Open Focus Brief:/ })
       .first()
       .click();
-    if (vp.width < 850) {
-      await expect(
-        page.getByRole("button", { name: "Extracted", exact: true }),
-      ).toBeVisible();
-    } else {
-      await expect(
-        page.getByRole("heading", { name: "01 / Extracted", exact: true }),
-      ).toBeVisible();
-    }
+    await expect(
+      page.getByRole("heading", { name: "IDENTIFIED ACTORS", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: "Explore actor Port authority",
+        exact: true,
+      }),
+    ).toBeVisible();
     await page.screenshot({
       path: `${CAPTURE}/${vp.name}-narrow-tabs-default-button.png`,
       fullPage: true,

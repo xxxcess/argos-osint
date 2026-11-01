@@ -1,45 +1,24 @@
-import {
-  DEFAULT_BACKEND,
-  safeBackend,
-  type BackendSettings,
-} from "@argos/api-client";
+import type { BackendSettings } from "@argos/api-client";
 
-// Browser state is initialized only by the client snapshot. The static export
-// always renders DEFAULT_BACKEND, then useSyncExternalStore hydrates the choice.
-let selected: string | undefined;
-const listeners = new Set<() => void>();
-
+/** The browser only knows Next's same-origin API. Rust configuration is server-only. */
 export const webBackendSettings: BackendSettings = {
-  subscribe(onChange) {
-    listeners.add(onChange);
-    return () => {
-      listeners.delete(onChange);
-    };
-  },
-  getSnapshot() {
-    if (selected === undefined) {
-      selected = DEFAULT_BACKEND;
-      try {
-        selected = safeBackend(
-          new URLSearchParams(location.search).get("api") ||
-            localStorage.getItem("argos.backend") ||
-            DEFAULT_BACKEND,
-        );
-      } catch {
-        // Invalid/unavailable persisted settings keep the loopback default.
-      }
+  subscribe: () => {
+    const url = new URL(location.href);
+    if (url.searchParams.has("api")) {
+      url.searchParams.delete("api");
+      history.replaceState(null, "", url);
     }
-    return selected;
-  },
-  getServerSnapshot: () => DEFAULT_BACKEND,
-  setBase(base) {
-    selected = base;
     try {
-      localStorage.setItem("argos.backend", base);
+      localStorage.removeItem("argos.backend");
     } catch {
-      // A blocked browser store must not prevent a connection for this session.
+      /* Blocked storage still permits the same-origin API. */
     }
-    for (const onChange of listeners) onChange();
+    return () => {};
+  },
+  getSnapshot: () => "",
+  getServerSnapshot: () => "",
+  setBase: () => {
+    throw new Error("Workspace service configuration belongs to the server");
   },
   createRequestId: () => crypto.randomUUID(),
 };

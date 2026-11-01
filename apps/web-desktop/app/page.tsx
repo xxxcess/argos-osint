@@ -1,11 +1,4 @@
-"use client";
-import { BackendProvider } from "@argos/api-client";
-import { IntelApp } from "@argos/intel";
-import { webBackendSettings } from "./backend-settings";
+// Root is an alias for Home; the persistent workspace lives in the layout.
 export default function Page() {
-  return (
-    <BackendProvider settings={webBackendSettings}>
-      <IntelApp />
-    </BackendProvider>
-  );
+  return null;
 }

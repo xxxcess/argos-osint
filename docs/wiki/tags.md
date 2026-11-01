@@ -20,6 +20,10 @@ Tags connect a documented concern to its implementation across directory boundar
 | `@tag:abort-signal` | [Intel web](code/intel-web.md#async-presentation) | [index.tsx](../../packages/api-client/src/index.tsx) |
 | `@tag:testing` | [Testing](code/react-ui.md#react-component-testing-real-component-pattern) | [UI tests](../../packages/ui/__tests__/) / [Intel tests](../../packages/intel/__tests__/) |
 | `@tag:look-and-feel` | [Look & Feel](code/react-ui.md#argos-look--feel-reference) | [UI primitives](../../packages/ui/src/index.tsx) |
+| `@tag:web-routing` | [Intel web](code/intel-web.md#running-locally) | [navigation.ts](../../packages/intel/src/navigation.ts) / [web adapter](../../apps/web-desktop/app/navigation.ts) |
+| `@tag:api-proxy` | [Intel web](code/intel-web.md#running-locally) | [server-api.ts](../../apps/web-desktop/app/server-api.ts) |
+| `@tag:live-updates` | [Live update contract](code/intel-web.md#rest-snapshots-and-live-updates) | [Rust live.rs](../../crates/argos-osint-api/src/live.rs) / [Next relay](../../apps/web-desktop/live-relay.mjs) / [browser adapter](../../apps/web-desktop/app/live-transport.ts) |
+| `@tag:host-metrics` | [Intel web](code/intel-web.md#api-contract) | [host_metrics.rs](../../crates/argos-osint-api/src/host_metrics.rs) / [client](../../packages/api-client/src/index.tsx) |
 | `@tag:react-ui` | [React UI](code/react-ui.md) | [UI primitives](../../packages/ui/src/index.tsx) / [Intel screens](../../packages/intel/src/index.tsx) |
 
 From the repo root:

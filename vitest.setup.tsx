@@ -102,6 +102,14 @@ export const mswServer = setupServer(
       instance_id: "test-instance",
     });
   }),
+  http.get(api("host/metrics"), () =>
+    HttpResponse.json({
+      cpu_percent: null,
+      memory_percent: null,
+      disk_percent: null,
+      network_kbps: null,
+    }),
+  ),
   http.get(api("days"), () => {
     return HttpResponse.json({ days: [] });
   }),
@@ -153,6 +161,18 @@ export const mswServer = setupServer(
       has_continuation: false,
     });
   }),
+  http.get(api("articles/counts"), () =>
+    HttpResponse.json({
+      counts: {
+        geopolitical: 0,
+        economic: 0,
+        military: 0,
+        information: 0,
+        stability: 0,
+        technology: 0,
+      },
+    }),
+  ),
   http.get(api("articles/related*"), () => {
     return HttpResponse.json({ rows: [], next_cursor: null });
   }),

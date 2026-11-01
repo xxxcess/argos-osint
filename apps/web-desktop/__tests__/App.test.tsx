@@ -1,5 +1,6 @@
 import React from "react";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { mswServer, testBase } from "../../../vitest.setup";
 import { BackendProvider } from "@argos/api-client";
@@ -33,11 +34,7 @@ const readyHealth = {
 
 function providerWrapper() {
   return function Wrapper({ children }: { children?: React.ReactNode }) {
-    return (
-      <BackendProvider settings={settings}>
-        {children}
-      </BackendProvider>
-    );
+    return <BackendProvider settings={settings}>{children}</BackendProvider>;
   };
 }
 
@@ -50,37 +47,51 @@ describe("Web Desktop App (real IntelApp)", () => {
     // Mock health endpoint to return offline initially
     mswServer.use(
       http.get(`${testBase}/api/v1/health/ready`, () => {
-        return HttpResponse.json({ ...readyHealth, ready: false, storage: false });
-      })
+        return HttpResponse.json({
+          ...readyHealth,
+          ready: false,
+          storage: false,
+        });
+      }),
     );
   });
 
-  it("renders the Intel app with masthead and offline status", () => {
+  it("renders the offline shell without exposing a working app tab", () => {
     render(<IntelApp />, { wrapper: providerWrapper() });
-    // Find the masthead via the unique "Local intelligence workspace" text
-    // Its parent is the brand container which also holds "ARGOS / INTEL"
-    const workspaceDesc = screen.getByText("Local intelligence workspace");
-    const brandContainer = workspaceDesc.parentElement?.parentElement;
-    expect(brandContainer?.textContent).toContain("ARGOS");
-    expect(brandContainer?.textContent).toContain("INTEL");
-    expect(workspaceDesc).toBeInTheDocument();
-    // Shows offline · reconnecting when health is not ready
-    expect(screen.getByText(/offline · reconnecting/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("API offline")).toHaveTextContent("OFFLINE");
+    expect(screen.getByRole("button", { name: "Desktop" })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Open Intel" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^Bulletin$/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Intelligence bulletin" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows connection form when API is offline", async () => {
     render(<IntelApp />, { wrapper: providerWrapper() });
-    // Wait for health query to complete and show offline state
-    await waitFor(() => expect(screen.getByText(/offline · reconnecting/i)).toBeInTheDocument(), { timeout: 5000 });
+    // A settled not-ready response must leave a usable retry, not a pending form.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Connect / retry" }),
+      ).toBeEnabled(),
+    );
+    expect(screen.getByLabelText("API offline")).toHaveTextContent("OFFLINE");
     expect(screen.getByText(/connection required/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/api endpoint/i)).toBeInTheDocument();
-    // Button may show "Connecting..." initially or "Connect / retry" - check for either
-    const button = screen.getByRole("button", { name: /connect/i });
-    expect(button).toBeInTheDocument();
-    expect(screen.getByText(/loopback only · local development/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/api endpoint/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("progressbar", { name: "Checking local API…" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/server-managed workspace connection/i),
+    ).toBeInTheDocument();
   });
 
   it("shows connecting state when health check is in progress", async () => {
+    const user = userEvent.setup();
     let resolveHealth!: (value: Response) => void;
     const healthPromise = new Promise<Response>((resolve) => {
       resolveHealth = resolve;
@@ -91,24 +102,85 @@ describe("Web Desktop App (real IntelApp)", () => {
     );
 
     render(<IntelApp />, { wrapper: providerWrapper() });
-    expect(screen.getByText("Checking local API…")).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "Checking local API…" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Connecting…" })).toBeDisabled();
+    expect(screen.getByLabelText("API offline")).toHaveTextContent("OFFLINE");
     resolveHealth(HttpResponse.json(readyHealth));
-    await waitFor(() => expect(screen.getByText("● API connected")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByLabelText("API connected")).toHaveTextContent(
+        "API_OK",
+      ),
+    );
+    expect(screen.getByRole("button", { name: "Desktop" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: /^Bulletin$/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open Intel" })).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "Intelligence bulletin" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open Intel" }));
+    expect(screen.getByRole("button", { name: /^Bulletin$/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(
+      screen.queryByRole("progressbar", { name: "Checking local API…" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/api endpoint/i)).not.toBeInTheDocument();
   });
 
-  it("has accessible API endpoint input with default value", async () => {
+  it("keeps backend configuration server-side and offers readiness retry", async () => {
     render(<IntelApp />, { wrapper: providerWrapper() });
-    await waitFor(() => expect(screen.getByText(/offline · reconnecting/i)).toBeInTheDocument(), { timeout: 5000 });
-    const input = screen.getByLabelText(/api endpoint/i) as HTMLInputElement;
-    expect(input).toHaveValue("http://127.0.0.1:8080");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Connect / retry" }),
+      ).toBeEnabled(),
+    );
+    expect(screen.queryByRole("textbox", { name: /API endpoint/i })).toBeNull();
+    expect(
+      screen.getByText("Server-managed workspace connection"),
+    ).toBeVisible();
   });
 
-  it("renders without crashing", async () => {
-    const { unmount } = render(<IntelApp />, { wrapper: providerWrapper() });
-    // Wait for initial render to settle
-    await waitFor(() => expect(screen.getByText(/offline · reconnecting/i)).toBeInTheDocument(), { timeout: 5000 });
-    unmount();
+  it("retries readiness and retains Bulletin filters while navigating through Home", async () => {
+    const user = userEvent.setup();
+    render(<IntelApp />, { wrapper: providerWrapper() });
+    const retry = await screen.findByRole("button", {
+      name: "Connect / retry",
+    });
+    mswServer.use(
+      http.get(`${testBase}/api/v1/health/ready`, () =>
+        HttpResponse.json(readyHealth),
+      ),
+    );
+    await user.click(retry);
+    await screen.findByLabelText("API connected");
+    await user.click(screen.getByRole("button", { name: "Open Intel" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Search articles" }),
+      "shipping",
+    );
+    await user.click(screen.getByRole("button", { name: /^Economic$/ }));
+    await user.click(screen.getByRole("button", { name: /^Desktop$/ }));
+    expect(screen.getByRole("button", { name: "Open Intel" })).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /^Bulletin$/ }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open Intel" }));
+    expect(
+      screen.getByRole("heading", { name: "Intelligence bulletin" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("textbox", { name: "Search articles" }),
+    ).toHaveValue("shipping");
+    expect(screen.getByRole("button", { name: /^Economic$/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByLabelText("API connected")).toHaveTextContent("API_OK");
   });
 });
 
@@ -122,7 +194,7 @@ describe("Web Desktop App - Error Boundary", () => {
     const { container } = render(
       <ErrorBoundary label="Test Error Boundary" onRetry={() => {}}>
         <ThrowingComponent />
-      </ErrorBoundary>
+      </ErrorBoundary>,
     );
 
     // ErrorBoundary should catch the error and display fallback

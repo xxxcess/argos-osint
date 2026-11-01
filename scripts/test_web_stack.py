@@ -472,7 +472,7 @@ def main():
             web = spawn(launcher, "stack", "up", "--web", "--profile", "installed", "--port", str(web_port), "--api-port", str(api_port))
             managed = eventually(state, web)
             assert managed["frontend_pid"] and not managed["adopted"]
-            assert browser_log.read_text().strip() == f"http://localhost:{web_port}/?api=http://127.0.0.1:{api_port}"
+            assert browser_log.read_text().strip() == f"http://localhost:{web_port}/home"
             assert ready(api_port)
             eventually(lambda: b"ARGOS" in get(f"http://127.0.0.1:{web_port}/"), web)
             run("stack", "down", "--web")

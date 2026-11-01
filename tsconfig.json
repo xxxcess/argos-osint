@@ -29,6 +29,7 @@
   "include": [
     "apps/**/*.tsx",
     "packages/**/*.tsx",
+    "packages/intel/src/topology/three.d.ts",
     "tests/web/**/*.ts"
   ],
   "exclude": [

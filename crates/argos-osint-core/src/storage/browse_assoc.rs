@@ -78,7 +78,7 @@ struct Inputs {
 
 const INPUTS_SURQL: &str = "
 SELECT meta::id(id) AS a, to_actor AS b FROM brain_actor_redirect;
-SELECT meta::id(id) AS a, payload_json AS b FROM memory WHERE payload_json != '';
+SELECT meta::id(id) AS a, payload_json AS b FROM memory WHERE payload_json != '' AND memory_kind != 'actor';
 SELECT memory_id AS a, actor_id AS b FROM brain_memory_actor_ref;
 SELECT actor_id, origin_kind, origin_scope, origin_id, origin_revision FROM brain_actor_mention
   ORDER BY origin_scope, origin_id;

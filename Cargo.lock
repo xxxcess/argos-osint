@@ -234,8 +234,10 @@ dependencies = [
 name = "argos-osint-core"
 version = "0.2.1"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "chrono",
+ "csv",
  "dirs",
  "futures-util",
  "libc",

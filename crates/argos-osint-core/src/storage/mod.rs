@@ -16,6 +16,7 @@ pub mod brain_scope;
 pub mod error;
 
 pub mod actor_bind;
+pub mod actor_catalog;
 pub mod actor_dedup;
 pub mod article_body;
 pub mod atlas;

@@ -24,7 +24,7 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// before refresh. The event logs (`argos_event`, `investigation_event`)
 /// stand alone; telemetry writes use `profile_view`'s tables, with
 /// `telemetry_meta` after them.
-pub fn schemas() -> [(&'static str, &'static str); 36] {
+pub fn schemas() -> [(&'static str, &'static str); 37] {
     [
         ("counters", super::counters::SCHEMA),
         ("outbox", super::outbox::SCHEMA),
@@ -39,6 +39,7 @@ pub fn schemas() -> [(&'static str, &'static str); 36] {
         ("intel", super::intel::SCHEMA),
         ("brief", super::brief::SCHEMA),
         ("lifecycle", super::lifecycle::SCHEMA),
+        ("actor_catalog", super::actor_catalog::SCHEMA),
         ("refresh", super::refresh::SCHEMA),
         ("recon", super::recon::SCHEMA),
         ("entities", super::entities::SCHEMA),

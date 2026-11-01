@@ -212,7 +212,8 @@ async fn supported(tx: &Tx, ids: &[String]) -> Result<HashSet<String>, TxError> 
     let mut sql = String::new();
     for i in 0..ids.len() {
         sql.push_str(&format!(
-            "RETURN count(SELECT id FROM brain_actor_mention WHERE actor_id = $i{i} LIMIT 1) > 0
+            "RETURN (SELECT VALUE scope_key FROM ONLY $a{i}) = 'dataset:argos_actors'
+               OR count(SELECT id FROM brain_actor_mention WHERE actor_id = $i{i} LIMIT 1) > 0
                OR count(SELECT id FROM brain_graph_edge WHERE out = $n{i} AND meaning = 'concerns'
                     AND in.memory_kind INSIDE $kinds AND owner != $i{i} LIMIT 1) > 0
                OR ((SELECT VALUE pinned FROM ONLY $m{i}) ?? false)
@@ -225,6 +226,7 @@ async fn supported(tx: &Tx, ids: &[String]) -> Result<HashSet<String>, TxError> 
     for (i, id) in ids.iter().enumerate() {
         q = q
             .bind((format!("i{i}"), id.clone()))
+            .bind((format!("a{i}"), rid("brain_actor", id)))
             .bind((format!("n{i}"), rid("brain_graph_node", &memory_node(id))))
             .bind((format!("m{i}"), rid("memory", id)))
             .bind((format!("e{i}"), rid("insight_user_edit", id)));
@@ -502,7 +504,7 @@ pub async fn reconcile_lifecycle_in(tx: &Tx) -> Result<Vec<String>, TxError> {
     }
     let mut r = run(
         tx,
-        tx.query("SELECT record::id(id) AS id, scope_key FROM brain_actor"),
+        tx.query("SELECT record::id(id) AS id, scope_key FROM brain_actor WHERE scope_key != 'dataset:argos_actors'"),
     )
     .await?;
     let actors: Vec<Actor> = take(&mut r, 0)?;

@@ -1,0 +1,19 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Actor catalog</title><style>body{margin:0;background:#f5f5f5}main{max-width:1200px;margin:auto}svg{width:100%;height:auto}</style><main><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 470" role="img" aria-labelledby="title desc">
+<title id="title">Actor catalog seeding and deterministic association</title><desc id="desc">Venture probes seed readiness in a child. A seed child validates CSV and commits actor batches with a completion receipt. Article names and strong aliases match canonical actors; ambiguous and unknown names do not create actors.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
+<rect width="1000" height="470" fill="#f5f5f5"/>
+<style>text{font-family:system-ui,sans-serif;fill:#2d3142}.head{font-size:21px;font-weight:600}.label{font-size:16px}.note{font-size:13px}.line{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#arrow)}.box{fill:#fff;stroke:#4f5d75}</style>
+<text x="32" y="38" class="head">Static actor catalog · Source identity, not evidence of involvement</text>
+<rect x="32" y="75" width="260" height="110" class="box"/><text x="48" y="101" class="label">Venture service root</text><text x="48" y="127" class="note">Short-lived readiness probe</text><text x="48" y="150" class="note">Seed DB if incomplete or empty</text><text x="48" y="172" class="note">No repository retained by parent</text>
+<path d="M292 130H350" class="line"/>
+<rect x="350" y="75" width="280" height="110" class="box"/><text x="366" y="101" class="label">Seed child · local CSV</text><text x="366" y="127" class="note">Validate all records before writes</text><text x="366" y="150" class="note">128 actors per transaction</text><text x="366" y="172" class="note">Progress: committed / total</text>
+<path d="M630 130H690" class="line"/>
+<rect x="690" y="75" width="280" height="110" class="box"/><text x="706" y="101" class="label">Canonical Brain records</text><text x="706" y="127" class="note">Stable actor + memory + alias IDs</text><text x="706" y="150" class="note">Graph nodes + CSV provenance</text><text x="706" y="172" class="note">Complete receipt after last batch</text>
+<path d="M490 185V231H162V185" class="line"/><text x="360" y="219" class="note">Retry committed IDs; exit returns to Venture</text>
+<rect x="32" y="280" width="260" height="105" class="box"/><text x="48" y="308" class="label">Article title + description</text><text x="48" y="335" class="note">Names / normalized names / aliases</text><text x="48" y="359" class="note">Original mention byte spans retained</text>
+<path d="M292 330H350M830 185V250H490V280" class="line"/>
+<rect x="350" y="280" width="280" height="105" class="box"/><text x="366" y="308" class="label">Deterministic matcher</text><text x="366" y="335" class="note">Word boundaries; unique strong aliases</text><text x="366" y="359" class="note">No weak / short / ambiguous matches</text>
+<path d="M630 330H690" class="line"/>
+<rect x="690" y="280" width="280" height="105" class="box"/><text x="706" y="308" class="label">Recorded article relationships</text><text x="706" y="335" class="note">Existing mention / link receipts</text><text x="706" y="359" class="note">Claims without actor matches retained</text>
+<text x="32" y="438" class="note">Classification, extraction and evidence semantics stay in the existing news pipeline.</text>
+</svg></main></html>

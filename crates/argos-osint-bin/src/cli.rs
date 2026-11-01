@@ -100,6 +100,13 @@ enum Command {
 #[cfg(feature = "surreal")]
 #[derive(Subcommand)]
 enum StorageCommand {
+    /// Whether the canonical actor catalog needs an initial/retry ingestion.
+    ActorSeedStatus,
+    /// Ingest the local deterministic actor catalog into Brain.
+    SeedActors {
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+    },
     /// Show mode, address, schema and readiness as JSON (never starts a server).
     Status,
     /// Record the storage mode and bootstrap the schema.
@@ -554,6 +561,17 @@ async fn storage_command(command: StorageCommand) -> Result<()> {
     use argos_osint_core::storage::{commands, home::Layout, server};
     let layout = Layout::new(paths::ensure_home()?);
     match command {
+        StorageCommand::ActorSeedStatus => {
+            if argos_osint_core::storage::home::load_config(&layout)?.is_none() {
+                return print_json(&argos_osint_core::storage::actor_catalog::Status {
+                    needs_seed: true,
+                    ..Default::default()
+                });
+            }
+            let repo = argos_osint_core::storage::repo::Repository::open_home(&layout).await?;
+            print_json(&argos_osint_core::storage::actor_catalog::status(repo.db()).await?)
+        }
+        StorageCommand::SeedActors { file } => crate::welcome::seed::run(file).await,
         StorageCommand::Status => print_json(&commands::status(&layout).await?),
         StorageCommand::Init { mode, port } => {
             print_json(&commands::init(&layout, mode, port).await?)

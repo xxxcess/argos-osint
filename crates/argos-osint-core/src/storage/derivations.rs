@@ -731,7 +731,7 @@ async fn bind_item_in(
     now: &str,
 ) -> Result<Vec<String>, TxError> {
     use super::actor_bind::{
-        add_memory_actor_ref_in, bind_claim_subject_in, bind_in, referenced, resolve_in,
+        add_memory_actor_ref_in, bind_claim_subject_in, referenced, resolve_in,
         update_claim_payload_in,
     };
     use crate::memory_metadata::{ActorRef, InferencePayload, MemoryKind, MemoryPayload};
@@ -768,7 +768,7 @@ async fn bind_item_in(
                 .first()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or(&entity.comparison_key);
-            let (bound, changed) = bind_in(
+            let Some((bound, changed)) = super::actor_bind::bind_optional_in(
                 tx,
                 &crate::brain_actors::BindRequest {
                     name,
@@ -780,7 +780,10 @@ async fn bind_item_in(
                 },
                 now,
             )
-            .await?;
+            .await?
+            else {
+                continue;
+            };
             touched.extend(changed);
             let role = if entity.id == item.subject {
                 "subject"

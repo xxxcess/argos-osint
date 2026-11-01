@@ -8719,7 +8719,10 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
             )
         })
         .collect();
-    for actor in grounded {
+    for actor in grounded
+        .into_iter()
+        .filter(|_| app.intel_actor_state != "catalog")
+    {
         if !app
             .intel_actors
             .iter()
@@ -8741,7 +8744,11 @@ fn intel_extracted_layout(app: &App, viewport: Rect) -> Option<IntelExtractedLay
     };
     // Streamed progression lives in Background jobs, not in content panes.
     let actors_md = if buckets.actors.is_empty() {
-        format!("_NLP {}_", app.intel_actor_state)
+        if app.intel_actor_state == "catalog" {
+            "_No catalog actor matches_".to_owned()
+        } else {
+            format!("_NLP {}_", app.intel_actor_state)
+        }
     } else {
         extracted_actors_markdown(&buckets.actors)
     };

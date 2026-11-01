@@ -246,6 +246,10 @@ Related article eligibility requires **at least two distinct overlapping entity 
 
 The [web/API guide](../code/intel-web.md#running-locally) covers `argos stack up --web`, API-only `--server`, static export builds, connection settings and safe shutdown. `argos` and `argos stack up --tui` continue to open the terminal directly. The web application is local development only; public deployment and native clients remain later phases in the [living specification](../../argos-intel-living-spec.md).
 
+## Actor catalog seeding
+
+After resetting or initializing storage, choose **Seed DB** in Argos Venture to ingest the local `datasets/argos_actors.csv`. The option disappears only after successful completion and a nonempty catalog. A failed or cancelled import can be retried. `argos storage seed-actors --file <csv>` provides the same service directly; see the [catalog contract](../code/actor-catalog.md).
+
 ## Async Intel and Venture navigation
 
 The React Native Web Intel client distinguishes loading, refresh, pagination and empty/error states. Scroll toward the end of a Bulletin category to load another retained cursor page; manual load/retry remains available. Category/day/search changes keep their own data. A zero count means no matching items after a successful read; numeric zero confidence remains a value.

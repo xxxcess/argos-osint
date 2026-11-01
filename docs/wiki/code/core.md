@@ -30,6 +30,8 @@ The UI-independent [Intel service](../../../crates/argos-osint-core/src/intel_se
 
 [brain.rs](../../../crates/argos-osint-core/src/brain.rs) defines memory/provenance concepts and recall scoring; [store.rs](../../../crates/argos-osint-core/src/store.rs) exposes persistence-facing operations. Follow [storage/recall.rs](../../../crates/argos-osint-core/src/storage/recall.rs) for retrieval. Read [source lifecycle](../../diagrams/brain-source-lifecycle.html) and [topology](../concepts/topology-mapper.md) before changing eligibility or associations.
 
+Actor sourcing and Venture seed behavior are defined by the [seeded catalog](actor-catalog.md), implemented in [actor_catalog.rs](../../../crates/argos-osint-core/src/actor_catalog.rs) and [storage/actor_catalog.rs](../../../crates/argos-osint-core/src/storage/actor_catalog.rs).
+
 ## Providers and tool adapters
 
 `@tag:osint-providers`

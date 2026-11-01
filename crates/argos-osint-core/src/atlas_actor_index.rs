@@ -11,7 +11,7 @@ use anyhow::Result;
 use crate::brain_actors::IDENTITY_INDEX_VERSION;
 
 pub const BATCH: usize = 100;
-pub const INDEX_CONTRACT: &str = "atlas-actor-index-v1";
+pub const INDEX_CONTRACT: &str = "atlas-actor-index-v2-catalog";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IndexReport {
@@ -123,6 +123,7 @@ pub mod surreal {
         run_id: &str,
         stop: &(dyn Fn() -> bool + Sync),
     ) -> Result<IndexReport> {
+        let catalog = catalog_matcher(repo).await?;
         let units = run_units(repo, run_id).await?;
         let have = receipts(repo, run_id).await?;
         let mut report = IndexReport {
@@ -147,7 +148,16 @@ pub mod surreal {
             let now = chrono::Utc::now().to_rfc3339();
             for (article, metadata, rev) in chunk {
                 let unit = format!("{run_id}/{}", article.id);
-                match index_occurrence(repo, article, metadata.as_ref(), rev, &now).await {
+                match index_with_catalog(
+                    repo,
+                    article,
+                    metadata.as_ref(),
+                    rev,
+                    &now,
+                    catalog.clone(),
+                )
+                .await
+                {
                     Ok(coverage) => {
                         report.indexed += 1;
                         if coverage == "zero actors" || coverage == "metadata missing" {
@@ -178,9 +188,50 @@ pub mod surreal {
         rev: &str,
         now: &str,
     ) -> Result<String> {
+        index_with_catalog(
+            repo,
+            article,
+            metadata,
+            rev,
+            now,
+            catalog_matcher(repo).await?,
+        )
+        .await
+    }
+
+    async fn catalog_matcher(
+        repo: &Repository,
+    ) -> Result<Option<Arc<crate::actor_catalog::Matcher>>> {
+        let mut r = repo
+            .db()
+            .query("RETURN record::exists(brain_actor_seed:catalog)")
+            .await?
+            .check()?;
+        let enabled: Option<bool> = r.take(0)?;
+        if enabled != Some(true) {
+            return Ok(None);
+        }
+        if crate::storage::actor_catalog::status(repo.db())
+            .await?
+            .needs_seed
+        {
+            anyhow::bail!("Actor catalog is incomplete; run Seed DB from Argos Venture");
+        }
+        Ok(Some(repo.actor_matcher().await?))
+    }
+
+    async fn index_with_catalog(
+        repo: &Repository,
+        article: &AtlasArticleRow,
+        metadata: Option<&ArticleMetadata>,
+        rev: &str,
+        now: &str,
+        catalog: Option<Arc<crate::actor_catalog::Matcher>>,
+    ) -> Result<String> {
         if article.run_id.is_empty() || article.id.is_empty() {
             return Err(anyhow!("actor index: empty article id"));
         }
+        let found = Arc::new(catalog.as_ref().map(|c| c.article_actors(article)));
         let article = Arc::new(article.clone());
         let metadata = Arc::new(metadata.cloned());
         let rev = rev.to_string();
@@ -190,15 +241,23 @@ pub mod surreal {
         let out = coverage.clone();
         let write: MemoryWrite = Arc::new(move |tx: Tx| {
             let article = article.clone();
+            let found = found.clone();
             let metadata = metadata.clone();
             let rev = rev.clone();
             let now = now.clone();
             let db = db.clone();
             let out = out.clone();
             Box::pin(async move {
-                let (cov, touched) =
-                    write_occurrence(&tx, &db, &article, metadata.as_ref().as_ref(), &rev, &now)
-                        .await?;
+                let (cov, touched) = write_occurrence(
+                    &tx,
+                    &db,
+                    &article,
+                    metadata.as_ref().as_ref(),
+                    found.as_ref().as_deref(),
+                    &rev,
+                    &now,
+                )
+                .await?;
                 let (run_id, article_id) = (article.run_id.as_str(), article.id.as_str());
                 lifecycle::put_article_index_in(
                     &tx,
@@ -239,6 +298,7 @@ pub mod surreal {
         db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
         article: &AtlasArticleRow,
         metadata: Option<&ArticleMetadata>,
+        catalog_actors: Option<&[crate::atlas_metadata::ArticleActor]>,
         revision: &str,
         now: &str,
     ) -> Result<(String, Vec<String>), TxError> {
@@ -248,10 +308,11 @@ pub mod surreal {
                 .await?
                 .into_iter()
                 .collect();
-        let Some(metadata) = metadata else {
-            return Ok(("metadata missing".into(), touched.into_iter().collect()));
+        let found = match (catalog_actors, metadata) {
+            (Some(actors), _) => actors.to_vec(),
+            (None, Some(metadata)) => crate::atlas_metadata::article_actors(article, metadata),
+            (None, None) => return Ok(("metadata missing".into(), touched.into_iter().collect())),
         };
-        let found = crate::atlas_metadata::article_actors(article, metadata);
         if found.is_empty() {
             return Ok(("zero actors".into(), touched.into_iter().collect()));
         }
@@ -267,19 +328,30 @@ pub mod surreal {
             let key = crate::atlas_metadata::comparison_key(&a.display_name);
             let legacy = format!("{}:{key}", a.type_hint);
             let ext_scope = format!("atlas:{article_id}");
-            let (binding, changed) = crate::storage::actor_bind::bind_in(
-                tx,
-                &BindRequest {
-                    name: &a.display_name,
-                    subtype,
-                    scope: &scope,
-                    identifiers: &[],
-                    external: Some((&ext_scope, &legacy)),
-                    provenance: json!({"atlas_run":run_id,"article":article_id}),
-                },
-                now,
-            )
-            .await?;
+            let (binding, changed) = if catalog_actors.is_some() {
+                (
+                    crate::storage::actor_bind::Bound {
+                        actor_id: a.id.clone(),
+                        state: crate::memory_metadata::IdentityState::Resolved,
+                    },
+                    Vec::new(),
+                )
+            } else {
+                let (binding, changed) = crate::storage::actor_bind::bind_in(
+                    tx,
+                    &BindRequest {
+                        name: &a.display_name,
+                        subtype,
+                        scope: &scope,
+                        identifiers: &[],
+                        external: Some((&ext_scope, &legacy)),
+                        provenance: json!({"atlas_run":run_id,"article":article_id}),
+                    },
+                    now,
+                )
+                .await?;
+                (binding, changed)
+            };
             touched.extend(changed);
             let spans: Vec<Value> = a
                 .mentions
@@ -350,7 +422,7 @@ pub mod surreal {
                     let cmeta = crate::storage::atlas_metadata::metadata(db, &orun, &oid).await?;
                     let shared = crate::related_articles::shared_entity_mentions_with(
                         article,
-                        Some(metadata),
+                        metadata,
                         &candidate,
                         cmeta.as_ref(),
                     );

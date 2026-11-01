@@ -180,6 +180,19 @@ pub async fn bind_in(
     if name.is_empty() {
         return Err(TxError::Abort("actor name is empty".into()));
     }
+    if super::actor_catalog::enabled_in(tx).await? {
+        let id = super::actor_catalog::lookup_in(tx, &name)
+            .await?
+            .ok_or_else(|| TxError::Abort(format!("no unique catalog actor for {name}")))?;
+        link_external_in(tx, req, &id, now).await?;
+        return Ok((
+            Bound {
+                actor_id: id,
+                state: IdentityState::Resolved,
+            },
+            Vec::new(),
+        ));
+    }
     let subtype = req.subtype;
     if let Some((scope, legacy)) = req.external {
         let mut r = run(
@@ -289,6 +302,23 @@ pub async fn bind_in(
         },
         changed,
     ))
+}
+
+/// Bind an extraction only when its name uniquely identifies a seeded actor.
+/// Before catalog activation, historical homes retain their scoped bindings.
+pub async fn bind_optional_in(
+    tx: &Tx,
+    req: &BindRequest<'_>,
+    now: &str,
+) -> Result<Option<(Bound, Vec<String>)>, TxError> {
+    if super::actor_catalog::enabled_in(tx).await?
+        && super::actor_catalog::lookup_in(tx, req.name)
+            .await?
+            .is_none()
+    {
+        return Ok(None);
+    }
+    bind_in(tx, req, now).await.map(Some)
 }
 
 /// Reference an actor from another memory (claim subject, mention …) and
@@ -498,7 +528,7 @@ async fn claim_subject_in(
     } else {
         format!("{app}:{conversation}")
     };
-    let (bound, mut changed) = bind_in(
+    let Some((bound, mut changed)) = bind_optional_in(
         tx,
         &BindRequest {
             name: &entity,
@@ -510,7 +540,10 @@ async fn claim_subject_in(
         },
         now,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(Some((claim, "no unique catalog subject", Vec::new())));
+    };
     if claim.entity_id != entity {
         // Repair only the machine-generated id spelling, keeping analyst names.
         let old = format!(
@@ -604,7 +637,7 @@ async fn claim_subject_in(
             let scope = format!("{}:{}", row.owner_kind, row.owner_id);
             let external = format!("snapshot:{}", row.snapshot);
             let provenance = json!({"snapshot": row.snapshot});
-            let (b, c) = bind_in(
+            let Some((b, c)) = bind_optional_in(
                 tx,
                 &BindRequest {
                     name,
@@ -616,7 +649,10 @@ async fn claim_subject_in(
                 },
                 now,
             )
-            .await?;
+            .await?
+            else {
+                continue;
+            };
             changed.extend(c);
             let role = if entity.id == item.subject_ref {
                 "subject"

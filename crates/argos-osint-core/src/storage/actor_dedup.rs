@@ -145,6 +145,16 @@ pub async fn merge_in(
     if actor_in(tx, &from).await?.is_none() || actor_in(tx, &to).await?.is_none() {
         return Err(abort("unknown actor"));
     }
+    for actor in [&from, &to] {
+        if actor_in(tx, actor)
+            .await?
+            .is_some_and(|row| row.scope_key == crate::actor_catalog::SCOPE)
+        {
+            return Err(abort(
+                "catalog identities are deterministic and cannot be merged",
+            ));
+        }
+    }
     super::lifecycle::add_redirect_in(tx, &from, &to, now).await?;
     run(
         tx,
@@ -285,7 +295,7 @@ pub async fn candidates(repo: &Repository, limit: usize) -> Result<Vec<Candidate
                 tx.query(
                     "SELECT record::id(id) AS id, subtype, \
                        (SELECT VALUE lifecycle FROM ONLY type::record('memory', record::id($parent.id))) \
-                         AS lifecycle FROM brain_actor ORDER BY id",
+                         AS lifecycle FROM brain_actor WHERE scope_key != 'dataset:argos_actors' ORDER BY id",
                 ),
             )
             .await?;
@@ -545,7 +555,7 @@ pub async fn repair_local(repo: &Repository, limit: usize) -> Result<usize> {
         .db()
         .query(
             "SELECT record::id(id) AS id, subtype, display_name, scope_key, revision \
-             FROM brain_actor ORDER BY id;
+             FROM brain_actor WHERE scope_key != 'dataset:argos_actors' ORDER BY id;
              SELECT VALUE record::id(id) FROM brain_actor_redirect;
              SELECT unit_id, revision FROM brain_backfill_receipt \
              WHERE source = 'actor_normalization';",

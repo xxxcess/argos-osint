@@ -21,6 +21,7 @@ struct Inner {
     bootstrap: Bootstrap,
     mode: Option<Mode>,
     publisher: std::sync::OnceLock<super::publisher::Publisher>,
+    actor_matcher: tokio::sync::OnceCell<Arc<crate::actor_catalog::Matcher>>,
     _hold: Option<Hold>,
 }
 
@@ -82,6 +83,7 @@ impl Repository {
                 bootstrap,
                 mode,
                 publisher: std::sync::OnceLock::new(),
+                actor_matcher: tokio::sync::OnceCell::new(),
                 _hold: hold,
             }),
         }
@@ -98,6 +100,18 @@ impl Repository {
         self.inner
             .publisher
             .get_or_init(|| super::publisher::Publisher::spawn(self.inner.db.clone()))
+    }
+
+    /// One deterministic actor matcher per open repository; a reset/reseed
+    /// runs in a separate Venture child and therefore gets a fresh cache.
+    pub(crate) async fn actor_matcher(&self) -> Result<Arc<crate::actor_catalog::Matcher>> {
+        self.inner
+            .actor_matcher
+            .get_or_try_init(|| async {
+                super::actor_catalog::load_matcher(self).await.map(Arc::new)
+            })
+            .await
+            .cloned()
     }
 
     pub fn bootstrap(&self) -> Bootstrap {

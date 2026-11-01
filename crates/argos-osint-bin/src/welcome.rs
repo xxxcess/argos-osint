@@ -1,4 +1,6 @@
 //! Service setup before any application opens storage.
+#[cfg(feature = "surreal")]
+pub(crate) mod seed;
 mod terminal;
 use std::io::{self, BufRead, IsTerminal, Write};
 
@@ -55,18 +57,43 @@ pub(crate) fn run_with_notice(notice: Option<&str>) -> anyhow::Result<Option<Sel
             });
         }
     }
+    #[cfg(feature = "surreal")]
+    let needs_seed = {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["storage", "actor-seed-status"])
+            .output()?;
+        if output.status.success() {
+            serde_json::from_slice::<argos_osint_core::storage::actor_catalog::Status>(
+                &output.stdout,
+            )?
+            .needs_seed
+        } else {
+            // An unavailable/locked database is not an empty database. Keep
+            // the normal launcher usable and surface the probe failure.
+            eprintln!(
+                "Actor seed status unavailable: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            false
+        }
+    };
+    #[cfg(not(feature = "surreal"))]
+    let needs_seed = false;
     if let Some(msg) = notice {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             eprintln!("{msg}");
         }
     }
     if io::stdin().is_terminal() && io::stdout().is_terminal() {
-        return terminal::run(existing, notice);
+        return terminal::run(existing, notice, needs_seed);
     }
-    Ok(select(
-        &mut io::stdin().lock(),
-        &mut io::stdout().lock(),
+    Ok(configure_seed(
+        &mut Lines {
+            input: &mut io::stdin().lock(),
+            output: &mut io::stdout().lock(),
+        },
         existing,
+        needs_seed,
     )?)
 }
 
@@ -112,6 +139,7 @@ fn port(value: &str) -> bool {
     value.parse::<u16>().is_ok_and(|port| port > 0)
 }
 
+#[cfg(test)]
 fn select(
     input: &mut impl BufRead,
     output: &mut impl Write,
@@ -120,7 +148,16 @@ fn select(
     configure(&mut Lines { input, output }, existing)
 }
 
+#[cfg(test)]
 fn configure(ui: &mut impl Prompts, existing: Option<&str>) -> io::Result<Option<Selection>> {
+    configure_seed(ui, existing, false)
+}
+
+fn configure_seed(
+    ui: &mut impl Prompts,
+    existing: Option<&str>,
+    needs_seed: bool,
+) -> io::Result<Option<Selection>> {
     macro_rules! prompt {
         ($label:expr, $default:expr, $valid:expr) => {
             match ui.ask($label, $default, &$valid)? {
@@ -142,11 +179,34 @@ fn configure(ui: &mut impl Prompts, existing: Option<&str>) -> io::Result<Option
     ui.message(&format!(
         "{banner}\nWelcome to Argos Venture! Which service would you like to run?\n"
     ))?;
-    ui.message("  1. TUI\n  2. API Server\n  3. Web\n  q. Quit\n")?;
-    let service = prompt!("Choose a service [1-3, q]", "", |value: &str| matches!(
-        value.to_ascii_lowercase().as_str(),
-        "1" | "tui" | "2" | "api" | "api server" | "server" | "3" | "web"
-    ));
+    ui.message(if needs_seed {
+        "  1. TUI\n  2. API Server\n  3. Web\n  4. Seed DB\n  q. Quit\n"
+    } else {
+        "  1. TUI\n  2. API Server\n  3. Web\n  q. Quit\n"
+    })?;
+    let service = prompt!("Choose a service", "", |value: &str| {
+        let value = value.to_ascii_lowercase();
+        matches!(
+            value.as_str(),
+            "1" | "tui" | "2" | "api" | "api server" | "server" | "3" | "web"
+        ) || (needs_seed && matches!(value.as_str(), "4" | "seed" | "seed db"))
+    });
+    if matches!(
+        service.to_ascii_lowercase().as_str(),
+        "4" | "seed" | "seed db"
+    ) {
+        return Ok(Some(Selection {
+            args: vec!["argos".into(), "storage".into(), "seed-actors".into()],
+            storage_init: existing.is_none().then(|| {
+                vec![
+                    "storage".into(),
+                    "init".into(),
+                    "--mode".into(),
+                    "embedded".into(),
+                ]
+            }),
+        }));
+    }
     let target = match service.to_ascii_lowercase().as_str() {
         "1" | "tui" => "--tui",
         "2" | "api" | "api server" | "server" => "--server",
@@ -263,6 +323,42 @@ mod tests {
             .unwrap()
             .unwrap()
     }
+    #[test]
+    fn seed_service_is_conditional_and_dispatches_without_stack_startup() {
+        let mut input = std::io::Cursor::new(b"4\n");
+        let mut output = Vec::new();
+        let selected = configure_seed(
+            &mut Lines {
+                input: &mut input,
+                output: &mut output,
+            },
+            Some("embedded"),
+            true,
+        )
+        .expect("prompt")
+        .expect("selection");
+        assert_eq!(selected.args, vec!["argos", "storage", "seed-actors"]);
+        assert!(selected.storage_init.is_none());
+        assert!(String::from_utf8(output)
+            .expect("output")
+            .contains("Seed DB"));
+        let mut input = std::io::Cursor::new(b"4\nq\n");
+        let mut output = Vec::new();
+        assert!(configure_seed(
+            &mut Lines {
+                input: &mut input,
+                output: &mut output
+            },
+            Some("embedded"),
+            false
+        )
+        .expect("prompt")
+        .is_none());
+        assert!(!String::from_utf8(output)
+            .expect("output")
+            .contains("Seed DB"));
+    }
+
     #[test]
     fn tui_keeps_existing_storage_and_server_initializes_new_storage() {
         let tui = choose("1\n\n\n", Some("embedded"));

@@ -1,5 +1,9 @@
 //! Brain actor registry and typed relationship writer (spec §4).
 //!
+//! Seeded homes resolve actors through the deterministic CSV catalog; unknown
+//! and ambiguous extraction names do not create new identities. The source-
+//! scoped behavior below remains for historical homes before catalog activation.
+//!
 //! One identity authority for every app: Atlas, Intel, Recon, claims,
 //! inferences, graphs and Related browsing bind through [`bind`]. Names are
 //! search keys, never identities. An Actor is reused only through
@@ -21,7 +25,7 @@ use crate::memory_metadata::{ActorSubtype, EndpointRef, IdentityState, MemoryKin
 
 /// Identity/index contract version (folded into recall-cache and Links
 /// dependency identity).
-pub const IDENTITY_INDEX_VERSION: &str = "brain-actors-v2-possessive";
+pub const IDENTITY_INDEX_VERSION: &str = "brain-actors-v3-catalog";
 pub const PAYLOAD_SCHEMA: i64 = 1;
 /// Bounded materialized Related records per newly indexed article.
 pub const RELATED_PER_ARTICLE: usize = 20;

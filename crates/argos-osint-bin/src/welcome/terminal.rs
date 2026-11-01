@@ -1,5 +1,5 @@
 //! The launcher uses the same semantic palette as the investigation TUI.
-use super::{configure, Prompts, Selection};
+use super::{configure_seed, Prompts, Selection};
 use crate::tui::theme;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
@@ -33,6 +33,7 @@ impl Drop for Restore {
 pub(super) fn run(
     existing: Option<&str>,
     notice: Option<&str>,
+    needs_seed: bool,
 ) -> anyhow::Result<Option<Selection>> {
     enable_raw_mode()?;
     let _restore = Restore;
@@ -59,7 +60,7 @@ pub(super) fn run(
         if prompts.notice.is_empty() {
             prompts.notice = initial_notice.clone();
         }
-        let selection = configure(&mut prompts, existing)?;
+        let selection = configure_seed(&mut prompts, existing, needs_seed)?;
         if !prompts.navigation.back_requested {
             return Ok(selection);
         }
@@ -182,7 +183,12 @@ struct Question {
 impl Question {
     fn new(label: &str, default: &str, valid: &dyn Fn(&str) -> bool) -> Self {
         let candidates: Vec<(&str, &str)> = if label.starts_with("Choose a service") {
-            vec![("1", "TUI"), ("2", "API Server"), ("3", "Web")]
+            vec![
+                ("1", "TUI"),
+                ("2", "API Server"),
+                ("3", "Web"),
+                ("4", "Seed DB"),
+            ]
         } else if label.starts_with("Web profile") {
             vec![("dev", "Development"), ("installed", "Built static app")]
         } else if label.starts_with("API [") {
@@ -645,6 +651,12 @@ mod tests {
                     "Choose a service",
                     "",
                     (|v: &str| matches!(v, "1" | "2" | "3")) as fn(&str) -> bool,
+                ),
+                (
+                    "service-seed",
+                    "Choose a service",
+                    "4",
+                    (|v: &str| matches!(v, "1" | "2" | "3" | "4")) as fn(&str) -> bool,
                 ),
                 (
                     "terminal",

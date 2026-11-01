@@ -55,3 +55,5 @@ sibling SVG consistent; update catalog/index/prose links for added, replaced or
 retired figures. An index-only refresh does not replace these maintained figures.
 
 Follow this file and [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design). Put new figures in `docs/diagrams/` as HTML plus a sibling SVG, then link them from this catalog and the matching wiki page. Do not drop Mermaid fences into `docs/`.
+
+- [Actor catalog](diagrams/actor-catalog.html) ([SVG](diagrams/actor-catalog.svg)): Venture seeding, durable batches and deterministic article associations; [contract](wiki/code/actor-catalog.md).

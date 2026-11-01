@@ -19,6 +19,7 @@ compile_error!(
     "argos-osint-core needs the `embedded` or `server` feature: SurrealDB is its only storage"
 );
 
+pub mod actor_catalog;
 pub mod async_bridge;
 pub mod atlas;
 pub mod atlas_actor_index;

@@ -60,18 +60,17 @@ pub(crate) async fn upgrade(
         .on_upgrade(move |socket| stream(socket, state, feed))
 }
 
-fn running(state: &str) -> bool {
+fn stage_open(state: &str) -> bool {
     matches!(
         state,
         "queued" | "running" | "retry_scheduled" | "waiting" | "pending"
     )
 }
 
-fn pending(job: Option<&str>, stages: bool, indexing: bool) -> bool {
-    if matches!(job, Some("failed" | "cancelled" | "superseded")) {
-        return false;
-    }
-    stages || indexing || job.is_some_and(running)
+fn pending(stages_open: bool, indexing: bool) -> bool {
+    // A job row left at `running` after its stages finish is not a queued brief.
+    // Indexing is reported on its own and does not keep the chain queued.
+    stages_open || indexing
 }
 
 /// Read only the bounded lifecycle projection, never the full evidence/topology DTO.
@@ -88,6 +87,8 @@ async fn progress(state: &ApiState, key: &BriefKey) -> Result<(Value, String, bo
         .map_err(crate::internal)?
         .filter(|index| Some(&index.job_id) == job_id.as_ref());
     let (stages, job_state) = if let Some(job_id) = &job_id {
+        // Heal chains whose tasks finished while the job row stayed `running`.
+        let _ = storage::jobs::settle_finished_job(state.repo.db(), job_id).await;
         let mut stages = crate::safe_stages(&state.repo, job_id).await?;
         for stage in &mut stages {
             stage.row = stage.row.chars().take(512).collect();
@@ -100,12 +101,11 @@ async fn progress(state: &ApiState, key: &BriefKey) -> Result<(Value, String, bo
     } else {
         (Vec::new(), None)
     };
-    let indexing_pending = index.as_ref().is_some_and(|index| {
-        index.state != "indexed" && index.state != "failed" && !index.required.is_empty()
-    });
+    let indexing_pending = index
+        .as_ref()
+        .is_some_and(|index| index.state == "indexing");
     let active = pending(
-        job_state.as_deref(),
-        stages.iter().any(|stage| running(&stage.state)),
+        stages.iter().any(|stage| stage_open(&stage.state)),
         indexing_pending,
     );
     let refresh_key = json!([
@@ -183,7 +183,7 @@ async fn stream(mut socket: WebSocket, state: ApiState, feed: Arc<HostFeed>) {
                     if !send(&mut socket, json!({"type":"metrics","data":snapshot})).await { break; }
                 }
                 if let Some(watch) = brief.as_mut().filter(|watch| watch.active) {
-                    let result = tokio::time::timeout(Duration::from_secs(10), progress(&state, &watch.key)).await;
+                    let result = tokio::time::timeout(Duration::from_secs(20), progress(&state, &watch.key)).await;
                     match result {
                         Ok(Ok((mut payload, refresh_key, active))) => {
                             let signature = payload.to_string();
@@ -195,7 +195,10 @@ async fn stream(mut socket: WebSocket, state: ApiState, feed: Arc<HostFeed>) {
                             watch.refresh_key = refresh_key;
                             watch.active = active;
                         }
-                        _ => { let _ = send(&mut socket, json!({"type":"error","channel":"brief","error":"Brief progress unavailable"})).await; break; }
+                        // One slow storage read while a brief is writing is not
+                        // a dead subscription. The next tick tries again.
+                        Err(_) => {}
+                        Ok(Err(_)) => { let _ = send(&mut socket, json!({"type":"error","channel":"brief","error":"Brief progress unavailable"})).await; break; }
                     }
                 }
             }

@@ -64,10 +64,42 @@ pub fn task_id(job_id: &str, operation: &str) -> String {
     codec::encode(&[job_id, operation])
 }
 
+#[derive(SurrealValue)]
+struct ExistingRun {
+    job_id: String,
+    generation: i64,
+    state: String,
+}
+
+async fn latest_run(repo: &Repository, article_id: &str) -> Result<Option<ExistingRun>> {
+    let mut response = repo
+        .db()
+        .query(
+            "SELECT record::id(job) AS job_id, generation, state FROM brief_run \
+             WHERE article_id = $a ORDER BY generation DESC LIMIT 1",
+        )
+        .bind(("a", article_id.to_string()))
+        .await?
+        .check()?;
+    let rows: Vec<ExistingRun> = response.take(0)?;
+    Ok(rows.into_iter().find(|run| run.state != "superseded"))
+}
+
 /// `brief_pipeline::ensure_chain` on the repository: attach to the
 /// article's chain for unchanged inputs, otherwise supersede it and admit
 /// the next generation with its captured stage inputs.
 pub async fn ensure(repo: &Repository, inputs: &BriefInputs) -> Result<jobs::Chain> {
+    // Opening a brief that already has a run must not admit another queued
+    // chain. Reload still carries a distinct `:reload:` revision.
+    if !inputs.input_revision.contains(":reload:") {
+        if let Some(existing) = latest_run(repo, &inputs.article_id).await? {
+            return Ok(jobs::Chain {
+                job_id: existing.job_id,
+                generation: existing.generation,
+                created: false,
+            });
+        }
+    }
     let specs: Vec<StageSpec<'_>> = brief_pipeline::STAGES
         .iter()
         .map(|(op, _)| StageSpec {
@@ -270,6 +302,9 @@ impl StageStore for SurrealStages {
         article: &'a AtlasArticleRow,
     ) -> BoxFut<'a, Result<Vec<ContextActor>>> {
         Box::pin(async move {
+            if let Some(actors) = super::actor_catalog::article_actors(&self.repo, article).await? {
+                return Ok(actors.iter().map(ContextActor::from).collect());
+            }
             Ok(
                 super::atlas_metadata::metadata(self.repo.db(), &article.run_id, &article.id)
                     .await?
@@ -456,9 +491,9 @@ pub async fn commit(
                  DELETE brief_checkpoint WHERE job_id = $job AND stage = $stage;
              };
              IF $last {
-                 UPDATE brief_run SET state = 'completed', updated_at = time::now() WHERE job = $j;
+                 UPDATE brief_run SET state = 'completed', updated_at = time::now() WHERE job = $j AND state = 'active';
                  UPDATE $j SET state = 'completed', finished_at = time::now(),
-                   updated_at = time::now() WHERE state = 'active' OR state = 'queued';
+                   updated_at = time::now() WHERE state IN ['active', 'queued', 'running'];
              };",
         )
         .bind(("m", rid("brief_stage_meta", &leased.id)))
@@ -652,6 +687,11 @@ pub async fn fail(repo: &Repository, leased: &Leased, error: &anyhow::Error) -> 
     })
     .await
     .map_err(|e| anyhow!("fail {}: {e}", leased.id))?;
+    if done.value {
+        // A failed stage leaves later stages queued. Those cannot start, so
+        // close them and the job instead of leaving the chain `running`.
+        let _ = jobs::settle_blocked_job(repo.db(), &leased.job_id).await;
+    }
     Ok(done.value)
 }
 

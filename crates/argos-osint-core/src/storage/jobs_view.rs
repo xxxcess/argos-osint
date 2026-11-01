@@ -162,6 +162,9 @@ fn retryable_ops() -> Vec<String> {
 /// updated, other services last. Running API/Web services stay first. Select
 /// the bounded page before loading correlated event/task/attempt details.
 pub async fn list_jobs(db: &Surreal<Any>, filter: &JobFilter, limit: usize) -> Result<Vec<JobRow>> {
+    // Finished intel briefs used to stay `running` because the job row was
+    // never moved off that initial state. Correct them before the page read.
+    let _ = super::jobs::settle_running_intel_briefs(db).await;
     let mut sql = format!("SELECT id, record::id(id) AS key, updated_at, {RANK} AS rank FROM job WHERE parent = NONE AND {ELIGIBLE}");
     let states: Vec<String> = filter
         .status

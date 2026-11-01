@@ -980,6 +980,9 @@ pub async fn commit_stage(
                 &now_s,
             )
             .await?;
+            // The job row is created as `running`. Close it once every stage
+            // is terminal so a finished brief is not still "running".
+            settle_finished_job_in(&tx, &claimed.job_id).await?;
             Ok(Publish::Committed)
         }
     })
@@ -1069,6 +1072,143 @@ pub enum Finalize {
     AlreadyFinal,
     LeaseLost,
     Retired,
+}
+
+/// Close a job that is still `running` after every task has finished.
+///
+/// Brief jobs are inserted as `running` and the last-stage update only
+/// matched `active` or `queued`, so a completed or failed chain stayed
+/// `running` and the brief page treated that as queued.
+/// Cancel queued stages blocked by a failed or cancelled dependency, then
+/// close the job if nothing is left to run.
+pub async fn settle_blocked_job(db: &Surreal<Any>, job_id: &str) -> Result<bool, TxError> {
+    run_tx(db, RetryPolicy::default(), |tx| async move {
+        #[derive(SurrealValue)]
+        struct OpenTask {
+            id: String,
+            state: String,
+            dep_states: Vec<String>,
+        }
+        for _ in 0..4 {
+            let mut res = run(
+                &tx,
+                tx.query(
+                    "SELECT record::id(id) AS id, state, deps.map(|$d| $d.state) AS dep_states \
+                     FROM task WHERE job = $j AND state = 'queued'",
+                )
+                .bind(("j", rid("job", job_id))),
+            )
+            .await?;
+            let queued: Vec<OpenTask> = take(&mut res, 0)?;
+            let blocked: Vec<String> = queued
+                .into_iter()
+                .filter(|task| {
+                    !task.dep_states.is_empty()
+                        && task.dep_states.iter().all(|state| {
+                            matches!(
+                                state.as_str(),
+                                "completed" | "failed" | "cancelled" | "superseded"
+                            )
+                        })
+                        && task
+                            .dep_states
+                            .iter()
+                            .any(|state| matches!(state.as_str(), "failed" | "cancelled"))
+                })
+                .map(|task| task.id)
+                .collect();
+            if blocked.is_empty() {
+                break;
+            }
+            let now = ts(Utc::now());
+            for id in blocked {
+                run(
+                    &tx,
+                    tx.query(
+                        "UPDATE $t SET state = 'cancelled', finished_at = <datetime>$now, \
+                         updated_at = <datetime>$now WHERE state = 'queued' RETURN NONE",
+                    )
+                    .bind(("t", rid("task", &id)))
+                    .bind(("now", now.clone())),
+                )
+                .await?;
+            }
+        }
+        settle_finished_job_in(&tx, job_id).await
+    })
+    .await
+    .map(|committed| committed.value)
+}
+
+/// Close every intel brief whose tasks have finished but whose job row is
+/// still `running`.
+pub async fn settle_running_intel_briefs(db: &Surreal<Any>) -> Result<(), TxError> {
+    #[derive(SurrealValue)]
+    struct IdRow {
+        id: String,
+    }
+    let mut response = db
+        .query(
+            "SELECT record::id(id) AS id FROM job WHERE state = 'running' AND operation = 'intel_brief'",
+        )
+        .await?
+        .check()?;
+    let rows: Vec<IdRow> = response
+        .take(0)
+        .map_err(|error| TxError::Abort(error.to_string()))?;
+    for row in rows {
+        settle_finished_job(db, &row.id).await?;
+    }
+    Ok(())
+}
+
+pub async fn settle_finished_job(db: &Surreal<Any>, job_id: &str) -> Result<bool, TxError> {
+    run_tx(db, RetryPolicy::default(), |tx| async move {
+        settle_finished_job_in(&tx, job_id).await
+    })
+    .await
+    .map(|committed| committed.value)
+}
+
+pub(crate) async fn settle_finished_job_in(tx: &Tx, job_id: &str) -> Result<bool, TxError> {
+    #[derive(SurrealValue)]
+    struct TaskRow {
+        state: String,
+    }
+    let mut res = run(
+        tx,
+        tx.query("SELECT state FROM task WHERE job = $j")
+            .bind(("j", rid("job", job_id))),
+    )
+    .await?;
+    let tasks: Vec<TaskRow> = take(&mut res, 0)?;
+    if tasks.is_empty() {
+        return Ok(false);
+    }
+    let open = |state: &str| {
+        matches!(
+            state,
+            "queued" | "running" | "retry_scheduled" | "waiting" | "pending"
+        )
+    };
+    if tasks.iter().any(|task| open(&task.state)) {
+        return Ok(false);
+    }
+    let failed = tasks.iter().any(|task| task.state == "failed");
+    let next = if failed { "failed" } else { "completed" };
+    run(
+        tx,
+        tx.query(
+            "UPDATE $j SET state = $state, finished_at = finished_at ?? time::now(), \
+             updated_at = time::now() WHERE state IN ['running', 'active', 'queued'] RETURN NONE;
+             UPDATE brief_run SET state = $state, updated_at = time::now() \
+             WHERE job = $j AND state = 'active' RETURN NONE;",
+        )
+        .bind(("j", rid("job", job_id)))
+        .bind(("state", next.to_string())),
+    )
+    .await?;
+    Ok(true)
 }
 
 /// Set a job's terminal state under an optional task lease. The caller

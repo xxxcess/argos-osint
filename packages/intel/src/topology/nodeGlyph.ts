@@ -127,7 +127,7 @@ export function createNodeGlyph(node: GlyphNode): HTMLElement {
   label.style.border = `1px solid ${color}77`;
   label.style.background = topologyColors.labelBg;
   label.style.color = color;
-  label.style.font = `${focused ? 700 : 500} ${focused ? 11 : 10}px ${fonts.mono}`;
+  label.style.font = `${focused ? 700 : 500} ${focused ? 14 : 12}px ${fonts.mono}`;
   root.append(tile, label);
   return root;
 }

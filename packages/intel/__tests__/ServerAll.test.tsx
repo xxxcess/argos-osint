@@ -187,31 +187,51 @@ describe("server-backed global All", () => {
     expect(screen.queryByText("0 loaded")).not.toBeInTheDocument();
     fail = false;
     await user.click(retry);
-    await screen.findByText("2 loaded");
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^Open Focus Brief:/ }),
+      ).toHaveLength(2),
+    );
     expect(cards()).toEqual(
       [a, b].map((row) => `Open Focus Brief: ${row.title}`),
     );
-    expect(reads.filter((read) => read.category !== "geopolitical")).toHaveLength(0);
+    expect(
+      reads.filter((read) => read.category !== "geopolitical"),
+    ).toHaveLength(0);
   });
   it("uses one server stream, preserves uneven page order, deduplicates occurrences and exhausts opaque cursors", async () => {
     const user = userEvent.setup();
     render(<App />);
     await openAll(user);
-    await screen.findByText("2 loaded");
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^Open Focus Brief:/ }),
+      ).toHaveLength(2),
+    );
     expect(cards()).toEqual(
       [a, b].map((row) => `Open Focus Brief: ${row.title}`),
     );
     expect(reads.filter((read) => read.category === "geopolitical")).toEqual([
       { category: "geopolitical", day: "2026-10-29", search: "", cursor: null },
     ]);
-    expect(reads.filter((read) => read.category !== "geopolitical")).toHaveLength(0);
+    expect(
+      reads.filter((read) => read.category !== "geopolitical"),
+    ).toHaveLength(0);
     await loadMore(user);
-    await screen.findByText("3 loaded");
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^Open Focus Brief:/ }),
+      ).toHaveLength(3),
+    );
     expect(cards()).toEqual(
       [a, b, c].map((row) => `Open Focus Brief: ${row.title}`),
     );
     await loadMore(user);
-    await screen.findByText("4 loaded");
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^Open Focus Brief:/ }),
+      ).toHaveLength(4),
+    );
     expect(cards()).toEqual(
       [a, b, c, d].map((row) => `Open Focus Brief: ${row.title}`),
     );
@@ -247,7 +267,11 @@ describe("server-backed global All", () => {
     const user = userEvent.setup();
     render(<App />);
     await openAll(user);
-    await screen.findByText("2 loaded");
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^Open Focus Brief:/ }),
+      ).toHaveLength(2),
+    );
     await loadMore(user);
     const retry = await screen.findByRole(
       "button",
@@ -266,9 +290,18 @@ describe("server-backed global All", () => {
     const before = reads.length;
     fail = false;
     await user.click(retry);
-    await screen.findByText("3 loaded");
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^Open Focus Brief:/ }),
+      ).toHaveLength(3),
+    );
     expect(reads.slice(before)).toEqual([
-      { category: "geopolitical", day: "2026-10-29", search: "", cursor: cursor1 },
+      {
+        category: "geopolitical",
+        day: "2026-10-29",
+        search: "",
+        cursor: cursor1,
+      },
     ]);
     expect(cards()).toEqual(
       [a, b, c].map((row) => `Open Focus Brief: ${row.title}`),
@@ -305,9 +338,17 @@ describe("server-backed global All", () => {
     const user = userEvent.setup();
     render(<App invalidationControl />);
     await openAll(user);
-    await screen.findByText("2 loaded");
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^Open Focus Brief:/ }),
+      ).toHaveLength(2),
+    );
     await loadMore(user);
-    await screen.findByText("3 loaded");
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^Open Focus Brief:/ }),
+      ).toHaveLength(3),
+    );
     const before = reads.length;
     await user.click(
       screen.getByRole("button", {
@@ -355,9 +396,17 @@ describe("server-backed global All", () => {
     const user = userEvent.setup();
     render(<App />);
     await openAll(user);
-    await screen.findByText("2 loaded");
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^Open Focus Brief:/ }),
+      ).toHaveLength(2),
+    );
     await loadMore(user);
-    await screen.findByText("3 loaded");
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^Open Focus Brief:/ }),
+      ).toHaveLength(3),
+    );
     await user.type(
       screen.getByRole("textbox", { name: "Search articles" }),
       "ports",
@@ -425,7 +474,7 @@ describe("server-backed global All", () => {
     const user = userEvent.setup();
     render(<App />);
     await openAll(user);
-    await screen.findByRole("progressbar", { name: "Loading bulletin…" });
+    await screen.findByRole("status", { name: "Loading bulletin…" });
     expect(
       screen.queryByRole("heading", { name: "NO MATCHING INTELLIGENCE" }),
     ).not.toBeInTheDocument();

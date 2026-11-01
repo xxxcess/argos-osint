@@ -132,7 +132,7 @@ describe("Intel status bar", () => {
       const tab = screen.getByRole("button", { name: "Bulletin" });
       expect(tab).toHaveTextContent(width < 600 ? "Intel" : "intelligence");
       expect(tab).toHaveAttribute("aria-pressed", "true");
-      await user.click(screen.getByRole("button", { name: "Desktop" }));
+      await user.click(screen.getByRole("button", { name: "server" }));
       await user.click(screen.getByRole("button", { name: "Bulletin" }));
       expect(home).toHaveBeenCalledOnce();
       expect(intel).toHaveBeenCalledOnce();

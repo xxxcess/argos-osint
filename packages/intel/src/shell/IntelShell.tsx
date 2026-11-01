@@ -1,5 +1,5 @@
 "use client";
-import React, { useSyncExternalStore } from "react";
+import React, { useState, useSyncExternalStore } from "react";
 import {
   View,
   Text,
@@ -7,12 +7,24 @@ import {
   StyleSheet,
   useWindowDimensions,
 } from "react-native";
-import { intelColors as c, intelMetricColors } from "./intel-theme";
+import {
+  intelColors as c,
+  intelMetricColors,
+  intelStatus,
+} from "./intel-theme";
 import { intelFonts } from "./intel-fonts";
+import type { JobState } from "./jobState";
 
 const subscribeHydration = () => () => {};
 const clientSnapshot = () => true;
 const serverSnapshot = () => false;
+
+export type StatusJob = {
+  id: string;
+  label: string;
+  detail?: string;
+  state: JobState;
+};
 
 export type IntelMetrics = {
   cpuPercent?: number | null;
@@ -34,7 +46,11 @@ export function IntelStatusBar({
   clock,
   onHome,
   onIntel,
+  job,
+  hideConnectionIndicator = false,
 }: {
+  job?: React.ReactNode;
+  hideConnectionIndicator?: boolean;
   connected: boolean;
   activeApp: boolean;
   metrics?: IntelMetrics;
@@ -59,7 +75,7 @@ export function IntelStatusBar({
       <View style={[s.cluster, s.navCluster]}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Desktop"
+          accessibilityLabel="server"
           onPress={onHome}
           disabled={!onHome}
           style={s.home}
@@ -76,6 +92,7 @@ export function IntelStatusBar({
               <View style={s.serverLight} />
             </View>
           </View>
+          <Text style={s.navText}>server</Text>
         </Pressable>
         <View style={s.divider} />
         {activeApp ? (
@@ -152,23 +169,89 @@ export function IntelStatusBar({
             <View nativeID="intel-status-metric-divider" style={s.divider} />
           </>
         ) : null}
-        <Text
-          nativeID="intel-status-api"
-          accessibilityLabel={connected ? "API connected" : "API offline"}
-          style={[
-            s.api,
-            { fontSize: width >= 600 ? 18 : 12 },
-            { color: connected ? c.accent : c.danger },
-          ]}
-        >
-          ● {connected ? "API_OK" : "OFFLINE"}
-        </Text>
+        {job}
+        {!hideConnectionIndicator ? (
+          <Text
+            nativeID="intel-status-api"
+            accessibilityLabel={connected ? "API connected" : "API offline"}
+            style={[
+              s.api,
+              { fontSize: width >= 600 ? 18 : 12 },
+              { color: connected ? c.accent : c.danger },
+            ]}
+          >
+            ● {connected ? "API_OK" : "OFFLINE"}
+          </Text>
+        ) : null}
         {wide ? (
           <Text nativeID="intel-status-clock" style={s.clock}>
             {clock || "—"}
           </Text>
         ) : null}
       </View>
+    </View>
+  );
+}
+
+const rank: Record<JobState, number> = {
+  failed: 5,
+  stale: 4,
+  running: 3,
+  queued: 2,
+  succeeded: 1,
+  idle: 0,
+};
+
+export function JobDropUp({ jobs }: { jobs: StatusJob[] }) {
+  const [open, setOpen] = useState(false);
+  const lead = jobs.reduce<StatusJob | undefined>((best, job) => {
+    if (!best || rank[job.state] > rank[best.state]) return job;
+    return best;
+  }, undefined);
+  const state = lead?.state ?? "idle";
+  const tone = intelStatus[state].color;
+  return (
+    <View style={s.jobs}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Background jobs"
+        accessibilityState={{ expanded: open }}
+        aria-expanded={open}
+        onPress={() => setOpen((value) => !value)}
+        style={s.jobTrigger}
+      >
+        <View style={[s.jobDot, { backgroundColor: tone }]} />
+        <Text style={[s.navText, { color: tone }]}>Jobs</Text>
+      </Pressable>
+      {open ? (
+        <View
+          nativeID="intel-job-menu"
+          accessibilityRole="menu"
+          style={s.jobMenu}
+        >
+          <Text style={s.jobHeading}>Background</Text>
+          {jobs.length === 0 ? (
+            <Text style={s.jobDetail}>No background work</Text>
+          ) : (
+            jobs.map((job) => (
+              <View key={job.id} style={s.jobRow}>
+                <View
+                  style={[
+                    s.jobDot,
+                    { backgroundColor: intelStatus[job.state].color },
+                  ]}
+                />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={s.jobLabel}>{job.label}</Text>
+                  {job.detail ? (
+                    <Text style={s.jobDetail}>{job.detail}</Text>
+                  ) : null}
+                </View>
+              </View>
+            ))
+          )}
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -188,7 +271,7 @@ export function IntelScrollFab({
       onPress={onPress}
       style={({ pressed }) => [s.fab, pressed && { borderColor: c.select }]}
     >
-      <Text style={s.arrow}>↓</Text>
+      <Text style={s.arrow}>End</Text>
     </Pressable>
   );
 }
@@ -205,14 +288,62 @@ const s = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     gap: 8,
+    overflow: "visible",
+    zIndex: 8,
+  },
+  jobs: { position: "relative", zIndex: 12, overflow: "visible" },
+  jobTrigger: {
+    minHeight: 44,
+    paddingHorizontal: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  jobDot: { width: 8, height: 8, borderRadius: 4 },
+  jobMenu: {
+    position: "absolute",
+    bottom: 48,
+    right: 0,
+    width: 260,
+    maxWidth: 280,
+    zIndex: 30,
+    gap: 8,
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: c.borderStrong,
+    backgroundColor: c.panelRaised,
+  },
+  jobHeading: {
+    fontFamily: intelFonts.mono,
+    fontSize: 12,
+    color: c.muted,
+  },
+  jobRow: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
+  jobLabel: {
+    fontFamily: intelFonts.mono,
+    fontSize: 13,
+    color: c.text,
+  },
+  jobDetail: {
+    fontFamily: intelFonts.mono,
+    fontSize: 12,
+    color: c.dim,
   },
   cluster: { flexDirection: "row", alignItems: "center", gap: 16, minWidth: 0 },
   navCluster: { height: "100%" },
   home: {
     minWidth: 40,
     minHeight: 44,
+    paddingHorizontal: 8,
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
+    gap: 8,
+  },
+  navText: {
+    fontFamily: intelFonts.mono,
+    fontSize: 12,
+    color: c.dim,
   },
   server: { gap: 4, width: 28 },
   serverUnit: {
@@ -282,14 +413,15 @@ const s = StyleSheet.create({
     position: "absolute",
     bottom: 88,
     alignSelf: "center",
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    minWidth: 56,
+    height: 40,
+    paddingHorizontal: 12,
+    borderRadius: 8,
     backgroundColor: c.fab,
     borderWidth: 1,
     borderColor: c.borderStrong,
     alignItems: "center",
     justifyContent: "center",
   },
-  arrow: { color: c.text, fontSize: 28 },
+  arrow: { color: c.text, fontFamily: intelFonts.mono, fontSize: 13 },
 });

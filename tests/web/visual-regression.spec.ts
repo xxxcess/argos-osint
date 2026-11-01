@@ -53,7 +53,7 @@ for (const width of [1440, 768, 390, 320]) {
       "● API_OK",
     );
     await expect(
-      page.getByRole("button", { name: "Desktop", exact: true }),
+      page.getByRole("button", { name: "server", exact: true }),
     ).toBeEnabled();
     await expect(
       page.getByRole("button", { name: "Bulletin", exact: true }),

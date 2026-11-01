@@ -58,8 +58,9 @@ describe("Web Desktop App (real IntelApp)", () => {
 
   it("renders the offline shell without exposing a working app tab", () => {
     render(<IntelApp />, { wrapper: providerWrapper() });
-    expect(screen.getByLabelText("API offline")).toHaveTextContent("OFFLINE");
-    expect(screen.getByRole("button", { name: "Desktop" })).toBeDisabled();
+    expect(screen.queryByLabelText("API offline")).toBeNull();
+    expect(screen.getByTestId("landing-core")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "server" })).toBeDisabled();
     expect(
       screen.queryByRole("button", { name: "Open Intel" }),
     ).not.toBeInTheDocument();
@@ -71,22 +72,25 @@ describe("Web Desktop App (real IntelApp)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows connection form when API is offline", async () => {
+  it("shows connection status and retry when API is offline", async () => {
     render(<IntelApp />, { wrapper: providerWrapper() });
     // A settled not-ready response must leave a usable retry, not a pending form.
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "Connect / retry" }),
+        screen.getByRole("button", { name: "Retry connection checks" }),
       ).toBeEnabled(),
     );
-    expect(screen.getByLabelText("API offline")).toHaveTextContent("OFFLINE");
-    expect(screen.getByText(/connection required/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText("API offline")).toBeNull();
+    expect(screen.getByTestId("landing-core")).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Waiting for workspace readiness" }),
+    ).toBeInTheDocument();
     expect(screen.queryByLabelText(/api endpoint/i)).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("progressbar", { name: "Checking local API…" }),
+      screen.queryByRole("status", { name: "Checking local API…" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByText(/server-managed workspace connection/i),
+      screen.getByRole("list", { name: "Connection checks" }),
     ).toBeInTheDocument();
   });
 
@@ -102,22 +106,29 @@ describe("Web Desktop App (real IntelApp)", () => {
     );
 
     render(<IntelApp />, { wrapper: providerWrapper() });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("status", { name: "Checking local API…" }),
+      ).toBeVisible(),
+    );
     expect(
-      screen.getByRole("progressbar", { name: "Checking local API…" }),
-    ).toBeVisible();
-    expect(screen.getByRole("button", { name: "Connecting…" })).toBeDisabled();
-    expect(screen.getByLabelText("API offline")).toHaveTextContent("OFFLINE");
+      screen.queryByRole("button", { name: "Retry connection checks" }),
+    ).toBeNull();
+    expect(screen.queryByLabelText("API offline")).toBeNull();
+    expect(screen.getByTestId("landing-core")).toBeInTheDocument();
     resolveHealth(HttpResponse.json(readyHealth));
     await waitFor(() =>
       expect(screen.getByLabelText("API connected")).toHaveTextContent(
         "API_OK",
       ),
     );
-    expect(screen.getByRole("button", { name: "Desktop" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "server" })).toBeEnabled();
     expect(
       screen.queryByRole("button", { name: /^Bulletin$/ }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open Intel" })).toBeVisible();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Open Intel" })).toBeVisible(),
+    );
     expect(
       screen.queryByRole("heading", { name: "Intelligence bulletin" }),
     ).not.toBeInTheDocument();
@@ -127,7 +138,7 @@ describe("Web Desktop App (real IntelApp)", () => {
       "true",
     );
     expect(
-      screen.queryByRole("progressbar", { name: "Checking local API…" }),
+      screen.queryByRole("status", { name: "Checking local API…" }),
     ).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/api endpoint/i)).not.toBeInTheDocument();
   });
@@ -136,12 +147,12 @@ describe("Web Desktop App (real IntelApp)", () => {
     render(<IntelApp />, { wrapper: providerWrapper() });
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "Connect / retry" }),
+        screen.getByRole("button", { name: "Retry connection checks" }),
       ).toBeEnabled(),
     );
     expect(screen.queryByRole("textbox", { name: /API endpoint/i })).toBeNull();
     expect(
-      screen.getByText("Server-managed workspace connection"),
+      screen.getByRole("list", { name: "Connection checks" }),
     ).toBeVisible();
   });
 
@@ -149,7 +160,7 @@ describe("Web Desktop App (real IntelApp)", () => {
     const user = userEvent.setup();
     render(<IntelApp />, { wrapper: providerWrapper() });
     const retry = await screen.findByRole("button", {
-      name: "Connect / retry",
+      name: "Retry connection checks",
     });
     mswServer.use(
       http.get(`${testBase}/api/v1/health/ready`, () =>
@@ -164,8 +175,10 @@ describe("Web Desktop App (real IntelApp)", () => {
       "shipping",
     );
     await user.click(screen.getByRole("button", { name: /^Economic$/ }));
-    await user.click(screen.getByRole("button", { name: /^Desktop$/ }));
-    expect(screen.getByRole("button", { name: "Open Intel" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /^server$/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Open Intel" })).toBeVisible(),
+    );
     expect(
       screen.queryByRole("button", { name: /^Bulletin$/ }),
     ).not.toBeInTheDocument();

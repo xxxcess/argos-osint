@@ -24,9 +24,9 @@ import {
 } from "three/examples/jsm/renderers/CSS2DRenderer.js";
 import { assignParticles, particleOffset } from "./neighborhood";
 import { neighborhoodCamera } from "./cameraFrame";
-import { placeEdgeLabels } from "./labelLayout";
+import { labelZoomOpacity, placeEdgeLabels } from "./labelLayout";
 import { createNodeGlyph } from "./nodeGlyph";
-import { topologyColors } from "../shell/intel-theme";
+import { intelMotion, topologyColors } from "../shell/intel-theme";
 
 export type NodeRole = "focus" | "first" | "second" | "ghost" | "full";
 export type GNode = {
@@ -117,6 +117,7 @@ function visibleNode(node: GNode) {
     ),
   );
   const glyph = createNodeGlyph(node);
+  glyph.dataset.nodeId = node.id;
   group.add(new CSS2DObject(glyph));
   group.addEventListener("removed", () => glyph.remove());
   return group;
@@ -132,7 +133,7 @@ function visibleLink(raw: object) {
       dashSize: 0.35,
       gapSize: 0.45,
       transparent: true,
-      opacity: 0.7,
+      opacity: 0.2,
     }),
   );
   group.add(line);
@@ -152,6 +153,10 @@ function positionLink(
 ) {
   const group = raw as Group;
   const line = group.children[0] as Line;
+  const material = line.material as LineDashedMaterial;
+  // Preserve a quiet entrance while graph geometry settles.
+  const target = 0.7;
+  material.opacity += (target - material.opacity) * 0.16;
   line.geometry.setFromPoints([
     new Vector3(start.x, start.y, start.z || 0),
     new Vector3(end.x, end.y, end.z || 0),
@@ -163,6 +168,76 @@ function positionLink(
     ((start.z || 0) + (end.z || 0)) / 2,
   );
   return true;
+}
+
+function createLabelRenderer() {
+  let reducedMotion = true;
+  let zoomDistance = 300;
+  const renderer = new CSS2DRenderer();
+  const opacityCache = new Map<string, number>();
+  const render = renderer.render.bind(renderer);
+  let layoutFrame = 0;
+  renderer.render = (scene, camera) => {
+    render(scene, camera);
+    const root = renderer.domElement;
+    for (const glyph of root.querySelectorAll<HTMLElement>(
+      ".intel-topology-node",
+    )) {
+      const id = glyph.dataset.nodeId ?? "";
+      const target =
+        glyph.dataset.role === "ghost"
+          ? 0.35
+          : glyph.dataset.role === "second"
+            ? 0.7
+            : 1;
+      const previous = opacityCache.get(id) ?? 1;
+      const opacity = reducedMotion
+        ? target
+        : previous + (target - previous) * 0.16;
+      opacityCache.set(id, opacity);
+      glyph.style.opacity = String(
+        Math.abs(opacity - target) < 0.005 ? target : opacity,
+      );
+    }
+    layoutFrame = (layoutFrame + 1) % 6;
+    if (layoutFrame !== 1) return;
+    const labels = [
+      ...root.querySelectorAll<HTMLElement>(".intel-topology-edge-label"),
+    ];
+    for (const label of labels) label.style.transform = "";
+    const blockers = [
+      ...root.querySelectorAll<HTMLElement>(
+        "[data-tile=node], .intel-topology-node-label",
+      ),
+    ].map((element) => element.getBoundingClientRect());
+    const offsets = placeEdgeLabels(
+      blockers,
+      labels.map((label) => label.getBoundingClientRect()),
+      root.getBoundingClientRect(),
+    );
+    // Rectangles are viewport pixels; CSS transforms use the unscaled layout pixels.
+    const scale = root.offsetWidth
+      ? root.getBoundingClientRect().width / root.offsetWidth
+      : 1;
+    labels.forEach((label, index) => {
+      const offset = offsets[index];
+      label.style.transform = `translate(${offset.x / scale}px, ${offset.y / scale}px)`;
+      label.style.opacity = String(
+        offset.visible ? labelZoomOpacity(zoomDistance) : 0,
+      );
+    });
+  };
+  renderer.domElement.style.pointerEvents = "none";
+  renderer.domElement.setAttribute("aria-hidden", "true");
+  return {
+    renderers: [renderer],
+    setZoomDistance(value: number) {
+      zoomDistance = value;
+    },
+    setReducedMotion(value: boolean) {
+      reducedMotion = value;
+    },
+  };
 }
 
 const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
@@ -183,47 +258,11 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
   },
   ref,
 ) {
-  const extraRenderers = useMemo(() => {
-    const renderer = new CSS2DRenderer();
-    const render = renderer.render.bind(renderer);
-    let layoutFrame = 0;
-    renderer.render = (scene, camera) => {
-      render(scene, camera);
-      layoutFrame = (layoutFrame + 1) % 6;
-      if (layoutFrame !== 1) return;
-      const root = renderer.domElement;
-      const labels = [
-        ...root.querySelectorAll<HTMLElement>(".intel-topology-edge-label"),
-      ];
-      for (const label of labels) label.style.transform = "";
-      const blockers = [
-        ...root.querySelectorAll<HTMLElement>(
-          "[data-tile=node], .intel-topology-node-label",
-        ),
-      ].map((element) => element.getBoundingClientRect());
-      const hud = root
-        .closest("#intel-topology-viewport")
-        ?.querySelector("#intel-topology-neighborhood");
-      if (hud) blockers.push(hud.getBoundingClientRect());
-      const offsets = placeEdgeLabels(
-        blockers,
-        labels.map((label) => label.getBoundingClientRect()),
-        root.getBoundingClientRect(),
-      );
-      // Rectangles are viewport pixels; CSS transforms use the unscaled layout pixels.
-      const scale = root.offsetWidth
-        ? root.getBoundingClientRect().width / root.offsetWidth
-        : 1;
-      labels.forEach((label, index) => {
-        const offset = offsets[index];
-        label.style.transform = `translate(${offset.x / scale}px, ${offset.y / scale}px)`;
-        label.style.opacity = offset.visible ? "1" : "0";
-      });
-    };
-    renderer.domElement.style.pointerEvents = "none";
-    renderer.domElement.setAttribute("aria-hidden", "true");
-    return [renderer];
-  }, []);
+  const labelRenderer = useMemo(() => createLabelRenderer(), []);
+  const extraRenderers = labelRenderer.renderers;
+  useEffect(() => {
+    labelRenderer.setReducedMotion(reducedMotion);
+  }, [labelRenderer, reducedMotion]);
   useEffect(
     () => () => {
       extraRenderers[0].domElement.replaceChildren();
@@ -250,8 +289,8 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
   });
   const resumeAt = useRef(0);
   const framedSelection = useRef<string | null | undefined>(undefined);
-  const zoomMs = reducedMotion ? 0 : 400;
-  const focusMs = reducedMotion ? 0 : 700;
+  const zoomMs = reducedMotion ? 0 : intelMotion.fit;
+  const focusMs = reducedMotion ? 0 : intelMotion.focus;
   const motion = reducedMotion ? "off" : orbit;
   const nodeThreeObject = useCallback(
     (raw: object) => visibleNode(raw as GNode),
@@ -393,13 +432,14 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
       const x = camera.x - target.x;
       const y = camera.y - target.y;
       const z = camera.z - target.z;
+      labelRenderer.setZoomDistance(Math.hypot(x, y, z));
       onViewRef.current?.({
         yaw: Math.round(Math.atan2(x, z) * 100) / 100,
         zoom: Math.round(30000 / (Math.hypot(x, y, z) || 1)),
       });
     }, 250);
     return () => clearInterval(timer);
-  }, []);
+  }, [labelRenderer]);
   const engage = () => {
     resumeAt.current = performance.now() + 3000;
   };

@@ -336,3 +336,5 @@ const s = StyleSheet.create({
     color: colors.danger,
   },
 });
+
+export { Skeleton } from "./Skeleton";

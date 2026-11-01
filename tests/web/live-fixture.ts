@@ -28,7 +28,7 @@ async function createFixture(page: Page) {
       () => socket.send(JSON.stringify({ type: "heartbeat" })),
       10_000,
     );
-    heartbeat.unref();
+    (heartbeat as unknown as { unref?: () => void }).unref?.();
     socket.onClose(() => {
       clearInterval(heartbeat);
       sockets.delete(socket);

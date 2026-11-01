@@ -6,6 +6,7 @@ import { http, HttpResponse } from "msw";
 import { BackendProvider, type Article } from "@argos/api-client";
 import { IntelApp } from "../src";
 import { mswServer, testBase } from "../../../vitest.setup";
+import { sheetProp } from "../../../vitest.test-support";
 
 // @tag:testing — real IntelApp + Query, isolated offline HTTP boundary.
 const row: Article = {
@@ -143,7 +144,7 @@ describe("Nexus Desk Bulletin", () => {
       name: `Open Focus Brief: ${row.title}`,
     });
     await user.click(card);
-    expect(card).not.toBeInTheDocument();
+    await waitFor(() => expect(card).not.toBeInTheDocument());
     await screen.findByRole("button", { name: "Return to Bulletin" });
     expect(screen.getByRole("heading", { name: row.title })).toBeVisible();
   });
@@ -169,7 +170,11 @@ describe("Nexus Desk Bulletin", () => {
     await user.click(
       screen.getByRole("button", { name: "Load more articles" }),
     );
-    await screen.findByText("2 loaded");
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^Open Focus Brief:/ }),
+      ).toHaveLength(2),
+    );
     expect(
       screen.getAllByRole("button", { name: `Open Focus Brief: ${row.title}` }),
     ).toHaveLength(2);
@@ -185,7 +190,7 @@ describe("Nexus Desk Bulletin", () => {
     mswServer.use(http.get(`${testBase}/api/v1/articles`, () => pending));
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Open Intel" }));
-    await screen.findByRole("progressbar", { name: "Loading bulletin…" });
+    await screen.findByRole("status", { name: "Loading bulletin…" });
     expect(screen.getAllByTestId("bulletin-skeleton")).toHaveLength(3);
     expect(
       screen.queryByRole("heading", { name: "NO MATCHING INTELLIGENCE" }),
@@ -197,8 +202,39 @@ describe("Nexus Desk Bulletin", () => {
       name: `Open Focus Brief: ${row.title}`,
     });
     expect(
-      screen.queryByRole("progressbar", { name: "Loading bulletin…" }),
+      screen.queryByRole("status", { name: "Loading bulletin…" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("replaces the feed category stamp with an overlay date filter", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Open Intel" }));
+    const article = await screen.findByRole("button", {
+      name: `Open Focus Brief: ${row.title}`,
+    });
+    expect(
+      screen.queryByRole("heading", { name: /GEOPOLITICAL/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Updated /)).not.toBeInTheDocument();
+    const day = screen.getByRole("button", { name: "Retained day 2026-10-29" });
+    const articleTop = article.getBoundingClientRect().top;
+    await user.click(day);
+    expect(article.getBoundingClientRect().top).toBe(articleTop);
+    expect(
+      screen.getByRole("button", { name: "Day 2026-10-28" }),
+    ).toBeVisible();
+    const feed = document.getElementById("intel-article-feed");
+    const overlay = document.getElementById("intel-day-overlay");
+    expect(feed).toBeTruthy();
+    expect(overlay).toBeTruthy();
+    expect(feed?.contains(overlay)).toBe(true);
+    expect(sheetProp(overlay!, "position")).toBe("absolute");
+    await user.click(screen.getByRole("button", { name: "Day 2026-10-28" }));
+    expect(
+      screen.getByRole("button", { name: "Retained day 2026-10-28" }),
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Day 2026-10-28" })).toBeNull();
   });
 
   it("retains a concrete retry after a failed Bulletin request", async () => {

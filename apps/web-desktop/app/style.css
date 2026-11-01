@@ -5,23 +5,27 @@ html {
 #intel-content-frame {
   max-width: calc(1440px / var(--intel-ui-scale, 0.75));
 }
+/* Topology uses full-size type, controls and graph tiles inside the compact shell. */
+#intel-topology-workspace {
+  zoom: calc(1 / var(--intel-ui-scale, 0.75));
+}
 /* Intel-only browser canvas; shared Argos/TUI tokens remain unchanged. */
 * {
   box-sizing: border-box;
   scrollbar-width: thin;
-  scrollbar-color: #2e3850 transparent;
+  scrollbar-color: #34343a transparent;
 }
 html,
 body {
   margin: 0;
   height: 100%;
   min-height: 100%;
-  background-color: #0a0f1a;
+  background-color: #0b0b0c;
   background-image:
-    radial-gradient(ellipse at 15% 10%, #0f1a22 0%, transparent 45%),
-    radial-gradient(ellipse at 85% 90%, #0f1724 0%, transparent 50%);
+    radial-gradient(ellipse at 15% 10%, #171719 0%, transparent 45%),
+    radial-gradient(ellipse at 85% 90%, #101012 0%, transparent 50%);
   background-attachment: fixed;
-  color: #e6eaf2;
+  color: #ececee;
   font-family:
     var(--intel-body, Inter),
     system-ui,
@@ -33,7 +37,7 @@ body {
 /* The graph engine retains its previous pixel width until RN onLayout runs.
    Constrain its actual display boxes during that interval; onLayout still
    updates the renderer buffer/camera through the ForceCanvas width contract. */
-#intel-topology-viewport > div:not(#intel-topology-neighborhood) {
+#intel-topology-viewport > div {
   width: 100%;
   max-width: 100%;
   min-width: 0;
@@ -43,7 +47,7 @@ body {
   max-width: 100%;
 }
 @media (min-width: 1000px) {
-  #intel-workspace-scroll > div {
+  #intel-content-frame {
     padding-left: 46px;
     padding-right: 46px;
   }
@@ -107,7 +111,7 @@ select {
   background: #111726;
   border: 1px solid #2e3850;
   border-radius: 8px;
-  color: #e6eaf2;
+  color: #ececee;
   min-width: 0;
 }
 :focus-visible {
@@ -117,7 +121,7 @@ select {
 }
 ::selection {
   background: #2e3850;
-  color: #e6eaf2;
+  color: #ececee;
 }
 /* Intel views only: browser motion/glow stays outside shared RN primitives. */
 #intel-home {
@@ -126,13 +130,6 @@ select {
 }
 #intel-bulletin {
   animation: intel-enter 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-#intel-search-label {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
 }
 @keyframes intel-enter {
   from {
@@ -161,16 +158,8 @@ select {
 #intel-home-launcher:is(:hover, :focus-visible) [data-testid="intel-globe"] {
   filter: drop-shadow(0 0 24px rgba(95, 211, 154, 0.55));
 }
-#intel-categories [aria-pressed="true"] {
-  box-shadow: 0 0 18px rgba(95, 211, 154, 0.2);
-}
 [data-testid^="article-card-"] {
-  transition:
-    transform 120ms,
-    border-color 120ms;
-}
-[data-testid^="article-card-"]:hover {
-  transform: translateY(-1px);
+  transition: border-color 120ms;
 }
 #intel-bulletin input:focus-visible {
   border-color: rgba(95, 211, 154, 0.35);
@@ -233,12 +222,11 @@ select {
   border: 1px solid #232c3d;
   border-radius: 4px;
   font:
-    9px var(--intel-mono, ui-monospace),
+    12px var(--intel-mono, ui-monospace),
     monospace;
   pointer-events: none;
 }
 #intel-topology-side > div {
-  flex: 1;
   min-width: 0;
 }
 
@@ -319,5 +307,151 @@ select {
 @media (prefers-reduced-motion: reduce) {
   .intel-topology-node[data-role="focus"] [data-tile="node"] {
     animation: none;
+  }
+}
+
+/* @tag:intel-brief — matte reading/feed desk and preference-aware motion. */
+#intel-context-rail {
+  position: sticky;
+  top: 0;
+}
+#intel-feed-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-bottom: 12px;
+}
+@keyframes intel-desk-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes intel-inspector-enter {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+#intel-topology-inspector {
+  animation: intel-inspector-enter 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+#intel-article-feed [data-testid^="article-card-"] {
+  transition:
+    background-color 120ms,
+    border-color 120ms;
+}
+#intel-feed-cards > :nth-child(-n + 8) {
+  animation: intel-desk-enter 200ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+#intel-feed-cards > :nth-child(1) {
+  animation-delay: 0ms;
+}
+#intel-feed-cards > :nth-child(2) {
+  animation-delay: 30ms;
+}
+#intel-feed-cards > :nth-child(3) {
+  animation-delay: 60ms;
+}
+#intel-feed-cards > :nth-child(4) {
+  animation-delay: 90ms;
+}
+#intel-feed-cards > :nth-child(5) {
+  animation-delay: 120ms;
+}
+#intel-feed-cards > :nth-child(6) {
+  animation-delay: 150ms;
+}
+#intel-feed-cards > :nth-child(7) {
+  animation-delay: 180ms;
+}
+#intel-feed-cards > :nth-child(8) {
+  animation-delay: 210ms;
+}
+
+.intel-topology-node,
+.intel-topology-node [data-tile="node"],
+.intel-topology-edge-label {
+  transition:
+    opacity 200ms,
+    transform 200ms,
+    border-color 120ms;
+}
+@media (max-width: 899px) {
+  #intel-context-rail {
+    position: relative;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #intel-topology-inspector,
+  #intel-feed-cards > :nth-child(-n + 8) {
+    animation: none;
+  }
+  #intel-article-feed [data-testid^="article-card-"],
+  .intel-topology-node,
+  .intel-topology-node [data-tile="node"],
+  .intel-topology-edge-label {
+    transition: none;
+  }
+}
+
+@keyframes intel-skeleton-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+[data-testid="skeleton-line"] {
+  background-image: linear-gradient(
+    100deg,
+    transparent 20%,
+    rgba(255, 255, 255, 0.06) 50%,
+    transparent 80%
+  );
+  background-size: 200% 100%;
+  animation: intel-skeleton-shimmer 1.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-testid="skeleton-line"] {
+    animation: none;
+  }
+}
+
+#intel-landing .scene-container,
+#intel-landing canvas {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100%;
+}
+
+@keyframes intel-landing-status-cycle {
+  0% {
+    opacity: 0;
+  }
+  20%,
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+#intel-landing-status {
+  animation: intel-landing-status-cycle 3s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  #intel-landing-status {
+    animation: none;
+    opacity: 1;
   }
 }

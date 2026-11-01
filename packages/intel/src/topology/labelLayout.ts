@@ -52,3 +52,8 @@ export function placeEdgeLabels(
     return { x: 0, y: 0, visible: false };
   });
 }
+
+/** Far views progressively quiet relationship captions instead of popping off. */
+export function labelZoomOpacity(distance: number) {
+  return Math.max(0, Math.min(1, (700 - distance) / 250));
+}

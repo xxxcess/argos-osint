@@ -1,4 +1,7 @@
 "use client";
+import { Skeleton } from "@argos/ui";
+import { InspectorPresence } from "./InspectorPresence";
+import { useSelectedNodeScroll } from "./selection.web";
 import React, {
   lazy,
   Suspense,
@@ -55,22 +58,16 @@ export function Topology({
   seed,
   onSeed,
   pageStyle,
-  titleStyle,
   displayScale = 1,
 }: {
   seed: string | null;
   onSeed: (s: Seed) => void;
   pageStyle: object;
-  titleStyle: object;
   displayScale?: number;
 }) {
   const graph = useTopology(seed);
   return (
     <View style={[pageStyle, { minWidth: 0, maxWidth: "100%" }]}>
-      <Label>Brain / Topology</Label>
-      <Text accessibilityRole="header" style={titleStyle}>
-        {graph.data?.root_label || "Evidence topology"}
-      </Text>
       {!seed ? (
         <Copy>
           Select an actor, claim or article from a Focus Brief to begin.
@@ -84,7 +81,7 @@ export function Topology({
         </EmptyState>
       ) : null}
       {seed && graph.isPending ? (
-        <LoadingState label="Loading topology…" />
+        <CanvasSkeleton label="Loading topology…" />
       ) : null}
       {graph.isRefetching ? (
         <LoadingState label="Refreshing topology…" compact />
@@ -135,7 +132,7 @@ function GraphExplorer({
     ),
   };
   const { width: winWidth, height: winHeight } = useWindowDimensions();
-  const wide = winWidth >= 900;
+  const wide = winWidth >= 1100;
   const client = useSyncExternalStore(
     noopSubscribe,
     () => true,
@@ -169,6 +166,8 @@ function GraphExplorer({
       : ((selectedId ? byId.get(selectedId) : undefined) ??
         data.nodes.find((node) => node.is_root) ??
         data.nodes[0]);
+
+  useSelectedNodeScroll(selected?.id);
 
   const neighborhood = classifyNeighborhood(
     data.nodes.map((node) => node.id),
@@ -254,7 +253,7 @@ function GraphExplorer({
     setBox(Math.floor(e.nativeEvent.layout.width));
   const height =
     Math.max(580, Math.min(900, winHeight - 180 * displayScale)) / displayScale;
-  const graphHeight = winWidth < 600 ? height - 264 : height - 216;
+  const graphHeight = height;
   // Neighbors of the selection, grouped by kind.
   const hood = new Map<
     string,
@@ -308,7 +307,7 @@ function GraphExplorer({
             }}
           >
             <ErrorBoundary label="Topology graph" onRetry={reset}>
-              <Suspense fallback={<LoadingState label="Loading graph…" />}>
+              <Suspense fallback={<CanvasSkeleton />}>
                 <ForceCanvas
                   ref={canvas}
                   nodes={gNodes}
@@ -340,7 +339,9 @@ function GraphExplorer({
             <Button onPress={reset}>Reset filters</Button>
           </View>
         ) : null}
-        <View nativeID="intel-topology-neighborhood" style={t.neighborhoodHud}>
+      </View>
+      <View nativeID="intel-topology-neighborhood" style={t.neighborhoodHud}>
+        <View style={t.controlGroup}>
           <View style={t.hudHeading}>
             <Text style={t.hudTitle}>◈ NEIGHBORHOOD</Text>
             <Text style={t.hudDegree}>DEG: {depth}</Text>
@@ -368,35 +369,16 @@ function GraphExplorer({
             >
               2nd DEG
             </HudButton>
-            <HudButton
-              label="Clear selection"
-              danger
-              disabled={!selected}
-              onPress={() => {
-                explicitSecond.current = false;
-                setSelectedId(null);
-                setDepth(0);
-              }}
-            >
-              UNFOCUS
-            </HudButton>
           </View>
+        </View>
+        <View style={[t.controlGroup, t.kindControls]}>
           <Text style={t.hudTitle}>NODE TYPE FILTER</Text>
           <View style={t.hudKinds} role="group" aria-label="Node kinds">
-            <HudButton
-              grid
-              label="Show all node types"
-              active={hiddenKinds.length === 0}
-              onPress={() => setHiddenKinds([])}
-            >
-              ALL
-            </HudButton>
             {kinds.map((kind) => (
               <HudButton
                 key={kind}
-                grid
                 label={`Show ${kind} nodes`}
-                active={hiddenKinds.length > 0 && !hiddenKinds.includes(kind)}
+                active={!hiddenKinds.includes(kind)}
                 onPress={() =>
                   setHiddenKinds(
                     hiddenKinds.includes(kind)
@@ -414,8 +396,8 @@ function GraphExplorer({
               </HudButton>
             ))}
           </View>
-          <ViewTelemetry store={view} />
         </View>
+        <ViewTelemetry store={view} />
       </View>
       <View style={t.controls} role="group" aria-label="Graph legend">
         {kinds.map((kind) => (
@@ -440,75 +422,85 @@ function GraphExplorer({
 
   const details = (
     <Panel title="Neighborhood">
-      {selected ? (
-        <View style={{ gap: 8 }}>
-          <View style={t.kindLabel}>
-            <KindIcon kind={selected.kind} />
-            <Text style={[t.hudTitle, { color: kindColor[selected.kind] }]}>
-              {selected.kind.toUpperCase()}
-            </Text>
-          </View>
-          <Text style={t.headline}>{selected.label}</Text>
-          <Copy>{selected.detail}</Copy>
-          {selected.topology_seed && (
-            <Button onPress={() => onSeed(selected.topology_seed!)}>
-              Navigate this node →
-            </Button>
-          )}
-          {sel && (
-            <View style={{ gap: 4 }}>
-              <DegreeBar
-                label="Outgoing"
-                value={sel.out}
-                max={maxDegree}
-                color={c.accent}
-              />
-              <DegreeBar
-                label="Incoming"
-                value={sel.in}
-                max={maxDegree}
-                color={c.accent2}
-              />
+      <InspectorPresence visible={!!selected}>
+        {selected ? (
+          <View
+            key={selected.id}
+            nativeID="intel-topology-inspector"
+            style={{ gap: 8 }}
+          >
+            <View style={t.kindLabel}>
+              <KindIcon kind={selected.kind} />
+              <Text style={[t.hudTitle, { color: kindColor[selected.kind] }]}>
+                {selected.kind.toUpperCase()}
+              </Text>
             </View>
-          )}
-          {hood.size === 0 ? (
-            <Copy>No retained connections for this node.</Copy>
-          ) : (
-            [...hood.entries()].map(([kind, items]) => (
-              <View key={kind} style={{ gap: 4 }}>
-                <Label>
-                  {kind} ({items.length})
-                </Label>
-                {items.map((it) => (
-                  <Button
-                    key={it.key}
-                    variant="quiet"
-                    onPress={() => choose(it.node.id)}
-                    label={`Select neighbor ${it.node.label}, ${
-                      it.out ? "outgoing" : "incoming"
-                    } ${it.edge.label}`}
-                  >
-                    {it.out ? "→" : "←"} {it.edge.label} · {it.node.label}
-                  </Button>
-                ))}
+            <Text style={t.headline}>{selected.label}</Text>
+            <Copy>{selected.detail}</Copy>
+            {selected.topology_seed && (
+              <Button onPress={() => onSeed(selected.topology_seed!)}>
+                Navigate this node →
+              </Button>
+            )}
+            {sel && (
+              <View style={{ gap: 4 }}>
+                <DegreeBar
+                  label="Outgoing"
+                  value={sel.out}
+                  max={maxDegree}
+                  color={c.accent}
+                />
+                <DegreeBar
+                  label="Incoming"
+                  value={sel.in}
+                  max={maxDegree}
+                  color={c.accent2}
+                />
               </View>
-            ))
-          )}
-        </View>
-      ) : (
-        <Copy>No node selected. Choose one from the graph or the list.</Copy>
-      )}
+            )}
+            {hood.size === 0 ? (
+              <Copy>No retained connections for this node.</Copy>
+            ) : (
+              [...hood.entries()].map(([kind, items]) => (
+                <View key={kind} style={{ gap: 4 }}>
+                  <Label>
+                    {kind} ({items.length})
+                  </Label>
+                  {items.map((it) => (
+                    <Button
+                      key={it.key}
+                      variant="quiet"
+                      onPress={() => choose(it.node.id)}
+                      label={`Select neighbor ${it.node.label}, ${
+                        it.out ? "outgoing" : "incoming"
+                      } ${it.edge.label}`}
+                    >
+                      {it.out ? "→" : "←"} {it.edge.label} · {it.node.label}
+                    </Button>
+                  ))}
+                </View>
+              ))
+            )}
+          </View>
+        ) : (
+          <Copy>No node selected. Choose one from the graph or the list.</Copy>
+        )}
+      </InspectorPresence>
     </Panel>
   );
 
   const nodeList = (
     <Panel title="Nodes">
-      <ScrollView style={t.listBox} nestedScrollEnabled>
+      <ScrollView
+        nativeID="intel-topology-node-scroll"
+        style={t.listBox}
+        nestedScrollEnabled
+      >
         <View role="list" aria-label="Topology nodes">
           {nodes.map((n) => {
             const on = n.id === selected?.id;
             return (
-              <View role="listitem" key={n.id}>
+              <View role="listitem" key={n.id} nativeID={`intel-node-${n.id}`}>
                 <NodeListRow
                   node={n}
                   dotColor={kindColor[n.kind] ?? c.accent}
@@ -540,15 +532,20 @@ function GraphExplorer({
 
   return (
     <View style={{ gap: 12, minWidth: 0 }}>
-      <View nativeID="intel-topology-layout" style={t.layout}>
+      <View
+        nativeID="intel-topology-layout"
+        style={[t.layout, wide && t.layoutWide]}
+      >
         {graphArea}
         <View
           nativeID="intel-topology-side"
           style={[t.sideCol, wide && t.sideColWide]}
         >
           {details}
-          {nodeList}
         </View>
+      </View>
+      <View nativeID="intel-topology-nodes" style={t.nodesSection}>
+        {nodeList}
       </View>
     </View>
   );
@@ -609,16 +606,12 @@ function HudButton({
   label,
   active = false,
   disabled = false,
-  danger = false,
-  grid = false,
   onPress,
 }: {
   children: React.ReactNode;
   label: string;
   active?: boolean;
   disabled?: boolean;
-  danger?: boolean;
-  grid?: boolean;
   onPress: () => void;
 }) {
   return (
@@ -631,9 +624,7 @@ function HudButton({
       onPress={onPress}
       style={({ pressed }) => [
         t.hudButton,
-        grid && { flexBasis: "45%" },
         active && t.hudButtonActive,
-        danger && t.hudButtonDanger,
         disabled && { opacity: 0.4 },
         pressed && { opacity: 0.7 },
       ]}
@@ -641,11 +632,7 @@ function HudButton({
       {typeof children === "string" ? (
         <Text
           numberOfLines={1}
-          style={[
-            t.hudButtonText,
-            active && { color: topologyColors.accent },
-            danger && { color: intelColors.danger },
-          ]}
+          style={[t.hudButtonText, active && { color: topologyColors.accent }]}
         >
           {children}
         </Text>
@@ -727,10 +714,12 @@ function NodeListRow({
 const t = StyleSheet.create({
   kindLabel: { flexDirection: "row", alignItems: "center", gap: 6 },
   controls: { flexDirection: "row", flexWrap: "wrap", gap: 8, minWidth: 0 },
-  layout: { gap: 12, minWidth: 0 },
-  graphCol: { width: "100%", minWidth: 0, gap: 6 },
+  layout: { gap: 16, minWidth: 0 },
+  layoutWide: { flexDirection: "row-reverse", alignItems: "flex-start" },
+  graphCol: { flex: 1, minWidth: 0, gap: 12 },
+  nodesSection: { width: "100%", minWidth: 0 },
   sideCol: { width: "100%", minWidth: 0, gap: 12 },
-  sideColWide: { flexDirection: "row", alignItems: "flex-start" },
+  sideColWide: { width: 320, flexShrink: 0 },
   canvasBox: {
     width: "100%",
     minWidth: 0,
@@ -743,36 +732,35 @@ const t = StyleSheet.create({
     justifyContent: "center",
   },
   neighborhoodHud: {
-    position: "absolute",
-    bottom: 16,
-    left: 16,
-    width: 216,
-    maxWidth: "90%",
-    gap: 12,
-    padding: 14,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "flex-end",
+    gap: 16,
+    padding: 16,
     backgroundColor: topologyColors.panel,
     borderColor: intelColors.border,
     borderWidth: 1,
     borderRadius: 10,
   },
+  controlGroup: { gap: 8, minWidth: 0 },
+  kindControls: { flexGrow: 1, flexShrink: 1 },
   hudHeading: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
   },
-  hudTitle: { fontFamily: fonts.mono, fontSize: 10, color: intelColors.dim },
+  hudTitle: { fontFamily: fonts.mono, fontSize: 12, color: intelColors.dim },
   hudDegree: {
     fontFamily: fonts.mono,
-    fontSize: 9,
+    fontSize: 12,
     color: topologyColors.accent,
   },
   hudRow: { flexDirection: "row", gap: 6 },
   hudKinds: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   hudButton: {
-    minHeight: 24,
+    minHeight: 32,
     minWidth: 0,
-    flexGrow: 1,
-    paddingHorizontal: 6,
+    paddingHorizontal: 12,
     paddingVertical: 5,
     borderRadius: 3,
     borderWidth: 1,
@@ -785,23 +773,18 @@ const t = StyleSheet.create({
     borderColor: topologyColors.accent,
     backgroundColor: intelColors.accentSoft,
   },
-  hudButtonDanger: {
-    borderColor: intelColors.danger,
-    backgroundColor: intelColors.dangerSoft,
-  },
   hudButtonText: {
     fontFamily: fonts.mono,
-    fontSize: 9,
+    fontSize: 12,
     color: intelColors.dim,
   },
   hudTelemetry: {
-    borderTopWidth: 1,
-    borderTopColor: intelColors.border,
-    paddingTop: 8,
     flexDirection: "row",
-    justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: 12,
+    paddingVertical: 8,
   },
-  hudMetric: { fontFamily: fonts.mono, fontSize: 8, color: intelColors.muted },
+  hudMetric: { fontFamily: fonts.mono, fontSize: 11, color: intelColors.muted },
   overlay: { position: "absolute", alignItems: "center", gap: 8, padding: 12 },
   count: { fontFamily: fonts.mono, fontSize: 12, color: c.dim },
   headline: { fontSize: 19, lineHeight: 28, fontWeight: "600", color: c.text },
@@ -834,3 +817,22 @@ const t = StyleSheet.create({
   },
   barFill: { height: 6, borderRadius: 3 },
 });
+
+function CanvasSkeleton({ label = "Loading graph…" }: { label?: string }) {
+  return (
+    <View
+      nativeID="intel-topology-skeleton"
+      role="status"
+      accessibilityLabel={label}
+      style={{ padding: 32, gap: 32 }}
+    >
+      <Skeleton width="50%" height={12} />
+      <View style={{ flexDirection: "row", justifyContent: "space-around" }}>
+        {[0, 1, 2].map((i) => (
+          <Skeleton key={i} width={40} height={40} radius={20} />
+        ))}
+      </View>
+      <Skeleton width="80%" height={12} />
+    </View>
+  );
+}

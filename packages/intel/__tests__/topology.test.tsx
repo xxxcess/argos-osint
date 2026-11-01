@@ -1,3 +1,4 @@
+import { intelMotion } from "../src/shell/intel-theme";
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
@@ -140,7 +141,7 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
     expect(record.cameraPosition![0][1]).toEqual(
       expect.objectContaining({ x: 5, y: 6, z: 7 }),
     );
-    expect(record.cameraPosition!.at(-1)![2]).toBe(700);
+    expect(record.cameraPosition!.at(-1)![2]).toBe(intelMotion.focus);
   });
 
   function positionEngineNodes() {
@@ -164,7 +165,7 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
     expect(forceGraphInstances[0].cameraPosition!.at(-1)).toEqual([
       expect.any(Object),
       { x: 20, y: 10, z: 0 },
-      700,
+      intelMotion.focus,
     ]);
   });
 
@@ -220,7 +221,7 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
     expect(record.cameraPosition!.at(-1)).toEqual([
       { x: 5, y: 10, z: 165 },
       { x: 10, y: 20, z: 30 },
-      400,
+      intelMotion.fit,
     ]);
   });
 
@@ -386,7 +387,7 @@ async function startTopology(
   const view = render(
     <QueryClientProvider client={client}>
       <BackendProvider settings={connectedSettings}>
-        <Topology seed={seed} onSeed={onSeed} pageStyle={{}} titleStyle={{}} />
+        <Topology seed={seed} onSeed={onSeed} pageStyle={{}} />
       </BackendProvider>
     </QueryClientProvider>,
   );
@@ -521,7 +522,7 @@ describe("Topology list twin (real Topology)", () => {
     expect(screen.getByText(/Actor One → asserts → Claim Two/)).toBeVisible();
   });
 
-  it("scripts a reset back to unfiltered topology", async () => {
+  it("restores a hidden kind when its filter is toggled again", async () => {
     await startTopology("n1");
     fireEvent.click(
       screen.getByRole("button", { name: "Select node Claim Two, claim" }),
@@ -534,12 +535,12 @@ describe("Topology list twin (real Topology)", () => {
       expect(screen.queryByText(/Actor One → asserts/)).toBeNull(),
     );
     fireEvent.click(
-      screen.getByRole("button", { name: "Show all node types" }),
+      screen.getByRole("button", { name: "Show actor nodes" }),
     );
     await waitFor(() =>
       expect(screen.getByText(/Actor One → asserts → Claim Two/)).toBeVisible(),
     );
-    // The selection survives the reset.
+    // The selection survives toggling a node kind.
     expect(
       screen.getByRole("button", { name: "Select node Claim Two, claim" }),
     ).toBeTruthy();

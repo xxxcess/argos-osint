@@ -6,7 +6,7 @@ async function gotoBulletin(page: Page, url = "/") {
     name: "Open Intel",
     exact: true,
   });
-  await expect(launcher).toBeVisible();
+  await expect(launcher).toBeVisible({ timeout: 35000 });
   await expect(
     page.getByRole("button", { name: "Bulletin", exact: true }),
   ).toHaveCount(0);
@@ -24,6 +24,10 @@ async function expectFixedStatusBar(page: Page) {
     Math.abs(box.y + box.height - (await page.evaluate(() => innerHeight))),
   ).toBeLessThanOrEqual(1);
 }
+test.use({
+  video:
+    process.env.ARGOS_WEB_RECORD_VIDEO === "1" ? "on" : "retain-on-failure",
+});
 const captureDir = process.env.ARGOS_WEB_CAPTURE_DIR || ".agent-scratch/web-ui";
 const runtimeErrors = new WeakMap<Page, string[]>();
 test.beforeEach(async ({ page }) => {
@@ -256,13 +260,16 @@ async function fixtures(
     requests,
   };
 }
-test("opening and revisiting briefs admits each occurrence without polling job endpoints", async ({
+test("opening and revisiting a published brief does not queue another run", async ({
   page,
 }) => {
   const f = await fixtures(page);
   await gotoBulletin(page);
   await page.getByRole("button", { name: /^Open Focus Brief:/ }).click();
-  await expect.poll(() => f.admissions).toEqual([{ run: "r1", id: "a1" }]);
+  await expect(
+    page.getByRole("button", { name: "Ensure / resume brief" }),
+  ).toBeEnabled();
+  await expect.poll(() => f.admissions).toEqual([]);
   await expect(
     page.getByRole("button", { name: "Ensure / resume brief" }),
   ).toBeEnabled();
@@ -272,28 +279,27 @@ test("opening and revisiting briefs admits each occurrence without polling job e
   await page.getByRole("button", { name: "Refresh retained brief" }).click();
   await expect.poll(reads).toBeGreaterThan(initial);
   const refreshed = reads();
-  await expect.poll(reads, { timeout: 8000 }).toBeGreaterThan(refreshed);
-  expect(f.admissions).toEqual([{ run: "r1", id: "a1" }]);
+  const live = await installLiveFixture(page);
+  live.brief({
+    run: "r1",
+    id: "a1",
+    job_id: null,
+    stages: [],
+    indexing: null,
+    complete: true,
+    refresh: true,
+  });
+  await expect.poll(reads).toBeGreaterThan(refreshed);
+  expect(f.admissions).toEqual([]);
   await page
     .getByRole("button", {
       name: "Open Focus Brief for related lead: Earlier shipping agreement",
     })
     .click();
-  await expect
-    .poll(() => f.admissions)
-    .toEqual([
-      { run: "r1", id: "a1" },
-      { run: "r1", id: "a2" },
-    ]);
+  await expect.poll(() => f.admissions).toEqual([]);
   await page.getByRole("button", { name: "Return to Bulletin" }).click();
   await page.getByRole("button", { name: /^Open Focus Brief:/ }).click();
-  await expect
-    .poll(() => f.admissions)
-    .toEqual([
-      { run: "r1", id: "a1" },
-      { run: "r1", id: "a2" },
-      { run: "r1", id: "a1" },
-    ]);
+  await expect.poll(() => f.admissions).toEqual([]);
   expect(
     f.requests.filter((path) => /^(jobs|logs|brief\/stages)/.test(path)),
   ).toEqual([]);
@@ -307,6 +313,7 @@ test("automatic admission errors are visible on narrow Brief and can be retried"
   f.failAdmission(true);
   await gotoBulletin(page);
   await page.getByRole("button", { name: /^Open Focus Brief:/ }).click();
+  await page.getByRole("button", { name: "Ensure / resume brief" }).click();
   await expect(
     page
       .getByRole("alert")
@@ -328,7 +335,7 @@ test("automatic admission errors are visible on narrow Brief and can be retried"
 });
 
 for (const width of [1440, 768, 390, 320]) {
-  test(`feed image stays left of article text at ${width}px`, async ({
+  test(`feed thumbnail stays right of article text at ${width}px`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 1100 });
@@ -363,10 +370,10 @@ for (const width of [1440, 768, 390, 320]) {
     const secondaryTextBox = (await secondary
       .getByText("Another regional signal", { exact: true })
       .boundingBox())!;
-    expect(secondaryImageBox.x + secondaryImageBox.width).toBeLessThan(
-      secondaryTextBox.x,
+    expect(secondaryTextBox.x + secondaryTextBox.width).toBeLessThan(
+      secondaryImageBox.x,
     );
-    expect(imageBox.x + imageBox.width).toBeLessThan(titleBox.x);
+    expect(titleBox.x + titleBox.width).toBeLessThan(imageBox.x);
     expect(titleBox.x + titleBox.width).toBeLessThanOrEqual(width);
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth),
@@ -425,7 +432,9 @@ test("gates the workspace when the API is unavailable", async ({ page }) => {
   await page.route("**/api/v1/**", (r) => r.abort());
   await page.goto("/");
   await expect(
-    page.getByText("Connect to your Intel workspace."),
+    page.getByRole("status", {
+      name: /Local API unavailable|Waiting for workspace readiness/,
+    }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Intelligence bulletin", exact: true }),
@@ -433,7 +442,7 @@ test("gates the workspace when the API is unavailable", async ({ page }) => {
   await expect(page.getByRole("textbox", { name: "API endpoint" })).toHaveCount(
     0,
   );
-  await page.getByRole("button", { name: "Connect / retry" }).click();
+  await page.getByRole("button", { name: "Retry connection checks" }).click();
   await page.screenshot({
     path: `${captureDir}/connection-error.png`,
     fullPage: true,
@@ -442,6 +451,7 @@ test("gates the workspace when the API is unavailable", async ({ page }) => {
 test("browse, search, brief, related, topology and reconnect", async ({
   page,
 }) => {
+  test.setTimeout(90000);
   await page.clock.install();
   const f = await fixtures(page);
   await gotoBulletin(page);
@@ -472,9 +482,11 @@ test("browse, search, brief, related, topology and reconnect", async ({
   });
   await page.getByRole("textbox", { name: "Search articles" }).fill("");
   await page.getByRole("button", { name: /^Open Focus Brief:/ }).click();
-  await expect.poll(() => f.admissions).toEqual([{ run: "r1", id: "a1" }]);
+  await expect.poll(() => f.admissions).toEqual([]);
   await expect(
-    page.getByText("Officials meet to discuss regional shipping access."),
+    page
+      .locator("#intel-brief-reader")
+      .getByText("Officials meet to discuss regional shipping access."),
   ).toBeVisible();
   await expect(
     page.getByText(
@@ -489,7 +501,7 @@ test("browse, search, brief, related, topology and reconnect", async ({
     fullPage: true,
   });
   await page.getByRole("button", { name: "Ensure / resume brief" }).click();
-  await expect.poll(() => f.admissions.length).toBe(2);
+  await expect.poll(() => f.admissions.length).toBe(1);
   await page
     .getByRole("button", { name: "Reload article / new generation" })
     .click();
@@ -501,22 +513,30 @@ test("browse, search, brief, related, topology and reconnect", async ({
     .getByRole("button", { name: "Explore actor Port authority" })
     .click();
   await expect(page.getByText("Recorded actor")).toBeVisible();
-  await expect.poll(() => f.seeds).toContain("actor1");
-  await page.getByRole("button", { name: "Bulletin", exact: true }).click();
+  await expect(page).toHaveURL(/\/topology\?seed=actor1$/);
+  await page
+    .getByRole("button", { name: "Return to Brief", exact: true })
+    .click();
   await page.getByRole("button", { name: "Launch 3D topology" }).click();
-  await expect.poll(() => f.seeds).toContain("actor1");
+  await expect(page).toHaveURL(/\/topology\?seed=actor1$/);
   await expect(page.getByText("Recorded actor")).toBeVisible();
   f.offline();
   await page.clock.fastForward(60_000);
-  await expect(page.getByText("Connect to your Intel workspace.")).toBeVisible({
+  await expect(
+    page.getByRole("status", {
+      name: /Local API unavailable|Waiting for workspace readiness/,
+    }),
+  ).toBeVisible({
     timeout: 75000,
   });
   await expect(
     page.getByRole("button", { name: "Jobs", exact: true }),
   ).toHaveCount(0);
   f.online();
-  await page.getByRole("button", { name: "Connect / retry" }).click();
-  await page.getByRole("button", { name: "Open Intel", exact: true }).click();
+  await page.getByRole("button", { name: "Retry connection checks" }).click();
+  await expect(page.getByText("Recorded actor")).toBeVisible();
+  await expect(page).toHaveURL(/\/topology\?seed=actor1$/);
+  await page.getByRole("button", { name: "Bulletin", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "Intelligence bulletin", exact: true }),
   ).toBeVisible();
@@ -573,7 +593,9 @@ test("metadata excerpt is not presented as a retained full body", async ({
   await gotoBulletin(page);
   await page.getByRole("button", { name: /^Open Focus Brief:/ }).click();
   await expect(
-    page.getByText("Officials meet to discuss regional shipping access."),
+    page
+      .locator("#intel-brief-reader")
+      .getByText("Officials meet to discuss regional shipping access."),
   ).toBeVisible();
   await expect(page.getByText(/Full article body/)).toHaveCount(0);
 });
@@ -759,7 +781,9 @@ test("loading days and a verified empty cycle are distinct states", async ({
     page.getByRole("heading", { name: "No articles yet" }),
   ).toBeVisible();
   await expect(page.getByRole("progressbar")).toHaveCount(0);
-  await expect(page.getByText("0 loaded", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Open Focus Brief:/ }),
+  ).toHaveCount(0);
   await page.screenshot({
     path: `${captureDir}/days-empty.png`,
     fullPage: true,
@@ -778,7 +802,7 @@ test("pending articles never show a false empty result", async ({ page }) => {
   });
   await gotoBulletin(page);
   await expect(
-    page.getByRole("progressbar", { name: "Loading bulletin…", exact: true }),
+    page.getByRole("status", { name: "Loading bulletin…", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByText("No articles match this day, category and search."),
@@ -791,7 +815,9 @@ test("pending articles never show a false empty result", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "NO MATCHING INTELLIGENCE" }),
   ).toBeVisible();
-  await expect(page.getByText("0 loaded", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Open Focus Brief:/ }),
+  ).toHaveCount(0);
 });
 
 test("brief and related loading states preserve numeric zero and verified empty evidence", async ({
@@ -827,13 +853,13 @@ test("brief and related loading states preserve numeric zero and verified empty 
   await gotoBulletin(page);
   await page.getByRole("button", { name: /^Open Focus Brief:/ }).click();
   await expect(
-    page.getByRole("progressbar", { name: "Loading extracted evidence…" }),
+    page.getByRole("status", { name: "Loading extracted evidence…" }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "No published claims" }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("progressbar", { name: "Loading related leads…" }),
+    page.getByRole("status", { name: "Loading related leads…" }),
   ).toBeVisible();
   await page.screenshot({
     path: `${captureDir}/brief-loading.png`,
@@ -912,7 +938,7 @@ for (const changeCategory of [false, true]) {
     await gotoBulletin(page);
     await expect(page.getByTestId("article-card-page-0")).toBeVisible();
     await expect(page.getByTestId("article-card-page-11")).toBeAttached();
-    const scroller = page.getByTestId("workspace-scroll");
+    const scroller = page.getByTestId("article-list-scroll");
     await scroller.evaluate((el) => {
       el.scrollTop = el.scrollHeight;
     });
@@ -951,7 +977,9 @@ for (const changeCategory of [false, true]) {
     } else {
       await expect(page.getByTestId("article-card-page-12")).toBeVisible();
       await expect(page.getByTestId("article-card-page-11")).toHaveCount(1);
-      await expect(page.getByText("13 loaded", { exact: true })).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: /^Open Focus Brief:/ }),
+      ).toHaveCount(13);
       await expect(
         page.getByRole("button", { name: "Load more articles" }),
       ).toHaveCount(0);
@@ -1016,7 +1044,7 @@ test("topology distinguishes no selection, loading and an empty graph", async ({
   await page.getByRole("button", { name: /^Open Focus Brief:/ }).click();
   await page.getByRole("button", { name: "Launch 3D topology" }).click();
   await expect(
-    page.getByRole("progressbar", { name: "Loading topology…", exact: true }),
+    page.getByRole("status", { name: "Loading topology…", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "No retained connections" }),
@@ -1060,7 +1088,7 @@ test("failed scroll pages retain rows and require an explicit retry", async ({
   await gotoBulletin(page);
   await expect(page.getByTestId("article-card-retry-0")).toBeVisible();
   await expect(page.getByTestId("article-card-retry-11")).toBeAttached();
-  const scroller = page.getByTestId("workspace-scroll");
+  const scroller = page.getByTestId("article-list-scroll");
   await scroller.evaluate((el) => {
     el.scrollTop = el.scrollHeight;
   });
@@ -1072,7 +1100,9 @@ test("failed scroll pages retain rows and require an explicit retry", async ({
   await page.getByRole("button", { name: "Retry loading articles" }).click();
   await expect(page.getByTestId("article-card-recovered")).toBeVisible();
   expect(requests).toBe(3);
-  await expect(page.getByText("13 loaded", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Open Focus Brief:/ }),
+  ).toHaveCount(13);
 });
 
 for (const width of [1440, 390]) {
@@ -1106,11 +1136,11 @@ for (const width of [1440, 390]) {
     expect(headings.indexOf("ANALYTICAL INFERENCES")).toBeLessThan(
       headings.indexOf("CORRELATED INTELLIGENCE REPORTS"),
     );
-    const source = await page
-      .getByRole("button", { name: "Read original source ↗" })
-      .boundingBox();
-    const inference = await section.boundingBox();
-    expect(inference!.y).toBeGreaterThan(source!.y);
+    const reader = (await page.locator("#intel-brief-reader").boundingBox())!;
+    const context = (await page.locator("#intel-context-rail").boundingBox())!;
+    if (width < 900)
+      expect(context.y).toBeGreaterThanOrEqual(reader.y + reader.height - 1);
+    else expect(context.x).toBeGreaterThanOrEqual(reader.x + reader.width - 1);
     await expect(
       page.getByRole("heading", { name: "RETAINED CLAIMS", exact: true }),
     ).toBeVisible();
@@ -1178,7 +1208,7 @@ test("topology graph explorer selects, filters and stays within 320px", async ({
     await expect(page.getByRole("button", { name, exact: true })).toHaveCount(
       0,
     );
-  await expect(page.getByText("Showing 3 of 3 nodes")).toBeVisible();
+  await expect(page.getByText("Showing 2 of 3 nodes")).toBeVisible();
   await expect(page.getByText("Recorded actor")).toBeVisible();
   await expect(page.locator("canvas").first()).toBeVisible({ timeout: 20000 });
   await page.locator("canvas").first().scrollIntoViewIfNeeded();
@@ -1196,7 +1226,10 @@ test("topology graph explorer selects, filters and stays within 320px", async ({
   ).toBeVisible();
   await page.getByRole("button", { name: "Show article nodes" }).click();
   await expect(page.getByText("Showing 2 of 3 nodes")).toBeVisible();
-  await page.getByRole("button", { name: "Clear selection" }).click();
+  await page
+    .locator("canvas")
+    .first()
+    .click({ position: { x: 10, y: 10 } });
   await page.getByRole("button", { name: "Show claim nodes" }).click();
   await page.getByRole("button", { name: "Show entity nodes" }).click();
   await expect(
@@ -1283,7 +1316,7 @@ test("desktop launcher returns to the retained intelligence bulletin", async ({
   await fixtures(page);
   await gotoBulletin(page);
   await expect(page.getByText(a.title)).toBeVisible();
-  await page.getByRole("button", { name: "Desktop", exact: true }).click();
+  await page.getByRole("button", { name: "server", exact: true }).click();
   await page.getByRole("button", { name: "Open Intel", exact: true }).click();
   await expect(page.getByText(a.title)).toBeVisible();
   await page.getByRole("textbox", { name: "Search articles" }).fill("missing");
@@ -1358,7 +1391,9 @@ test("global All follows one server cursor stream and retains rows across a fail
   });
   await gotoBulletin(page);
   await expect(page.getByText(first.title)).toBeVisible();
-  await expect(page.getByText("2 loaded", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Open Focus Brief:/ }),
+  ).toHaveCount(2);
   const cards = page.getByRole("button", { name: /^Open Focus Brief:/ });
   await expect(cards).toHaveCount(2);
   expect(
@@ -1368,10 +1403,10 @@ test("global All follows one server cursor stream and retains rows across a fail
   ).toEqual([first, second].map((row) => `Open Focus Brief: ${row.title}`));
   expect(
     await page
-      .getByTestId("workspace-scroll")
+      .getByTestId("article-list-scroll")
       .evaluate((element) => element.scrollHeight - element.clientHeight),
   ).toBeGreaterThan(0);
-  await page.getByTestId("workspace-scroll").evaluate((element) => {
+  await page.getByTestId("article-list-scroll").evaluate((element) => {
     element.scrollTop = element.scrollHeight;
   });
   const retry = page.getByRole("button", {
@@ -1388,7 +1423,9 @@ test("global All follows one server cursor stream and retains rows across a fail
   ).toHaveCount(0);
   failNext = false;
   await retry.click();
-  await expect(page.getByText("3 loaded", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Open Focus Brief:/ }),
+  ).toHaveCount(3);
   await expect(cards).toHaveCount(3);
   expect(
     await cards.evaluateAll((elements) =>
@@ -1435,7 +1472,7 @@ for (const width of [1440, 320]) {
     await expect(page.getByLabel("API offline", { exact: true })).toBeVisible();
     await expectFixedStatusBar(page);
     await expect(
-      page.getByRole("button", { name: "Connect / retry" }),
+      page.getByRole("button", { name: "Retry connection checks" }),
     ).toBeEnabled();
     if (width >= 1100)
       await expect(page.locator("#intel-status-metric-cpu")).toHaveText(
@@ -1537,7 +1574,52 @@ for (const width of [1536, 1440, 768, 390, 320]) {
   });
 }
 
-for (const referenceWidth of [1280, 832, 320]) {
+for (const width of [1440, 768, 390, 320]) {
+  test(`bulletin date filter sits above category articles at ${width}px`, async ({
+    page,
+  }) => {
+    await fixtures(page);
+    await page.setViewportSize({ width, height: 1100 });
+    await gotoBulletin(page);
+    for (const name of ["Geopolitical", "Economic"]) {
+      await page.getByRole("button", { name, exact: true }).click();
+      const feed = page.locator("#intel-article-feed");
+      const day = feed.getByRole("button", { name: /^Retained day / });
+      const article = feed
+        .getByRole("button", { name: /^Open Focus Brief:/ })
+        .first();
+      await expect(day).toBeVisible();
+      await expect(article).toBeVisible();
+      const dayBox = (await day.boundingBox())!;
+      const articleBox = (await article.boundingBox())!;
+      expect(dayBox.y + dayBox.height).toBeLessThan(articleBox.y);
+      await expect(page.getByText(/^\d+ loaded$/)).toHaveCount(0);
+      await expect(
+        page.getByRole("heading", { name: /GEOPOLITICAL/ }),
+      ).toHaveCount(0);
+      const closedTop = articleBox.y;
+      await day.click();
+      const overlay = page.locator("#intel-day-overlay");
+      await expect(overlay).toBeVisible();
+      await expect
+        .poll(
+          async () =>
+            await overlay.evaluate((el) => getComputedStyle(el).position),
+        )
+        .toBe("absolute");
+      const openBox = (await article.boundingBox())!;
+      expect(openBox.y).toBe(closedTop);
+      await page.getByRole("button", { name: /^Day / }).nth(1).click();
+      await expect(overlay).toHaveCount(0);
+    }
+    await page.screenshot({
+      path: `${captureDir}/bulletin-filter-${width}.png`,
+      fullPage: true,
+    });
+  });
+}
+
+for (const referenceWidth of [1440, 1280, 768, 390, 320]) {
   test(`topology reference tiles, labeled edges and compact controls at ${referenceWidth}px`, async ({
     page,
   }) => {
@@ -1637,6 +1719,15 @@ for (const referenceWidth of [1280, 832, 320]) {
       (await page.locator("#intel-status-bar").boundingBox())!.height,
     ).toBe(48);
     const viewport = page.locator("#intel-topology-viewport");
+    await expect(
+      page.getByText("Brain / Topology", { exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", {
+        name: "Financial Routing Hack",
+        exact: true,
+      }),
+    ).toHaveCount(0);
     await expect(viewport.locator("[data-tile=node]")).toHaveCount(5, {
       timeout: 15000,
     });
@@ -1710,34 +1801,46 @@ for (const referenceWidth of [1280, 832, 320]) {
       await expect(viewport.locator(".intel-topology-edge-label")).toHaveCount(
         5,
       );
-      const boxes = await viewport.evaluate((el) => ({
-        viewport: el.getBoundingClientRect().toJSON(),
-        hud: el
-          .querySelector("#intel-topology-neighborhood")!
-          .getBoundingClientRect()
-          .toJSON(),
-      }));
-      expect(boxes.hud.width).toBeLessThanOrEqual(216);
-      expect(boxes.hud.left).toBeGreaterThan(boxes.viewport.left);
-      expect(boxes.hud.bottom).toBeLessThan(boxes.viewport.bottom);
-      expect(
-        await viewport.evaluate((el) => {
-          const panel = el
-            .querySelector("#intel-topology-neighborhood")!
-            .getBoundingClientRect();
-          return [...el.querySelectorAll(".intel-topology-node-label")].every(
-            (label) => {
-              const r = label.getBoundingClientRect();
-              return (
-                r.bottom <= panel.top ||
-                r.top >= panel.bottom ||
-                r.right <= panel.left ||
-                r.left >= panel.right
-              );
-            },
-          );
-        }),
-      ).toBe(true);
+      await expect(viewport.locator("button")).toHaveCount(0);
+      await expect(
+        page.getByRole("button", { name: "Clear selection" }),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole("button", { name: "Show all node types" }),
+      ).toHaveCount(0);
+      const controls = page.locator("#intel-topology-neighborhood");
+      const controlsBox = (await controls.boundingBox())!;
+      const viewportBox = (await viewport.boundingBox())!;
+      expect(controlsBox.y).toBeGreaterThan(viewportBox.y + viewportBox.height);
+      expect(controlsBox.width).toBeCloseTo(viewportBox.width, 0);
+      if (width >= 1100) {
+        const depthBox = (await page
+          .getByRole("group", { name: "Neighbor depth", exact: true })
+          .boundingBox())!;
+        const kindsBox = (await page
+          .getByRole("group", { name: "Node kinds", exact: true })
+          .boundingBox())!;
+        expect(kindsBox.x).toBeGreaterThan(depthBox.x + depthBox.width);
+      }
+      const side = page.locator("#intel-topology-side");
+      const sideBox = (await side.boundingBox())!;
+      const graphBox = (await viewport.boundingBox())!;
+      const nodesBox = (await page
+        .locator("#intel-topology-nodes")
+        .boundingBox())!;
+      const layoutBox = (await page
+        .locator("#intel-topology-layout")
+        .boundingBox())!;
+      expect(nodesBox.y).toBeGreaterThan(layoutBox.y + layoutBox.height);
+      expect(nodesBox.x).toBeCloseTo(layoutBox.x, 0);
+      expect(nodesBox.width).toBeCloseTo(layoutBox.width, 0);
+      if (width >= 1100) {
+        expect(sideBox.x + sideBox.width).toBeLessThan(graphBox.x);
+        expect(sideBox.y).toBeCloseTo(graphBox.y, 0);
+        expect(sideBox.width).toBeCloseTo(320, 0);
+      } else {
+        expect(sideBox.y).toBeGreaterThan(graphBox.y + graphBox.height);
+      }
       if (width >= 600) {
         await expect
           .poll(() =>
@@ -1766,8 +1869,14 @@ for (const referenceWidth of [1280, 832, 320]) {
       }
       await expect(viewport.locator("#intel-topology-axes")).toHaveCount(0);
       await page.screenshot({
-        clip: (await viewport.boundingBox())!,
+        fullPage: true,
         path: `${captureDir}/topology-reference-${width}.png`,
+      });
+      await controls.screenshot({
+        path: `${captureDir}/topology-controls-${width}.png`,
+      });
+      await page.locator("#intel-topology-nodes").screenshot({
+        path: `${captureDir}/topology-nodes-${width}.png`,
       });
       await expect
         .poll(() =>
@@ -1950,7 +2059,10 @@ test("Home, Bulletin, Brief and inference Topology routes survive reload and his
   ).toBeVisible();
   await page.goForward();
   await expect(
-    page.getByRole("heading", { name: "State Sponsorship", exact: true }),
+    page.getByRole("button", {
+      name: "Select node State Sponsorship, inference",
+      exact: true,
+    }),
   ).toBeVisible();
   await page.reload();
   await expect(
@@ -1971,7 +2083,7 @@ test("Home, Bulletin, Brief and inference Topology routes survive reload and his
     .getByRole("button", { name: "Return to Bulletin", exact: true })
     .click();
   await expect(page).toHaveURL(/\/bulletin$/);
-  await page.getByRole("button", { name: "Desktop", exact: true }).click();
+  await page.getByRole("button", { name: "server", exact: true }).click();
   await expect(page).toHaveURL(/\/home$/);
   expect(state.requests).toContain("articles/detail");
 });
@@ -2100,7 +2212,7 @@ test("manual topology zoom survives updates and node drag cancellation stays saf
       ),
     )
     .toBe("finished");
-  const zoom = viewport.getByText(/^ZOOM:/);
+  const zoom = page.locator("#intel-topology-neighborhood").getByText(/^ZOOM:/);
   async function stableZoom() {
     let previous = "";
     let stable = 0;
@@ -2296,7 +2408,10 @@ test("pending Brief follows push progress, resyncs after reconnect and stops RES
   const waitingReads = detailReads;
   await page.clock.runFor(10_000);
   expect(detailReads).toBe(waitingReads);
-  await page.screenshot({ path: `${captureDir}/brief-live-pending.png`, fullPage: true });
+  await page.screenshot({
+    path: `${captureDir}/brief-live-pending.png`,
+    fullPage: true,
+  });
   live.disconnect();
   await expect(
     page.getByText("Live updates interrupted. Reconnecting…"),
@@ -2330,5 +2445,166 @@ test("pending Brief follows push progress, resyncs after reconnect and stops RES
   await page
     .getByRole("button", { name: "Return to Bulletin", exact: true })
     .click();
-  await expect.poll(() => live.subscriptions.at(-1)?.brief).toBeNull();
+  await expect
+    .poll(() => live.subscriptions.at(-1)?.brief)
+    .toMatchObject({ run: "r1", id: "a1" });
+  await expect(
+    page.locator("#intel-status-bar").getByRole("status"),
+  ).toContainText("Brief complete");
+});
+
+test.describe("revamp connection scene", () => {
+  test("landing orbit remains accessible while readiness is pending", async ({
+    page,
+  }) => {
+    test.setTimeout(60000);
+    await fixtures(page);
+    const ready = deferred();
+    await page.route("**/api/v1/health/ready", async (route) => {
+      await ready.promise;
+      await route.fulfill({
+        json: {
+          service: "argos-intel",
+          api_version: 1,
+          ready: true,
+          storage: true,
+          instance_id: "fixture-instance",
+        },
+      });
+    });
+    await page.goto("/");
+    await expect(
+      page.getByRole("status", { name: "Checking local API…" }),
+    ).toBeVisible();
+    await expect(page.locator("canvas")).toHaveCount(1);
+    await expect
+      .poll(() =>
+        page
+          .locator("#intel-landing-status")
+          .evaluate((node) => Number(getComputedStyle(node).opacity)),
+      )
+      .toBeGreaterThan(0.95);
+    const stage = (await page.locator("#intel-landing").boundingBox())!;
+    const canvas = (await page.locator("canvas").boundingBox())!;
+    const bar = (await page.locator("#intel-status-bar").boundingBox())!;
+    expect(stage.x).toBe(0);
+    expect(stage.y).toBe(0);
+    expect(
+      Math.abs(stage.width - (await page.evaluate(() => innerWidth))),
+    ).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs(
+        stage.height + bar.height - (await page.evaluate(() => innerHeight)),
+      ),
+    ).toBeLessThanOrEqual(1);
+    expect(Math.abs(canvas.width - stage.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(canvas.height - stage.height)).toBeLessThanOrEqual(1);
+
+    await page.screenshot({
+      path: `${captureDir}/landing-orbit.png`,
+      fullPage: true,
+    });
+    await expect(
+      page.getByRole("button", { name: "Retry connection checks" }),
+    ).toHaveCount(0);
+    // Advance a real scene through arrival and acceleration for the retained video.
+    await page.waitForTimeout(1000);
+    ready.resolve();
+    for (const [index, label] of [
+      "Local API reachable",
+      "Intel service identified",
+      "API compatible",
+      "Storage ready",
+      "Workspace readiness passed",
+    ].entries()) {
+      await expect(
+        page.getByRole("status", { name: label, exact: true }),
+      ).toBeVisible({ timeout: 5000 });
+      await expect(
+        page
+          .getByRole("list", { name: "Connection checks" })
+          .getByRole("listitem"),
+      ).toHaveCount(index + 1);
+      await expect(
+        page.getByRole("button", { name: "Open Intel", exact: true }),
+      ).toHaveCount(0);
+    }
+    await expect(
+      page.getByRole("status", {
+        name: "All connections healthy",
+        exact: true,
+      }),
+    ).toBeVisible({ timeout: 5000 });
+    await page.screenshot({
+      path: `${captureDir}/landing-core-green.png`,
+      fullPage: true,
+    });
+    await expect(
+      page.getByRole("status", { name: "Workspace ready", exact: true }),
+    ).toBeVisible({ timeout: 5000 });
+    await page.screenshot({
+      path: `${captureDir}/landing-core-blue.png`,
+      fullPage: true,
+    });
+    await expect(
+      page.getByRole("button", { name: "Open Intel", exact: true }),
+    ).toBeVisible({ timeout: 10000 });
+  });
+  test("landing fallback honors reduced motion without WebGL", async ({
+    page,
+  }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.addInitScript(() => {
+      Object.defineProperty(window, "WebGL2RenderingContext", {
+        value: undefined,
+      });
+    });
+    await fixtures(page);
+    const ready = deferred();
+    await page.route("**/api/v1/health/ready", async (route) => {
+      await ready.promise;
+      await route.fulfill({
+        json: {
+          service: "argos-intel",
+          api_version: 1,
+          ready: true,
+          storage: true,
+          instance_id: "fixture-instance",
+        },
+      });
+    });
+    await page.goto("/");
+    await expect(
+      page.getByRole("status", { name: "Checking local API…" }),
+    ).toBeVisible();
+    await expect(page.locator("canvas")).toHaveCount(0);
+    await page.screenshot({
+      path: `${captureDir}/landing-static-fallback.png`,
+      fullPage: true,
+    });
+    ready.resolve();
+    await expect(
+      page.getByRole("button", { name: "Open Intel", exact: true }),
+    ).toBeVisible();
+  });
+});
+
+test("bulletin skeleton reserves the loaded card height", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await fixtures(page);
+  const ready = deferred();
+  await page.route(/\/api\/v1\/articles\?/, async (route) => {
+    await ready.promise;
+    await route.fallback();
+  });
+  await gotoBulletin(page);
+  const skeleton = page.getByTestId("bulletin-skeleton").first();
+  await expect(skeleton).toBeVisible();
+  const height = (await skeleton.boundingBox())!.height;
+  ready.resolve();
+  const card = page.getByTestId("article-card-a1");
+  await expect(card).toBeVisible();
+  expect(
+    Math.abs((await card.boundingBox())!.height - height),
+  ).toBeLessThanOrEqual(1);
 });

@@ -1,18 +1,12 @@
 "use client";
 import React, {
   useEffect,
+  useCallback,
   useRef,
   useState,
   useSyncExternalStore,
 } from "react";
-import {
-  View,
-  Text,
-  ScrollView,
-  Image,
-  Linking,
-  StyleSheet,
-} from "react-native";
+import { View, ScrollView, StyleSheet } from "react-native";
 import {
   useBackend,
   useHostMetrics,
@@ -40,10 +34,15 @@ import {
   colors as c,
   ErrorBoundary,
 } from "@argos/ui";
-import { IntelStatusBar } from "./shell/IntelShell";
+import { OrbitScene } from "./landing/OrbitScene";
+import { IntelStatusBar, JobDropUp, type StatusJob } from "./shell/IntelShell";
 import { Topology } from "./topology/Topology";
 import { HomeView } from "./views/HomeView";
 import { BulletinView } from "./views/BulletinView";
+import { ContextRail } from "./views/brief/ContextRail";
+import { BriefSkeleton } from "./views/brief/BriefSkeleton";
+import { deriveBriefJobState, type JobState } from "./shell/jobState";
+import { ScreenTransition } from "./shell/ScreenTransition";
 import { BriefView, RelatedBriefCard } from "./views/BriefView";
 const categories = [...INTEL_CATEGORIES];
 import {
@@ -54,47 +53,45 @@ import {
 export type { IntelNavigation, IntelRoute } from "./navigation";
 export function IntelApp({
   navigation,
-  displayScale = 1,
 }: { navigation?: IntelNavigation; displayScale?: number } = {}) {
   const [fallbackNavigation] = useState(createMemoryNavigation);
   const navigator = navigation ?? fallbackNavigation;
+  const route = useSyncExternalStore(
+    navigator.subscribe,
+    navigator.getSnapshot,
+    navigator.getServerSnapshot,
+  );
   const b = useBackend();
+  const [introComplete, setIntroComplete] = useState(false);
+  const completeIntro = useCallback(() => setIntroComplete(true), []);
+  if (route.screen !== "home" && !introComplete) setIntroComplete(true);
+  const playLanding = route.screen === "home" && !introComplete;
   return (
     <View style={s.shell}>
-      {!b.connected ? (
-        <ScrollView
-          style={{ flex: 1, minHeight: 0 }}
-          contentContainerStyle={{ flexGrow: 1, paddingBottom: 24 }}
-        >
-          <View style={s.connection}>
-            <Label>Connection required</Label>
-            {b.connecting ? (
-              <LoadingState label="Checking local API…" compact />
-            ) : null}
-            <Text accessibilityRole="header" style={s.title}>
-              Connect to your Intel workspace.
-            </Text>
-            <Copy>
-              The workspace service must be ready before articles and actions
-              are available. Start the server, then retry.
-            </Copy>
-            <Button variant="primary" disabled={b.connecting} onPress={b.retry}>
-              {b.connecting ? "Connecting…" : "Connect / retry"}
-            </Button>
-            <Text style={s.small}>Server-managed workspace connection</Text>
-          </View>
-        </ScrollView>
-      ) : (
-        <ErrorBoundary label="Workspace">
-          <Workspace
-            key={`${b.base}/${b.instance}`}
-            navigation={navigator}
-            displayScale={displayScale}
+      <ScreenTransition fill screen={playLanding ? "connection" : "home"}>
+        {playLanding ? (
+          <OrbitScene
+            onComplete={completeIntro}
+            ready={b.connected}
+            health={b.health}
+            connecting={b.connecting}
+            error={b.connectionError}
+            onRetry={b.retry}
           />
-        </ErrorBoundary>
-      )}
-      {!b.connected ? (
-        <WorkspaceStatusBar connected={false} activeApp={false} />
+        ) : b.connected ? (
+          <ErrorBoundary label="Workspace">
+            <Workspace key={`${b.base}/${b.instance}`} navigation={navigator} />
+          </ErrorBoundary>
+        ) : (
+          <LoadingState label="Connecting to local API…" />
+        )}
+      </ScreenTransition>
+      {playLanding || !b.connected ? (
+        <WorkspaceStatusBar
+          hideConnectionIndicator={playLanding}
+          connected={b.connected}
+          activeApp={false}
+        />
       ) : null}
     </View>
   );
@@ -127,19 +124,12 @@ function WorkspaceStatusBar(
     />
   );
 }
-function Workspace({
-  navigation,
-  displayScale,
-}: {
-  navigation: IntelNavigation;
-  displayScale: number;
-}) {
+function Workspace({ navigation }: { navigation: IntelNavigation }) {
   const route = useSyncExternalStore(
     navigation.subscribe,
     navigation.getSnapshot,
     navigation.getServerSnapshot,
   );
-  const scroll = useRef<ScrollView>(null);
   const [category, setCategory] = useState<string>(INTEL_CATEGORIES[0]);
   const [day, setDay] = useState("");
   const [search, setSearch] = useState("");
@@ -167,9 +157,9 @@ function Workspace({
       !!location?.run_id &&
       !!location.article_id &&
       !matches,
-    30000,
   );
   const article = matches ? retainedArticle : directBrief.data?.article;
+  const lastArticle = retainedArticle ?? directBrief.data?.article;
   const screen = route.screen;
   const seed = route.screen === "topology" ? route.seed : null;
   const navigate = navigation.navigate;
@@ -177,7 +167,6 @@ function Workspace({
   function openArticle(next: Article) {
     setArticle(next);
     navigate({ screen: "brief", run_id: next.run_id, article_id: next.id });
-    scroll.current?.scrollTo({ y: 0, animated: false });
   }
   const days = useRead<{ days: string[] }>("days", screen === "bulletin");
   const selectedDay = days.data?.days.includes(day)
@@ -201,13 +190,8 @@ function Workspace({
       ]),
     ).values(),
   ];
-  function loadNextPage() {
-    if (!list.hasNextPage || list.isFetching || list.isFetchNextPageError)
-      return;
-    void list.fetchNextPage({ cancelRefetch: false });
-  }
   function topology(next: Seed) {
-    const direct = [next.Actor, next.Claim, next.Inference].find(
+    const direct = [next.Actor, next.Claim, next.Inference, next.Brief].find(
       (value): value is string => typeof value === "string" && !!value,
     );
     const from = article
@@ -217,7 +201,6 @@ function Workspace({
         : undefined;
     const open = (seed: string) => {
       navigate({ screen: "topology", seed, ...(from ? { from } : {}) });
-      scroll.current?.scrollTo({ y: 0, animated: false });
     };
     if (direct) {
       resolveTopology.reset();
@@ -231,35 +214,21 @@ function Workspace({
   }
   return (
     <>
-      <ScrollView
-        nativeID="intel-workspace-scroll"
-        ref={scroll}
-        testID="workspace-scroll"
-        style={{ flex: 1, minHeight: 0 }}
-        contentContainerStyle={s.workspaceInsets}
-        scrollEventThrottle={100}
-        onScroll={({
-          nativeEvent: { contentOffset, contentSize, layoutMeasurement },
-        }) => {
-          if (
-            screen === "bulletin" &&
-            contentOffset.y + layoutMeasurement.height >=
-              contentSize.height - 240
-          )
-            loadNextPage();
-        }}
-      >
-        <View nativeID="intel-content-frame" style={s.contentFrame}>
-          {resolveTopology.isPending ? (
-            <LoadingState label="Finding retained Brain memory…" compact />
-          ) : null}
-          {resolveTopology.error ? (
-            <Notice>{resolveTopology.error.message}</Notice>
-          ) : null}
+      <View nativeID="intel-content-frame" style={s.contentFrame}>
+        {resolveTopology.isPending ? (
+          <LoadingState label="Finding retained Brain memory…" compact />
+        ) : null}
+        {resolveTopology.error ? (
+          <Notice>{resolveTopology.error.message}</Notice>
+        ) : null}
+        <ScreenTransition fill screen={screen}>
           {screen === "home" ? (
             <HomeView onOpen={() => navigate({ screen: "bulletin" })} />
           ) : screen === "topology" ? (
-            <View style={{ minWidth: 0, width: "100%", maxWidth: "100%" }}>
+            <View
+              nativeID="intel-topology-workspace"
+              style={{ minWidth: 0, width: "100%", maxWidth: "100%" }}
+            >
               <Button
                 onPress={() =>
                   navigate(
@@ -273,22 +242,21 @@ function Workspace({
                   ? "Return to Brief"
                   : "Return to Bulletin"}
               </Button>
-              <Topology
-                displayScale={displayScale}
-                seed={seed}
-                onSeed={topology}
-                pageStyle={s.page}
-                titleStyle={s.title}
-              />
+              <Topology seed={seed} onSeed={topology} pageStyle={s.page} />
             </View>
           ) : screen === "brief" && article ? (
-            <Focus
-              key={`${article.run_id}/${article.id}`}
-              article={article}
-              onBack={() => navigate({ screen: "bulletin" })}
-              onArticle={openArticle}
-              onTopology={topology}
-            />
+            <ScrollView
+              style={{ flex: 1, minHeight: 0 }}
+              contentContainerStyle={{ flexGrow: 1 }}
+            >
+              <Focus
+                key={`${article.run_id}/${article.id}`}
+                article={article}
+                onBack={() => navigate({ screen: "bulletin" })}
+                onArticle={openArticle}
+                onTopology={topology}
+              />
+            </ScrollView>
           ) : screen === "brief" ? (
             <View style={s.page}>
               <Button onPress={() => navigate({ screen: "bulletin" })}>
@@ -310,7 +278,7 @@ function Workspace({
                   Open an article from the Bulletin.
                 </EmptyState>
               ) : (
-                <LoadingState label="Loading Focus Brief…" />
+                <BriefSkeleton />
               )}
             </View>
           ) : (
@@ -341,10 +309,31 @@ function Workspace({
               }}
             />
           )}
-        </View>
-      </ScrollView>
+        </ScreenTransition>
+      </View>
       <WorkspaceStatusBar
         connected
+        job={
+          screen === "home" ? undefined : (
+            <PageJobs
+              screen={screen}
+              article={screen === "brief" ? article : lastArticle}
+              daysPending={days.isPending}
+              daysError={days.error?.message}
+              feedFetching={list.isFetching}
+              feedError={
+                list.isError && !list.isFetchNextPageError
+                  ? list.error?.message
+                  : list.isFetchNextPageError
+                    ? list.error?.message
+                    : undefined
+              }
+              resolving={resolveTopology.isPending}
+              resolveError={resolveTopology.error?.message}
+              seed={seed}
+            />
+          )
+        }
         activeApp={screen !== "home"}
         onHome={() => navigate({ screen: "home" })}
         onIntel={() => navigate({ screen: "bulletin" })}
@@ -352,34 +341,137 @@ function Workspace({
     </>
   );
 }
-function BriefSourceImage({ uri, title }: { uri: string; title: string }) {
-  const [aspectRatio, setAspectRatio] = useState(16 / 9);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    let active = true;
-    Image.getSize(
-      uri,
-      (width, height) => {
-        if (active && width > 0 && height > 0) setAspectRatio(width / height);
-      },
-      () => {},
-    );
-    return () => {
-      active = false;
-    };
-  }, [uri]);
-  if (failed) return null;
+
+function stageJob(state: string, active: boolean): JobState {
+  if (/fail|error|blocked/i.test(state)) return "failed";
+  if (active || /^(running|extracting|processing)$/i.test(state))
+    return "running";
+  if (/queued|pending|waiting/i.test(state)) return "queued";
+  if (/completed|succeeded|done|indexed/i.test(state)) return "succeeded";
+  return "idle";
+}
+
+function PageJobs({
+  screen,
+  article,
+  daysPending,
+  daysError,
+  feedFetching,
+  feedError,
+  resolving,
+  resolveError,
+  seed,
+}: {
+  screen: "bulletin" | "brief" | "topology" | "home";
+  article?: Article | null;
+  daysPending: boolean;
+  daysError?: string;
+  feedFetching: boolean;
+  feedError?: string;
+  resolving: boolean;
+  resolveError?: string;
+  seed: string | null;
+}) {
+  const local: StatusJob[] =
+    screen === "bulletin"
+      ? [
+          {
+            id: "days",
+            label: "Retained days",
+            state: daysError ? "failed" : daysPending ? "running" : "succeeded",
+            detail: daysError ?? (daysPending ? "Loading" : "Ready"),
+          },
+          {
+            id: "feed",
+            label: "Article feed",
+            state: feedError
+              ? "failed"
+              : feedFetching
+                ? "running"
+                : "succeeded",
+            detail: feedError ?? (feedFetching ? "Loading" : "Ready"),
+          },
+        ]
+      : screen === "topology"
+        ? [
+            {
+              id: "topology",
+              label: "Topology",
+              state: resolveError
+                ? "failed"
+                : resolving
+                  ? "running"
+                  : seed
+                    ? "succeeded"
+                    : "idle",
+              detail:
+                resolveError ??
+                (resolving ? "Finding memory" : seed ? "Open" : "No selection"),
+            },
+          ]
+        : [];
+  if (!article) return <JobDropUp jobs={local} />;
   return (
-    <Image
-      accessibilityLabel={title}
-      source={{ uri }}
-      style={{ width: "100%", aspectRatio, maxHeight: 520 }}
-      resizeMode="contain"
-      onError={() => setFailed(true)}
+    <PageJobsWithBrief
+      article={article}
+      local={local}
+      includeBrief={screen === "brief" || screen === "bulletin"}
     />
   );
 }
 
+function PageJobsWithBrief({
+  article,
+  local,
+  includeBrief,
+}: {
+  article: Article;
+  local: StatusJob[];
+  includeBrief: boolean;
+}) {
+  const detail = useRead<Brief>(
+    "articles/detail?" + keyFor(article),
+    includeBrief,
+  );
+  const live = useBriefLive(article, detail.data?.job_id ?? "");
+  const progress = live?.progress;
+  const brief: StatusJob[] = !includeBrief
+    ? []
+    : progress?.stages.length
+      ? [
+          ...progress.stages.map((stage) => ({
+            id: stage.operation,
+            label: stage.label,
+            detail: stage.detail || stage.row || stage.state,
+            state: stageJob(stage.state, stage.active),
+          })),
+          {
+            id: "indexing",
+            label: "Indexing",
+            detail:
+              progress.indexing?.reason ||
+              progress.indexing?.state ||
+              "Not indexed",
+            state:
+              progress.indexing?.state === "indexed"
+                ? "succeeded"
+                : progress.indexing?.state === "failed"
+                  ? "failed"
+                  : progress.indexing?.state
+                    ? "running"
+                    : "idle",
+          },
+        ]
+      : [
+          {
+            id: "brief",
+            label: "Brief",
+            detail: detail.data?.status || article.title,
+            state: deriveBriefJobState({ live, detail: detail.data }),
+          },
+        ];
+  return <JobDropUp jobs={[...local, ...brief]} />;
+}
 function Focus({
   article: a,
   onBack,
@@ -391,7 +483,7 @@ function Focus({
   onArticle: (a: Article) => void;
   onTopology: (s: Seed) => void;
 }) {
-  const detail = useRead<Brief>("articles/detail?" + keyFor(a), true, 30000);
+  const detail = useRead<Brief>("articles/detail?" + keyFor(a), true);
   const related = useRelated(a);
   const ensure = useAction<{ job_id: string }>("brief/ensure");
   const reload = useAction<{ job_id: string }>("brief/reload");
@@ -402,8 +494,9 @@ function Focus({
   );
   const admitted = useRef("");
   const admit = ensure.mutate;
+  const alreadyRan = Boolean(detail.data?.job_id || detail.data?.publication);
   useEffect(() => {
-    if (!backend.connected) return;
+    if (!backend.connected || !detail.isSuccess || alreadyRan) return;
     const key = JSON.stringify([
       backend.base,
       backend.instance,
@@ -412,107 +505,26 @@ function Focus({
     ]);
     if (admitted.current === key) return;
     admitted.current = key;
-    // Admission is idempotent in core; polling and render updates must not
-    // repeatedly admit the same occurrence. Reopening can safely reattach.
+    // A brief with no retained run is admitted once. Revisiting a completed
+    // run does not queue another chain; Reload does that explicitly.
     admit({ run: a.run_id, id: a.id });
   }, [
     a.run_id,
     a.id,
+    alreadyRan,
     backend.base,
     backend.instance,
     backend.connected,
+    detail.isSuccess,
     admit,
   ]);
   const d = detail.data;
   const shown = d?.article || a;
-  const source = (
-    <View style={{ gap: 16 }}>
-      {safeLink(shown.image_url) && (
-        <BriefSourceImage
-          key={shown.image_url}
-          uri={shown.image_url}
-          title={shown.title}
-        />
-      )}
-      {safeLink(shown.url) && (
-        <Button
-          variant="quiet"
-          onPress={() => {
-            void Linking.openURL(shown.url);
-          }}
-        >
-          Read original source ↗
-        </Button>
-      )}
-    </View>
-  );
-  const context = (
-    <View style={{ gap: 16, minWidth: 0 }}>
-      {detail.isPending ? (
-        <LoadingState label="Loading brief status…" />
-      ) : d ? (
-        <>
-          <Label>Brief lifecycle</Label>
-          <Copy>{d?.status || "Loading…"}</Copy>
-          <Text style={s.small}>
-            Extraction: {d?.lifecycle || "unavailable"}
-          </Text>
-          <Text style={s.small}>
-            Publication:{" "}
-            {d?.publication ? "Retained canonical brief" : "Not published"}
-          </Text>
-          <Copy>
-            Indexing: {d?.indexing?.state || "Not indexed"}
-            {d?.indexing?.reason ? ` · ${d.indexing.reason}` : ""}
-          </Copy>
-        </>
-      ) : (
-        <EmptyState title="Brief status unavailable" />
-      )}
-      <Button
-        variant="primary"
-        disabled={ensure.isPending}
-        onPress={() => ensure.mutate({ run: a.run_id, id: a.id })}
-      >
-        {ensure.isPending ? "Admitting…" : "Ensure / resume brief"}
-      </Button>
-      <Button
-        variant="quiet"
-        disabled={reload.isPending}
-        onPress={() =>
-          reload.mutate({
-            run: a.run_id,
-            id: a.id,
-            request_id: backend.createRequestId(),
-          })
-        }
-      >
-        Reload article / new generation
-      </Button>
-      {reload.error && <Notice>{reload.error.message}</Notice>}
-      <Button
-        variant="quiet"
-        onPress={() => {
-          void detail.refetch();
-          void related.refetch();
-        }}
-      >
-        Refresh retained brief
-      </Button>
-      <Label>Links</Label>
-      {detail.isPending ? (
-        <LoadingState label="Loading retained links…" />
-      ) : d ? (
-        <JsonLines value={d.links} />
-      ) : (
-        <EmptyState title="Links unavailable" />
-      )}
-    </View>
-  );
+  const jobState = deriveBriefJobState({ ensure, reload, live, detail: d });
   const relatedContent = (
     <View style={{ gap: 16, minWidth: 0 }}>
       {related.isPending ? (
-        <LoadingState label="Loading related leads…" />
+        <BriefSkeleton label="Loading related leads…" />
       ) : null}
       {related.isRefetching && !related.isFetchingNextPage ? (
         <LoadingState label="Refreshing related leads…" compact />
@@ -546,7 +558,7 @@ function Focus({
         <EmptyState title="No related leads">No retained leads.</EmptyState>
       ) : null}
       {related.isFetchingNextPage ? (
-        <LoadingState label="Loading more related leads…" />
+        <BriefSkeleton label="Loading more related leads…" />
       ) : null}
       {related.hasNextPage && (
         <Button
@@ -578,9 +590,22 @@ function Focus({
       pending={detail.isPending}
       onBack={onBack}
       onTopology={onTopology}
-      source={source}
+      jobState={jobState}
+      source={null}
       related={relatedContent}
-      operations={context}
+      operations={
+        <ContextRail
+          a={a}
+          d={d}
+          shown={shown}
+          detail={detail}
+          related={related}
+          ensure={ensure}
+          reload={reload}
+          backend={backend}
+          jobState={jobState}
+        />
+      }
       notices={
         <>
           {live?.progress && !live.progress.complete ? (
@@ -613,59 +638,11 @@ function Focus({
               Could not start brief extraction: {ensure.error.message}
             </Notice>
           )}
-          {detail.isPending ? (
-            <LoadingState label="Loading Focus Brief…" compact />
-          ) : null}
+          {detail.isPending ? <BriefSkeleton /> : null}
         </>
       }
     />
   );
-}
-function JsonLines({ value }: { value: unknown }) {
-  function lines(v: unknown): string[] {
-    if (Array.isArray(v)) return v.flatMap(lines);
-    if (typeof v === "string") return [v];
-    if (!v || typeof v !== "object") return [];
-    const object = v as Record<string, unknown>;
-    const own = [
-      "text",
-      "claim",
-      "inference_text",
-      "why",
-      "verification_needed",
-      "interpretation",
-      "empty_reason",
-    ].flatMap((key) =>
-      typeof object[key] === "string" && object[key]
-        ? [String(object[key])]
-        : [],
-    );
-    return own.length
-      ? own
-      : Object.entries(object)
-          .filter(([key]) =>
-            ["claims", "inferences", "leads", "links"].includes(key),
-          )
-          .flatMap(([, v]) => lines(v));
-  }
-  const items = lines(value);
-  return items.length ? (
-    <View style={{ gap: 12 }}>
-      {items.map((line, i) => (
-        <Copy key={i}>{line}</Copy>
-      ))}
-    </View>
-  ) : (
-    <EmptyState title="No retained output" />
-  );
-}
-
-function safeLink(raw: string) {
-  try {
-    return ["http:", "https:"].includes(new URL(raw).protocol);
-  } catch {
-    return false;
-  }
 }
 const s = StyleSheet.create({
   desktop: {
@@ -701,17 +678,15 @@ const s = StyleSheet.create({
   },
   bulletinContent: { flex: 1, minWidth: 0, gap: 16 },
   shell: { height: "100%", minHeight: 0, position: "relative" },
-  workspaceInsets: {
-    flexGrow: 1,
-    paddingTop: 32,
-    paddingBottom: 32,
-    paddingHorizontal: 16,
-  },
   contentFrame: {
-    flexGrow: 1,
+    flex: 1,
+    minHeight: 0,
     width: "100%",
     maxWidth: 1440,
     alignSelf: "center",
+    paddingTop: 32,
+    paddingBottom: 32,
+    paddingHorizontal: 16,
   },
   masthead: {
     ...(glass as object),

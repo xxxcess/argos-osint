@@ -141,7 +141,9 @@ describe("Focus Brief", () => {
         data={{ ...brief, confidence: null, output: { inferences: [] } }}
       />,
     );
-    expect(screen.getByText("Not assessed")).toBeVisible();
+    expect(screen.getByText("B2")).toBeVisible();
+    expect(screen.getByText("F6")).toBeVisible();
+    expect(screen.queryByText("Not assessed")).not.toBeInTheDocument();
     expect(
       within(screen.getByTestId("reader-inferences")).getByRole("heading", {
         name: "No retained output",
@@ -161,7 +163,7 @@ describe("Focus Brief", () => {
     };
     const { rerender } = render(<BriefView {...props} pending />);
     expect(
-      screen.getByRole("progressbar", { name: "Loading extracted evidence…" }),
+      screen.getByRole("status", { name: "Loading extracted evidence…" }),
     ).toBeVisible();
     expect(
       screen.queryByRole("heading", { name: "No actors extracted" }),
@@ -216,8 +218,10 @@ describe("Focus Brief", () => {
     await user.keyboard(" ");
     expect(onTopology).toHaveBeenLastCalledWith({ Claim: "claim-memory" });
   });
-  it("keeps unindexed actor, claim and inference navigation read-only", async () => {
+  it("opens extracted claims, actors and inferences before indexing assigns a memory", async () => {
+    const user = userEvent.setup();
     const onTopology = vi.fn();
+    const extracted = { Brief: "brief:run-1/raw-id" };
     render(
       <View
         data={{
@@ -235,17 +239,27 @@ describe("Focus Brief", () => {
         onTopology={onTopology}
       />,
     );
-    for (const name of [
-      "Explore actor Harbor authority",
-      "Explore claim: Retained statement",
-      "Explore inference: Possible outcome",
-      "Launch 3D topology",
-    ])
-      expect(screen.getByRole("button", { name })).toBeDisabled();
     expect(
-      screen.getAllByText(/Awaiting Brain indexing/).length,
-    ).toBeGreaterThan(0);
-    expect(onTopology).not.toHaveBeenCalled();
+      screen.queryByText(/Awaiting Brain indexing/),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Explore claim: Retained statement" }),
+    );
+    expect(onTopology).toHaveBeenLastCalledWith(extracted);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Explore inference: Possible outcome",
+      }),
+    );
+    expect(onTopology).toHaveBeenLastCalledWith(extracted);
+    await user.click(
+      screen.getByRole("button", { name: "Explore actor Harbor authority" }),
+    );
+    expect(onTopology).toHaveBeenLastCalledWith(extracted);
+    await user.click(
+      screen.getByRole("button", { name: "Launch 3D topology" }),
+    );
+    expect(onTopology).toHaveBeenLastCalledWith(extracted);
   });
   it("opens related cards with keyboard activation and preserves basis/tentative attribution", async () => {
     const user = userEvent.setup();
@@ -268,7 +282,7 @@ describe("Focus Brief", () => {
     await user.keyboard("{Enter}");
     expect(onPress).toHaveBeenCalledOnce();
   });
-  it("navigates a related occurrence through real queries and admits the new occurrence", async () => {
+  it("navigates a related occurrence that already ran without admitting another chain", async () => {
     const admissions: unknown[] = [];
     const next = {
       ...article,
@@ -345,11 +359,6 @@ describe("Focus Brief", () => {
       }),
     );
     await screen.findByRole("heading", { name: "Related report" });
-    await vi.waitFor(() =>
-      expect(admissions).toEqual([
-        { run: "run-1", id: "raw-id" },
-        { run: "run-2", id: "related-id" },
-      ]),
-    );
+    await vi.waitFor(() => expect(admissions).toEqual([]));
   });
 });

@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::atlas_metadata;
 use crate::brain_topology::TopologyNode;
 use crate::brain_topology::TopologyNodeKind;
+use crate::brain_topology::TopologyOptions;
 use crate::brain_topology::TopologySeed;
 use crate::storage::repo::Repository;
 use crate::store::AtlasArticleRow;
@@ -51,8 +52,13 @@ pub(crate) async fn decorate(
         revision: revision.into(),
         originating_memory: None,
     };
-    let snapshot =
-        crate::storage::topology::topology_snapshot(repo, &source, &Default::default()).await?;
+    // Brief bindings are direct article neighbours. Expanding their neighbours
+    // builds the graph view on every brief read, including completed briefs.
+    let options = TopologyOptions {
+        depth: 1,
+        ..Default::default()
+    };
+    let snapshot = crate::storage::topology::topology_snapshot(repo, &source, &options).await?;
     if let Some(items) = value["actors"].as_array_mut() {
         for item in items {
             let mut labels = vec![item["display_name"].as_str().unwrap_or_default().to_owned()];
@@ -63,7 +69,23 @@ pub(crate) async fn decorate(
                     .flatten()
                     .filter_map(|label| label.as_str().map(str::to_owned)),
             );
-            item["topology_seed"] = unique_seed(&snapshot.nodes, TopologyNodeKind::Entity, &labels);
+            let actor_id = item["id"].as_str().unwrap_or_default();
+            item["topology_seed"] = if actor_id.starts_with("catalog-actor-") {
+                snapshot
+                    .nodes
+                    .iter()
+                    .find_map(|node| {
+                        node.topology_seed
+                            .as_ref()
+                            .filter(
+                                |seed| matches!(seed, TopologySeed::Actor(id) if id == actor_id),
+                            )
+                            .map(|seed| json!(seed))
+                    })
+                    .unwrap_or(Value::Null)
+            } else {
+                unique_seed(&snapshot.nodes, TopologyNodeKind::Entity, &labels)
+            };
         }
     }
     for field in ["claims", "inferences"] {

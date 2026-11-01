@@ -48,6 +48,12 @@ Stage completion and canonical publication are separate commits: `brief_stages::
 
 The Jobs dashboard reads a bounded page of top-level ids before loading event, task and attempt metrics. Those page metrics are grouped by the selected ids. Running `api_server` and `web_server` rows rank ahead of ordinary work inside the active filters. A single job's event total covers that job and its immediate children, matching the page cohort. See [Intel web](intel-web.md#traffic-in-rust-jobs--logs).
 
+Topology snapshots keep their consistent transaction in a worker that owns `BEGIN` through `COMMIT`/`CANCEL`. If the awaiting caller is dropped (for example by the HTTP timeout), the worker stops traversal and awaits rollback through `run_tx`; dropping the request does not drop the open SDK transaction. This cleanup applies to topology snapshots, including brief navigation binding reads; other transaction callers retain their existing behavior.
+
 ## Intel web read service
 
 The [UI-independent Intel service](../../../crates/argos-osint-core/src/intel_service.rs) supplies keyset article occurrence pages and brief projections to the [local HTTP API](intel-web.md). Bootstrap adds the `atlas_article_bulletin` category/time/ID index idempotently; record formats and schema version remain unchanged. The API host owns the repository and the CLI supervisor does not open it. Existing embedded locks/server leases therefore remain authoritative.
+
+## Actor catalog
+
+The [seeded actor catalog](actor-catalog.md) adds provenance-bearing catalog fields to `brain_actor` and the leased `brain_actor_seed:catalog` completion/progress receipt. Actor, alias, typed-memory and graph-node batches commit together. Existing schema version 1 is extended idempotently; no automatic data wipe or actor conversion runs at startup. A user-requested `storage reset --yes` removes data and the receipt while keeping configuration, credentials, models and datasets.

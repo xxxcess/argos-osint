@@ -218,6 +218,9 @@ struct Query<'a> {
     gaps: BTreeSet<String>,
     remaining_rows: usize,
     memories: HashMap<String, Option<MemoryRow>>,
+    /// Brief detail only needs direct article bindings, not the graph walk.
+    binding: bool,
+    cancel: &'a tokio::sync::watch::Sender<()>,
 }
 
 impl Query<'_> {
@@ -1585,6 +1588,9 @@ impl Query<'_> {
         n: &TopologyNode,
         out: &mut Vec<Adjacency>,
     ) -> Result<()> {
+        if self.cancel.is_closed() {
+            anyhow::bail!("Topology request cancelled");
+        }
         let mut r = stmt(
             self.tx
                 .query(
@@ -2063,18 +2069,59 @@ pub async fn topology_snapshot(
     seed: &TopologySeed,
     options: &TopologyOptions,
 ) -> Result<TopologySnapshot> {
+    snapshot_worker(repo, seed, options, false).await
+}
+
+/// Direct article bindings for a brief read. Skips the neighborhood walk that
+/// can hold a transaction until the HTTP deadline drops it.
+pub async fn brief_binding_snapshot(
+    repo: &Repository,
+    seed: &TopologySeed,
+) -> Result<TopologySnapshot> {
+    let options = TopologyOptions {
+        depth: 1,
+        max_nodes: 48,
+        max_edges: 64,
+        ..Default::default()
+    };
+    snapshot_worker(repo, seed, &options, true).await
+}
+
+async fn snapshot_worker(
+    repo: &Repository,
+    seed: &TopologySeed,
+    options: &TopologyOptions,
+    binding: bool,
+) -> Result<TopologySnapshot> {
     ensure!(
         options.continuation_token.is_none(),
         "Topology continuation is unavailable; refresh with a larger bounded limit"
     );
-    // Every read of one snapshot runs in one transaction, so a concurrent
-    // publish never shows half its writes. Errors keep their text.
-    let out = run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
-        snapshot_in(repo, tx, seed, options)
-            .await
-            .map_err(|e| TxError::Abort(format!("{e:#}")))
-    })
-    .await;
+    // The worker owns BEGIN through COMMIT/CANCEL. Dropping the receiver
+    // (HTTP timeout) is observed between statements. The in-flight statement
+    // is allowed to finish so its transaction is cancelled, not dropped.
+    let (caller, lifetime) = tokio::sync::watch::channel(());
+    let (finished, waiting) = tokio::sync::oneshot::channel();
+    let (repo, seed, options) = (repo.clone(), seed.clone(), options.clone());
+    tokio::spawn(async move {
+        let out = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+            let (repo, seed, options, caller) = (&repo, &seed, &options, &caller);
+            async move {
+                if caller.is_closed() {
+                    return Err(TxError::Abort("Topology request cancelled".into()));
+                }
+                snapshot_in(repo, tx, seed, options, binding, caller)
+                    .await
+                    .map_err(|e| TxError::Abort(format!("{e:#}")))
+            }
+        })
+        .await;
+        let _ = finished.send(out);
+    });
+    let out = waiting
+        .await
+        .map_err(|_| anyhow::anyhow!("Topology transaction worker stopped"))?;
+    drop(lifetime);
     match out {
         Ok(c) => Ok(c.value),
         Err(TxError::Abort(message)) => Err(anyhow::anyhow!(message)),
@@ -2087,6 +2134,8 @@ async fn snapshot_in(
     tx: Tx,
     seed: &TopologySeed,
     options: &TopologyOptions,
+    binding: bool,
+    cancel: &tokio::sync::watch::Sender<()>,
 ) -> Result<TopologySnapshot> {
     let changed: Option<i64> = {
         let mut r = stmt(
@@ -2106,6 +2155,8 @@ async fn snapshot_in(
         remaining_rows: options.max_nodes.saturating_mul(64).clamp(4096, 32768),
         memories: HashMap::new(),
         tx,
+        binding,
+        cancel,
     };
     let mut snapshot = TopologySnapshot {
         seed: Some(seed.clone()),
@@ -2326,6 +2377,9 @@ async fn snapshot_in(
     let candidate_limit = options.max_nodes.saturating_mul(8).clamp(256, 4096);
     let edge_limit = options.max_edges.saturating_mul(8).clamp(512, 8192);
     while let Some(id) = queue.pop_front() {
+        if q.cancel.is_closed() {
+            anyhow::bail!("Topology request cancelled");
+        }
         let current: TopologyNode = nodes[&id].clone();
         if current.min_hops >= depth {
             continue;

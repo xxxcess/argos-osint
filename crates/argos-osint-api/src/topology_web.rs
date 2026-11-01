@@ -39,6 +39,21 @@ pub(crate) async fn read(
     State(state): State<ApiState>,
     Query(query): Query<MemoryQuery>,
 ) -> ApiResult {
+    if let Some(rest) = query.seed.strip_prefix("brief:") {
+        let mut parts = rest.splitn(2, '/');
+        let run = parts.next().unwrap_or("");
+        let id = parts.next().unwrap_or("");
+        if !argos_osint_core::intel_service::valid_id(run)
+            || !argos_osint_core::intel_service::valid_id(id)
+        {
+            return Err(crate::bad());
+        }
+        return Ok(Json(
+            argos_osint_core::intel_service::extracted_topology(&state.repo, run, id)
+                .await
+                .map_err(crate::internal)?,
+        ));
+    }
     let seed = memory_seed(&state, &query.seed).await?;
     let snapshot = storage::topology::topology_snapshot(&state.repo, &seed, &Default::default())
         .await

@@ -160,12 +160,16 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
     let source_revision = crate::atlas_metadata::input_hash(article);
     let mut parts = intel_brief_view::brief_parts(repo, article).await?;
     parts.relations.sort();
-    let mut actors = parts
-        .metadata
-        .as_ref()
-        .map(|m| crate::atlas_metadata::article_actors(article, m))
-        .unwrap_or_default();
-    if let Some(output) = &parts.output {
+    let catalog_actors = crate::storage::actor_catalog::article_actors(repo, article).await?;
+    let catalog_enabled = catalog_actors.is_some();
+    let mut actors = catalog_actors.unwrap_or_else(|| {
+        parts
+            .metadata
+            .as_ref()
+            .map(|m| crate::atlas_metadata::article_actors(article, m))
+            .unwrap_or_default()
+    });
+    if let Some(output) = parts.output.as_ref().filter(|_| !catalog_enabled) {
         crate::atlas_metadata::merge_output_actors(&mut actors, &output.entities);
     }
     let links = crate::intel_recon::bucket_extracted_with_explanations(
@@ -246,7 +250,24 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
     if let Some(inferences) = inference_rows {
         value["inferences"] = json!(inferences);
     }
-    crate::intel_topology::decorate(repo, article, &source_revision, &mut value).await?;
+    // A running chain already owns storage. Binding navigation seeds here
+    // rebuilds a topology snapshot on every progress refresh and pushes the
+    // read past the client abort deadline ("signal timed out").
+    let brief_running = match &job_id {
+        Some(job) => brief_stages::stage_views(repo, job)
+            .await?
+            .iter()
+            .any(|stage| {
+                matches!(
+                    stage.state.as_str(),
+                    "queued" | "running" | "retry_scheduled" | "waiting" | "pending"
+                )
+            }),
+        None => false,
+    };
+    if !brief_running {
+        crate::intel_topology::decorate(repo, article, &source_revision, &mut value).await?;
+    }
     let revision = crate::nlp::cache::hash(&serde_json::to_string(&value)?);
     value["revision"] = json!(revision);
     Ok(value)
@@ -314,4 +335,212 @@ pub async fn reload_brief(
         metadata: crate::intel_recon::brief_stages::metadata_snapshot(article),
     };
     Ok(brief_stages::ensure(repo, &inputs).await?.job_id)
+}
+
+/// Graph of extracted brief items. Indexing is not required: these nodes are
+/// the claims, actors and inferences already stored for the article.
+pub async fn extracted_topology(repo: &Repository, run: &str, id: &str) -> Result<Value> {
+    let Some(article) = article(repo, run, id).await? else {
+        bail!("article is not retained");
+    };
+    let parts = intel_brief_view::brief_parts(repo, &article).await?;
+    let actors = parts
+        .metadata
+        .as_ref()
+        .map(|metadata| crate::atlas_metadata::article_actors(&article, metadata))
+        .unwrap_or_default();
+    Ok(extracted_graph(
+        &article.title,
+        &article.run_id,
+        &article.id,
+        &actors
+            .iter()
+            .map(|actor| (actor.id.as_str(), actor.display_name.as_str()))
+            .collect::<Vec<_>>(),
+        &parts
+            .claims
+            .iter()
+            .map(|claim| {
+                (
+                    claim.fingerprint.as_str(),
+                    claim.claim.as_str(),
+                    claim.classification.as_str(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        &parts
+            .output
+            .as_ref()
+            .map(|output| {
+                output
+                    .inferences
+                    .iter()
+                    .map(|item| {
+                        (
+                            item.id.as_str(),
+                            item.text.as_str(),
+                            item.premise_claim_ids
+                                .iter()
+                                .map(String::as_str)
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        &parts
+            .relations
+            .iter()
+            .map(|(left, right, relation)| (left.as_str(), right.as_str(), relation.as_str()))
+            .collect::<Vec<_>>(),
+    ))
+}
+
+pub(crate) fn extracted_graph(
+    title: &str,
+    run: &str,
+    id: &str,
+    actors: &[(&str, &str)],
+    claims: &[(&str, &str, &str)],
+    inferences: &[(&str, &str, Vec<&str>)],
+    relations: &[(&str, &str, &str)],
+) -> Value {
+    let root = format!("article:{run}/{id}");
+    let mut nodes = vec![json!({
+        "id": root,
+        "kind": "article",
+        "label": title,
+        "detail": "Extracted brief",
+        "is_root": true,
+        "min_hops": 0,
+    })];
+    let mut edges = Vec::new();
+    for (actor_id, name) in actors {
+        if name.is_empty() {
+            continue;
+        }
+        let node = format!("actor:{actor_id}");
+        nodes.push(json!({
+            "id": node,
+            "kind": "entity",
+            "label": name,
+            "detail": "Extracted actor",
+            "is_root": false,
+            "min_hops": 1,
+        }));
+        edges.push(json!({
+            "id": format!("mention:{node}"),
+            "from": root,
+            "to": node,
+            "label": "mentioned",
+        }));
+    }
+    let mut claim_ids = std::collections::BTreeSet::new();
+    for (claim_id, text, classification) in claims {
+        if text.is_empty() {
+            continue;
+        }
+        let node = format!("claim:{claim_id}");
+        claim_ids.insert(*claim_id);
+        let inference = *classification == "inference";
+        nodes.push(json!({
+            "id": node,
+            "kind": if inference { "inference" } else { "claim" },
+            "label": text,
+            "detail": "Extracted brief item",
+            "is_root": false,
+            "min_hops": 1,
+        }));
+        edges.push(json!({
+            "id": format!("contains:{node}"),
+            "from": root,
+            "to": node,
+            "label": "extracted",
+        }));
+    }
+    for (inference_id, text, premises) in inferences {
+        if text.is_empty() {
+            continue;
+        }
+        let node = format!("inference:{inference_id}");
+        nodes.push(json!({
+            "id": node,
+            "kind": "inference",
+            "label": text,
+            "detail": "Extracted inference",
+            "is_root": false,
+            "min_hops": 1,
+        }));
+        edges.push(json!({
+            "id": format!("contains:{node}"),
+            "from": root,
+            "to": node,
+            "label": "extracted",
+        }));
+        for premise in premises {
+            if claim_ids.contains(premise) {
+                edges.push(json!({
+                    "id": format!("premise:{node}:{premise}"),
+                    "from": format!("claim:{premise}"),
+                    "to": node,
+                    "label": "premise",
+                }));
+            }
+        }
+    }
+    for (left, right, relation) in relations {
+        if claim_ids.contains(left) && claim_ids.contains(right) {
+            edges.push(json!({
+                "id": format!("relation:{left}:{right}:{relation}"),
+                "from": format!("claim:{left}"),
+                "to": format!("claim:{right}"),
+                "label": relation,
+            }));
+        }
+    }
+    json!({
+        "root_label": title,
+        "nodes": nodes,
+        "edges": edges,
+        "findings": { "gaps": [] },
+        "has_continuation": false,
+    })
+}
+
+#[cfg(test)]
+mod extracted_graph_tests {
+    use super::extracted_graph;
+
+    #[test]
+    fn extracted_items_are_navigable_before_indexing() {
+        let graph = extracted_graph(
+            "Harbor report",
+            "run-1",
+            "art-1",
+            &[("local-actor", "Harbor authority")],
+            &[("claim-1", "Retained statement", "fact")],
+            &[("inf-1", "Possible outcome", vec!["claim-1"])],
+            &[],
+        );
+        let labels: Vec<_> = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Harbor report",
+                "Harbor authority",
+                "Retained statement",
+                "Possible outcome"
+            ]
+        );
+        assert!(graph["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["label"] == "premise"));
+    }
 }

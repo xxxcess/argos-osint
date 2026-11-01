@@ -35,8 +35,9 @@ export async function proxyRust(
   if (request.method !== method) return failure(405, "Method not allowed");
   const url = new URL(request.url);
   const host = request.headers.get("host");
+  let presented: URL;
   try {
-    const presented = new URL(`${url.protocol}//${host || url.host}`);
+    presented = new URL(`${url.protocol}//${host || url.host}`);
     if (
       !["127.0.0.1", "localhost"].includes(presented.hostname) ||
       presented.port !== url.port
@@ -47,7 +48,9 @@ export async function proxyRust(
   }
   const origin = request.headers.get("origin");
   if (
-    (origin && origin !== url.origin) ||
+    // Next can reconstruct request.url with its internal hostname. The
+    // browser's origin must match the validated incoming Host instead.
+    (origin && origin !== presented.origin) ||
     (!origin && request.headers.get("sec-fetch-site") === "cross-site")
   )
     return failure(403, "Origin refused");
@@ -87,7 +90,7 @@ export async function proxyRust(
       cache: "no-store",
       redirect: "error",
       headers: body === undefined ? {} : { "content-type": "application/json" },
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(30000)]),
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(55000)]),
     });
     return new Response(response.body, {
       status: response.status,

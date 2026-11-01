@@ -60,6 +60,47 @@ describe("Next same-origin API → Rust transport", () => {
     expect(await response.json()).toEqual({ nodes: [{ kind: "inference" }] });
   });
 
+  it.each([
+    ["http://localhost:3000", "127.0.0.1:3000"],
+    ["http://127.0.0.1:3000", "localhost:3000"],
+  ])(
+    "admits same-origin ensure through Host when Next reconstructs %s",
+    async (internal, host) => {
+      vi.stubEnv("ARGOS_RUST_API_ORIGIN", rust);
+      mswServer.use(
+        http.post(`${rust}/api/v1/brief/ensure`, async ({ request }) => {
+          expect(request.headers.get("origin")).toBeNull();
+          expect(await request.json()).toEqual({ run: "r1", id: "a1" });
+          return HttpResponse.json({ job_id: "existing-job" });
+        }),
+      );
+      const input = (origin: string) =>
+        new Request(`${internal}/api/v1/brief/ensure`, {
+          method: "POST",
+          headers: { host, origin, "content-type": "application/json" },
+          body: JSON.stringify({ run: "r1", id: "a1" }),
+        });
+      const response = await proxyRust(input(`http://${host}`), [
+        "brief",
+        "ensure",
+      ]);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ job_id: "existing-job" });
+      // Loopback aliases are distinct browser origins, as are different ports.
+      expect(
+        (await proxyRust(input(internal), ["brief", "ensure"])).status,
+      ).toBe(403);
+      expect(
+        (
+          await proxyRust(input(`http://${host.replace(":3000", ":3001")}`), [
+            "brief",
+            "ensure",
+          ])
+        ).status,
+      ).toBe(403);
+    },
+  );
+
   it("rejects cross-origin writes, unknown routes, wrong methods and oversized bodies before forwarding", async () => {
     const input = (body: string, origin = next) =>
       new Request(`${next}/api/v1/topology/resolve`, {

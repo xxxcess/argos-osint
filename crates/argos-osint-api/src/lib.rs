@@ -72,7 +72,10 @@ pub fn router(state: ApiState) -> Router {
 }
 
 async fn request_timeout(request: Request, next: Next) -> Response {
-    match tokio::time::timeout(Duration::from_secs(30), next.run(request)).await {
+    // A read queued behind a running brief still has to return. 45s covers
+    // that wait; the web client waits longer so it receives this JSON timeout
+    // instead of aborting with "signal timed out".
+    match tokio::time::timeout(Duration::from_secs(45), next.run(request)).await {
         Ok(response) => response,
         Err(_) => (
             StatusCode::REQUEST_TIMEOUT,

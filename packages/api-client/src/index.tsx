@@ -96,7 +96,7 @@ export interface Topology {
   findings: { gaps: string[] };
   has_continuation: boolean;
 }
-interface Health {
+export interface Health {
   ready: boolean;
   storage: boolean;
   service: string;
@@ -121,6 +121,8 @@ interface Backend {
   connected: boolean;
   live?: LiveTransport;
   connecting: boolean;
+  health?: Health;
+  connectionError?: string;
   retry: () => void;
   createRequestId: () => string;
   theme: "dark" | "light";
@@ -154,9 +156,14 @@ export class ApiError extends Error {
   }
 }
 
+// Longer than the API's 45s deadline and shorter than the Next relay's 55s
+// deadline, so a slow read queued behind a running brief can finish and a
+// real server timeout arrives as JSON instead of AbortSignal "signal timed out".
+const REQUEST_TIMEOUT_MS = 52_000;
+
 function combineSignals(
   signal?: AbortSignal,
-  timeoutMs = 10000,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): { signal?: AbortSignal; cleanup?: () => void } {
   const timeoutSignal =
     typeof AbortSignal !== "undefined" &&
@@ -203,7 +210,7 @@ async function request<T>(
   path: string,
   body?: unknown,
   signal?: AbortSignal,
-  timeoutMs = 10000,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<T> {
   const combined = combineSignals(signal, timeoutMs);
   let response: Response;
@@ -337,6 +344,8 @@ function Connection({
     connected,
     live,
     connecting: health.isFetching,
+    health: health.isSuccess ? health.data : undefined,
+    connectionError: health.error?.message,
     createRequestId: settings.createRequestId,
     retry: () => {
       void health.refetch();
@@ -353,7 +362,11 @@ export function useBackend() {
   if (!v) throw new Error("BackendProvider required");
   return v;
 }
-export function useRead<T>(path: string, enabled = true, timeoutMs = 10000) {
+export function useRead<T>(
+  path: string,
+  enabled = true,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+) {
   const b = useBackend();
   return useQuery({
     queryKey: [b.base, b.instance, path],
@@ -539,7 +552,6 @@ export function useTopology(seed: string | null) {
         `topology?seed=${encodeURIComponent(seed || "")}`,
         undefined,
         signal,
-        30000,
       ),
   });
 }
@@ -561,7 +573,6 @@ export function useRelated(article: Article) {
           (pageParam ? "&" + new URLSearchParams({ cursor: pageParam }) : ""),
         undefined,
         signal,
-        30000,
       ),
     getNextPageParam: (last) => last.next_cursor || undefined,
     staleTime: 30_000,

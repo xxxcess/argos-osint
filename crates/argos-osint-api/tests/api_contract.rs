@@ -127,6 +127,93 @@ async fn storage_api_contracts() {
         port: 8080,
         origins: Arc::new(vec!["http://localhost:3000".into()]),
     });
+    repo.db().query("CREATE memory:routeactor SET text = 'Route actor', memory_kind = 'actor'; CREATE brain_actor:routeactor SET display_name = 'Route actor', created_at = '', updated_at = ''; CREATE memory:routeclaim SET text = 'Route claim', memory_kind = 'claim'; CREATE memory:routeinference SET text = 'Route inference', memory_kind = 'inference';").await.unwrap().check().unwrap();
+    for (id, kind) in [
+        ("routeactor", "entity"),
+        ("routeclaim", "claim"),
+        ("routeinference", "inference"),
+    ] {
+        let (status, graph) = call(
+            &app,
+            "GET",
+            &format!("/api/v1/topology?seed={id}"),
+            None,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{graph}");
+        assert_eq!(graph["root_id"], id);
+        assert_eq!(graph["root_kind"], kind);
+    }
+    let (status, resolved) = call(
+        &app,
+        "POST",
+        "/api/v1/topology/resolve",
+        None,
+        json!({"seed":{"Inference":"routeinference"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resolved, json!({"seed":"routeinference"}));
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/topology?seed=missing",
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/topology?seed=routeinference&kind=claim",
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/topology/resolve",
+            None,
+            json!({"seed":{"Topic":"No fabricated memory"}})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let (status, metrics) = call(&app, "GET", "/api/v1/host/metrics", None, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metrics["cpu_percent"], Value::Null, "CPU needs two samples");
+    assert_eq!(
+        metrics["network_kbps"],
+        Value::Null,
+        "Network needs a delta window"
+    );
+    for field in ["memory_percent", "disk_percent"] {
+        assert!(metrics.get(field).is_some(), "Missing {field}");
+        if let Some(value) = metrics[field].as_f64() {
+            assert!((0.0..=100.0).contains(&value), "Invalid {field}: {value}");
+        }
+    }
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/v1/host/metrics",
+        Some("http://untrusted.test"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, ready) = call(&app, "GET", "/api/v1/health/ready", None, Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ready["storage"], true);
@@ -361,7 +448,11 @@ async fn capabilities_advertise_only_supported_features() {
     assert_eq!(body["auth"], false);
     assert_eq!(
         body["features"],
-        json!(["bulletin", "brief", "related", "jobs", "topology"])
+        json!(["bulletin", "brief", "related", "jobs", "topology", "live"])
+    );
+    assert_eq!(
+        body["live"],
+        json!({"path":"/api/v1/live","channels":["metrics","brief"],"version":1})
     );
 }
 

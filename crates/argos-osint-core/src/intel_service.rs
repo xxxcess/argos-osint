@@ -32,7 +32,7 @@ pub struct ArticleQuery {
 }
 impl ArticleQuery {
     pub fn validate(&self) -> Result<()> {
-        if !CATEGORIES.contains(&self.category.as_str()) {
+        if self.category != "all" && !CATEGORIES.contains(&self.category.as_str()) {
             bail!("invalid category");
         }
         if chrono::NaiveDate::parse_from_str(&self.day, "%Y-%m-%d").is_err() || self.day.len() != 10
@@ -60,7 +60,7 @@ pub struct ArticlePage {
 }
 
 /// Keyset pagination over article occurrences, ordered deterministically. No
-/// list_runs/list_articles loop and no offset scan. Search stays inside a day/category.
+/// list_runs/list_articles loop and no offset scan. Search stays inside the selected day and category.
 pub async fn articles(repo: &Repository, q: &ArticleQuery) -> Result<ArticlePage> {
     q.validate()?;
     let after: (String, String, String, String) = q
@@ -70,18 +70,38 @@ pub async fn articles(repo: &Repository, q: &ArticleQuery) -> Result<ArticlePage
         .transpose()?
         .unwrap_or_default();
     let n = q.limit.unwrap_or(30);
-    let mut response = repo.db().query(
-        "SELECT * FROM atlas_article WHERE category = $category
-         AND run_id IN (SELECT VALUE record::id(id) FROM atlas_run WHERE started_at >= $start AND started_at < $end)
+    // Keep the single-category predicate separate rather than hiding it in an
+    // OR, so the category-first index remains available to the query planner.
+    let category_filter = if q.category == "all" {
+        ""
+    } else {
+        "AND category = $category"
+    };
+    let sql = format!(
+        "SELECT * FROM atlas_article WHERE
+          run_id IN (SELECT VALUE record::id(id) FROM atlas_run WHERE started_at >= $start AND started_at < $end)
+          {category_filter}
          AND ($search = '' OR string::contains(string::lowercase(string::concat(title, ' ', description, ' ', source_name, ' ', source_domain, ' ', url)), $search))
          AND ($first OR published_at < $p OR (published_at = $p AND seen_at < $s)
            OR (published_at = $p AND seen_at = $s AND article_id > $a)
            OR (published_at = $p AND seen_at = $s AND article_id = $a AND run_id > $r))
-         ORDER BY published_at DESC, seen_at DESC, article_id, run_id LIMIT $limit"
-    ).bind(("category", q.category.clone())).bind(("start", q.day.clone()))
-      .bind(("end", format!("{}~", q.day))).bind(("search", q.search.trim().to_lowercase()))
-      .bind(("first", q.cursor.is_none())).bind(("p", after.0)).bind(("s", after.1))
-      .bind(("a", after.2)).bind(("r", after.3)).bind(("limit", (n + 1) as i64)).await?.check()?;
+          ORDER BY published_at DESC, seen_at DESC, article_id, run_id LIMIT $limit"
+    );
+    let mut response = repo
+        .db()
+        .query(sql)
+        .bind(("category", q.category.clone()))
+        .bind(("start", q.day.clone()))
+        .bind(("end", format!("{}~", q.day)))
+        .bind(("search", q.search.trim().to_lowercase()))
+        .bind(("first", q.cursor.is_none()))
+        .bind(("p", after.0))
+        .bind(("s", after.1))
+        .bind(("a", after.2))
+        .bind(("r", after.3))
+        .bind(("limit", (n + 1) as i64))
+        .await?
+        .check()?;
     let raw: Vec<crate::storage::atlas::ArticleRow> = response.take(0)?;
     let mut rows: Vec<AtlasArticleRow> = raw.into_iter().map(Into::into).collect();
     let more = rows.len() > n;
@@ -99,6 +119,32 @@ pub async fn articles(repo: &Repository, q: &ArticleQuery) -> Result<ArticlePage
         next_cursor,
         revision,
     })
+}
+
+/// Article totals for one retained day, keyed by stored category.
+pub async fn category_counts(
+    repo: &Repository,
+    day: &str,
+) -> Result<std::collections::BTreeMap<String, u64>> {
+    if chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").is_err() || day.len() != 10 {
+        bail!("invalid day");
+    }
+    let mut response = repo
+        .db()
+        .query(
+            "SELECT VALUE category FROM atlas_article WHERE
+              run_id IN (SELECT VALUE record::id(id) FROM atlas_run WHERE started_at >= $start AND started_at < $end)",
+        )
+        .bind(("start", day.to_string()))
+        .bind(("end", format!("{day}~")))
+        .await?
+        .check()?;
+    let rows: Vec<String> = response.take(0)?;
+    let mut counts = std::collections::BTreeMap::new();
+    for category in rows {
+        *counts.entry(category).or_default() += 1;
+    }
+    Ok(counts)
 }
 
 pub async fn article(repo: &Repository, run: &str, id: &str) -> Result<Option<AtlasArticleRow>> {
@@ -195,7 +241,12 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
             .transpose()?;
         indexing = current.filter(|state| Some(&state.job_id) == job_id.as_ref());
     }
+    let inference_rows = parts.output.as_ref().map(|output| output.inferences.iter().map(|item| json!({"id":crate::investigation::insights::inference_fingerprint(item),"text":item.text})).collect::<Vec<_>>());
     let mut value = json!({"article":article,"source_revision":source_revision,"actors": actors,"claims":claims,"body":parts.body,"output":parts.output,"lifecycle":parts.lifecycle,"status":crate::provider_diag::sanitize(&parts.status),"publication":published,"relations":parts.relations,"links":links,"job_id":job_id,"indexing":indexing,"confidence":confidence,"body_pending":body_pending});
+    if let Some(inferences) = inference_rows {
+        value["inferences"] = json!(inferences);
+    }
+    crate::intel_topology::decorate(repo, article, &source_revision, &mut value).await?;
     let revision = crate::nlp::cache::hash(&serde_json::to_string(&value)?);
     value["revision"] = json!(revision);
     Ok(value)

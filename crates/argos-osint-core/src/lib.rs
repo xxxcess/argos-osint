@@ -57,6 +57,8 @@ mod http_client;
 pub mod intel_recon;
 #[cfg(feature = "surreal")]
 pub mod intel_service;
+#[cfg(feature = "surreal")]
+mod intel_topology;
 pub mod investigation;
 pub mod iso3166;
 pub mod job_cleanup;

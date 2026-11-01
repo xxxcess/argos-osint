@@ -1,4 +1,8 @@
 //! Versioned local Intel HTTP adapter. @tag:intel-brief
+mod host_metrics;
+mod live;
+mod topology_web;
+
 use argos_osint_core::{
     intel_service as intel,
     storage::{self, repo::Repository},
@@ -39,11 +43,16 @@ pub fn loopback_url(raw: &str) -> anyhow::Result<url::Url> {
 }
 
 pub fn router(state: ApiState) -> Router {
+    let sampler = Arc::new(std::sync::Mutex::new(host_metrics::HostSampler::default()));
+    let feed = Arc::new(host_metrics::HostFeed::new(sampler.clone()));
     Router::new()
         .route("/api/v1/health/ready", get(ready))
         .route("/api/v1/capabilities", get(capabilities))
+        .route("/api/v1/host/metrics", get(host_metrics::read))
+        .route("/api/v1/live", get(live::upgrade))
         .route("/api/v1/days", get(days))
         .route("/api/v1/articles", get(articles))
+        .route("/api/v1/articles/counts", get(article_counts))
         .route("/api/v1/articles/detail", get(detail))
         .route("/api/v1/articles/related", get(related))
         .route("/api/v1/brief/ensure", post(ensure))
@@ -52,7 +61,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/jobs/detail", get(job))
         .route("/api/v1/jobs/retry", post(retry))
-        .route("/api/v1/topology", post(topology))
+        .route("/api/v1/topology", get(topology_web::read).post(topology))
+        .route("/api/v1/topology/resolve", post(topology_web::resolve))
+        .layer(axum::Extension(sampler))
+        .layer(axum::Extension(feed))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn(request_timeout))
         .layer(middleware::from_fn_with_state(state.clone(), protect))
@@ -183,13 +195,22 @@ async fn ready(State(s): State<ApiState>) -> ApiResult {
 }
 async fn capabilities() -> Json<Value> {
     Json(
-        json!({"api_version":1,"categories":intel::CATEGORIES,"auth":false,"features":["bulletin","brief","related","jobs","topology"]}),
+        json!({"api_version":1,"categories":intel::CATEGORIES,"auth":false,"features":["bulletin","brief","related","jobs","topology","live"],"live":{"path":"/api/v1/live","channels":["metrics","brief"],"version":1}}),
     )
 }
 async fn days(State(s): State<ApiState>) -> ApiResult {
     Ok(Json(
         json!({"days":storage::atlas::run_days(s.repo.db()).await.map_err(internal)?,"categories":intel::CATEGORIES}),
     ))
+}
+#[derive(Deserialize)]
+struct DayQuery {
+    day: String,
+}
+async fn article_counts(State(s): State<ApiState>, Query(q): Query<DayQuery>) -> ApiResult {
+    Ok(Json(json!({
+        "counts": intel::category_counts(&s.repo, &q.day).await.map_err(internal)?
+    })))
 }
 async fn articles(State(s): State<ApiState>, Query(q): Query<intel::ArticleQuery>) -> ApiResult {
     q.validate().map_err(|_| bad())?;

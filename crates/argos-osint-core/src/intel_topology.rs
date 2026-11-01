@@ -1,0 +1,160 @@
+//! Read-only Brain identities for Intel brief navigation. @tag:intel-brief
+
+use anyhow::Result;
+use serde_json::json;
+use serde_json::Value;
+
+use crate::atlas_metadata;
+use crate::brain_topology::TopologyNode;
+use crate::brain_topology::TopologyNodeKind;
+use crate::brain_topology::TopologySeed;
+use crate::storage::repo::Repository;
+use crate::store::AtlasArticleRow;
+
+fn unique_seed(nodes: &[TopologyNode], kind: TopologyNodeKind, labels: &[String]) -> Value {
+    let mut seeds: Vec<_> = nodes
+        .iter()
+        .filter(|node| {
+            node.kind == kind
+                && labels.iter().any(|label| {
+                    atlas_metadata::comparison_key(label)
+                        == atlas_metadata::comparison_key(&node.label)
+                })
+        })
+        .filter_map(|node| node.topology_seed.as_ref())
+        .filter(|seed| {
+            matches!(
+                seed,
+                TopologySeed::Actor(_) | TopologySeed::Claim(_) | TopologySeed::Inference(_)
+            )
+        })
+        .collect();
+    seeds.sort_by_key(|seed| seed.key());
+    seeds.dedup();
+    match seeds.as_slice() {
+        [seed] => json!(seed),
+        _ => Value::Null,
+    }
+}
+
+/// Reuse the topology reader's current-article provenance and lifecycle fences.
+/// Neither this projection nor the subsequent navigation creates Brain memories.
+pub(crate) async fn decorate(
+    repo: &Repository,
+    article: &AtlasArticleRow,
+    revision: &str,
+    value: &mut Value,
+) -> Result<()> {
+    let source = TopologySeed::Article {
+        run_id: article.run_id.clone(),
+        article_id: article.id.clone(),
+        revision: revision.into(),
+        originating_memory: None,
+    };
+    let snapshot =
+        crate::storage::topology::topology_snapshot(repo, &source, &Default::default()).await?;
+    if let Some(items) = value["actors"].as_array_mut() {
+        for item in items {
+            let mut labels = vec![item["display_name"].as_str().unwrap_or_default().to_owned()];
+            labels.extend(
+                item["spellings"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|label| label.as_str().map(str::to_owned)),
+            );
+            item["topology_seed"] = unique_seed(&snapshot.nodes, TopologyNodeKind::Entity, &labels);
+        }
+    }
+    for field in ["claims", "inferences"] {
+        if let Some(items) = value[field].as_array_mut() {
+            for item in items {
+                let kind = if field == "inferences" || item["classification"] == "inference" {
+                    TopologyNodeKind::Inference
+                } else {
+                    TopologyNodeKind::Claim
+                };
+                item["topology_seed"] = unique_seed(
+                    &snapshot.nodes,
+                    kind,
+                    &[item["text"].as_str().unwrap_or_default().to_owned()],
+                );
+            }
+        }
+    }
+    value["topology_seed"] = ["claims", "inferences", "actors"]
+        .iter()
+        .flat_map(|field| value[*field].as_array().into_iter().flatten())
+        .find_map(|item| {
+            item.get("topology_seed")
+                .filter(|seed| !seed.is_null())
+                .cloned()
+        })
+        .unwrap_or(Value::Null);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_seed;
+    use crate::brain_topology::node;
+    use crate::brain_topology::TopologyNodeKind;
+    use crate::brain_topology::TopologySeed;
+    use serde_json::json;
+
+    #[test]
+    fn each_brief_kind_receives_its_own_existing_memory_identity() {
+        let mut actor = node(
+            "actor-memory".into(),
+            TopologyNodeKind::Entity,
+            "Recorded item".into(),
+        );
+        actor.topology_seed = Some(TopologySeed::Actor(actor.id.clone()));
+        let mut claim = node(
+            "claim-memory".into(),
+            TopologyNodeKind::Claim,
+            "Recorded item".into(),
+        );
+        claim.topology_seed = Some(TopologySeed::Claim(claim.id.clone()));
+        let mut inference = node(
+            "inference-memory".into(),
+            TopologyNodeKind::Inference,
+            "Recorded item".into(),
+        );
+        inference.topology_seed = Some(TopologySeed::Inference(inference.id.clone()));
+        let nodes = vec![actor, claim, inference];
+        for (kind, expected) in [
+            (TopologyNodeKind::Entity, json!({"Actor":"actor-memory"})),
+            (TopologyNodeKind::Claim, json!({"Claim":"claim-memory"})),
+            (
+                TopologyNodeKind::Inference,
+                json!({"Inference":"inference-memory"}),
+            ),
+        ] {
+            assert_eq!(
+                unique_seed(&nodes, kind, &["Recorded item".into()]),
+                expected
+            );
+        }
+        assert!(unique_seed(&nodes, TopologyNodeKind::Claim, &["Unindexed item".into()]).is_null());
+    }
+
+    #[test]
+    fn ambiguous_actor_names_do_not_fabricate_a_canonical_identity() {
+        let mut first = node(
+            "actor-one".into(),
+            TopologyNodeKind::Entity,
+            "Same name".into(),
+        );
+        first.topology_seed = Some(TopologySeed::Actor(first.id.clone()));
+        let mut second = first.clone();
+        second.id = "actor-two".into();
+        second.topology_seed = Some(TopologySeed::Actor(second.id.clone()));
+        assert!(unique_seed(
+            &[first, second],
+            TopologyNodeKind::Entity,
+            &["Same name".into()]
+        )
+        .is_null());
+    }
+}

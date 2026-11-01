@@ -43,10 +43,11 @@ The web workflow runs on matching web/config/build-check changes on `main` and p
 | Check | Enforced behavior |
 | --- | --- |
 | Frozen install and peer check | Reproducible lockfile and compatible dependency peers |
+| `pnpm test` | Offline unit, component and Query/MSW contracts; Vitest configuration changes trigger this workflow |
 | `pnpm typecheck` / `pnpm lint` | Type checking and recommended Hooks/compiler diagnostics with zero warnings |
-| `pnpm build` | Static export using the enabled strict React Compiler pipeline; no API needed |
-| `pnpm check:web-build` | Built Next configuration retains strict compiler options and RN Web/shared transpilation; exported **app page** chunks contain compiler memoization (framework runtime alone is insufficient) |
-| Offline Playwright | The same Chromium fixtures run against the static export and the Next development server; both exercise RN Web UI, compilation, hydration, connection/actions and responsive layout. Static-host CSP/header assertions apply to export only. |
+| `pnpm build` | Next server build using the strict React Compiler pipeline; the upstream need not run at build time |
+| `pnpm check:web-build` | Built Next configuration retains strict compiler options and RN Web/shared transpilation; compiled **application** chunks contain compiler memoization (framework runtime alone is insufficient) |
+| Offline Playwright | The same Chromium fixtures run against the production Next server and the Next development server; both exercise RN Web UI, compilation, hydration, connection/actions and responsive layout. Production nonce CSP and same-origin API assertions apply to the production server. |
 | Retained evidence | Export/dev test results and screenshots use separate directories under `test-results/`; HTML reports use `playwright-report/export` and `playwright-report/dev`. Uploaded with `always()` and seven-day retention. |
 
 The evidence upload ignores absent files when an earlier step fails; it does not turn a missing build/test into a pass. Captures are review evidence, not automatic visual approval. No public deployment, live provider keys, secrets or native builds are involved. Path filters mean a docs-only PR does not run this job; configure required checks with that behavior in mind rather than assuming a workflow run for every PR.
@@ -55,7 +56,7 @@ The user authorized the original web workflow addition and this follow-up CI upd
 
 ## Supplemental process checks
 
-Launcher/stack lifecycle changes also run `python3 scripts/test_web_stack.py --terminal-captures .agent-scratch/stack-review` after building `argos` and `argos-api-host` through the isolated Cargo wrapper and exporting the web app. `--tui-only --tui-web-profile installed` narrows this to Venture back/value restoration, TUI return, same-parent storage reuse, shared API/Web TUI and terminal cleanup. These PTY/process checks are local supplemental evidence; the workflows above do not execute this script. Keep actual hosted results separate.
+Launcher/stack lifecycle changes also run `python3 scripts/test_web_stack.py --terminal-captures .agent-scratch/stack-review` after building `argos` and `argos-api-host` through the isolated Cargo wrapper and building the Next server. `--tui-only --tui-web-profile installed` narrows this to Venture back/value restoration, TUI return, same-parent storage reuse, shared API/Web TUI and terminal cleanup. These PTY/process checks are local supplemental evidence; the workflows above do not execute this script. Keep actual hosted results separate.
 
 The composer-launch regression `python3 scripts/test_web_stack.py --composer-smoke`
 runs the same PTY harness in its own temp `ARGOS_HOME`: `storage init --mode
@@ -68,9 +69,11 @@ termios restored. It needs only `argos` built (no
 checks, it is local supplemental evidence that the workflows do not execute;
 keep actual hosted results separate.
 
+Live-transport changes also run `pnpm test:live` after the Next build. Its offline Node fixtures verify origin checks, raw relay framing, dropped upstream connections and the real Next runtime across a stateless restart. Browser fixtures intercept WebSockets as well as REST; request-count assertions cover quiet pages, push metrics, pending work and reconnect. These supplemental local tests are separate from hosted evidence.
+
 ## Scoped mutation diagnostics
 
-[mutation.yml](../../../.github/workflows/mutation.yml) is a manually dispatched Linux embedded diagnostic gate, separate from the platform/storage matrix. Run it after ordinary checks pass with `gh workflow run mutation.yml --ref <branch>`. It pins cargo-mutants 27.1.0 and uses [.cargo/mutants.toml](../../../.cargo/mutants.toml) to restrict mutation sites to NLP selection, provider attempt/request policy and Atlas classification, with the core library and property integration tests as the oracle. Default features remain embedded/nlp; no live providers or server storage are used.
+[mutation.yml](../../../.github/workflows/mutation.yml) is a Linux embedded diagnostic gate triggered on pushes to `main`, separate from the platform/storage matrix. Its current trigger is defined in the workflow; there is no manual-dispatch trigger. It pins cargo-mutants 27.1.0 and uses [.cargo/mutants.toml](../../../.cargo/mutants.toml) to restrict mutation sites to NLP selection, provider attempt/request policy and Atlas classification, with the core library and property integration tests as the oracle. Default features remain embedded/nlp; no live providers or server storage are used.
 
 The runner keeps the unmutated baseline check, fails on missed or timed-out mutations and retains outcome/log artifacts for seven days, including failure evidence. The 120-minute workflow limit bounds this expensive diagnostic; a timeout is incomplete evidence, not a passing baseline. Configuration and local smoke results do not establish a hosted mutation result. Review survivors before changing tests; equivalent mutants require a documented rationale rather than silently weakening the gate.
 

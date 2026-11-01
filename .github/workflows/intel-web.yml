@@ -19,6 +19,8 @@ on:
       - 'tsconfig.json'
       - 'eslint.config.mjs'
       - 'playwright.config.ts'
+      - 'vitest*.ts'
+      - 'vitest*.tsx'
       - '.github/workflows/intel-web.yml'
   pull_request:
     paths: *web_paths
@@ -49,6 +51,8 @@ jobs:
         run: |
           pnpm typecheck
           pnpm lint
+      - name: Run offline unit and hook contracts
+        run: pnpm test
       - name: Build static export without API
         run: pnpm build
       - name: Verify compiled RN Web export

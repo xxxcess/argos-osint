@@ -13,16 +13,16 @@ test("agent Cargo isolates inherited targets, forwards arguments and preserves f
   const bin = mkdtempSync(join(tmpdir(), "argos-agent-cargo-"));
   try {
     const cargo = join(bin, "cargo");
-    writeFileSync(cargo, '#!/bin/sh\nprintf "%s\\n" "$CARGO_TARGET_DIR" "$@"\nexit 17\n');
+    writeFileSync(cargo, '#!/bin/sh\nprintf "%s\\n" "${ARGOS_EMBED-unset}" "$CARGO_TARGET_DIR" "$@"\nexit 17\n');
     chmodSync(cargo, 0o755);
     const run = (args) => spawnSync("python3", [script, ...args], {
       encoding: "utf8", cwd: tmpdir(),
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CARGO_TARGET_DIR: join(root, "target") },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ARGOS_EMBED: "1", CARGO_TARGET_DIR: join(root, "target") },
     });
     const result = run(["test", "--locked", "--no-default-features", "--", "--ignored"]);
     assert.equal(result.status, 17);
     assert.deepEqual(result.stdout.trim().split("\n"), [
-      join(root, "target/agents"), "test", "--target-dir", join(root, "target/agents"),
+      "unset", join(root, "target/agents"), "test", "--target-dir", join(root, "target/agents"),
       "--locked", "--no-default-features", "--", "--ignored",
     ]);
     for (const args of [["check", "--target-dir", "target"], ["check", "--target-dir=target"], ["clean"]]) {

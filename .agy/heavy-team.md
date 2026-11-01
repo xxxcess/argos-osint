@@ -1,70 +1,12 @@
-# Antigravity Heavy Agent Team (`heavy-team.md`)
+# Heavy teamwork
 
-[How-To Guide](./howto.md) · [Lite Team](./lite-team.md)
+Follow [shared contracts](howto.md). Use for independent implementation areas or cross-cutting contracts.
 
-`architect` is the default primary coordinator (`experimental.subagent_depth: 3`). `architect`, `rust-coder`, `react-coder`, `tester`, and `scribe` can run as primary agents or children (`mode: all`).
+1. One lead pins the plan, integration root, base revision and acceptance criteria. Record existing edits and active processes before resuming work.
+2. Map dependencies and assign disjoint edit units to Rust/React specialists. Create worktrees only where isolation helps. Coders may delegate edit units, but return review/test/docs needs to the lead. Do not reserve all execution slots with parents waiting on children.
+3. The plan owner integrates completed changes and schedules documentation checkpoints. Workers write separate evidence files; only the owner edits shared status.
+4. One tester owns serialized Cargo verification. Run scoped checks first; schedule the full embedded gate after integration stabilizes. Run browser suites serially when they share server ports or artifact directories. Reuse passing evidence unless relevant source/config changes invalidate it.
+5. Independent review and integrity audit assess the integrated diff and execution evidence. Failures return to the relevant owner; only affected checks rerun before a justified final gate. Never mark skipped/unexecuted checks passed.
+6. Reconcile acceptance checkboxes and report limitations. Preserve unresolved evidence and unrelated work. Remove clean task-owned worktrees only after integration and verification.
 
-| Caller | Permitted Children | Assigned `subagent.model` | Purpose |
-| --- | --- | --- | --- |
-| `orchestrator` / `architect` (Team Lead) | `architect` (`CONSULT`), `rust-coder`, `react-coder`, `tester`, `scribe` | `google/gemini-4-argon#low` *(alias: `google/argon#low`)* | Long-term team coordination, plan tracking, and general team orchestration for efficient work completion (`experimental.subagent_depth: 3`) |
-| `architect` / `consultant` (`CONSULT` / Analysis) | `none` | `anthropic/claude-sonnet-5.5#low` | Consult team member for code planning, code review, architecture, and analysis (explore code/docs, define technical spec/contracts, audit diffs, review UI conventions) |
-| `rust-coder` (Rust Implementation & Admin) | `rust-coder`, `architect` (`CONSULT`), `tester`, `scribe` | Coder: `opencode-go/kimi-k2.7-code`; spawned `EDIT_UNIT` children: `opencode-go/kimi-k2.7-code` (no reasoning variants; verbatim ID) | Precise changes in repo files or worktrees (`crates/**`, `scripts/**`), manage `.agent-scratch/worktrees/`, format files, and handle general administrative tasks |
-| `react-coder` (React Implementation & Admin) | `react-coder`, `architect` (`CONSULT`), `tester`, `scribe` | Coder: `opencode-go/kimi-k2.7-code`; spawned `EDIT_UNIT` children: `opencode-go/kimi-k2.7-code` (no reasoning variants; verbatim ID) | Precise UI changes in repo files or worktrees (`apps/**`, `packages/**`), manage `.agent-scratch/worktrees/`, format files, and handle general administrative tasks |
-| `tester` (Verification) | `architect` (`CONSULT`) | `google/gemini-4-argon#low` *(alias: `google/argon#low`)* | Run host-native Rust/CI and UI verification gates in `INTEGRATION_ROOT`, consult `anthropic/claude-sonnet-5.5#low` for code review/analysis |
-| `scribe` (Plan Tracking & Docs) | `none` | `google/gemini-4-argon#low` *(alias: `google/argon#low`)* / `google/gemini-3.8-flash#medium` | Long-term plan tracking in `.planning/` (`google/gemini-4-argon#low`); general administrative doc formatting and chore updates (`google/gemini-3.8-flash#medium`) |
-
-## Phase Sequence & Handoffs
-
-1. **Phase 0 Bootstrap (Team Coordination, Code Planning & Plan Tracking):**
-   * The team orchestrator (`google/gemini-4-argon#low`) establishes long-term team coordination and orchestrates the phase lifecycle.
-   * For code planning, architecture, and analysis, the team consults a team member with `anthropic/claude-sonnet-5.5#low` (`architect` / `CONSULT` / `AUDIT_UNIT`) to explore the repo, define exact file targets, verify contract boundaries, and produce the technical specification.
-   * The orchestrator dispatches `scribe` (`DOC_REVIEW` on `google/gemini-4-argon#low`) to initialize and track the durable `.planning/` docs framework via `planning-with-files` for long-term GitHub persistence.
-2. **Scoped Implementation (`EDIT_UNIT` — Precise Changes & Administrative Work):**
-   * `rust-coder` and `react-coder` run on `opencode-go/kimi-k2.7-code` to handle precise changes in their stack's repo files or worktrees and general administrative work.
-   * The owning stack coder records `INTEGRATION_ROOT` and assigns disjoint same-type `EDIT_UNIT` children (`subagent.model: opencode-go/kimi-k2.7-code`, no reasoning variants; verbatim ID) using its worker override (`.opencode/coder-rust-worker.json` or `.opencode/coder-react-worker.json`) and task-owned worktrees under `.agent-scratch/worktrees/` for precise source edits across crates, packages, and UI files. Rust edits load `argos-rust-style`.
-   * If code planning, review, or architecture questions arise during implementation, consult team member on `anthropic/claude-sonnet-5.5#low`.
-   * `EDIT_UNIT` children edit and format only their assigned files, use `.agent-scratch/` for any temporary data, and never delegate, build, or test.
-3. **Documentation & `.planning/` Checkpoint (`DOC_REVIEW`):**
-   * Once deltas are integrated and formatted in `INTEGRATION_ROOT`, the owning stack coder (`rust-coder` or `react-coder`) dispatches `scribe`.
-   * `scribe` uses `google/gemini-4-argon#low` for long-term plan tracking in `.planning/`, and `google/gemini-3.8-flash#medium` for general administrative documentation updates, wiki docs, diagrams, and READMEs, returning `COMPLETE | NEEDS_DECISION | BLOCKED`.
-4. **Verification Gate (`VERIFY`):**
-   * The owning stack coder invokes `tester` (`subagent.model: google/gemini-4-argon#low`) to execute host-native verification gates in `INTEGRATION_ROOT` (Rust builds, clippy, and embedded storage mode tests referencing `.github/workflows/ci.yml` and `docs/wiki/code/ci.md`).
-   * For code review, architecture analysis, and React Native UI compliance review (`react-ui.md` Argos look and feel, creative component design inside the theme, shared React Native primitives, zero-warning React Compiler/Hooks lint, and offline Playwright fixture screenshots), consult team member on `anthropic/claude-sonnet-5.5#low`.
-   * Both verification results and review notes are saved to `.agent-scratch/` and returned (`PASS | FAIL | BLOCKED | PENDING`) to the owning stack coder, which relays them to the orchestrator.
-5. **Acceptance & Cleanup:**
-   * The orchestrator (`google/gemini-4-argon#low`) reviews diagnostics, verifies long-term plan tracking ledgers in `.planning/` for GitHub persistence, and instructs the owning stack coders to execute `.agent-scratch/` and `.agent-scratch/worktrees/` cleanup.
-
-## Storage, Persistence & Cleanup Conventions
-
-* **Temporary Files & Directories (`.agent-scratch/` & `.agent-scratch/worktrees/`):** All temporary files, scratch directories, patch files, runtime diagnostics, and isolated feature worktrees **must** use either `.agent-scratch/` or `.agent-scratch/worktrees/`. Never write temporary files outside `.agent-scratch/`, and never stage or commit `.agent-scratch/` paths to GitHub.
-* **Long-Term GitHub Commit Persistence (`.planning/`):** All durable planning documents, phase specifications, architectural decisions, and status ledgers intended for long-term repository persistence and GitHub commits **must** be placed in the appropriate `.planning/` directory owned by `scribe` (`planning-with-files`).
-* **Write Boundaries:** `architect` and `tester` edit only local planning/verification evidence in `.agent-scratch/`. `rust-coder`/`react-coder` edit source, tests, and fixtures for their stack. `scribe` edits only `.planning/` docs, repo docs, and READMEs (never source, tests, or configs). Browser tools are denied.
-* **Worktree Isolation:** Create parallel feature worktrees from the agreed baseline (`git worktree add --detach .agent-scratch/worktrees/<unit-id> <base>`). Isolate parallel Rust checks with `CARGO_TARGET_DIR=.agent-scratch/target-<unit-id>` and `CARGO_BUILD_JOBS=2`. Never run `tester` inside feature worktrees.
-* **Workflow Cleanup:** Retain task worktrees under `.agent-scratch/worktrees/` only until verified and integrated. Upon phase completion, remove clean integrated worktrees without force (`git worktree remove`), run `git worktree prune`, delete temporary build/patch artifacts, and keep only essential diagnostic logs in `.agent-scratch/`.
-
-## Handoff Envelope
-
-Every subagent call must include this compact envelope:
-
-```text
-MODE: PHASE | EDIT_UNIT | AUDIT_UNIT | CONSULT | VERIFY | DOC_REVIEW
-SUBAGENT_MODEL: google/gemini-4-argon#low | opencode-go/kimi-k2.7-code (coder) | opencode-go/kimi-k2.7-code (EDIT_UNIT child; verbatim ID) | anthropic/claude-sonnet-5.5#low
-PLAN_ID / absolute PLAN_DIR (.planning) / PHASE:
-INTEGRATION_ROOT / absolute WORKTREE (.agent-scratch/worktrees/...) / BASE_REVISION:
-OWNED_FILES: exact paths (read-only references listed separately)
-SPEC: file:line refs, contracts, constraints, performance/migration risks
-ACCEPTANCE: host-native checks, expected results, scratch evidence paths (.agent-scratch/...), user exclusions
-RETURN: COMPLETE | NEEDS_DECISION | FAILED | BLOCKED | PASS | FAIL | PENDING; changed files and evidence
-```
-
-## Verification Commands, Rust Embedded Storage & Host Platform Rules
-
-* **Local Host Stabilization First (Never Run All-Platform CI Stack Locally):** Never run the multi-platform or `server` storage stack from `.github/workflows/ci.yml` on the local machine. Agents must primarily get the **local host machine's native platform build and embedded storage tests (`--storage embedded`, default features `embedded,nlp` with `ARGOS_EMBED` unset) to a stable, passing state first**. Use bash shell commands (`uname -ms`, `rustc -vV | grep '^host:'`, `sysctl -n hw.ncpu 2>/dev/null || nproc`) to detect the host platform and CPU specs before running Rust builds.
-* **Targeted Rust Commands (Scoped Phase Verification in Embedded Mode):**
-  * Crate check & Clippy: `python3 scripts/agent_cargo.py check --locked -p <crate>` and `python3 scripts/agent_cargo.py clippy --locked -p <crate> --all-targets -- -D warnings`
-  * Unit & binary tests: `python3 scripts/agent_cargo.py test --locked -p <crate> --lib [filter]` (or `--bin argos [filter]`)
-  * Integration test binary: `python3 scripts/agent_cargo.py test --locked -p <crate> --test <name> [filter]` (e.g., `--test api_contract`, `--test stack_cli`)
-  * Single embedded storage contract test: `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 python3 scripts/agent_cargo.py test --locked -p argos-osint-core --test storage_<name> [filter] -- --nocapture`
-* **Full Local Rust Gate (Embedded Storage Only):** `scripts/local_matrix.sh --storage embedded` in `INTEGRATION_ROOT` (`ARGOS_EMBED` unset) or `python3 scripts/test_surreal.py --mode embedded --no-fail-fast` for the detected host platform (respecting the 1–2 runs / max 3 cap).
-* **GitHub CI Monitoring for Other Platforms:** Once local builds are stable and pushed, monitor GitHub Actions checks/runs for issues on non-host platforms (`ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-14`, `macos-15-intel`) or `server` storage mode when git/GitHub CLI commands are available (`gh pr checks`, `gh run list --branch "$(git branch --show-current)"`, `gh run view <run-id> --log-failed`).
-* **React Native / UI:** Reference `.github/workflows/intel-web.yml` — pinned Node/pnpm compiler/lint checks (`pnpm typecheck`, `pnpm lint`, `pnpm build`, `pnpm check:web-build` with zero-warning Hooks/Next compiler baseline) and offline Playwright fixtures via shell.
+Use the host's configured role/model catalog. Concurrency limits apply to the whole task, including descendants; queue work rather than repeatedly retrying provider-limit failures. A missing role/tool is a concrete blocker to report, not permission to invent a successful gate.

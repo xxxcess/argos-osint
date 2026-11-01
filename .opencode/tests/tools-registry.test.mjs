@@ -21,17 +21,17 @@ function workerModel(name) {
   return JSON.parse(readFileSync(join(root, name), "utf8")).model;
 }
 
-const activeAgents = ["coordinator", "orchestrator", "architect", "rust-coder", "react-coder", "reviewer", "tester", "auditor", "scribe"];
+const activeAgents = ["coordinator", "orchestrator", "architect", "rust-coder", "react-coder", "reviewer", "tester", "auditor", "scribe", "utility"];
 
-test("coordinator is the default agent with the approved model and teamwork catalog roles enforce nested handoffs and write boundaries", () => {
+test("coordinator is the default agent with configured models and teamwork catalog roles enforce nested handoffs and write boundaries", () => {
   assert.equal(config.default_agent, "coordinator");
-  const approvedModel = "nvidia/minimaxai/minimax-m3.1-flash#thinking";
-  assert.equal(config.model, approvedModel);
-  assert.equal(config.agents.coordinator.model, approvedModel);
-  assert.equal(config.agents.orchestrator.model, approvedModel);
+  // Model choices are customer configuration; validate usable IDs, not stale provider pins.
+  const modelId = /^[^/\s]+\/[^\s]+$/;
+  assert.match(config.model, modelId);
+  for (const id of activeAgents) assert.match(config.agents[id].model, modelId);
   assert.equal(config.experimental.subagent_depth, 4);
   assert.equal(config.subagent_depth, undefined);
-  for (const id of ["build", "plan"]) assert.equal(config.agents[id].disabled, true);
+  for (const id of ["build", "plan"]) assert.ok(!config.agents[id] || config.agents[id].disabled === true);
   for (const id of ["general", "explore"]) assert.equal(config.agents[id], undefined);
   for (const id of activeAgents) {
     assert.equal(config.agents[id].mode, "all");
@@ -41,18 +41,18 @@ test("coordinator is the default agent with the approved model and teamwork cata
     assert.equal(effect(id, "subagent", "*"), "deny");
     assert.equal(effect(id, "skill", "*"), "allow");
   }
-  for (const child of ["orchestrator", "architect", "rust-coder", "react-coder", "reviewer", "tester", "auditor", "scribe"]) {
+  for (const child of ["orchestrator", "architect", "rust-coder", "react-coder", "reviewer", "tester", "auditor", "scribe", "utility"]) {
     assert.equal(effect("coordinator", "subagent", child), "allow");
   }
   assert.equal(effect("coordinator", "question", "*"), "allow");
-  for (const parent of ["orchestrator", "architect", "rust-coder", "react-coder"]) {
-    for (const child of ["architect", "rust-coder", "react-coder", "reviewer", "tester", "auditor", "scribe"]) {
+  for (const parent of ["orchestrator"]) {
+    for (const child of ["architect", "rust-coder", "react-coder", "reviewer", "tester", "auditor", "scribe", "utility"]) {
       assert.equal(effect(parent, "subagent", child), "allow");
     }
   }
-  for (const parent of ["architect", "rust-coder", "react-coder"]) {
-    const file = parent === "architect" ? "architect-worker.json" : `coder-${parent.replace(/-coder$/, "")}-worker.json`;
-    assert.match(workerModel(file), /^[^/]+\/[^/]+(\/[^/]+)*(#[^/]+)?$/);
+  assert.match(workerModel("architect-worker.json"), /^[^/]+\/[^/]+(\/[^/]+)*(#[^/]+)?$/);
+  for (const id of ["architect", "rust-coder", "react-coder"]) {
+    assert.equal(rules(id).some((rule) => rule.action === "subagent" && rule.effect === "allow"), false);
   }
   assert.equal(effect("tester", "subagent", "architect"), "allow");
   assert.equal(effect("reviewer", "subagent", "architect"), "allow");
@@ -68,6 +68,20 @@ test("coordinator is the default agent with the approved model and teamwork cata
   assert.equal(effect("tester", "edit", "**/.agent-scratch/**"), "allow");
 });
 
+test("utility agent performs quick non-code edits only", () => {
+  const doc = readFileSync(join(root, "agents/utility.md"), "utf8");
+  assert.match(doc, /Never edit source code, tests, or CI workflows/);
+  assert.match(doc, /do not spawn children/i);
+  assert.equal(effect("utility", "edit", "*"), "deny");
+  for (const resource of ["docs/**", "**/docs/**", "README.md", "**/README.md", ".planning/**", "**/.planning/**", ".opencode/**", ".agy/**", ".agent-scratch/**"]) {
+    assert.equal(effect("utility", "edit", resource), "allow");
+  }
+  for (const resource of [".opencode/tests/**", "crates/**", "packages/**", "apps/**", "scripts/**", ".github/**"]) {
+    assert.equal(effect("utility", "edit", resource), "deny");
+  }
+  assert.equal(rules("utility").some((rule) => rule.action === "subagent" && rule.effect === "allow"), false);
+});
+
 test("commands map to catalog specialists and verify uses the embedded integration gate", () => {
   const command = readFileSync(join(root, "commands/tui-verify.md"), "utf8");
   assert.match(command, /argos-tui-verify/);
@@ -78,6 +92,7 @@ test("commands map to catalog specialists and verify uses the embedded integrati
   assert.match(verify, /local_matrix\.sh --storage embedded/);
   assert.doesNotMatch(verify, /--no-default-features/);
   assert.match(verify, /ARGOS_EMBED.*unset/);
+  assert.match(verify, /no Rust build for docs\/config-only/);
 });
 
 test("teamwork prompts enforce interview triage, leaf modes, and caller-owned continuation", () => {
@@ -88,21 +103,21 @@ test("teamwork prompts enforce interview triage, leaf modes, and caller-owned co
   const auditor = readFileSync(join(root, "agents/auditor.md"), "utf8");
   assert.match(coordinator, /Concise Pre-Execution Interview/);
   assert.match(coordinator, /question/);
+  assert.match(coordinator, /existing session authorization/);
+  assert.match(coordinator, /no ask tool exists/);
   assert.match(coordinator, /Translating Team Needs/);
   assert.match(coordinator, /Dynamic Team Selection from Catalog/);
   assert.match(orchestrator, /INTEGRITY_VIOLATION/);
-  assert.match(architect, /AUDIT_UNIT and CONSULT are leaf modes/);
+  assert.match(architect, /Do not spawn children/);
   const rustCoder = readFileSync(join(root, "agents/rust-coder.md"), "utf8");
   const reactCoder = readFileSync(join(root, "agents/react-coder.md"), "utf8");
-  assert.match(rustCoder, /EDIT_UNIT/);
-  assert.match(rustCoder, /Do not delegate, build or test/);
-  assert.match(reactCoder, /EDIT_UNIT/);
-  assert.match(reactCoder, /Do not delegate, build or test/);
+  assert.match(rustCoder, /Do not spawn children/);
+  assert.match(reactCoder, /Do not spawn children/);
   assert.match(reviewer, /APPROVE \| REJECT/);
   assert.match(auditor, /CLEAN/);
   assert.match(auditor, /INTEGRITY_VIOLATION/);
   assert.match(auditor, /do not delegate/i);
-  for (const id of ["coordinator", "orchestrator", "architect", "reviewer", "tester", "rust-coder", "react-coder"]) {
+  for (const id of ["coordinator", "orchestrator", "reviewer", "tester"]) {
     assert.match(readFileSync(join(root, "agents", `${id}.md`), "utf8"), /Resume only your own child sessionID/);
   }
 });
@@ -132,9 +147,11 @@ test("Scribe and Auditor preserve leaf non-delegation and strict edit scopes", (
   }
   for (const id of ["rust-coder", "react-coder"]) {
     const coderDoc = readFileSync(join(root, `agents/${id}.md`), "utf8");
-    assert.match(coderDoc, /agents\.<role>\.model/);
-    assert.match(coderDoc, /documentation updates before verification/);
-    assert.match(coderDoc, /Re-run `scribe` after fixes/);
+    assert.match(coderDoc, /parent.*delegate.*scribe/);
+    assert.match(coderDoc, /documentation updates must precede verification/);
+    assert.match(coderDoc, /fixes affecting documented behavior/);
+    assert.match(coderDoc, /implement and format the assigned changes yourself/);
+    assert.doesNotMatch(coderDoc, /Fan-out mandate/);
   }
   const scribe = readFileSync(join(root, "agents/scribe.md"), "utf8");
   assert.match(scribe, /do not delegate/i);

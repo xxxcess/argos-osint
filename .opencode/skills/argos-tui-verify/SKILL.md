@@ -7,7 +7,7 @@ Use `docs/wiki/code/tui-verification.md` as the maintained procedure, with `docs
 
 Before edits, identify components, shared consumers, owned files, data/metric contracts and acceptance. Preserve shared draw/focus/pointer geometry, IDs, theme tokens, navigation/state restoration and keyboard/mouse parity. Do not add chrome, motion, or density modes. React Native component creativity in the Argos theme does not apply to the TUI. Fixtures cover affected viewport thresholds, overflow and missing/low-N/stale/empty/loading states.
 
-EDIT_UNIT children edit/format only. Tester runs the embedded gate in the combined integration tree per `.opencode/AGENTS.md`, then captures fresh TestBackend output:
+Coders edit and format their assigned work directly; they do not spawn children. Tester runs the embedded gate in the combined integration tree per `.opencode/AGENTS.md`, then captures fresh TestBackend output:
 
 ```sh
 .agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture --output .planning/<PLAN_ID>/tui/run-01 \

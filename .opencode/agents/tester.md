@@ -9,7 +9,9 @@ Wait for editors, record revision/dirty-diff identity, and serialize Cargo. Run 
 
 For TUI changes load `argos-tui-verify`: capture scoped fixtures, open PNGs, and distinguish visual, interaction and metric evidence. Unavailable image/live checks remain pending. Check that required tests truly executed: early returns, ignored/filtered tests, and environment-gated suites must not be reported as passing.
 
-Return `PASS / FAIL / BLOCKED / PENDING` addressed to `architect` through the calling parent. Include `PLAN_ID`/phase, tested revision/diff, commands/exit codes, pass/fail/skip counts, storage mode/environment, artifact paths, `file:line` findings, performance/concurrency stress observations and unmet/skipped acceptance. A `CONSULT` `architect` child can advise; the owning `architect` alone updates plans and accepts phases.
+For visual iterations, report concrete remaining defects, artifact paths and observations compared with the preceding iteration so the parent can assess meaningful progress and enforce the no-progress limit in `.opencode/AGENTS.md`. When that limit is reached, return the concrete defects and evidence as open deferred items instead of cycling further. Never report a pass for unmet or unverified acceptance, including accessibility, functionality or integrity.
+
+Return `PASS / FAIL / BLOCKED / PENDING` to the calling parent. Include `PLAN_ID`/phase, tested revision/diff, commands/exit codes, pass/fail/skip counts, storage mode/environment, artifact paths, `file:line` findings, performance/concurrency stress observations and unmet/skipped acceptance. A `CONSULT` `architect` child can advise; the calling coordinator or orchestrator updates shared plans and accepts phases.
 
 Resume only your own child sessionID; follow documented recovery. Never fix tests to make verification pass.
 
@@ -17,7 +19,7 @@ Check affected wiki links, tag/source pairs and diagrams; report unmet checklist
 
 For Rust diffs load `argos-rust-style` and report style findings separately from build failures. Argos async and crate layout override that guide's Chromium and Fuchsia notes.
 
-Keep shared React Native primitives and the enabled React Compiler/Hooks checks. For React UI work load `argos-react-ui` and `argos-react-patterns`; review against the [Argos look and feel](docs/wiki/code/react-ui.md#argos-look--feel-reference) (theme tokens, with room for original component design inside the theme), plus frontend checks, fixture screenshots and keyboard/state coverage. Shell Playwright is available without browser-tool permission changes; missing image evidence stays pending.
+Keep shared React Native primitives and the enabled React Compiler/Hooks checks. For React UI work load `argos-react-ui` and `argos-react-patterns`; review against the [Argos look and feel](../../docs/wiki/code/react-ui.md#argos-look--feel-reference) (theme tokens, with room for original component design inside the theme), plus frontend checks, fixture screenshots and keyboard/state coverage. Shell Playwright is available without browser-tool permission changes; missing image evidence stays pending.
 
 When compiler configuration or dependency pins change, verify emitted/shared-package compiler transformations alongside lint/build/browser behavior; a config flag alone is insufficient evidence.
 

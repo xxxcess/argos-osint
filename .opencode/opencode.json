@@ -14,7 +14,7 @@
   "agents": {
     "coordinator": {
       "mode": "all",
-      "model": "openai/gpt-6.1-terra#high",
+      "model": "nvidia/minimaxai/minimax-m3.1-flash#thinking",
       "permissions": [
         {
           "action": "read",
@@ -112,6 +112,11 @@
           "effect": "allow"
         },
         {
+          "action": "subagent",
+          "resource": "utility",
+          "effect": "allow"
+        },
+        {
           "action": "edit",
           "resource": "*",
           "effect": "allow"
@@ -120,7 +125,7 @@
     },
     "orchestrator": {
       "mode": "all",
-      "model": "opencode/glm-5.3-flash-free#thinking",
+      "model": "nvidia/minimaxai/minimax-m3.1-flash#thinking",
       "permissions": [
         {
           "action": "read",
@@ -205,6 +210,11 @@
         {
           "action": "subagent",
           "resource": "scribe",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "utility",
           "effect": "allow"
         },
         {
@@ -225,112 +235,6 @@
       ]
     },
     "architect": {
-      "mode": "all",
-      "model": "openai/gpt-6.1-terra#max",
-      "permissions": [
-        {
-          "action": "read",
-          "resource": "*",
-          "effect": "allow"
-        },
-        {
-          "action": "glob",
-          "resource": "*",
-          "effect": "allow"
-        },
-        {
-          "action": "grep",
-          "resource": "*",
-          "effect": "allow"
-        },
-        {
-          "action": "shell",
-          "resource": "*",
-          "effect": "allow"
-        },
-        {
-          "action": "webfetch",
-          "resource": "*",
-          "effect": "allow"
-        },
-        {
-          "action": "websearch",
-          "resource": "*",
-          "effect": "allow"
-        },
-        {
-          "action": "skill",
-          "resource": "*",
-          "effect": "allow"
-        },
-        {
-          "action": "execute",
-          "resource": "*",
-          "effect": "allow"
-        },
-        {
-          "action": "browser",
-          "resource": "*",
-          "effect": "deny"
-        },
-        {
-          "action": "subagent",
-          "resource": "*",
-          "effect": "deny"
-        },
-        {
-          "action": "subagent",
-          "resource": "architect",
-          "effect": "allow"
-        },
-        {
-          "action": "subagent",
-          "resource": "rust-coder",
-          "effect": "allow"
-        },
-        {
-          "action": "subagent",
-          "resource": "react-coder",
-          "effect": "allow"
-        },
-        {
-          "action": "subagent",
-          "resource": "reviewer",
-          "effect": "allow"
-        },
-        {
-          "action": "subagent",
-          "resource": "tester",
-          "effect": "allow"
-        },
-        {
-          "action": "subagent",
-          "resource": "auditor",
-          "effect": "allow"
-        },
-        {
-          "action": "subagent",
-          "resource": "scribe",
-          "effect": "allow"
-        },
-        {
-          "action": "edit",
-          "resource": "*",
-          "effect": "deny"
-        },
-        {
-          "action": "edit",
-          "resource": ".planning/**",
-          "effect": "allow"
-        },
-        {
-          "action": "edit",
-          "resource": "**/.planning/**",
-          "effect": "allow"
-        }
-      ]
-    },
-    "rust-coder": {
       "mode": "all",
       "model": "openai/gpt-6.1-terra#high",
       "permissions": [
@@ -385,50 +289,25 @@
           "effect": "deny"
         },
         {
-          "action": "subagent",
-          "resource": "architect",
-          "effect": "allow"
+          "action": "edit",
+          "resource": "*",
+          "effect": "deny"
         },
         {
-          "action": "subagent",
-          "resource": "rust-coder",
-          "effect": "allow"
-        },
-        {
-          "action": "subagent",
-          "resource": "react-coder",
-          "effect": "allow"
-        },
-        {
-          "action": "subagent",
-          "resource": "reviewer",
-          "effect": "allow"
-        },
-        {
-          "action": "subagent",
-          "resource": "tester",
-          "effect": "allow"
-        },
-        {
-          "action": "subagent",
-          "resource": "auditor",
-          "effect": "allow"
-        },
-        {
-          "action": "subagent",
-          "resource": "scribe",
+          "action": "edit",
+          "resource": ".planning/**",
           "effect": "allow"
         },
         {
           "action": "edit",
-          "resource": "*",
+          "resource": "**/.planning/**",
           "effect": "allow"
         }
       ]
     },
-    "react-coder": {
+    "rust-coder": {
       "mode": "all",
-      "model": "openai/gpt-6.1-sol#low",
+      "model": "openai/gpt-6.1-terra#medium",
       "permissions": [
         {
           "action": "read",
@@ -481,39 +360,65 @@
           "effect": "deny"
         },
         {
-          "action": "subagent",
-          "resource": "architect",
+          "action": "edit",
+          "resource": "*",
+          "effect": "allow"
+        }
+      ]
+    },
+    "react-coder": {
+      "mode": "all",
+      "model": "openai/gpt-6.1-sol#medium",
+      "permissions": [
+        {
+          "action": "read",
+          "resource": "*",
           "effect": "allow"
         },
         {
-          "action": "subagent",
-          "resource": "rust-coder",
+          "action": "glob",
+          "resource": "*",
           "effect": "allow"
         },
         {
-          "action": "subagent",
-          "resource": "react-coder",
+          "action": "grep",
+          "resource": "*",
           "effect": "allow"
         },
         {
-          "action": "subagent",
-          "resource": "reviewer",
+          "action": "shell",
+          "resource": "*",
           "effect": "allow"
         },
         {
-          "action": "subagent",
-          "resource": "tester",
+          "action": "webfetch",
+          "resource": "*",
           "effect": "allow"
         },
         {
-          "action": "subagent",
-          "resource": "auditor",
+          "action": "websearch",
+          "resource": "*",
           "effect": "allow"
         },
         {
-          "action": "subagent",
-          "resource": "scribe",
+          "action": "skill",
+          "resource": "*",
           "effect": "allow"
+        },
+        {
+          "action": "execute",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "browser",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "*",
+          "effect": "deny"
         },
         {
           "action": "edit",
@@ -524,7 +429,7 @@
     },
     "reviewer": {
       "mode": "all",
-      "model": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free#high",
+      "model": "openrouter/nvidia/nemotron-3.5-super-vl:free#thinking",
       "permissions": [
         {
           "action": "read",
@@ -600,7 +505,7 @@
     },
     "tester": {
       "mode": "all",
-      "model": "nvidia/nvidia/nemotron-3.5-super-vl-120b-a12b",
+      "model": "openrouter/nvidia/nemotron-3.5-super-vl:free#thinking",
       "permissions": [
         {
           "action": "read",
@@ -843,6 +748,152 @@
           "action": "edit",
           "resource": "**/README.md",
           "effect": "allow"
+        }
+      ]
+    },
+    "utility": {
+      "mode": "all",
+      "model": "openrouter/nvidia/nemotron-3.5-lightning:free",
+      "permissions": [
+        {
+          "action": "read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "glob",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "grep",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "shell",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "webfetch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "websearch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "execute",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "browser",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "question",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "docs/**",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "**/docs/**",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "README.md",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "**/README.md",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": ".planning/**",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "**/.planning/**",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": ".agent-scratch/**",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": "**/.agent-scratch/**",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": ".opencode/**",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": ".agy/**",
+          "effect": "allow"
+        },
+        {
+          "action": "edit",
+          "resource": ".opencode/tests/**",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "crates/**",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "packages/**",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "apps/**",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": "scripts/**",
+          "effect": "deny"
+        },
+        {
+          "action": "edit",
+          "resource": ".github/**",
+          "effect": "deny"
         }
       ]
     }

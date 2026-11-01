@@ -22,3 +22,5 @@ Keep shared React Native primitives and the enabled React Compiler/Hooks checks.
 For build/test changes, inspect `docs/wiki/code/ci.md` and affected `.github/workflows/`; map acceptance to their actual commands (including targeted host-native embedded Rust commands `-p <crate>`, `--lib`, `--test <name>` for scoped phases and `scripts/local_matrix.sh --storage embedded` for full gates), preserve Code Architect ownership and distinguish local validation from hosted Actions.
 
 Rust mutation policy: until further notice, do not run Rust mutation tests or baselines locally. Use GitHub Actions `mutation.yml`; report local execution as intentionally skipped. Ordinary Rust checks and embedded tests remain required.
+
+Follow [build cache hygiene](../../docs/wiki/code/contributing.md#build-cache-hygiene). The build owner checks disk headroom and cleans verified obsolete inactive artifacts before/between large builds and at handoff, retaining the selected binary and reusable cache. Coordinate cleanup through that owner; this does not expand this role’s execution permissions.

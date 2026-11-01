@@ -43,6 +43,7 @@ Follow [provider limits and continuation](../docs/wiki/code/opencode-v2.md#task-
 ## Quick Reference
 
 - **Navigate:** [wiki](../docs/index.md) → concepts/code → source; use [tags](../docs/wiki/tags.md) and scoped search
+- **Disk/cache:** Follow [build cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene) before builds, between large checks and at handoff. The build owner removes verified obsolete agent artifacts, preserves the selected reusable cache and reports free space; roles without execution ownership return cleanup needs to that owner.
 - **CI:** Inspect [contracts](../docs/wiki/code/ci.md) and affected `.github/workflows/`; stabilize host-native embedded build first; monitor Actions for other platforms
 - **Plan:** Pin one named task; use [planning format](../docs/wiki/code/planning-artifacts.md#working-format); update phase checkboxes with evidence and Next Step
 - **Test:** Load [Argos testing guidelines](skills/argos-testing/SKILL.md) for Rust/React test rules

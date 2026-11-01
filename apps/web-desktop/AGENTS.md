@@ -16,6 +16,8 @@ Launch Next with this app directory as its working directory; an app path argume
 
 Use [CI workflow contracts](../../docs/wiki/code/ci.md) and `.github/workflows/intel-web.yml` for frontend verification; async UI changes must cover pending, refresh, empty/zero, failure and cursor-page behavior.
 
+Follow [build cache hygiene](../../docs/wiki/code/contributing.md#build-cache-hygiene): check free space before/after builds, remove only verified obsolete inactive artifacts, and preserve the active Next output/cache, running dev server and retained Rust build.
+
 ## Rust mutation execution restriction
 
 Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Local mutation execution is deliberately skipped, not passed; ordinary targeted checks and the embedded gate remain required.

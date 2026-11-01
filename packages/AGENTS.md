@@ -4,6 +4,8 @@ Follow root [AGENTS.md](../AGENTS.md) and [React UI rules](../docs/wiki/code/rea
 
 Choose frontend checks from [CI contracts](../docs/wiki/code/ci.md) and `.github/workflows/intel-web.yml`; preserve opaque cursors and distinguish loading, empty collections and valid numeric zero.
 
+Follow [build cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene) before builds and at handoff; reclaim verified obsolete artifacts while preserving the current reusable Rust/web cache and running services.
+
 ## Rust mutation execution restriction
 
 Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Local mutation execution is deliberately skipped, not passed; ordinary targeted checks and the embedded gate remain required.

@@ -54,6 +54,8 @@ The evidence upload ignores absent files when an earlier step fails; it does not
 
 The user authorized the original web workflow addition and this follow-up CI update under Code Architect ownership. Workflow/action validation, the real build guard (including rejection cases), peer/type/lint/build/browser commands and artifact generation are checked locally. Hosted Actions execution requires publication and is not claimed as local evidence.
 
+Local build owners apply [build cache hygiene](contributing.md#build-cache-hygiene) before verification, between large phases and at handoff. Preserve the reusable host/embedded cache, reclaim verified obsolete artifacts and measure disk headroom before launching the next gate.
+
 ## Supplemental process checks
 
 Launcher/stack lifecycle changes also run `python3 scripts/test_web_stack.py --terminal-captures .agent-scratch/stack-review` after building `argos` and `argos-api-host` through the isolated Cargo wrapper and building the Next server. `--tui-only --tui-web-profile installed` narrows this to Venture back/value restoration, TUI return, same-parent storage reuse, shared API/Web TUI and terminal cleanup. These PTY/process checks are local supplemental evidence; the workflows above do not execute this script. Keep actual hosted results separate.

@@ -18,3 +18,7 @@ Coders edit and format their assigned work directly; they do not spawn children.
 Follow the guide's dependency setup. Choose explicit `--test`, quoted `--include` globs, affected `--size` and `--reason`; implement ARGOS_SCREEN_DIR fixture export if absent. No implicit Profile sweep. Shared shell/theme/global navigation or full overhauls require both fixture suites with `--all`; other shared components need representative consumers. Unmatched selectors fail; selected rendering still runs the fixture's assertions.
 
 Open emitted PNGs and compare contracts/available approved references. Record image paths, observations, fixes and limitations; generation or readable cells alone is not visual review. Verify interactions and metric cohorts with tests separately. Missing image/live evidence stays pending. Re-capture changed output; interaction-only changes may use focused tests when buffers are unchanged and the gate passed. Refresh affected wiki routes/tags/diagrams after code edits and retain artifacts per the guide.
+
+## Build cache hygiene
+
+Follow [cache retention and disk budgets](../../../docs/wiki/code/contributing.md#build-cache-hygiene) before builds, between large checks and at handoff. The build owner proactively removes verified obsolete inactive artifacts, preserves the selected reusable cache and executable, and records free space. Roles without build ownership report cleanup needs to the owner; do not bypass role permissions or use blanket/global cache cleanup.

@@ -114,6 +114,8 @@ RETURN: COMPLETE | NEEDS_DECISION | FAILED | APPROVE | REJECT | PASS | FAIL | BL
 4. Each coder implements and formats its assigned changes directly, then returns owned paths, diff and unresolved decisions. The dispatching role waits for all coders and integrates only each unit's delta.
 5. Have coders resolve integration conflicts; consult `architect` when contracts change, format the combined tree, and at scheduled documentation checkpoints give `scribe` exclusive ownership of the affected docs while it reviews the integrated delta. Wait for documentation updates before running the verification gate (`reviewer`, `tester`, `auditor`) in `INTEGRATION_ROOT`. Never test in feature worktrees.
 
+Build owners follow [cache retention and disk budgets](contributing.md#build-cache-hygiene) before builds, between large checks and at handoff. Dispatchers include the retained cache and free-space budget in handoffs; only the execution owner performs safe cleanup of obsolete artifacts.
+
 ## Verification
 
 Map each phase to [CI contracts](ci.md) and the affected `.github/workflows/` before choosing commands. Frontend phases include strict compiler/export and development browser checks; Rust phases start with targeted checks and use the embedded local gate when broad integration acceptance requires it. Respect Code Architect ownership for workflow edits and report hosted Actions separately from local evidence.

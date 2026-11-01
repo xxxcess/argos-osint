@@ -34,3 +34,5 @@ Select the smallest, most efficient team topology from `.opencode/opencode.json`
 - Preserve unrelated working-tree changes, keep scratch strictly in `.agent-scratch/`, and report final outcomes concisely with `file:line` references and actual verification evidence.
 
 Rust mutation policy: until further notice, do not run Rust mutation tests or baselines locally. Use GitHub Actions `mutation.yml`; report local execution as intentionally skipped. Ordinary Rust checks and embedded tests remain required.
+
+Follow [build cache hygiene](../../docs/wiki/code/contributing.md#build-cache-hygiene). The build owner checks disk headroom and cleans verified obsolete inactive artifacts before/between large builds and at handoff, retaining the selected binary and reusable cache. Coordinate cleanup through that owner; this does not expand this role’s execution permissions.

@@ -26,3 +26,5 @@ Follow `.opencode/AGENTS.md` and `docs/wiki/code/opencode-v2.md`. You are the **
 - Update phase checkboxes immediately as verified evidence arrives and return a concise milestone summary to `coordinator`.
 
 Rust mutation policy: until further notice, do not run Rust mutation tests or baselines locally. Use GitHub Actions `mutation.yml`; report local execution as intentionally skipped. Ordinary Rust checks and embedded tests remain required.
+
+Follow [build cache hygiene](../../docs/wiki/code/contributing.md#build-cache-hygiene). The build owner checks disk headroom and cleans verified obsolete inactive artifacts before/between large builds and at handoff, retaining the selected binary and reusable cache. Coordinate cleanup through that owner; this does not expand this role’s execution permissions.

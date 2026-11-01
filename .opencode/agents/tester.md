@@ -26,3 +26,5 @@ When compiler configuration or dependency pins change, verify emitted/shared-pac
 For build/test changes, inspect `docs/wiki/code/ci.md` and affected `.github/workflows/`; map acceptance to their actual commands, preserve Code Architect ownership and distinguish local validation from hosted Actions.
 
 Rust mutation policy: until further notice, do not run Rust mutation tests or baselines locally. Use GitHub Actions `mutation.yml`; report local execution as intentionally skipped. Ordinary Rust checks and embedded tests remain required.
+
+Follow [build cache hygiene](../../docs/wiki/code/contributing.md#build-cache-hygiene). The build owner checks disk headroom and cleans verified obsolete inactive artifacts before/between large builds and at handoff, retaining the selected binary and reusable cache. Coordinate cleanup through that owner; this does not expand this role’s execution permissions.

@@ -11,9 +11,10 @@ Use [lite](lite-team.md) for bounded changes with known ownership. Use [heavy](h
 - Start at [the wiki](../docs/index.md), then [contributing](../docs/wiki/code/contributing.md) and [testing](../.opencode/skills/argos-testing/SKILL.md).
 - One owner maintains `.planning/<date-slug>/task_plan.md`, findings and progress. These are local working memory; only curated design/decision/acceptance/handoff documents are eligible for Git. Follow [retention](../docs/wiki/code/planning-artifacts.md).
 - Temporary artifacts belong in `.agent-scratch/`. Cargo artifacts are the deliberate exception: `python3 scripts/agent_cargo.py` owns `target/agents`. Never override it or create per-worker build caches.
+- Follow [build cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene): the build owner checks disk budgets before/between builds and at handoff, removes verified obsolete inactive agent artifacts, and retains the selected binary and reusable cache. Never wipe active or global caches.
 - One tester owns serialized Cargo builds in the integration tree. Worktrees are edit-only. Match verification to changed contracts; docs-only work needs document/policy checks, not a full Rust build.
 - Agents must not run Rust mutation tests or baselines locally until further notice. Execution belongs to GitHub Actions `mutation.yml`; report absent hosted evidence honestly.
-- Preserve unrelated work, locks, servers, caches and unresolved evidence. Remove only clean, integrated, task-owned worktrees; never force cleanup to make status look clean.
+- Preserve unrelated work, locks, servers, retained reusable caches and unresolved evidence; reclaim verified obsolete build caches under the linked hygiene policy. Remove only clean, integrated, task-owned worktrees; never force cleanup to make status look clean.
 - Keep existing source conventions, React Compiler, accessible 3D topology/list twin, offline fixtures and host-native embedded constraints. Hosted runners own server/non-host verification.
 
 ## Handoff

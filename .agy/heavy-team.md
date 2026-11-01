@@ -1,6 +1,6 @@
 # Heavy teamwork
 
-Follow [shared contracts](howto.md). Use for independent implementation areas or cross-cutting contracts.
+Follow [shared contracts](howto.md), including proactive [build cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene). Use for independent implementation areas or cross-cutting contracts.
 
 1. One lead pins the plan, integration root, base revision and acceptance criteria. Record existing edits and active processes before resuming work.
 2. Map dependencies and assign disjoint edit units to Rust/React specialists. Create worktrees only where isolation helps. Coders may delegate edit units, but return review/test/docs needs to the lead. Do not reserve all execution slots with parents waiting on children.

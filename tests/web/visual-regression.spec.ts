@@ -64,6 +64,12 @@ for (const width of [1440, 768, 390, 320]) {
     await page.goto("/");
     await page.getByRole("button", { name: "Open Intel", exact: true }).click();
     await expect(page.getByText(article.title)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Latest", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Hottest", exact: true }),
+    ).toBeVisible();
     await expect(page.getByLabel("API connected", { exact: true })).toHaveText(
       "● API_OK",
     );

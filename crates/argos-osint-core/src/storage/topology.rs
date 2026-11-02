@@ -218,6 +218,7 @@ struct Query<'a> {
     gaps: BTreeSet<String>,
     remaining_rows: usize,
     memories: HashMap<String, Option<MemoryRow>>,
+    body_revisions: HashMap<String, Option<(String, String, String)>>,
     /// Brief detail only needs direct article bindings, not the graph walk.
     binding: bool,
     cancel: &'a tokio::sync::watch::Sender<()>,
@@ -348,6 +349,39 @@ impl Query<'_> {
                         }
                         out.member_ids.push(old.clone());
                         aliases.push_back(old);
+                    }
+                }
+                let mut r = stmt(
+                    self.tx
+                        .query("SELECT VALUE alias FROM brain_actor_alias WHERE actor_id = $a")
+                        .bind(("a", canonical.clone())),
+                )
+                .await?;
+                let names: Vec<String> = r.take(0)?;
+                let mut unique = Vec::new();
+                for name in names {
+                    if super::actor_catalog::lookup_in(&self.tx, &name)
+                        .await?
+                        .as_deref()
+                        == Some(canonical.as_str())
+                    {
+                        unique.push(crate::brain_actors::normalize_alias(&name));
+                    }
+                }
+                if !unique.is_empty() {
+                    let mut r = stmt(self.tx.query("SELECT VALUE actor_id FROM brain_actor_alias WHERE normalized IN $names AND type::record('brain_actor', actor_id).scope_key != $catalog ORDER BY actor_id LIMIT $limit")
+                        .bind(("names", unique))
+                        .bind(("catalog", crate::actor_catalog::SCOPE))
+                        .bind(("limit", (self.limit + 1) as i64))).await?;
+                    let legacy: Vec<String> = r.take(0)?;
+                    for id in self.bound(legacy) {
+                        let resolved = self.resolve(&id).await?;
+                        if resolved != id && resolved != canonical {
+                            continue;
+                        }
+                        if !out.member_ids.contains(&id) {
+                            out.member_ids.push(id);
+                        }
                     }
                 }
                 out.member_ids.sort();
@@ -931,6 +965,39 @@ impl Query<'_> {
         Ok(r.take(0)?)
     }
 
+    /// A body mention must still name the selected retained clean artifact.
+    async fn actor_spans(&mut self, article_id: &str, raw: &str) -> Result<Option<String>> {
+        let Ok(Value::Array(mut spans)) = serde_json::from_str(raw) else {
+            return Ok(Some(raw.to_owned()));
+        };
+        if !spans.iter().any(|span| span["field"] == "body") {
+            return Ok(Some(raw.to_owned()));
+        }
+        if !self.body_revisions.contains_key(article_id) {
+            let body = super::actor_catalog::clean_body_in(&self.tx, article_id).await?;
+            self.body_revisions.insert(
+                article_id.to_owned(),
+                body.map(|body| (body.source_id, body.revision, body.artifact_hash)),
+            );
+        }
+        let current = self.body_revisions.get(article_id).and_then(Option::as_ref);
+        let before = spans.len();
+        spans.retain(|span| {
+            span["field"] != "body"
+                || current.is_some_and(|(source, revision, hash)| {
+                    span["source_id"].as_str() == Some(source.as_str())
+                        && span["revision"].as_str() == Some(revision.as_str())
+                        && span["artifact_hash"].as_str() == Some(hash.as_str())
+                })
+        });
+        if spans.len() != before {
+            self.gaps.insert(format!(
+                "article:{article_id}: cleaned-body actor mention changed"
+            ));
+        }
+        Ok((!spans.is_empty()).then(|| Value::Array(spans).to_string()))
+    }
+
     async fn actor_neighbours(&mut self, n: &TopologyNode, out: &mut Vec<Adjacency>) -> Result<()> {
         for actor_id in n.member_ids.clone() {
             let mut r = stmt(
@@ -967,6 +1034,10 @@ impl Query<'_> {
                         row.provenance_json,
                     );
                     e.status = format!("recorded · {}", row.binding_state);
+                    e.actor_reference = Some(crate::brain_topology::ActorReference {
+                        role: row.role.clone(),
+                        binding_state: row.binding_state.clone(),
+                    });
                     e.rationale = format!("Recorded actor role: {}", row.role);
                     e.member_ids.push(actor_id.clone());
                     out.push((memory, e));
@@ -1017,6 +1088,10 @@ impl Query<'_> {
                         format!("memory_metadata:{mid}@{}", memory.revision),
                     );
                     e.status = format!("recorded · {state}");
+                    e.actor_reference = Some(crate::brain_topology::ActorReference {
+                        role: role.clone(),
+                        binding_state: state.clone(),
+                    });
                     e.rationale = format!("Recorded actor role: {role}");
                     e.member_ids.push(actor_id.clone());
                     out.push((memory, e));
@@ -1032,7 +1107,13 @@ impl Query<'_> {
             if let Some(cycle) = self.cycle() {
                 mentions.retain(|m| m.origin_kind == "article" && m.origin_scope == cycle);
             }
-            for m in self.bound(mentions) {
+            for mut m in self.bound(mentions) {
+                if m.origin_kind == "article" {
+                    let Some(spans) = self.actor_spans(&m.origin_id, &m.spans_json).await? else {
+                        continue;
+                    };
+                    m.spans_json = spans;
+                }
                 let (kind, scope, id, revision) = (
                     &m.origin_kind,
                     &m.origin_scope,
@@ -1100,6 +1181,10 @@ impl Query<'_> {
                 );
                 e.member_ids.push(row.actor_id);
                 e.status = format!("recorded · {}", row.binding_state);
+                e.actor_reference = Some(crate::brain_topology::ActorReference {
+                    role: row.role.clone(),
+                    binding_state: row.binding_state.clone(),
+                });
                 e.rationale = format!("Recorded actor role: {}", row.role);
                 out.push((actor, e));
             }
@@ -1125,6 +1210,10 @@ impl Query<'_> {
                     format!("memory_metadata:{}@{}", n.id, n.revision),
                 );
                 e.member_ids.push(reference.actor_id);
+                e.actor_reference = Some(crate::brain_topology::ActorReference {
+                    role: reference.role.clone(),
+                    binding_state: reference.binding_state.as_str().into(),
+                });
                 e.status = format!("recorded · {}", reference.binding_state.as_str());
                 out.push((actor, e));
             }
@@ -1609,7 +1698,11 @@ impl Query<'_> {
         mentions.sort_by(|a, b| {
             (&a.actor_id, &a.origin_revision).cmp(&(&b.actor_id, &b.origin_revision))
         });
-        for m in self.bound(mentions) {
+        for mut m in self.bound(mentions) {
+            let Some(spans) = self.actor_spans(&n.article_id, &m.spans_json).await? else {
+                continue;
+            };
+            m.spans_json = spans;
             let (aid, revision) = (&m.actor_id, &m.origin_revision);
             if !revision.is_empty() && *revision != n.revision {
                 self.gaps
@@ -2163,6 +2256,7 @@ async fn snapshot_in(
         gaps: BTreeSet::new(),
         remaining_rows: options.max_nodes.saturating_mul(64).clamp(4096, 32768),
         memories: HashMap::new(),
+        body_revisions: HashMap::new(),
         tx,
         binding,
         cancel,

@@ -496,7 +496,7 @@ pub struct PreparationCoverage {
     pub complete: bool,
 }
 
-fn entity_candidates(source: &Source, annotation: &Annotation) -> Vec<EntityCandidate> {
+pub(crate) fn entity_candidates(source: &Source, annotation: &Annotation) -> Vec<EntityCandidate> {
     if annotation.status != Status::Complete || !annotation.validate(source) {
         return Vec::new();
     }

@@ -106,6 +106,24 @@ async function fixtures(
         storage: true,
         instance_id: "fixture-instance",
       };
+    else if (path === "actors/detail")
+      body = {
+        id: "actor1",
+        display_name: "Port authority",
+        subtype: "organization",
+        identity_state: "provisional",
+        catalog_source_id: null,
+        catalog_type: null,
+        description: null,
+        aliases: [],
+        metadata: [],
+        claims: [],
+        briefs: [],
+        loaded_claims: 0,
+        loaded_briefs: 0,
+        gaps: [],
+        truncated: false,
+      };
     else if (path === "host/metrics")
       body = {
         cpu_percent: null,
@@ -526,8 +544,13 @@ test("browse, search, brief, related, topology and reconnect", async ({
   await page
     .getByRole("button", { name: "Explore actor Port authority" })
     .click();
+  await expect(page).toHaveURL(/\/actor\?id=actor1$/);
+  await page.getByRole("button", { name: "OPEN ACTOR TOPOLOGY" }).click();
   await expect(page.getByText("Recorded actor")).toBeVisible();
   await expect(page).toHaveURL(/\/topology\?seed=actor1$/);
+  await page
+    .getByRole("button", { name: "Return to Actor", exact: true })
+    .click();
   await page
     .getByRole("button", { name: "Return to Brief", exact: true })
     .click();
@@ -2124,12 +2147,20 @@ test("each indexed brief actor, claim and inference opens its own memory seed", 
     const action = page.getByRole("button", { name, exact: true });
     await expect(action).toBeEnabled();
     await action.click();
+    if (id === "actor1") {
+      await expect(page).toHaveURL(/\/actor\?id=actor1$/);
+      await page.getByRole("button", { name: "OPEN ACTOR TOPOLOGY" }).click();
+    }
     await expect
       .poll(() => new URL(page.url()).searchParams.get("seed"))
       .toBe(id);
     await expect(
       page.getByRole("heading", { name: id, exact: true }),
     ).toBeVisible();
+    if (id === "actor1")
+      await page
+        .getByRole("button", { name: "Return to Actor", exact: true })
+        .click();
     await page
       .getByRole("button", { name: "Return to Brief", exact: true })
       .click();
@@ -2600,4 +2631,87 @@ test("bulletin skeleton reserves the loaded card height", async ({ page }) => {
   expect(
     Math.abs((await card.boundingBox())!.height - height),
   ).toBeLessThanOrEqual(1);
+});
+
+for (const width of [1440, 390]) {
+  test(`bulletin latest and hottest controls use server ordering at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await fixtures(page);
+    const seen: URLSearchParams[] = [];
+    await page.route("**/api/v1/articles?**", async (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      seen.push(params);
+      const latest = {
+        ...a,
+        id: "new",
+        title: "Latest retained story",
+        temperature: 0.1,
+      };
+      const hot = {
+        ...a,
+        id: "hot",
+        title: "Hottest retained story",
+        temperature: 0.9,
+      };
+      await route.fulfill({
+        json: {
+          rows:
+            params.get("sort") === "hottest" ? [hot, latest] : [latest, hot],
+          next_cursor: null,
+          revision: "sort-fixture",
+        },
+      });
+    });
+    await page.goto("/bulletin");
+    await expect(
+      page.getByRole("heading", { name: "Intelligence bulletin", exact: true }),
+    ).toBeVisible();
+    const cards = page.getByRole("button", { name: /^Open Focus Brief:/ });
+    await expect(cards.first()).toHaveAccessibleName(/Latest retained story/);
+    const dayBox = (await page
+      .getByRole("button", { name: /^Retained day/ })
+      .boundingBox())!;
+    const latestBox = (await page
+      .getByRole("button", { name: "Latest", exact: true })
+      .boundingBox())!;
+    if (width >= 900)
+      expect(latestBox.x - dayBox.x - dayBox.width).toBeLessThan(20);
+    await page.getByRole("button", { name: "Hottest", exact: true }).click();
+    await expect(cards.first()).toHaveAccessibleName(/Hottest retained story/);
+    expect(
+      seen.filter((p) => p.get("sort") === "hottest")[0].get("cursor"),
+    ).toBeNull();
+    await page.screenshot({
+      path: `${captureDir}/bulletin-hottest-${width}.png`,
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "Latest", exact: true }).click();
+    await expect(cards.first()).toHaveAccessibleName(/Latest retained story/);
+  });
+}
+
+test("HTTP article images are allowed by the image CSP and render", async ({
+  page,
+}) => {
+  const image = "http://images.fixture.test/article.svg";
+  await fixtures(page, true, image);
+  await page.route(image, (route) =>
+    route.fulfill({
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="green"/></svg>',
+    }),
+  );
+  await page.goto("/bulletin");
+  await expect(
+    page.getByRole("heading", { name: "Intelligence bulletin", exact: true }),
+  ).toBeVisible();
+  const img = page
+    .locator('img[src="http://images.fixture.test/article.svg"]')
+    .first();
+  await expect(img).toBeVisible();
+  await expect
+    .poll(() => img.evaluate((el) => (el as HTMLImageElement).naturalWidth))
+    .toBe(80);
 });

@@ -136,13 +136,16 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
       />,
     );
     const record = forceGraphInstances[0];
-    await waitFor(() =>
-      expect(record.cameraPosition?.length).toBeGreaterThanOrEqual(2),
-    );
-    expect(record.cameraPosition![0][1]).toEqual(
-      expect.objectContaining({ x: 5, y: 6, z: 7 }),
-    );
-    expect(record.cameraPosition!.at(-1)![2]).toBe(intelMotion.focus);
+    await waitFor(() => expect(record.cameraPosition?.length).toBe(1));
+    const [position, lookAt, duration] = record.cameraPosition![0] as [
+      { x: number; y: number },
+      { x: number; y: number; z: number },
+      number,
+    ];
+    expect(lookAt).toEqual({ x: 5, y: 6, z: 7 });
+    expect(position.x).toBe(lookAt.x);
+    expect(position.y).toBe(lookAt.y);
+    expect(duration).toBe(0);
   });
 
   function positionEngineNodes() {
@@ -163,11 +166,12 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
     expect(forceGraphInstances[0].cameraPosition).toBeUndefined();
     positionEngineNodes();
     (lastForceGraphProps!.onEngineStop as () => void)();
-    expect(forceGraphInstances[0].cameraPosition!.at(-1)).toEqual([
-      expect.any(Object),
-      { x: 20, y: 10, z: 0 },
-      intelMotion.focus,
-    ]);
+    const landing = forceGraphInstances[0].cameraPosition!.at(-1)!;
+    expect(landing[1]).toEqual({ x: 20, y: 10, z: 0 });
+    expect(landing[0]).toEqual(
+      expect.objectContaining({ x: 20, y: 10 }),
+    );
+    expect(landing[2]).toBe(0);
   });
 
   it("aligns the disabled controls target for an instant reduced-motion fit", () => {
@@ -211,7 +215,20 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
     view.rerender(<ForceCanvas {...props} ref={ref} selectedId="n1" />);
     positionEngineNodes();
     (lastForceGraphProps!.onEngineStop as () => void)();
-    expect(moves()).toBe(before + 2);
+    expect(moves()).toBe(before);
+    ref.current!.reset();
+    expect(moves()).toBe(before);
+    (lastForceGraphProps!.onEngineStop as () => void)();
+    expect(moves()).toBe(before + 1);
+    const landing = record.cameraPosition!.at(-1)! as [
+      { x: number; y: number },
+      { x: number; y: number },
+      number,
+    ];
+    expect(landing[0].x).toBe(landing[1].x);
+    expect(landing[0].y).toBe(landing[1].y);
+    (lastForceGraphProps!.onEngineStop as () => void)();
+    expect(moves()).toBe(before + 1);
   });
 
   it("zooms along the camera ray while retaining an off-origin orbit target", () => {
@@ -230,7 +247,7 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
     const { ref } = renderCanvas();
     const record = forceGraphInstances[0];
     ref.current!.zoomBy(1.4);
-    expect(record.cameraPosition).toHaveLength(2);
+    expect(record.cameraPosition).toHaveLength(1);
     ref.current!.fit();
     expect(record.zoomToFit![0][1]).toBe(40); // 40px padding around the frame
     ref.current!.reset();

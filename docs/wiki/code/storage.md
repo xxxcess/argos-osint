@@ -57,3 +57,5 @@ The [UI-independent Intel service](../../../crates/argos-osint-core/src/intel_se
 ## Actor catalog
 
 The [seeded actor catalog](actor-catalog.md) adds provenance-bearing catalog fields to `brain_actor` and the leased `brain_actor_seed:catalog` completion/progress receipt. Actor, alias, typed-memory and graph-node batches commit together. Existing schema version 1 is extended idempotently; no automatic data wipe or actor conversion runs at startup. A user-requested `storage reset --yes` removes data and the receipt while keeping configuration, credentials, models and datasets.
+
+Job/task creation, claim and completion now retain `job_event` lifecycle rows atomically with their transition. The per-job log reader combines those rows with `argos_event` for the same descendant cohort, ordered by time with deterministic ties; unscoped durable telemetry retains its sequence pagination. Clear events continues to clear the durable telemetry journal; job lifecycle history remains with its job until job cleanup.

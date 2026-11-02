@@ -8,6 +8,9 @@ import React, {
 } from "react";
 import { View, ScrollView, StyleSheet } from "react-native";
 import {
+  useActorDossier,
+  useAssociationLive,
+  ApiError,
   useBackend,
   useHostMetrics,
   useBriefLive,
@@ -24,8 +27,6 @@ import {
 } from "@argos/api-client";
 import {
   Button,
-  Label,
-  Copy,
   Notice,
   LoadingState,
   EmptyState,
@@ -37,9 +38,11 @@ import {
 } from "@argos/ui";
 import { OrbitScene } from "./landing/OrbitScene";
 import { IntelStatusBar, JobDropUp, type StatusJob } from "./shell/IntelShell";
+import { ActorDossierView } from "./views/actor/ActorDossierView";
 import { Topology } from "./topology/Topology";
 import { HomeView } from "./views/HomeView";
 import { BulletinView } from "./views/BulletinView";
+import { BriefProgressStepper } from "./views/brief/BriefProgressStepper";
 import { ContextRail } from "./views/brief/ContextRail";
 import { BriefSkeleton } from "./views/brief/BriefSkeleton";
 import {
@@ -179,7 +182,64 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
   const screen = route.screen;
   const seed = route.screen === "topology" ? route.seed : null;
   const focus = route.screen === "topology" ? route.focus : undefined;
+  const actorSource = route.screen === "actor" ? route.source : undefined;
+  const actorBrief = useRead<Brief>(
+    `articles/detail?${keyFor({ run_id: actorSource?.run_id || "", id: actorSource?.article_id || "" })}`,
+    !!actorSource,
+  );
+  const extractedActor =
+    actorSource && !actorBrief.isPlaceholderData
+      ? actorBrief.data?.actors.find(
+          (actor) => actor.id === actorSource.actor_id,
+        )
+      : undefined;
+  const resolvedActorId =
+    route.screen === "actor"
+      ? route.id ||
+        (typeof extractedActor?.topology_seed?.Actor === "string"
+          ? extractedActor.topology_seed.Actor
+          : null)
+      : null;
+  // A retained source actor ID may already identify a catalog row even when
+  // article graph decoration has not produced a seed. The read endpoint alone
+  // decides whether it is an active canonical actor; never infer it from a name.
+  const dossierLookupId = resolvedActorId || extractedActor?.id || null;
+  useAssociationLive(
+    route.screen === "actor"
+      ? route.from || route.source
+      : route.screen === "topology"
+        ? route.from || route.actorFrom?.from || route.actorFrom?.source
+        : undefined,
+  );
+  const dossier = useActorDossier(dossierLookupId);
+  const sourcePreview =
+    !!actorSource &&
+    !resolvedActorId &&
+    dossier.error instanceof ApiError &&
+    dossier.error.status === 404;
   const navigate = navigation.navigate;
+  function openActor(actor: Brief["actors"][number]) {
+    const id =
+      typeof actor.topology_seed?.Actor === "string"
+        ? actor.topology_seed.Actor
+        : null;
+    navigate({
+      screen: "actor",
+      id,
+      ...(!id && article
+        ? {
+            source: {
+              run_id: article.run_id,
+              article_id: article.id,
+              actor_id: actor.id,
+            },
+          }
+        : {}),
+      ...(article
+        ? { from: { run_id: article.run_id, article_id: article.id } }
+        : {}),
+    });
+  }
   const resolveTopology = useAction<{ seed: string }>("topology/resolve");
   function openArticle(next: Article) {
     setArticle(next);
@@ -193,11 +253,13 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
     `articles/counts?day=${encodeURIComponent(selectedDay)}`,
     screen === "bulletin" && !!selectedDay,
   );
+  const [feedSort, setFeedSort] = useState<"latest" | "hottest">("latest");
   const list = useArticles(
     category,
     selectedDay,
     debouncedSearch,
     screen === "bulletin",
+    feedSort,
   );
   const articles = [
     ...new Map(
@@ -211,17 +273,31 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
     const direct = [next.Actor, next.Claim, next.Inference, next.Brief].find(
       (value): value is string => typeof value === "string" && !!value,
     );
-    const from = article
-      ? { run_id: article.run_id, article_id: article.id }
-      : route.screen === "topology"
+    const from =
+      route.screen === "actor"
         ? route.from
-        : undefined;
+        : article
+          ? { run_id: article.run_id, article_id: article.id }
+          : route.screen === "topology"
+            ? route.from
+            : undefined;
     const open = (seed: string) => {
       navigate({
         screen: "topology",
         seed,
         ...(focus && seed.startsWith("brief:") ? { focus } : {}),
         ...(from ? { from } : {}),
+        ...(route.screen === "actor"
+          ? {
+              actorFrom: {
+                id: route.id,
+                source: route.source,
+                from: route.from,
+              },
+            }
+          : route.screen === "topology" && route.actorFrom
+            ? { actorFrom: route.actorFrom }
+            : {}),
       });
     };
     if (direct) {
@@ -257,19 +333,56 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
                 maxWidth: "100%",
               }}
             >
-              <Button
-                onPress={() =>
-                  navigate(
-                    route.screen === "topology" && route.from
-                      ? { screen: "brief", ...route.from }
-                      : { screen: "bulletin" },
-                  )
-                }
+              <View
+                style={{
+                  flexDirection: "row",
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                }}
               >
-                {route.screen === "topology" && route.from
-                  ? "Return to Brief"
-                  : "Return to Bulletin"}
-              </Button>
+                <Button
+                  onPress={() =>
+                    navigate(
+                      route.screen === "topology" && route.actorFrom
+                        ? { screen: "actor", ...route.actorFrom }
+                        : route.screen === "topology" && route.from
+                          ? { screen: "brief", ...route.from }
+                          : { screen: "bulletin" },
+                    )
+                  }
+                >
+                  {route.screen === "topology" && route.actorFrom
+                    ? "Return to Actor"
+                    : route.screen === "topology" && route.from
+                      ? "Return to Brief"
+                      : "Return to Bulletin"}
+                </Button>
+                <View
+                  style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}
+                >
+                  {(
+                    [
+                      ["Neighbors", "intel-topology-neighborhood"],
+                      ["Nodes", "intel-topology-nodes"],
+                      ["Connections", "intel-topology-connections"],
+                    ] as const
+                  ).map(([label, id]) => (
+                    <Button
+                      key={id}
+                      onPress={() =>
+                        document.getElementById(id)?.scrollIntoView({
+                          behavior: "smooth",
+                          block: "start",
+                        })
+                      }
+                    >
+                      {label}
+                    </Button>
+                  ))}
+                </View>
+              </View>
               <ScrollView
                 nativeID="intel-topology-content-scroll"
                 style={{ flex: 1, minHeight: 0 }}
@@ -283,8 +396,48 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
                 />
               </ScrollView>
             </View>
+          ) : route.screen === "actor" ? (
+            <ScrollView
+              nativeID="intel-actor-scroll"
+              style={{ flex: 1, minHeight: 0 }}
+              contentContainerStyle={{ flexGrow: 1 }}
+            >
+              <ActorDossierView
+                dossier={dossier.data}
+                extractedActor={sourcePreview ? extractedActor : undefined}
+                sourceArticle={actorBrief.data?.article}
+                pending={
+                  dossier.isLoading ||
+                  actorBrief.isLoading ||
+                  actorBrief.isPlaceholderData
+                }
+                refreshing={dossier.isFetching && !!dossier.data}
+                error={dossier.error?.message || actorBrief.error?.message}
+                missing={
+                  (!route.id && !route.source) ||
+                  (!!route.source && actorBrief.isSuccess && !extractedActor) ||
+                  (dossier.error instanceof ApiError &&
+                    dossier.error.status === 404)
+                }
+                fromBrief={!!route.from}
+                onBack={() =>
+                  navigate(
+                    route.from
+                      ? { screen: "brief", ...route.from }
+                      : { screen: "bulletin" },
+                  )
+                }
+                onRetry={() => {
+                  if (dossierLookupId) void dossier.refetch();
+                  else void actorBrief.refetch();
+                }}
+                onTopology={topology}
+                onArticle={openArticle}
+              />
+            </ScrollView>
           ) : screen === "brief" && article ? (
             <ScrollView
+              nativeID="intel-brief-scroll"
               style={{ flex: 1, minHeight: 0 }}
               contentContainerStyle={{ flexGrow: 1 }}
             >
@@ -294,10 +447,12 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
                 onBack={() => navigate({ screen: "bulletin" })}
                 onArticle={openArticle}
                 onTopology={topology}
+                onActor={openActor}
               />
             </ScrollView>
           ) : screen === "brief" ? (
             <ScrollView
+              nativeID="intel-brief-scroll"
               style={{ flex: 1, minHeight: 0 }}
               contentContainerStyle={{ flexGrow: 1, gap: 12 }}
             >
@@ -331,6 +486,8 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
             </ScrollView>
           ) : (
             <BulletinView
+              sort={feedSort}
+              onSort={setFeedSort}
               categories={categories}
               category={category}
               onCategory={setCategory}
@@ -364,6 +521,8 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
           screen === "home" ? undefined : (
             <PageJobs
               screen={screen}
+              actorFetching={dossier.isFetching || actorBrief.isFetching}
+              actorError={dossier.error?.message || actorBrief.error?.message}
               article={screen === "brief" ? article : lastArticle}
               daysPending={days.isLoading}
               daysError={days.error?.message}
@@ -401,6 +560,8 @@ function stageJob(state: string, active: boolean): JobState {
 
 function PageJobs({
   screen,
+  actorFetching,
+  actorError,
   article,
   daysPending,
   daysError,
@@ -411,7 +572,9 @@ function PageJobs({
   resolveError,
   seed,
 }: {
-  screen: "bulletin" | "brief" | "topology" | "home";
+  screen: "bulletin" | "brief" | "actor" | "topology" | "home";
+  actorFetching: boolean;
+  actorError?: string;
   article?: Article | null;
   daysPending: boolean;
   daysError?: string;
@@ -462,6 +625,23 @@ function PageJobs({
             },
           ]
         : [];
+  if (screen === "actor")
+    return (
+      <JobDropUp
+        jobs={[
+          {
+            id: "actor-read",
+            label: "Actor dossier",
+            state: actorError
+              ? "failed"
+              : actorFetching
+                ? "running"
+                : "succeeded",
+            detail: actorError || (actorFetching ? "Reading actor" : "Ready"),
+          },
+        ]}
+      />
+    );
   if (!article) return <JobDropUp jobs={local} />;
   return (
     <PageJobsWithBrief
@@ -519,11 +699,13 @@ function PageJobsWithBrief({
 }
 function Focus({
   article: a,
+  onActor,
   onBack,
   onArticle,
   onTopology,
 }: {
   article: Article;
+  onActor: (actor: Brief["actors"][number]) => void;
   onBack: () => void;
   onArticle: (a: Article) => void;
   onTopology: (s: Seed, focus?: string) => void;
@@ -576,9 +758,7 @@ function Focus({
         <LoadingState label="Loading related leads…" compact />
       ) : null}
       {related.error && <Notice>{related.error.message}</Notice>}
-      <View
-        style={{ flexDirection: "row", flexWrap: "wrap", gap: 24, minWidth: 0 }}
-      >
+      <View style={{ gap: 12, minWidth: 0, width: "100%" }}>
         {related.data?.pages
           .flatMap((p) => p.rows)
           .filter(
@@ -632,6 +812,7 @@ function Focus({
   return (
     <BriefView
       article={a}
+      onActor={onActor}
       brief={d}
       stages={stages}
       pending={detail.isLoading && !d}
@@ -658,24 +839,12 @@ function Focus({
       }
       notices={
         <>
-          {live?.progress &&
-          !live.progress.complete &&
-          jobState !== "succeeded" ? (
-            <View role="status" aria-live="polite" style={{ gap: 8 }}>
-              <Label>
-                {jobState === "failed"
-                  ? "Brief extraction failed"
-                  : "Brief in progress"}
-              </Label>
-              {live.progress.stages.map((stage) => (
-                <Copy key={stage.operation}>
-                  {stage.label} · {stage.row}
-                </Copy>
-              ))}
-              {!live.connected ? (
-                <Notice>Live updates interrupted. Reconnecting…</Notice>
-              ) : null}
-            </View>
+          {stages && stages.length > 0 ? (
+            <BriefProgressStepper
+              stages={stages}
+              state={jobState}
+              connected={live?.connected ?? false}
+            />
           ) : null}
           {detail.isError && (
             <>

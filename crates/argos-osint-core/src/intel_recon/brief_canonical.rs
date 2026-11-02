@@ -46,7 +46,7 @@ pub struct IndexReceipt {
     pub revision: String,
 }
 
-pub const PUBLICATION_VERSION: u32 = 4;
+pub const PUBLICATION_VERSION: u32 = 5;
 
 pub fn state_key(article_id: &str) -> String {
     format!("intel-brief-canonical:{article_id}")

@@ -17,7 +17,7 @@
 <text x="384" y="264" class="heading">Storage-backed readiness</text><text x="384" y="290" class="note">Compatible API version + instance</text><text x="384" y="309" class="note">Live schema probe, bounded retries</text>
 <path d="M624 278H700" class="line"/><text x="642" y="265" class="note">ready</text>
 <rect x="700" y="232" width="260" height="92" rx="6" fill="white" stroke="#eb6c36" stroke-width="2"/>
-<text x="720" y="264" class="heading">Next · UI / API / relay</text><text x="720" y="290" class="note">Home, Bulletin, Brief, Topology</text><text x="720" y="309" class="note">HTTP ready → open browser tab</text>
+<text x="720" y="264" class="heading">Next · UI / API / relay</text><text x="720" y="290" class="note">Home, Bulletin, Brief, Actor, Topology</text><text x="720" y="309" class="note">HTTP ready → open browser tab</text>
 <path d="M364 278H290" class="line"/><text x="305" y="265" class="note">fail</text>
 <rect x="40" y="232" width="250" height="92" rx="6" class="node"/>
 <text x="60" y="264" class="heading">Abort launch</text><text x="60" y="290" class="note">Diagnostics + owned-child cleanup</text><text x="60" y="309" class="note">Preserve storage and adopted API</text>

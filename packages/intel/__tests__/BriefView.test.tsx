@@ -74,12 +74,14 @@ function View({
   data = brief,
   pending = false,
   onTopology = vi.fn(),
+  onActor = vi.fn(),
   stages,
 }: {
   data?: Brief;
   stages?: BriefStage[];
   pending?: boolean;
   onTopology?: ReturnType<typeof vi.fn>;
+  onActor?: ReturnType<typeof vi.fn>;
 }) {
   return (
     <BriefView
@@ -89,6 +91,7 @@ function View({
       stages={stages}
       onBack={vi.fn()}
       onTopology={onTopology}
+      onActor={onActor}
       related={null}
       operations={null}
       notices={null}
@@ -262,6 +265,7 @@ describe("Focus Brief", () => {
   it("sends retained actor identity/revision, supplied claim seed and article seed on real presses", async () => {
     const user = userEvent.setup();
     const onTopology = vi.fn();
+    const onActor = vi.fn();
     const supplied = { Claim: "published-claim" };
     render(
       <View
@@ -270,13 +274,14 @@ describe("Focus Brief", () => {
           claims: [{ ...brief.claims[0], topology_seed: supplied }],
         }}
         onTopology={onTopology}
+        onActor={onActor}
       />,
     );
     screen
       .getByRole("button", { name: "Explore actor Harbor authority" })
       .focus();
     await user.keyboard("{Enter}");
-    expect(onTopology).toHaveBeenLastCalledWith({ Actor: "actor-memory" });
+    expect(onActor).toHaveBeenLastCalledWith(brief.actors[0]);
     await user.click(
       screen.getByRole("button", { name: "Explore claim: Retained statement" }),
     );
@@ -285,9 +290,10 @@ describe("Focus Brief", () => {
     await user.keyboard(" ");
     expect(onTopology).toHaveBeenLastCalledWith({ Claim: "claim-memory" });
   });
-  it("opens extracted claims, actors and inferences before indexing assigns a memory", async () => {
+  it("opens extracted actors in dossiers while claims and inferences retain topology navigation", async () => {
     const user = userEvent.setup();
     const onTopology = vi.fn();
+    const onActor = vi.fn();
     const extracted = { Brief: "brief:run-1/raw-id" };
     render(
       <View
@@ -304,6 +310,7 @@ describe("Focus Brief", () => {
           })),
         }}
         onTopology={onTopology}
+        onActor={onActor}
       />,
     );
     expect(
@@ -325,7 +332,10 @@ describe("Focus Brief", () => {
     await user.click(
       screen.getByRole("button", { name: "Explore actor Harbor authority" }),
     );
-    expect(onTopology).toHaveBeenLastCalledWith(extracted, "actor:local-actor");
+    expect(onActor).toHaveBeenCalledWith({
+      ...brief.actors[0],
+      topology_seed: null,
+    });
     await user.click(
       screen.getByRole("button", { name: "Launch 3D topology" }),
     );
@@ -480,4 +490,133 @@ it("uses each section's stage independently and restores retained content on com
     screen.queryByRole("status", { name: /Claims:|Inferences:/ }),
   ).toBeNull();
   expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("keeps one actor section and opens dossier actions for canonical and extracted actors", async () => {
+  const onActor = vi.fn(),
+    onTopology = vi.fn();
+  const props = {
+    article,
+    brief,
+    pending: false,
+    onBack: vi.fn(),
+    onActor,
+    onTopology,
+    related: null,
+    operations: null,
+    notices: null,
+    source: null,
+  };
+  const { rerender } = render(<BriefView {...props} />);
+  await userEvent.click(
+    screen.getByRole("button", { name: "Explore actor Harbor authority" }),
+  );
+  expect(onActor).toHaveBeenLastCalledWith(brief.actors[0]);
+  expect(
+    screen.queryByRole("button", { name: "Extracted actor Harbor authority" }),
+  ).toBeNull();
+  expect(onTopology).not.toHaveBeenCalled();
+  const extracted = { ...brief.actors[0], topology_seed: null };
+  rerender(<BriefView {...props} brief={{ ...brief, actors: [extracted] }} />);
+  await userEvent.click(
+    screen.getByRole("button", { name: "Explore actor Harbor authority" }),
+  );
+  expect(onActor).toHaveBeenLastCalledWith(extracted);
+  expect(onTopology).not.toHaveBeenCalled();
+});
+
+it("keeps an empty actor section loading until cleaned-body matching finishes", () => {
+  const pending = {
+    ...brief,
+    actors: [],
+    actors_pending: true,
+    actors_body_pending: true,
+  };
+  const { rerender } = render(<View data={pending} />);
+  expect(
+    screen.getByRole("status", {
+      name: "Checking cleaned article for actors…",
+    }),
+  ).toBeVisible();
+  expect(screen.queryByText("No actors extracted")).toBeNull();
+  rerender(
+    <View
+      data={{ ...pending, actors_pending: false, actors_body_pending: false }}
+    />,
+  );
+  expect(screen.getByText("No actors extracted")).toBeVisible();
+});
+it("keeps metadata actors visible and appends cleaned-body matches without replacing them", () => {
+  const initial = { ...brief, actors_body_pending: true };
+  const { rerender } = render(<View data={initial} />);
+  expect(
+    screen.getByRole("button", { name: "Explore actor Harbor authority" }),
+  ).toBeVisible();
+  expect(
+    screen.getByRole("progressbar", {
+      name: "Checking cleaned article for more actors…",
+    }),
+  ).toBeVisible();
+  const bodyActor = {
+    id: "body-actor",
+    display_name: "Body-only organization",
+    type_hint: "organization",
+    topology_seed: { Actor: "body-canonical" },
+  };
+  rerender(
+    <View
+      data={{
+        ...initial,
+        actors_body_pending: false,
+        actors: [...brief.actors, bodyActor],
+      }}
+    />,
+  );
+  expect(
+    screen
+      .getAllByRole("button", { name: /^Explore actor / })
+      .map((button) => button.getAttribute("aria-label")),
+  ).toEqual([
+    "Explore actor Harbor authority",
+    "Explore actor Body-only organization",
+  ]);
+});
+it("does not label a failed body cleanup as a verified empty actor collection", () => {
+  render(
+    <View data={{ ...brief, actors: [], actors_body_unavailable: true }} />,
+  );
+  expect(screen.getByText("Actor detection incomplete")).toBeVisible();
+  expect(screen.queryByText("No actors extracted")).toBeNull();
+});
+
+it("shows zero confidence above identified actors with the terminal grade", () => {
+  render(<View data={{ ...brief, confidence_grade: "B2" }} />);
+  expect(screen.getByText("Brief rating 0/100")).toBeInTheDocument();
+  expect(screen.getByLabelText("Admiralty grade B2")).toHaveTextContent("██");
+  const confidence = screen.getByRole("button", { name: "ARTICLE CONFIDENCE" });
+  const actors = screen.getByRole("button", { name: /IDENTIFIED ACTORS/ });
+  expect(
+    confidence.compareDocumentPosition(actors) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
+
+it("updates generated inference totals independently of scored inference eligibility", () => {
+  const initial = {
+    ...brief,
+    confidence: { score: null, provisional: true, claims: 1, inferences: 0 },
+    inferences: [],
+  };
+  const { rerender } = render(<View data={initial} />);
+  expect(screen.getByText("1 claims · 0 inferences")).toBeVisible();
+  rerender(
+    <View
+      data={{
+        ...initial,
+        inferences: [{ id: "new", text: "New generated inference" }],
+      }}
+    />,
+  );
+  expect(screen.getByText("1 claims · 1 inferences")).toBeVisible();
+  expect(screen.getByText("New generated inference")).toBeVisible();
 });

@@ -30,6 +30,7 @@ type MutableRecord = {
   pauseAnimation?: number;
   resumeAnimation?: number;
   d3ReheatSimulation?: number;
+  lastCamera?: { x: number; y: number; z: number };
 };
 
 // Latestcaptured props + per-instance method call records.
@@ -58,8 +59,13 @@ export const ForceGraph3DMock = forwardRef<
   useImperativeHandle(ref, () => ({
     controls: () => ({ target: record.controlTarget ?? { x: 0, y: 0, z: 0 } }),
     cameraPosition: (position, lookAt, ms) => {
-      (record.cameraPosition ??= []).push([position, lookAt, ms]);
-      return position ?? { x: 0, y: 0, z: 300 };
+      if (position) {
+        record.lastCamera = { x: position.x, y: position.y, z: position.z };
+        (record.cameraPosition ??= []).push([position, lookAt, ms]);
+      }
+      return record.lastCamera
+        ? { ...record.lastCamera }
+        : { x: 0, y: 0, z: 300 };
     },
     zoomToFit: (ms?: number, padding?: number) => {
       (record.zoomToFit ??= []).push([ms, padding]);

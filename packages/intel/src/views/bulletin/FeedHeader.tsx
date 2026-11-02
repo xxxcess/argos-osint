@@ -7,12 +7,16 @@ import { intelColors as c, intelRadius } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
 
 export function FeedHeader({
+  sort,
+  onSort,
   days,
   selectedDay,
   onDay,
   refreshing,
   onRefresh,
 }: {
+  sort: "latest" | "hottest";
+  onSort: (sort: "latest" | "hottest") => void;
   days: string[];
   selectedDay: string;
   onDay: (day: string) => void;
@@ -22,55 +26,68 @@ export function FeedHeader({
   const [daysOpen, setDaysOpen] = useState(false);
   return (
     <View nativeID="intel-feed-header" style={s.header}>
-      {days.length > 0 ? (
-        <View style={s.dayMenu}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Retained day ${selectedDay}`}
-            accessibilityState={{ expanded: daysOpen }}
-            aria-expanded={daysOpen}
-            onPress={() => setDaysOpen((open) => !open)}
-            style={s.dayTrigger}
-          >
-            <View style={s.dayValue}>
-              <Text style={s.dayCaption}>Day</Text>
-              <Text style={s.dayLabel}>{selectedDay}</Text>
-            </View>
-            <Text style={s.dayLabel}>{daysOpen ? "▴" : "▾"}</Text>
-          </Pressable>
-          {daysOpen ? (
-            <View
-              nativeID="intel-day-overlay"
-              accessibilityRole="menu"
-              style={s.dayOverlay}
+      <View style={s.filters}>
+        {days.length > 0 ? (
+          <View style={s.dayMenu}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Retained day ${selectedDay}`}
+              accessibilityState={{ expanded: daysOpen }}
+              aria-expanded={daysOpen}
+              onPress={() => setDaysOpen((open) => !open)}
+              style={s.dayTrigger}
             >
-              {days.map((day) => (
-                <Pressable
-                  key={day}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Day ${day}`}
-                  accessibilityState={{ selected: day === selectedDay }}
-                  onPress={() => {
-                    onDay(day);
-                    setDaysOpen(false);
-                  }}
-                  style={[
-                    s.dayOption,
-                    day === selectedDay && {
-                      borderColor: c.accentBorder,
-                      backgroundColor: c.accentSoft,
-                    },
-                  ]}
-                >
-                  <Text style={s.dayLabel}>{day}</Text>
-                </Pressable>
-              ))}
-            </View>
-          ) : null}
+              <View style={s.dayValue}>
+                <Text style={s.dayCaption}>Day</Text>
+                <Text style={s.dayLabel}>{selectedDay}</Text>
+              </View>
+              <Text style={s.dayLabel}>{daysOpen ? "▴" : "▾"}</Text>
+            </Pressable>
+            {daysOpen ? (
+              <View
+                nativeID="intel-day-overlay"
+                accessibilityRole="menu"
+                style={s.dayOverlay}
+              >
+                {days.map((day) => (
+                  <Pressable
+                    key={day}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Day ${day}`}
+                    accessibilityState={{ selected: day === selectedDay }}
+                    onPress={() => {
+                      onDay(day);
+                      setDaysOpen(false);
+                    }}
+                    style={[
+                      s.dayOption,
+                      day === selectedDay && {
+                        borderColor: c.accentBorder,
+                        backgroundColor: c.accentSoft,
+                      },
+                    ]}
+                  >
+                    <Text style={s.dayLabel}>{day}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+          </View>
+        ) : (
+          <View />
+        )}
+        <View style={{ flexDirection: "row", gap: 8 }}>
+          {(["latest", "hottest"] as const).map((value) => (
+            <DeskButton
+              key={value}
+              active={sort === value}
+              onPress={() => onSort(value)}
+            >
+              {value === "latest" ? "Latest" : "Hottest"}
+            </DeskButton>
+          ))}
         </View>
-      ) : (
-        <View />
-      )}
+      </View>
       <DeskButton disabled={refreshing} onPress={onRefresh}>
         Refresh feed
       </DeskButton>
@@ -89,6 +106,13 @@ const s = StyleSheet.create({
     backgroundColor: c.inset,
     zIndex: 4,
     overflow: "visible",
+  },
+  filters: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 12,
+    flexShrink: 1,
   },
   dayMenu: {
     position: "relative",

@@ -844,7 +844,43 @@ async fn bind_item_in(
                 _ => None,
             })
             .unwrap_or_default();
-        actors.retain(|a| a.role != "premise");
+        actors.retain(|a| a.role != "premise" && a.role != "mentioned");
+        // Direct mentions require a catalog-resolved entity inside this
+        // inference's cited source range; article co-occurrence is insufficient.
+        for entity in &output.entities {
+            if !referenced(entity, "", &inference.evidence_refs, |id| {
+                owner_kind == "article" && input.snapshot.entities.iter().any(|e| e.id == id)
+            }) {
+                continue;
+            }
+            let name = entity
+                .original_forms
+                .first()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(&entity.comparison_key);
+            let Some((bound, changed)) = super::actor_bind::bind_optional_in(
+                tx,
+                &crate::brain_actors::BindRequest {
+                    name,
+                    subtype: crate::brain_actors::parse_subtype(&entity.type_hint),
+                    scope: &scope,
+                    identifiers: &[],
+                    external: Some(("recon_entities", &entity.id)),
+                    provenance: serde_json::json!({"snapshot": snapshot_id, "inference": item.id}),
+                },
+                now,
+            )
+            .await?
+            else {
+                continue;
+            };
+            touched.extend(changed);
+            actors.push(ActorRef {
+                actor_id: bound.actor_id,
+                role: "mentioned".into(),
+                binding_state: bound.state,
+            });
+        }
         // Explicit premise associations, not independent support.
         for premise in &premises {
             let mut r = run(
@@ -899,7 +935,7 @@ async fn bind_item_in(
         .await?;
         run(
             tx,
-            tx.query("DELETE brain_memory_actor_ref WHERE memory_id = $m AND role = 'premise' RETURN NONE")
+            tx.query("DELETE brain_memory_actor_ref WHERE memory_id = $m AND role INSIDE ['premise', 'mentioned'] RETURN NONE")
                 .bind(("m", mid.to_string())),
         )
         .await?;

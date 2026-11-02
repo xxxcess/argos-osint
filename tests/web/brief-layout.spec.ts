@@ -17,6 +17,8 @@ const article = {
   url: "https://example.test/report",
 };
 const brief = {
+  confidence_grade: "B2",
+  confidence: { score: 0, provisional: true, claims: 1, inferences: 1 },
   article,
   revision: "brief-complete",
   source_revision: "source",
@@ -435,3 +437,251 @@ test("only matching-generation stages control claims, inferences and links", asy
     page.getByRole("status", { name: /Claims:|Links:/ }),
   ).toHaveCount(0);
 });
+
+for (const width of [1440, 900, 390, 320])
+  test(`related lead cards fit their sidebar at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await setup(page);
+    await page.route("**/api/v1/articles/related?**", (route) =>
+      route.fulfill({
+        json: {
+          rows: [
+            {
+              article: {
+                ...article,
+                id: "related",
+                title:
+                  "Pope Leo voiced hope Oleshky truce could spur Ukraine–Russia peace efforts",
+                description:
+                  "Officials expressed hope that cooperation would help implement a ceasefire and support lasting peace efforts in the region.",
+              },
+              basis: ["Shared mentions: Russia, Ukraine"],
+              tentative: true,
+            },
+          ],
+          next_cursor: null,
+        },
+      }),
+    );
+    await page.goto("/brief?run=fixture-run&id=fixture-article");
+    const card = page.getByRole("button", {
+      name: /^Open Focus Brief for related lead:/,
+    });
+    await card.scrollIntoViewIfNeeded();
+    await expect(card).toBeVisible();
+    const cardBox = (await card.boundingBox())!;
+    const railBox = (await page.locator("#intel-context-rail").boundingBox())!;
+    expect(cardBox.x).toBeGreaterThanOrEqual(railBox.x);
+    expect(cardBox.x + cardBox.width).toBeLessThanOrEqual(
+      railBox.x + railBox.width + 1,
+    );
+    expect(
+      await card.evaluate((node) => node.scrollWidth <= node.clientWidth + 1),
+    ).toBe(true);
+    await card.screenshot({ path: `${captureDir}/related-card-${width}.png` });
+  });
+
+for (const initialActor of [false, true])
+  test(`cleaned-body actors append after cleanup (metadata available: ${initialActor})`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 1000 });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const metadataActor = {
+      id: "catalog-meta",
+      display_name: "Metadata actor",
+      type_hint: "organization",
+      topology_seed: { Actor: "catalog-meta" },
+    };
+    const bodyActor = {
+      id: "catalog-body",
+      display_name: "Cleaned-body actor",
+      type_hint: "person",
+      topology_seed: { Actor: "catalog-body" },
+    };
+    let snapshot = {
+      ...brief,
+      actors: initialActor ? [metadataActor] : [],
+      actors_pending: !initialActor,
+      actors_body_pending: true,
+    };
+    await setup(page, false, () => snapshot);
+    const live = await installLiveFixture(page);
+    await page.goto("/brief?run=fixture-run&id=fixture-article");
+    if (initialActor) {
+      await expect(
+        page.getByRole("button", {
+          name: "Explore actor Metadata actor",
+          exact: true,
+        }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("progressbar", {
+          name: "Checking cleaned article for more actors…",
+        }),
+      ).toBeVisible();
+    } else {
+      await expect(
+        page.getByRole("status", {
+          name: "Checking cleaned article for actors…",
+        }),
+      ).toBeVisible();
+      await expect(
+        page.getByText("No actors extracted", { exact: true }),
+      ).toHaveCount(0);
+    }
+    const section = page
+      .getByRole("button", { name: "IDENTIFIED ACTORS", exact: true })
+      .locator("..");
+    await section.screenshot({
+      path: `${captureDir}/body-actors-${initialActor}-pending.png`,
+    });
+    snapshot = {
+      ...snapshot,
+      actors: [...(initialActor ? [metadataActor] : []), bodyActor],
+      actors_pending: false,
+      actors_body_pending: false,
+    };
+    live.brief({
+      run: article.run_id,
+      id: article.id,
+      job_id: brief.job_id,
+      stages: [
+        {
+          operation: "intel_brief_body",
+          label: "Full article",
+          state: "completed",
+          active: false,
+          row: "Complete",
+          detail: "Cleaned article retained",
+        },
+      ],
+      indexing: { state: "indexed", reason: "" },
+      complete: true,
+      refresh: true,
+    });
+    await expect(
+      page.getByRole("button", {
+        name: "Explore actor Cleaned-body actor",
+        exact: true,
+      }),
+    ).toBeVisible();
+    const actors = page.getByRole("button", { name: /^Explore actor / });
+    await expect(actors).toHaveCount(initialActor ? 2 : 1);
+    if (initialActor)
+      await expect(actors.first()).toHaveAccessibleName(
+        "Explore actor Metadata actor",
+      );
+    await expect(
+      page.getByRole("status", {
+        name: "Checking cleaned article for actors…",
+      }),
+    ).toHaveCount(0);
+    await section.screenshot({
+      path: `${captureDir}/body-actors-${initialActor}-complete.png`,
+    });
+  });
+
+for (const width of [1440, 390]) {
+  test(`confidence grade precedes actors and fits at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await setup(page);
+    await page.goto("/brief?run=fixture-run&id=fixture-article");
+    const confidence = page.getByRole("button", {
+      name: "ARTICLE CONFIDENCE",
+      exact: true,
+    });
+    const actors = page.getByRole("button", {
+      name: "IDENTIFIED ACTORS",
+      exact: true,
+    });
+    await expect(
+      page.getByText("Brief rating 0/100", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByLabel("Admiralty grade B2", { exact: true }),
+    ).toBeVisible();
+    expect((await confidence.boundingBox())!.y).toBeLessThan(
+      (await actors.boundingBox())!.y,
+    );
+    await page.screenshot({
+      path: `${captureDir}/confidence-${width}.png`,
+      fullPage: true,
+    });
+  });
+}
+
+test("confidence inference total updates after generated output arrives even while unscored", async ({
+  page,
+}) => {
+  let generated = false;
+  await setup(page, false, () => ({
+    ...brief,
+    confidence: { score: null, provisional: true, claims: 1, inferences: 0 },
+    inferences: generated ? brief.inferences : [],
+  }));
+  await page.goto("/brief?run=fixture-run&id=fixture-article");
+  await expect(
+    page.getByText("1 claims · 0 inferences", { exact: true }),
+  ).toBeVisible();
+  generated = true;
+  await page
+    .getByRole("button", { name: "Refresh retained brief", exact: true })
+    .click();
+  await expect(
+    page.getByText("Stored inference must render", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("1 claims · 1 inferences", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Brief rating N/A", { exact: true }),
+  ).toBeVisible();
+});
+
+for (const prior of [true, false]) {
+  test(`confidence explains ${prior ? "publisher-only" : "unavailable"} ratings`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: prior ? 1440 : 320, height: 1000 });
+    const reason = prior
+      ? "Publisher prior only; no scored corroboration yet."
+      : "No scored corroboration or publisher reliability assessment is available.";
+    await setup(page, false, () => ({
+      ...brief,
+      confidence_grade: prior ? "B6" : "F6",
+      confidence_basis: prior ? "publisher_prior" : "unavailable",
+      confidence_reason: reason,
+      confidence: {
+        score: prior ? 60 : null,
+        provisional: true,
+        claims: 1,
+        inferences: 0,
+      },
+    }));
+    await page.goto("/brief?run=fixture-run&id=fixture-article");
+    await expect(
+      page.getByText(prior ? "Brief rating 60/100" : "Brief rating N/A", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(page.getByText(reason, { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("1 claims · 1 inferences", { exact: true }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: `${captureDir}/confidence-${prior ? "prior" : "unavailable"}.png`,
+      fullPage: true,
+    });
+  });
+}

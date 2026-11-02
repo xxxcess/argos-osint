@@ -259,7 +259,7 @@ pub async fn list_events(
         .query(sql)
         .bind(("rank", filter.min_severity.map(severity_rank).unwrap_or(0)))
         .bind(("app", filter.app.clone()))
-        .bind(("jobs", jobs))
+        .bind(("jobs", jobs.clone()))
         .bind(("text", filter.text.replace('%', "")))
         .bind(("since", filter.since.clone()))
         .bind(("before", filter.before_seq.unwrap_or(0)))
@@ -267,7 +267,57 @@ pub async fn list_events(
         .await?
         .check()?;
     let rows: Vec<StoredEvent> = r.take(0)?;
-    Ok(rows.into_iter().map(EventRow::from).collect())
+    let mut rows: Vec<EventRow> = rows.into_iter().map(EventRow::from).collect();
+    if !filter.job_id.is_empty() && filter.before_seq.is_none() {
+        // Retry/lifecycle records counted by Jobs are also readable from its Logs action.
+        let mut r = db.query("SELECT record::id(id) AS key, <string>ts AS ts, severity, app, event_type, message, job_id FROM job_event WHERE job_id IN $jobs AND ($app = '' OR app = $app) AND ($since = '' OR ts >= <datetime>$since) AND severity IN $levels AND ($text = '' OR string::contains(message, $text)) ORDER BY ts DESC LIMIT $limit")
+            .bind(("jobs", jobs))
+            .bind(("app", filter.app.clone()))
+            .bind(("since", filter.since.clone()))
+            .bind(("levels", [Severity::Debug, Severity::Info, Severity::Warn, Severity::Error].into_iter().filter(|level| filter.min_severity.is_none_or(|min| severity_rank(*level) >= severity_rank(min))).map(|level| level.as_str().to_owned()).collect::<Vec<_>>()))
+            .bind(("text", filter.text.replace('%', "")))
+            .bind(("limit", limit.max(1) as i64)).await?.check()?;
+        let job_events: Vec<JobLog> = r.take(0)?;
+        for e in job_events {
+            if filter
+                .min_severity
+                .is_some_and(|min| severity_rank(Severity::parse(&e.severity)) < severity_rank(min))
+                || (!filter.text.is_empty() && !e.message.contains(&filter.text.replace('%', "")))
+            {
+                continue;
+            }
+            rows.push(EventRow {
+                id: format!("job-event:{}", e.key),
+                seq: 0,
+                ts: e.ts,
+                severity: e.severity,
+                app: e.app,
+                event_type: e.event_type,
+                message: redact(&e.message),
+                details: String::new(),
+                job_id: e.job_id,
+                task_id: String::new(),
+                attempt_id: String::new(),
+                run_id: String::new(),
+                resource_ref: String::new(),
+                correlation_id: String::new(),
+            });
+        }
+        rows.sort_by(|a, b| (&b.ts, b.seq, &b.id).cmp(&(&a.ts, a.seq, &a.id)));
+        rows.truncate(limit.max(1));
+    }
+    Ok(rows)
+}
+
+#[derive(SurrealValue)]
+struct JobLog {
+    key: String,
+    ts: String,
+    severity: String,
+    app: String,
+    event_type: String,
+    message: String,
+    job_id: String,
 }
 
 /// The job id and every descendant job id (breadth-first over

@@ -1,4 +1,8 @@
 /* Compact the complete browser UI while retaining a full-window shell. */
+/* Next's dev badge is outside the desk. Hide it even before a server restart. */
+nextjs-portal {
+  display: none !important;
+}
 html {
   zoom: var(--intel-ui-scale, 0.75);
 }
@@ -38,6 +42,41 @@ body {
     -apple-system,
     sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+/* Page scrolling stays available; the bars stay hidden. */
+#intel-actor-scroll,
+#intel-actor-scroll *,
+#intel-brief-scroll,
+#intel-brief-scroll *,
+#intel-topology-workspace,
+#intel-topology-workspace * {
+  scrollbar-width: none;
+}
+#intel-actor-scroll::-webkit-scrollbar,
+#intel-actor-scroll *::-webkit-scrollbar,
+#intel-brief-scroll::-webkit-scrollbar,
+#intel-brief-scroll *::-webkit-scrollbar,
+#intel-topology-workspace::-webkit-scrollbar,
+#intel-topology-workspace *::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+/* Nodes and Connections keep the desk scrollbar. */
+#intel-topology-node-scroll,
+#intel-topology-connection-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #34343a transparent;
+}
+#intel-topology-node-scroll::-webkit-scrollbar,
+#intel-topology-connection-scroll::-webkit-scrollbar {
+  display: block;
+  width: 8px;
+  height: 8px;
+}
+#intel-topology-node-scroll::-webkit-scrollbar-thumb,
+#intel-topology-connection-scroll::-webkit-scrollbar-thumb {
+  background: #34343a;
 }
 /* Keep list wheel/trackpad scrolling inside its panel at either boundary. */
 #intel-topology-node-scroll,

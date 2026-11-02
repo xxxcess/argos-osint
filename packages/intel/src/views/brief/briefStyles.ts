@@ -192,8 +192,9 @@ export const briefStyles = StyleSheet.create({
     padding: 20,
     gap: 16,
     minWidth: 0,
-    flexBasis: "auto",
-    flexGrow: 1,
+    width: "100%",
+    flexShrink: 1,
+    alignSelf: "stretch",
     maxWidth: "100%",
   },
   meta: {
@@ -204,12 +205,16 @@ export const briefStyles = StyleSheet.create({
     minWidth: 0,
   },
   relatedTitle: {
+    minWidth: 0,
+    flexShrink: 1,
     fontFamily: intelFonts.body,
     fontSize: 16,
     fontWeight: "700",
     color: c.text,
   },
   relatedCopy: {
+    minWidth: 0,
+    flexShrink: 1,
     fontFamily: intelFonts.body,
     fontSize: 16,
     lineHeight: 23,

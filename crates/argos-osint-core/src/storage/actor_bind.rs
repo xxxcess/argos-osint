@@ -305,14 +305,14 @@ pub async fn bind_in(
 }
 
 /// Bind an extraction only when its name uniquely identifies a seeded actor.
-/// Before catalog activation, historical homes retain their scoped bindings.
+/// Missing catalog seed or unknown names leave extraction references unbound.
 pub async fn bind_optional_in(
     tx: &Tx,
     req: &BindRequest<'_>,
     now: &str,
 ) -> Result<Option<(Bound, Vec<String>)>, TxError> {
-    if super::actor_catalog::enabled_in(tx).await?
-        && super::actor_catalog::lookup_in(tx, req.name)
+    if !super::actor_catalog::enabled_in(tx).await?
+        || super::actor_catalog::lookup_in(tx, req.name)
             .await?
             .is_none()
     {
@@ -690,7 +690,9 @@ pub fn referenced(
                     span.start_byte >= range.start_byte
                         && span.end_byte <= range.end_byte
                         && (entity.id.starts_with(&r.source_id)
-                            || (r.source_id.starts_with("article:") && article_entity(&entity.id)))
+                            || (r.source_id.starts_with("article:")
+                                && !entity.id.starts_with("body:")
+                                && article_entity(&entity.id)))
                 }
                 _ => false,
             })

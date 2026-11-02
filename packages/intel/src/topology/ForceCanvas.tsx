@@ -62,16 +62,24 @@ type Props = {
   selectedId: string | null;
   /** Ids to keep fully lit; null means nothing is dimmed. */
   focusIds: Set<string> | null;
+  /** Ids that set the automatic zoom. Defaults to every lit node. */
+  cameraIds?: Set<string> | null;
   reducedMotion: boolean;
   orbit?: OrbitMode;
   orbitSuspended?: boolean;
   onSelect: (id: string | null) => void;
   onView?: (view: { yaw: number; zoom: number }) => void;
+  /** True while the pointer is over a node or edge, not empty graph space. */
+  onItemHover?: (overItem: boolean) => void;
 };
 type Position = { x: number; y: number; z: number };
 type GraphMethods = {
-  controls: () => { target: Position };
-  camera?: () => { fov: number };
+  controls: () => { target: Position; update?: () => void };
+  camera?: () => {
+    fov: number;
+    position?: Position;
+    lookAt?: (x: number, y: number, z: number) => void;
+  };
   cameraPosition: (
     position?: Position,
     lookAt?: Position,
@@ -204,11 +212,13 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
     palette,
     selectedId,
     focusIds,
+    cameraIds,
     reducedMotion,
     orbit = "off",
     orbitSuspended = false,
     onSelect,
     onView,
+    onItemHover,
   },
   ref,
 ) {
@@ -241,10 +251,14 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
     suspendedRef.current = orbitSuspended;
     onViewRef.current = onView;
   });
+  const overNode = useRef(false);
+  const overLink = useRef(false);
+  const reportHover = () =>
+    onItemHover?.(overNode.current || overLink.current);
   const resumeAt = useRef(0);
-  const framedSelection = useRef<string | null | undefined>(undefined);
+  // Automatic centering is a visit/reset action. Later selections and drags keep the camera.
+  const framedVisit = useRef(false);
   const zoomMs = reducedMotion ? 0 : intelMotion.fit;
-  const focusMs = reducedMotion ? 0 : intelMotion.focus;
   const motion = reducedMotion ? "off" : orbit;
   const nodeThreeObject = useCallback(
     (raw: object) => visibleNode(raw as GNode),
@@ -261,6 +275,67 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
       reducedMotion,
     );
   }, [links, reducedMotion, selectedId]);
+  const centerVisit = useCallback(
+    (force = false) => {
+      if (framedVisit.current && !force) return;
+      const graph = graphRef.current;
+      if (!graph || width <= 0 || height <= 0) return;
+      const currentId = selectedRef.current;
+      if (currentId === null) {
+        const before = graph.cameraPosition();
+        graph.zoomToFit(0, width < 400 ? 50 : 80);
+        const after = graph.cameraPosition();
+        if (
+          before.x === after.x &&
+          before.y === after.y &&
+          before.z === after.z
+        )
+          return;
+        framedVisit.current = true;
+        return;
+      }
+      const landing = neighborhoodCamera(
+        data.nodes,
+        currentId,
+        width,
+        height,
+        graph.camera?.().fov ?? 50,
+        cameraIds ?? focusIds,
+      );
+      // Warmup may not have assigned coordinates yet. The next engine stop retries.
+      if (!landing) return;
+      const controls = graph.controls();
+      controls.target.x = landing.target.x;
+      controls.target.y = landing.target.y;
+      controls.target.z = landing.target.z;
+      // Snap. An in-flight tween leaves TrackballControls looking past the node,
+      // so the glyph sits low in the viewport.
+      graph.cameraPosition(landing.position, landing.target, 0);
+      const now = graph.cameraPosition();
+      if (
+        Math.abs(now.x - landing.position.x) > 0.5 ||
+        Math.abs(now.y - landing.position.y) > 0.5
+      )
+        return;
+      const camera = graph.camera?.();
+      if (camera?.position) {
+        camera.position.x = landing.position.x;
+        camera.position.y = landing.position.y;
+        camera.position.z = landing.position.z;
+      }
+      camera?.lookAt?.(landing.target.x, landing.target.y, landing.target.z);
+      controls.update?.();
+      framedVisit.current = true;
+    },
+    [data, width, height, focusIds, cameraIds],
+  );
+  const centerRef = useRef(centerVisit);
+  useEffect(() => {
+    centerRef.current = centerVisit;
+  }, [centerVisit]);
+  const onEngineStop = useCallback(() => {
+    centerRef.current();
+  }, []);
   useImperativeHandle(
     ref,
     () => ({
@@ -281,63 +356,31 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
       },
       fit: () => graphRef.current?.zoomToFit(zoomMs, 40),
       reset: () => {
-        if (!reducedMotion) graphRef.current?.d3ReheatSimulation();
-        graphRef.current?.zoomToFit(zoomMs, 40);
+        // A reset is a new visit: center once the reheated layout settles.
+        framedVisit.current = false;
+        if (!reducedMotion) {
+          graphRef.current?.d3ReheatSimulation();
+          return;
+        }
+        centerVisit(true);
       },
       pause: () => graphRef.current?.pauseAnimation(),
       resume: () => {
         if (!reducedMotion) graphRef.current?.resumeAnimation();
       },
     }),
-    [zoomMs, reducedMotion],
+    [zoomMs, reducedMotion, centerVisit],
   );
-  const frameSelection = useCallback(() => {
-    // A render, resize, filter update or another engine stop must preserve
-    // the user's camera. Only a different selection gets an automatic fit.
-    if (framedSelection.current === selectedId) return;
-    const graph = graphRef.current;
-    if (!graph || width <= 0 || height <= 0) return;
-    if (selectedId === null) {
-      framedSelection.current = null;
-      graph.zoomToFit(0, width < 400 ? 50 : 80);
-      return;
-    }
-    const landing = neighborhoodCamera(
-      data.nodes,
-      selectedId,
-      width,
-      height,
-      graph.camera?.().fov ?? 50,
-      focusIds,
-    );
-    // Warmup may not have assigned coordinates yet. Engine stop retries this
-    // pending selection, but never re-fits one that has already entered.
-    if (!landing) return;
-    framedSelection.current = selectedId;
-    // Trackball still updates its target when navigation is disabled. Keep it
-    // aligned with the explicit look-at point in reduced-motion mode as well.
-    Object.assign(graph.controls().target, landing.target);
-    if (!reducedMotion)
-      graph.cameraPosition(
-        {
-          ...landing.position,
-          z: landing.target.z + landing.distance * 1.25,
-        },
-        landing.target,
-        0,
-      );
-    graph.cameraPosition(landing.position, landing.target, focusMs);
-  }, [data, width, height, selectedId, focusIds, reducedMotion, focusMs]);
   useEffect(() => {
     let fittedFrame = 0;
     const frame = requestAnimationFrame(() => {
-      fittedFrame = requestAnimationFrame(frameSelection);
+      fittedFrame = requestAnimationFrame(() => centerVisit());
     });
     return () => {
       cancelAnimationFrame(frame);
       cancelAnimationFrame(fittedFrame);
     };
-  }, [frameSelection]);
+  }, [centerVisit]);
   useEffect(() => {
     if (motion !== "auto") return;
     let frame = 0;
@@ -406,7 +449,7 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
       height={height}
       backgroundColor="rgba(0,0,0,0)"
       showNavInfo={false}
-      onEngineStop={frameSelection}
+      onEngineStop={onEngineStop}
       linkThreeObject={visibleLink}
       linkPositionUpdate={positionLink}
       linkWidth={0}
@@ -430,6 +473,10 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
       nodeVal={(n) => ((n as GNode).id === selectedId ? 4 : 2)}
       nodeOpacity={0.9}
       linkHoverPrecision={8}
+      onLinkHover={(link) => {
+        overLink.current = !!link;
+        reportHover();
+      }}
       linkLabel={(l) => escapeGraphLabel((l as unknown as GLink).label)}
       linkColor={(l) => {
         const edge = l as unknown as {
@@ -455,7 +502,11 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
         particleOffset(String((link as { id?: string }).id || ""))
       }
       onNodeClick={(n) => onSelect((n as GNode).id)}
-      onNodeHover={() => engage()}
+      onNodeHover={(node) => {
+        overNode.current = !!node;
+        reportHover();
+        engage();
+      }}
       onNodeDrag={() => engage()}
       onBackgroundClick={() => onSelect(null)}
     />

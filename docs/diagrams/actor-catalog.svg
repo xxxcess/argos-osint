@@ -10,10 +10,11 @@
 <path d="M630 130H690" class="line"/>
 <rect x="690" y="75" width="280" height="110" class="box"/><text x="706" y="101" class="label">Canonical Brain records</text><text x="706" y="127" class="note">Stable actor + memory + alias IDs</text><text x="706" y="150" class="note">Graph nodes + CSV provenance</text><text x="706" y="172" class="note">Complete receipt after last batch</text>
 <path d="M490 185V231H162V185" class="line"/><text x="360" y="219" class="note">Retry committed IDs; exit returns to Venture</text>
-<rect x="32" y="280" width="260" height="105" class="box"/><text x="48" y="308" class="label">Article title + description</text><text x="48" y="335" class="note">Names / normalized names / aliases</text><text x="48" y="359" class="note">Original mention byte spans retained</text>
+<rect x="32" y="280" width="260" height="105" class="box"/><text x="48" y="308" class="label">Article + cleaned body</text><text x="48" y="335" class="note">Commit metadata; retry body NLP next</text><text x="48" y="359" class="note">Byte spans + clean artifact hash</text>
 <path d="M292 330H350M830 185V250H490V280" class="line"/>
-<rect x="350" y="280" width="280" height="105" class="box"/><text x="366" y="308" class="label">Deterministic matcher</text><text x="366" y="335" class="note">Word boundaries; unique strong aliases</text><text x="366" y="359" class="note">No weak / short / ambiguous matches</text>
+<rect x="350" y="280" width="280" height="105" class="box"/><text x="366" y="308" class="label">Resolve catalog matches</text><text x="366" y="335" class="note">Body: NLP people / organizations</text><text x="366" y="359" class="note">Strong + curated aliases; no new actors</text>
 <path d="M630 330H690" class="line"/>
-<rect x="690" y="280" width="280" height="105" class="box"/><text x="706" y="308" class="label">Recorded article relationships</text><text x="706" y="335" class="note">Existing mention / link receipts</text><text x="706" y="359" class="note">Claims without actor matches retained</text>
-<text x="32" y="438" class="note">Classification, extraction and evidence semantics stay in the existing news pipeline.</text>
+<rect x="690" y="280" width="280" height="105" class="box"/><text x="706" y="308" class="label">Recorded article relationships</text><text x="706" y="335" class="note">Source-revision mention / link receipts</text><text x="706" y="359" class="note">Claims without actor matches retained</text>
+<text x="32" y="422" class="note">Classification, extraction and evidence semantics stay in the existing news pipeline.</text>
+<text x="32" y="448" class="note">Retention retires removed source links; protected and independently retained sources survive.</text>
 </svg>

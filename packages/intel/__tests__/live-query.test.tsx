@@ -5,6 +5,9 @@ import { http, HttpResponse } from "msw";
 import {
   BackendProvider,
   useBriefLive,
+  useAssociationLive,
+  useActorDossier,
+  useTopology,
   useHostMetrics,
   useRead,
   type Article,
@@ -136,4 +139,156 @@ it("keeps metrics on the stream and refreshes only the selected brief on a meani
   expect(await screen.findByText("CPU null")).toBeVisible();
   view.unmount();
   expect(listeners.size).toBe(0);
+});
+
+it("refreshes a zero dossier and actor topology when its source finishes indexing", async () => {
+  let revision = 0;
+  let dossierReads = 0;
+  let topologyReads = 0;
+  let listener: ((event: LiveEvent) => void) | undefined;
+  mswServer.use(
+    http.get(`${testBase}/api/v1/health/ready`, () =>
+      HttpResponse.json({
+        ready: true,
+        storage: true,
+        service: "argos-intel",
+        api_version: 1,
+        instance_id: "association-live",
+      }),
+    ),
+    http.get(`${testBase}/api/v1/actors/detail`, () => {
+      dossierReads++;
+      return HttpResponse.json({ loaded_claims: revision });
+    }),
+    http.get(`${testBase}/api/v1/topology`, () => {
+      topologyReads++;
+      return HttpResponse.json({
+        root_label: `graph-${revision}`,
+        nodes: [],
+        edges: [],
+        findings: { gaps: [] },
+        has_continuation: false,
+      });
+    }),
+  );
+  const live: LiveTransport = {
+    subscribe(channel, next) {
+      if (channel.type === "brief") listener = next;
+      return () => {
+        listener = undefined;
+      };
+    },
+  };
+  const settings: BackendSettings = {
+    subscribe: () => () => {},
+    getSnapshot: () => testBase,
+    getServerSnapshot: () => testBase,
+    setBase: () => {},
+    createRequestId: () => "association-live",
+  };
+  function Probe() {
+    useAssociationLive({ run_id: "r", article_id: "a" });
+    const dossier = useActorDossier("actor");
+    const graph = useTopology("actor");
+    return (
+      <div>
+        <span>Claims {dossier.data?.loaded_claims}</span>
+        <span>{graph.data?.root_label}</span>
+      </div>
+    );
+  }
+  render(
+    <BackendProvider settings={settings} live={live}>
+      <Probe />
+    </BackendProvider>,
+  );
+  await screen.findByText("Claims 0");
+  await screen.findByText("graph-0");
+  await waitFor(() => expect(listener).toBeDefined());
+  const progress: Extract<LiveEvent, { type: "brief" }> = {
+    type: "brief",
+    run: "r",
+    id: "a",
+    job_id: "job",
+    stages: [],
+    indexing: { state: "indexed", reason: "" },
+    complete: true,
+    refresh: false,
+  };
+  act(() => listener?.(progress));
+  expect(dossierReads).toBe(1);
+  expect(topologyReads).toBe(1);
+  revision = 1;
+  act(() => listener?.({ ...progress, refresh: true }));
+  await screen.findByText("Claims 1");
+  await screen.findByText("graph-1");
+  expect(dossierReads).toBe(2);
+  expect(topologyReads).toBe(2);
+});
+
+it("revalidates after an in-flight pre-index dossier returns an old zero snapshot", async () => {
+  let reads = 0;
+  let release!: () => void;
+  let listener: ((event: LiveEvent) => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  mswServer.use(
+    http.get(`${testBase}/api/v1/health/ready`, () =>
+      HttpResponse.json({
+        ready: true,
+        storage: true,
+        service: "argos-intel",
+        api_version: 1,
+        instance_id: "dossier-race",
+      }),
+    ),
+    http.get(`${testBase}/api/v1/actors/detail`, async () => {
+      const claimCount = reads++;
+      if (claimCount === 0) await gate;
+      return HttpResponse.json({ loaded_claims: claimCount });
+    }),
+  );
+  const live: LiveTransport = {
+    subscribe(channel, next) {
+      if (channel.type === "brief") listener = next;
+      return () => {
+        listener = undefined;
+      };
+    },
+  };
+  const settings: BackendSettings = {
+    subscribe: () => () => {},
+    getSnapshot: () => testBase,
+    getServerSnapshot: () => testBase,
+    setBase: () => {},
+    createRequestId: () => "dossier-race",
+  };
+  function Probe() {
+    useAssociationLive({ run_id: "r", article_id: "a" });
+    const dossier = useActorDossier("actor");
+    return <span>Claims {dossier.data?.loaded_claims}</span>;
+  }
+  render(
+    <BackendProvider settings={settings} live={live}>
+      <Probe />
+    </BackendProvider>,
+  );
+  await waitFor(() => expect(reads).toBe(1));
+  await waitFor(() => expect(listener).toBeDefined());
+  act(() => {
+    listener?.({
+      type: "brief",
+      run: "r",
+      id: "a",
+      job_id: "job",
+      stages: [],
+      indexing: { state: "indexed", reason: "" },
+      complete: true,
+      refresh: true,
+    });
+    release();
+  });
+  await screen.findByText("Claims 1");
+  expect(reads).toBe(2);
 });

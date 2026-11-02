@@ -4,6 +4,7 @@ import { View, Text, Pressable } from "react-native";
 import type { Brief, Seed, BriefStage } from "@argos/api-client";
 import { EmptyState } from "@argos/ui";
 import { intelKindColors as kinds } from "../../shell/intel-theme";
+import { ClaimEvidenceRow } from "./ClaimEvidenceRow";
 import { BriefSection } from "./BriefSection";
 import { BriefSkeleton } from "./BriefSkeleton";
 import { extractedFocus, topologyTarget } from "./BriefAction";
@@ -65,23 +66,21 @@ export function ClaimList({
                       accessibilityLabel={`Explore claim: ${text}`}
                       disabled={!topologyTarget(claim.topology_seed, extracted)}
                       onPress={() => {
-                      const seed = topologyTarget(
-                        claim.topology_seed,
-                        extracted,
-                      );
-                      const focus = seed
-                        ? extractedFocus(seed, extracted, `claim:${claim.id}`)
-                        : undefined;
-                      if (seed && focus) onTopology(seed, focus);
-                      else if (seed) onTopology(seed);
+                        const seed = topologyTarget(
+                          claim.topology_seed,
+                          extracted,
+                        );
+                        const focus = seed
+                          ? extractedFocus(seed, extracted, `claim:${claim.id}`)
+                          : undefined;
+                        if (seed && focus) onTopology(seed, focus);
+                        else if (seed) onTopology(seed);
                       }}
                     >
-                      <View style={s.evidenceRow}>
-                        <Text style={[s.marker, { color: kinds.claim }]}>
-                          {claimMarker(index)}
-                        </Text>
-                        <Text style={s.evidenceText}>{text}</Text>
-                      </View>
+                      <ClaimEvidenceRow
+                        marker={claimMarker(index)}
+                        text={text}
+                      />
                       {claim.admiralty &&
                       claim.admiralty.toLowerCase() !== "unassessed" ? (
                         <Text style={s.micro}>{claim.admiralty}</Text>

@@ -4,6 +4,10 @@ import { View, Text, Image, Pressable, StyleSheet } from "react-native";
 import type { Article } from "@argos/api-client";
 import { intelColors as c, intelRadius } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
+import { TemperatureTag } from "../temperatureTag";
+
+/** One square for every bulletin image. The photo scales to fit inside it. */
+export const bulletinThumb = 120;
 
 function safeImage(url: string) {
   try {
@@ -50,6 +54,7 @@ export function ArticleCard({
       <View style={s.content}>
         <View style={s.meta}>
           <Text style={s.category}>{a.category.toUpperCase()}</Text>
+          <TemperatureTag value={a.temperature} />
           <Text style={s.date}>{a.published_at.slice(0, 10)}</Text>
         </View>
         <Text accessibilityRole="header" numberOfLines={2} style={s.title}>
@@ -66,13 +71,9 @@ export function ArticleCard({
         <Image
           accessibilityLabel={`Article image: ${a.title}`}
           source={{ uri: a.image_url }}
-          resizeMode="cover"
+          resizeMode="contain"
           onError={() => setFailedImage(a.image_url)}
-          style={{
-            width: 72,
-            height: 72,
-            borderRadius: 8,
-          }}
+          style={s.thumb}
         />
       ) : null}
     </Pressable>
@@ -81,6 +82,7 @@ export function ArticleCard({
 const s = StyleSheet.create({
   card: {
     flexDirection: "row",
+    alignItems: "stretch",
     gap: 12,
     padding: 16,
     borderWidth: 1,
@@ -88,6 +90,15 @@ const s = StyleSheet.create({
     borderRadius: intelRadius.card,
     backgroundColor: c.panel,
     minWidth: 0,
+  },
+  thumb: {
+    width: bulletinThumb,
+    height: bulletinThumb,
+    flexGrow: 0,
+    flexShrink: 0,
+    alignSelf: "center",
+    borderRadius: 8,
+    backgroundColor: c.inset,
   },
   content: { flex: 1, minWidth: 0, gap: 6 },
   meta: {

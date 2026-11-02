@@ -54,6 +54,7 @@ pub(crate) fn edge(
         member_ids: Vec::new(),
         receipts: vec![receipt],
         rationale: String::new(),
+        actor_reference: None,
     }
 }
 

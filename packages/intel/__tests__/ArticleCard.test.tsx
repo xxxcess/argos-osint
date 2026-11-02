@@ -42,4 +42,51 @@ describe("Bulletin article metadata", () => {
     );
     expect(onPress).toHaveBeenCalledOnce();
   });
+
+  it("gives every article image the same square and scales it to fit", () => {
+    render(
+      <ArticleCard
+        article={{
+          id: "article-with-image",
+          run_id: "run-1",
+          title: "Retained harbor report",
+          description: "Stored source description.",
+          category: "geopolitical",
+          source_name: "Fixture Wire",
+          source_domain: "example.test",
+          published_at: "2026-10-25T12:00:00Z",
+          image_url: "https://images.example.test/story.jpg",
+          url: "https://example.test/report",
+          author: "Fixture reporter",
+        }}
+        onPress={() => {}}
+      />,
+    );
+    const image = screen.getByRole("img", {
+      name: "Article image: Retained harbor report",
+    });
+    const frame = image.parentElement;
+    const painted = frame?.querySelector("div");
+    const rules = [...document.styleSheets].flatMap((sheet) => {
+      try {
+        return [...sheet.cssRules].map((rule) => rule.cssText);
+      } catch {
+        return [];
+      }
+    });
+    const sizeClass = painted?.className
+      .split(" ")
+      .find((name) => name.startsWith("r-backgroundSize-"));
+    const widthClass = frame?.className
+      .split(" ")
+      .find((name) => name.startsWith("r-width-"));
+    const heightClass = frame?.className
+      .split(" ")
+      .find((name) => name.startsWith("r-height-"));
+    const rule = (className: string | undefined) =>
+      rules.find((entry) => className && entry.includes(`.${className}`));
+    expect(rule(sizeClass)).toContain("background-size: contain");
+    expect(rule(widthClass)).toContain("width: 120px");
+    expect(rule(heightClass)).toContain("height: 120px");
+  });
 });

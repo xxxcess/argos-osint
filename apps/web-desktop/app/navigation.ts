@@ -11,6 +11,23 @@ export function routeFromUrl(url: URL): IntelRoute {
   const article_id = url.searchParams.get("id") || undefined;
   if (path === "/bulletin") return { screen: "bulletin" };
   if (path === "/brief") return { screen: "brief", run_id, article_id };
+  if (path === "/actor") {
+    const id = url.searchParams.get("id");
+    const run = url.searchParams.get("run");
+    const article = url.searchParams.get("article");
+    const actor = url.searchParams.get("actor");
+    const valid = (value: string | null): value is string =>
+      !!value &&
+      new TextEncoder().encode(value).length <= 512 &&
+      !/[\u0000-\u001f]/.test(value);
+    return {
+      screen: "actor",
+      id: id && new TextEncoder().encode(id).length <= 256 ? id : null,
+      ...(!id && valid(run) && valid(article) && valid(actor)
+        ? { source: { run_id: run, article_id: article, actor_id: actor } }
+        : {}),
+    };
+  }
   if (path === "/topology") {
     const seed = url.searchParams.get("seed");
     const focus = url.searchParams.get("focus");
@@ -32,6 +49,14 @@ export function routeUrl(route: IntelRoute): string {
   if (route.screen === "brief" && route.run_id && route.article_id) {
     params.set("run", route.run_id);
     params.set("id", route.article_id);
+  }
+  if (route.screen === "actor") {
+    if (route.id) params.set("id", route.id);
+    else if (route.source) {
+      params.set("run", route.source.run_id);
+      params.set("article", route.source.article_id);
+      params.set("actor", route.source.actor_id);
+    }
   }
   if (route.screen === "topology") {
     if (route.seed) params.set("seed", route.seed);
@@ -67,12 +92,20 @@ export const webNavigation: IntelNavigation = {
       snapshot = routeFromUrl(new URL(href));
       const from = history.state?.argosFrom;
       if (
-        snapshot.screen === "topology" &&
+        (snapshot.screen === "topology" || snapshot.screen === "actor") &&
         from &&
         typeof from.run_id === "string" &&
         typeof from.article_id === "string"
       )
         snapshot = { ...snapshot, from };
+      const actorFrom = history.state?.argosActorFrom;
+      if (
+        snapshot.screen === "topology" &&
+        actorFrom &&
+        (typeof actorFrom.id === "string" ||
+          (actorFrom.id === null && actorFrom.source))
+      )
+        snapshot = { ...snapshot, actorFrom };
     }
     return snapshot;
   },
@@ -81,8 +114,13 @@ export const webNavigation: IntelNavigation = {
     const next = new URL(routeUrl(route), location.origin);
     if (next.href !== location.href)
       window.history.pushState(
-        route.screen === "topology" && route.from
-          ? { argosFrom: route.from }
+        route.screen === "topology" || route.screen === "actor"
+          ? {
+              argosFrom: route.from,
+              ...(route.screen === "topology"
+                ? { argosActorFrom: route.actorFrom }
+                : {}),
+            }
           : null,
         "",
         next,

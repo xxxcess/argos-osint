@@ -18,6 +18,7 @@ pub mod error;
 pub mod actor_bind;
 pub mod actor_catalog;
 pub mod actor_dedup;
+pub mod actor_dossier;
 pub mod article_body;
 pub mod atlas;
 pub mod atlas_delete;

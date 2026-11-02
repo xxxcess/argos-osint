@@ -28,6 +28,8 @@ pub struct ArticleQuery {
     pub category: String,
     pub day: String,
     pub search: String,
+    /// Empty/latest orders by publication time; hottest orders by temperature first.
+    pub sort: String,
     pub cursor: Option<String>,
     pub limit: Option<usize>,
 }
@@ -40,6 +42,9 @@ impl ArticleQuery {
         {
             bail!("invalid day");
         }
+        if !matches!(self.sort.as_str(), "" | "latest" | "hottest") {
+            bail!("invalid sort");
+        }
         if self.search.len() > 256 || !(1..=100).contains(&self.limit.unwrap_or(30)) {
             bail!("invalid search or limit");
         }
@@ -47,7 +52,11 @@ impl ArticleQuery {
             if c.len() > 4096 {
                 bail!("invalid cursor");
             }
-            let _: (String, String, String, String) = serde_json::from_str(c)?;
+            if self.sort == "hottest" {
+                let _: (f64, String, String, String, String) = serde_json::from_str(c)?;
+            } else {
+                let _: (String, String, String, String) = serde_json::from_str(c)?;
+            }
         }
         Ok(())
     }
@@ -64,12 +73,25 @@ pub struct ArticlePage {
 /// list_runs/list_articles loop and no offset scan. Search stays inside the selected day and category.
 pub async fn articles(repo: &Repository, q: &ArticleQuery) -> Result<ArticlePage> {
     q.validate()?;
-    let after: (String, String, String, String) = q
-        .cursor
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()?
-        .unwrap_or_default();
+    let hottest = q.sort == "hottest";
+    let (heat, after) = if hottest {
+        let (heat, p, s, a, r): (f64, String, String, String, String) = q
+            .cursor
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or_default();
+        (heat, (p, s, a, r))
+    } else {
+        (
+            0.0,
+            q.cursor
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?
+                .unwrap_or_default(),
+        )
+    };
     let n = q.limit.unwrap_or(30);
     // Keep the single-category predicate separate rather than hiding it in an
     // OR, so the category-first index remains available to the query planner.
@@ -78,15 +100,27 @@ pub async fn articles(repo: &Repository, q: &ArticleQuery) -> Result<ArticlePage
     } else {
         "AND category = $category"
     };
+    let time_after = "published_at < $p OR (published_at = $p AND seen_at < $s)
+           OR (published_at = $p AND seen_at = $s AND article_id > $a)
+           OR (published_at = $p AND seen_at = $s AND article_id = $a AND run_id > $r)";
+    let (after_filter, ordering) = if hottest {
+        (
+            format!("temperature < $heat OR (temperature = $heat AND ({time_after}))"),
+            "temperature DESC, published_at DESC, seen_at DESC, article_id, run_id",
+        )
+    } else {
+        (
+            time_after.to_owned(),
+            "published_at DESC, seen_at DESC, article_id, run_id",
+        )
+    };
     let sql = format!(
         "SELECT * FROM atlas_article WHERE
           run_id IN (SELECT VALUE record::id(id) FROM atlas_run WHERE started_at >= $start AND started_at < $end)
           {category_filter}
          AND ($search = '' OR string::contains(string::lowercase(string::concat(title, ' ', description, ' ', source_name, ' ', source_domain, ' ', url)), $search))
-         AND ($first OR published_at < $p OR (published_at = $p AND seen_at < $s)
-           OR (published_at = $p AND seen_at = $s AND article_id > $a)
-           OR (published_at = $p AND seen_at = $s AND article_id = $a AND run_id > $r))
-          ORDER BY published_at DESC, seen_at DESC, article_id, run_id LIMIT $limit"
+         AND ($first OR {after_filter})
+          ORDER BY {ordering} LIMIT $limit"
     );
     let mut response = repo
         .db()
@@ -96,6 +130,7 @@ pub async fn articles(repo: &Repository, q: &ArticleQuery) -> Result<ArticlePage
         .bind(("end", format!("{}~", q.day)))
         .bind(("search", q.search.trim().to_lowercase()))
         .bind(("first", q.cursor.is_none()))
+        .bind(("heat", heat))
         .bind(("p", after.0))
         .bind(("s", after.1))
         .bind(("a", after.2))
@@ -109,7 +144,19 @@ pub async fn articles(repo: &Repository, q: &ArticleQuery) -> Result<ArticlePage
     rows.truncate(n);
     let next_cursor = if more {
         rows.last()
-            .map(|a| serde_json::to_string(&(&a.published_at, &a.seen_at, &a.id, &a.run_id)))
+            .map(|a| {
+                if hottest {
+                    serde_json::to_string(&(
+                        a.temperature,
+                        &a.published_at,
+                        &a.seen_at,
+                        &a.id,
+                        &a.run_id,
+                    ))
+                } else {
+                    serde_json::to_string(&(&a.published_at, &a.seen_at, &a.id, &a.run_id))
+                }
+            })
             .transpose()?
     } else {
         None
@@ -166,7 +213,7 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
     let mut actors_pending = false;
     let catalog_actors = match tokio::time::timeout(
         Duration::from_secs(1),
-        crate::storage::actor_catalog::article_actors(repo, article),
+        crate::storage::actor_catalog::metadata_article_actors(repo, article),
     )
     .await
     {
@@ -184,6 +231,12 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
             .map(|m| crate::atlas_metadata::article_actors(article, m))
             .unwrap_or_default()
     });
+    let mut clean_actors_checked = false;
+    if catalog_enabled && !actors_pending {
+        let body_actors = crate::storage::actor_catalog::body_actors(repo, &article.id).await?;
+        clean_actors_checked = body_actors.is_some();
+        crate::actor_catalog::append_body_actors(&mut actors, body_actors.unwrap_or_default());
+    }
     if let Some(output) = parts.output.as_ref().filter(|_| !catalog_enabled) {
         crate::atlas_metadata::merge_output_actors(&mut actors, &output.entities);
     }
@@ -193,10 +246,57 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
         &parts.explanations,
     )
     .links;
-    let confidence = parts
-        .output
+    use crate::osint::source_eval::SourceReliability;
+    let reliability = parts
+        .metadata
         .as_ref()
-        .map(|output| crate::intel_recon::EvidenceConfidence::estimate(output, false));
+        .and_then(|m| m.publisher_prior.as_ref())
+        .and_then(|p| SourceReliability::parse(&p.observation.reliability))
+        .unwrap_or(SourceReliability::F);
+    let mut confidence = crate::intel_recon::article_confidence_surreal(repo, &article.id)
+        .await?
+        .or_else(|| {
+            parts.output.as_ref().map(|output| {
+                crate::intel_recon::EvidenceConfidence::estimate_for_source(
+                    output,
+                    false,
+                    reliability,
+                    false,
+                )
+            })
+        });
+    let mut confidence_basis = "evidence";
+    if confidence.as_ref().and_then(|c| c.score).is_none() {
+        let (initial, _) = crate::intel_recon::initial_rating(
+            reliability,
+            crate::osint::source_eval::InformationCredibility::CannotBeJudged,
+        );
+        if let Some(score) = initial {
+            let estimate =
+                confidence.get_or_insert_with(|| crate::intel_recon::EvidenceConfidence {
+                    information_grade: 6,
+                    provisional: true,
+                    ..Default::default()
+                });
+            estimate.score = Some(score);
+            estimate.provisional = true;
+            confidence_basis = "publisher_prior";
+        } else {
+            confidence_basis = "unavailable";
+        }
+    }
+    let confidence_reason = match confidence_basis {
+        "publisher_prior" => "Publisher prior only; no scored corroboration yet.",
+        "unavailable" => {
+            "No scored corroboration or publisher reliability assessment is available."
+        }
+        _ => "",
+    };
+    let confidence_grade = format!(
+        "{}{}",
+        reliability.as_str(),
+        confidence.as_ref().map_or(6, |c| c.information_grade)
+    );
     let mut claims: Vec<Value> = parts.claims.iter().map(|c| json!({"id":c.fingerprint,"text":c.claim,"classification":c.classification,"confidence":c.confidence,"admiralty":c.admiralty,"source_url":c.source_url})).collect();
     let published = crate::storage::brief::published_brief(repo, &article.id).await?;
     if claims.is_empty() {
@@ -261,7 +361,8 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
         indexing = current.filter(|state| Some(&state.job_id) == job_id.as_ref());
     }
     let inference_rows = parts.output.as_ref().map(|output| output.inferences.iter().map(|item| json!({"id":crate::investigation::insights::inference_fingerprint(item),"text":item.text})).collect::<Vec<_>>());
-    let mut value = json!({"article":article,"source_revision":source_revision,"actors": actors,"claims":claims,"body":parts.body,"output":parts.output,"lifecycle":parts.lifecycle,"status":crate::provider_diag::sanitize(&parts.status),"publication":published,"relations":parts.relations,"links":links,"job_id":job_id,"indexing":indexing,"confidence":confidence,"body_pending":body_pending});
+    let no_actors = actors.is_empty();
+    let mut value = json!({"article":article,"source_revision":source_revision,"actors": actors,"claims":claims,"body":parts.body,"output":parts.output,"lifecycle":parts.lifecycle,"status":crate::provider_diag::sanitize(&parts.status),"publication":published,"relations":parts.relations,"links":links,"job_id":job_id,"indexing":indexing,"confidence":confidence,"confidence_grade":confidence_grade,"confidence_basis":confidence_basis,"confidence_reason":confidence_reason,"body_pending":body_pending});
     if let Some(inferences) = inference_rows {
         value["inferences"] = json!(inferences);
     }
@@ -269,18 +370,28 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
     // A running chain already owns storage. Binding navigation seeds here
     // rebuilds a topology snapshot on every progress refresh and pushes the
     // read past the client abort deadline ("signal timed out").
-    let brief_running = match &job_id {
-        Some(job) => brief_stages::stage_views(repo, job)
-            .await?
-            .iter()
-            .any(|stage| {
-                matches!(
-                    stage.state.as_str(),
-                    "queued" | "running" | "retry_scheduled" | "waiting" | "pending"
-                )
-            }),
-        None => false,
+    let chain_stages = match &job_id {
+        Some(job) => brief_stages::stage_views(repo, job).await?,
+        None => Vec::new(),
     };
+    let waiting = |state: &str| {
+        matches!(
+            state,
+            "queued" | "running" | "retry_scheduled" | "waiting" | "pending"
+        )
+    };
+    let brief_running = chain_stages.iter().any(|stage| waiting(&stage.state));
+    let body_pending = chain_stages
+        .iter()
+        .any(|stage| stage.operation == "intel_brief_body" && waiting(&stage.state))
+        || (job_id.is_none() && !clean_actors_checked);
+    let body_unavailable = chain_stages.iter().any(|stage| {
+        stage.operation == "intel_brief_body"
+            && matches!(stage.state.as_str(), "failed" | "blocked" | "cancelled")
+    });
+    value["actors_body_pending"] = json!(body_pending);
+    value["actors_body_unavailable"] = json!(body_unavailable);
+    value["actors_pending"] = json!(actors_pending || (no_actors && body_pending));
     if !brief_running {
         match tokio::time::timeout(
             Duration::from_secs(1),
@@ -291,6 +402,11 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
             Ok(result) => result?,
             Err(_) => value["bindings_pending"] = json!(true),
         }
+    }
+    // A catalog actor exists before article indexing. Do not make dossier
+    // access depend on whether the article's topology neighborhood is ready.
+    if catalog_enabled {
+        crate::intel_topology::decorate_catalog_actors(repo, &mut value).await?;
     }
     let revision = crate::nlp::cache::hash(&serde_json::to_string(&value)?);
     value["revision"] = json!(revision);

@@ -60,6 +60,7 @@ pub fn read(reader: impl Read) -> Result<Vec<Actor>> {
         let mut aliases: Vec<String> = serde_json::from_str(&metadata["aliases"])
             .with_context(|| format!("invalid aliases for {source_id}"))?;
         aliases.extend([name.clone(), metadata["name_normalized"].clone()]);
+        aliases.extend(curated_aliases(&source_id).iter().map(|s| (*s).to_owned()));
         aliases.retain(|a| !brain_actors::normalize_alias(a).is_empty());
         aliases.sort();
         aliases.dedup();
@@ -94,19 +95,36 @@ pub fn read(reader: impl Read) -> Result<Vec<Actor>> {
     Ok(actors)
 }
 
+/// Curated short forms tied to catalog source identifiers, never inferred surnames.
+/// Keep automatic matching and transactional binding on the same alias set.
+pub(crate) fn curated_aliases(source_id: &str) -> &'static [&'static str] {
+    match source_id {
+        "os:Q22686" => &["Trump"],
+        _ => &[],
+    }
+}
+
 /// Exact normalized word-boundary matching. Shared aliases stay ambiguous;
 /// weak_aliases are metadata only and never participate in automatic binding.
 pub struct Matcher {
     actors: Vec<Actor>,
     patterns: AhoCorasick,
     owners: Vec<Vec<usize>>,
+    aliases: BTreeMap<String, Vec<usize>>,
 }
 
 impl Matcher {
-    pub fn new(actors: Vec<Actor>) -> Result<Self> {
+    pub fn new(mut actors: Vec<Actor>) -> Result<Self> {
+        for actor in &mut actors {
+            actor.aliases.extend(
+                curated_aliases(&actor.source_id)
+                    .iter()
+                    .map(|s| (*s).to_owned()),
+            );
+        }
         let mut names: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
         for (index, actor) in actors.iter().enumerate() {
-            for alias in &actor.aliases {
+            for alias in std::iter::once(&actor.name).chain(&actor.aliases) {
                 let key = brain_actors::normalize_alias(alias);
                 if key.chars().count() < 3 {
                     continue;
@@ -118,6 +136,10 @@ impl Matcher {
         Ok(Self {
             actors,
             patterns,
+            aliases: names
+                .iter()
+                .map(|(key, owners)| (key.trim().to_owned(), owners.iter().copied().collect()))
+                .collect(),
             owners: names
                 .into_values()
                 .map(|o| o.into_iter().collect())
@@ -128,18 +150,85 @@ impl Matcher {
     /// Canonical article actors with byte offsets into the original title and
     /// description, independent of NLP availability. Ambiguous names are omitted.
     pub fn article_actors(&self, article: &AtlasArticleRow) -> Vec<ArticleActor> {
-        let mut found: BTreeMap<usize, ArticleActor> = BTreeMap::new();
-        for (field, text) in [
+        self.fields(&[
             ("title", &article.title),
             ("description", &article.description),
-        ] {
+        ])
+    }
+
+    /// Resolve only NLP person/organization candidates against unique strong
+    /// catalog aliases. Unknown and ambiguous names never create identities.
+    pub fn body_actors(
+        &self,
+        text: &str,
+        candidates: &[crate::nlp::EntityCandidate],
+    ) -> Vec<ArticleActor> {
+        let mut found = Vec::new();
+        for candidate in candidates {
+            if !matches!(candidate.type_hint.as_str(), "person" | "organization") {
+                continue;
+            }
+            let key = brain_actors::normalize_alias(&candidate.comparison_key);
+            let Some(owners) = self.aliases.get(&key) else {
+                continue;
+            };
+            let [owner] = owners.as_slice() else { continue };
+            let actor = &self.actors[*owner];
+            let mut resolved = ArticleActor {
+                id: actor.id.clone(),
+                type_hint: actor.subtype.clone(),
+                display_name: actor.name.clone(),
+                spellings: Vec::new(),
+                mentions: Vec::new(),
+            };
+            for span in &candidate.mention_refs {
+                let Some(original) = span.slice(text) else {
+                    continue;
+                };
+                if brain_actors::normalize_alias(original) != key {
+                    continue;
+                }
+                if !resolved.spellings.iter().any(|s| s == original) {
+                    resolved.spellings.push(original.to_owned());
+                }
+                resolved.mentions.push(ArticleMention {
+                    type_hint: actor.subtype.clone(),
+                    comparison_key: key.clone(),
+                    field: "body".into(),
+                    start_byte: span.start_byte,
+                    end_byte: span.end_byte,
+                    original_text: original.to_owned(),
+                });
+            }
+            if !resolved.mentions.is_empty() {
+                append_body_actors(&mut found, vec![resolved]);
+            }
+        }
+        found
+    }
+
+    fn fields(&self, fields: &[(&str, &str)]) -> Vec<ArticleActor> {
+        let mut found: BTreeMap<usize, ArticleActor> = BTreeMap::new();
+        for &(field, text) in fields {
             let (normalized, offsets) = normalized_offsets(text);
-            for matched in self.patterns.find_overlapping_iter(&normalized) {
+            let matches: Vec<_> = self.patterns.find_overlapping_iter(&normalized).collect();
+            for matched in &matches {
                 let owners = &self.owners[matched.pattern().as_usize()];
                 let [owner] = owners.as_slice() else {
                     continue;
                 };
                 let actor = &self.actors[*owner];
+                let alias = normalized[matched.start()..matched.end()].trim();
+                let curated = curated_aliases(&actor.source_id)
+                    .iter()
+                    .any(|name| brain_actors::normalize_alias(name) == alias);
+                // A curated short form must not override another person's
+                // longer exact name, e.g. Melania Trump versus bare Trump.
+                if curated && matches.iter().any(|other| {
+                    other.start() <= matched.start() && other.end() >= matched.end()
+                        && (other.start() < matched.start() || other.end() > matched.end())
+                        && matches!(self.owners[other.pattern().as_usize()].as_slice(), [id] if id != owner)
+                }) { continue; }
                 let start = offsets[matched.start() + 1].0;
                 let end = offsets[matched.end() - 2].1;
                 let original_text = text[start..end].to_owned();
@@ -167,6 +256,25 @@ impl Matcher {
             }
         }
         found.into_values().collect()
+    }
+}
+/// Append identities discovered in a clean body without moving metadata actors.
+pub(crate) fn append_body_actors(actors: &mut Vec<ArticleActor>, body_actors: Vec<ArticleActor>) {
+    for body_actor in body_actors {
+        if let Some(actor) = actors.iter_mut().find(|actor| actor.id == body_actor.id) {
+            for spelling in body_actor.spellings {
+                if !actor.spellings.contains(&spelling) {
+                    actor.spellings.push(spelling);
+                }
+            }
+            for mention in body_actor.mentions {
+                if !actor.mentions.contains(&mention) {
+                    actor.mentions.push(mention);
+                }
+            }
+        } else {
+            actors.push(body_actor);
+        }
     }
 }
 
@@ -209,6 +317,34 @@ mod tests {
     }
 
     #[test]
+    fn curated_trump_title_binds_the_catalog_identity_without_surname_guessing() {
+        let mut trump = actor("donald", "Donald Trump", &[]);
+        trump.source_id = "os:Q22686".into();
+        let article = AtlasArticleRow {
+            title: "trump considering using nuclear weapons against iran - tucker carlson".into(),
+            ..Default::default()
+        };
+        let matcher =
+            Matcher::new(vec![trump.clone(), actor("other", "Other Trump", &[])]).unwrap();
+        let found = matcher.article_actors(&article);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "donald");
+        assert_eq!(found[0].mentions[0].original_text, "trump");
+        let family =
+            Matcher::new(vec![trump.clone(), actor("melania", "Melania Trump", &[])]).unwrap();
+        let named_relative = AtlasArticleRow {
+            title: "Melania Trump speaks".into(),
+            ..Default::default()
+        };
+        let relatives = family.article_actors(&named_relative);
+        assert_eq!(relatives.len(), 1);
+        assert_eq!(relatives[0].id, "melania");
+        let ambiguous =
+            Matcher::new(vec![trump, actor("other", "Other Person", &["Trump"])]).unwrap();
+        assert!(ambiguous.article_actors(&article).is_empty());
+    }
+
+    #[test]
     fn matching_respects_boundaries_ambiguity_unicode_and_original_spans() {
         let matcher = Matcher::new(vec![
             actor(
@@ -231,6 +367,50 @@ mod tests {
             assert_eq!(&article.title[m.start_byte..m.end_byte], m.original_text);
         }
         assert_eq!(found[0].mentions[0].original_text, "Harbor-Union");
+    }
+
+    #[test]
+    fn body_requires_nlp_person_or_organization_and_unique_existing_catalog_alias() {
+        let matcher = Matcher::new(vec![
+            actor("one", "Harbor Union", &["Harbor Union", "Shared"]),
+            actor("two", "Other Group", &["Other Group", "Shared"]),
+        ])
+        .unwrap();
+        let text = "é Harbor Union, Shared, Unknown Person, Other Group";
+        let candidate = |form: &str, kind: &str| {
+            let start = text.find(form).unwrap();
+            crate::nlp::EntityCandidate {
+                id: form.into(),
+                type_hint: kind.into(),
+                comparison_key: form.to_lowercase(),
+                original_forms: vec![form.into()],
+                mention_refs: vec![crate::nlp::Span {
+                    start_byte: start,
+                    end_byte: start + form.len(),
+                }],
+            }
+        };
+        assert!(
+            matcher.body_actors(text, &[]).is_empty(),
+            "catalog substrings without NLP entities cannot supply body actors"
+        );
+        let found = matcher.body_actors(
+            text,
+            &[
+                candidate("Harbor Union", "organization"),
+                candidate("Shared", "organization"),
+                candidate("Unknown Person", "person"),
+                candidate("Other Group", "place"),
+            ],
+        );
+        assert_eq!(
+            found.len(),
+            1,
+            "ambiguous, unknown and non-person/org entities stay unbound"
+        );
+        assert_eq!(found[0].id, "one");
+        let mention = &found[0].mentions[0];
+        assert_eq!(&text[mention.start_byte..mention.end_byte], "Harbor Union");
     }
 
     #[test]

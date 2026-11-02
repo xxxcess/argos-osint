@@ -494,3 +494,32 @@ describe("server-backed global All", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
+
+it("sort changes request the server order with an independent first-page cursor", async () => {
+  const requests: URLSearchParams[] = [];
+  mswServer.use(
+    http.get(`${testBase}/api/v1/articles`, ({ request }) => {
+      const params = new URL(request.url).searchParams;
+      requests.push(params);
+      return params.get("sort") === "hottest"
+        ? page([b, a], "heat-cursor")
+        : page([a, b], cursor1);
+    }),
+  );
+  const user = userEvent.setup();
+  render(<App />);
+  await openAll(user);
+  await waitFor(() => expect(cards()[0]).toContain(a.title));
+  await user.click(
+    screen.getByRole("button", { name: "Hottest" }),
+  );
+  await waitFor(() => expect(cards()[0]).toContain(b.title));
+  expect(
+    requests.filter((p) => p.get("sort") === "hottest")[0].get("cursor"),
+  ).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Latest" }));
+  await waitFor(() => expect(cards()[0]).toContain(a.title));
+  expect(
+    screen.getByRole("button", { name: "Latest" }),
+  ).toHaveAttribute("aria-pressed", "true");
+});

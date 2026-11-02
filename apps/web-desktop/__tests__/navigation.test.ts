@@ -87,3 +87,52 @@ it.each(["unknown:row", "claim:" + "x".repeat(257), '{"claim":1}'])(
     expect(routeFromUrl(url)).toEqual({ screen: "topology", seed: "memory" });
   },
 );
+
+it("round-trips canonical actor links and retains Actor → Topology return context", () => {
+  const from = { run_id: "run", article_id: "article" };
+  const actor = { screen: "actor" as const, id: "actor /?&", from };
+  expect(routeFromUrl(new URL(routeUrl(actor), location.origin))).toEqual({
+    screen: "actor",
+    id: actor.id,
+  });
+  webNavigation.navigate(actor);
+  expect(webNavigation.getSnapshot()).toEqual(actor);
+  webNavigation.navigate({
+    screen: "topology",
+    seed: actor.id,
+    actorFrom: { id: actor.id, from },
+  });
+  expect(webNavigation.getSnapshot()).toMatchObject({
+    actorFrom: { id: actor.id, from },
+  });
+  expect(location.search).not.toContain("run");
+  webNavigation.navigate(actor);
+  expect(webNavigation.getSnapshot()).toEqual(actor);
+});
+
+it("bounds actor IDs in bytes at the host boundary", () => {
+  expect(
+    routeFromUrl(new URL(`/actor?id=${"é".repeat(129)}`, location.origin)),
+  ).toEqual({ screen: "actor", id: null });
+});
+
+it("round-trips source actor dossiers without treating the extracted reference as a canonical ID", () => {
+  const route = {
+    screen: "actor" as const,
+    id: null,
+    source: {
+      run_id: "run /?",
+      article_id: "article &",
+      actor_id: "local-actor",
+    },
+  };
+  expect(routeFromUrl(new URL(routeUrl(route), location.origin))).toEqual(
+    route,
+  );
+  webNavigation.navigate({
+    screen: "topology",
+    seed: "brief:run/article",
+    actorFrom: route,
+  });
+  expect(webNavigation.getSnapshot()).toMatchObject({ actorFrom: route });
+});

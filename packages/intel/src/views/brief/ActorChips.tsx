@@ -1,37 +1,52 @@
 "use client";
 import React from "react";
 import { View, Text, Pressable } from "react-native";
-import type { Brief, Seed } from "@argos/api-client";
-import { EmptyState } from "@argos/ui";
+import type { Brief } from "@argos/api-client";
+import { EmptyState, LoadingState } from "@argos/ui";
 import { intelKindColors as kinds } from "../../shell/intel-theme";
 import { BriefSection } from "./BriefSection";
 import { BriefSkeleton } from "./BriefSkeleton";
-import { extractedFocus, topologyTarget } from "./BriefAction";
 import { briefStyles as s } from "./briefStyles";
 export function ActorChips({
   actors,
   pending,
   brief,
-  extracted = null,
-  onTopology,
+  onActor,
 }: {
   actors: Brief["actors"];
   pending: boolean;
   brief?: Brief;
-  extracted?: Seed | null;
-  onTopology: (seed: Seed, focus?: string) => void;
+  onActor?: (actor: Brief["actors"][number]) => void;
 }) {
   const evidenceState = (
     empty: string,
     loading = "Loading extracted evidence…",
   ) =>
-    pending && (!brief || brief.actors_pending) ? (
+    pending && (!brief || brief.actors_pending || brief.actors_body_pending) ? (
       <BriefSkeleton
         variant="actors"
-        label={brief?.actors_pending ? "Matching catalog actors…" : loading}
+        label={
+          brief?.actors_body_pending
+            ? "Checking cleaned article for actors…"
+            : brief?.actors_pending
+              ? "Matching catalog actors…"
+              : loading
+        }
       />
     ) : (
-      <EmptyState title={brief ? empty : "Evidence unavailable"} />
+      <EmptyState
+        title={
+          brief?.actors_body_unavailable
+            ? "Actor detection incomplete"
+            : brief
+              ? empty
+              : "Evidence unavailable"
+        }
+      >
+        {brief?.actors_body_unavailable
+          ? "The cleaned article is unavailable. Actors could not be checked in its body."
+          : null}
+      </EmptyState>
     );
   return (
     <>
@@ -48,18 +63,11 @@ export function ActorChips({
                   key={actor.id}
                   accessibilityRole="button"
                   accessibilityLabel={`Explore actor ${actor.display_name}`}
-                  disabled={!topologyTarget(actor.topology_seed, extracted)}
+                  disabled={!onActor}
                   accessibilityState={{
-                    disabled: !topologyTarget(actor.topology_seed, extracted),
+                    disabled: !onActor,
                   }}
-                  onPress={() => {
-                    const seed = topologyTarget(actor.topology_seed, extracted);
-                    const focus = seed
-                      ? extractedFocus(seed, extracted, `actor:${actor.id}`)
-                      : undefined;
-                    if (seed && focus) onTopology(seed, focus);
-                    else if (seed) onTopology(seed);
-                  }}
+                  onPress={() => onActor?.(actor)}
                   style={s.evidenceRow}
                 >
                   <Text style={[s.marker, { color: kinds.actor }]}>
@@ -68,13 +76,17 @@ export function ActorChips({
                   <Text style={s.evidenceText}>
                     {actor.display_name}
                     {actor.type_hint ? ` · ${actor.type_hint}` : ""}
-                    {topologyTarget(actor.topology_seed, extracted)
-                      ? " · Topology"
-                      : ""}
+                    {" · Dossier"}
                   </Text>
                 </Pressable>
               ))
             : evidenceState("No actors extracted")}
+          {actors.length > 0 && brief?.actors_body_pending ? (
+            <LoadingState
+              compact
+              label="Checking cleaned article for more actors…"
+            />
+          ) : null}
         </View>
       </BriefSection>
     </>

@@ -2,6 +2,7 @@ import React from "react";
 import { View } from "react-native";
 import { Skeleton } from "@argos/ui";
 import { intelColors as c, intelRadius } from "../../shell/intel-theme";
+import { bulletinThumb } from "./ArticleCard";
 export function BulletinSkeleton() {
   return (
     <View
@@ -29,7 +30,7 @@ export function BulletinSkeleton() {
             <Skeleton lines={3} height={22} />
             <Skeleton width="60%" height={20} />
           </View>
-          <Skeleton width={72} height={72} />
+          <Skeleton width={bulletinThumb} height={bulletinThumb} radius={8} />
         </View>
       ))}
     </View>

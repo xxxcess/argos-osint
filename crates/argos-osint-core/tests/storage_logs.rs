@@ -307,3 +307,46 @@ async fn event_seq_is_seeded_per_database_not_per_process() {
     assert_eq!(new.seq, 6, "seeded from this store's top seq");
     assert_eq!(rows.first().map(|r| r.id.clone()), Some(id), "newest first");
 }
+
+#[tokio::test]
+async fn per_job_logs_include_retry_records_while_other_service_logs_are_active() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "job_log_sources").await;
+    event_log::record_event(
+        repo.db(),
+        &event(Severity::Info, "api", "api-service", "API listening"),
+    )
+    .await
+    .unwrap();
+    event_log::record_event(
+        repo.db(),
+        &event(Severity::Info, "intel", "brief-job", "Started brief"),
+    )
+    .await
+    .unwrap();
+    repo.db().query("CREATE job_event:retry SET job_id = 'brief-job', app = 'intel', event_type = 'job.retry', severity = 'warn', message = 'Retry extraction', ts = time::now()").await.unwrap().check().unwrap();
+    let filter = EventFilter {
+        job_id: "brief-job".into(),
+        ..Default::default()
+    };
+    let rows = event_log::list_events(repo.db(), &filter, 10)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|e| e.job_id == "brief-job"));
+    assert!(rows.iter().any(|e| e.message == "Retry extraction"));
+    repo.db().query("CREATE job_event:new_info SET job_id = 'brief-job', app = 'intel', event_type = 'task.started', severity = 'info', message = 'Newer info', ts = time::now() + 1s").await.unwrap().check().unwrap();
+    let warnings = EventFilter {
+        min_severity: Some(Severity::Warn),
+        ..filter
+    };
+    assert_eq!(
+        event_log::list_events(repo.db(), &warnings, 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}

@@ -19,6 +19,8 @@ import { intelColors as c, intelRadius } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
 
 type Props = {
+  sort: "latest" | "hottest";
+  onSort: (sort: "latest" | "hottest") => void;
   categories: string[];
   category: string;
   onCategory: (category: string) => void;
@@ -91,6 +93,8 @@ export function BulletinView(p: Props) {
           style={[s.feed, !wide && { padding: 16 }]}
         >
           <FeedHeader
+            sort={p.sort}
+            onSort={p.onSort}
             days={p.days}
             selectedDay={p.selectedDay}
             onDay={p.onDay}

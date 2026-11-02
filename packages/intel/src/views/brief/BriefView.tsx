@@ -2,20 +2,15 @@
 import React from "react";
 import { View, Text, useWindowDimensions } from "react-native";
 import type { Article, Brief, Seed, BriefStage } from "@argos/api-client";
-import { intelKindColors as kinds } from "../../shell/intel-theme";
 import { briefStyles as s } from "./briefStyles";
 import { BriefSection } from "./BriefSection";
 export { BriefSection } from "./BriefSection";
 export { RelatedBriefCard } from "./RelatedBriefCard";
+import { ConfidenceSection } from "./ConfidenceSection";
 import { ActorChips } from "./ActorChips";
 import { ClaimList } from "./ClaimList";
 import { InferenceList } from "./InferenceList";
-import {
-  BriefAction,
-  extractedBriefSeed,
-  extractedFocus,
-  topologyTarget,
-} from "./BriefAction";
+import { BriefAction, extractedBriefSeed, topologyTarget } from "./BriefAction";
 import { BriefHeader } from "./BriefHeader";
 import type { JobState } from "../../shell/jobState";
 
@@ -51,6 +46,7 @@ export function BriefView({
   stages,
   onBack,
   onTopology,
+  onActor,
   related,
   operations,
   notices,
@@ -62,6 +58,7 @@ export function BriefView({
   pending: boolean;
   stages?: BriefStage[];
   onBack: () => void;
+  onActor?: (actor: Brief["actors"][number]) => void;
   onTopology: (seed: Seed, focus?: string) => void;
   related: React.ReactNode;
   operations: React.ReactNode;
@@ -130,12 +127,21 @@ export function BriefView({
           <Text style={[s.lede, narrow && { fontSize: 16, lineHeight: 23 }]}>
             {shown.description || "No description available."}
           </Text>
+          <ConfidenceSection
+            brief={brief}
+            pending={loading}
+            claimCount={claims.length}
+            inferenceCount={inferences.length}
+          />
           <ActorChips
             actors={actors}
-            pending={loading || !!brief?.actors_pending}
+            pending={
+              loading ||
+              !!brief?.actors_pending ||
+              (actors.length === 0 && !!brief?.actors_body_pending)
+            }
             brief={brief}
-            extracted={extracted}
-            onTopology={onTopology}
+            onActor={onActor}
           />
           <ClaimList
             stage={stages?.find((s) => s.operation === "intel_brief_claims")}
@@ -179,34 +185,6 @@ export function BriefView({
           Source · {sourceName}
           {shown.author ? ` · ${shown.author}` : ""}
         </Text>
-        <Text style={s.micro}>Actors</Text>
-        {actors.length ? (
-          actors.map((actor) => (
-            <BriefAction
-              key={actor.id}
-              label={`Extracted actor ${actor.display_name}`}
-              disabled={!topologyTarget(actor.topology_seed, extracted)}
-              onPress={() => {
-                const seed = topologyTarget(actor.topology_seed, extracted);
-                const focus = seed
-                  ? extractedFocus(seed, extracted, `actor:${actor.id}`)
-                  : undefined;
-                if (seed && focus) onTopology(seed, focus);
-                else if (seed) onTopology(seed);
-              }}
-            >
-              <Text style={{ color: kinds.actor }}>● </Text>
-              {actor.display_name}
-              {topologyTarget(actor.topology_seed, extracted)
-                ? " · Topology"
-                : ""}
-            </BriefAction>
-          ))
-        ) : !brief?.actors_pending && (brief || !loading) ? (
-          <Text style={s.micro}>
-            {brief ? "No actors" : "Actors unavailable"}
-          </Text>
-        ) : null}
       </View>
       <View style={[s.lower, narrow && s.narrowPadding]}>
         <BriefAction

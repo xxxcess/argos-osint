@@ -160,6 +160,23 @@ function GraphExplorer({
     () => false,
   );
   const canvas = useRef<CanvasHandle>(null);
+  const overItem = useRef(false);
+  useEffect(() => {
+    const viewport = document.getElementById("intel-topology-viewport");
+    const scroller = document.getElementById("intel-topology-content-scroll");
+    if (!viewport || !scroller) return;
+    const onWheel = (event: WheelEvent) => {
+      if (overItem.current) return;
+      scroller.scrollBy({ top: event.deltaY });
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    viewport.addEventListener("wheel", onWheel, {
+      capture: true,
+      passive: false,
+    });
+    return () => viewport.removeEventListener("wheel", onWheel, true);
+  }, []);
   const [box, setBox] = useState(0);
   // undefined = default to first node; null = explicitly cleared.
   const [selectedId, setSelectedId] = useState<string | null | undefined>(
@@ -210,6 +227,14 @@ function GraphExplorer({
       visible.has(e.to),
   );
   const focusIds = selected ? new Set(nodes.map((node) => node.id)) : null;
+  const cameraIds =
+    selected && depth === 2
+      ? new Set(
+          [...neighborhood.role.entries()]
+            .filter(([, role]) => role === "focus" || role === "first")
+            .map(([id]) => id),
+        )
+      : focusIds;
   const gNodes: GNode[] = nodes.map((n) => ({
     id: n.id,
     label: displayEvidence(n.label),
@@ -313,6 +338,7 @@ function GraphExplorer({
             <ErrorBoundary label="Topology graph" onRetry={reset}>
               <Suspense fallback={<GraphSquare contained />}>
                 <ForceCanvas
+                  key={graphSeed ?? "open"}
                   ref={canvas}
                   nodes={gNodes}
                   links={gLinks}
@@ -327,9 +353,13 @@ function GraphExplorer({
                   }}
                   selectedId={selected?.id ?? null}
                   focusIds={focusIds}
+                  cameraIds={cameraIds}
                   reducedMotion={reduced}
                   onView={view.report}
                   onSelect={choose}
+                  onItemHover={(over) => {
+                    overItem.current = over;
+                  }}
                 />
               </Suspense>
             </ErrorBoundary>
@@ -343,6 +373,20 @@ function GraphExplorer({
             <Button onPress={reset}>Reset filters</Button>
           </View>
         ) : null}
+      </View>
+      <View style={t.controls} role="group" aria-label="Graph legend">
+        {kinds.map((kind) => (
+          <View key={kind} style={t.kindLabel}>
+            <KindIcon kind={kind} />
+            <Text style={[t.hudTitle, { color: kindColor[kind] }]}>
+              {kind.toUpperCase()}
+            </Text>
+          </View>
+        ))}
+        <Copy>
+          Lines show recorded relationships. Select a node to inspect its
+          neighborhood.
+        </Copy>
       </View>
       <View nativeID="intel-topology-neighborhood" style={t.neighborhoodHud}>
         <View style={t.controlGroup}>
@@ -402,20 +446,6 @@ function GraphExplorer({
           </View>
         </View>
         <ViewTelemetry store={view} />
-      </View>
-      <View style={t.controls} role="group" aria-label="Graph legend">
-        {kinds.map((kind) => (
-          <View key={kind} style={t.kindLabel}>
-            <KindIcon kind={kind} />
-            <Text style={[t.hudTitle, { color: kindColor[kind] }]}>
-              {kind.toUpperCase()}
-            </Text>
-          </View>
-        ))}
-        <Copy>
-          Lines show recorded relationships. Select a node to inspect its
-          neighborhood.
-        </Copy>
       </View>
       <Text style={t.count} accessibilityLiveRegion="polite">
         Showing {nodes.length} of {data.nodes.length} nodes · {links.length} of{" "}

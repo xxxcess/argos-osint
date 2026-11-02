@@ -460,6 +460,66 @@ pub async fn article_input(
             });
         }
     }
+    // Catalog matches augment NLP candidates. Body spans live in their own
+    // source namespace so equal byte offsets cannot bind metadata evidence.
+    if let Some(actors) = super::actor_catalog::article_actors(repo, article).await? {
+        let clean = super::actor_catalog::clean_body(repo, &article.id).await?;
+        let body_evidence = input.evidence.iter().find(|e| {
+            clean.as_ref().is_some_and(|body| {
+                e.reference.source_id == body.source_id
+                    && e.reference.artifact_hash == body.artifact_hash
+            })
+        });
+        for actor in actors {
+            let metadata_spans: Vec<Span> = actor
+                .mentions
+                .iter()
+                .filter(|m| m.field != "body")
+                .map(|m| {
+                    let offset = if m.field == "description" {
+                        article.title.len() + 1
+                    } else {
+                        0
+                    };
+                    Span {
+                        start_byte: offset + m.start_byte,
+                        end_byte: offset + m.end_byte,
+                    }
+                })
+                .collect();
+            if !metadata_spans.is_empty()
+                && !input.snapshot.entities.iter().any(|e| e.id == actor.id)
+            {
+                input.snapshot.entities.push(crate::nlp::EntityCandidate {
+                    id: actor.id.clone(),
+                    type_hint: actor.type_hint.clone(),
+                    comparison_key: actor.display_name.to_lowercase(),
+                    original_forms: actor.spellings.clone(),
+                    mention_refs: metadata_spans,
+                });
+            }
+            if let Some(evidence) = body_evidence {
+                let body_spans: Vec<Span> = actor
+                    .mentions
+                    .iter()
+                    .filter(|m| m.field == "body")
+                    .map(|m| Span {
+                        start_byte: m.start_byte,
+                        end_byte: m.end_byte,
+                    })
+                    .collect();
+                if !body_spans.is_empty() {
+                    input.snapshot.entities.push(crate::nlp::EntityCandidate {
+                        id: format!("{}:actor:{}", evidence.reference.source_id, actor.id),
+                        type_hint: actor.type_hint,
+                        comparison_key: actor.display_name.to_lowercase(),
+                        original_forms: actor.spellings,
+                        mention_refs: body_spans,
+                    });
+                }
+            }
+        }
+    }
     input.required_tasks_complete =
         !article.title.trim().is_empty() && !article.description.trim().is_empty();
     Ok(input)

@@ -11170,6 +11170,7 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
     let title = match kind {
         ChoiceKind::Provider => format!(" {} provider ", app.defaults_role.label()),
         ChoiceKind::Model => format!(" {} model ", app.defaults_role.label()),
+        ChoiceKind::Variant => format!(" {} variant ", app.defaults_role.label()),
         ChoiceKind::IntelDay => " news cycle day ".into(),
         ChoiceKind::Investigation => " switch investigation ".into(),
     };
@@ -11197,6 +11198,7 @@ fn draw_choice(frame: &mut Frame, app: &App, kind: ChoiceKind) {
     if app.choice_items.is_empty() && height > 0 {
         let empty = match kind {
             ChoiceKind::Model => "No models for this account yet.",
+            ChoiceKind::Variant => "Provider default is available.",
             ChoiceKind::IntelDay => "No Atlas news-cycle days yet.",
             ChoiceKind::Provider => "No connected account yet. Local is always listed.",
             ChoiceKind::Investigation => "No investigations yet.",

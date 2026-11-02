@@ -155,3 +155,25 @@ describe("Next same-origin API → Rust transport", () => {
     expect(text).not.toContain("private.example.test");
   });
 });
+
+it("proxies actor dossier GET and refuses mutations", async () => {
+  vi.stubEnv("ARGOS_RUST_API_ORIGIN", rust);
+  mswServer.use(
+    http.get(`${rust}/api/v1/actors/detail`, ({ request }) => {
+      expect(new URL(request.url).searchParams.get("id")).toBe("actor /&");
+      return HttpResponse.json({ id: "canonical" });
+    }),
+  );
+  const url = `${next}/api/v1/actors/detail?id=actor%20%2F%26`;
+  expect(
+    await (await proxyRust(new Request(url), ["actors", "detail"])).json(),
+  ).toEqual({ id: "canonical" });
+  expect(
+    (
+      await proxyRust(new Request(url, { method: "POST" }), [
+        "actors",
+        "detail",
+      ])
+    ).status,
+  ).toBe(405);
+});

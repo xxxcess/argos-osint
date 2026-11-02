@@ -192,7 +192,7 @@ async fn grouped_page_metadata_matches_single_job_details() {
         );
     }
     let root = rows.iter().find(|r| r.id == "root").unwrap();
-    assert_eq!((root.children, root.attempt_rows, root.events), (1, 2, 2));
+    assert_eq!((root.children, root.attempt_rows, root.events), (1, 2, 4));
     assert!(!root.started_at.is_empty() && !root.open_attempt_started.is_empty());
     assert!(root.cancellable);
 }
@@ -334,7 +334,7 @@ async fn jobs_view_lists_details_and_retries_from_surrealdb() {
         (t1.error_category.as_str(), t1.max_attempts),
         ("timeout", 5)
     );
-    assert_eq!(detail.job.events, 0);
+    assert_eq!(detail.job.events, 2, "root and child start events");
     assert_eq!(detail.attempts[0].task_id, "t1");
     assert!(detail.attempts[0].duration_ms.is_some_and(|ms| ms >= 1000));
 
@@ -342,11 +342,14 @@ async fn jobs_view_lists_details_and_retries_from_surrealdb() {
     assert_eq!(view::retry_failed_tasks(&db, "j1").await.unwrap(), 0);
     let detail = view::job_detail(&db, "j1", 40).await.unwrap().unwrap();
     assert_eq!(detail.job.state, "running");
-    assert_eq!(detail.job.events, 1, "job.retry recorded");
+    assert_eq!(
+        detail.job.events, 3,
+        "job.retry joins root and child start events"
+    );
     let t1 = detail.tasks.iter().find(|t| t.id == "t1").unwrap();
     assert!(t1.error_message.is_empty());
     let mut r = db
-        .query("SELECT VALUE state FROM index_change ORDER BY seq; SELECT VALUE event_type FROM job_event")
+        .query("SELECT VALUE state FROM index_change ORDER BY seq; SELECT VALUE event_type FROM job_event WHERE event_type = 'job.retry'")
         .await
         .unwrap();
     let states: Vec<String> = r.take(0).unwrap();
@@ -486,7 +489,25 @@ async fn jobs_pane_stop_and_clear_history_on_the_repository() {
         .unwrap()
         .is_none());
     assert!(view::get_job(&db, "busy_root").await.unwrap().is_some());
-    assert_eq!(count(&db, "job_event").await, 0);
+    let removed_events: Option<i64> = db.query("RETURN count(SELECT id FROM job_event WHERE job_id IN ['multi_done', 'multi_child_fail', 'succeeded_root'])").await.unwrap().check().unwrap().take(0).unwrap();
+    assert_eq!(
+        removed_events,
+        Some(0),
+        "cleared job trees lose their lifecycle history"
+    );
+    let retained_events: Option<i64> = db
+        .query("RETURN count(SELECT id FROM job_event WHERE job_id IN ['busy_root', 'busy_child'])")
+        .await
+        .unwrap()
+        .check()
+        .unwrap()
+        .take(0)
+        .unwrap();
+    assert_eq!(
+        retained_events,
+        Some(2),
+        "busy job trees retain their lifecycle history"
+    );
 
     // Stopped filter clears `paused` (and `cancelled` / `superseded`) roots.
     assert_eq!(

@@ -242,6 +242,7 @@ struct TopologyOrigin {
 pub enum ChoiceKind {
     Provider,
     Model,
+    Variant,
     IntelDay,
     Investigation,
 }
@@ -1970,6 +1971,7 @@ impl App {
             // `brain_dirty` gate): entering the module, a filter change or a
             // new durable event marks it; a successful snapshot clears it.
             Some(ModuleId::Logs) => {
+                self.logs_dirty |= self.logs.follow;
                 if self.logs_dirty && self.dashboard_reading.is_none() {
                     self.reload_logs();
                 }
@@ -2215,6 +2217,10 @@ impl App {
         let Some(id) = self.jobs.selected().map(|job| job.id.clone()) else {
             return Ok("Select a job first".into());
         };
+        self.logs.level = super::logs::LevelFilter::All;
+        self.logs.app.clear();
+        self.logs.search.clear();
+        self.logs.invalidate_filter();
         self.logs.job = id.clone();
         self.logs.back_to_job = Some(id.clone());
         self.logs.follow = true;
@@ -6728,6 +6734,66 @@ impl App {
         self.refresh_catalog();
     }
 
+    fn open_variant_picker(&mut self) {
+        use argos_osint_core::provider_capabilities::{self, ReasoningControl};
+        let mut secret = provider::account_secret(&self.auth, &self.role_provider());
+        secret.model = self.role_model();
+        let caps = provider_capabilities::for_secret(&secret);
+        let mut items = vec![ChoiceItem {
+            id: "default".into(),
+            label: "Provider / operation default".into(),
+        }];
+        if caps.reasoning.control == ReasoningControl::ChatTemplateThinking {
+            items.push(ChoiceItem {
+                id: "thinking".into(),
+                label: "Thinking".into(),
+            });
+            if !caps.reasoning.mandatory {
+                items.push(ChoiceItem {
+                    id: "off".into(),
+                    label: "Off".into(),
+                });
+            }
+        } else {
+            for value in [
+                "minimal", "low", "medium", "high", "xhigh", "max", "thinking",
+            ] {
+                if caps.reasoning.values.iter().any(|v| v == value) {
+                    items.push(ChoiceItem {
+                        id: value.into(),
+                        label: value.into(),
+                    });
+                }
+            }
+            if caps.reasoning.off.is_some() {
+                items.push(ChoiceItem {
+                    id: "off".into(),
+                    label: "Off".into(),
+                });
+            }
+        }
+        let key = provider::RoleDefaults::variant_key(
+            self.defaults_role.settings_key(),
+            &self.role_provider(),
+            &secret.model,
+        );
+        let current = self
+            .settings
+            .defaults
+            .model_variants
+            .get(&key)
+            .map_or("default", |v| v.as_str());
+        self.overlay = Overlay::Choice(ChoiceKind::Variant);
+        self.scrolls.popup = 0;
+        self.choice_note = if items.len() == 1 {
+            "No optional variants confirmed by this provider; use its default."
+        } else {
+            "Confirmed variants for this provider and model. Save role after selection."
+        }
+        .into();
+        self.set_choices(items, current);
+    }
+
     fn rebuild_provider_choices(&mut self) {
         let mut items = Vec::new();
         let current = self.role_provider();
@@ -6818,6 +6884,26 @@ impl App {
             Overlay::Choice(ChoiceKind::Model) => {
                 self.set_role_model(&item.id);
                 self.status = format!("Model {}", item.id);
+                self.open_variant_picker();
+                return;
+            }
+            Overlay::Choice(ChoiceKind::Variant) => {
+                let Ok(variant) =
+                    serde_json::from_value(serde_json::Value::String(item.id.clone()))
+                else {
+                    return;
+                };
+                let key = provider::RoleDefaults::variant_key(
+                    self.defaults_role.settings_key(),
+                    &self.role_provider(),
+                    &self.role_model(),
+                );
+                if variant == argos_osint_core::request_policy::ReasoningEffort::Default {
+                    self.settings.defaults.model_variants.remove(&key);
+                } else {
+                    self.settings.defaults.model_variants.insert(key, variant);
+                }
+                self.status = format!("Variant {} · Save role to apply", item.label);
             }
             Overlay::Choice(ChoiceKind::IntelDay) => {
                 self.intel_day = item.id;
@@ -8898,10 +8984,11 @@ impl App {
         } else {
             kind
         };
-        if role != DefaultsRole::Synthesis
-            && !matches!(kind.as_str(), "openai-chatgpt" | "openrouter" | "local")
-        {
-            anyhow::bail!("Choose OpenAI, OpenRouter, or local");
+        if !matches!(
+            kind.as_str(),
+            "openai" | "openai-chatgpt" | "openrouter" | "local" | "google" | "nvidia"
+        ) {
+            anyhow::bail!("Choose a configured model provider");
         }
         let assignment = self
             .settings
@@ -12090,6 +12177,8 @@ mod tests {
         assert_eq!(app.choice_items[1].id, "openai/gpt-5-mini");
         click(&mut app, Target::Choice(0));
         assert_eq!(app.picker_model, "typesafe/jev-1.13");
+        assert_eq!(app.overlay, Overlay::Choice(ChoiceKind::Variant));
+        click(&mut app, Target::Choice(0));
 
         click(&mut app, Target::Button(ButtonId::SavePicker));
         assert!(app.status.contains("decisions"), "{}", app.status);
@@ -12358,6 +12447,8 @@ mod tests {
         assert_eq!(models, ["alpha", "beta"]);
         click(&mut app, Target::Choice(1));
         assert_eq!(app.recon_model, "beta");
+        assert_eq!(app.overlay, Overlay::Choice(ChoiceKind::Variant));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(app.overlay, Overlay::None));
 
         click(&mut app, Target::PaneTab(0));
@@ -12398,6 +12489,8 @@ mod tests {
         );
         click(&mut app, Target::Choice(0));
         assert_eq!(app.synthesis_model, "nvidia-text-model");
+        assert_eq!(app.overlay, Overlay::Choice(ChoiceKind::Variant));
+        click(&mut app, Target::Choice(0));
         app.on_work_event(WorkEvent::CatalogDone {
             role: DefaultsRole::Synthesis,
             provider: "local".into(),
@@ -12963,10 +13056,16 @@ mod tests {
         assert!(text.contains("View logs"));
         assert!(!text.contains("Retry failed"), "no misleading Retry");
 
+        // A prior API/errors search must not hide another job's events.
+        app.logs.app = "api".into();
+        app.logs.level = super::super::logs::LevelFilter::Error;
+        app.logs.search = "server listening".into();
         // Jobs → Logs prefiltered to the job, with a return path.
         app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
         assert_eq!(app.module, Some(ModuleId::Logs));
         assert_eq!(app.logs.job, "job-a");
+        assert!(app.logs.app.is_empty() && app.logs.search.is_empty());
+        assert_eq!(app.logs.level, super::super::logs::LevelFilter::All);
         let messages: Vec<&str> = app.logs.rows.iter().map(|r| r.message.as_str()).collect();
         assert_eq!(messages, ["phase 5 started"]);
         app.set_focus(Target::LogLine(0));
@@ -13123,6 +13222,98 @@ mod tests {
     }
 
     /// `ARGOS_SCREEN_DIR=… cargo test -p argos-osint-bin dump_defaults_popup_screens -- --ignored`
+    #[test]
+    fn model_selection_opens_confirmed_variant_and_preserves_role_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app();
+        app.settings_path = dir.path().join("config.toml");
+        app.defaults_role = DefaultsRole::Synthesis;
+        app.set_role_provider("nvidia");
+        app.set_role_model("nvidia/nemotron-3-ultra-550b-a55b");
+        app.overlay = Overlay::Choice(ChoiceKind::Model);
+        app.choice_items = vec![ChoiceItem {
+            id: app.role_model(),
+            label: "Nemotron".into(),
+        }];
+        app.apply_choice(0);
+        assert_eq!(app.overlay, Overlay::Choice(ChoiceKind::Variant));
+        assert!(app.choice_items.iter().any(|i| i.id == "medium"));
+        let index = app
+            .choice_items
+            .iter()
+            .position(|i| i.id == "medium")
+            .unwrap();
+        app.apply_choice(index);
+        let key = provider::RoleDefaults::variant_key("synthesis", "nvidia", &app.role_model());
+        assert_eq!(
+            app.settings.defaults.model_variants[&key].as_str(),
+            "medium"
+        );
+        assert_eq!(app.overlay, Overlay::None);
+        app.save_role(DefaultsRole::Synthesis).unwrap();
+        let saved = SettingsFile::load_from(&app.settings_path).unwrap();
+        assert_eq!(saved.defaults.model_variants[&key].as_str(), "medium");
+        app.open_variant_picker();
+        app.apply_choice(0);
+        assert!(
+            !app.settings.defaults.model_variants.contains_key(&key),
+            "default restores operation policy"
+        );
+        app.set_role_model("unknown-model");
+        app.open_variant_picker();
+        assert_eq!(
+            app.choice_items.len(),
+            1,
+            "unknown models offer only provider default"
+        );
+    }
+
+    #[test]
+    fn model_variants_save_for_every_role_and_offered_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app();
+        app.settings_path = dir.path().join("config.toml");
+        for role in DefaultsRole::ALL {
+            app.defaults_role = role;
+            app.set_role_provider("nvidia");
+            app.set_role_model("nvidia/nemotron-3-ultra-550b-a55b");
+            app.open_variant_picker();
+            let high = app
+                .choice_items
+                .iter()
+                .position(|i| i.id == "high")
+                .unwrap();
+            app.apply_choice(high);
+            app.save_role(role).unwrap();
+            let saved = SettingsFile::load_from(&app.settings_path).unwrap();
+            let key =
+                provider::RoleDefaults::variant_key(role.role_key(), "nvidia", &app.role_model());
+            assert_eq!(
+                saved.defaults.model_variants[&key].as_str(),
+                "high",
+                "{role:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dump_variant_popup_screens() {
+        let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        for (w, h) in [(160, 50), (80, 24), (60, 18)] {
+            let mut app = app();
+            app.module = Some(ModuleId::Providers);
+            app.provider_page = ProviderPage::Defaults;
+            app.defaults_role = DefaultsRole::Synthesis;
+            app.set_role_provider("nvidia");
+            app.set_role_model("nvidia/nemotron-3-ultra-550b-a55b");
+            app.open_variant_picker();
+            dump_cells(&mut app, &dir, &format!("model-variant-{w}x{h}"), w, h);
+        }
+    }
+
     #[test]
     #[ignore]
     fn dump_defaults_popup_screens() {
@@ -18614,6 +18805,7 @@ mod tests {
             member_ids: vec![],
             receipts: vec!["Article revision demo-r7 · retained evidence".into()],
             rationale: "Exact relationship receipt; no inferred identity or corroboration.".into(),
+            actor_reference: None,
         })
         .collect::<Vec<_>>();
         app.topology_state.seed = Some(seed.clone());

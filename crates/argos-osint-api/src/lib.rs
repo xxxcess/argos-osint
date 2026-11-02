@@ -1,4 +1,5 @@
 //! Versioned local Intel HTTP adapter. @tag:intel-brief
+mod actor_dossier;
 mod host_metrics;
 mod live;
 mod topology_web;
@@ -51,6 +52,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/host/metrics", get(host_metrics::read))
         .route("/api/v1/live", get(live::upgrade))
         .route("/api/v1/days", get(days))
+        .route("/api/v1/actors/detail", get(actor_dossier::read))
         .route("/api/v1/articles", get(articles))
         .route("/api/v1/articles/counts", get(article_counts))
         .route("/api/v1/articles/detail", get(detail))

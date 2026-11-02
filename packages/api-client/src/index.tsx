@@ -45,6 +45,8 @@ export interface Article {
   image_url: string;
   url: string;
   author: string;
+  /** Article heat from 0 (cold) to 1 (hot). */
+  temperature?: number;
 }
 export interface Brief {
   article: Article;
@@ -73,6 +75,9 @@ export interface Brief {
   publication: [number, unknown, unknown] | null;
   relations: [string, string, string][];
   links?: string[];
+  confidence_grade?: string;
+  confidence_basis?: "evidence" | "publisher_prior" | "unavailable";
+  confidence_reason?: string;
   confidence?: {
     score: number | null;
     provisional: boolean;
@@ -81,6 +86,8 @@ export interface Brief {
   } | null;
   body_pending?: boolean;
   actors_pending?: boolean;
+  actors_body_pending?: boolean;
+  actors_body_unavailable?: boolean;
   bindings_pending?: boolean;
   job_id?: string;
   indexing?: { state: string; reason: string } | null;
@@ -518,10 +525,11 @@ export function useArticles(
   day: string,
   search: string,
   enabled = true,
+  sort: "latest" | "hottest" = "latest",
 ) {
   const b = useBackend();
   return useInfiniteQuery({
-    queryKey: [b.base, b.instance, "articles", category, day, search],
+    queryKey: [b.base, b.instance, "articles", category, day, search, sort],
     initialPageParam: "",
     // A visible feed gets one slow freshness check; briefs never poll.
     refetchInterval: enabled ? 60_000 : false,
@@ -540,6 +548,7 @@ export function useArticles(
             category,
             day,
             search,
+            ...(sort === "hottest" ? { sort } : {}),
             ...(pageParam ? { cursor: pageParam } : {}),
           }),
         undefined,
@@ -557,6 +566,7 @@ export function useTopology(seed: string | null) {
     queryKey: [b.base, b.instance, "topology", seed],
     enabled: b.connected && !!seed,
     staleTime: 30_000,
+    refetchInterval: seed ? 60_000 : false,
     refetchOnWindowFocus: false,
     placeholderData: keepPreviousData,
     queryFn: ({ signal }) =>
@@ -594,3 +604,94 @@ export function useRelated(article: Article) {
 }
 
 export type { BriefStage } from "./live";
+
+/** Read-only, bounded recorded actor neighborhood. */
+export interface ActorAssociation {
+  node: {
+    id: string;
+    label: string;
+    revision: string;
+    topology_seed: Seed | null;
+  };
+  relationship: {
+    id: string;
+    rationale: string;
+    status: string;
+    receipts: string[];
+    actor_reference?: { role: string; binding_state: string };
+  };
+  recorded_at: string | null;
+  article: Article | null;
+}
+export interface ActorDossier {
+  id: string;
+  display_name: string;
+  subtype: string;
+  identity_state: string;
+  catalog_source_id: string | null;
+  catalog_type: string | null;
+  description: string | null;
+  aliases: string[];
+  metadata: { key: string; value: string | null }[];
+  claims: ActorAssociation[];
+  briefs: ActorAssociation[];
+  inferences?: ActorAssociation[];
+  loaded_inferences?: number;
+  loaded_claims: number;
+  loaded_briefs: number;
+  gaps: string[];
+  truncated: boolean;
+}
+/** Keep associations fresh when their originating brief finishes indexing. */
+export function useAssociationLive(source?: {
+  run_id: string;
+  article_id: string;
+}) {
+  const b = useBackend();
+  const client = useQueryClient();
+  const run = source?.run_id;
+  const id = source?.article_id;
+  useEffect(() => {
+    if (!b.connected || !b.live || !run || !id) return;
+    return b.live.subscribe({ type: "brief", run, id, watch: "" }, (event) => {
+      if (
+        event.type !== "brief" ||
+        !event.refresh ||
+        event.run !== run ||
+        event.id !== id
+      )
+        return;
+      for (const resource of ["actor-dossier", "topology"]) {
+        const filter = { queryKey: [b.base, b.instance, resource] };
+        const wasFetching = client.isFetching(filter) > 0;
+        void client
+          .invalidateQueries(filter, { cancelRefetch: false })
+          .then(() => {
+            // A pre-publication read may still return the old snapshot.
+            // Follow it once rather than cancelling its progress.
+            if (wasFetching)
+              return client.invalidateQueries(filter, { cancelRefetch: false });
+          });
+      }
+    });
+  }, [b.base, b.instance, b.connected, b.live, run, id, client]);
+}
+
+export function useActorDossier(id: string | null) {
+  const b = useBackend();
+  return useQuery({
+    queryKey: [b.base, b.instance, "actor-dossier", id],
+    refetchOnMount: "always",
+    enabled: b.connected && !!id,
+    staleTime: 30_000,
+    refetchInterval: id ? 60_000 : false,
+    refetchOnWindowFocus: false,
+    queryFn: ({ signal }) =>
+      request<ActorDossier>(
+        b.base,
+        `actors/detail?id=${encodeURIComponent(id || "")}`,
+        undefined,
+        signal,
+      ),
+  });
+}

@@ -71,7 +71,17 @@ pub async fn lookup_in(tx: &Tx, name: &str) -> Result<Option<String>, TxError> {
     let mut r = run(tx, tx.query("SELECT VALUE actor_id FROM brain_actor_alias WHERE normalized = $name AND alias_type = 'name' AND type::record('brain_actor', actor_id).scope_key = $scope AND type::record('memory', actor_id).lifecycle = 'active' LIMIT 2")
         .bind(("name", brain_actors::normalize_alias(name)))
         .bind(("scope", actor_catalog::SCOPE))).await?;
-    let ids: Vec<String> = take(&mut r, 0)?;
+    let mut ids: Vec<String> = take(&mut r, 0)?;
+    // Existing seeded homes predate curated short forms. Read their source ID
+    // directly, retaining ambiguity rejection if another actor owns the alias.
+    if brain_actors::normalize_alias(name) == "trump" {
+        let mut r = run(tx, tx.query("SELECT VALUE record::id(id) FROM brain_actor WHERE catalog_id = $source AND scope_key = $scope AND type::record('memory', record::id(id)).lifecycle = 'active' LIMIT 2")
+            .bind(("source", "os:Q22686"))
+            .bind(("scope", actor_catalog::SCOPE))).await?;
+        ids.extend(take::<Vec<String>>(&mut r, 0)?);
+        ids.sort();
+        ids.dedup();
+    }
     Ok(match ids.as_slice() {
         [id] => Some(id.clone()),
         _ => None,
@@ -98,7 +108,7 @@ pub(crate) async fn load_matcher(repo: &Repository) -> Result<Matcher> {
 
 /// Current catalog actors for all article consumers, including before NLP
 /// metadata is available. None preserves a pre-catalog home's legacy view.
-pub async fn article_actors(
+pub(crate) async fn metadata_article_actors(
     repo: &Repository,
     article: &crate::store::AtlasArticleRow,
 ) -> Result<Option<Vec<crate::atlas_metadata::ArticleActor>>> {
@@ -117,6 +127,77 @@ pub async fn article_actors(
         return Ok(Some(Vec::new()));
     }
     Ok(Some(repo.actor_matcher().await?.article_actors(article)))
+}
+
+/// Current metadata actors followed by actors detected in the retained clean body.
+pub async fn article_actors(
+    repo: &Repository,
+    article: &crate::store::AtlasArticleRow,
+) -> Result<Option<Vec<crate::atlas_metadata::ArticleActor>>> {
+    let Some(mut actors) = metadata_article_actors(repo, article).await? else {
+        return Ok(None);
+    };
+    crate::actor_catalog::append_body_actors(
+        &mut actors,
+        body_actors(repo, &article.id).await?.unwrap_or_default(),
+    );
+    Ok(Some(actors))
+}
+
+pub(crate) async fn body_actors(
+    repo: &Repository,
+    article_id: &str,
+) -> Result<Option<Vec<crate::atlas_metadata::ArticleActor>>> {
+    let Some(clean) = clean_body(repo, article_id).await? else {
+        return Ok(None);
+    };
+    let mut ready = repo
+        .db()
+        .query("SELECT VALUE status FROM ONLY brain_actor_seed:catalog")
+        .await?
+        .check()?;
+    if ready.take::<Option<String>>(0)?.as_deref() != Some("complete") {
+        return Ok(None);
+    }
+    let Some(candidates) = clean_body_candidates(repo, &clean).await? else {
+        return Ok(None);
+    };
+    let matcher = repo.actor_matcher().await?;
+    Ok(Some(
+        tokio::task::spawn_blocking(move || matcher.body_actors(&clean.text, &candidates)).await?,
+    ))
+}
+
+/// NLP runs only on the retained cleaned artifact. Incomplete engine results
+/// stay retryable and must never become successful empty-match receipts.
+pub(crate) async fn clean_body_candidates(
+    repo: &Repository,
+    clean: &CleanBody,
+) -> Result<Option<Vec<crate::nlp::EntityCandidate>>> {
+    use crate::nlp::{Mode, Service, Source, Status};
+    if crate::nlp::configured_mode() == Mode::Off {
+        return Ok(None);
+    }
+    let source = Source::derived(&clean.source_id, &clean.revision, &clean.text);
+    let context = source.context();
+    let annotation = match super::nlp_cache::get(repo, &source, &context).await? {
+        Some(annotation) => annotation,
+        None => {
+            let annotation = Service::shared()
+                .annotate(
+                    source.clone(),
+                    context.clone(),
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .await;
+            if annotation.status != Status::Complete {
+                return Ok(None);
+            }
+            super::nlp_cache::put(repo, &source, &context, &annotation).await?;
+            annotation
+        }
+    };
+    Ok(Some(crate::nlp::entity_candidates(&source, &annotation)))
 }
 
 /// Committed work only; the denominator is the fully validated input CSV.
@@ -322,4 +403,75 @@ async fn ingest(
     progress.complete = true;
     report(progress.clone());
     Ok(progress)
+}
+
+/// The current registered clean artifact, never raw acquisition markdown.
+#[derive(Clone, Debug)]
+pub(crate) struct CleanBody {
+    pub source_id: String,
+    pub revision: String,
+    pub artifact_hash: String,
+    pub text: String,
+}
+
+#[derive(SurrealValue)]
+struct BodyHead {
+    id: String,
+    body_version: i64,
+    state: String,
+}
+#[derive(SurrealValue)]
+struct BodyAcquisition {
+    attempt_id: String,
+    raw_hash: String,
+}
+
+/// Select only cleanup output attached to the latest body's baseline acquisition.
+pub(crate) async fn clean_body_in(tx: &Tx, article_id: &str) -> Result<Option<CleanBody>, TxError> {
+    let mut rows = run(tx, tx.query("SELECT record::id(id) AS id, body_version, state, updated_at FROM article_body WHERE article_id = $a ORDER BY body_version DESC, updated_at DESC LIMIT 1").bind(("a", article_id.to_owned()))).await?;
+    let Some(body) = take::<Vec<BodyHead>>(&mut rows, 0)?
+        .into_iter()
+        .next()
+        .filter(|body| body.state == "ready")
+    else {
+        return Ok(None);
+    };
+    let revision = body.body_version.to_string();
+    let mut rows = run(tx, tx.query("SELECT attempt_id, raw_hash, registered_at FROM nlp_source_ref WHERE owner_kind = 'article' AND owner_id = $a AND source_id = $source AND revision = $revision AND transform_version = 'validated-baseline-v1' AND raw_hash != NONE ORDER BY registered_at DESC LIMIT 1")
+        .bind(("a", article_id.to_owned())).bind(("source", body.id.clone())).bind(("revision", revision.clone()))).await?;
+    let Some(acquisition) = take::<Vec<BodyAcquisition>>(&mut rows, 0)?
+        .into_iter()
+        .next()
+    else {
+        return Ok(None);
+    };
+    let mut rows = run(tx, tx.query("SELECT VALUE prose_hash FROM nlp_source_ref WHERE owner_kind = 'article' AND owner_id = $a AND source_id = $source AND revision = $revision AND transform_version = $transform AND attempt_id = $attempt AND raw_hash = $raw ORDER BY registered_at DESC LIMIT 1")
+        .bind(("a", article_id.to_owned())).bind(("source", body.id.clone())).bind(("revision", revision.clone()))
+        .bind(("transform", crate::intel_recon::clean_body::TRANSFORM.to_owned())).bind(("attempt", acquisition.attempt_id)).bind(("raw", acquisition.raw_hash))).await?;
+    let Some(artifact_hash) = take::<Vec<String>>(&mut rows, 0)?.into_iter().next() else {
+        return Ok(None);
+    };
+    let mut rows = run(
+        tx,
+        tx.query("SELECT VALUE text FROM ONLY $artifact")
+            .bind(("artifact", rid("nlp_artifact", &artifact_hash))),
+    )
+    .await?;
+    Ok(take::<Option<String>>(&mut rows, 0)?
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| CleanBody {
+            source_id: format!("body:{}", body.id),
+            revision,
+            artifact_hash,
+            text,
+        }))
+}
+
+pub(crate) async fn clean_body(repo: &Repository, article_id: &str) -> Result<Option<CleanBody>> {
+    Ok(run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let article_id = article_id.to_owned();
+        async move { clean_body_in(&tx, &article_id).await }
+    })
+    .await?
+    .value)
 }

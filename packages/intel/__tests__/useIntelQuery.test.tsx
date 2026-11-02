@@ -11,6 +11,7 @@ import {
   useAction,
   useArticles,
   useBackend,
+  useActorDossier,
   useRelated,
   useRead,
   useTopology,
@@ -546,4 +547,52 @@ describe("query regression boundaries", () => {
     expect(result.current.query.data?.revision).toBe("current");
     expect(result.current.query.error).toBeNull();
   });
+});
+
+it("isolates delayed actor reads across actor and backend changes", async () => {
+  const nextBase = "http://127.0.0.1:8081";
+  let release!: () => void;
+  let started!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const received = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  mswServer.use(
+    http.get(`${testBase}/api/v1/health/ready`, () =>
+      HttpResponse.json(readyHealth),
+    ),
+    http.get(`${nextBase}/api/v1/health/ready`, () =>
+      HttpResponse.json({ ...readyHealth, instance_id: "actor-next" }),
+    ),
+    http.get(`${testBase}/api/v1/actors/detail`, async ({ request }) => {
+      const id = new URL(request.url).searchParams.get("id");
+      if (id === "old") {
+        started();
+        await gate;
+      }
+      return HttpResponse.json({ id });
+    }),
+    http.get(`${nextBase}/api/v1/actors/detail`, () =>
+      HttpResponse.json({ id: "next-backend" }),
+    ),
+  );
+  const { result, rerender } = renderHook(
+    ({ id }) => ({ backend: useBackend(), query: useActorDossier(id) }),
+    { initialProps: { id: "old" }, wrapper: providerWrapper() },
+  );
+  await received;
+  try {
+    rerender({ id: "current" });
+    expect(result.current.query.data).toBeUndefined();
+    await waitFor(() => expect(result.current.query.data?.id).toBe("current"));
+    act(() => result.current.backend.setBase(nextBase));
+    await waitFor(() =>
+      expect(result.current.query.data?.id).toBe("next-backend"),
+    );
+  } finally {
+    await act(async () => release());
+  }
+  expect(result.current.query.data?.id).toBe("next-backend");
 });

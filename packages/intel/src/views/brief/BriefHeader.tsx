@@ -6,6 +6,7 @@ import { JobStatusBeacon } from "../../shell/JobStatusBeacon";
 import { intelColors as c } from "../../shell/intel-theme";
 import { BriefAction } from "./BriefAction";
 import { briefStyles as s } from "./briefStyles";
+import { TemperatureTag } from "../temperatureTag";
 export function BriefHeader({
   article,
   brief,
@@ -45,6 +46,7 @@ export function BriefHeader({
         </BriefAction>
         <View style={s.metaLine}>
           <Text style={s.headerMeta}>{date}</Text>
+          <TemperatureTag value={article.temperature} />
           {grades.map((grade) => (
             <Text key={grade} style={s.headerMeta}>
               {grade}
@@ -54,8 +56,6 @@ export function BriefHeader({
             <Text style={[s.headerMeta, { color: confidenceColor }]}>
               {score}%
             </Text>
-          ) : grades.length === 0 ? (
-            <Text style={s.headerMeta}>Not assessed</Text>
           ) : null}
           <JobStatusBeacon state={jobState} />
         </View>

@@ -1,11 +1,18 @@
 export type ArticleLocation = { run_id: string; article_id: string };
+export type ActorLocation = {
+  id: string | null;
+  source?: ArticleLocation & { actor_id: string };
+  from?: ArticleLocation;
+};
 /** @tag:web-routing — Shared screen routes; each host supplies its navigation/history implementation. */
 export type IntelRoute =
   | { screen: "home" }
   | { screen: "bulletin" }
   | ({ screen: "brief" } & Partial<ArticleLocation>)
+  | ({ screen: "actor" } & ActorLocation)
   | {
       screen: "topology";
+      actorFrom?: ActorLocation;
       seed: string | null;
       /** Node to select inside an extracted brief graph. */
       focus?: string;

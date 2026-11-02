@@ -179,7 +179,9 @@ async fn publish_kind(
             input.snapshot.generation = u32::try_from(generation).map_err(abort)?;
             input.snapshot.key = crate::nlp::cache::key(&serde_json::json!([
                 crate::intel_recon::brief_pipeline::CANONICAL_CONTRACT,
+                PUBLICATION_VERSION,
                 input.snapshot.source_refs,
+                input.snapshot.entities,
                 hash
             ]));
             for inference in &mut output.inferences {

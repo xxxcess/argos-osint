@@ -251,6 +251,22 @@ pub(crate) async fn rollup_in(tx: &Tx, job_id: &str) -> Result<(), TxError> {
     Ok(())
 }
 
+/// Lifecycle logs commit with their job/task transition, including API-hosted work.
+async fn log_transition_in(
+    tx: &Tx,
+    job: &str,
+    key: &str,
+    event: &str,
+    message: &str,
+    now: &str,
+) -> Result<(), TxError> {
+    run(tx, tx.query("UPSERT type::record('job_event', $key) SET job_id = $job, app = type::record('job', $job).app ?? 'jobs', event_type = $event, severity = 'info', message = $message, ts = <datetime>$now RETURN NONE")
+        .bind(("key", key.to_owned())).bind(("job", job.to_owned()))
+        .bind(("event", event.to_owned())).bind(("message", crate::events::redact(message)))
+        .bind(("now", now.to_owned()))).await?;
+    Ok(())
+}
+
 pub(crate) async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxError> {
     let (root, ancestors) = match job.parent {
         None => (rid("job", job.id), Vec::new()),
@@ -290,6 +306,15 @@ pub(crate) async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxErr
         .bind(("root", root))
         .bind(("ancestors", ancestors))
         .bind(("at", ts(job.created_at))),
+    )
+    .await?;
+    log_transition_in(
+        tx,
+        job.id,
+        &format!("{}:started", job.id),
+        "job.started",
+        &format!("Started: {}", job_title(job.operation)),
+        &ts(job.created_at),
     )
     .await?;
     Ok(())
@@ -703,6 +728,15 @@ async fn claim_in(
                 // row itself, which they all write.
                 bump(tx, "job_guard", &task.root_id).await?;
             }
+            log_transition_in(
+                tx,
+                &task.job_id,
+                &format!("{}:{}:started", task.id, task.lease_epoch),
+                "task.started",
+                &format!("Started: {}", task.operation),
+                &now_s,
+            )
+            .await?;
             write_receipt(tx, op_key, "claim", &task.id, task.lease_epoch, &now_s).await?;
             return Ok(Some(task));
         }
@@ -918,6 +952,15 @@ pub(crate) async fn complete_in(
         .bind(("hash", hash.to_string()))
         .bind(("now", now.to_string()))
         .bind(("e", claimed.lease_epoch)),
+    )
+    .await?;
+    log_transition_in(
+        tx,
+        &claimed.job_id,
+        &format!("{}:{}:completed", claimed.id, claimed.lease_epoch),
+        "task.completed",
+        &format!("Completed: {}", claimed.operation),
+        now,
     )
     .await?;
     Ok(())
@@ -1194,6 +1237,7 @@ pub(crate) async fn settle_finished_job_in(tx: &Tx, job_id: &str) -> Result<bool
     if tasks.iter().any(|task| open(&task.state)) {
         return Ok(false);
     }
+    rollup_in(tx, job_id).await?;
     let failed = tasks.iter().any(|task| task.state == "failed");
     let next = if failed { "failed" } else { "completed" };
     run(

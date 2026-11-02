@@ -529,7 +529,7 @@ pub async fn commit(
 /// failure is recorded in the bound state and never fails the stage.
 async fn publish_stage(repo: &Repository, job_id: &str, operation: &str, run: &Run) -> Result<()> {
     let stage = super::brief::Stage::from_operation(operation);
-    if stage == super::brief::Stage::Other {
+    if stage == super::brief::Stage::Other && operation != "intel_brief_body" {
         return Ok(());
     }
     let mut r = repo
@@ -549,6 +549,10 @@ async fn publish_stage(repo: &Repository, job_id: &str, operation: &str, run: &R
         .first()
         .is_some_and(|s| matches!(s.as_str(), "active" | "completed" | "failed"));
     if newer.unwrap_or(0) > 0 || !live {
+        return Ok(());
+    }
+    if operation == "intel_brief_body" {
+        crate::atlas_actor_index::surreal::index_article_occurrences(repo, &run.article_id).await?;
         return Ok(());
     }
     let stages = SurrealStages::new(repo);

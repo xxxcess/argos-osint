@@ -128,6 +128,7 @@ async fn storage_api_contracts() {
         origins: Arc::new(vec!["http://localhost:3000".into()]),
     });
     repo.db().query("CREATE memory:routeactor SET text = 'Route actor', memory_kind = 'actor'; CREATE brain_actor:routeactor SET display_name = 'Route actor', created_at = '', updated_at = ''; CREATE memory:routeclaim SET text = 'Route claim', memory_kind = 'claim'; CREATE memory:routeinference SET text = 'Route inference', memory_kind = 'inference';").await.unwrap().check().unwrap();
+    actor_dossier_contracts(&app, &repo).await;
     for (id, kind) in [
         ("routeactor", "entity"),
         ("routeclaim", "claim"),
@@ -292,6 +293,30 @@ async fn storage_api_contracts() {
         "http://localhost:3000"
     );
     let query = format!("/api/v1/articles?category=geopolitical&day={today}&search=harbor&limit=2");
+    for order in ["latest", "hottest"] {
+        let (status, _) = call(
+            &app,
+            "GET",
+            &format!("/api/v1/articles?category=geopolitical&day={today}&sort={order}"),
+            None,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "sort={order} must reach the current query contract"
+        );
+    }
+    let (status, _) = call(
+        &app,
+        "GET",
+        &format!("/api/v1/articles?category=geopolitical&day={today}&sort=unknown"),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, page) = call(&app, "GET", &query, None, Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["rows"].as_array().unwrap().len(), 2);
@@ -525,4 +550,159 @@ async fn untrusted_origin_cannot_retry_jobs() {
     assert!(body["error"].is_string());
     let (_, body) = call(&app, "GET", "/api/v1/jobs", None, Value::Null).await;
     assert_eq!(body, json!({"rows": []}));
+}
+
+// The caller owns the temporary embedded repository; these reads must be inert.
+async fn actor_dossier_contracts(app: &Router, repo: &Repository) {
+    for (id, expected) in [
+        ("", StatusCode::BAD_REQUEST),
+        ("missing", StatusCode::NOT_FOUND),
+        ("routeclaim", StatusCode::NOT_FOUND),
+    ] {
+        let (status, _) = call(
+            app,
+            "GET",
+            &format!("/api/v1/actors/detail?id={id}"),
+            None,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, expected);
+    }
+    let (status, _) = call(
+        app,
+        "GET",
+        &format!("/api/v1/actors/detail?id={}", "x".repeat(257)),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    repo.db().query("CREATE memory:otheractor SET text = 'Route actor', memory_kind = 'actor'; CREATE brain_actor:otheractor SET display_name = 'Route actor', created_at = '', updated_at = ''; CREATE brain_actor_redirect:oldactor SET to_actor = 'routeactor', created_at = ''; UPDATE memory:routeactor SET payload_json = $payload; UPDATE brain_actor:routeactor SET catalog_id = 'fixture:1', catalog_json = $catalog;")
+        .bind(("payload", json!({"kind":"actor","payload":{"subtype":"organization","display_name":"Route actor","aliases":["Legacy alias"],"identity_state":"provisional"}}).to_string()))
+        .bind(("catalog", json!({"id":"routeactor","source_id":"fixture:1","name":"Route actor","subtype":"organization","aliases":["Catalog alias"],"metadata":{"actor_type":"government","description":"Attributed description","country_of_origin":"[\"Example\"]","countries_operated_in":"broken"}}).to_string()))
+        .await.unwrap().check().unwrap();
+    let counts = || async {
+        let mut r = repo
+            .db()
+            .query("RETURN count(SELECT id FROM memory); RETURN count(SELECT id FROM job);")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        (
+            r.take::<Option<i64>>(0).unwrap(),
+            r.take::<Option<i64>>(1).unwrap(),
+        )
+    };
+    let before = counts().await;
+    let (status, dossier) = call(
+        app,
+        "GET",
+        "/api/v1/actors/detail?id=oldactor",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{dossier}");
+    assert_eq!(dossier["id"], "routeactor");
+    assert_eq!(dossier["catalog_type"], "government");
+    assert_eq!(dossier["description"], "Attributed description");
+    assert!(dossier["aliases"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("Legacy alias")));
+    assert_eq!(dossier["loaded_claims"], 0);
+    assert_eq!(dossier["loaded_briefs"], 0);
+    assert!(!dossier["truncated"].as_bool().unwrap());
+    let (_, other) = call(
+        app,
+        "GET",
+        "/api/v1/actors/detail?id=otheractor",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(other["id"], "otheractor");
+    assert!(other["description"].is_null());
+    assert!(other["catalog_source_id"].is_null());
+    // Sharing an article or a display name never supplies a claim reference.
+    repo.db().query("CREATE brain_memory_actor_ref:recorded SET memory_id = 'routeclaim', actor_id = 'routeactor', role = 'subject', binding_state = 'confirmed', provenance_json = 'offline receipt'; CREATE brain_memory_actor_ref:inferred SET memory_id = 'routeinference', actor_id = 'routeactor', role = 'mentioned'; CREATE brain_actor_mention:current SET actor_id = 'routeactor', origin_kind = 'article', origin_scope = 'r1', origin_id = 'a0', origin_revision = $revision, created_at = ''; CREATE brain_actor_mention:stale SET actor_id = 'routeactor', origin_kind = 'article', origin_scope = 'r1', origin_id = 'a1', origin_revision = 'stale', created_at = '';")
+        .bind(("revision", argos_osint_core::atlas_metadata::input_hash(&atlas::article(repo.db(), "r1", "a0").await.unwrap().unwrap())))
+        .await.unwrap().check().unwrap();
+    let (_, associated) = call(
+        app,
+        "GET",
+        "/api/v1/actors/detail?id=routeactor",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(associated["loaded_claims"], 1, "{associated}");
+    assert_eq!(associated["claims"][0]["node"]["id"], "routeclaim");
+    assert_eq!(
+        associated["claims"][0]["relationship"]["actor_reference"]["role"],
+        "subject"
+    );
+    assert_eq!(
+        associated["claims"][0]["relationship"]["actor_reference"]["binding_state"],
+        "confirmed"
+    );
+    assert_eq!(associated["loaded_inferences"], 1);
+    assert_eq!(associated["inferences"][0]["node"]["id"], "routeinference");
+    assert_eq!(
+        associated["loaded_claims"], 1,
+        "inferences remain separate from claims"
+    );
+    assert_eq!(associated["loaded_briefs"], 1);
+    assert_eq!(associated["briefs"][0]["article"]["run_id"], "r1");
+    assert_eq!(associated["briefs"][0]["article"]["id"], "a0");
+    assert!(
+        !associated["gaps"].as_array().unwrap().is_empty(),
+        "stale revision must remain visible as a gap"
+    );
+    let (_, isolated) = call(
+        app,
+        "GET",
+        "/api/v1/actors/detail?id=otheractor",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(isolated["loaded_claims"], 0);
+    // Exact read side-effect invariant before adding the deliberate bound fixture.
+    assert_eq!(
+        before,
+        counts().await,
+        "dossier reads must not create memories or jobs"
+    );
+    for i in 0..105 {
+        repo.db().query("CREATE type::record('memory', $id) SET text = $id, memory_kind = 'claim'; CREATE type::record('brain_memory_actor_ref', $id) SET memory_id = $id, actor_id = 'routeactor', role = 'subject';")
+            .bind(("id", format!("bounded-{i}"))).await.unwrap().check().unwrap();
+    }
+    let (_, bounded) = call(
+        app,
+        "GET",
+        "/api/v1/actors/detail?id=routeactor",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert!(bounded["loaded_claims"].as_u64().unwrap() <= 99);
+    assert_eq!(bounded["truncated"], true);
+    repo.db()
+        .query("UPDATE memory:otheractor SET lifecycle = 'retired'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let (status, _) = call(
+        app,
+        "GET",
+        "/api/v1/actors/detail?id=otheractor",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

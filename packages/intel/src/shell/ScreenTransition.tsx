@@ -8,7 +8,8 @@ const order: Record<string, number> = {
   home: 0,
   bulletin: 1,
   brief: 2,
-  topology: 3,
+  actor: 3,
+  topology: 4,
 };
 export function transitionDirection(from: string, to: string) {
   return (order[to] ?? 0) >= (order[from] ?? 0) ? 1 : -1;

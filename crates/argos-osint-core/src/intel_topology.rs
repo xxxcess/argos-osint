@@ -58,6 +58,45 @@ fn unique_seed(nodes: &[TopologyNode], kind: TopologyNodeKind, labels: &[String]
     }
 }
 
+/// Catalog matching already selects durable IDs. Verify those exact records,
+/// independently of article indexing, before exposing dossier navigation.
+pub(crate) async fn decorate_catalog_actors(repo: &Repository, value: &mut Value) -> Result<()> {
+    use crate::storage::jobs::{rid, run, take};
+    use crate::storage::tx::{run_tx, RetryPolicy};
+    let ids: Vec<String> = value["actors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["id"].as_str().map(str::to_owned))
+        .collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let verified = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let ids = ids.clone();
+        async move {
+            let mut verified = std::collections::BTreeMap::new();
+            for requested in ids {
+                let canonical = crate::storage::actor_bind::resolve_in(&tx, &requested).await?;
+                let mut response = run(&tx, tx.query("RETURN record::exists($actor) AND $memory.lifecycle = 'active' AND $memory.memory_kind = 'actor'")
+                    .bind(("actor", rid("brain_actor", &canonical))).bind(("memory", rid("memory", &canonical)))).await?;
+                if take::<Option<bool>>(&mut response, 0)?.unwrap_or(false) { verified.insert(requested, canonical); }
+            }
+            Ok(verified)
+        }
+    }).await?;
+    if let Some(items) = value["actors"].as_array_mut() {
+        for item in items {
+            item["topology_seed"] = item["id"]
+                .as_str()
+                .and_then(|id| verified.value.get(id))
+                .map(|id| json!(TopologySeed::Actor(id.clone())))
+                .unwrap_or(Value::Null);
+        }
+    }
+    Ok(())
+}
+
 /// Reuse the topology reader's current-article provenance and lifecycle fences.
 /// Neither this projection nor the subsequent navigation creates Brain memories.
 pub(crate) async fn decorate(

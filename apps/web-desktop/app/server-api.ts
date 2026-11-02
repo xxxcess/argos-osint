@@ -5,6 +5,7 @@ const routes = new Map([
   ["capabilities", "GET"],
   ["host/metrics", "GET"],
   ["days", "GET"],
+  ["actors/detail", "GET"],
   ["articles", "GET"],
   ["articles/counts", "GET"],
   ["articles/detail", "GET"],

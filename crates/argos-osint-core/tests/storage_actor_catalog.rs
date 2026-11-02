@@ -54,6 +54,15 @@ async fn partial_seed_retries_without_duplicates_and_only_complete_receipts_hide
             .expect("partial status")
             .needs_seed
     );
+    let partial_article = AtlasArticleRow {
+        title: "Harbor Alias 0".into(),
+        ..Default::default()
+    };
+    assert!(actor_catalog::article_actors(&repo, &partial_article)
+        .await
+        .expect("partial catalog article lookup")
+        .expect("catalog remains enabled")
+        .is_empty());
     cancel.store(false, Ordering::Release);
     let progress = actor_catalog::seed_actors(&repo, actors(129), "fixture-v1", &cancel, |_| {})
         .await

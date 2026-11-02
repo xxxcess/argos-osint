@@ -1,6 +1,10 @@
 import { installLiveFixture } from "./live-fixture";
 // @tag:testing — deterministic export screenshots with observable UI assertions.
 import { test, expect } from "@playwright/test";
+import { resolve } from "node:path";
+const screenshotStyle = resolve("tests/web/screenshot.css");
+
+test.use({ reducedMotion: "reduce", timezoneId: "UTC", locale: "en-US" });
 
 const article = {
   id: "visual-article",
@@ -36,6 +40,17 @@ for (const width of [1440, 768, 390, 320]) {
             instance_id: "visual-instance",
           };
         else if (path === "days") body = { days: ["2026-10-25"] };
+        else if (path === "articles/counts")
+          body = {
+            counts: {
+              geopolitical: 1,
+              economic: 0,
+              military: 0,
+              information: 0,
+              stability: 0,
+              technology: 0,
+            },
+          };
         else if (path === "articles")
           body = {
             rows: [article],
@@ -70,11 +85,13 @@ for (const width of [1440, 768, 390, 320]) {
       ),
     ).toBe(true);
     await expect(page).toHaveScreenshot(`bulletin-${width}.png`, {
-      fullPage: true,
+      fullPage: false,
       animations: "disabled",
+      stylePath: screenshotStyle,
       maxDiffPixelRatio: 0.001,
       threshold: 0.2,
     });
+    await page.keyboard.press("Tab");
     await page
       .getByRole("button", { name: "Geopolitical", exact: true })
       .focus();
@@ -89,8 +106,9 @@ for (const width of [1440, 768, 390, 320]) {
     expect(interactionColors.selection).toBe("rgb(46, 56, 80)");
     expect(interactionColors.selection).not.toBe(interactionColors.focus);
     await expect(page).toHaveScreenshot(`bulletin-focus-${width}.png`, {
-      fullPage: true,
+      fullPage: false,
       animations: "disabled",
+      stylePath: screenshotStyle,
       maxDiffPixelRatio: 0.001,
       threshold: 0.2,
     });

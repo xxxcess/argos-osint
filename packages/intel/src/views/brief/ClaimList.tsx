@@ -1,13 +1,15 @@
 "use client";
 import React from "react";
-import { View, Text } from "react-native";
-import type { Brief, Seed } from "@argos/api-client";
+import { View, Text, Pressable } from "react-native";
+import type { Brief, Seed, BriefStage } from "@argos/api-client";
 import { EmptyState } from "@argos/ui";
 import { intelKindColors as kinds } from "../../shell/intel-theme";
 import { BriefSection } from "./BriefSection";
 import { BriefSkeleton } from "./BriefSkeleton";
-import { BriefAction, topologyTarget } from "./BriefAction";
+import { extractedFocus, topologyTarget } from "./BriefAction";
+import { StageContent } from "./StageContent";
 import { briefStyles as s } from "./briefStyles";
+import { displayEvidence } from "./displayEvidence";
 function claimMarker(index: number): string {
   let value = index + 1;
   let label = "";
@@ -21,22 +23,24 @@ function claimMarker(index: number): string {
 export function ClaimList({
   claims,
   pending,
+  stage,
   brief,
   extracted = null,
   onTopology,
 }: {
   claims: Brief["claims"];
   pending: boolean;
+  stage?: BriefStage;
   brief?: Brief;
   extracted?: Seed | null;
-  onTopology: (seed: Seed) => void;
+  onTopology: (seed: Seed, focus?: string) => void;
 }) {
   const evidenceState = (
     empty: string,
     loading = "Loading extracted evidence…",
   ) =>
-    pending ? (
-      <BriefSkeleton label={loading} />
+    pending && !brief ? (
+      <BriefSkeleton variant="claims" label={loading} />
     ) : (
       <EmptyState title={brief ? empty : "Evidence unavailable"} />
     );
@@ -46,43 +50,50 @@ export function ClaimList({
         title="RETAINED CLAIMS"
         color={kinds.claim}
         icon="claim"
-        count={claims.length}
+        count={stage && stage.state !== "completed" ? undefined : claims.length}
       >
         <View style={s.evidenceBox}>
-          {claims.length
-            ? claims.map((claim, index) => (
-                <View key={claim.id} style={s.section}>
-                  <View style={s.evidenceRow}>
-                    <Text style={[s.marker, { color: kinds.claim }]}>
-                      {claimMarker(index)}
-                    </Text>
-                    <Text style={s.evidenceText}>{claim.text}</Text>
-                  </View>
-                  <Text style={s.micro}>
-                    {claim.admiralty &&
-                    claim.admiralty.toLowerCase() !== "unassessed"
-                      ? `${claim.admiralty} · `
-                      : ""}
-                    {claim.classification}
-                  </Text>
-                  <BriefAction
-                    label={`Explore claim: ${claim.text}`}
-                    disabled={!topologyTarget(claim.topology_seed, extracted)}
-                    onPress={() => {
+          <StageContent stage={stage} kind="claims">
+            {claims.length
+              ? claims.map((claim, index) => {
+                  const text = displayEvidence(claim.text);
+                  return (
+                    <Pressable
+                      key={claim.id}
+                      style={s.section}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Explore claim: ${text}`}
+                      disabled={!topologyTarget(claim.topology_seed, extracted)}
+                      onPress={() => {
                       const seed = topologyTarget(
                         claim.topology_seed,
                         extracted,
                       );
-                      if (seed) onTopology(seed);
-                    }}
-                  >
-                    {topologyTarget(claim.topology_seed, extracted)
-                      ? "Explore claim"
-                      : "Awaiting Brain indexing"}
-                  </BriefAction>
-                </View>
-              ))
-            : evidenceState("No published claims", "Loading retained claims…")}
+                      const focus = seed
+                        ? extractedFocus(seed, extracted, `claim:${claim.id}`)
+                        : undefined;
+                      if (seed && focus) onTopology(seed, focus);
+                      else if (seed) onTopology(seed);
+                      }}
+                    >
+                      <View style={s.evidenceRow}>
+                        <Text style={[s.marker, { color: kinds.claim }]}>
+                          {claimMarker(index)}
+                        </Text>
+                        <Text style={s.evidenceText}>{text}</Text>
+                      </View>
+                      {claim.admiralty &&
+                      claim.admiralty.toLowerCase() !== "unassessed" ? (
+                        <Text style={s.micro}>{claim.admiralty}</Text>
+                      ) : null}
+                    </Pressable>
+                  );
+                })
+              : evidenceState(
+                  "No published claims",
+                  "Loading retained claims…",
+                )}
+          </StageContent>
         </View>
       </BriefSection>
     </>

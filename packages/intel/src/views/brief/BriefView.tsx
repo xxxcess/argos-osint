@@ -1,7 +1,7 @@
 "use client";
 import React from "react";
 import { View, Text, useWindowDimensions } from "react-native";
-import type { Article, Brief, Seed } from "@argos/api-client";
+import type { Article, Brief, Seed, BriefStage } from "@argos/api-client";
 import { intelKindColors as kinds } from "../../shell/intel-theme";
 import { briefStyles as s } from "./briefStyles";
 import { BriefSection } from "./BriefSection";
@@ -10,8 +10,12 @@ export { RelatedBriefCard } from "./RelatedBriefCard";
 import { ActorChips } from "./ActorChips";
 import { ClaimList } from "./ClaimList";
 import { InferenceList } from "./InferenceList";
-import { BriefAction, extractedBriefSeed, topologyTarget } from "./BriefAction";
-import { BriefSkeleton } from "./BriefSkeleton";
+import {
+  BriefAction,
+  extractedBriefSeed,
+  extractedFocus,
+  topologyTarget,
+} from "./BriefAction";
 import { BriefHeader } from "./BriefHeader";
 import type { JobState } from "../../shell/jobState";
 
@@ -44,6 +48,7 @@ export function BriefView({
   article,
   brief,
   pending,
+  stages,
   onBack,
   onTopology,
   related,
@@ -55,8 +60,9 @@ export function BriefView({
   article: Article;
   brief?: Brief;
   pending: boolean;
+  stages?: BriefStage[];
   onBack: () => void;
-  onTopology: (seed: Seed) => void;
+  onTopology: (seed: Seed, focus?: string) => void;
   related: React.ReactNode;
   operations: React.ReactNode;
   notices: React.ReactNode;
@@ -66,6 +72,7 @@ export function BriefView({
   const { width } = useWindowDimensions();
   const narrow = width < 900;
   const shown = brief?.article || article;
+  const loading = pending && !brief;
   const actors = (brief?.actors || []).filter(
     (actor, index, all) =>
       all.findIndex((other) => other.id === actor.id) === index,
@@ -120,26 +127,30 @@ export function BriefView({
           ]}
         >
           {notices}
-          <Text style={[s.lede, narrow && { fontSize: 15, lineHeight: 22 }]}>
+          <Text style={[s.lede, narrow && { fontSize: 16, lineHeight: 23 }]}>
             {shown.description || "No description available."}
           </Text>
           <ActorChips
             actors={actors}
-            pending={pending}
+            pending={loading || !!brief?.actors_pending}
             brief={brief}
             extracted={extracted}
             onTopology={onTopology}
           />
           <ClaimList
+            stage={stages?.find((s) => s.operation === "intel_brief_claims")}
             claims={claims}
-            pending={pending}
+            pending={loading}
             brief={brief}
             extracted={extracted}
             onTopology={onTopology}
           />
           <InferenceList
+            stage={stages?.find(
+              (s) => s.operation === "intel_brief_inferences",
+            )}
             inferences={inferences}
-            pending={pending}
+            pending={loading}
             brief={brief}
             extracted={extracted}
             onTopology={onTopology}
@@ -177,7 +188,11 @@ export function BriefView({
               disabled={!topologyTarget(actor.topology_seed, extracted)}
               onPress={() => {
                 const seed = topologyTarget(actor.topology_seed, extracted);
-                if (seed) onTopology(seed);
+                const focus = seed
+                  ? extractedFocus(seed, extracted, `actor:${actor.id}`)
+                  : undefined;
+                if (seed && focus) onTopology(seed, focus);
+                else if (seed) onTopology(seed);
               }}
             >
               <Text style={{ color: kinds.actor }}>● </Text>
@@ -187,13 +202,11 @@ export function BriefView({
                 : ""}
             </BriefAction>
           ))
-        ) : pending ? (
-          <BriefSkeleton label="Loading actor entities…" />
-        ) : (
+        ) : !brief?.actors_pending && (brief || !loading) ? (
           <Text style={s.micro}>
             {brief ? "No actors" : "Actors unavailable"}
           </Text>
-        )}
+        ) : null}
       </View>
       <View style={[s.lower, narrow && s.narrowPadding]}>
         <BriefAction

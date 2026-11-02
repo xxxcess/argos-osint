@@ -1,6 +1,8 @@
 import { installLiveFixture } from "./live-fixture";
 import { test, expect, type Page } from "@playwright/test";
 
+test.use({ reducedMotion: "reduce" });
+
 const CAPTURE =
   process.env.ARGOS_WEB_CAPTURE_DIR || ".agent-scratch/tester-gate/screenshots";
 const API = `http://127.0.0.1:${process.env.ARGOS_WEB_TEST_PORT || 3100}`;

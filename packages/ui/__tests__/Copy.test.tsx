@@ -5,12 +5,12 @@ import { Copy } from "@argos/ui";
 import { paint, sheetProp } from "../../../vitest.test-support";
 
 describe("Copy (real @argos/ui component)", () => {
-  it("renders prose in the body type at 14/23", () => {
+  it("renders prose in the body type at 15/24", () => {
     render(<Copy>Retained articles from Atlas.</Copy>);
     const copy = screen.getByText("Retained articles from Atlas.");
     expect(sheetProp(copy, "fontFamily")).toContain("system-ui");
-    expect(sheetProp(copy, "fontSize")).toBe("14px");
-    expect(sheetProp(copy, "lineHeight")).toBe("23px");
+    expect(sheetProp(copy, "fontSize")).toBe("15px");
+    expect(sheetProp(copy, "lineHeight")).toBe("24px");
   });
 
   it("uses the dim neutral token (readable but subordinate)", () => {

@@ -61,14 +61,14 @@ export const intelSpace = {
 };
 export const intelRadius = { shell: 16, card: 14, control: 8, chip: 4 };
 export const intelType = {
-  display: { fontSize: 32, fontWeight: "800" as const, letterSpacing: -0.5 },
-  title: { fontSize: 22, fontWeight: "700" as const },
-  body: { fontSize: 15, lineHeight: 22 },
-  row: { fontSize: 15 },
-  section: { fontSize: 12, fontWeight: "700" as const, letterSpacing: 1.4 },
-  micro: { fontSize: 12, fontWeight: "600" as const, letterSpacing: 1.6 },
-  chip: { fontSize: 12, fontWeight: "700" as const, letterSpacing: 1.2 },
-  launcher: { fontSize: 18, fontWeight: "700" as const, letterSpacing: 1.2 },
+  display: { fontSize: 33, fontWeight: "800" as const, letterSpacing: -0.5 },
+  title: { fontSize: 23, fontWeight: "700" as const },
+  body: { fontSize: 16, lineHeight: 23 },
+  row: { fontSize: 16 },
+  section: { fontSize: 13, fontWeight: "700" as const, letterSpacing: 1.4 },
+  micro: { fontSize: 13, fontWeight: "600" as const, letterSpacing: 1.6 },
+  chip: { fontSize: 13, fontWeight: "700" as const, letterSpacing: 1.2 },
+  launcher: { fontSize: 19, fontWeight: "700" as const, letterSpacing: 1.2 },
 };
 
 /** Graph-only treatments, matching the evidence topology reference. */

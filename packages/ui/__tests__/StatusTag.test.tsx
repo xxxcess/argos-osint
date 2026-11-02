@@ -51,11 +51,11 @@ describe("StatusTag (real @argos/ui component)", () => {
     expect(new Set([a, p, s]).size).toBe(3);
   });
 
-  it("keeps the compact 11/16 telemetry metrics with bold weight", () => {
+  it("keeps the compact 12/17 telemetry metrics with bold weight", () => {
     render(<StatusTag tone="warning">STALE</StatusTag>);
     const tag = sheetProp(screen.getByText("[STALE]"), "fontSize");
-    expect(tag).toBe("11px");
-    expect(sheetProp(screen.getByText("[STALE]"), "lineHeight")).toBe("16px");
+    expect(tag).toBe("12px");
+    expect(sheetProp(screen.getByText("[STALE]"), "lineHeight")).toBe("17px");
     expect(sheetProp(screen.getByText("[STALE]"), "fontWeight")).toBe("700");
   });
 });

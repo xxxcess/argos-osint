@@ -7,6 +7,28 @@ export type JobState =
   | "succeeded"
   | "failed"
   | "stale";
+export function indexingJobState(state?: string): JobState {
+  switch (state) {
+    case "indexed":
+      return "succeeded";
+    case "failed":
+    case "error":
+    case "blocked":
+      return "failed";
+    case "queued":
+    case "pending":
+      return "queued";
+    case "running":
+    case "indexing":
+    case "processing":
+      return "running";
+    case "stale":
+    case "deferred":
+      return "stale";
+    default:
+      return "idle";
+  }
+}
 type Action = {
   status: string;
   submittedAt?: number;
@@ -53,8 +75,8 @@ export function deriveBriefJobState({
         detail?.indexing?.state ?? "",
       ];
   if (states.some((s) => /failed|error|blocked/i.test(s))) return "failed";
-  if (progress && !progress.complete && !live?.connected) return "stale";
-  if (progress?.stages.some((s) => s.active)) return "running";
+  if (progress?.stages.some((s) => s.active))
+    return !progress.complete && !live?.connected ? "stale" : "running";
   const stageDone = (state: string) =>
     /completed|succeeded|done|failed|cancelled|superseded/i.test(state);
   if (
@@ -73,18 +95,13 @@ export function deriveBriefJobState({
   if (states.some((s) => /queued|pending/i.test(s))) return "queued";
   if (states.some((s) => /stale|deferred/i.test(s))) return "stale";
   if (
-    !progress &&
-    detail?.indexing?.state === "not_indexed" &&
-    !detail.publication
-  )
-    return "idle";
-  if (
     (progress?.complete &&
       (progress.stages.some((stage) =>
         /completed|succeeded|done/i.test(stage.state),
       ) ||
         progress.indexing?.state === "indexed")) ||
-    detail?.publication
+    detail?.publication ||
+    /^(complete|completed|succeeded|done)$/i.test(detail?.lifecycle ?? "")
   )
     return "succeeded";
   if (states.some((s) => /stale/i.test(s))) return "stale";

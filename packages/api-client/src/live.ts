@@ -27,6 +27,8 @@ export type LiveEvent =
         memory_percent: number | null;
         disk_percent: number | null;
         network_kbps: number | null;
+        platform?: string | null;
+        chipset?: string | null;
       };
     }
   | ({ type: "brief" } & BriefProgress)
@@ -61,6 +63,13 @@ export function decodeLiveEvent(raw: string): LiveEvent | null {
           (typeof data[key] === "number" &&
             Number.isFinite(data[key]) &&
             data[key] >= 0),
+      ) ||
+      !["platform", "chipset"].every(
+        (key) =>
+          data[key] == null ||
+          (typeof data[key] === "string" &&
+            data[key].length > 0 &&
+            data[key].length <= 64),
       )
     )
       throw new Error("Invalid metrics event");

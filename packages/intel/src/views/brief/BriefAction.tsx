@@ -29,6 +29,17 @@ export function topologyTarget(
   if (hasMemorySeed(seed)) return seed;
   return extracted;
 }
+
+/** Node id to select when navigation stays on the extracted brief graph. */
+export function extractedFocus(
+  seed: Seed | null,
+  extracted: Seed | null,
+  nodeId: string,
+): string | undefined {
+  if (!seed || !extracted || seed.Brief !== extracted.Brief || !nodeId)
+    return undefined;
+  return nodeId;
+}
 export function BriefAction({
   children,
   label,

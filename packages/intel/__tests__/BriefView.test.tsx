@@ -3,9 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { BackendProvider, type Article, type Brief } from "@argos/api-client";
+import {
+  BackendProvider,
+  type Article,
+  type Brief,
+  type BriefStage,
+} from "@argos/api-client";
 import { BriefView, RelatedBriefCard } from "../src/views/BriefView";
 import { IntelApp } from "../src";
+import { createMemoryNavigation } from "../src/navigation";
 import { mswServer, testBase } from "../../../vitest.setup";
 import { paint } from "../../../vitest.test-support";
 import { intelColors } from "../src/shell/intel-theme";
@@ -41,7 +47,7 @@ const brief: Brief = {
     {
       id: "claim-local",
       topology_seed: { Claim: "claim-memory" },
-      text: "Retained statement",
+      text: "[claim · supports] Retained statement",
       confidence: 0,
       admiralty: "B2",
       classification: "fact",
@@ -49,7 +55,7 @@ const brief: Brief = {
     {
       id: "inference-local",
       topology_seed: { Inference: "inference-memory" },
-      text: "Possible outcome",
+      text: "[inference · references] Possible outcome",
       confidence: null,
       admiralty: "F6",
       classification: "inference",
@@ -68,8 +74,10 @@ function View({
   data = brief,
   pending = false,
   onTopology = vi.fn(),
+  stages,
 }: {
   data?: Brief;
+  stages?: BriefStage[];
   pending?: boolean;
   onTopology?: ReturnType<typeof vi.fn>;
 }) {
@@ -78,6 +86,7 @@ function View({
       article={article}
       brief={data}
       pending={pending}
+      stages={stages}
       onBack={vi.fn()}
       onTopology={onTopology}
       related={null}
@@ -116,6 +125,9 @@ describe("Focus Brief", () => {
       ),
     ).toBeVisible();
     expect(screen.getByText("[A]")).toBeVisible();
+    expect(
+      screen.queryByText(/\[claim ·|\[inference ·/),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("raw-id")).not.toBeInTheDocument();
     expect(
       screen.queryByText(/TLP:|REF-000|COOLING DOWN|CORROBORATED CLAIMS/),
@@ -141,8 +153,11 @@ describe("Focus Brief", () => {
         data={{ ...brief, confidence: null, output: { inferences: [] } }}
       />,
     );
-    expect(screen.getByText("B2")).toBeVisible();
-    expect(screen.getByText("F6")).toBeVisible();
+    const header = screen.getByRole("heading", {
+      name: "Retained report",
+    }).parentElement!;
+    expect(within(header).getByText("B2", { exact: true })).toBeVisible();
+    expect(within(header).getByText("F6", { exact: true })).toBeVisible();
     expect(screen.queryByText("Not assessed")).not.toBeInTheDocument();
     expect(
       within(screen.getByTestId("reader-inferences")).getByRole("heading", {
@@ -192,6 +207,58 @@ describe("Focus Brief", () => {
       screen.getByRole("heading", { name: "Inferences unavailable" }),
     ).toBeVisible();
   });
+  it("keeps a completed snapshot and verified empty sections visible while pending", () => {
+    const { rerender } = render(<View pending data={brief} />);
+    expect(screen.getByText("Retained statement")).toBeVisible();
+    expect(screen.getByText("Possible outcome")).toBeVisible();
+    expect(screen.queryAllByRole("status", { name: /Loading/ })).toHaveLength(
+      0,
+    );
+
+    rerender(
+      <View
+        pending
+        data={{
+          ...brief,
+          actors: [],
+          claims: [],
+          inferences: [],
+          output: null,
+        }}
+      />,
+    );
+    expect(
+      screen.getByRole("heading", { name: "No actors extracted" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "No published claims" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "No retained output" }),
+    ).toBeVisible();
+    expect(screen.queryAllByRole("status", { name: /Loading/ })).toHaveLength(
+      0,
+    );
+  });
+
+  it("renders stored insights while catalog actors are still matching", () => {
+    render(<View data={{ ...brief, actors: [], actors_pending: true }} />);
+    expect(screen.getByText("Retained statement")).toBeVisible();
+    expect(screen.getByText("Possible outcome")).toBeVisible();
+    expect(
+      screen.getByRole("status", { name: "Matching catalog actors…" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "No actors extracted" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("No actors", { exact: true }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("status", { name: "Loading retained claims…" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("sends retained actor identity/revision, supplied claim seed and article seed on real presses", async () => {
     const user = userEvent.setup();
     const onTopology = vi.fn();
@@ -245,17 +312,20 @@ describe("Focus Brief", () => {
     await user.click(
       screen.getByRole("button", { name: "Explore claim: Retained statement" }),
     );
-    expect(onTopology).toHaveBeenLastCalledWith(extracted);
+    expect(onTopology).toHaveBeenLastCalledWith(extracted, "claim:claim-local");
     await user.click(
       screen.getByRole("button", {
         name: "Explore inference: Possible outcome",
       }),
     );
-    expect(onTopology).toHaveBeenLastCalledWith(extracted);
+    expect(onTopology).toHaveBeenLastCalledWith(
+      extracted,
+      "inference:inference-local",
+    );
     await user.click(
       screen.getByRole("button", { name: "Explore actor Harbor authority" }),
     );
-    expect(onTopology).toHaveBeenLastCalledWith(extracted);
+    expect(onTopology).toHaveBeenLastCalledWith(extracted, "actor:local-actor");
     await user.click(
       screen.getByRole("button", { name: "Launch 3D topology" }),
     );
@@ -283,6 +353,12 @@ describe("Focus Brief", () => {
     expect(onPress).toHaveBeenCalledOnce();
   });
   it("navigates a related occurrence that already ran without admitting another chain", async () => {
+    const navigation = createMemoryNavigation();
+    navigation.navigate({
+      screen: "brief",
+      run_id: article.run_id,
+      article_id: article.id,
+    });
     const admissions: unknown[] = [];
     const next = {
       ...article,
@@ -344,15 +420,10 @@ describe("Focus Brief", () => {
           createRequestId: () => "request-1",
         }}
       >
-        <IntelApp />
+        <IntelApp navigation={navigation} />
       </BackendProvider>,
     );
-    await user.click(await screen.findByRole("button", { name: "Open Intel" }));
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Open Focus Brief: Retained report",
-      }),
-    );
+    await screen.findByRole("heading", { name: article.title });
     await user.click(
       await screen.findByRole("button", {
         name: "Open Focus Brief for related lead: Related report",
@@ -361,4 +432,52 @@ describe("Focus Brief", () => {
     await screen.findByRole("heading", { name: "Related report" });
     await vi.waitFor(() => expect(admissions).toEqual([]));
   });
+});
+
+it("uses each section's stage independently and restores retained content on completion", async () => {
+  const stage = (
+    operation: string,
+    state: string,
+    label: string,
+  ): BriefStage => ({
+    operation,
+    state,
+    label,
+    row: state,
+    active: state === "running",
+    detail: state === "failed" ? "Provider unavailable" : "",
+  });
+  const { rerender } = render(
+    <View
+      stages={[
+        stage("intel_brief_claims", "running", "Claims"),
+        stage("intel_brief_inferences", "failed", "Inferences"),
+      ]}
+    />,
+  );
+  expect(
+    await screen.findByRole("status", { name: "Claims: running" }),
+  ).toBeVisible();
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Inferences: Provider unavailable",
+  );
+  expect(screen.queryByText("Retained statement")).toBeNull();
+  expect(screen.queryByText("Possible outcome")).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "Explore actor Harbor authority" }),
+  ).toBeVisible();
+  rerender(
+    <View
+      stages={[
+        stage("intel_brief_claims", "completed", "Claims"),
+        stage("intel_brief_inferences", "completed", "Inferences"),
+      ]}
+    />,
+  );
+  expect(screen.getByText("Retained statement")).toBeVisible();
+  expect(screen.getByText("Possible outcome")).toBeVisible();
+  expect(
+    screen.queryByRole("status", { name: /Claims:|Inferences:/ }),
+  ).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
 });

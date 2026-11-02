@@ -4,7 +4,6 @@ import {
   View,
   Text,
   TextInput,
-  Pressable,
   ScrollView,
   StyleSheet,
   useWindowDimensions,
@@ -36,13 +35,16 @@ type Props = {
   counts?: Record<string, number>;
   list: ReturnType<typeof useArticles>;
   onArticle: (article: Article) => void;
-  onHome: () => void;
   onReset: () => void;
 };
 
 export function BulletinView(p: Props) {
   const { width } = useWindowDimensions();
   const wide = width >= 900;
+  const loading =
+    !p.list.data &&
+    p.articles.length === 0 &&
+    (p.daysPending || (p.list.isLoading && !!p.selectedDay));
   return (
     <View nativeID="intel-bulletin" style={s.shell}>
       <View
@@ -56,23 +58,11 @@ export function BulletinView(p: Props) {
         ]}
       >
         <View style={s.headingRow}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Home"
-            onPress={p.onHome}
-            style={s.back}
-          >
-            <Text style={s.backGlyph}>‹</Text>
-            <Text style={s.backText}>Home</Text>
-          </Pressable>
           <Text accessibilityRole="header" style={s.title}>
             Intelligence bulletin
           </Text>
         </View>
         <View style={[s.search, wide && { flex: 1, maxWidth: 512 }]}>
-          <Text nativeID="intel-search-label" style={s.micro}>
-            Search
-          </Text>
           <View style={s.searchField}>
             <TextInput
               accessibilityLabel="Search articles"
@@ -80,7 +70,7 @@ export function BulletinView(p: Props) {
               placeholderTextColor={c.dim}
               value={p.search}
               onChangeText={p.onSearch}
-              style={[s.input, width < 600 && { fontSize: 16 }]}
+              style={[s.input, width < 600 && { fontSize: 17 }]}
             />
           </View>
         </View>
@@ -151,23 +141,19 @@ export function BulletinView(p: Props) {
                 </DeskButton>
               </View>
             ) : null}
-            {p.daysPending ? <BulletinSkeleton /> : null}
-            {p.list.isPending && !!p.selectedDay ? <BulletinSkeleton /> : null}
+            {loading ? <BulletinSkeleton /> : null}
             {p.daysSuccess && !p.selectedDay ? (
               <EmptyState title="No articles yet">
                 Collect an Atlas cycle in Argos to populate this bulletin.
               </EmptyState>
             ) : null}
-            {p.list.isSuccess && !!p.selectedDay && p.articles.length === 0 ? (
+            {p.list.data && !!p.selectedDay && p.articles.length === 0 ? (
               <View style={{ gap: 16 }}>
                 <EmptyState title="NO MATCHING INTELLIGENCE">
                   No articles match this day, category and search.
                 </EmptyState>
                 <DeskButton onPress={p.onReset}>Reset filters</DeskButton>
               </View>
-            ) : null}
-            {p.list.isRefetching && !p.list.isFetchingNextPage ? (
-              <LoadingState label="Refreshing bulletin…" compact />
             ) : null}
             <View nativeID="intel-feed-cards" style={s.cards}>
               {p.articles.map((article, index) => (
@@ -179,7 +165,9 @@ export function BulletinView(p: Props) {
                 />
               ))}
             </View>
-            {p.list.isFetchingNextPage ? <BulletinSkeleton /> : null}
+            {p.list.isFetchingNextPage ? (
+              <LoadingState label="Loading more articles…" compact />
+            ) : null}
             {p.list.isFetchNextPageError ? (
               <Notice>
                 Could not load more articles. {p.list.error?.message}
@@ -235,28 +223,11 @@ const s = StyleSheet.create({
     minWidth: 0,
     flexShrink: 1,
   },
-  back: {
-    minHeight: 44,
-    paddingHorizontal: 12,
-    borderRadius: intelRadius.control,
-    borderWidth: 1,
-    borderColor: c.borderStrong,
-    backgroundColor: c.inset,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  backGlyph: { fontSize: 22, lineHeight: 24, color: c.text },
-  backText: {
-    fontFamily: intelFonts.mono,
-    fontSize: 13,
-    color: c.text,
-  },
   title: {
     color: c.text,
     fontFamily: intelFonts.body,
-    fontSize: 20,
-    lineHeight: 26,
+    fontSize: 21,
+    lineHeight: 27,
     fontWeight: "700",
     flexShrink: 1,
   },
@@ -265,7 +236,7 @@ const s = StyleSheet.create({
   micro: {
     color: c.dim,
     fontFamily: intelFonts.mono,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "600",
   },
   input: {
@@ -279,7 +250,7 @@ const s = StyleSheet.create({
     width: "100%",
     fontFamily: intelFonts.body,
     color: c.text,
-    fontSize: 15,
+    fontSize: 16,
     minWidth: 0,
   },
   rail: { gap: 12, padding: 12, borderColor: c.border, flexShrink: 0 },

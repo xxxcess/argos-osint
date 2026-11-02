@@ -7,10 +7,30 @@ use serde_json::Value;
 use crate::atlas_metadata;
 use crate::brain_topology::TopologyNode;
 use crate::brain_topology::TopologyNodeKind;
-use crate::brain_topology::TopologyOptions;
 use crate::brain_topology::TopologySeed;
 use crate::storage::repo::Repository;
 use crate::store::AtlasArticleRow;
+
+/// Stored claims keep a leading `[claim · supports]` tag. Brain labels do not.
+fn evidence_label(text: &str) -> String {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed
+        .strip_prefix('[')
+        .and_then(|body| body.split_once(']'))
+        .filter(|(tag, _)| {
+            let tag = tag.trim();
+            tag.starts_with("claim ·") || tag.starts_with("inference ·")
+        })
+        .map(|(_, rest)| rest.trim())
+    else {
+        return trimmed.to_owned();
+    };
+    if rest.is_empty() {
+        trimmed.to_owned()
+    } else {
+        rest.to_owned()
+    }
+}
 
 fn unique_seed(nodes: &[TopologyNode], kind: TopologyNodeKind, labels: &[String]) -> Value {
     let mut seeds: Vec<_> = nodes
@@ -52,13 +72,7 @@ pub(crate) async fn decorate(
         revision: revision.into(),
         originating_memory: None,
     };
-    // Brief bindings are direct article neighbours. Expanding their neighbours
-    // builds the graph view on every brief read, including completed briefs.
-    let options = TopologyOptions {
-        depth: 1,
-        ..Default::default()
-    };
-    let snapshot = crate::storage::topology::topology_snapshot(repo, &source, &options).await?;
+    let snapshot = crate::storage::topology::brief_binding_snapshot(repo, &source).await?;
     if let Some(items) = value["actors"].as_array_mut() {
         for item in items {
             let mut labels = vec![item["display_name"].as_str().unwrap_or_default().to_owned()];
@@ -96,11 +110,13 @@ pub(crate) async fn decorate(
                 } else {
                     TopologyNodeKind::Claim
                 };
-                item["topology_seed"] = unique_seed(
-                    &snapshot.nodes,
-                    kind,
-                    &[item["text"].as_str().unwrap_or_default().to_owned()],
-                );
+                let text = item["text"].as_str().unwrap_or_default();
+                let shown = evidence_label(text);
+                let mut labels = vec![text.to_owned()];
+                if shown != text {
+                    labels.push(shown);
+                }
+                item["topology_seed"] = unique_seed(&snapshot.nodes, kind, &labels);
             }
         }
     }
@@ -118,6 +134,29 @@ pub(crate) async fn decorate(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn evidence_labels_remove_only_leading_assessment_tags_and_preserve_content() {
+        for (stored, shown) in [
+            ("[claim · supports] Harbor statement", "Harbor statement"),
+            (
+                "[inference · tentative] Possible outcome",
+                "Possible outcome",
+            ),
+            (
+                "  Ordinary [claim · supports] text  ",
+                "Ordinary [claim · supports] text",
+            ),
+            (
+                "[source · wire] Harbor statement",
+                "[source · wire] Harbor statement",
+            ),
+            ("[claim · supports]", "[claim · supports]"),
+            ("", ""),
+        ] {
+            assert_eq!(super::evidence_label(stored), shown, "{stored:?}");
+        }
+    }
+
     use super::unique_seed;
     use crate::brain_topology::node;
     use crate::brain_topology::TopologyNodeKind;
@@ -159,6 +198,17 @@ mod tests {
             );
         }
         assert!(unique_seed(&nodes, TopologyNodeKind::Claim, &["Unindexed item".into()]).is_null());
+        assert_eq!(
+            unique_seed(
+                &nodes,
+                TopologyNodeKind::Claim,
+                &[
+                    "[claim · supports] Recorded item".into(),
+                    "Recorded item".into()
+                ]
+            ),
+            json!({"Claim":"claim-memory"})
+        );
     }
 
     #[test]

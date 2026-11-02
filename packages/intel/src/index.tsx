@@ -19,6 +19,7 @@ import {
   INTEL_CATEGORIES,
   type Article,
   type Brief,
+  type BriefStage,
   type Seed,
 } from "@argos/api-client";
 import {
@@ -41,7 +42,11 @@ import { HomeView } from "./views/HomeView";
 import { BulletinView } from "./views/BulletinView";
 import { ContextRail } from "./views/brief/ContextRail";
 import { BriefSkeleton } from "./views/brief/BriefSkeleton";
-import { deriveBriefJobState, type JobState } from "./shell/jobState";
+import {
+  deriveBriefJobState,
+  indexingJobState,
+  type JobState,
+} from "./shell/jobState";
 import { ScreenTransition } from "./shell/ScreenTransition";
 import { BriefView, RelatedBriefCard } from "./views/BriefView";
 const categories = [...INTEL_CATEGORIES];
@@ -83,7 +88,16 @@ export function IntelApp({
             <Workspace key={`${b.base}/${b.instance}`} navigation={navigator} />
           </ErrorBoundary>
         ) : (
-          <LoadingState label="Connecting to local API…" />
+          <View style={{ gap: 12, padding: 24 }}>
+            {b.connecting ? (
+              <LoadingState label="Connecting to local API…" />
+            ) : (
+              <Notice>{b.connectionError || "Local API unavailable"}</Notice>
+            )}
+            <Button disabled={b.connecting} onPress={b.retry}>
+              Connect / retry
+            </Button>
+          </View>
         )}
       </ScreenTransition>
       {playLanding || !b.connected ? (
@@ -118,6 +132,8 @@ function WorkspaceStatusBar(
               memoryPercent: host.memory_percent,
               diskPercent: host.disk_percent,
               networkKBps: host.network_kbps,
+              platform: host.platform,
+              chipset: host.chipset,
             }
           : undefined
       }
@@ -162,6 +178,7 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
   const lastArticle = retainedArticle ?? directBrief.data?.article;
   const screen = route.screen;
   const seed = route.screen === "topology" ? route.seed : null;
+  const focus = route.screen === "topology" ? route.focus : undefined;
   const navigate = navigation.navigate;
   const resolveTopology = useAction<{ seed: string }>("topology/resolve");
   function openArticle(next: Article) {
@@ -190,7 +207,7 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
       ]),
     ).values(),
   ];
-  function topology(next: Seed) {
+  function topology(next: Seed, focus?: string) {
     const direct = [next.Actor, next.Claim, next.Inference, next.Brief].find(
       (value): value is string => typeof value === "string" && !!value,
     );
@@ -200,7 +217,12 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
         ? route.from
         : undefined;
     const open = (seed: string) => {
-      navigate({ screen: "topology", seed, ...(from ? { from } : {}) });
+      navigate({
+        screen: "topology",
+        seed,
+        ...(focus && seed.startsWith("brief:") ? { focus } : {}),
+        ...(from ? { from } : {}),
+      });
     };
     if (direct) {
       resolveTopology.reset();
@@ -227,7 +249,13 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
           ) : screen === "topology" ? (
             <View
               nativeID="intel-topology-workspace"
-              style={{ minWidth: 0, width: "100%", maxWidth: "100%" }}
+              style={{
+                flex: 1,
+                minHeight: 0,
+                minWidth: 0,
+                width: "100%",
+                maxWidth: "100%",
+              }}
             >
               <Button
                 onPress={() =>
@@ -242,7 +270,18 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
                   ? "Return to Brief"
                   : "Return to Bulletin"}
               </Button>
-              <Topology seed={seed} onSeed={topology} pageStyle={s.page} />
+              <ScrollView
+                nativeID="intel-topology-content-scroll"
+                style={{ flex: 1, minHeight: 0 }}
+                contentContainerStyle={{ flexGrow: 1 }}
+              >
+                <Topology
+                  seed={seed}
+                  focus={focus}
+                  onSeed={topology}
+                  pageStyle={s.page}
+                />
+              </ScrollView>
             </View>
           ) : screen === "brief" && article ? (
             <ScrollView
@@ -258,10 +297,17 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
               />
             </ScrollView>
           ) : screen === "brief" ? (
-            <View style={s.page}>
-              <Button onPress={() => navigate({ screen: "bulletin" })}>
-                Return to Bulletin
-              </Button>
+            <ScrollView
+              style={{ flex: 1, minHeight: 0 }}
+              contentContainerStyle={{ flexGrow: 1, gap: 12 }}
+            >
+              {directBrief.error ||
+              !location?.run_id ||
+              !location.article_id ? (
+                <Button onPress={() => navigate({ screen: "bulletin" })}>
+                  Return to Bulletin
+                </Button>
+              ) : null}
               {directBrief.error ? (
                 <>
                   <Notice>{directBrief.error.message}</Notice>
@@ -278,9 +324,11 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
                   Open an article from the Bulletin.
                 </EmptyState>
               ) : (
-                <BriefSkeleton />
+                <BriefSkeleton
+                  onBack={() => navigate({ screen: "bulletin" })}
+                />
               )}
-            </View>
+            </ScrollView>
           ) : (
             <BulletinView
               categories={categories}
@@ -291,7 +339,7 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
               days={days.data?.days || []}
               selectedDay={selectedDay}
               onDay={setDay}
-              daysPending={days.isPending}
+              daysPending={days.isLoading}
               daysSuccess={days.isSuccess}
               daysError={days.error}
               onRetryDays={() => {
@@ -301,7 +349,6 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
               counts={counts.data?.counts}
               list={list}
               onArticle={openArticle}
-              onHome={() => navigate({ screen: "home" })}
               onReset={() => {
                 setCategory(INTEL_CATEGORIES[0]);
                 setDay("");
@@ -318,9 +365,10 @@ function Workspace({ navigation }: { navigation: IntelNavigation }) {
             <PageJobs
               screen={screen}
               article={screen === "brief" ? article : lastArticle}
-              daysPending={days.isPending}
+              daysPending={days.isLoading}
               daysError={days.error?.message}
               feedFetching={list.isFetching}
+              feedLoading={list.isLoading}
               feedError={
                 list.isError && !list.isFetchNextPageError
                   ? list.error?.message
@@ -357,6 +405,7 @@ function PageJobs({
   daysPending,
   daysError,
   feedFetching,
+  feedLoading,
   feedError,
   resolving,
   resolveError,
@@ -367,6 +416,7 @@ function PageJobs({
   daysPending: boolean;
   daysError?: string;
   feedFetching: boolean;
+  feedLoading: boolean;
   feedError?: string;
   resolving: boolean;
   resolveError?: string;
@@ -389,7 +439,9 @@ function PageJobs({
               : feedFetching
                 ? "running"
                 : "succeeded",
-            detail: feedError ?? (feedFetching ? "Loading" : "Ready"),
+            detail:
+              feedError ??
+              (feedLoading ? "Loading" : feedFetching ? "Refreshing" : "Ready"),
           },
         ]
       : screen === "topology"
@@ -452,14 +504,7 @@ function PageJobsWithBrief({
               progress.indexing?.reason ||
               progress.indexing?.state ||
               "Not indexed",
-            state:
-              progress.indexing?.state === "indexed"
-                ? "succeeded"
-                : progress.indexing?.state === "failed"
-                  ? "failed"
-                  : progress.indexing?.state
-                    ? "running"
-                    : "idle",
+            state: indexingJobState(progress.indexing?.state),
           },
         ]
       : [
@@ -481,7 +526,7 @@ function Focus({
   article: Article;
   onBack: () => void;
   onArticle: (a: Article) => void;
-  onTopology: (s: Seed) => void;
+  onTopology: (s: Seed, focus?: string) => void;
 }) {
   const detail = useRead<Brief>("articles/detail?" + keyFor(a), true);
   const related = useRelated(a);
@@ -519,15 +564,16 @@ function Focus({
     admit,
   ]);
   const d = detail.data;
+  let stages: BriefStage[] | undefined;
+  if (live && live.progress && d && live.progress.job_id === d.job_id) {
+    stages = live.progress.stages;
+  }
   const shown = d?.article || a;
   const jobState = deriveBriefJobState({ ensure, reload, live, detail: d });
   const relatedContent = (
     <View style={{ gap: 16, minWidth: 0 }}>
-      {related.isPending ? (
-        <BriefSkeleton label="Loading related leads…" />
-      ) : null}
-      {related.isRefetching && !related.isFetchingNextPage ? (
-        <LoadingState label="Refreshing related leads…" compact />
+      {!related.data && related.isLoading ? (
+        <LoadingState label="Loading related leads…" compact />
       ) : null}
       {related.error && <Notice>{related.error.message}</Notice>}
       <View
@@ -553,12 +599,12 @@ function Focus({
             />
           ))}
       </View>
-      {related.isSuccess &&
+      {related.data &&
       related.data.pages.flatMap((p) => p.rows).length === 0 ? (
         <EmptyState title="No related leads">No retained leads.</EmptyState>
       ) : null}
       {related.isFetchingNextPage ? (
-        <BriefSkeleton label="Loading more related leads…" />
+        <LoadingState label="Loading more related leads…" compact />
       ) : null}
       {related.hasNextPage && (
         <Button
@@ -587,7 +633,8 @@ function Focus({
     <BriefView
       article={a}
       brief={d}
-      pending={detail.isPending}
+      stages={stages}
+      pending={detail.isLoading && !d}
       onBack={onBack}
       onTopology={onTopology}
       jobState={jobState}
@@ -604,13 +651,22 @@ function Focus({
           reload={reload}
           backend={backend}
           jobState={jobState}
+          linksStage={stages?.find(
+            (stage) => stage.operation === "intel_brief_links",
+          )}
         />
       }
       notices={
         <>
-          {live?.progress && !live.progress.complete ? (
+          {live?.progress &&
+          !live.progress.complete &&
+          jobState !== "succeeded" ? (
             <View role="status" aria-live="polite" style={{ gap: 8 }}>
-              <Label>Brief in progress</Label>
+              <Label>
+                {jobState === "failed"
+                  ? "Brief extraction failed"
+                  : "Brief in progress"}
+              </Label>
               {live.progress.stages.map((stage) => (
                 <Copy key={stage.operation}>
                   {stage.label} · {stage.row}
@@ -638,7 +694,6 @@ function Focus({
               Could not start brief extraction: {ensure.error.message}
             </Notice>
           )}
-          {detail.isPending ? <BriefSkeleton /> : null}
         </>
       }
     />
@@ -681,6 +736,7 @@ const s = StyleSheet.create({
   contentFrame: {
     flex: 1,
     minHeight: 0,
+    overflow: "hidden",
     width: "100%",
     maxWidth: 1440,
     alignSelf: "center",
@@ -709,8 +765,8 @@ const s = StyleSheet.create({
   },
   brand: {
     fontFamily: fonts.mono,
-    fontSize: 17,
-    lineHeight: 24,
+    fontSize: 18,
+    lineHeight: 25,
     fontWeight: "700",
     color: c.text,
     letterSpacing: 2,
@@ -718,10 +774,10 @@ const s = StyleSheet.create({
   },
   wordmark: {
     fontFamily: fonts.mono,
-    fontSize: 11,
+    fontSize: 12,
     letterSpacing: 1,
     textTransform: "uppercase",
-    lineHeight: 18,
+    lineHeight: 19,
     color: c.muted,
   },
   row: {
@@ -750,9 +806,9 @@ const s = StyleSheet.create({
   },
   small: {
     fontFamily: fonts.mono,
-    fontSize: 11,
+    fontSize: 12,
     color: c.muted,
-    lineHeight: 19,
+    lineHeight: 20,
     flexShrink: 1,
   },
   page: {
@@ -764,21 +820,21 @@ const s = StyleSheet.create({
     gap: 16,
   },
   title: {
-    fontSize: 27,
-    lineHeight: 35,
+    fontSize: 28,
+    lineHeight: 36,
     fontWeight: "600",
     color: c.text,
     letterSpacing: -0.5,
   },
-  headline: { fontSize: 19, lineHeight: 28, fontWeight: "600", color: c.text },
+  headline: { fontSize: 20, lineHeight: 29, fontWeight: "600", color: c.text },
   readerTitle: {
-    fontSize: 26,
-    lineHeight: 35,
+    fontSize: 27,
+    lineHeight: 36,
     fontWeight: "600",
     color: c.text,
     letterSpacing: -0.4,
   },
-  readerCopy: { fontSize: 16, lineHeight: 29, color: c.text, maxWidth: 640 },
+  readerCopy: { fontSize: 17, lineHeight: 30, color: c.text, maxWidth: 640 },
   filters: {
     gap: 8,
     paddingTop: 12,
@@ -824,8 +880,8 @@ const s = StyleSheet.create({
     padding: 12,
     fontFamily: fonts.mono,
     color: c.text,
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 15,
+    lineHeight: 21,
   },
   connection: {
     ...(glass as object),
@@ -887,20 +943,20 @@ const s = StyleSheet.create({
   },
   leadTitle: {
     fontFamily: fonts.body,
-    fontSize: 14,
-    lineHeight: 22,
+    fontSize: 15,
+    lineHeight: 23,
     color: c.text,
     fontWeight: "600",
   },
   leadBasis: {
     fontFamily: fonts.mono,
-    fontSize: 11,
-    lineHeight: 18,
+    fontSize: 12,
+    lineHeight: 19,
     color: c.muted,
   },
   leadChevron: {
     fontFamily: fonts.mono,
-    fontSize: 16,
+    fontSize: 17,
     color: c.accent,
     alignSelf: "center",
     marginLeft: "auto",

@@ -7,6 +7,7 @@ use crate::{
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::time::Duration;
 
 pub const CATEGORIES: [&str; 6] = [
     "geopolitical",
@@ -160,7 +161,21 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
     let source_revision = crate::atlas_metadata::input_hash(article);
     let mut parts = intel_brief_view::brief_parts(repo, article).await?;
     parts.relations.sort();
-    let catalog_actors = crate::storage::actor_catalog::article_actors(repo, article).await?;
+    // Catalog matching enriches the snapshot; it must not hold retained claims
+    // and inferences behind the HTTP deadline while a cold matcher loads.
+    let mut actors_pending = false;
+    let catalog_actors = match tokio::time::timeout(
+        Duration::from_secs(1),
+        crate::storage::actor_catalog::article_actors(repo, article),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            actors_pending = true;
+            Some(Vec::new())
+        }
+    };
     let catalog_enabled = catalog_actors.is_some();
     let mut actors = catalog_actors.unwrap_or_else(|| {
         parts
@@ -250,6 +265,7 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
     if let Some(inferences) = inference_rows {
         value["inferences"] = json!(inferences);
     }
+    value["actors_pending"] = json!(actors_pending);
     // A running chain already owns storage. Binding navigation seeds here
     // rebuilds a topology snapshot on every progress refresh and pushes the
     // read past the client abort deadline ("signal timed out").
@@ -266,7 +282,15 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
         None => false,
     };
     if !brief_running {
-        crate::intel_topology::decorate(repo, article, &source_revision, &mut value).await?;
+        match tokio::time::timeout(
+            Duration::from_secs(1),
+            crate::intel_topology::decorate(repo, article, &source_revision, &mut value),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => value["bindings_pending"] = json!(true),
+        }
     }
     let revision = crate::nlp::cache::hash(&serde_json::to_string(&value)?);
     value["revision"] = json!(revision);

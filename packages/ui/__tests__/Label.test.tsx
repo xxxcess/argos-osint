@@ -10,9 +10,9 @@ describe("Label (real @argos/ui component)", () => {
     const label = screen.getByText("01 / Atlas collection");
     expect(sheetProp(label, "fontFamily")).toContain("ui-monospace");
     expect(sheetProp(label, "textTransform")).toBe("uppercase");
-    expect(sheetProp(label, "fontSize")).toBe("11px");
+    expect(sheetProp(label, "fontSize")).toBe("12px");
     expect(sheetProp(label, "letterSpacing")).toBe("1.2px");
-    expect(sheetProp(label, "lineHeight")).toBe("18px");
+    expect(sheetProp(label, "lineHeight")).toBe("19px");
   });
 
   it("uses the muted neutral token, not accent or body colors", () => {

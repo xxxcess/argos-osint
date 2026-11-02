@@ -5,6 +5,11 @@ const nativeWeb = require.resolve("react-native-web");
 
 /** @type {import('next').NextConfig} */
 export default {
+  // Browser verification must never claim the launcher's .next/dev lock/cache.
+  distDir:
+    process.env.ARGOS_WEB_TEST_DEV === "1"
+      ? "../../.agent-scratch/next-web-tests"
+      : ".next",
   reactCompiler: {
     panicThreshold: "all_errors",
     environment: { enablePreserveExistingMemoizationGuarantees: true },

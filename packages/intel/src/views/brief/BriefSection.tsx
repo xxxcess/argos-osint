@@ -52,7 +52,7 @@ export function BriefSection({
           accessibilityRole="header"
           style={{
             fontFamily: intelFonts.mono,
-            fontSize: 12,
+            fontSize: 13,
             fontWeight: "700",
             color,
             flex: 1,
@@ -63,7 +63,7 @@ export function BriefSection({
         {count != null ? (
           <Text
             accessibilityLabel={`${count} items`}
-            style={{ color: c.dim, fontSize: 12 }}
+            style={{ color: c.dim, fontSize: 13 }}
           >
             {count}
           </Text>

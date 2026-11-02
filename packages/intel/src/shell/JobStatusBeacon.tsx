@@ -57,7 +57,7 @@ export function JobStatusBeacon({ state }: { state: JobState }) {
       <Text
         style={{
           fontFamily: intelFonts.mono,
-          fontSize: 12,
+          fontSize: 13,
           color: token.color,
         }}
       >

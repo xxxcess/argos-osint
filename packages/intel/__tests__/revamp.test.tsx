@@ -1,3 +1,4 @@
+import { StageContent } from "../src/views/brief/StageContent";
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
@@ -5,7 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { Text } from "react-native";
 import { Skeleton } from "@argos/ui";
 import type { BriefProgress, Brief } from "@argos/api-client";
-import { deriveBriefJobState } from "../src/shell/jobState";
+import { deriveBriefJobState, indexingJobState } from "../src/shell/jobState";
 import { JobStatusBeacon } from "../src/shell/JobStatusBeacon";
 import {
   ScreenTransition,
@@ -52,6 +53,8 @@ describe("brief job beacon", () => {
     [{ detail: detail({ status: "failed" }) }, "failed"],
     [{ detail: detail({ status: "stale" }) }, "stale"],
     [{ detail: detail({ publication: [1, {}, {}] }) }, "succeeded"],
+    [{ detail: detail({ lifecycle: "complete" }) }, "succeeded"],
+    [{ detail: detail({ lifecycle: "completed" }) }, "succeeded"],
     [{ live: { connected: false, progress: progress() } }, "stale"],
     [{ live: { connected: true, progress: progress() } }, "queued"],
     [
@@ -121,6 +124,38 @@ describe("brief job beacon", () => {
   ] as const)("maps %j to %s", (input, state) =>
     expect(deriveBriefJobState(input)).toBe(state),
   );
+  it.each([
+    [undefined, "idle"],
+    ["not_indexed", "idle"],
+    ["indexed", "succeeded"],
+    ["pending", "queued"],
+    ["indexing", "running"],
+    ["failed", "failed"],
+    ["deferred", "stale"],
+  ] as const)("shows indexing %s as %s", (state, expected) => {
+    expect(indexingJobState(state)).toBe(expected);
+  });
+  it("keeps terminal stages complete after their live connection closes", () => {
+    expect(
+      deriveBriefJobState({
+        live: {
+          connected: false,
+          progress: progress({
+            stages: [
+              {
+                operation: "links",
+                label: "Links",
+                state: "completed",
+                row: "Completed",
+                active: false,
+                detail: "",
+              },
+            ],
+          }),
+        },
+      }),
+    ).toBe("succeeded");
+  });
   it("lets a newer retry supersede an older failed mutation", () =>
     expect(
       deriveBriefJobState({
@@ -311,5 +346,118 @@ describe("topology presence", () => {
     expect(labelZoomOpacity(300)).toBe(1);
     expect(labelZoomOpacity(575)).toBe(0.5);
     expect(labelZoomOpacity(900)).toBe(0);
+  });
+});
+
+// @tag:testing — stage state wins over stale retained content.
+describe("section stage state", () => {
+  it.each(["queued", "running", "retry_scheduled"])(
+    "loads %s stages",
+    async (state) => {
+      render(
+        <StageContent
+          kind="inferences"
+          stage={{
+            operation: "intel_brief_inferences",
+            label: "Inferences",
+            state,
+            row: state,
+            detail: "",
+            active: state === "running",
+          }}
+        >
+          old content
+        </StageContent>,
+      );
+      await act(async () => {});
+      expect(
+        screen.getByRole("status", { name: `Inferences: ${state}` }),
+      ).toBeVisible();
+      expect(screen.queryByText("old content")).toBeNull();
+    },
+  );
+  it("shows failure details instead of old output", () => {
+    render(
+      <StageContent
+        kind="claims"
+        stage={{
+          operation: "intel_brief_claims",
+          label: "Claims",
+          state: "failed",
+          row: "Failed",
+          detail: "Provider unavailable",
+          active: false,
+        }}
+      >
+        old content
+      </StageContent>,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("Provider unavailable");
+    expect(screen.queryByText("old content")).toBeNull();
+  });
+  it("shows completed content", () => {
+    render(
+      <StageContent
+        kind="claims"
+        stage={{
+          operation: "intel_brief_claims",
+          label: "Claims",
+          state: "completed",
+          row: "Done",
+          detail: "",
+          active: false,
+        }}
+      >
+        completed content
+      </StageContent>,
+    );
+    expect(screen.getByText("completed content")).toBeVisible();
+  });
+});
+
+describe("terminal stage diagnostics", () => {
+  it.each(["failed", "cancelled", "superseded", "blocked"])(
+    "never leaves %s work showing a permanent skeleton",
+    (state) => {
+      render(
+        <StageContent
+          stage={{
+            operation: "intel_brief_links",
+            label: "Links",
+            state,
+            row: "",
+            active: false,
+            detail: "Stage cannot continue",
+          }}
+          kind="inferences"
+        >
+          <Text>Old links</Text>
+        </StageContent>,
+      );
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Links: Stage cannot continue",
+      );
+      expect(screen.queryByText("Old links")).toBeNull();
+      expect(screen.queryByRole("status")).toBeNull();
+    },
+  );
+  it("announces a blocked dependency even while the stage is queued", () => {
+    render(
+      <StageContent
+        stage={{
+          operation: "intel_brief_inferences",
+          label: "Inferences",
+          state: "queued",
+          row: "Blocked by Claims",
+          active: false,
+          detail: "",
+        }}
+        kind="inferences"
+      >
+        <Text>Old inference</Text>
+      </StageContent>,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("Blocked by Claims");
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });

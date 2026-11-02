@@ -375,6 +375,10 @@ impl Query<'_> {
         } else {
             TopologySeed::Claim(id.into())
         });
+        if self.binding {
+            // The brief consumes identity, kind and label, not graph detail.
+            return Ok(Some(out));
+        }
         match self.payload(id).await? {
             Some(MemoryPayload::Claim(p)) => {
                 out.status = if p.assessment.trim().is_empty()
@@ -1709,6 +1713,11 @@ impl Query<'_> {
                 out.push((c, e));
             }
         }
+        if self.binding {
+            // Direct actors and evidence above are sufficient for brief links.
+            // Related article expansion belongs to the graph/Related readers.
+            return Ok(());
+        }
         if let Some(t) = topic_node(&n.subtype) {
             out.push((
                 t.clone(),
@@ -2445,6 +2454,11 @@ async fn snapshot_in(
     let exhausted = q.exhausted;
     let gaps = std::mem::take(&mut q.gaps);
     admit(&mut snapshot, nodes, edges, options, exhausted, gaps);
+    if binding {
+        // Brief decoration reads only the admitted nodes. Association payloads
+        // and the neighborhood summary are needed only by the graph page.
+        return Ok(snapshot);
+    }
     for n in snapshot.nodes.clone() {
         if n.is_root {
             continue;

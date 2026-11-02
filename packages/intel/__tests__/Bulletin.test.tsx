@@ -88,6 +88,50 @@ beforeEach(() => {
 });
 
 describe("Nexus Desk Bulletin", () => {
+  it("keeps cached feed rows visible without loaders during refresh", async () => {
+    let reads = 0;
+    let release!: () => void;
+    const refreshing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mswServer.use(
+      http.get(`${testBase}/api/v1/articles`, async () => {
+        if (++reads > 1) await refreshing;
+        return HttpResponse.json({
+          rows: [row],
+          next_cursor: null,
+          revision: "cached",
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Open Intel" }));
+    await screen.findByRole("button", {
+      name: `Open Focus Brief: ${row.title}`,
+    });
+    try {
+      await user.click(screen.getByRole("button", { name: "Refresh feed" }));
+      await waitFor(() => expect(reads).toBe(2));
+      expect(
+        screen.getByRole("button", { name: `Open Focus Brief: ${row.title}` }),
+      ).toBeVisible();
+      expect(
+        screen.queryByRole("status", { name: "Loading bulletin…" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("progressbar", { name: "Refreshing bulletin…" }),
+      ).not.toBeInTheDocument();
+    } finally {
+      release();
+    }
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh feed" }),
+      ).toBeEnabled(),
+    );
+  });
+
   it("selects categories, debounces search and resets a verified empty result", async () => {
     const user = userEvent.setup();
     render(<App />);

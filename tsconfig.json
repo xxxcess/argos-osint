@@ -27,7 +27,9 @@
     }
   },
   "include": [
+    "apps/**/*.ts",
     "apps/**/*.tsx",
+    "packages/**/*.ts",
     "packages/**/*.tsx",
     "packages/intel/src/topology/three.d.ts",
     "tests/web/**/*.ts"

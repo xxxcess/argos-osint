@@ -101,14 +101,14 @@ const s = StyleSheet.create({
   },
   buttonText: {
     fontFamily: intelFonts.mono,
-    fontSize: 13,
+    fontSize: 14,
     color: c.dim,
     flexShrink: 1,
   },
   active: { borderColor: c.accentBorder, backgroundColor: c.accentSoft },
   chip: {
     fontFamily: intelFonts.mono,
-    fontSize: 18,
+    fontSize: 19,
     color: c.accent,
     backgroundColor: c.accentSoft,
     borderColor: c.accentBorder,

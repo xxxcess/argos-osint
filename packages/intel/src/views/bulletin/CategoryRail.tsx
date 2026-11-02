@@ -127,19 +127,19 @@ const s = StyleSheet.create({
   },
   categoryName: {
     fontFamily: intelFonts.mono,
-    fontSize: 12,
+    fontSize: 13,
     color: c.dim,
     flexShrink: 1,
   },
   countBadge: {
     fontFamily: intelFonts.mono,
-    fontSize: 12,
+    fontSize: 13,
     color: c.dim,
     backgroundColor: c.inset,
     borderRadius: 14,
     minWidth: 28,
     height: 28,
     textAlign: "center",
-    lineHeight: 28,
+    lineHeight: 29,
   },
 });

@@ -131,6 +131,6 @@ const s = StyleSheet.create({
     justifyContent: "center",
   },
   dayValue: { flexDirection: "row", alignItems: "center", gap: 8, minWidth: 0 },
-  dayCaption: { fontFamily: intelFonts.mono, fontSize: 12, color: c.muted },
-  dayLabel: { fontFamily: intelFonts.mono, fontSize: 14, color: c.text },
+  dayCaption: { fontFamily: intelFonts.mono, fontSize: 13, color: c.muted },
+  dayLabel: { fontFamily: intelFonts.mono, fontSize: 15, color: c.text },
 });

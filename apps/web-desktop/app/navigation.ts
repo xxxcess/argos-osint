@@ -13,9 +13,15 @@ export function routeFromUrl(url: URL): IntelRoute {
   if (path === "/brief") return { screen: "brief", run_id, article_id };
   if (path === "/topology") {
     const seed = url.searchParams.get("seed");
+    const focus = url.searchParams.get("focus");
     return {
       screen: "topology",
       seed: seed && seed.length <= 256 && !/^[{\[]/.test(seed) ? seed : null,
+      ...(focus &&
+      focus.length <= 256 &&
+      /^(claim|inference|actor|article):/.test(focus)
+        ? { focus }
+        : {}),
     };
   }
   return initial;
@@ -29,6 +35,7 @@ export function routeUrl(route: IntelRoute): string {
   }
   if (route.screen === "topology") {
     if (route.seed) params.set("seed", route.seed);
+    if (route.focus) params.set("focus", route.focus);
   }
   const query = params.toString();
   return `/${route.screen}${query ? `?${query}` : ""}`;

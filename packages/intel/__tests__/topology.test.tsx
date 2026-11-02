@@ -17,6 +17,7 @@ import {
   type Topology as TopologyData,
 } from "@argos/api-client";
 import { mswServer, testBase } from "../../../vitest.setup";
+import userEvent from "@testing-library/user-event";
 import {
   forceGraphInstances,
   lastForceGraphProps,
@@ -78,15 +79,15 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
   }
 
   it("hands FLAT COPIES to the graph library (nodes/links are mutated by d3)", () => {
-    renderCanvas();
+    const { props } = renderCanvas();
     const graphData = lastForceGraphProps!.graphData as {
       nodes: unknown[];
       links: unknown[];
     };
-    expect(graphData.nodes).not.toBe(nodes);
-    expect(graphData.nodes[0]).not.toBe(nodes[0]);
+    expect(graphData.nodes).not.toBe(props.nodes);
+    expect(graphData.nodes[0]).not.toBe(props.nodes[0]);
     expect(graphData.nodes).toEqual(nodes);
-    expect(graphData.links[0]).not.toBe(links[0]);
+    expect(graphData.links[0]).not.toBe(props.links[0]);
     expect(graphData.links).toEqual(links);
   });
 
@@ -269,16 +270,18 @@ describe("ForceCanvas (real wrapper, canvas library mocked)", () => {
     expect(seen).toEqual(["n3", null]);
   });
 
-  it("keeps focused edges lit and dims the rest", () => {
-    renderCanvas();
+  it("keeps focused edges lit and restores all edges when focus clears", () => {
+    const { view, props } = renderCanvas();
     const linkColor = lastForceGraphProps!.linkColor as (l: unknown) => string;
     const edgeInFocus = { source: { id: "n1" }, target: { id: "n2" } };
     const edgeOutside = { source: { id: "n1" }, target: { id: "n3" } };
     expect(linkColor(edgeInFocus)).toBe(palette.accent);
     expect(linkColor(edgeOutside)).toBe(palette.bg);
     // No focusIds means nothing is dimmed.
-    const unset = { ...lastForceGraphProps!, focusIds: null };
-    void unset;
+    view.rerender(<ForceCanvas {...props} focusIds={null} />);
+    const allEdges = lastForceGraphProps!.linkColor as (l: unknown) => string;
+    expect(allEdges(edgeInFocus)).toBe(palette.accent);
+    expect(allEdges(edgeOutside)).toBe(palette.accent);
   });
 
   it("paints labels/types via nodeLabel for tooltips", () => {
@@ -420,8 +423,9 @@ describe("Topology list twin (real Topology)", () => {
     expect(
       screen.getByRole("button", { name: "Select node Claim Two, claim" }),
     ).toBeTruthy();
-    // Default selection is the first node; its details render in access order.
-    expect(screen.getByText(/Primary collection actor/)).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Select node Actor One, actor" }),
+    ).toHaveAttribute("aria-pressed", "true");
     // Connections panel preserves recorded direction and meaning.
     expect(screen.getByText(/Actor One → asserts → Claim Two/)).toBeVisible();
     expect(screen.queryByText(/Claim Two → cites → Circuit/)).toBeNull();
@@ -463,25 +467,32 @@ describe("Topology list twin (real Topology)", () => {
     ).toBeNull();
     expect(screen.queryByText(/categorized/)).toBeNull();
   });
-  it("syncs selection from the list twin into the details panel", async () => {
+  it("marks the list twin row that is selected", async () => {
     await startTopology("n1");
     fireEvent.click(
       screen.getByRole("button", { name: "Select node Claim Two, claim" }),
     );
     await waitFor(() =>
-      expect(screen.getAllByText("Claim Two").length).toBeGreaterThan(0),
+      expect(
+        screen.getByRole("button", { name: "Select node Claim Two, claim" }),
+      ).toHaveAttribute("aria-pressed", "true"),
     );
-    expect(screen.getByText(/Retained claim record/)).toBeVisible();
   });
 
-  it("navigates seeds from the details panel onto the parent shell", async () => {
+  it("navigates a newly selected node's seed onto the parent shell", async () => {
     const onSeed = vi.fn();
-    await startTopology("n1", onSeed);
-    fireEvent.click(screen.getByRole("button", { name: /Navigate this node/ }));
+    const claimSeed = { Claim: "claim-memory" };
+    await startTopology("n1", onSeed, {
+      ...topologyPayload,
+      nodes: topologyPayload.nodes.map((node) =>
+        node.id === "n2" ? { ...node, topology_seed: claimSeed } : node,
+      ),
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Select node Claim Two, claim" }),
+    );
     await waitFor(() => {
-      expect(onSeed).toHaveBeenCalledWith(
-        topologyPayload.nodes[0].topology_seed,
-      );
+      expect(onSeed).toHaveBeenCalledWith(claimSeed);
     });
   });
 
@@ -493,7 +504,9 @@ describe("Topology list twin (real Topology)", () => {
       screen.getByRole("button", { name: "Select node Claim Two, claim" }),
     );
     await waitFor(() =>
-      expect(screen.getByText(/Retained claim record/)).toBeVisible(),
+      expect(
+        screen.getByRole("button", { name: "Select node Claim Two, claim" }),
+      ).toHaveAttribute("aria-pressed", "true"),
     );
     fireEvent.click(screen.getByRole("button", { name: "Show actor nodes" }));
     await waitFor(() =>
@@ -528,15 +541,15 @@ describe("Topology list twin (real Topology)", () => {
       screen.getByRole("button", { name: "Select node Claim Two, claim" }),
     );
     await waitFor(() =>
-      expect(screen.getByText(/Retained claim record/)).toBeVisible(),
+      expect(
+        screen.getByRole("button", { name: "Select node Claim Two, claim" }),
+      ).toHaveAttribute("aria-pressed", "true"),
     );
     fireEvent.click(screen.getByRole("button", { name: "Show actor nodes" }));
     await waitFor(() =>
       expect(screen.queryByText(/Actor One → asserts/)).toBeNull(),
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Show actor nodes" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Show actor nodes" }));
     await waitFor(() =>
       expect(screen.getByText(/Actor One → asserts → Claim Two/)).toBeVisible(),
     );
@@ -553,7 +566,112 @@ describe("Topology list twin (real Topology)", () => {
     );
     fireEvent.keyDown(window, { key: "Backspace" });
     await waitFor(() =>
-      expect(screen.getByText(/Primary collection actor/)).toBeVisible(),
+      expect(
+        screen.getByRole("button", { name: "Select node Actor One, actor" }),
+      ).toHaveAttribute("aria-pressed", "true"),
     );
+  });
+});
+
+describe("topology request lifecycle", () => {
+  function ready() {
+    mswServer.use(
+      http.get(`${testBase}/api/v1/health/ready`, () =>
+        HttpResponse.json({
+          ready: true,
+          storage: true,
+          service: "argos-intel",
+          api_version: 1,
+          instance_id: "topology-lifecycle",
+        }),
+      ),
+    );
+  }
+  function viewer(seed: string) {
+    return (
+      <BackendProvider settings={connectedSettings}>
+        <Topology seed={seed} onSeed={vi.fn()} pageStyle={{}} />
+      </BackendProvider>
+    );
+  }
+  it("surfaces a failed graph read and lets Retry replace the error with retained evidence", async () => {
+    ready();
+    let failed = true;
+    mswServer.use(
+      http.get(`${testBase}/api/v1/topology`, () =>
+        failed
+          ? HttpResponse.json(
+              { error: "Topology temporarily unavailable" },
+              { status: 503 },
+            )
+          : HttpResponse.json(topologyPayload),
+      ),
+    );
+    render(viewer("n1"));
+    expect(
+      await screen.findByRole("alert", {}, { timeout: 4000 }),
+    ).toHaveTextContent("Topology temporarily unavailable");
+    expect(
+      screen.queryByRole("status", { name: "Loading topology…" }),
+    ).toBeNull();
+    expect(screen.queryByText("No retained connections")).toBeNull();
+    failed = false;
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Retry topology" }));
+    expect(
+      await screen.findByRole("button", {
+        name: "Select node Actor One, actor",
+      }),
+    ).toBeVisible();
+    expect(screen.queryByText("Topology temporarily unavailable")).toBeNull();
+  });
+  it("does not let an old seed response replace a newer selection", async () => {
+    ready();
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const received = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    mswServer.use(
+      http.get(`${testBase}/api/v1/topology`, async ({ request }) => {
+        if (new URL(request.url).searchParams.get("seed") === "old") {
+          started();
+          await gate;
+          return HttpResponse.json({
+            ...topologyPayload,
+            nodes: [{ ...topologyPayload.nodes[0], label: "Obsolete actor" }],
+          });
+        }
+        return HttpResponse.json(topologyPayload);
+      }),
+    );
+    const { rerender } = render(viewer("old"));
+    await received;
+    expect(
+      screen.getByRole("status", { name: "Loading topology…" }),
+    ).toBeVisible();
+    expect(document.getElementById("intel-topology-graph-skeleton")).toBeTruthy();
+    expect(document.getElementById("intel-topology-side-skeleton")).toBeNull();
+    expect(document.getElementById("intel-topology-nodes-skeleton")).toBeTruthy();
+    try {
+      rerender(viewer("current"));
+      expect(
+        await screen.findByRole("button", {
+          name: "Select node Actor One, actor",
+        }),
+      ).toBeVisible();
+    } finally {
+      await act(async () => release());
+    }
+    expect(
+      screen.queryByRole("button", {
+        name: "Select node Obsolete actor, actor",
+      }),
+    ).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

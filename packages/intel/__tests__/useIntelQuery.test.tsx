@@ -278,23 +278,28 @@ describe("useArticles (real paginated feed)", () => {
     },
   );
 
-  it("disables the query before a day is selected (enabled=!!day)", async () => {
+  it("does not fetch articles without a selected day even after the backend is connected", async () => {
+    let reads = 0;
     mswServer.use(
       http.get(`${testBase}/api/v1/health/ready`, () =>
         HttpResponse.json(readyHealth),
       ),
       http.get(`${testBase}/api/v1/articles`, () => {
-        throw new Error("articles must not be fetched without a day");
+        reads++;
+        return HttpResponse.json({ rows: [] });
       }),
     );
-    const { result } = renderHook(() => useArticles("signals", "", ""), {
-      wrapper: providerWrapper(),
-    });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
-    });
-    expect(result.current.fetchStatus).toBe("idle");
-    expect(result.current.data).toBeUndefined();
+    const { result } = renderHook(
+      () => ({
+        connected: useBackend().connected,
+        query: useArticles("signals", "", ""),
+      }),
+      { wrapper: providerWrapper() },
+    );
+    await waitForConnected(() => result.current.connected);
+    expect(result.current.query.fetchStatus).toBe("idle");
+    expect(result.current.query.data).toBeUndefined();
+    expect(reads).toBe(0);
   });
 });
 
@@ -370,7 +375,7 @@ describe("useAction (real mutation over MSW)", () => {
   });
 });
 
-describe("useTopology (real POST over MSW)", () => {
+describe("useTopology (real GET over MSW)", () => {
   it("loads topology from one Brain memory ID in a GET query", async () => {
     const bodies: unknown[] = [];
     mswServer.use(
@@ -438,5 +443,107 @@ describe("useRelated (real graph page over MSW)", () => {
     });
     expect(result.current.data?.pages[0]?.rows[0]?.basis).toEqual(["same day"]);
     expect(result.current.data?.pages[0]?.rows[0]?.tentative).toBe(false);
+  });
+});
+
+describe("query regression boundaries", () => {
+  it("keeps retained data after a 408 refresh failure and recovers on deliberate retry", async () => {
+    let failed = false;
+    let revision = "retained";
+    mswServer.use(
+      http.get(`${testBase}/api/v1/health/ready`, () =>
+        HttpResponse.json(readyHealth),
+      ),
+      http.get(`${testBase}/api/v1/articles/detail`, () =>
+        failed
+          ? HttpResponse.json({ error: "Request timed out" }, { status: 408 })
+          : HttpResponse.json({ revision }),
+      ),
+    );
+    const { result } = renderHook(
+      () => {
+        const query = useRead<{ revision: string }>(
+          "articles/detail?run=r&id=a",
+        );
+        // Consume error/loading during render, as the real screen does, so
+        // Query's property tracking subscribes this observer to those changes.
+        return {
+          data: query.data,
+          error: query.error,
+          isLoading: query.isLoading,
+          refetch: query.refetch,
+        };
+      },
+      { wrapper: providerWrapper() },
+    );
+    await waitFor(() => expect(result.current.data?.revision).toBe("retained"));
+    failed = true;
+    await act(async () => {
+      await result.current.refetch();
+    });
+    expect(result.current.data?.revision).toBe("retained");
+    expect(result.current.isLoading).toBe(false);
+    await waitFor(() =>
+      expect(result.current.error).toMatchObject({
+        status: 408,
+        message: "Request timed out",
+      }),
+    );
+    failed = false;
+    revision = "recovered";
+    await act(async () => {
+      await result.current.refetch();
+    });
+    await waitFor(() =>
+      expect(result.current.data?.revision).toBe("recovered"),
+    );
+    expect(result.current.error).toBeNull();
+  });
+
+  it("never exposes an old backend's delayed response after switching servers", async () => {
+    const nextBase = "http://127.0.0.1:8081";
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const received = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    mswServer.use(
+      http.get(`${testBase}/api/v1/health/ready`, () =>
+        HttpResponse.json(readyHealth),
+      ),
+      http.get(`${nextBase}/api/v1/health/ready`, () =>
+        HttpResponse.json({ ...readyHealth, instance_id: "next-instance" }),
+      ),
+      http.get(`${testBase}/api/v1/articles/detail`, async () => {
+        started();
+        await gate;
+        return HttpResponse.json({ revision: "obsolete" });
+      }),
+      http.get(`${nextBase}/api/v1/articles/detail`, () =>
+        HttpResponse.json({ revision: "current" }),
+      ),
+    );
+    const { result } = renderHook(
+      () => ({
+        backend: useBackend(),
+        query: useRead<{ revision: string }>("articles/detail?run=r&id=a"),
+      }),
+      { wrapper: providerWrapper() },
+    );
+    await received;
+    try {
+      act(() => result.current.backend.setBase(nextBase));
+      await waitFor(() =>
+        expect(result.current.query.data?.revision).toBe("current"),
+      );
+      expect(result.current.backend.instance).toBe("next-instance");
+    } finally {
+      await act(async () => release());
+    }
+    expect(result.current.query.data?.revision).toBe("current");
+    expect(result.current.query.error).toBeNull();
   });
 });

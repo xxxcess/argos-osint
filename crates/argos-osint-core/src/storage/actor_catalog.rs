@@ -104,13 +104,16 @@ pub async fn article_actors(
 ) -> Result<Option<Vec<crate::atlas_metadata::ArticleActor>>> {
     let mut r = repo
         .db()
-        .query("RETURN record::exists(brain_actor_seed:catalog)")
+        .query("SELECT VALUE status FROM ONLY brain_actor_seed:catalog")
         .await?
         .check()?;
-    if r.take::<Option<bool>>(0)? != Some(true) {
+    let state: Option<String> = r.take(0)?;
+    let Some(state) = state else {
         return Ok(None);
-    }
-    if status(repo.db()).await?.needs_seed {
+    };
+    // The seed receipt is authoritative here. Counting the entire actor table
+    // on every brief read turns a local lookup into a catalog-wide scan.
+    if state != "complete" {
         return Ok(Some(Vec::new()));
     }
     Ok(Some(repo.actor_matcher().await?.article_actors(article)))

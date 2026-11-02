@@ -24,7 +24,6 @@ import {
 } from "three/examples/jsm/renderers/CSS2DRenderer.js";
 import { assignParticles, particleOffset } from "./neighborhood";
 import { neighborhoodCamera } from "./cameraFrame";
-import { labelZoomOpacity, placeEdgeLabels } from "./labelLayout";
 import { createNodeGlyph } from "./nodeGlyph";
 import { intelMotion, topologyColors } from "../shell/intel-theme";
 
@@ -123,8 +122,7 @@ function visibleNode(node: GNode) {
   return group;
 }
 
-function visibleLink(raw: object) {
-  const link = raw as GLink;
+function visibleLink() {
   const group = new Group();
   const line = new Line(
     new BufferGeometry(),
@@ -137,13 +135,6 @@ function visibleLink(raw: object) {
     }),
   );
   group.add(line);
-  const label = document.createElement("div");
-  label.className = "intel-topology-edge-label";
-  label.textContent = link.label;
-  const anchor = document.createElement("div");
-  anchor.appendChild(label);
-  group.add(new CSS2DObject(anchor));
-  group.addEventListener("removed", () => anchor.remove());
   return group;
 }
 
@@ -162,21 +153,14 @@ function positionLink(
     new Vector3(end.x, end.y, end.z || 0),
   ]);
   line.computeLineDistances();
-  group.children[1].position.set(
-    (start.x + end.x) / 2,
-    (start.y + end.y) / 2,
-    ((start.z || 0) + (end.z || 0)) / 2,
-  );
   return true;
 }
 
 function createLabelRenderer() {
   let reducedMotion = true;
-  let zoomDistance = 300;
   const renderer = new CSS2DRenderer();
   const opacityCache = new Map<string, number>();
   const render = renderer.render.bind(renderer);
-  let layoutFrame = 0;
   renderer.render = (scene, camera) => {
     render(scene, camera);
     const root = renderer.domElement;
@@ -199,41 +183,11 @@ function createLabelRenderer() {
         Math.abs(opacity - target) < 0.005 ? target : opacity,
       );
     }
-    layoutFrame = (layoutFrame + 1) % 6;
-    if (layoutFrame !== 1) return;
-    const labels = [
-      ...root.querySelectorAll<HTMLElement>(".intel-topology-edge-label"),
-    ];
-    for (const label of labels) label.style.transform = "";
-    const blockers = [
-      ...root.querySelectorAll<HTMLElement>(
-        "[data-tile=node], .intel-topology-node-label",
-      ),
-    ].map((element) => element.getBoundingClientRect());
-    const offsets = placeEdgeLabels(
-      blockers,
-      labels.map((label) => label.getBoundingClientRect()),
-      root.getBoundingClientRect(),
-    );
-    // Rectangles are viewport pixels; CSS transforms use the unscaled layout pixels.
-    const scale = root.offsetWidth
-      ? root.getBoundingClientRect().width / root.offsetWidth
-      : 1;
-    labels.forEach((label, index) => {
-      const offset = offsets[index];
-      label.style.transform = `translate(${offset.x / scale}px, ${offset.y / scale}px)`;
-      label.style.opacity = String(
-        offset.visible ? labelZoomOpacity(zoomDistance) : 0,
-      );
-    });
   };
   renderer.domElement.style.pointerEvents = "none";
   renderer.domElement.setAttribute("aria-hidden", "true");
   return {
     renderers: [renderer],
-    setZoomDistance(value: number) {
-      zoomDistance = value;
-    },
     setReducedMotion(value: boolean) {
       reducedMotion = value;
     },
@@ -432,7 +386,6 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
       const x = camera.x - target.x;
       const y = camera.y - target.y;
       const z = camera.z - target.z;
-      labelRenderer.setZoomDistance(Math.hypot(x, y, z));
       onViewRef.current?.({
         yaw: Math.round(Math.atan2(x, z) * 100) / 100,
         zoom: Math.round(30000 / (Math.hypot(x, y, z) || 1)),
@@ -476,6 +429,7 @@ const ForceCanvas = forwardRef<CanvasHandle, Props>(function ForceCanvas(
       nodeRelSize={6}
       nodeVal={(n) => ((n as GNode).id === selectedId ? 4 : 2)}
       nodeOpacity={0.9}
+      linkHoverPrecision={8}
       linkLabel={(l) => escapeGraphLabel((l as unknown as GLink).label)}
       linkColor={(l) => {
         const edge = l as unknown as {

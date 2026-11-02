@@ -194,6 +194,18 @@ async fn storage_api_contracts() {
     let (status, metrics) = call(&app, "GET", "/api/v1/host/metrics", None, Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(metrics["cpu_percent"], Value::Null, "CPU needs two samples");
+    for field in ["platform", "chipset"] {
+        let value = metrics.get(field).expect("Host identity field is present");
+        assert!(
+            value.is_null()
+                || value.as_str().is_some_and(|label| {
+                    !label.is_empty()
+                        && label.chars().count() <= 64
+                        && !label.chars().any(char::is_control)
+                }),
+            "Invalid host {field}: {value}"
+        );
+    }
     assert_eq!(
         metrics["network_kbps"],
         Value::Null,

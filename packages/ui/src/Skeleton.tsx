@@ -12,11 +12,14 @@ export function Skeleton({
   width = "100%",
   height = 16,
   radius = 4,
+  fill = false,
 }: {
   lines?: number;
   width?: DimensionValue;
   height?: number;
   radius?: number;
+  /** Stretch one block to its parent. Used for the topology graph square. */
+  fill?: boolean;
 }) {
   const [opacity] = useState(() => new Animated.Value(0.55));
   useEffect(() => {
@@ -61,14 +64,19 @@ export function Skeleton({
       aria-hidden
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
-      style={{ gap: 8, width }}
+      style={
+        fill
+          ? { width: "100%", height: "100%", flex: 1 }
+          : { gap: 8, width }
+      }
     >
-      {Array.from({ length: lines }, (_, i) => (
+      {Array.from({ length: fill ? 1 : lines }, (_, i) => (
         <Animated.View
           testID="skeleton-line"
           key={i}
           style={{
-            height,
+            height: fill ? "100%" : height,
+            flex: fill ? 1 : undefined,
             borderRadius: radius,
             backgroundColor: "#34343A",
             opacity,

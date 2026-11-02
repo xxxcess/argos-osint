@@ -1,19 +1,27 @@
 "use client";
 import React, { useEffect, useState } from "react";
 import { View, Text, Image, Linking } from "react-native";
-import { Button, Label, Copy, Notice, EmptyState } from "@argos/ui";
+import {
+  Button,
+  Label,
+  Copy,
+  Notice,
+  EmptyState,
+  LoadingState,
+} from "@argos/ui";
 import type {
+  BriefStage,
   Article,
   Brief,
   useRead,
   useAction,
   useRelated,
 } from "@argos/api-client";
-import { BriefSkeleton } from "./BriefSkeleton";
+import { StageContent } from "./StageContent";
 import { JobStatusBeacon } from "../../shell/JobStatusBeacon";
-import type { JobState } from "../../shell/jobState";
+import { indexingJobState, type JobState } from "../../shell/jobState";
 import { intelStatus, intelColors } from "../../shell/intel-theme";
-const s = { small: { color: intelColors.dim, fontSize: 12 } };
+const s = { small: { color: intelColors.dim, fontSize: 13 } };
 function JsonLines({ value }: { value: unknown }) {
   function lines(v: unknown): string[] {
     if (Array.isArray(v)) return v.flatMap(lines);
@@ -98,6 +106,7 @@ export function ContextRail({
   reload,
   backend,
   jobState,
+  linksStage,
 }: {
   a: Article;
   d?: Brief;
@@ -108,6 +117,7 @@ export function ContextRail({
   reload: ReturnType<typeof useAction<{ job_id: string }>>;
   backend: { createRequestId: () => string };
   jobState: JobState;
+  linksStage?: BriefStage;
 }) {
   const source = (
     <View style={{ gap: 16 }}>
@@ -135,13 +145,13 @@ export function ContextRail({
       <Text accessibilityRole="header" style={s.small}>
         RETAINED BRIEF CONTROLS
       </Text>
-      {detail.isPending ? (
-        <BriefSkeleton label="Loading brief status…" />
+      {!d && detail.isLoading ? (
+        <LoadingState label="Loading brief status…" compact />
       ) : d ? (
         <>
           <JobStatusBeacon state={jobState} />
           <Label>Brief lifecycle</Label>
-          <Copy>{d?.status || "Loading…"}</Copy>
+          <Copy>{d.status || "Status unavailable"}</Copy>
           <View
             role="list"
             accessibilityLabel="Brief lifecycle timeline"
@@ -163,7 +173,7 @@ export function ContextRail({
               {
                 label: "Indexing",
                 value: `${d.indexing?.state || "Not indexed"}${d.indexing?.reason ? ` · ${d.indexing.reason}` : ""}`,
-                state: d.indexing?.state === "indexed" ? "succeeded" : jobState,
+                state: indexingJobState(d.indexing?.state),
               },
             ].map((step) => (
               <View
@@ -228,13 +238,13 @@ export function ContextRail({
         Refresh retained brief
       </Button>
       <Label>Links</Label>
-      {detail.isPending ? (
-        <BriefSkeleton label="Loading retained links…" />
-      ) : d ? (
-        <JsonLines value={d.links} />
-      ) : (
-        <EmptyState title="Links unavailable" />
-      )}
+      <StageContent stage={linksStage} kind="inferences">
+        {d ? (
+          <JsonLines value={d.links} />
+        ) : !detail.isLoading ? (
+          <EmptyState title="Links unavailable" />
+        ) : null}
+      </StageContent>
     </View>
   );
   return (

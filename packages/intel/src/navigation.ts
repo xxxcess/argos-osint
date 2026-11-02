@@ -4,7 +4,13 @@ export type IntelRoute =
   | { screen: "home" }
   | { screen: "bulletin" }
   | ({ screen: "brief" } & Partial<ArticleLocation>)
-  | { screen: "topology"; seed: string | null; from?: ArticleLocation };
+  | {
+      screen: "topology";
+      seed: string | null;
+      /** Node to select inside an extracted brief graph. */
+      focus?: string;
+      from?: ArticleLocation;
+    };
 export interface IntelNavigation {
   subscribe: (listener: () => void) => () => void;
   getSnapshot: () => IntelRoute;

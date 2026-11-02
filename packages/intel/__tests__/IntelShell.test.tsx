@@ -4,9 +4,13 @@ import { hydrateRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { IntelScrollFab, IntelStatusBar } from "../src/shell/IntelShell";
+import {
+  IntelScrollFab,
+  IntelStatusBar,
+  JobDropUp,
+} from "../src/shell/IntelShell";
 import { fontFamilies } from "../src/shell/intel-fonts";
-import { intelMetricColors } from "../src/shell/intel-theme";
+import { intelStatus, intelMetricColors } from "../src/shell/intel-theme";
 import { paint, sheetProp } from "../../../vitest.test-support";
 
 // @tag:testing — only the host viewport is controlled; render real RN components.
@@ -65,6 +69,8 @@ describe("Intel status bar", () => {
           memoryPercent: 45.4,
           diskPercent: null,
           networkKBps: 3376,
+          platform: " macOS 26.0 ",
+          chipset: " x86 · 16 cores ",
         }}
         clock="10:00:54 AM"
       />,
@@ -73,17 +79,20 @@ describe("Intel status bar", () => {
     expect(screen.getByText("45%")).toBeVisible();
     expect(screen.getByText("—")).toBeVisible();
     expect(screen.getByRole("group", { name: "NET 3376 KB/s" })).toBeVisible();
-    expect(screen.getByText("3376")).toBeVisible();
-    expect(screen.getByText("KB/s")).toBeVisible();
+    expect(screen.getByText("3376 KB/s")).toBeVisible();
     expect(paint(screen.getByText("0%"), "color")).toBe(
       intelMetricColors.cpu.toLowerCase(),
     );
     expect(paint(screen.getByText("45%"), "color")).toBe(
       intelMetricColors.memory.toLowerCase(),
     );
-    expect(paint(screen.getByText("3376"), "color")).toBe(
+    expect(paint(screen.getByText("3376 KB/s"), "color")).toBe(
       intelMetricColors.network.toLowerCase(),
     );
+    expect(
+      screen.getByRole("button", { name: "macOS 26.0, x86 · 16 cores" }),
+    ).toHaveTextContent("macOS");
+    expect(screen.getByText("x86 · 16 cores")).toBeVisible();
     expect(screen.getByLabelText("API connected")).toHaveTextContent("API_OK");
     expect(screen.getByText("10:00:54 AM")).toBeVisible();
   });
@@ -96,7 +105,7 @@ describe("Intel status bar", () => {
     expect(screen.getByLabelText("API offline")).toHaveTextContent("OFFLINE");
     expect(screen.queryByText(/\d+%/)).not.toBeInTheDocument();
   });
-  it("stacks network units for a measured zero but does not imply a measurement when unavailable", () => {
+  it("keeps network units on one row for a measured zero but does not imply a measurement when unavailable", () => {
     const { rerender } = render(
       <IntelStatusBar
         connected
@@ -105,7 +114,6 @@ describe("Intel status bar", () => {
       />,
     );
     expect(screen.getByRole("group", { name: "NET 0 KB/s" })).toBeVisible();
-    expect(screen.getByText("KB/s")).toBeVisible();
     rerender(<IntelStatusBar connected activeApp={false} />);
     expect(screen.getByRole("group", { name: "NET —" })).toBeVisible();
     expect(screen.queryByText("KB/s")).not.toBeInTheDocument();
@@ -171,4 +179,67 @@ describe("Intel font platform boundary", () => {
       expect(Object.values(families).join(" ")).not.toMatch(/var\(|,/);
     },
   );
+});
+
+describe("background job indicator", () => {
+  it.each([
+    "idle",
+    "queued",
+    "running",
+    "succeeded",
+    "failed",
+    "stale",
+  ] as const)(
+    "shows %s status and only glows for unfinished or failed work",
+    async (state) => {
+      render(
+        <JobDropUp
+          jobs={[
+            { id: "job", label: "Inferences", state, detail: "Model stage" },
+          ]}
+        />,
+      );
+      const trigger = screen.getByRole("button", { name: "Background jobs" });
+      const dot = trigger.firstElementChild!;
+      expect(paint(dot, "backgroundColor")).toBe(
+        intelStatus[state].color.toLowerCase(),
+      );
+      const glow = getComputedStyle(dot).boxShadow;
+      if (["queued", "running", "failed", "stale"].includes(state))
+        expect(glow).toContain("9px");
+      else expect(glow).toBe("none");
+      const user = userEvent.setup();
+      trigger.focus();
+      await user.keyboard("{Enter}");
+      expect(trigger).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByRole("menu")).toHaveTextContent("Inferences");
+      expect(screen.getByRole("menu")).toHaveTextContent("Model stage");
+      await user.keyboard(" ");
+      expect(trigger).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByRole("menu")).toBeNull();
+    },
+  );
+  it("keeps a background failure visible when another job succeeds, then clears its glow on recovery", () => {
+    const { rerender } = render(
+      <JobDropUp
+        jobs={[
+          { id: "ready", label: "Full article", state: "succeeded" },
+          { id: "broken", label: "Links", state: "failed" },
+          { id: "active", label: "Inferences", state: "running" },
+        ]}
+      />,
+    );
+    const dot = () =>
+      screen.getByRole("button", { name: "Background jobs" })
+        .firstElementChild!;
+    expect(paint(dot(), "backgroundColor")).toBe(
+      intelStatus.failed.color.toLowerCase(),
+    );
+    rerender(
+      <JobDropUp
+        jobs={[{ id: "ready", label: "All stages", state: "succeeded" }]}
+      />,
+    );
+    expect(getComputedStyle(dot()).boxShadow).toBe("none");
+  });
 });

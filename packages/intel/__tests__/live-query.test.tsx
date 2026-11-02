@@ -19,6 +19,11 @@ it("keeps metrics on the stream and refreshes only the selected brief on a meani
   let detailReads = 0;
   let metricsReads = 0;
   let otherReads = 0;
+  let finishRefresh!: () => void;
+  let abortedRefreshes = 0;
+  const refreshGate = new Promise<void>((resolve) => {
+    finishRefresh = resolve;
+  });
   mswServer.use(
     http.get(`${testBase}/api/v1/health/ready`, () =>
       HttpResponse.json({
@@ -29,13 +34,19 @@ it("keeps metrics on the stream and refreshes only the selected brief on a meani
         instance_id: "live-query-fixture",
       }),
     ),
-    http.get(`${testBase}/api/v1/articles/detail`, ({ request }) => {
+    http.get(`${testBase}/api/v1/articles/detail`, async ({ request }) => {
       if (new URL(request.url).searchParams.get("id") === "other") {
         otherReads++;
         return HttpResponse.json({ revision: "other" });
       }
-      detailReads++;
-      return HttpResponse.json({ revision: String(detailReads) });
+      const revision = ++detailReads;
+      if (revision > 1) {
+        request.signal.addEventListener("abort", () => {
+          abortedRefreshes++;
+        });
+        await refreshGate;
+      }
+      return HttpResponse.json({ revision: String(revision) });
     }),
     http.get(`${testBase}/api/v1/host/metrics`, () => {
       metricsReads++;
@@ -109,7 +120,16 @@ it("keeps metrics on the stream and refreshes only the selected brief on a meani
   act(() =>
     listeners.get("brief")!({ ...progress, refresh: true, complete: true }),
   );
+  try {
+    await waitFor(() => expect(detailReads).toBe(2));
+    await act(async () => {
+      listeners.get("brief")!({ ...progress, refresh: true, complete: true });
+    });
+  } finally {
+    finishRefresh();
+  }
   await screen.findByText("revision 2");
+  expect(abortedRefreshes).toBe(0);
   expect(detailReads).toBe(2);
   expect(otherReads).toBe(1);
   act(() => listeners.get("metrics")!({ type: "status", connected: false }));

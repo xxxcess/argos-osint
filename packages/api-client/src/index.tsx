@@ -13,6 +13,7 @@ import {
   useMutation,
   useQueryClient,
   useInfiniteQuery,
+  keepPreviousData,
 } from "@tanstack/react-query";
 import type { LiveTransport, BriefProgress } from "./live";
 export { decodeLiveEvent } from "./live";
@@ -28,6 +29,9 @@ export interface HostMetrics {
   memory_percent: number | null;
   disk_percent: number | null;
   network_kbps: number | null;
+  /** Host OS name. Absent or null when the API did not report one. */
+  platform?: string | null;
+  chipset?: string | null;
 }
 export interface Article {
   id: string;
@@ -76,6 +80,8 @@ export interface Brief {
     inferences: number;
   } | null;
   body_pending?: boolean;
+  actors_pending?: boolean;
+  bindings_pending?: boolean;
   job_id?: string;
   indexing?: { state: string; reason: string } | null;
 }
@@ -403,6 +409,7 @@ export function useHostMetrics() {
           memory_percent: null,
           disk_percent: null,
           network_kbps: null,
+          platform: null,
         });
     });
   }, [b.base, b.instance, b.connected, b.live, client]);
@@ -438,14 +445,17 @@ export function useBriefLive(article: Article, watch: string) {
         if (event.type === "brief") {
           client.setQueryData(key, { connected: true, progress: event });
           if (event.refresh)
-            void client.invalidateQueries({
-              queryKey: [
-                b.base,
-                b.instance,
-                `articles/detail?${keyFor({ run_id: run, id })}`,
-              ],
-              exact: true,
-            });
+            void client.invalidateQueries(
+              {
+                queryKey: [
+                  b.base,
+                  b.instance,
+                  `articles/detail?${keyFor({ run_id: run, id })}`,
+                ],
+                exact: true,
+              },
+              { cancelRefetch: false },
+            );
         }
         if (event.type === "error")
           client.setQueryData(
@@ -546,6 +556,9 @@ export function useTopology(seed: string | null) {
   return useQuery({
     queryKey: [b.base, b.instance, "topology", seed],
     enabled: b.connected && !!seed,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    placeholderData: keepPreviousData,
     queryFn: ({ signal }) =>
       request<Topology>(
         b.base,
@@ -579,3 +592,5 @@ export function useRelated(article: Article) {
     refetchOnWindowFocus: false,
   });
 }
+
+export type { BriefStage } from "./live";

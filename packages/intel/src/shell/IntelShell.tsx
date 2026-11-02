@@ -31,6 +31,8 @@ export type IntelMetrics = {
   memoryPercent?: number | null;
   diskPercent?: number | null;
   networkKBps?: number | null;
+  platform?: string | null;
+  chipset?: string | null;
 };
 function metric(value: number | null | undefined, suffix: string) {
   return value != null && Number.isFinite(value) && value >= 0
@@ -68,14 +70,21 @@ export function IntelStatusBar({
   );
   const width = hydrated ? dimensions.width : 0;
   const wide = width >= 1100;
+  const navSize = width >= 600 ? 18 : 13;
   const networkValue = metric(metrics?.networkKBps, "");
   const networkAvailable = networkValue !== "—";
+  const platform = metrics?.platform?.trim();
+  const platformShort = platform?.split(/\s+/)[0] || "server";
+  const chipset = metrics?.chipset?.trim() || "";
+  const serverLabel = chipset
+    ? `${platform || "server"}, ${chipset}`
+    : platform || "server";
   return (
     <View nativeID="intel-status-bar" style={s.bar}>
       <View style={[s.cluster, s.navCluster]}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="server"
+          accessibilityLabel={serverLabel}
           onPress={onHome}
           disabled={!onHome}
           style={s.home}
@@ -92,7 +101,12 @@ export function IntelStatusBar({
               <View style={s.serverLight} />
             </View>
           </View>
-          <Text style={s.navText}>server</Text>
+          <Text numberOfLines={1} style={[s.serverName, { fontSize: navSize }]}>
+            {platformShort}
+          </Text>
+          {chipset ? (
+            <Text style={[s.chipBadge, { fontSize: navSize }]}>{chipset}</Text>
+          ) : null}
         </Pressable>
         <View style={s.divider} />
         {activeApp ? (
@@ -150,21 +164,19 @@ export function IntelStatusBar({
               aria-label={`NET ${networkValue}${networkAvailable ? " KB/s" : ""}`}
               style={s.networkMetric}
             >
-              <Text style={s.telemetry}>NET</Text>
-              <View>
-                <Text
-                  style={[s.telemetry, { color: intelMetricColors.network }]}
-                >
-                  {networkValue}
-                </Text>
-                {networkAvailable ? (
-                  <Text
-                    style={[s.telemetry, { color: intelMetricColors.network }]}
-                  >
-                    KB/s
-                  </Text>
-                ) : null}
-              </View>
+              <Text numberOfLines={1} style={s.telemetry}>
+                NET
+              </Text>
+              <Text
+                numberOfLines={1}
+                style={[
+                  s.telemetry,
+                  { color: intelMetricColors.network, flexShrink: 0 },
+                ]}
+              >
+                {networkValue}
+                {networkAvailable ? " KB/s" : ""}
+              </Text>
             </View>
             <View nativeID="intel-status-metric-divider" style={s.divider} />
           </>
@@ -176,7 +188,7 @@ export function IntelStatusBar({
             accessibilityLabel={connected ? "API connected" : "API offline"}
             style={[
               s.api,
-              { fontSize: width >= 600 ? 18 : 12 },
+              { fontSize: navSize },
               { color: connected ? c.accent : c.danger },
             ]}
           >
@@ -204,6 +216,7 @@ const rank: Record<JobState, number> = {
 
 export function JobDropUp({ jobs }: { jobs: StatusJob[] }) {
   const [open, setOpen] = useState(false);
+  const navSize = useWindowDimensions().width >= 600 ? 18 : 13;
   const lead = jobs.reduce<StatusJob | undefined>((best, job) => {
     if (!best || rank[job.state] > rank[best.state]) return job;
     return best;
@@ -220,8 +233,22 @@ export function JobDropUp({ jobs }: { jobs: StatusJob[] }) {
         onPress={() => setOpen((value) => !value)}
         style={s.jobTrigger}
       >
-        <View style={[s.jobDot, { backgroundColor: tone }]} />
-        <Text style={[s.navText, { color: tone }]}>Jobs</Text>
+        <View
+          style={[
+            s.jobDot,
+            {
+              backgroundColor: tone,
+              boxShadow: ["failed", "running", "queued", "stale"].includes(
+                state,
+              )
+                ? `0 0 9px 3px ${tone}`
+                : "none",
+            },
+          ]}
+        />
+        <Text style={[s.navText, { color: tone, fontSize: navSize }]}>
+          Jobs
+        </Text>
       </Pressable>
       {open ? (
         <View
@@ -316,23 +343,24 @@ const s = StyleSheet.create({
   },
   jobHeading: {
     fontFamily: intelFonts.mono,
-    fontSize: 12,
+    fontSize: 13,
     color: c.muted,
   },
   jobRow: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
   jobLabel: {
     fontFamily: intelFonts.mono,
-    fontSize: 13,
+    fontSize: 14,
     color: c.text,
   },
   jobDetail: {
     fontFamily: intelFonts.mono,
-    fontSize: 12,
+    fontSize: 13,
     color: c.dim,
   },
   cluster: { flexDirection: "row", alignItems: "center", gap: 16, minWidth: 0 },
-  navCluster: { height: "100%" },
+  navCluster: { height: "100%", flexShrink: 1 },
   home: {
+    flexShrink: 1,
     minWidth: 40,
     minHeight: 44,
     paddingHorizontal: 8,
@@ -342,8 +370,29 @@ const s = StyleSheet.create({
   },
   navText: {
     fontFamily: intelFonts.mono,
-    fontSize: 12,
+    fontSize: 13,
     color: c.dim,
+  },
+  serverName: {
+    fontFamily: intelFonts.mono,
+    fontSize: 13,
+    color: c.dim,
+    flexShrink: 1,
+    maxWidth: 120,
+  },
+  chipBadge: {
+    fontFamily: intelFonts.mono,
+    fontSize: 13,
+    fontWeight: "700",
+    color: c.accent,
+    backgroundColor: c.inset,
+    borderWidth: 1,
+    borderColor: c.borderStrong,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    overflow: "hidden",
+    flexShrink: 0,
   },
   server: { gap: 4, width: 28 },
   serverUnit: {
@@ -390,18 +439,18 @@ const s = StyleSheet.create({
   },
   appText: {
     fontFamily: intelFonts.mono,
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: "700",
     color: c.accent,
   },
-  appTextWide: { fontSize: 20 },
+  appTextWide: { fontSize: 21 },
   telemetry: {
     fontFamily: intelFonts.mono,
     fontSize: 18,
     color: c.dim,
     fontVariant: ["tabular-nums"],
   },
-  api: { fontFamily: intelFonts.mono, fontSize: 12, fontWeight: "600" },
+  api: { fontFamily: intelFonts.mono, fontSize: 13, fontWeight: "600" },
   networkMetric: { flexDirection: "row", alignItems: "center", gap: 8 },
   clock: {
     fontFamily: intelFonts.mono,
@@ -423,5 +472,5 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  arrow: { color: c.text, fontFamily: intelFonts.mono, fontSize: 13 },
+  arrow: { color: c.text, fontFamily: intelFonts.mono, fontSize: 14 },
 });

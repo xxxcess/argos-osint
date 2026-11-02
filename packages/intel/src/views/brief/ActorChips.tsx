@@ -6,7 +6,7 @@ import { EmptyState } from "@argos/ui";
 import { intelKindColors as kinds } from "../../shell/intel-theme";
 import { BriefSection } from "./BriefSection";
 import { BriefSkeleton } from "./BriefSkeleton";
-import { topologyTarget } from "./BriefAction";
+import { extractedFocus, topologyTarget } from "./BriefAction";
 import { briefStyles as s } from "./briefStyles";
 export function ActorChips({
   actors,
@@ -19,14 +19,17 @@ export function ActorChips({
   pending: boolean;
   brief?: Brief;
   extracted?: Seed | null;
-  onTopology: (seed: Seed) => void;
+  onTopology: (seed: Seed, focus?: string) => void;
 }) {
   const evidenceState = (
     empty: string,
     loading = "Loading extracted evidence…",
   ) =>
-    pending ? (
-      <BriefSkeleton label={loading} />
+    pending && (!brief || brief.actors_pending) ? (
+      <BriefSkeleton
+        variant="actors"
+        label={brief?.actors_pending ? "Matching catalog actors…" : loading}
+      />
     ) : (
       <EmptyState title={brief ? empty : "Evidence unavailable"} />
     );
@@ -36,7 +39,7 @@ export function ActorChips({
         title="IDENTIFIED ACTORS"
         color={kinds.actor}
         icon="actor"
-        count={actors.length}
+        count={pending && actors.length === 0 ? undefined : actors.length}
       >
         <View style={s.evidenceBox}>
           {actors.length
@@ -51,7 +54,11 @@ export function ActorChips({
                   }}
                   onPress={() => {
                     const seed = topologyTarget(actor.topology_seed, extracted);
-                    if (seed) onTopology(seed);
+                    const focus = seed
+                      ? extractedFocus(seed, extracted, `actor:${actor.id}`)
+                      : undefined;
+                    if (seed && focus) onTopology(seed, focus);
+                    else if (seed) onTopology(seed);
                   }}
                   style={s.evidenceRow}
                 >

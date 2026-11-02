@@ -1,6 +1,5 @@
 "use client";
 import { Skeleton } from "@argos/ui";
-import { InspectorPresence } from "./InspectorPresence";
 import { useSelectedNodeScroll } from "./selection.web";
 import React, {
   lazy,
@@ -21,13 +20,12 @@ import {
   type LayoutChangeEvent,
 } from "react-native";
 import { useTopology, type Seed } from "@argos/api-client";
+import { displayEvidence } from "../views/brief/displayEvidence";
 import {
   Button,
-  Label,
   Copy,
   Panel,
   Notice,
-  LoadingState,
   EmptyState,
   fonts,
   colors as c,
@@ -43,7 +41,6 @@ const ForceCanvas = lazy(() => import("./ForceCanvas"));
 
 type TopoData = NonNullable<ReturnType<typeof useTopology>["data"]>;
 type TNode = TopoData["nodes"][number];
-type TEdge = TopoData["edges"][number];
 
 const noopSubscribe = () => () => {};
 const subscribeMotion = (cb: () => void) => {
@@ -56,12 +53,14 @@ const motionSnapshot = () =>
 
 export function Topology({
   seed,
+  focus,
   onSeed,
   pageStyle,
   displayScale = 1,
 }: {
   seed: string | null;
-  onSeed: (s: Seed) => void;
+  focus?: string;
+  onSeed: (s: Seed, focus?: string) => void;
   pageStyle: object;
   displayScale?: number;
 }) {
@@ -74,19 +73,31 @@ export function Topology({
           Connections preserve their recorded meaning.
         </Copy>
       ) : null}
-      {graph.error && <Notice>{graph.error.message}</Notice>}
+      {graph.error && (
+        <>
+          <Notice>{graph.error.message}</Notice>
+          <Button
+            disabled={graph.isFetching}
+            onPress={() => {
+              void graph.refetch();
+            }}
+          >
+            Retry topology
+          </Button>
+        </>
+      )}
       {!seed ? (
         <EmptyState title="No topology selected">
           Open an actor, claim or article from a Focus Brief.
         </EmptyState>
       ) : null}
-      {seed && graph.isPending ? (
-        <CanvasSkeleton label="Loading topology…" />
+      {seed && !graph.data && graph.isLoading ? (
+        <TopologySkeleton
+          label="Loading topology…"
+          displayScale={displayScale}
+        />
       ) : null}
-      {graph.isRefetching ? (
-        <LoadingState label="Refreshing topology…" compact />
-      ) : null}
-      {seed && graph.isSuccess && graph.data.nodes.length === 0 ? (
+      {seed && graph.data?.nodes.length === 0 ? (
         <EmptyState title="No retained connections">
           No topology records are available for this seed.
         </EmptyState>
@@ -95,6 +106,8 @@ export function Topology({
         <GraphExplorer
           key={seed}
           data={graph.data}
+          graphSeed={seed}
+          focus={focus}
           onSeed={onSeed}
           displayScale={displayScale}
         />
@@ -113,12 +126,16 @@ export function Topology({
 
 function GraphExplorer({
   data: sourceData,
+  graphSeed,
+  focus,
   onSeed,
   displayScale,
 }: {
   data: TopoData;
+  graphSeed: string | null;
+  focus?: string;
   displayScale: number;
-  onSeed: (s: Seed) => void;
+  onSeed: (s: Seed, focus?: string) => void;
 }) {
   const retainedNodes = sourceData.nodes.filter(
     (node) => node.kind !== "topic",
@@ -131,8 +148,7 @@ function GraphExplorer({
       (edge) => retainedIds.has(edge.from) && retainedIds.has(edge.to),
     ),
   };
-  const { width: winWidth, height: winHeight } = useWindowDimensions();
-  const wide = winWidth >= 1100;
+  const { height: winHeight } = useWindowDimensions();
   const client = useSyncExternalStore(
     noopSubscribe,
     () => true,
@@ -147,8 +163,13 @@ function GraphExplorer({
   const [box, setBox] = useState(0);
   // undefined = default to first node; null = explicitly cleared.
   const [selectedId, setSelectedId] = useState<string | null | undefined>(
-    undefined,
+    focus,
   );
+  const [previousFocus, setPreviousFocus] = useState(focus);
+  if (focus !== previousFocus) {
+    setPreviousFocus(focus);
+    if (focus) setSelectedId(focus);
+  }
   const [hiddenKinds, setHiddenKinds] = useState<string[]>([]);
   const [depth, setDepth] = useState<0 | 1 | 2>(1);
   const [view] = useState(createViewStore);
@@ -191,7 +212,7 @@ function GraphExplorer({
   const focusIds = selected ? new Set(nodes.map((node) => node.id)) : null;
   const gNodes: GNode[] = nodes.map((n) => ({
     id: n.id,
-    label: n.label,
+    label: displayEvidence(n.label),
     kind: n.kind,
     role: neighborhood.role.get(n.id),
   }));
@@ -205,7 +226,9 @@ function GraphExplorer({
     kinds.map((kind) => [kind, kindHue(kind)]),
   );
   const summary = `Topology graph with ${data.nodes.length} nodes and ${edges.length} connections across ${kinds.length} kinds. ${
-    selected ? `Selected ${selected.label}.` : "No node selected."
+    selected
+      ? `Selected ${displayEvidence(selected.label)}.`
+      : "No node selected."
   } Use the node and connection lists for keyboard access.`;
   const reset = () => {
     setHiddenKinds([]);
@@ -217,16 +240,24 @@ function GraphExplorer({
     if (id && previous && id !== previous) history.current.push(previous);
     setSelectedId(id);
     if (id && !explicitSecond.current) setDepth(1);
-    const target = id ? byId.get(id)?.topology_seed : null;
+    const node = id ? byId.get(id) : undefined;
+    const target = node?.topology_seed;
+    const canonical =
+      !!target &&
+      [target.Actor, target.Claim, target.Inference].some(
+        (value) => typeof value === "string" && !!value,
+      );
+    if (id && id !== previous && canonical && target) {
+      onSeed(target);
+      return;
+    }
     if (
       id &&
       id !== previous &&
-      target &&
-      [target.Actor, target.Claim, target.Inference].some(
-        (value) => typeof value === "string" && !!value,
-      )
+      graphSeed?.startsWith("brief:") &&
+      (node?.kind === "claim" || node?.kind === "inference")
     )
-      onSeed(target);
+      onSeed({ Brief: graphSeed }, id);
   }
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -251,35 +282,8 @@ function GraphExplorer({
   }, []);
   const onLayout = (e: LayoutChangeEvent) =>
     setBox(Math.floor(e.nativeEvent.layout.width));
-  const height =
-    Math.max(580, Math.min(900, winHeight - 180 * displayScale)) / displayScale;
+  const height = graphViewportHeight(winHeight, displayScale);
   const graphHeight = height;
-  // Neighbors of the selection, grouped by kind.
-  const hood = new Map<
-    string,
-    { key: string; node: TNode; edge: TEdge; out: boolean }[]
-  >();
-  if (selected)
-    for (const e of edges) {
-      if (e.from !== selected.id && e.to !== selected.id) continue;
-      const out = e.from === selected.id;
-      const node = byId.get(out ? e.to : e.from)!;
-      const list = hood.get(node.kind) ?? [];
-      list.push({ key: e.id, node, edge: e, out });
-      hood.set(node.kind, list);
-    }
-  const degree = (id: string) => ({
-    out: edges.filter((e) => e.from === id).length,
-    in: edges.filter((e) => e.to === id).length,
-  });
-  const maxDegree = Math.max(
-    1,
-    ...data.nodes.map((n) => {
-      const d = degree(n.id);
-      return d.in + d.out;
-    }),
-  );
-  const sel = selected ? degree(selected.id) : null;
 
   const graphArea = (
     <View nativeID="intel-topology-graph" style={t.graphCol}>
@@ -307,7 +311,7 @@ function GraphExplorer({
             }}
           >
             <ErrorBoundary label="Topology graph" onRetry={reset}>
-              <Suspense fallback={<CanvasSkeleton />}>
+              <Suspense fallback={<GraphSquare contained />}>
                 <ForceCanvas
                   ref={canvas}
                   nodes={gNodes}
@@ -420,80 +424,13 @@ function GraphExplorer({
     </View>
   );
 
-  const details = (
-    <Panel title="Neighborhood">
-      <InspectorPresence visible={!!selected}>
-        {selected ? (
-          <View
-            key={selected.id}
-            nativeID="intel-topology-inspector"
-            style={{ gap: 8 }}
-          >
-            <View style={t.kindLabel}>
-              <KindIcon kind={selected.kind} />
-              <Text style={[t.hudTitle, { color: kindColor[selected.kind] }]}>
-                {selected.kind.toUpperCase()}
-              </Text>
-            </View>
-            <Text style={t.headline}>{selected.label}</Text>
-            <Copy>{selected.detail}</Copy>
-            {selected.topology_seed && (
-              <Button onPress={() => onSeed(selected.topology_seed!)}>
-                Navigate this node →
-              </Button>
-            )}
-            {sel && (
-              <View style={{ gap: 4 }}>
-                <DegreeBar
-                  label="Outgoing"
-                  value={sel.out}
-                  max={maxDegree}
-                  color={c.accent}
-                />
-                <DegreeBar
-                  label="Incoming"
-                  value={sel.in}
-                  max={maxDegree}
-                  color={c.accent2}
-                />
-              </View>
-            )}
-            {hood.size === 0 ? (
-              <Copy>No retained connections for this node.</Copy>
-            ) : (
-              [...hood.entries()].map(([kind, items]) => (
-                <View key={kind} style={{ gap: 4 }}>
-                  <Label>
-                    {kind} ({items.length})
-                  </Label>
-                  {items.map((it) => (
-                    <Button
-                      key={it.key}
-                      variant="quiet"
-                      onPress={() => choose(it.node.id)}
-                      label={`Select neighbor ${it.node.label}, ${
-                        it.out ? "outgoing" : "incoming"
-                      } ${it.edge.label}`}
-                    >
-                      {it.out ? "→" : "←"} {it.edge.label} · {it.node.label}
-                    </Button>
-                  ))}
-                </View>
-              ))
-            )}
-          </View>
-        ) : (
-          <Copy>No node selected. Choose one from the graph or the list.</Copy>
-        )}
-      </InspectorPresence>
-    </Panel>
-  );
-
   const nodeList = (
     <Panel title="Nodes">
       <ScrollView
         nativeID="intel-topology-node-scroll"
+        accessibilityLabel="Topology nodes"
         style={t.listBox}
+        contentContainerStyle={t.listContent}
         nestedScrollEnabled
       >
         <View role="list" aria-label="Topology nodes">
@@ -511,7 +448,19 @@ function GraphExplorer({
             );
           })}
         </View>
-        <Label>Connections</Label>
+      </ScrollView>
+    </Panel>
+  );
+
+  const connectionList = (
+    <Panel title="Connections">
+      <ScrollView
+        nativeID="intel-topology-connection-scroll"
+        accessibilityLabel="Topology connections"
+        style={t.listBox}
+        contentContainerStyle={t.listContent}
+        nestedScrollEnabled
+      >
         {links.length === 0 ? (
           <Copy>No connections match the current filters.</Copy>
         ) : (
@@ -519,8 +468,9 @@ function GraphExplorer({
             {links.map((edge) => (
               <View role="listitem" key={edge.id} style={t.edgeRow}>
                 <Copy>
-                  {byId.get(edge.from)?.label || edge.from} → {edge.label} →{" "}
-                  {byId.get(edge.to)?.label || edge.to}
+                  {displayEvidence(byId.get(edge.from)?.label || edge.from)} →{" "}
+                  {edge.label} →{" "}
+                  {displayEvidence(byId.get(edge.to)?.label || edge.to)}
                 </Copy>
               </View>
             ))}
@@ -532,20 +482,14 @@ function GraphExplorer({
 
   return (
     <View style={{ gap: 12, minWidth: 0 }}>
-      <View
-        nativeID="intel-topology-layout"
-        style={[t.layout, wide && t.layoutWide]}
-      >
+      <View nativeID="intel-topology-layout" style={t.layout}>
         {graphArea}
-        <View
-          nativeID="intel-topology-side"
-          style={[t.sideCol, wide && t.sideColWide]}
-        >
-          {details}
-        </View>
       </View>
       <View nativeID="intel-topology-nodes" style={t.nodesSection}>
         {nodeList}
+      </View>
+      <View nativeID="intel-topology-connections" style={t.nodesSection}>
+        {connectionList}
       </View>
     </View>
   );
@@ -643,38 +587,6 @@ function HudButton({
   );
 }
 
-function DegreeBar({
-  label,
-  value,
-  max,
-  color,
-}: {
-  label: string;
-  value: number;
-  max: number;
-  color: string;
-}) {
-  return (
-    <View
-      role="img"
-      aria-label={`${label} connections: ${value}`}
-      style={t.barRow}
-    >
-      <Text style={t.barLabel}>
-        {label} {value}
-      </Text>
-      <View style={t.barTrack}>
-        <View
-          style={[
-            t.barFill,
-            { backgroundColor: color, width: `${(value / max) * 100}%` },
-          ]}
-        />
-      </View>
-    </View>
-  );
-}
-
 function NodeListRow({
   node,
   dotColor,
@@ -690,7 +602,7 @@ function NodeListRow({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Select node ${node.label}, ${node.kind}`}
+      accessibilityLabel={`Select node ${displayEvidence(node.label)}, ${node.kind}`}
       aria-pressed={on}
       onPress={onPress}
       onHoverIn={() => setHovered(true)}
@@ -704,7 +616,7 @@ function NodeListRow({
     >
       <View style={[t.dot, { backgroundColor: dotColor }]} />
       <Text style={t.itemText} numberOfLines={2}>
-        {node.label}
+        {displayEvidence(node.label)}
       </Text>
       <Text style={t.itemKind}>{node.kind}</Text>
     </Pressable>
@@ -713,13 +625,43 @@ function NodeListRow({
 
 const t = StyleSheet.create({
   kindLabel: { flexDirection: "row", alignItems: "center", gap: 6 },
-  controls: { flexDirection: "row", flexWrap: "wrap", gap: 8, minWidth: 0 },
-  layout: { gap: 16, minWidth: 0 },
-  layoutWide: { flexDirection: "row-reverse", alignItems: "flex-start" },
-  graphCol: { flex: 1, minWidth: 0, gap: 12 },
+  controls: {
+    width: "100%",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    minWidth: 0,
+  },
+  layout: { width: "100%", gap: 16, minWidth: 0 },
+  graphCol: { width: "100%", minWidth: 0, gap: 12 },
   nodesSection: { width: "100%", minWidth: 0 },
-  sideCol: { width: "100%", minWidth: 0, gap: 12 },
-  sideColWide: { width: 320, flexShrink: 0 },
+  graphSquare: {
+    alignSelf: "stretch",
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: "#34343A",
+  },
+  graphSquarePage: {
+    width: "100%",
+    maxWidth: "100%",
+  },
+  graphSquareContained: {
+    height: "100%",
+    maxWidth: "100%",
+    maxHeight: "100%",
+  },
+  sectionRect: {
+    width: "100%",
+    height: 120,
+    borderRadius: 12,
+    overflow: "hidden",
+  },
+  sectionRectTall: {
+    width: "100%",
+    height: 220,
+    borderRadius: 12,
+    overflow: "hidden",
+  },
   canvasBox: {
     width: "100%",
     minWidth: 0,
@@ -732,9 +674,9 @@ const t = StyleSheet.create({
     justifyContent: "center",
   },
   neighborhoodHud: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "flex-end",
+    width: "100%",
+    flexDirection: "column",
+    alignItems: "stretch",
     gap: 16,
     padding: 16,
     backgroundColor: topologyColors.panel,
@@ -742,17 +684,17 @@ const t = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 10,
   },
-  controlGroup: { gap: 8, minWidth: 0 },
-  kindControls: { flexGrow: 1, flexShrink: 1 },
+  controlGroup: { width: "100%", gap: 8, minWidth: 0 },
+  kindControls: { width: "100%" },
   hudHeading: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
   },
-  hudTitle: { fontFamily: fonts.mono, fontSize: 12, color: intelColors.dim },
+  hudTitle: { fontFamily: fonts.mono, fontSize: 13, color: intelColors.dim },
   hudDegree: {
     fontFamily: fonts.mono,
-    fontSize: 12,
+    fontSize: 13,
     color: topologyColors.accent,
   },
   hudRow: { flexDirection: "row", gap: 6 },
@@ -775,7 +717,7 @@ const t = StyleSheet.create({
   },
   hudButtonText: {
     fontFamily: fonts.mono,
-    fontSize: 12,
+    fontSize: 13,
     color: intelColors.dim,
   },
   hudTelemetry: {
@@ -784,11 +726,11 @@ const t = StyleSheet.create({
     gap: 12,
     paddingVertical: 8,
   },
-  hudMetric: { fontFamily: fonts.mono, fontSize: 11, color: intelColors.muted },
+  hudMetric: { fontFamily: fonts.mono, fontSize: 12, color: intelColors.muted },
   overlay: { position: "absolute", alignItems: "center", gap: 8, padding: 12 },
-  count: { fontFamily: fonts.mono, fontSize: 12, color: c.dim },
-  headline: { fontSize: 19, lineHeight: 28, fontWeight: "600", color: c.text },
-  listBox: { maxHeight: 260 },
+  count: { fontFamily: fonts.mono, fontSize: 13, color: c.dim },
+  listBox: { maxHeight: 260, minHeight: 0, minWidth: 0 },
+  listContent: { paddingRight: 8, paddingBottom: 8 },
   item: {
     flexDirection: "row",
     alignItems: "center",
@@ -804,35 +746,73 @@ const t = StyleSheet.create({
   itemHover: { backgroundColor: c.glassStrong },
   itemPressed: { backgroundColor: c.glassStrong, borderLeftColor: c.border },
   dot: { width: 10, height: 10, borderRadius: 5 },
-  itemText: { flex: 1, minWidth: 0, color: c.text, fontSize: 14 },
-  itemKind: { fontFamily: fonts.mono, fontSize: 11, color: c.muted },
+  itemText: { flex: 1, minWidth: 0, color: c.text, fontSize: 15 },
+  itemKind: { fontFamily: fonts.mono, fontSize: 12, color: c.muted },
   edgeRow: { paddingVertical: 4 },
-  barRow: { gap: 2 },
-  barLabel: { fontFamily: fonts.mono, fontSize: 12, color: c.dim },
-  barTrack: {
-    height: 6,
-    backgroundColor: c.raised,
-    borderRadius: 3,
-    overflow: "hidden",
-  },
-  barFill: { height: 6, borderRadius: 3 },
 });
 
-function CanvasSkeleton({ label = "Loading graph…" }: { label?: string }) {
+/** Layout height whose on-screen size is 75% of the browser viewport. */
+function graphViewportHeight(winHeight: number, displayScale: number) {
+  const scale = displayScale > 0 ? displayScale : 1;
+  const measured = winHeight > 0 ? winHeight : 800 * scale;
+  return (measured * 0.75) / scale;
+}
+
+function GraphSquare({
+  contained = false,
+  height,
+}: {
+  contained?: boolean;
+  height?: number;
+}) {
+  return (
+    <View
+      nativeID="intel-topology-graph-skeleton"
+      style={[
+        t.graphSquare,
+        contained ? t.graphSquareContained : t.graphSquarePage,
+        !contained && height != null ? { height } : null,
+      ]}
+    >
+      <Skeleton fill radius={12} />
+    </View>
+  );
+}
+
+/** Mirrors the loaded graph, neighborhood controls, inspector, and node list. */
+function TopologySkeleton({
+  label,
+  displayScale,
+}: {
+  label: string;
+  displayScale: number;
+}) {
+  const { height: winHeight } = useWindowDimensions();
+  const graphHeight = graphViewportHeight(winHeight, displayScale);
   return (
     <View
       nativeID="intel-topology-skeleton"
       role="status"
       accessibilityLabel={label}
-      style={{ padding: 32, gap: 32 }}
+      style={{ gap: 12, minWidth: 0 }}
     >
-      <Skeleton width="50%" height={12} />
-      <View style={{ flexDirection: "row", justifyContent: "space-around" }}>
-        {[0, 1, 2].map((i) => (
-          <Skeleton key={i} width={40} height={40} radius={20} />
-        ))}
+      <View style={t.layout}>
+        <View style={t.graphCol}>
+          <GraphSquare height={graphHeight} />
+          <View nativeID="intel-topology-controls-skeleton" style={t.sectionRect}>
+            <Skeleton fill radius={12} />
+          </View>
+        </View>
       </View>
-      <Skeleton width="80%" height={12} />
+      <View nativeID="intel-topology-nodes-skeleton" style={t.sectionRectTall}>
+        <Skeleton fill radius={12} />
+      </View>
+      <View
+        nativeID="intel-topology-connections-skeleton"
+        style={t.sectionRectTall}
+      >
+        <Skeleton fill radius={12} />
+      </View>
     </View>
   );
 }

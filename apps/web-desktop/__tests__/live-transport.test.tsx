@@ -150,3 +150,54 @@ it("does not open a throwaway connection during immediate Strict Mode cleanup", 
   await Promise.resolve();
   expect(Socket.instances).toHaveLength(0);
 });
+
+it("reconnects a silent socket, ignores its late messages and cancels retries on cleanup", async () => {
+  const events: LiveEvent[] = [];
+  const live = createLiveTransport();
+  const stop = live.subscribe({ type: "metrics" }, (event) =>
+    events.push(event),
+  );
+  await Promise.resolve();
+  const stale = Socket.instances[0];
+  stale.open();
+  await vi.advanceTimersByTimeAsync(35_000);
+  expect(stale.readyState).toBe(3);
+  expect(events.at(-1)).toEqual({ type: "status", connected: false });
+  await vi.advanceTimersByTimeAsync(1000);
+  const current = Socket.instances[1];
+  current.open();
+  const count = events.length;
+  stale.message({
+    type: "metrics",
+    data: {
+      cpu_percent: 88,
+      memory_percent: 0,
+      disk_percent: 0,
+      network_kbps: 0,
+    },
+  });
+  expect(events).toHaveLength(count);
+  current.close();
+  stop();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(Socket.instances).toHaveLength(2);
+});
+
+it("keeps a healthy heartbeat stream connected without emitting fictitious metrics", async () => {
+  const events: LiveEvent[] = [];
+  const live = createLiveTransport();
+  const stop = live.subscribe({ type: "metrics" }, (event) =>
+    events.push(event),
+  );
+  await Promise.resolve();
+  const socket = Socket.instances[0];
+  socket.open();
+  for (let i = 0; i < 4; i++) {
+    await vi.advanceTimersByTimeAsync(15_000);
+    socket.message({ type: "heartbeat" });
+  }
+  expect(socket.readyState).toBe(1);
+  expect(events.filter((event) => event.type === "metrics")).toEqual([]);
+  expect(Socket.instances).toHaveLength(1);
+  stop();
+});

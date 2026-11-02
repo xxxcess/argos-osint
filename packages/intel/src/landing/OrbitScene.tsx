@@ -242,7 +242,7 @@ export function OrbitScene({
               style={{
                 color: intelColors.accent,
                 fontFamily: intelFonts.mono,
-                fontSize: 12,
+                fontSize: 13,
               }}
             >
               Retry connection checks

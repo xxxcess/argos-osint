@@ -19,7 +19,10 @@ async function expectFixedStatusBar(page: Page) {
   const bar = page.locator("#intel-status-bar");
   await expect(bar).toBeVisible();
   const box = (await bar.boundingBox())!;
-  expect(box.height).toBe(48);
+  const scale = await page
+    .locator("html")
+    .evaluate((el) => Number(getComputedStyle(el).zoom) || 1);
+  expect(box.height).toBe(64 * scale);
   expect(
     Math.abs(box.y + box.height - (await page.evaluate(() => innerHeight))),
   ).toBeLessThanOrEqual(1);
@@ -250,6 +253,9 @@ async function fixtures(
     online: () => {
       online = true;
     },
+    setDescription: (value: string) => {
+      article.description = value;
+    },
     mutations,
     reloads,
     admissions,
@@ -276,9 +282,14 @@ test("opening and revisiting a published brief does not queue another run", asyn
   const reads = () =>
     f.requests.filter((path) => path === "articles/detail").length;
   const initial = reads();
+  f.setDescription("Manually refreshed brief");
   await page.getByRole("button", { name: "Refresh retained brief" }).click();
+  await expect(
+    page.getByText("Manually refreshed brief", { exact: true }),
+  ).toBeVisible();
   await expect.poll(reads).toBeGreaterThan(initial);
   const refreshed = reads();
+  f.setDescription("Push refreshed brief");
   const live = await installLiveFixture(page);
   live.brief({
     run: "r1",
@@ -289,6 +300,9 @@ test("opening and revisiting a published brief does not queue another run", asyn
     complete: true,
     refresh: true,
   });
+  await expect(
+    page.getByText("Push refreshed brief", { exact: true }),
+  ).toBeVisible();
   await expect.poll(reads).toBeGreaterThan(refreshed);
   expect(f.admissions).toEqual([]);
   await page
@@ -523,17 +537,14 @@ test("browse, search, brief, related, topology and reconnect", async ({
   f.offline();
   await page.clock.fastForward(60_000);
   await expect(
-    page.getByRole("status", {
-      name: /Local API unavailable|Waiting for workspace readiness/,
-    }),
-  ).toBeVisible({
-    timeout: 75000,
-  });
+    page.getByRole("alert").filter({ hasText: "Failed to fetch" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("API offline", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Jobs", exact: true }),
   ).toHaveCount(0);
   f.online();
-  await page.getByRole("button", { name: "Retry connection checks" }).click();
+  await page.getByRole("button", { name: "Connect / retry" }).click();
   await expect(page.getByText("Recorded actor")).toBeVisible();
   await expect(page).toHaveURL(/\/topology\?seed=actor1$/);
   await page.getByRole("button", { name: "Bulletin", exact: true }).click();
@@ -641,6 +652,12 @@ test("selection controls support keyboard activation and visible focus", async (
     "solid",
   );
   await day.press("Tab");
+  const refresh = page.getByRole("button", {
+    name: "Refresh feed",
+    exact: true,
+  });
+  await expect(refresh).toBeFocused();
+  await refresh.press("Tab");
   const open = page.getByRole("button", { name: /^Open Focus Brief:/ });
   await expect(open).toBeFocused();
   await page.screenshot({
@@ -681,8 +698,6 @@ for (const width of [1440, 768, 390, 320]) {
       "IDENTIFIED ACTORS",
       "RETAINED CLAIMS",
       "ANALYTICAL INFERENCES",
-      "INTELLIGENCE ORIGIN",
-      "EXTRACTED ENTITIES",
       "RETAINED BRIEF CONTROLS",
     ])
       await expect(
@@ -764,8 +779,8 @@ test("loading days and a verified empty cycle are distinct states", async ({
   });
   await gotoBulletin(page);
   await expect(
-    page.getByRole("progressbar", {
-      name: "Loading retained days…",
+    page.getByRole("status", {
+      name: "Loading bulletin…",
       exact: true,
     }),
   ).toBeVisible();
@@ -859,7 +874,7 @@ test("brief and related loading states preserve numeric zero and verified empty 
     page.getByRole("heading", { name: "No published claims" }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("status", { name: "Loading related leads…" }),
+    page.getByRole("progressbar", { name: "Loading related leads…" }),
   ).toBeVisible();
   await page.screenshot({
     path: `${captureDir}/brief-loading.png`,
@@ -1005,13 +1020,17 @@ test("background refresh keeps readable bulletin rows", async ({ page }) => {
   });
   await gotoBulletin(page);
   await expect(page.getByText(a.title, { exact: true })).toBeVisible();
-  await page.clock.fastForward(5000);
+  await page.clock.fastForward(60_000);
+  await expect.poll(() => reads).toBeGreaterThan(1);
   await expect(
     page.getByRole("progressbar", {
       name: "Refreshing bulletin…",
       exact: true,
     }),
-  ).toBeVisible();
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("status", { name: "Loading bulletin…", exact: true }),
+  ).toHaveCount(0);
   await expect(page.getByText(a.title, { exact: true })).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "NO MATCHING INTELLIGENCE" }),
@@ -1328,7 +1347,7 @@ test("global All follows one server cursor stream and retains rows across a fail
 }) => {
   // This case exercises scrolling, not a sidebar-height dependency. A compact
   // sidebar may let two short records fit at the default 1000px viewport.
-  await page.setViewportSize({ width: 1440, height: 720 });
+  await page.setViewportSize({ width: 1440, height: 400 });
   await fixtures(page);
   const first = {
     ...a,
@@ -1469,7 +1488,15 @@ for (const width of [1440, 320]) {
       }),
     );
     await page.goto("/");
-    await expect(page.getByLabel("API offline", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("status", {
+        name: "Waiting for workspace readiness",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(page.getByLabel("API offline", { exact: true })).toHaveCount(
+      0,
+    );
     await expectFixedStatusBar(page);
     await expect(
       page.getByRole("button", { name: "Retry connection checks" }),
@@ -1509,7 +1536,7 @@ for (const width of [1536, 1440, 768, 390, 320]) {
     const frame = (await page.locator("#intel-content-frame").boundingBox())!;
     await expect(page.getByLabel("API connected", { exact: true })).toHaveCSS(
       "font-size",
-      width >= 600 ? "18px" : "12px",
+      width >= 600 ? "18px" : "13px",
     );
     expect(frame.width).toBeLessThanOrEqual(1440);
     if (width === 1536) expect(frame.width).toBe(1440);
@@ -1560,7 +1587,7 @@ for (const width of [1536, 1440, 768, 390, 320]) {
     await expect(page.getByText(a.title)).toBeVisible();
     await expectFixedStatusBar(page);
     await page.getByRole("textbox", { name: "Search articles" }).fill("harbor");
-    await page.getByRole("button", { name: "Home", exact: true }).click();
+    await page.getByRole("button", { name: "server", exact: true }).click();
     const returning = page.getByRole("button", {
       name: "Open Intel",
       exact: true,
@@ -1609,7 +1636,9 @@ for (const width of [1440, 768, 390, 320]) {
         .toBe("absolute");
       const openBox = (await article.boundingBox())!;
       expect(openBox.y).toBe(closedTop);
-      await page.getByRole("button", { name: /^Day / }).nth(1).click();
+      await overlay
+        .getByRole("button", { name: "Day 2026-10-25", exact: true })
+        .click();
       await expect(overlay).toHaveCount(0);
     }
     await page.screenshot({
@@ -1799,7 +1828,7 @@ for (const referenceWidth of [1440, 1280, 768, 390, 320]) {
         ).toBe(color);
       }
       await expect(viewport.locator(".intel-topology-edge-label")).toHaveCount(
-        5,
+        0,
       );
       await expect(viewport.locator("button")).toHaveCount(0);
       await expect(
@@ -1813,18 +1842,15 @@ for (const referenceWidth of [1440, 1280, 768, 390, 320]) {
       const viewportBox = (await viewport.boundingBox())!;
       expect(controlsBox.y).toBeGreaterThan(viewportBox.y + viewportBox.height);
       expect(controlsBox.width).toBeCloseTo(viewportBox.width, 0);
-      if (width >= 1100) {
-        const depthBox = (await page
-          .getByRole("group", { name: "Neighbor depth", exact: true })
-          .boundingBox())!;
-        const kindsBox = (await page
-          .getByRole("group", { name: "Node kinds", exact: true })
-          .boundingBox())!;
-        expect(kindsBox.x).toBeGreaterThan(depthBox.x + depthBox.width);
-      }
-      const side = page.locator("#intel-topology-side");
-      const sideBox = (await side.boundingBox())!;
-      const graphBox = (await viewport.boundingBox())!;
+      const depthBox = (await page
+        .getByRole("group", { name: "Neighbor depth", exact: true })
+        .boundingBox())!;
+      const kindsBox = (await page
+        .getByRole("group", { name: "Node kinds", exact: true })
+        .boundingBox())!;
+      expect(kindsBox.y).toBeGreaterThan(depthBox.y + depthBox.height);
+      expect(depthBox.x).toBeCloseTo(controlsBox.x, 0);
+      expect(kindsBox.x).toBeCloseTo(controlsBox.x, 0);
       const nodesBox = (await page
         .locator("#intel-topology-nodes")
         .boundingBox())!;
@@ -1834,39 +1860,6 @@ for (const referenceWidth of [1440, 1280, 768, 390, 320]) {
       expect(nodesBox.y).toBeGreaterThan(layoutBox.y + layoutBox.height);
       expect(nodesBox.x).toBeCloseTo(layoutBox.x, 0);
       expect(nodesBox.width).toBeCloseTo(layoutBox.width, 0);
-      if (width >= 1100) {
-        expect(sideBox.x + sideBox.width).toBeLessThan(graphBox.x);
-        expect(sideBox.y).toBeCloseTo(graphBox.y, 0);
-        expect(sideBox.width).toBeCloseTo(320, 0);
-      } else {
-        expect(sideBox.y).toBeGreaterThan(graphBox.y + graphBox.height);
-      }
-      if (width >= 600) {
-        await expect
-          .poll(() =>
-            viewport.evaluate((el) => {
-              const captions = [
-                ...el.querySelectorAll(".intel-topology-node-label"),
-              ].map((node) => node.getBoundingClientRect());
-              return [
-                ...el.querySelectorAll(".intel-topology-edge-label"),
-              ].every((label) => {
-                const box = label.getBoundingClientRect();
-                return (
-                  getComputedStyle(label).opacity !== "0" &&
-                  captions.every(
-                    (caption) =>
-                      box.right + 6 <= caption.left ||
-                      box.left - 6 >= caption.right ||
-                      box.bottom + 6 <= caption.top ||
-                      box.top - 6 >= caption.bottom,
-                  )
-                );
-              });
-            }),
-          )
-          .toBe(true);
-      }
       await expect(viewport.locator("#intel-topology-axes")).toHaveCount(0);
       await page.screenshot({
         fullPage: true,
@@ -1888,7 +1881,7 @@ for (const referenceWidth of [1440, 1280, 768, 390, 320]) {
     }
     await page.getByRole("button", { name: "2nd DEG", exact: true }).click();
     await expect(viewport.locator("[data-tile=node]")).toHaveCount(6);
-    await expect(viewport.locator(".intel-topology-edge-label")).toHaveCount(6);
+    await expect(viewport.locator(".intel-topology-edge-label")).toHaveCount(0);
     await page
       .getByRole("button", { name: "Show actor nodes", exact: true })
       .click();

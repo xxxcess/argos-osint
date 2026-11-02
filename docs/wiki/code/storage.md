@@ -48,7 +48,7 @@ Stage completion and canonical publication are separate commits: `brief_stages::
 
 The Jobs dashboard reads a bounded page of top-level ids before loading event, task and attempt metrics. Those page metrics are grouped by the selected ids. Running `api_server` and `web_server` rows rank ahead of ordinary work inside the active filters. A single job's event total covers that job and its immediate children, matching the page cohort. See [Intel web](intel-web.md#traffic-in-rust-jobs--logs).
 
-Topology snapshots keep their consistent transaction in a worker that owns `BEGIN` through `COMMIT`/`CANCEL`. If the awaiting caller is dropped (for example by the HTTP timeout), the worker stops traversal and awaits rollback through `run_tx`; dropping the request does not drop the open SDK transaction. This cleanup applies to topology snapshots, including brief navigation binding reads; other transaction callers retain their existing behavior.
+Topology snapshots keep their consistent transaction in a worker that owns `BEGIN` through `COMMIT`/`CANCEL`. If the awaiting caller is dropped (for example by the HTTP timeout), the worker stops traversal and awaits rollback through `run_tx`; dropping the request does not drop the open SDK transaction. This cleanup applies to topology snapshots, including brief navigation binding reads; other transaction callers retain their existing behavior. Brief navigation uses `brief_binding_snapshot` and returns after direct node admission; it skips graph-only topic/Related expansion, payload details, association hydration and neighborhood-summary generation.
 
 ## Intel web read service
 

@@ -2,12 +2,18 @@
 html {
   zoom: var(--intel-ui-scale, 0.75);
 }
+#intel-web-workspace {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
 #intel-content-frame {
   max-width: calc(1440px / var(--intel-ui-scale, 0.75));
 }
 /* Topology uses full-size type, controls and graph tiles inside the compact shell. */
 #intel-topology-workspace {
   zoom: calc(1 / var(--intel-ui-scale, 0.75));
+  overflow: hidden;
 }
 /* Intel-only browser canvas; shared Argos/TUI tokens remain unchanged. */
 * {
@@ -32,6 +38,16 @@ body {
     -apple-system,
     sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+/* Keep list wheel/trackpad scrolling inside its panel at either boundary. */
+#intel-topology-node-scroll,
+#intel-topology-connection-scroll {
+  overscroll-behavior: contain;
+  overflow-x: hidden;
+}
+#intel-topology-node-scroll [dir="auto"],
+#intel-topology-connection-scroll [dir="auto"] {
+  overflow-wrap: anywhere;
 }
 /* Resize layout synchronously, before RN's dimension subscription commits. */
 /* The graph engine retains its previous pixel width until RN onLayout runs.
@@ -58,8 +74,7 @@ body {
     width: 100%;
     max-width: 100%;
   }
-  #intel-topology-graph,
-  #intel-topology-side {
+  #intel-topology-graph {
     flex: none;
     width: 100%;
     max-width: 100%;
@@ -211,34 +226,8 @@ select {
     36px 36px,
     100% 100%;
 }
-.intel-topology-edge-label {
-  padding: 3px 12px;
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #a9b1c1;
-  background: rgba(3, 10, 22, 0.94);
-  border: 1px solid #232c3d;
-  border-radius: 4px;
-  font:
-    12px var(--intel-mono, ui-monospace),
-    monospace;
-  pointer-events: none;
-}
-#intel-topology-side > div {
-  min-width: 0;
-}
-
 .intel-topology-node {
   display: flex !important;
-}
-
-@media (max-width: 599px) {
-  .intel-topology-edge-label {
-    max-width: 112px;
-    padding: 3px 6px;
-  }
 }
 
 @media (max-width: 599px) {
@@ -254,10 +243,6 @@ select {
     max-width: 70px !important;
     font-size: 8px !important;
     padding: 3px 4px !important;
-  }
-  /* Relationships remain in the parallel connection list at phone widths. */
-  .intel-topology-edge-label {
-    display: none;
   }
 }
 
@@ -331,19 +316,6 @@ select {
     transform: translateY(0);
   }
 }
-@keyframes intel-inspector-enter {
-  from {
-    opacity: 0;
-    transform: translateX(16px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-#intel-topology-inspector {
-  animation: intel-inspector-enter 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
-}
 #intel-article-feed [data-testid^="article-card-"] {
   transition:
     background-color 120ms,
@@ -378,8 +350,7 @@ select {
 }
 
 .intel-topology-node,
-.intel-topology-node [data-tile="node"],
-.intel-topology-edge-label {
+.intel-topology-node [data-tile="node"] {
   transition:
     opacity 200ms,
     transform 200ms,
@@ -391,14 +362,12 @@ select {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  #intel-topology-inspector,
   #intel-feed-cards > :nth-child(-n + 8) {
     animation: none;
   }
   #intel-article-feed [data-testid^="article-card-"],
   .intel-topology-node,
-  .intel-topology-node [data-tile="node"],
-  .intel-topology-edge-label {
+  .intel-topology-node [data-tile="node"] {
     transition: none;
   }
 }

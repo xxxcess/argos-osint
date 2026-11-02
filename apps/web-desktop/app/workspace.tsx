@@ -9,8 +9,10 @@ import { WEB_UI_SCALE } from "./ui-scale";
 /** Persistent shell across the four screen routes; history never resets feed state. */
 export function WebWorkspace() {
   return (
-    <BackendProvider settings={webBackendSettings} live={webLiveTransport}>
-      <IntelApp navigation={webNavigation} displayScale={WEB_UI_SCALE} />
-    </BackendProvider>
+    <div id="intel-web-workspace">
+      <BackendProvider settings={webBackendSettings} live={webLiveTransport}>
+        <IntelApp navigation={webNavigation} displayScale={WEB_UI_SCALE} />
+      </BackendProvider>
+    </div>
   );
 }

@@ -77,10 +77,14 @@ fn pending(stages_open: bool, indexing: bool) -> bool {
 async fn progress(state: &ApiState, key: &BriefKey) -> Result<(Value, String, bool), ApiError> {
     let mut response = state.repo.db().query(
         "RETURN (SELECT record::id(id) AS job_id, generation FROM intel_brief_run WHERE article_id = $article ORDER BY generation DESC LIMIT 1)[0].job_id;
-         RETURN type::record('intel_brief_index_state', $article).state_json;",
+         RETURN type::record('intel_brief_index_state', $article).state_json;
+         RETURN (SELECT VALUE status FROM ONLY brain_actor_seed:catalog) ?? '';",
     ).bind(("article", key.id.clone())).await.map_err(crate::internal)?.check().map_err(crate::internal)?;
     let job_id: Option<String> = response.take(0).map_err(crate::internal)?;
     let raw_index: Option<String> = response.take(1).map_err(crate::internal)?;
+    let catalog_status: Option<String> = response.take(2).map_err(crate::internal)?;
+    let actors_ready =
+        catalog_status.as_deref() != Some("complete") || state.repo.actor_matcher_ready();
     let index = raw_index
         .map(|raw| serde_json::from_str::<IndexState>(&raw))
         .transpose()
@@ -104,11 +108,13 @@ async fn progress(state: &ApiState, key: &BriefKey) -> Result<(Value, String, bo
     let indexing_pending = index
         .as_ref()
         .is_some_and(|index| index.state == "indexing");
-    let active = pending(
-        stages.iter().any(|stage| stage_open(&stage.state)),
-        indexing_pending,
-    );
+    let active = !actors_ready
+        || pending(
+            stages.iter().any(|stage| stage_open(&stage.state)),
+            indexing_pending,
+        );
     let refresh_key = json!([
+        actors_ready,
         job_id,
         job_state,
         stages
@@ -212,21 +218,19 @@ async fn stream(mut socket: WebSocket, state: ApiState, feed: Arc<HostFeed>) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn terminal_failure_does_not_keep_blocked_children_watching() {
-        assert!(!super::pending(Some("failed"), true, false));
-        assert!(!super::pending(Some("cancelled"), true, true));
-        assert!(super::pending(Some("running"), false, false));
-        assert!(super::pending(Some("completed"), false, true));
-        assert!(!super::pending(Some("completed"), false, false));
+    fn finished_rows_do_not_keep_a_settled_brief_queued() {
+        assert!(!super::pending(false, false));
+        assert!(super::pending(true, false));
+        assert!(super::pending(false, true));
     }
 
     #[test]
     fn only_ongoing_states_keep_a_brief_subscription_active() {
         for state in ["queued", "running", "retry_scheduled", "waiting", "pending"] {
-            assert!(super::running(state));
+            assert!(super::stage_open(state));
         }
         for state in ["completed", "failed", "cancelled", "blocked"] {
-            assert!(!super::running(state));
+            assert!(!super::stage_open(state));
         }
     }
 }

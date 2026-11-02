@@ -25,6 +25,9 @@ pub(crate) struct HostMetrics {
     memory_percent: Option<f64>,
     disk_percent: Option<f64>,
     network_kbps: Option<f64>,
+    /// Host OS name from sysinfo. This is not a hostname.
+    platform: Option<String>,
+    chipset: Option<String>,
 }
 
 /// One sampler per router preserves CPU/network deltas across browser polls.
@@ -36,6 +39,7 @@ pub(crate) struct HostSampler {
     sampled_at: Option<Instant>,
     disk_sampled_at: Option<Instant>,
     snapshot: HostMetrics,
+    platform: Option<String>,
 }
 
 pub(crate) type SharedSampler = Arc<Mutex<HostSampler>>;
@@ -130,8 +134,23 @@ fn network_rate(bytes: u64, elapsed: Duration) -> Option<f64> {
     (elapsed.as_secs_f64() > 0.0).then(|| bytes as f64 / 1024.0 / elapsed.as_secs_f64())
 }
 
+/// Long OS name for the API host, bounded so a noisy sysctl string cannot
+/// dominate the status bar. Empty and control characters are dropped.
+fn platform_name() -> Option<String> {
+    System::long_os_version().and_then(|name| bounded_platform(&name))
+}
+
+fn bounded_platform(name: &str) -> Option<String> {
+    let name: String = name.chars().filter(|c| !c.is_control()).take(64).collect();
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 impl HostSampler {
     fn sample(&mut self, now: Instant, home: PathBuf) -> HostMetrics {
+        if self.platform.is_none() {
+            self.platform = platform_name();
+        }
         let elapsed = self.sampled_at.map(|previous| now.duration_since(previous));
         // Multiple clients cannot shorten the delta window or cause expensive resampling.
         if elapsed.is_some_and(|elapsed| elapsed < Duration::from_secs(1)) {
@@ -181,6 +200,11 @@ impl HostSampler {
             network_kbps: elapsed
                 .filter(|_| interface_count > 0)
                 .and_then(|elapsed| network_rate(network_bytes, elapsed)),
+            platform: self.platform.clone(),
+            chipset: Some(chipset_label(
+                std::env::consts::ARCH,
+                host_cores(&self.system),
+            )),
         };
         self.sampled_at = Some(now);
         self.snapshot.clone()
@@ -200,6 +224,30 @@ pub(crate) async fn read(
     .await
     .map_err(crate::internal)??;
     Ok(Json(snapshot))
+}
+
+fn host_cores(system: &System) -> usize {
+    let counted = system.cpus().len();
+    if counted > 0 {
+        return counted;
+    }
+    std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(0)
+}
+
+/// `x86 · 16 cores` — the host architecture name and logical core count.
+fn chipset_label(architecture: &str, cores: usize) -> String {
+    let architecture = match architecture.trim() {
+        "aarch64" | "arm64" | "arm" => "arm",
+        "x86_64" | "i686" | "x86" => "x86",
+        other => other,
+    };
+    if cores == 0 {
+        return architecture.to_owned();
+    }
+    let unit = if cores == 1 { "core" } else { "cores" };
+    format!("{architecture} · {cores} {unit}")
 }
 
 #[cfg(test)]
@@ -231,6 +279,8 @@ mod tests {
             memory_percent: Some(22.0),
             disk_percent: None,
             network_kbps: Some(0.0),
+            platform: None,
+            chipset: None,
         };
         let mut sampler = super::HostSampler {
             sampled_at: Some(now),
@@ -259,5 +309,23 @@ mod tests {
         );
         assert_eq!(super::network_rate(0, Duration::from_secs(5)), Some(0.0));
         assert_eq!(super::network_rate(100, Duration::ZERO), None);
+    }
+
+    #[test]
+    fn chipset_label_names_the_architecture_and_logical_cores() {
+        assert_eq!(super::chipset_label("x86_64", 16), "x86 · 16 cores");
+        assert_eq!(super::chipset_label("aarch64", 1), "arm · 1 core");
+        assert_eq!(super::chipset_label("riscv64", 0), "riscv64");
+    }
+
+    #[test]
+    fn platform_name_drops_controls_and_stays_bounded() {
+        assert_eq!(super::bounded_platform("  \n"), None);
+        assert_eq!(
+            super::bounded_platform("macOS\n26"),
+            Some("macOS26".to_owned())
+        );
+        let long = "m".repeat(80);
+        assert_eq!(super::bounded_platform(&long).unwrap().chars().count(), 64);
     }
 }

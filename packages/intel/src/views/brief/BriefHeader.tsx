@@ -60,17 +60,14 @@ export function BriefHeader({
           <JobStatusBeacon state={jobState} />
         </View>
       </View>
-      <View style={s.titleRow}>
-        <Text style={s.kicker}>{article.category}</Text>
-        <Text
-          nativeID="intel-brief-title"
-          accessibilityRole="header"
-          numberOfLines={2}
-          style={[s.title, narrow && { fontSize: 18, lineHeight: 24 }]}
-        >
-          {article.title}
-        </Text>
-      </View>
+      <Text
+        nativeID="intel-brief-title"
+        accessibilityRole="header"
+        numberOfLines={2}
+        style={[s.title, narrow && { fontSize: 19, lineHeight: 25 }]}
+      >
+        {article.title}
+      </Text>
     </View>
   );
 }

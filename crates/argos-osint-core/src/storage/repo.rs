@@ -105,13 +105,30 @@ impl Repository {
     /// One deterministic actor matcher per open repository; a reset/reseed
     /// runs in a separate Venture child and therefore gets a fresh cache.
     pub(crate) async fn actor_matcher(&self) -> Result<Arc<crate::actor_catalog::Matcher>> {
-        self.inner
-            .actor_matcher
-            .get_or_try_init(|| async {
-                super::actor_catalog::load_matcher(self).await.map(Arc::new)
-            })
-            .await
-            .cloned()
+        if let Some(matcher) = self.inner.actor_matcher.get() {
+            return Ok(matcher.clone());
+        }
+        let repo = self.clone();
+        // A request timeout must not discard catalog initialization and make
+        // every subsequent request start the same expensive load again.
+        tokio::spawn(async move {
+            repo.inner
+                .actor_matcher
+                .get_or_try_init(|| async {
+                    super::actor_catalog::load_matcher(&repo)
+                        .await
+                        .map(Arc::new)
+                })
+                .await
+                .cloned()
+        })
+        .await
+        .map_err(|error| anyhow!("actor matcher initialization worker: {error}"))?
+    }
+
+    /// Whether the shared actor catalog matcher has finished initialization.
+    pub fn actor_matcher_ready(&self) -> bool {
+        self.inner.actor_matcher.initialized()
     }
 
     pub fn bootstrap(&self) -> Bootstrap {

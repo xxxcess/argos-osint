@@ -50,7 +50,7 @@ export function StatusMessage({
         style={{
           color,
           fontFamily: intelFonts.mono,
-          fontSize: 12,
+          fontSize: 13,
           textAlign: "center",
         }}
       >

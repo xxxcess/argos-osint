@@ -591,7 +591,8 @@ it("does not label a failed body cleanup as a verified empty actor collection", 
 
 it("shows zero confidence above identified actors with the terminal grade", () => {
   render(<View data={{ ...brief, confidence_grade: "B2" }} />);
-  expect(screen.getByText("Brief rating 0/100")).toBeInTheDocument();
+  expect(screen.queryByText(/Brief rating/)).not.toBeInTheDocument();
+  expect(screen.getByText("Source B · Information 2")).toBeVisible();
   expect(screen.getByLabelText("Admiralty grade B2")).toHaveTextContent("██");
   const confidence = screen.getByRole("button", { name: "ARTICLE CONFIDENCE" });
   const actors = screen.getByRole("button", { name: /IDENTIFIED ACTORS/ });

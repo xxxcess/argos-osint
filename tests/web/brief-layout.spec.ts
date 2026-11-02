@@ -601,7 +601,7 @@ for (const width of [1440, 390]) {
       exact: true,
     });
     await expect(
-      page.getByText("Brief rating 0/100", { exact: true }),
+      page.getByText("Source B · Information 2", { exact: true }),
     ).toBeVisible();
     await expect(
       page.getByLabel("Admiralty grade B2", { exact: true }),
@@ -639,9 +639,7 @@ test("confidence inference total updates after generated output arrives even whi
   await expect(
     page.getByText("1 claims · 1 inferences", { exact: true }),
   ).toBeVisible();
-  await expect(
-    page.getByText("Brief rating N/A", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByText(/Brief rating/)).toHaveCount(0);
 });
 
 for (const prior of [true, false]) {
@@ -665,11 +663,7 @@ for (const prior of [true, false]) {
       },
     }));
     await page.goto("/brief?run=fixture-run&id=fixture-article");
-    await expect(
-      page.getByText(prior ? "Brief rating 60/100" : "Brief rating N/A", {
-        exact: true,
-      }),
-    ).toBeVisible();
+    await expect(page.getByText(/Brief rating/)).toHaveCount(0);
     await expect(page.getByText(reason, { exact: true })).toBeVisible();
     await expect(
       page.getByText("1 claims · 1 inferences", { exact: true }),

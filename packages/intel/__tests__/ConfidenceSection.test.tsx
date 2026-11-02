@@ -4,12 +4,13 @@ import { expect, it } from "vitest";
 import type { Brief } from "@argos/api-client";
 import { ConfidenceSection } from "../src/views/brief/ConfidenceSection";
 
-it("distinguishes pending, unavailable and an assessed zero score", () => {
+it("keeps the grade and evidence lines without a rating or assessment status", () => {
   const { rerender } = render(<ConfidenceSection pending />);
-  expect(screen.getByText("Assessment pending")).toBeVisible();
-  expect(screen.getByText("Brief rating N/A")).toBeVisible();
+  expect(screen.queryByText(/Brief rating/)).not.toBeInTheDocument();
+  expect(screen.queryByText("Assessment pending")).not.toBeInTheDocument();
+  expect(screen.getByText("Source F · Information 6")).toBeVisible();
   rerender(<ConfidenceSection pending={false} />);
-  expect(screen.getByText("Assessment unavailable")).toBeVisible();
+  expect(screen.queryByText("Assessment unavailable")).not.toBeInTheDocument();
   rerender(
     <ConfidenceSection
       pending={false}
@@ -26,32 +27,15 @@ it("distinguishes pending, unavailable and an assessed zero score", () => {
       }
     />,
   );
-  expect(screen.getByText("Brief rating 0/100")).toBeVisible();
-  expect(screen.getByText("Assessed")).toBeVisible();
+  expect(screen.queryByText(/Brief rating/)).not.toBeInTheDocument();
+  expect(screen.queryByText("Assessed")).not.toBeInTheDocument();
+  expect(screen.getByText("Source B · Information 2")).toBeVisible();
+  expect(screen.getByText("2 claims · 1 inferences")).toBeVisible();
   expect(screen.getByLabelText("Admiralty grade B2")).toBeVisible();
 });
 
-it("labels publisher-only ratings as provisional and explains an unavailable rating", () => {
-  const { rerender } = render(
-    <ConfidenceSection
-      pending={false}
-      brief={
-        {
-          confidence_grade: "B6",
-          confidence_basis: "publisher_prior",
-          confidence: {
-            score: 60,
-            provisional: true,
-            claims: 0,
-            inferences: 0,
-          },
-        } as Brief
-      }
-    />,
-  );
-  expect(screen.getByText("Brief rating 60/100")).toBeVisible();
-  expect(screen.getByText("Provisional · publisher prior only")).toBeVisible();
-  rerender(
+it("shows the confidence reason in the same evidence style as other sections", () => {
+  render(
     <ConfidenceSection
       pending={false}
       brief={
@@ -62,10 +46,11 @@ it("labels publisher-only ratings as provisional and explains an unavailable rat
       }
     />,
   );
-  expect(screen.getByText("Assessment unavailable")).toBeVisible();
-  expect(
-    screen.getByText(
-      "No scored corroboration or publisher reliability assessment is available.",
-    ),
-  ).toBeVisible();
+  expect(screen.queryByText("Assessment unavailable")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Brief rating/)).not.toBeInTheDocument();
+  const reason = screen.getByText(
+    "No scored corroboration or publisher reliability assessment is available.",
+  );
+  const source = screen.getByText("Source F · Information 6");
+  expect(reason.className).toBe(source.className);
 });

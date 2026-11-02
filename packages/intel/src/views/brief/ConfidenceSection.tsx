@@ -4,12 +4,12 @@ import { View, Text } from "react-native";
 import type { Brief } from "@argos/api-client";
 import { BriefSection } from "./BriefSection";
 import { gradeArt } from "./gradeArt";
+import { briefStyles as s } from "./briefStyles";
 import { intelColors as c } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
 
 export function ConfidenceSection({
   brief,
-  pending,
   claimCount,
   inferenceCount,
 }: {
@@ -43,68 +43,19 @@ export function ConfidenceSection({
         >
           {gradeArt(grade)}
         </Text>
-        <View style={{ gap: 8, flexShrink: 1 }}>
-          <Text
-            style={{
-              color: c.text,
-              fontFamily: intelFonts.mono,
-              fontSize: 16,
-              fontWeight: "700",
-            }}
-          >
-            Brief rating{" "}
-            {confidence?.score != null ? `${confidence.score}/100` : "N/A"}
-          </Text>
-          <Text
-            style={{ color: c.dim, fontFamily: intelFonts.mono, fontSize: 13 }}
-          >
-            {pending
-              ? "Assessment pending"
-              : confidence?.score == null
-                ? "Assessment unavailable"
-                : brief?.confidence_basis === "publisher_prior"
-                  ? "Provisional · publisher prior only"
-                  : confidence.provisional
-                    ? "Provisional assessment"
-                    : "Assessed"}
-          </Text>
-          <Text
-            style={{ color: c.dim, fontFamily: intelFonts.mono, fontSize: 13 }}
-          >
+        <View style={{ gap: 8, flexShrink: 1, minWidth: 0 }}>
+          <Text style={s.evidenceText}>
             Source {grade[0]} · Information {grade[1]}
           </Text>
           {brief ? (
-            <Text
-              style={{
-                color: c.dim,
-                fontFamily: intelFonts.mono,
-                fontSize: 13,
-              }}
-            >
+            <Text style={s.evidenceText}>
               {claimCount ?? confidence?.claims ?? 0} claims ·{" "}
               {inferenceCount ?? confidence?.inferences ?? 0} inferences
             </Text>
           ) : null}
           {brief?.confidence_reason ? (
-            <Text
-              style={{
-                color: c.dim,
-                fontFamily: intelFonts.body,
-                fontSize: 13,
-              }}
-            >
-              {brief.confidence_reason}
-            </Text>
+            <Text style={s.evidenceText}>{brief.confidence_reason}</Text>
           ) : null}
-          <Text
-            style={{
-              color: c.muted,
-              fontFamily: intelFonts.body,
-              fontSize: 13,
-            }}
-          >
-            Evidence assessment · not a probability of truth
-          </Text>
         </View>
       </View>
     </BriefSection>

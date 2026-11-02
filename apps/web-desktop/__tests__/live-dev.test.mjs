@@ -167,7 +167,10 @@ test(
     await page.goto(`${origin}/home`, { timeout: 60_000 });
     await expect(page.getByTestId("hmr-marker")).toHaveText("Before HMR");
     await expect(
-      page.getByRole("button", { name: "Connect / retry", exact: true }),
+      page.getByRole("button", {
+        name: "Retry connection checks",
+        exact: true,
+      }),
     ).toBeEnabled();
     await expect
       .poll(() => sockets.some((url) => url.includes("/_next/")))

@@ -29,13 +29,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: intel-web-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   web:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          # API fixtures do not need the full actor catalog; datasets.yml checks it once.
+          lfs: false
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -59,6 +65,8 @@ jobs:
         run: pnpm check:web-build
       - name: Install test browser
         run: pnpm exec playwright install --with-deps chromium
+      - name: Verify live relay and runtime lifecycle
+        run: pnpm test:live
       - name: Run offline browser contracts
         env:
           ARGOS_WEB_CAPTURE_DIR: test-results/export-ui

@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-Four workflows live in `.github/workflows/` (owned by Code Architect; CI changes are scoped separately from product edits).
+Six workflows live in `.github/workflows/` (owned by Code Architect; CI changes are scoped separately from product edits).
 
 ![CI matrix](../../img/ci-matrix.svg)
 
@@ -28,6 +28,12 @@ Cache: `Swatinem/rust-cache` keyed per OS × storage, covering `target/agents` (
 
 **Local vs. hosted rule:** never run the all-platform or `server` storage stack from `.github/workflows/ci.yml` locally. Agents must **stabilize the local host machine build and embedded storage tests first** (`uname -ms`, `rustc -vV | grep '^host:'`), preferring targeted crate/test commands (`python3 scripts/agent_cargo.py check|clippy|test --locked -p <crate> [--lib | --test <name>]`, or `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 python3 scripts/agent_cargo.py test --locked -p argos-osint-core --test storage_<name>`) during iteration before running `scripts/local_matrix.sh --storage embedded` ([contributor workflow](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration)). Once local builds are stable and changes are pushed, monitor GitHub Actions checks/runs for issues on other platforms and `server` storage mode when CLI access is available (`gh pr checks`, `gh run list --branch "$(git branch --show-current)"`, `gh run view <run-id> --log-failed`).
 
+## `datasets.yml` — LFS dataset integrity
+
+Runs for dataset, `.gitattributes` or its own workflow changes on `main` and pull requests, plus manual dispatch. This is the only job that requests an LFS checkout of the full actor catalog. `git lfs fsck --objects --pointers HEAD` verifies committed pointers and LFS objects; a metadata-only check confirms `datasets/argos_actors.csv` is an LFS pointer in Git and its checkout has the declared full file size. It does not parse the catalog or seed a datastore.
+
+Rust, mutation, web and policy checkouts explicitly leave LFS objects unmaterialized. Their tests use isolated synthetic catalogs; the large dataset is not embedded in Rust binaries. This avoids downloading the same catalog in every platform/storage leg. Checkout credentials are not persisted, and the Rust matrix has read-only contents permission.
+
 ## `commit-policy.yml`
 
 On PRs (including title/body edits) and pushes to `main`: `node scripts/release_check.mjs event` enforces Conventional Commits on the PR title/body or new `main` commits, `release_check.mjs versions` checks workspace/lockfile/manifest versions agree, and the `.opencode/tests` release/tool/planning tests run.
@@ -47,8 +53,11 @@ The web workflow runs on matching web/config/build-check changes on `main` and p
 | `pnpm typecheck` / `pnpm lint` | Type checking and recommended Hooks/compiler diagnostics with zero warnings |
 | `pnpm build` | Next server build using the strict React Compiler pipeline; the upstream need not run at build time |
 | `pnpm check:web-build` | Built Next configuration retains strict compiler options and RN Web/shared transpilation; compiled **application** chunks contain compiler memoization (framework runtime alone is insufficient) |
+| `pnpm test:live` | Offline raw-relay, production runtime/restart and isolated development/HMR lifecycle contracts; runs after the Next build and browser installation |
 | Offline Playwright | The same Chromium fixtures run against the production Next server and the Next development server; both exercise RN Web UI, compilation, hydration, connection/actions and responsive layout. Production nonce CSP and same-origin API assertions apply to the production server. |
 | Retained evidence | Export/dev test results and screenshots use separate directories under `test-results/`; HTML reports use `playwright-report/export` and `playwright-report/dev`. Uploaded with `always()` and seven-day retention. |
+
+New PR web runs cancel stale runs for the same PR; main runs are not cancelled. The web job has a 25-minute limit for the build, live lifecycle tests and both browser profiles.
 
 The evidence upload ignores absent files when an earlier step fails; it does not turn a missing build/test into a pass. Captures are review evidence, not automatic visual approval. No public deployment, live provider keys, secrets or native builds are involved. Path filters mean a docs-only PR does not run this job; configure required checks with that behavior in mind rather than assuming a workflow run for every PR.
 
@@ -71,7 +80,7 @@ termios restored. It needs only `argos` built (no
 checks, it is local supplemental evidence that the workflows do not execute;
 keep actual hosted results separate.
 
-Live-transport changes also run `pnpm test:live` after the Next build. Its offline Node fixtures verify origin checks, raw relay framing, dropped upstream connections and the real Next runtime across a stateless restart. Browser fixtures intercept WebSockets as well as REST; request-count assertions cover quiet pages, push metrics, pending work and reconnect. These supplemental local tests are separate from hosted evidence.
+Live-transport changes also run `pnpm test:live` after the Next build. Its offline Node fixtures verify origin checks, raw relay framing, dropped upstream connections and the real Next runtime across a stateless restart. Browser fixtures intercept WebSockets as well as REST; request-count assertions cover quiet pages, push metrics, pending work and reconnect. The web workflow runs these contracts in its live relay/runtime lifecycle step after building Next and installing Chromium. Local executions and hosted results remain separate evidence.
 
 ## Scoped mutation diagnostics
 

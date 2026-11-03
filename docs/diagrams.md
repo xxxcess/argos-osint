@@ -10,6 +10,9 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | --- | --- | --- | --- |
 | Local NLP | Data flow | [nlp-preprocessing.html](diagrams/nlp-preprocessing.html) | [nlp-preprocessing.svg](diagrams/nlp-preprocessing.svg) |
 | Workspace | Architecture | [workspace.html](diagrams/workspace.html) | [workspace.svg](diagrams/workspace.svg) |
+| Local Intel web lifecycle | Process | [intel-web.html](diagrams/intel-web.html) | [intel-web.svg](diagrams/intel-web.svg) |
+| Intel Focus Brief column order | Layout | [intel-focus-layout.html](diagrams/intel-focus-layout.html) | [intel-focus-layout.svg](diagrams/intel-focus-layout.svg) |
+| Venture navigation | Process | [venture-navigation.html](diagrams/venture-navigation.html) | [venture-navigation.svg](diagrams/venture-navigation.svg) |
 | TUI shell | Nested | [tui-shell.html](diagrams/tui-shell.html) | [tui-shell.svg](diagrams/tui-shell.svg) |
 | Recon turn | Process | [recon-turn.html](diagrams/recon-turn.html) | [recon-turn.svg](diagrams/recon-turn.svg) |
 | Bindings | Data flow | [recon-bindings.html](diagrams/recon-bindings.html) | [recon-bindings.svg](diagrams/recon-bindings.svg) |
@@ -52,3 +55,5 @@ sibling SVG consistent; update catalog/index/prose links for added, replaced or
 retired figures. An index-only refresh does not replace these maintained figures.
 
 Follow this file and [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design). Put new figures in `docs/diagrams/` as HTML plus a sibling SVG, then link them from this catalog and the matching wiki page. Do not drop Mermaid fences into `docs/`.
+
+- [Actor catalog](diagrams/actor-catalog.html) ([SVG](diagrams/actor-catalog.svg)): Venture seeding, durable batches and deterministic article associations; [contract](wiki/code/actor-catalog.md).

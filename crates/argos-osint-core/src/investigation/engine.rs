@@ -33,7 +33,7 @@ pub struct InvestigationRuntime {
 }
 
 /// Orchestrates an incremental execution step in the shared investigation harness.
-/// Storage goes through [`ReconStore`]: SQLite, or the SurrealDB repository
+/// Storage goes through [`ReconStore`]: the legacy store, or the SurrealDB repository
 /// when the process selected it (`ReconStore::open`); never both.
 pub async fn execute_harness_step(
     store: &ReconStore,

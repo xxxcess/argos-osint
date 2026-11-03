@@ -2,8 +2,8 @@
 //!
 //! Ports the scheduler election, task claim, lease renewal, lease reaper,
 //! cleanup, stop, finalize, brief-chain and stage/neighborhood publication
-//! fences. Each SQLite `BEGIN IMMEDIATE` boundary becomes a [`run_tx`]
-//! transaction that writes a guard record first (see `tx`):
+//! fences. Each serialized write boundary becomes a [`run_tx`] transaction
+//! that writes a guard record first (see `tx`):
 //!
 //! | Guard | Serializes |
 //! |---|---|
@@ -82,7 +82,15 @@ pub const STOP_BATCH: usize = 100;
 /// Jobs or tasks handled per reaper / cleanup transaction.
 pub const SWEEP_BATCH: i64 = 64;
 
-const TERMINAL: &[&str] = &["completed", "failed", "partial", "cancelled", "superseded"];
+const TERMINAL: &[&str] = &[
+    "completed",
+    "succeeded",
+    "failed",
+    "partial",
+    "cancelled",
+    "paused",
+    "superseded",
+];
 
 /// Candidate scan for a claim: queued rows of one pool in priority order. The
 /// index test runs this exact text under `EXPLAIN FULL`.
@@ -243,6 +251,22 @@ pub(crate) async fn rollup_in(tx: &Tx, job_id: &str) -> Result<(), TxError> {
     Ok(())
 }
 
+/// Lifecycle logs commit with their job/task transition, including API-hosted work.
+async fn log_transition_in(
+    tx: &Tx,
+    job: &str,
+    key: &str,
+    event: &str,
+    message: &str,
+    now: &str,
+) -> Result<(), TxError> {
+    run(tx, tx.query("UPSERT type::record('job_event', $key) SET job_id = $job, app = type::record('job', $job).app ?? 'jobs', event_type = $event, severity = 'info', message = $message, ts = <datetime>$now RETURN NONE")
+        .bind(("key", key.to_owned())).bind(("job", job.to_owned()))
+        .bind(("event", event.to_owned())).bind(("message", crate::events::redact(message)))
+        .bind(("now", now.to_owned()))).await?;
+    Ok(())
+}
+
 pub(crate) async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxError> {
     let (root, ancestors) = match job.parent {
         None => (rid("job", job.id), Vec::new()),
@@ -282,6 +306,15 @@ pub(crate) async fn create_job_in(tx: &Tx, job: &NewJob<'_>) -> Result<(), TxErr
         .bind(("root", root))
         .bind(("ancestors", ancestors))
         .bind(("at", ts(job.created_at))),
+    )
+    .await?;
+    log_transition_in(
+        tx,
+        job.id,
+        &format!("{}:started", job.id),
+        "job.started",
+        &format!("Started: {}", job_title(job.operation)),
+        &ts(job.created_at),
     )
     .await?;
     Ok(())
@@ -347,10 +380,10 @@ pub struct Election {
     pub epoch: i64,
 }
 
-/// Take or renew the single scheduler lease. SQLite ran the read and the
-/// conditional write as separate autocommit statements; here they share one
-/// transaction on `scheduler_lease:singleton`, so concurrent candidates
-/// conflict and the loser re-reads the winner. Server ownership is separate.
+/// Take or renew the single scheduler lease. The read and the conditional
+/// write share one transaction on `scheduler_lease:singleton`, so
+/// concurrent candidates conflict and the loser re-reads the winner.
+/// Server ownership is separate.
 pub async fn try_elect(
     db: &Surreal<Any>,
     owner: &str,
@@ -695,6 +728,15 @@ async fn claim_in(
                 // row itself, which they all write.
                 bump(tx, "job_guard", &task.root_id).await?;
             }
+            log_transition_in(
+                tx,
+                &task.job_id,
+                &format!("{}:{}:started", task.id, task.lease_epoch),
+                "task.started",
+                &format!("Started: {}", task.operation),
+                &now_s,
+            )
+            .await?;
             write_receipt(tx, op_key, "claim", &task.id, task.lease_epoch, &now_s).await?;
             return Ok(Some(task));
         }
@@ -912,6 +954,15 @@ pub(crate) async fn complete_in(
         .bind(("e", claimed.lease_epoch)),
     )
     .await?;
+    log_transition_in(
+        tx,
+        &claimed.job_id,
+        &format!("{}:{}:completed", claimed.id, claimed.lease_epoch),
+        "task.completed",
+        &format!("Completed: {}", claimed.operation),
+        now,
+    )
+    .await?;
     Ok(())
 }
 
@@ -972,6 +1023,9 @@ pub async fn commit_stage(
                 &now_s,
             )
             .await?;
+            // The job row is created as `running`. Close it once every stage
+            // is terminal so a finished brief is not still "running".
+            settle_finished_job_in(&tx, &claimed.job_id).await?;
             Ok(Publish::Committed)
         }
     })
@@ -1061,6 +1115,144 @@ pub enum Finalize {
     AlreadyFinal,
     LeaseLost,
     Retired,
+}
+
+/// Close a job that is still `running` after every task has finished.
+///
+/// Brief jobs are inserted as `running` and the last-stage update only
+/// matched `active` or `queued`, so a completed or failed chain stayed
+/// `running` and the brief page treated that as queued.
+/// Cancel queued stages blocked by a failed or cancelled dependency, then
+/// close the job if nothing is left to run.
+pub async fn settle_blocked_job(db: &Surreal<Any>, job_id: &str) -> Result<bool, TxError> {
+    run_tx(db, RetryPolicy::default(), |tx| async move {
+        #[derive(SurrealValue)]
+        struct OpenTask {
+            id: String,
+            state: String,
+            dep_states: Vec<String>,
+        }
+        for _ in 0..4 {
+            let mut res = run(
+                &tx,
+                tx.query(
+                    "SELECT record::id(id) AS id, state, deps.map(|$d| $d.state) AS dep_states \
+                     FROM task WHERE job = $j AND state = 'queued'",
+                )
+                .bind(("j", rid("job", job_id))),
+            )
+            .await?;
+            let queued: Vec<OpenTask> = take(&mut res, 0)?;
+            let blocked: Vec<String> = queued
+                .into_iter()
+                .filter(|task| {
+                    !task.dep_states.is_empty()
+                        && task.dep_states.iter().all(|state| {
+                            matches!(
+                                state.as_str(),
+                                "completed" | "failed" | "cancelled" | "superseded"
+                            )
+                        })
+                        && task
+                            .dep_states
+                            .iter()
+                            .any(|state| matches!(state.as_str(), "failed" | "cancelled"))
+                })
+                .map(|task| task.id)
+                .collect();
+            if blocked.is_empty() {
+                break;
+            }
+            let now = ts(Utc::now());
+            for id in blocked {
+                run(
+                    &tx,
+                    tx.query(
+                        "UPDATE $t SET state = 'cancelled', finished_at = <datetime>$now, \
+                         updated_at = <datetime>$now WHERE state = 'queued' RETURN NONE",
+                    )
+                    .bind(("t", rid("task", &id)))
+                    .bind(("now", now.clone())),
+                )
+                .await?;
+            }
+        }
+        settle_finished_job_in(&tx, job_id).await
+    })
+    .await
+    .map(|committed| committed.value)
+}
+
+/// Close every intel brief whose tasks have finished but whose job row is
+/// still `running`.
+pub async fn settle_running_intel_briefs(db: &Surreal<Any>) -> Result<(), TxError> {
+    #[derive(SurrealValue)]
+    struct IdRow {
+        id: String,
+    }
+    let mut response = db
+        .query(
+            "SELECT record::id(id) AS id FROM job WHERE state = 'running' AND operation = 'intel_brief'",
+        )
+        .await?
+        .check()?;
+    let rows: Vec<IdRow> = response
+        .take(0)
+        .map_err(|error| TxError::Abort(error.to_string()))?;
+    for row in rows {
+        settle_finished_job(db, &row.id).await?;
+    }
+    Ok(())
+}
+
+pub async fn settle_finished_job(db: &Surreal<Any>, job_id: &str) -> Result<bool, TxError> {
+    run_tx(db, RetryPolicy::default(), |tx| async move {
+        settle_finished_job_in(&tx, job_id).await
+    })
+    .await
+    .map(|committed| committed.value)
+}
+
+pub(crate) async fn settle_finished_job_in(tx: &Tx, job_id: &str) -> Result<bool, TxError> {
+    #[derive(SurrealValue)]
+    struct TaskRow {
+        state: String,
+    }
+    let mut res = run(
+        tx,
+        tx.query("SELECT state FROM task WHERE job = $j")
+            .bind(("j", rid("job", job_id))),
+    )
+    .await?;
+    let tasks: Vec<TaskRow> = take(&mut res, 0)?;
+    if tasks.is_empty() {
+        return Ok(false);
+    }
+    let open = |state: &str| {
+        matches!(
+            state,
+            "queued" | "running" | "retry_scheduled" | "waiting" | "pending"
+        )
+    };
+    if tasks.iter().any(|task| open(&task.state)) {
+        return Ok(false);
+    }
+    rollup_in(tx, job_id).await?;
+    let failed = tasks.iter().any(|task| task.state == "failed");
+    let next = if failed { "failed" } else { "completed" };
+    run(
+        tx,
+        tx.query(
+            "UPDATE $j SET state = $state, finished_at = finished_at ?? time::now(), \
+             updated_at = time::now() WHERE state IN ['running', 'active', 'queued'] RETURN NONE;
+             UPDATE brief_run SET state = $state, updated_at = time::now() \
+             WHERE job = $j AND state = 'active' RETURN NONE;",
+        )
+        .bind(("j", rid("job", job_id)))
+        .bind(("state", next.to_string())),
+    )
+    .await?;
+    Ok(true)
 }
 
 /// Set a job's terminal state under an optional task lease. The caller
@@ -1412,14 +1604,21 @@ pub struct CleanupCounts {
     pub jobs: usize,
 }
 
-async fn tree_busy(tx: &Tx, root: &str) -> Result<bool, TxError> {
+async fn tree_busy(tx: &Tx, root: &str, protect_active_jobs: bool) -> Result<bool, TxError> {
+    // Task jobs start as `running` even before a task is claimed. Only a
+    // running task proves that work is in flight; services have no task row
+    // and must instead be protected by their own active lifecycle state.
+    // Explicit history clearing also preserves active task-job descendants;
+    // retention expires idle task jobs in any state after the window.
     let mut res = run(
         tx,
         tx.query(
             "RETURN count(SELECT id FROM task WHERE root = $r AND state = 'running') \
-             + count(SELECT id FROM job WHERE root = $r AND kind = 'service')",
+             + count(SELECT id FROM job WHERE root = $r AND (kind = 'service' OR $protect_active_jobs) \
+               AND state IN ['running', 'queued', 'retry_scheduled', 'waiting', 'blocked'])",
         )
-        .bind(("r", rid("job", root))),
+        .bind(("r", rid("job", root)))
+        .bind(("protect_active_jobs", protect_active_jobs)),
     )
     .await?;
     let n: Option<i64> = take(&mut res, 0)?;
@@ -1431,7 +1630,9 @@ async fn purge_tree_in(tx: &Tx, root: &str, reason: &str, now: &str) -> Result<(
     run(
         tx,
         tx.query(
-            "DELETE attempt WHERE root = $r;
+            "LET $jids = (SELECT VALUE record::id(id) FROM job WHERE root = $r);
+             DELETE job_event WHERE job_id IN $jids;
+             DELETE attempt WHERE root = $r;
              DELETE stage_output WHERE root = $r;
              DELETE neighborhood_brief WHERE task.root = $r;
              DELETE task WHERE root = $r;
@@ -1476,7 +1677,7 @@ pub async fn cleanup_batch(
             let roots: Vec<String> = take(&mut res, 0)?;
             let mut counts = CleanupCounts::default();
             for root in roots {
-                if tree_busy(&tx, &root).await? {
+                if tree_busy(&tx, &root, false).await? {
                     continue;
                 }
                 purge_tree_in(&tx, &root, "retention", &now_s).await?;
@@ -1489,7 +1690,9 @@ pub async fn cleanup_batch(
 }
 
 /// Delete terminal root job trees in `states` (Completed, Stopped, Failed
-/// history), batch by batch, skipping trees with running work or services.
+/// history), batch by batch, skipping trees with running work. Terminal
+/// service roots clear like any other history tree; a tree whose service
+/// worker is still in an active state is protected by that state.
 pub async fn clear_jobs_by_status(
     db: &Surreal<Any>,
     states: &[&str],
@@ -1513,7 +1716,7 @@ pub async fn clear_jobs_by_status(
                     &tx,
                     tx.query(
                         "SELECT VALUE record::id(id) FROM job WHERE parent = NONE \
-                         AND kind != 'service' AND state IN $states \
+                         AND state IN $states \
                          ORDER BY created_at, id LIMIT $n START $skip",
                     )
                     .bind(("states", states))
@@ -1524,7 +1727,7 @@ pub async fn clear_jobs_by_status(
                 let roots: Vec<String> = take(&mut res, 0)?;
                 let (mut deleted, mut skipped) = (0usize, 0i64);
                 for root in &roots {
-                    if tree_busy(&tx, root).await? {
+                    if tree_busy(&tx, root, true).await? {
                         skipped += 1;
                         continue;
                     }

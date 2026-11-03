@@ -36,6 +36,10 @@ async fn scope_tasks_dedupe_and_drain_writes_inference_and_links() {
     let Some(server) = Server::start() else {
         return;
     };
+    // This drainer resolves optional model routes from ARGOS_HOME. Keep the
+    // deterministic offline contract independent of the developer's accounts.
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("ARGOS_HOME", home.path());
     let repo = server.repo("argos", "brain_scope").await;
     bootstrap::ensure_schema(repo.db()).await.unwrap();
     let actor = run_tx(repo.db(), RetryPolicy::default(), |tx| async move {

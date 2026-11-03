@@ -1,8 +1,10 @@
 //! Recon answer extraction and the full-text recall stopgap on SurrealDB
-//! (`storage::recon_extract`), against the SQLite `recon::persist_claims`
+//! (`storage::recon_extract`), against the legacy `recon::persist_claims`
 //! behaviour. Both modes via `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
 
+#[path = "support/actor_catalog.rs"]
+mod actor_catalog_fixture;
 mod support;
 
 use argos_osint_core::osint::ToolResult;
@@ -94,6 +96,7 @@ async fn extraction_writes_claims_sources_relations_and_index_work_in_one_transa
         return;
     };
     let repo = server.repo("argos", "recon_extract").await;
+    actor_catalog_fixture::seed_actor_catalog(&repo, &["Alice"]).await;
     let (a, call) = answer(&repo, true).await;
     let evidence = vec![
         (call.clone(), result("completed")),
@@ -113,9 +116,20 @@ async fn extraction_writes_claims_sources_relations_and_index_work_in_one_transa
         .await
         .unwrap();
     assert_eq!((p.written.len(), p.touched.len()), (2, 2));
-    assert_eq!(p.actors.len(), 1, "Alice's subject actor is bound once");
-    assert!(!p.touched.contains(&p.actors[0]));
-    assert_eq!(p.queued, 3, "index work for each new memory and the actor");
+    assert!(
+        p.actors.is_empty(),
+        "binding a catalog actor does not rewrite it"
+    );
+    assert_eq!(p.queued, 2, "index work for each new claim memory");
+    assert_eq!(
+        strings(
+            &repo,
+            "SELECT VALUE actor_id FROM brain_memory_actor_ref ORDER BY memory_id"
+        )
+        .await,
+        vec!["fixture-Alice", "fixture-Alice"],
+        "both claims reference the seeded Alice identity"
+    );
     assert_eq!(count(repo.db(), "insight_claim").await, 2);
     assert_eq!(
         count(repo.db(), "insight_source").await,
@@ -147,7 +161,11 @@ async fn extraction_writes_claims_sources_relations_and_index_work_in_one_transa
         rx::extraction_state(&repo, &a.id).await.unwrap(),
         Some("completed".into())
     );
-    assert_eq!(count(repo.db(), "index_change").await, 3);
+    assert_eq!(
+        count(repo.db(), "index_change").await,
+        2,
+        "only changed claim memories enter the index outbox"
+    );
     assert_eq!(
         counters::current(repo.db(), "memories_changed")
             .await

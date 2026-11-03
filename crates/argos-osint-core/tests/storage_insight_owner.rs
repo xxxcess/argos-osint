@@ -414,7 +414,7 @@ async fn reconcile_deleted_memories_retires_dangling_derivations() {
     let db = repo.db();
     output_fixture(db).await;
     // A deleted derivation on the active snapshot already retires its owner
-    // (as in SQLite); drop it so the first pass has nothing to do.
+    // (as in the legacy store); drop it so the first pass has nothing to do.
     sql(db, "DELETE insight_derivation:d4").await;
     // Nothing dangling: nothing changes.
     reconcile_deleted_memories(&repo).await.unwrap();

@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/argos-osint-core",
     "crates/argos-osint-bin",
+    "crates/argos-osint-api",
+    "crates/argos-api-host",
 ]
 
 [workspace.package]
@@ -20,8 +22,6 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 dirs = "5"
 futures-util = "0.3"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_28", "all-widgets", "layout-cache", "macros", "underline-color"] }
-ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 regex = "1"
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
@@ -41,6 +41,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "proce
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 toml = "0.8"
 tract-onnx = "0.23"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 scraper = "0.27"
 
@@ -52,3 +54,22 @@ opt-level = 3
 # biggest compile; skip -g for it in dev/test builds (local and CI).
 [profile.dev.package.surrealdb-librocksdb-sys]
 debug = false
+
+# cargo-mutants configuration for mutation testing
+[workspace.metadata.cargo-mutants]
+# Only run on the core crate for faster iteration
+packages = ["argos-osint-core"]
+# Use embedded storage mode for tests
+env = { ARGOS_SURREAL_MODE = "embedded", ARGOS_SURREAL_REQUIRED = "1" }
+# Timeout per mutant (seconds)
+timeout = 120
+# Number of jobs (0 = auto)
+jobs = 0
+# Exclude test files from mutation
+exclude = [
+    "tests/**",
+    "examples/**",
+    "benches/**",
+]
+# Only mutate source files in src/
+filter = "crates/argos-osint-core/src/**/*.rs"

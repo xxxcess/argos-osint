@@ -5,7 +5,7 @@
 Argos uses [Semantic Versioning 2.0.0](https://semver.org/) and
 [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
 One version covers the CLI/TUI and core crate. `Cargo.toml`'s
-`workspace.package.version` is the application version; both crates inherit it
+`workspace.package.version` is the application version; all workspace crates inherit it
 with `version.workspace = true`, and `argos --version` uses that package version.
 Database schema numbers and provider/API/model versions are separate contracts.
 

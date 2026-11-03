@@ -55,7 +55,7 @@ fn flag_enabled(value: Option<&str>) -> bool {
 }
 
 /// Identifies the model, pooling, and width that produced stored vectors. A change
-/// here makes the Brain index rebuild itself from SQLite.
+/// here makes the Brain index rebuild itself from the legacy store.
 pub fn fingerprint() -> String {
     #[cfg(test)]
     if testing::active() {

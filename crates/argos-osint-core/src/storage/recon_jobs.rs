@@ -1,6 +1,6 @@
 //! The Recon job writers on SurrealDB: model attempts and the operation
 //! `task_epoch`, Recon coverage, Intel report jobs and tasks, and the job
-//! registry rows of Recon investigations. SQLite parity:
+//! registry rows of Recon investigations. Legacy store parity:
 //! `recon_model_attempts` → `recon_model_attempt` (keyed by the canonical
 //! attempt id), `recon_model_operations.task_epoch` → a field on
 //! `recon_model_operation` (the table itself is `storage::recon_exec`),
@@ -234,7 +234,7 @@ pub struct AttemptStart<'a> {
 }
 
 /// Insert the attempt running, or reset a replayed one to running (same
-/// key, same id), like the SQLite `ON CONFLICT` upsert.
+/// key, same id), like the legacy store `ON CONFLICT` upsert.
 pub async fn record_attempt_start(repo: &Repository, a: &AttemptStart<'_>) -> Result<()> {
     repo.db()
         .query(
@@ -304,7 +304,7 @@ pub struct AttemptFinish {
 }
 
 /// Close an attempt with its outcome and measured timings. A missing
-/// attempt is left missing (SQLite `UPDATE` parity).
+/// attempt is left missing (legacy store `UPDATE` parity).
 pub async fn record_attempt_finish(repo: &Repository, id: &str, f: &AttemptFinish) -> Result<()> {
     let mut patch = serde_json::to_value(f)?;
     if let Some(map) = patch.as_object_mut() {
@@ -765,7 +765,7 @@ pub async fn claim_report_task(
         if !deps.iter().all(|d| completed.contains(d.as_str())) {
             continue;
         }
-        // Guarded like the SQLite UPDATE: a concurrent claim wins once.
+        // Guarded like the legacy store UPDATE: a concurrent claim wins once.
         let mut u = repo
             .db()
             .query(
@@ -1131,7 +1131,7 @@ struct PAttempt {
     transport: String,
 }
 
-/// Load the Profile rows (`SqliteSource` parity: attempts without a known
+/// Load the Profile rows (`LegacyStoreSource` parity: legacy store attempts without a known
 /// operation are dropped, and each attempt takes its operation's role).
 pub async fn profile_rows(db: &Surreal<Any>) -> Result<ProfileRows> {
     let mut r = db

@@ -4,13 +4,13 @@
 //! `reconcile_deleted_memories`, plus the live Recon opt-in that
 //! `run_refresh_slice` needs for a Recon owner.
 //!
-//! Each runs in one transaction, as the SQLite versions run in one
+//! Each runs in one transaction, as the legacy store versions run in one
 //! statement (or one batch). The `_in` forms join a caller's transaction;
 //! `reconcile_deleted_memories_in` is meant to run inside a deletion.
 //!
 //! `enqueue_refresh` requeues a task paused with `blocked_reason =
 //! 'cancelled; evidence dirty'` (on its `insight_refresh_task` sidecar), as
-//! SQLite does.
+//! the legacy store does.
 
 use anyhow::{anyhow, Result};
 use surrealdb::types::SurrealValue;
@@ -82,7 +82,7 @@ struct OptIn {
 
 /// The live Recon opt-in for a Recon owner, read in `tx`: saving needs the
 /// input's `save_insights`, a live (not cancelled) run on an undeleted
-/// thread, and the thread's `recall_insights` (SQLite's recheck in
+/// thread, and the thread's `recall_insights` (the legacy store's recheck in
 /// `write_derivations_with_kind`). Carries the run's thread either way.
 pub async fn recon_context_in(
     tx: &Tx,

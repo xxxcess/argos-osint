@@ -74,7 +74,7 @@ async fn replacement_swaps_claims_and_queues_index_work_atomically() {
     assert_eq!((out.claims, out.created.len()), (2, 2));
     let fps = out.created.clone();
     let rel = vec![(fps[0].clone(), fps[1].clone(), "contradicts".into())];
-    // Same claims again plus a relation. As in SQLite, the article's old
+    // Same claims again plus a relation. As in the legacy store, the article's old
     // sources go first, so its claims are orphaned and re-created.
     let out = commit_article_insight_replacement(
         &p,

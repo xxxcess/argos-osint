@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 460" role="img" aria-labelledby="workspace-title workspace-desc">
-<title id="workspace-title">Argos workspace</title><desc id="workspace-desc">Home launches four applications over one SurrealDB storage boundary. Intel prepares article briefs; independent Recon investigations remain available. Tools, Models and Profile configure Argos; Jobs and Logs monitor background work.</desc>
+<title id="workspace-title">Argos terminal workspace</title><desc id="workspace-desc">Home launches four terminal applications over one SurrealDB storage boundary. Intel prepares article briefs; independent Recon investigations remain available. Tools, Models and Profile configure Argos; Jobs and Logs monitor background work.</desc>
 <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker></defs>
 <rect width="960" height="460" fill="#f5f5f5"/>
 <style>text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}.label{font-size:18px}.note{font-size:13px}.line{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#arrow)}</style>

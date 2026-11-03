@@ -1,0 +1,2 @@
+/* Developer chrome is outside the application visual contract. */
+nextjs-portal { display: none !important; }

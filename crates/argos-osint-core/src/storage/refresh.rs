@@ -396,7 +396,7 @@ pub async fn schedule_article_refresh(
     let Some((task, retired, detail)) = out.value else {
         return Ok(None);
     };
-    // Best effort, like the SQLite event: a log failure never fails admission.
+    // Best effort, like the legacy store event: a log failure never fails admission.
     for r in retired {
         let event = crate::events::NewEvent {
             severity: Some(crate::events::Severity::Info),

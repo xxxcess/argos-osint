@@ -1,6 +1,6 @@
 //! The TUI Intel list and brief chain on SurrealDB. Under a storage config
 //! (`surreal_brain::on`) the bulletin list, the brief chain admission and
-//! its stage views read the repository and never the SQLite store. Reads
+//! its stage views read the repository and never the legacy store. Reads
 //! block on `storage::runtime::blocking`, so callers are worker threads;
 //! [`ensure_brief`] hops to its own thread so the UI thread may call it.
 
@@ -50,15 +50,15 @@ mod imp {
     pub(crate) fn ensure_brief(
         article: &AtlasArticleRow,
         settings: &SettingsFile,
-    ) -> Result<String> {
+        on_done: impl FnOnce(Result<String>) + Send + 'static,
+    ) {
         let (article, settings) = (article.clone(), settings.clone());
         std::thread::spawn(move || {
-            runtime::blocking(|repo| async move {
+            let result = runtime::blocking(|repo| async move {
                 brief_stages::ensure_for_article(&repo, &article, &settings).await
-            })
-        })
-        .join()
-        .map_err(|_| anyhow::anyhow!("brief admission worker panicked"))?
+            });
+            on_done(result);
+        });
     }
 
     /// Stage views, committed outputs and lead titles of a chain.
@@ -115,8 +115,12 @@ mod imp {
     pub(crate) fn intel_list(_: &str, _: &str, _: &str) -> Result<IntelList> {
         off()
     }
-    pub(crate) fn ensure_brief(_: &AtlasArticleRow, _: &SettingsFile) -> Result<String> {
-        off()
+    pub(crate) fn ensure_brief(
+        _: &AtlasArticleRow,
+        _: &SettingsFile,
+        on_done: impl FnOnce(Result<String>) + Send + 'static,
+    ) {
+        on_done(off());
     }
     #[allow(clippy::type_complexity)]
     pub(crate) fn brief_chain(_: &str) -> Result<BriefChain> {

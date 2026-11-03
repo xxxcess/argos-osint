@@ -1,0 +1,22 @@
+{
+  "name": "@argos/web-desktop",
+  "private": true,
+  "scripts": {
+    "dev": "node server.mjs --dev",
+    "build": "next build --webpack",
+    "serve": "node ../../scripts/serve_web.mjs"
+  },
+  "dependencies": {
+    "@argos/api-client": "workspace:*",
+    "@argos/intel": "workspace:*",
+    "@argos/ui": "workspace:*",
+    "next": "16.4.3",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native-web": "0.21.4",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "babel-plugin-react-compiler": "1.0.0"
+  }
+}

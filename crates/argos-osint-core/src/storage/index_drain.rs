@@ -1,5 +1,5 @@
 //! The index pool on SurrealDB: drain pending `index_change` rows for
-//! memories into `memory_embeddings` (the SQLite `drain_index` counterpart).
+//! memories into `memory_embeddings` (the legacy store `drain_index` counterpart).
 //! An upsert embeds the memory into the serving generation (skipped when no
 //! generation serves this embedder's model, or the memory is inactive); a
 //! remove deletes its vector. The `record_kind` filter runs in SQL

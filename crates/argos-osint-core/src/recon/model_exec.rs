@@ -112,6 +112,9 @@ pub struct DispatchDeclaration {
     /// Capability digest per route, frozen at stage admission (spec §1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capability_digests: Vec<String>,
+    /// Operator variant selection is part of the immutable dispatch/cache contract.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_variants: std::collections::BTreeMap<String, crate::request_policy::ReasoningEffort>,
 }
 
 impl<'a> OperationScope<'a> {
@@ -215,6 +218,7 @@ impl<'a> OperationScope<'a> {
     ) -> DispatchDeclaration {
         let canonical = provider::role_name(self.role).unwrap_or(self.role);
         DispatchDeclaration {
+            model_variants: settings.defaults.model_variants.clone(),
             logical_role: canonical.to_string(),
             operation_key: self.operation_key.unwrap_or("").to_string(),
             response_format: self.response_format,
@@ -493,7 +497,7 @@ pub enum ModelExecEvent {
     },
 }
 
-/// Durable operation record in SQLite.
+/// Durable operation record in the legacy store.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReconModelOperation {
     pub id: String,
@@ -508,7 +512,7 @@ pub struct ReconModelOperation {
     pub updated_at: String,
 }
 
-/// Durable attempt record in SQLite.
+/// Durable attempt record in the legacy store.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReconModelAttempt {
     pub id: String,
@@ -1482,8 +1486,8 @@ where
         secrets
             .iter()
             .map(|secret| {
-                // The capability cache is SQLite-only: never open it under SurrealDB.
-                let cache = db_path.and_then(super::backend::sqlite_path);
+                // The capability cache is on the legacy store only: skipped under SurrealDB.
+                let cache = db_path.and_then(super::backend::legacy_side_store_path);
                 crate::provider_capabilities::admit(secret, cache)
             })
             .collect(),
@@ -1517,6 +1521,10 @@ where
         let admitted = admitted.clone();
         let contract = contract.clone();
         let secret = secrets[route_idx].clone();
+        let mut insight_policy = insight_policy;
+        if let Some(variant) = settings.defaults.model_variant(scope.role, &secret) {
+            insight_policy.reasoning = variant;
+        }
         let transport = if stream && !provider_attempt::is_subscription(&secret) {
             Transport::Stream
         } else {
@@ -1673,7 +1681,10 @@ where
                     }) as Arc<provider_attempt::ProgressFn>,
                 )
             };
-            let rep = if insight_contract || summarization {
+            let rep = if insight_contract
+                || summarization
+                || insight_policy.reasoning != crate::request_policy::ReasoningEffort::Default
+            {
                 let deadlines = if summarization {
                     Deadlines::summarization()
                 } else {
@@ -2041,8 +2052,8 @@ where
         secrets
             .iter()
             .map(|secret| {
-                // The capability cache is SQLite-only: never open it under SurrealDB.
-                let cache = db_path.and_then(super::backend::sqlite_path);
+                // The capability cache is on the legacy store only: skipped under SurrealDB.
+                let cache = db_path.and_then(super::backend::legacy_side_store_path);
                 crate::provider_capabilities::admit(secret, cache)
             })
             .collect(),
@@ -2070,6 +2081,10 @@ where
         let backoff_ms = ctx.backoff_ms;
         let admitted = admitted.clone();
         let secret = secrets[route_idx].clone();
+        let mut chat_policy = chat_policy;
+        if let Some(variant) = settings.defaults.model_variant(scope.role, &secret) {
+            chat_policy.reasoning = variant;
+        }
         // Skipped incompatible Jev routes never reach dispatch, so a Jev ID here
         // always has a native connection.
         let is_native = provider::native_decision_capability(&secret).is_ok();
@@ -2316,7 +2331,10 @@ where
                         }
                     }
                 };
-                let rep = if insight_contract || stage_policy {
+                let rep = if insight_contract
+                    || stage_policy
+                    || chat_policy.reasoning != crate::request_policy::ReasoningEffort::Default
+                {
                     // Preserve the bounded decision response contract without
                     // imposing the former per-stage output/thinking ceilings.
                     provider_attempt::attempt_spec(

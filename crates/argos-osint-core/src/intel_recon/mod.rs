@@ -44,7 +44,7 @@ pub use classify_mode::{
     parse_mode_from_chat, ModeClassifyInput, PromptModeClassifyInput,
 };
 #[cfg(feature = "surreal")]
-pub(crate) use confidence::persist_article_rating_surreal;
+pub(crate) use confidence::{article_confidence_surreal, persist_article_rating_surreal};
 pub use confidence::{initial_rating, EvidenceConfidence};
 pub use modes::{
     chat_response_spec, investigation_mode_spec, section_guideline, section_plan, ReportMode,

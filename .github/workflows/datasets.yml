@@ -1,0 +1,41 @@
+name: Dataset integrity
+
+on:
+  push:
+    branches: [main]
+    paths: &dataset_paths
+      - 'datasets/**'
+      - '.gitattributes'
+      - '.github/workflows/datasets.yml'
+  pull_request:
+    paths: *dataset_paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actors:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          lfs: true
+          persist-credentials: false
+      - name: Verify LFS objects and pointers
+        run: git lfs fsck --objects --pointers HEAD
+      - name: Verify the actor catalog was materialized
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+
+          path = 'datasets/argos_actors.csv'
+          pointer = subprocess.check_output(
+              ['git', 'cat-file', 'blob', f'HEAD:{path}'], text=True
+          ).splitlines()
+          assert pointer[0] == 'version https://git-lfs.github.com/spec/v1', 'Actor catalog must use Git LFS'
+          expected = int(next(line.removeprefix('size ') for line in pointer if line.startswith('size ')))
+          actual = Path(path).stat().st_size
+          assert actual == expected, f'Actor catalog is not materialized: expected {expected} bytes, got {actual}'

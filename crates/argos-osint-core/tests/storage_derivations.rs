@@ -211,7 +211,7 @@ async fn derivations_write_memories_evidence_and_retire_on_refresh() {
     // Index work and the change counter joined the publication.
     assert_eq!(
         scalar::<i64>(&db, "RETURN count(SELECT id FROM index_change)").await,
-        3 // claim, inference and the claim subject actor
+        2 // Claim and inference; an unseeded subject cannot create an actor.
     );
     assert_eq!(
         scalar::<i64>(
@@ -220,6 +220,12 @@ async fn derivations_write_memories_evidence_and_retire_on_refresh() {
         )
         .await,
         1
+    );
+
+    assert_eq!(
+        scalar::<i64>(&db, "RETURN count(SELECT id FROM brain_actor)").await,
+        0,
+        "publishing an unseeded subject cannot create an actor"
     );
 
     // Refresh keeps the claim but drops the inference: its exclusively
@@ -349,6 +355,29 @@ async fn claims_bind_actors_and_kind_refresh_carries_the_other_kind() {
         return;
     };
     let repo = server.repo("argos", "derivations_actors").await;
+    // Extraction resolves existing catalog identities; it never creates them.
+    let catalog = [("acme", "Acme", "organization"), ("bob", "Bob", "person")]
+        .into_iter()
+        .map(
+            |(id, name, subtype)| argos_osint_core::actor_catalog::Actor {
+                id: format!("catalog-{id}"),
+                source_id: id.into(),
+                name: name.into(),
+                subtype: subtype.into(),
+                aliases: vec![name.into()],
+                metadata: std::collections::BTreeMap::new(),
+            },
+        )
+        .collect();
+    argos_osint_core::storage::actor_catalog::seed_actors(
+        &repo,
+        catalog,
+        "fixture-v1",
+        &std::sync::atomic::AtomicBool::new(false),
+        |_| {},
+    )
+    .await
+    .unwrap();
     let db = repo.db().clone();
     let mut kept = claim("c1", "office", true);
     kept.evidence_refs[0].location = EvidenceLocation::Range(Span {

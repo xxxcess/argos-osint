@@ -1,5 +1,5 @@
 //! Brain memory operations on the async repository, for the CLI and TUI
-//! (`argos remember|recall|memories`). Same JSON shapes as the SQLite
+//! (`argos remember|recall|memories`). Same JSON shapes as the legacy store
 //! `Store::add_memory`, `list_memories` and `recall`.
 
 use std::sync::Arc;

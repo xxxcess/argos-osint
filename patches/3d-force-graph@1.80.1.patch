@@ -1,0 +1,14 @@
+diff --git a/dist/3d-force-graph.mjs b/dist/3d-force-graph.mjs
+index a1ba7323e2436d858d69e669b9d9849bbc490457..786b20213c800c0f5083a84068edba64ece0cabb 100644
+--- a/dist/3d-force-graph.mjs
++++ b/dist/3d-force-graph.mjs
+@@ -349,6 +349,9 @@ var _3dForceGraph = Kapsule({
+           }
+           const initFixedPos = node.__initialFixedPos;
+           const initPos = node.__initialPos;
++          // Pointer cancellation can arrive twice as drag controls are replaced.
++          // The first dragend already released this node and restored controls.
++          if (!initPos) return;
+           const translate = {
+             x: initPos.x - node.x,
+             y: initPos.y - node.y,

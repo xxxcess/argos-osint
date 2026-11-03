@@ -1,5 +1,5 @@
 //! The brief chain on embedded SurrealDB (`storage::brief_stages`), with
-//! the SQLite suite's mock backend.
+//! the legacy store suite's mock backend.
 
 use super::*;
 use crate::storage::brief_stages as surreal_stages;
@@ -31,7 +31,7 @@ async fn repo(dir: &tempfile::TempDir) -> Repository {
     repo
 }
 
-// §8.5 on SurrealDB (`sqlite_contention_and_publication_delay_keep_leases_and_commit_once`):
+// §8.5 on SurrealDB (historical phase `legacy_contention_and_publication_delay_keep_leases_and_commit_once`):
 // a competing writer keeps conflicting with the chain's guard and task rows
 // while slow stages run and commit; renewal and commit retry within their
 // bounds, no stage is reaped, and every stage commits exactly once.

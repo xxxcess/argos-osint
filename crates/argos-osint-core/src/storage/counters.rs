@@ -1,6 +1,6 @@
 //! Persisted transactional counters.
 //!
-//! Replaces SQLite AUTOINCREMENT / `last_insert_rowid` and `MAX(seq)+1`
+//! Replaces the legacy store AUTOINCREMENT / `last_insert_rowid` and `MAX(seq)+1`
 //! (storage-audit.md:120). A counter is a regular `counter:[name]` record, so
 //! backup and restore include it. Allocation commits with the caller's
 //! logical change when it runs inside the caller's transaction

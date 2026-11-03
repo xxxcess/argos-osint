@@ -23,7 +23,7 @@ pub const PAGE: usize = 500;
 /// Retention shown in the dashboard and applied by pruning.
 pub const RETENTION_HOURS: i64 = argos_osint_core::events::DEFAULT_RETENTION_HOURS;
 
-/// Where the Logs pane reads events: the SQLite `Store`, or the
+/// Where the Logs pane reads events: the legacy `Store`, or the
 /// repository's `argos_event` under a storage config
 /// (`surreal_brain::SurrealLogs`). Never both.
 pub trait LogsSource {
@@ -154,6 +154,18 @@ impl LogsView {
             text: self.search.trim().to_string(),
             ..Default::default()
         }
+    }
+
+    /// A user changed the Logs filter. Old rows must not masquerade as the
+    /// new filter while an asynchronous read is still in flight.
+    pub fn invalidate_filter(&mut self) {
+        self.rows.clear();
+        self.sel = 0;
+        self.sel_id = None;
+        self.open.clear();
+        self.scroll = 0;
+        self.error = None;
+        self.loaded = false;
     }
 
     /// Reload the bounded page. Selection is kept by event id unless live

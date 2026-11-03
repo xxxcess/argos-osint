@@ -411,7 +411,7 @@ pub struct GlobalStatus {
 
 // ---------- snapshot assembly ----------
 
-/// [`snapshot`] over any [`ProfileSource`]: the SQLite connection or the
+/// [`snapshot`] over any [`ProfileSource`]: the legacy store connection or the
 /// rows `storage::profile_view` loads from SurrealDB.
 pub fn snapshot_from(
     src: &dyn ProfileSource,

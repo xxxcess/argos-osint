@@ -7,7 +7,7 @@
 //!
 //! Record keys: tasks, passages and assessments by their id; dependencies
 //! by `codec::encode([task_id, depends_on_task_id])`. Rewrites of an existing id update
-//! only the columns SQLite's `ON CONFLICT(id) DO UPDATE` updates. An empty
+//! only the columns the legacy store's `ON CONFLICT(id) DO UPDATE` updates. An empty
 //! id is rejected before any record id is built.
 
 use anyhow::{bail, Result};
@@ -285,7 +285,7 @@ pub async fn list_tasks(db: &Surreal<Any>, investigation_id: &str) -> Result<Vec
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
-/// `Store::update_task_state`. A missing task is left alone, like SQLite.
+/// `Store::update_task_state`. A missing task is left alone, like the legacy store.
 pub async fn update_task_state(
     db: &Surreal<Any>,
     id: &str,

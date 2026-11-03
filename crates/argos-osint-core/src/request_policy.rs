@@ -21,9 +21,13 @@ pub enum ReasoningEffort {
     Default,
     Off,
     Efficient,
+    Minimal,
     Low,
     Medium,
     High,
+    Xhigh,
+    Max,
+    Thinking,
 }
 
 impl ReasoningEffort {
@@ -32,7 +36,14 @@ impl ReasoningEffort {
     pub fn thinks(self) -> bool {
         matches!(
             self,
-            Self::Efficient | Self::Low | Self::Medium | Self::High
+            Self::Efficient
+                | Self::Minimal
+                | Self::Low
+                | Self::Medium
+                | Self::High
+                | Self::Xhigh
+                | Self::Max
+                | Self::Thinking
         )
     }
 
@@ -41,9 +52,13 @@ impl ReasoningEffort {
             Self::Default => "default",
             Self::Off => "off",
             Self::Efficient => "efficient",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+            Self::Thinking => "thinking",
         }
     }
 }

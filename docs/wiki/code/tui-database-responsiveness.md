@@ -18,7 +18,7 @@ cohort fixes 150 article occurrences and 250 Actor-name groups instead.
 | Atlas history, retention and cycle deletion | Background history/pruning and deletion; headline navigation fetches one article instead of decoding the retained corpus. Duplicate delete requests are rejected while pending. Completion updates caches after commit. |
 | Recon lists, transcript/tool/run history, recalled-memory popup and investigation deletion | Background reads/deletion with selection and pending-refresh guards; recalled-memory summaries arrive in the transcript snapshot, and historical tool-result log formatting and writes stay on the reader worker. |
 | Tools manual history | Background read, retaining a selected historical call. |
-| Jobs and Logs | Background bounded pages/counts/detail and direct job-source navigation, keyed by filters and selection. Old-job cleanup and durable event clearing run on workers; duplicate cleanup requests are rejected and failed clearing retains the current view. Fold, follow and scroll stay local. |
+| Jobs and Logs | Background bounded pages/counts/detail and direct job-source navigation, keyed by generation, filters and selection. Old-job cleanup (`Completed`/`Stopped`/`Failed`) and durable event clearing run on workers, optimistically prune cleared status rows, record synchronous audit events, and bump the dashboard generation so an in-flight pre-clear snapshot cannot restore deleted rows; duplicate cleanup requests are rejected and failed clearing retains the current view. **Jobs**: bounded self-heal tick marks `jobs_dirty` while parked (job registry progress has no TUI completion event); reload gated on `dashboard_reading.is_none()`. **Logs**: `clear_logs` runs on the ordered write queue (`runtime::spawn_ordered`) with oneshot sync — pre-clear queued lines drain before delete, post-clear event joins same closure; no re-materialization race. Fold, follow and scroll stay local. |
 | Profile analytics | Existing background snapshot reader retained. |
 | Rendering and list arrows | Cached presentation; no vector search or graph lookup during Brain list movement. |
 | Interactive point lookups and small edits | `Store::open_ui` returns a handle to the shared SurrealDB runtime. Reported writes preserve their error path; failed draft flushes remain dirty for retry. |
@@ -46,3 +46,5 @@ cannot be reconstructed from the older status-only receipts.
 
 Validation and visual review are recorded in the
 [verification ledger](../../archive/tui-verification-responsiveness-2026-10-14.md).
+
+Jobs and Logs filter changes and clear actions invalidate the displayed cohort (or optimistically prune cleared status rows) and bump the dashboard read generation before requesting a new asynchronous snapshot. An older in-flight completion is fenced by generation, module, filter and selection key and queues the latest scope; it cannot restore prior rows or filters. Same-filter periodic refresh keeps retained data.

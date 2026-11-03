@@ -54,6 +54,7 @@ pub(crate) fn edge(
         member_ids: Vec::new(),
         receipts: vec![receipt],
         rationale: String::new(),
+        actor_reference: None,
     }
 }
 
@@ -137,7 +138,7 @@ impl Store {
 /// Admit discovered nodes with their explanatory paths into `snapshot`
 /// under the node/edge budgets, and record findings, evidence counts and
 /// the store-independent associations (actors, threads). Shared by the
-/// SQLite query and `storage::topology`; callers add claim and article
+/// legacy store query and `storage::topology`; callers add claim and article
 /// associations from their own store.
 pub(crate) fn admit(
     snapshot: &mut TopologySnapshot,

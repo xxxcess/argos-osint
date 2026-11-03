@@ -2,9 +2,9 @@
 //! repository): local spelling repair, candidate pairs with their sampled
 //! source context, durable pair leases on `brain_actor_dedup_receipt`, and
 //! the assessed merge. The prompt, decision adapter, pair generation and
-//! input hash are shared with SQLite, so a pair hashes the same on both.
+//! input hash are shared with the legacy store, so a pair hashes the same on both.
 //!
-//! SQLite's repair also deletes pre-upgrade debris (mentions and index
+//! the legacy store's repair also deletes pre-upgrade debris (mentions and index
 //! receipts of deleted articles); a SurrealDB store starts empty and its
 //! delete paths remove those rows, so there is none to repair.
 
@@ -145,6 +145,16 @@ pub async fn merge_in(
     if actor_in(tx, &from).await?.is_none() || actor_in(tx, &to).await?.is_none() {
         return Err(abort("unknown actor"));
     }
+    for actor in [&from, &to] {
+        if actor_in(tx, actor)
+            .await?
+            .is_some_and(|row| row.scope_key == crate::actor_catalog::SCOPE)
+        {
+            return Err(abort(
+                "catalog identities are deterministic and cannot be merged",
+            ));
+        }
+    }
     super::lifecycle::add_redirect_in(tx, &from, &to, now).await?;
     run(
         tx,
@@ -169,7 +179,7 @@ pub async fn merge_in(
     Ok(changed)
 }
 
-/// The sampled identity context of one actor family (SQLite `context`).
+/// The sampled identity context of one actor family (legacy store `context`).
 async fn context_in(tx: &Tx, id: &str) -> Result<Value, TxError> {
     let root = resolve_in(tx, id).await?;
     let Some(a) = actor_in(tx, &root).await? else {
@@ -285,7 +295,7 @@ pub async fn candidates(repo: &Repository, limit: usize) -> Result<Vec<Candidate
                 tx.query(
                     "SELECT record::id(id) AS id, subtype, \
                        (SELECT VALUE lifecycle FROM ONLY type::record('memory', record::id($parent.id))) \
-                         AS lifecycle FROM brain_actor ORDER BY id",
+                         AS lifecycle FROM brain_actor WHERE scope_key != 'dataset:argos_actors' ORDER BY id",
                 ),
             )
             .await?;
@@ -545,7 +555,7 @@ pub async fn repair_local(repo: &Repository, limit: usize) -> Result<usize> {
         .db()
         .query(
             "SELECT record::id(id) AS id, subtype, display_name, scope_key, revision \
-             FROM brain_actor ORDER BY id;
+             FROM brain_actor WHERE scope_key != 'dataset:argos_actors' ORDER BY id;
              SELECT VALUE record::id(id) FROM brain_actor_redirect;
              SELECT unit_id, revision FROM brain_backfill_receipt \
              WHERE source = 'actor_normalization';",
@@ -586,7 +596,9 @@ pub async fn repair_local(repo: &Repository, limit: usize) -> Result<usize> {
         })
         .collect();
     let parsed = if nlp_enabled {
-        crate::nlp::Service::shared().actor_names(names)
+        tokio::task::spawn_blocking(move || crate::nlp::Service::shared().actor_names(names))
+            .await
+            .unwrap_or(None)
     } else {
         Some(names)
     };

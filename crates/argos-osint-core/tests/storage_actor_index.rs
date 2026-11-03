@@ -5,6 +5,8 @@
 //! `python3 scripts/test_surreal.py --mode both`.
 #![cfg(feature = "surreal")]
 
+#[path = "support/actor_catalog.rs"]
+mod actor_catalog_fixture;
 mod support;
 
 use argos_osint_core::atlas_actor_index::{index_run_store, surreal};
@@ -60,6 +62,7 @@ async fn repo(server: &Server, db: &str) -> Repository {
     lifecycle::apply_article_index_schema(repo.db())
         .await
         .unwrap();
+    actor_catalog_fixture::seed_actor_catalog(&repo, &["Jane Doe"]).await;
     repo
 }
 

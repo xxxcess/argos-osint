@@ -3,7 +3,7 @@
 //! (`insight_refresh_execution`: stage, window and withheld counters,
 //! activity, retry epoch) and the dispatch fence (`validate_dispatch`) that
 //! `insights::run_pipeline` reads and writes between model calls. With
-//! these, a SurrealDB run of the pipeline never opens the SQLite file
+//! these, a SurrealDB run of the pipeline never opens the legacy store file
 //! (`investigation::exec_store`).
 //!
 //! Record keys: `insight_stage_checkpoint` by operation key,

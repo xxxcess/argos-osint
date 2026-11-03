@@ -1,5 +1,5 @@
 //! Atlas memory-phase reads on SurrealDB (`storage::atlas_memory`): stored
-//! publication receipts and their verification match SQLite for a run with
+//! publication receipts and their verification match the legacy store for a run with
 //! no publication and for a receipt whose memories are gone.
 //! Run through `python3 scripts/test_surreal.py --mode both`.
 #![cfg(feature = "surreal")]

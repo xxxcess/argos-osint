@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "argos-api-host"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "argos-osint-api",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "argos-osint-api"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "argos-osint-core",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "argos-osint-bin"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "argos-osint-api",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "argos-osint-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aho-corasick",
  "anyhow",

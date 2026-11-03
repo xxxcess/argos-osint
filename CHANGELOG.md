@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/xxxcess/argos-osint/compare/v0.2.1...v0.2.2) (2026-11-03)
+
+
+### Bug Fixes
+
+* **intel:** harden focus brief admission and keep services visible ([#61](https://github.com/xxxcess/argos-osint/issues/61)) ([bfe994f](https://github.com/xxxcess/argos-osint/commit/bfe994f448a061fab29c3fa3368da19cf4d4788b))
+
 ## [0.2.1](https://github.com/xxxcess/argos-osint/compare/v0.2.0...v0.2.1) (2026-10-26)
 
 

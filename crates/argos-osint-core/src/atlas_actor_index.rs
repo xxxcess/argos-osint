@@ -11,7 +11,7 @@ use anyhow::Result;
 use crate::brain_actors::IDENTITY_INDEX_VERSION;
 
 pub const BATCH: usize = 100;
-pub const INDEX_CONTRACT: &str = "atlas-actor-index-v1";
+pub const INDEX_CONTRACT: &str = "atlas-actor-index-v6-metadata-first";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IndexReport {
@@ -39,7 +39,7 @@ fn checksum(revision: &str, coverage: &str) -> String {
     ))
 }
 
-/// Phase 6 on the selected store: SQLite runs [`index_run`]; SurrealDB runs
+/// Phase 6 on the selected store: the legacy store runs [`index_run`]; SurrealDB runs
 /// [`surreal::index_run`] on the repository.
 pub async fn index_run_store(
     store: &crate::atlas_store::AtlasStore,
@@ -65,9 +65,7 @@ pub mod surreal {
 
     use super::{checksum, IndexReport, BATCH};
     use crate::atlas_metadata::ArticleMetadata;
-    use crate::brain_actors::{
-        endpoint_key, hid, parse_subtype, subtype_str, text_of, BindRequest,
-    };
+    use crate::brain_actors::{endpoint_key, hid, text_of};
     use crate::memory_metadata::{
         EndpointRef, LinkPayload, MemoryKind, MemoryPayload, RelatedPayload,
     };
@@ -99,11 +97,72 @@ pub mod surreal {
             let m = crate::storage::atlas_metadata::metadata(repo.db(), run_id, &a.id)
                 .await
                 .map_err(tx_err("atlas run unit metadata"))?;
-            let raw = m.as_ref().map(serde_json::to_string).transpose()?;
-            let rev = crate::brain_backfill::h(&json!([a.title, a.description, a.category, raw]));
+            let rev = unit_revision(repo, &a, m.as_ref()).await?;
             out.push((a, m, rev));
         }
         Ok(out)
+    }
+
+    async fn unit_revision(
+        repo: &Repository,
+        article: &AtlasArticleRow,
+        metadata: Option<&ArticleMetadata>,
+    ) -> Result<String> {
+        let raw = metadata.map(serde_json::to_string).transpose()?;
+        let clean = crate::storage::actor_catalog::clean_body(repo, &article.id).await?;
+        let body_ready = if let Some(body) = &clean {
+            crate::storage::actor_catalog::clean_body_candidates(repo, body)
+                .await?
+                .is_some()
+        } else {
+            false
+        };
+        let clean_revision = clean.map(|body| {
+            (
+                body.source_id,
+                body.revision,
+                body.artifact_hash,
+                body_ready,
+            )
+        });
+        Ok(crate::brain_backfill::h(&json!([
+            article.title,
+            article.description,
+            article.category,
+            raw,
+            clean_revision
+        ])))
+    }
+
+    /// Refresh every retained occurrence after Full article cleanup commits.
+    pub async fn index_article_occurrences(repo: &Repository, article_id: &str) -> Result<()> {
+        let catalog = catalog_matcher(repo).await?;
+        let mut rows = repo
+            .db()
+            .query("SELECT VALUE run_id FROM atlas_article WHERE article_id = $a ORDER BY run_id")
+            .bind(("a", article_id.to_owned()))
+            .await?
+            .check()?;
+        let runs: Vec<String> = rows.take(0)?;
+        for run in runs {
+            let Some(article) = crate::storage::atlas::article(repo.db(), &run, article_id).await?
+            else {
+                continue;
+            };
+            let metadata =
+                crate::storage::atlas_metadata::metadata(repo.db(), &run, article_id).await?;
+            let revision = unit_revision(repo, &article, metadata.as_ref()).await?;
+            index_with_catalog(
+                repo,
+                &article,
+                metadata.as_ref(),
+                &revision,
+                &chrono::Utc::now().to_rfc3339(),
+                catalog.clone(),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Current, checksum-valid receipts for a run, keyed by article id.
@@ -123,6 +182,7 @@ pub mod surreal {
         run_id: &str,
         stop: &(dyn Fn() -> bool + Sync),
     ) -> Result<IndexReport> {
+        let catalog = catalog_matcher(repo).await?;
         let units = run_units(repo, run_id).await?;
         let have = receipts(repo, run_id).await?;
         let mut report = IndexReport {
@@ -147,7 +207,16 @@ pub mod surreal {
             let now = chrono::Utc::now().to_rfc3339();
             for (article, metadata, rev) in chunk {
                 let unit = format!("{run_id}/{}", article.id);
-                match index_occurrence(repo, article, metadata.as_ref(), rev, &now).await {
+                match index_with_catalog(
+                    repo,
+                    article,
+                    metadata.as_ref(),
+                    rev,
+                    &now,
+                    catalog.clone(),
+                )
+                .await
+                {
                     Ok(coverage) => {
                         report.indexed += 1;
                         if coverage == "zero actors" || coverage == "metadata missing" {
@@ -178,9 +247,77 @@ pub mod surreal {
         rev: &str,
         now: &str,
     ) -> Result<String> {
+        index_with_catalog(
+            repo,
+            article,
+            metadata,
+            rev,
+            now,
+            catalog_matcher(repo).await?,
+        )
+        .await
+    }
+
+    async fn catalog_matcher(
+        repo: &Repository,
+    ) -> Result<Option<Arc<crate::actor_catalog::Matcher>>> {
+        let mut r = repo
+            .db()
+            .query("RETURN record::exists(brain_actor_seed:catalog)")
+            .await?
+            .check()?;
+        let enabled: Option<bool> = r.take(0)?;
+        if enabled != Some(true) {
+            return Ok(None);
+        }
+        if crate::storage::actor_catalog::status(repo.db())
+            .await?
+            .needs_seed
+        {
+            anyhow::bail!("Actor catalog is incomplete; run Seed DB from Argos Venture");
+        }
+        Ok(Some(repo.actor_matcher().await?))
+    }
+
+    async fn index_with_catalog(
+        repo: &Repository,
+        article: &AtlasArticleRow,
+        metadata: Option<&ArticleMetadata>,
+        rev: &str,
+        now: &str,
+        catalog: Option<Arc<crate::actor_catalog::Matcher>>,
+    ) -> Result<String> {
         if article.run_id.is_empty() || article.id.is_empty() {
             return Err(anyhow!("actor index: empty article id"));
         }
+        let clean = Arc::new(crate::storage::actor_catalog::clean_body(repo, &article.id).await?);
+        let found = if let Some(matcher) = catalog {
+            let candidates = if let Some(body) = clean.as_ref() {
+                crate::storage::actor_catalog::clean_body_candidates(repo, body)
+                    .await?
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let article = article.clone();
+            let clean = clean.clone();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    let mut actors = matcher.article_actors(&article);
+                    if let Some(body) = clean.as_ref() {
+                        crate::actor_catalog::append_body_actors(
+                            &mut actors,
+                            matcher.body_actors(&body.text, &candidates),
+                        );
+                    }
+                    actors
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
+        let found = Arc::new(found);
         let article = Arc::new(article.clone());
         let metadata = Arc::new(metadata.cloned());
         let rev = rev.to_string();
@@ -190,15 +327,25 @@ pub mod surreal {
         let out = coverage.clone();
         let write: MemoryWrite = Arc::new(move |tx: Tx| {
             let article = article.clone();
+            let found = found.clone();
+            let clean = clean.clone();
             let metadata = metadata.clone();
             let rev = rev.clone();
             let now = now.clone();
             let db = db.clone();
             let out = out.clone();
             Box::pin(async move {
-                let (cov, touched) =
-                    write_occurrence(&tx, &db, &article, metadata.as_ref().as_ref(), &rev, &now)
-                        .await?;
+                let (cov, touched) = write_occurrence(
+                    &tx,
+                    &db,
+                    &article,
+                    metadata.as_ref().as_ref(),
+                    found.as_ref().as_deref(),
+                    clean.as_ref().as_ref(),
+                    &rev,
+                    &now,
+                )
+                .await?;
                 let (run_id, article_id) = (article.run_id.as_str(), article.id.as_str());
                 lifecycle::put_article_index_in(
                     &tx,
@@ -239,23 +386,28 @@ pub mod surreal {
         db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
         article: &AtlasArticleRow,
         metadata: Option<&ArticleMetadata>,
-        revision: &str,
+        catalog_actors: Option<&[crate::atlas_metadata::ArticleActor]>,
+        clean_body: Option<&crate::storage::actor_catalog::CleanBody>,
+        _index_revision: &str,
         now: &str,
     ) -> Result<(String, Vec<String>), TxError> {
+        // Index receipts track enrichment coverage. Graph endpoints/mentions
+        // must instead fence on the article input revision used by topology.
+        let source_revision = crate::atlas_metadata::input_hash(article);
+        let revision = source_revision.as_str();
         let (run_id, article_id) = (article.run_id.as_str(), article.id.as_str());
         let mut touched: BTreeSet<String> =
             lifecycle::retire_article_occurrence_in(tx, run_id, article_id)
                 .await?
                 .into_iter()
                 .collect();
-        let Some(metadata) = metadata else {
-            return Ok(("metadata missing".into(), touched.into_iter().collect()));
+        let found = match (catalog_actors, metadata) {
+            (Some(actors), _) => actors.to_vec(),
+            (None, _) => return Ok(("catalog unavailable".into(), touched.into_iter().collect())),
         };
-        let found = crate::atlas_metadata::article_actors(article, metadata);
         if found.is_empty() {
             return Ok(("zero actors".into(), touched.into_iter().collect()));
         }
-        let scope = format!("atlas-article:{article_id}");
         let article_ep = EndpointRef::Article {
             run_id: run_id.into(),
             article_id: article_id.into(),
@@ -263,28 +415,25 @@ pub mod surreal {
         };
         let mut bound: Vec<(String, String, String)> = Vec::new();
         for a in &found {
-            let subtype = parse_subtype(&a.type_hint);
-            let key = crate::atlas_metadata::comparison_key(&a.display_name);
-            let legacy = format!("{}:{key}", a.type_hint);
-            let ext_scope = format!("atlas:{article_id}");
-            let (binding, changed) = crate::storage::actor_bind::bind_in(
-                tx,
-                &BindRequest {
-                    name: &a.display_name,
-                    subtype,
-                    scope: &scope,
-                    identifiers: &[],
-                    external: Some((&ext_scope, &legacy)),
-                    provenance: json!({"atlas_run":run_id,"article":article_id}),
-                },
-                now,
-            )
-            .await?;
-            touched.extend(changed);
+            let binding = crate::storage::actor_bind::Bound {
+                actor_id: a.id.clone(),
+                state: crate::memory_metadata::IdentityState::Resolved,
+            };
             let spans: Vec<Value> = a
                 .mentions
                 .iter()
-                .map(|m| json!({"field":m.field,"start_byte":m.start_byte,"end_byte":m.end_byte}))
+                .map(|m| {
+                    let mut span =
+                        json!({"field":m.field,"start_byte":m.start_byte,"end_byte":m.end_byte});
+                    if m.field == "body" {
+                        if let Some(body) = clean_body {
+                            span["source_id"] = json!(body.source_id);
+                            span["revision"] = json!(body.revision);
+                            span["artifact_hash"] = json!(body.artifact_hash);
+                        }
+                    }
+                    span
+                })
                 .collect();
             let fields: Vec<&str> = {
                 let mut f: Vec<&str> = a.mentions.iter().map(|m| m.field.as_str()).collect();
@@ -328,7 +477,7 @@ pub mod surreal {
             touched.insert(put_memory(tx, &id, MemoryPayload::Link(link)).await?);
             bound.push((
                 a.display_name.clone(),
-                subtype_str(subtype).to_string(),
+                a.type_hint.clone(),
                 binding.actor_id,
             ));
         }
@@ -350,7 +499,7 @@ pub mod surreal {
                     let cmeta = crate::storage::atlas_metadata::metadata(db, &orun, &oid).await?;
                     let shared = crate::related_articles::shared_entity_mentions_with(
                         article,
-                        Some(metadata),
+                        metadata,
                         &candidate,
                         cmeta.as_ref(),
                     );

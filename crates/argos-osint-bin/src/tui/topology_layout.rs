@@ -455,6 +455,7 @@ mod tests {
                 member_ids: Vec::new(),
                 receipts: Vec::new(),
                 rationale: String::new(),
+                actor_reference: None,
             });
         }
         let indices: Vec<_> = (0..snapshot.nodes.len()).collect();

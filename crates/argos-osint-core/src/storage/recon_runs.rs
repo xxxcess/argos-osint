@@ -5,7 +5,7 @@
 //! `Store` operations the Recon callers use on them.
 //!
 //! JSON columns (`plan_json`, `inputs_json`, `result_json`) stay JSON
-//! strings, as in SQLite, so the stored text is byte-identical and
+//! strings, as in the legacy store, so the stored text is byte-identical and
 //! `inflight_duplicate` can compare inputs as text. Times are RFC 3339 UTC
 //! strings (they sort as text).
 //!
@@ -13,7 +13,7 @@
 //! `recon_message_evidence` by `[message, call]`. A run needs its thread;
 //! deleting a thread deletes its runs (event), and deleting a message
 //! deletes its evidence rows. Calls are not deleted with their thread
-//! (SQLite keeps them too); `delete_thread` handles them.
+//! (the legacy store keeps them too); `delete_thread` handles them.
 
 use anyhow::{anyhow, ensure, Result};
 use chrono::Utc;
@@ -133,7 +133,7 @@ impl From<RunRow> for Run {
 }
 
 /// `Store::new_run_with_models`: `models` is `[recon, tool picker,
-/// synthesis]`; the limits are checked as in SQLite.
+/// synthesis]`; the limits are checked as in the legacy store.
 pub async fn new_run(
     repo: &Repository,
     thread_id: &str,
@@ -408,7 +408,7 @@ pub enum CallFilter<'a> {
     Manual,
 }
 
-/// Calls in start order (then id), as the SQLite `Store::calls`.
+/// Calls in start order (then id), as the legacy `Store::calls`.
 pub async fn calls(repo: &Repository, filter: CallFilter<'_>) -> Result<Vec<Call>> {
     let (cond, key) = match filter {
         CallFilter::Run(k) => ("run_id = $k", k),

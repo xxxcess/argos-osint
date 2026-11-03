@@ -6,7 +6,6 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -1265,7 +1264,7 @@ fn hash_of(s: &str) -> u64 {
 #[derive(Clone, Debug, Default)]
 pub struct SummaryRowsCache {
     key: SummaryRowsKey,
-    rows: Rc<Vec<SummaryRow>>,
+    rows: Arc<Vec<SummaryRow>>,
 }
 
 /// All rows of the Summary pane at `width`. Built once per distinct
@@ -1276,7 +1275,7 @@ pub fn summary_rows(
     loading: bool,
     error: Option<&str>,
     width: u16,
-) -> Rc<Vec<SummaryRow>> {
+) -> Arc<Vec<SummaryRow>> {
     let (gen, failure_kind) = match &state.summary.gen {
         SummaryGen::Idle => (0, None),
         SummaryGen::Pending => (1, None),
@@ -1302,7 +1301,7 @@ pub fn summary_rows(
     {
         return hit.rows.clone();
     }
-    let rows = Rc::new(build_summary_rows(state, loading, error, width));
+    let rows = Arc::new(build_summary_rows(state, loading, error, width));
     *state.summary_rows_cache.borrow_mut() = Some(SummaryRowsCache {
         key,
         rows: rows.clone(),

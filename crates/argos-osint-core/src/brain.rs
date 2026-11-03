@@ -431,7 +431,7 @@ mod tests {
         assert!(!ids.contains(&"noise"), "below the semantic floor");
         assert!(
             !ids.contains(&"gone"),
-            "vector ids missing from SQLite are dropped"
+            "vector ids missing from the legacy store are dropped"
         );
         let both = ranked.iter().find(|h| h.memory.id == "both").unwrap().score;
         assert!(

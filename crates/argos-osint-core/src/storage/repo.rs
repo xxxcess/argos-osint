@@ -3,7 +3,7 @@
 //! A [`Repository`] is a cheap-to-clone handle on one bootstrapped store.
 //! Every constructor goes through `ensure_schema`. Consumers get one from
 //! [`super::runtime::repository`] (the single process entry point) and call
-//! the storage modules with [`Repository::db`]. The SQLite `Store` stays
+//! the storage modules with [`Repository::db`]. The legacy `Store` stays
 //! untouched beside it until phase 5.
 
 use std::sync::Arc;
@@ -21,6 +21,7 @@ struct Inner {
     bootstrap: Bootstrap,
     mode: Option<Mode>,
     publisher: std::sync::OnceLock<super::publisher::Publisher>,
+    actor_matcher: tokio::sync::OnceCell<Arc<crate::actor_catalog::Matcher>>,
     _hold: Option<Hold>,
 }
 
@@ -82,6 +83,7 @@ impl Repository {
                 bootstrap,
                 mode,
                 publisher: std::sync::OnceLock::new(),
+                actor_matcher: tokio::sync::OnceCell::new(),
                 _hold: hold,
             }),
         }
@@ -98,6 +100,35 @@ impl Repository {
         self.inner
             .publisher
             .get_or_init(|| super::publisher::Publisher::spawn(self.inner.db.clone()))
+    }
+
+    /// One deterministic actor matcher per open repository; a reset/reseed
+    /// runs in a separate Venture child and therefore gets a fresh cache.
+    pub(crate) async fn actor_matcher(&self) -> Result<Arc<crate::actor_catalog::Matcher>> {
+        if let Some(matcher) = self.inner.actor_matcher.get() {
+            return Ok(matcher.clone());
+        }
+        let repo = self.clone();
+        // A request timeout must not discard catalog initialization and make
+        // every subsequent request start the same expensive load again.
+        tokio::spawn(async move {
+            repo.inner
+                .actor_matcher
+                .get_or_try_init(|| async {
+                    super::actor_catalog::load_matcher(&repo)
+                        .await
+                        .map(Arc::new)
+                })
+                .await
+                .cloned()
+        })
+        .await
+        .map_err(|error| anyhow!("actor matcher initialization worker: {error}"))?
+    }
+
+    /// Whether the shared actor catalog matcher has finished initialization.
+    pub fn actor_matcher_ready(&self) -> bool {
+        self.inner.actor_matcher.initialized()
     }
 
     pub fn bootstrap(&self) -> Bootstrap {

@@ -3,7 +3,7 @@
 //! (`Store::verify_atlas_publication`), used by `atlas_memory`'s refresh of
 //! finished runs whose indexing was incomplete.
 //!
-//! Coverage differs from SQLite in one way: there is no separate serving
+//! Coverage differs from the legacy store in one way: there is no separate serving
 //! index to probe, so a memory counts as indexed when
 //! `memory_index_state` records its current revision.
 
@@ -143,7 +143,7 @@ pub async fn verify_publication(
 // (`argos_atlas_checkpoints`, `argos_atlas_repairs`).
 
 /// `atlas_memory::save_checkpoint`: insert or replace the payload of one
-/// `(run, revision)`, as SQLite's `ON CONFLICT DO UPDATE` does.
+/// `(run, revision)`, as the legacy store's `ON CONFLICT DO UPDATE` does.
 pub async fn put_checkpoint(
     db: &Surreal<Any>,
     run_id: &str,

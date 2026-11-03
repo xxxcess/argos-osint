@@ -271,7 +271,7 @@ pub fn fallback_excerpt(text: &str, budget: usize) -> String {
 
 /// [`cache_get`] for async callers on the selected store: the repository
 /// (`storage::summary_flush::cache_get`) under SurrealDB, otherwise `conn`
-/// opened by `open` (SQLite is never opened under SurrealDB).
+/// opened by `open` (the legacy store is never opened under SurrealDB).
 pub async fn cache_get_selected(
     req: &SummaryRequest,
     _open: impl FnOnce() -> anyhow::Result<crate::store::Store>,
@@ -774,8 +774,8 @@ mod preparation_tests {
 
 /// [`publish_deterministic_and_enqueue`] on the SurrealDB summary queue
 /// (`storage::summary_flush::publish`) when SurrealDB is selected; `None`
-/// otherwise, and the caller keeps its SQLite path. Nothing here opens
-/// SQLite. From synchronous code the publish completes before returning
+/// otherwise, and the caller keeps its legacy store path. Nothing here opens
+/// the legacy store. From synchronous code the publish completes before returning
 /// (a cached model result is returned); inside an async context it is
 /// queued on the storage runtime and `deterministic` is returned. A failed
 /// publish returns `deterministic`.

@@ -61,23 +61,7 @@ fn merge_output_actors(
     actors: &mut Vec<atlas_metadata::ArticleActor>,
     output: investigation::insights::PipelineOutput,
 ) {
-    for entity in output.entities {
-        let name = entity.original_forms.first().cloned().unwrap_or_default();
-        if name.trim().is_empty()
-            || actors.iter().any(|a| {
-                a.type_hint == entity.type_hint && a.display_name.eq_ignore_ascii_case(&name)
-            })
-        {
-            continue;
-        }
-        actors.push(atlas_metadata::ArticleActor {
-            id: entity.id,
-            type_hint: entity.type_hint,
-            display_name: name,
-            spellings: entity.original_forms,
-            mentions: Vec::new(),
-        });
-    }
+    atlas_metadata::merge_output_actors(actors, &output.entities);
 }
 
 #[cfg(feature = "surreal")]
@@ -92,18 +76,29 @@ impl IntelBriefSnapshot {
         related_limit: usize,
     ) -> Result<Self> {
         let parts = super::surreal_brain::brief_parts(article)?;
+        let actor_article = article.clone();
+        let catalog_actors = argos_osint_core::storage::runtime::blocking(|repo| async move {
+            argos_osint_core::storage::actor_catalog::article_actors(&repo, &actor_article).await
+        })?;
+        let catalog_enabled = catalog_actors.is_some();
         let mut out = Self {
-            actors: parts
-                .metadata
-                .as_ref()
-                .map(|m| atlas_metadata::article_actors(article, m))
-                .unwrap_or_default(),
-            actor_state: parts
-                .metadata
-                .as_ref()
-                .map(|m| m.entity_state.as_str())
-                .unwrap_or("pending")
-                .into(),
+            actors: catalog_actors.unwrap_or_else(|| {
+                parts
+                    .metadata
+                    .as_ref()
+                    .map(|m| atlas_metadata::article_actors(article, m))
+                    .unwrap_or_default()
+            }),
+            actor_state: if catalog_enabled {
+                "catalog".to_owned()
+            } else {
+                parts
+                    .metadata
+                    .as_ref()
+                    .map(|m| m.entity_state.as_str())
+                    .unwrap_or("pending")
+                    .into()
+            },
             metadata_present: parts.metadata.is_some(),
             publisher_prior: parts.metadata.and_then(|m| m.publisher_prior),
             lifecycle: parts.lifecycle,
@@ -134,7 +129,7 @@ impl IntelBriefSnapshot {
                 break;
             }
         }
-        if let Some(output) = parts.output {
+        if let Some(output) = parts.output.filter(|_| !catalog_enabled) {
             merge_output_actors(&mut out.actors, output);
         }
         for (left, right) in out.explanations.keys() {

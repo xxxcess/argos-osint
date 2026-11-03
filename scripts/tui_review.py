@@ -95,8 +95,9 @@ def capture(args):
     cells, screenshots = output / "cells", output / "screenshots"
     cells.mkdir()
     screenshots.mkdir()
-    command = cargo_command(["test", "-p", "argos-osint-bin", "--locked",
-                             "--no-default-features", args.test])
+    # Match the embedded gate's workspace feature unification so a scoped
+    # capture can reuse its verified artifacts instead of rebuilding core.
+    command = cargo_command(["test", "--workspace", "--lib", "--locked", args.test])
     if args.ignored:
         command.extend(["--", "--ignored"])
     manifest = {"created_utc": datetime.now(timezone.utc).isoformat(),

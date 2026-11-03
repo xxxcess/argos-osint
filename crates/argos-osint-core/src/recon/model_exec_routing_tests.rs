@@ -603,3 +603,49 @@ async fn inferences_send_their_per_model_effort_on_the_wire_and_claims_do_not() 
         );
     }
 }
+
+#[tokio::test]
+async fn selected_role_variant_overrides_operation_effort_on_the_wire() {
+    let model = "nvidia/nemotron-3-ultra-550b-a55b";
+    let server = mock::serve(vec![mock::ok_json("{}", "stop")]).await;
+    let mut auth = AuthFile::default();
+    auth.set_account(ProviderSecret {
+        kind: "nvidia".into(),
+        model: model.into(),
+        base_url: server.base_url.clone(),
+        api_key: Some("fixture-only".into()),
+        stt_model: None,
+        device: None,
+    });
+    let mut settings = synthesis_chain(("nvidia", model), &[]);
+    settings.defaults.model_variants.insert(
+        provider::RoleDefaults::variant_key("synthesis", "nvidia", model),
+        crate::request_policy::ReasoningEffort::High,
+    );
+    execute_chat(
+        &auth,
+        &settings,
+        &OperationScope::new("variant-wire", "synthesis")
+            .with_insight_contract()
+            .with_budget(crate::request_policy::INFERENCES_BUDGET)
+            .with_interactive(),
+        &user("JSON please"),
+        json_validator,
+        &Arc::new(AtomicBool::new(false)),
+        None,
+        None,
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    let request = &server.requests.lock().unwrap()[0];
+    assert!(
+        request.contains("\"reasoning_effort\":\"high\""),
+        "{request}"
+    );
+    assert!(
+        !request.contains("\"reasoning_effort\":\"medium\""),
+        "selected high replaces efficient medium"
+    );
+}

@@ -112,6 +112,41 @@ pub fn article_actors(article: &AtlasArticleRow, metadata: &ArticleMetadata) -> 
     actors
 }
 
+/// Add extraction entities that are not already article-local actors.
+/// Identity is the actor id. A normalized display name can differ from the
+/// raw spelling stored on the extraction entity, and those two rows still
+/// name the same actor.
+pub fn merge_output_actors(actors: &mut Vec<ArticleActor>, entities: &[nlp::EntityCandidate]) {
+    for entity in entities {
+        let name = entity
+            .original_forms
+            .first()
+            .map(String::as_str)
+            .unwrap_or("")
+            .trim();
+        if name.is_empty()
+            || actors.iter().any(|actor| {
+                actor.id == entity.id
+                    || (actor.type_hint == entity.type_hint
+                        && (actor.display_name.eq_ignore_ascii_case(name)
+                            || actor
+                                .spellings
+                                .iter()
+                                .any(|spelling| spelling.eq_ignore_ascii_case(name))))
+            })
+        {
+            continue;
+        }
+        actors.push(ArticleActor {
+            id: entity.id.clone(),
+            type_hint: entity.type_hint.clone(),
+            display_name: name.to_string(),
+            spellings: entity.original_forms.clone(),
+            mentions: Vec::new(),
+        });
+    }
+}
+
 /// Calendar mentions cannot become people just because a tagger also labels
 /// them Person. Full names such as August Wilson and May Chen remain eligible.
 pub(crate) fn temporal_person_mention(
@@ -380,7 +415,7 @@ pub async fn process_run(
         return Ok(coverage);
     }
     let store = AtlasStore::open(db_path).await?;
-    let sqlite_db = crate::recon::backend::sqlite_path(db_path);
+    let legacy_db = crate::recon::backend::legacy_side_store_path(db_path);
     let publishers_enabled = store.tool_enabled(rsp::TOOL_ID).await?;
     let articles = store.list_articles(run_id).await?;
     if articles.is_empty() {
@@ -419,7 +454,7 @@ pub async fn process_run(
         None
     } else {
         let lookup = tokio::select! {
-            result=rsp::warm_with_store_json_for_db(stored.as_deref(),user_agent,sqlite_db.map(std::path::Path::to_path_buf))=>Some(result),
+            result=rsp::warm_with_store_json_for_db(stored.as_deref(),user_agent,legacy_db.map(std::path::Path::to_path_buf))=>Some(result),
             _=wait_cancelled(cancel.clone())=>None,
         };
         match lookup {
@@ -482,7 +517,7 @@ pub async fn process_run(
                     None
                 },
                 cancel.clone(),
-                sqlite_db.as_deref(),
+                legacy_db.as_deref(),
             )
             .await
         };
@@ -823,7 +858,7 @@ async fn inventory_index(
         match rsp::warm_with_store_json_for_db(
             stored.as_deref(),
             user_agent,
-            crate::recon::backend::sqlite_path(db).map(std::path::Path::to_path_buf),
+            crate::recon::backend::legacy_side_store_path(db).map(std::path::Path::to_path_buf),
         )
         .await
         {
@@ -894,7 +929,7 @@ async fn inventory_worker(
     let Some(first) = receiver.recv().await else {
         return Ok(());
     };
-    let sqlite_db = crate::recon::backend::sqlite_path(&db);
+    let legacy_db = crate::recon::backend::legacy_side_store_path(&db);
     let enabled = store.tool_enabled(rsp::TOOL_ID).await?;
     let entity_job = metadata_job(
         &db,
@@ -921,7 +956,7 @@ async fn inventory_worker(
             break;
         }
         if let Some(article) = next.take() {
-            let native = collect_inner(&article, None, cancel.clone(), sqlite_db.as_deref());
+            let native = collect_inner(&article, None, cancel.clone(), legacy_db.as_deref());
             tokio::pin!(native);
             let mut metadata = loop {
                 tokio::select! {
@@ -1014,7 +1049,47 @@ async fn inventory_worker(
 }
 
 #[cfg(test)]
-mod inventory_tests {}
+mod inventory_tests {
+    use super::{merge_output_actors, ArticleActor};
+    use crate::nlp::EntityCandidate;
+
+    #[test]
+    fn output_entities_do_not_repeat_an_actor_id() {
+        let mut actors = vec![ArticleActor {
+            id: "actor:art-1:same".into(),
+            type_hint: "organization".into(),
+            display_name: "Port Authority".into(),
+            spellings: vec!["Port Authority's".into()],
+            mentions: Vec::new(),
+        }];
+        merge_output_actors(
+            &mut actors,
+            &[
+                EntityCandidate {
+                    id: "actor:art-1:same".into(),
+                    type_hint: "organization".into(),
+                    comparison_key: "port authority s".into(),
+                    original_forms: vec!["Port Authority's".into()],
+                    mention_refs: Vec::new(),
+                },
+                EntityCandidate {
+                    id: "actor:art-1:other".into(),
+                    type_hint: "person".into(),
+                    comparison_key: "ada".into(),
+                    original_forms: vec!["Ada".into()],
+                    mention_refs: Vec::new(),
+                },
+            ],
+        );
+        assert_eq!(
+            actors
+                .iter()
+                .map(|actor| actor.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["actor:art-1:same", "actor:art-1:other"]
+        );
+    }
+}
 
 fn metadata_job(
     _db: &std::path::Path,
@@ -1023,6 +1098,6 @@ fn metadata_job(
     _title: &str,
     _cancel: Arc<AtomicBool>,
 ) -> Option<crate::job_registry::JobHandle> {
-    // Job tracking lived in SQLite; under SurrealDB Atlas runs untracked.
+    // Job tracking lived in the legacy store; under SurrealDB Atlas runs untracked.
     None
 }

@@ -172,39 +172,93 @@ pub async fn complete(
             .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
             .collect::<Vec<_>>(),
     )?;
+    let prompt_payload = format!(
+        "Answer the enclosed Argos conversation as its assistant. Follow its system instructions. Do not inspect files, use tools, or conduct additional research. Return only the answer.\n{input}\n"
+    ).into_bytes();
     let mut stdin = child.stdin.take().context("Codex stdin")?;
-    stdin.write_all(format!("Answer the enclosed Argos conversation as its assistant. Follow its system instructions. Do not inspect files, use tools, or conduct additional research. Return only the answer.\n{input}\n").as_bytes()).await?;
-    stdin.shutdown().await?;
-    drop(stdin);
     let stdout = child.stdout.take().context("Codex stdout")?;
     let mut lines = BufReader::new(stdout.take(2 * 1024 * 1024 + 1)).lines();
+
     let result = tokio::time::timeout(Duration::from_secs(180), async {
+        let mut writer_done = false;
+        let write_fut = async {
+            match stdin.write_all(&prompt_payload).await {
+                Ok(()) => {
+                    let _ = stdin.shutdown().await;
+                    drop(stdin);
+                    Ok(())
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                    // Child closed stdin early. Drop stdin so child sees EOF and let
+                    // stdout reader process child's error output.
+                    drop(stdin);
+                    Ok(())
+                }
+                Err(err) => Err(anyhow::Error::from(err).context("write prompt to Codex stdin")),
+            }
+        };
+        tokio::pin!(write_fut);
+
         let mut content = String::new();
         let mut received = 0usize;
-        while let Some(line) = lines.next_line().await? {
-            received += line.len();
-            if received > 2 * 1024 * 1024 {
-                return Err(anyhow!("Codex completion output exceeded its limit"));
-            }
-            let Ok(event) = serde_json::from_str::<Value>(&line) else { continue; };
-            if matches!(event.get("type").and_then(Value::as_str), Some("turn.failed" | "error")) {
-                return Err(anyhow!("Codex completion failed; check subscription availability and the selected model with Codex CLI"));
-            }
-            if let Some(text) = answer_event(&event) {
-                // Codex JSONL currently emits complete message chunks.
-                if !content.is_empty() {
-                    content.push_str("\n\n");
-                    on_delta("\n\n");
+
+        loop {
+            tokio::select! {
+                res = &mut write_fut, if !writer_done => {
+                    writer_done = true;
+                    res?;
                 }
-                content.push_str(text);
-                on_delta(text);
+                line_res = lines.next_line() => {
+                    let line_opt = line_res.context("read Codex stdout")?;
+                    match line_opt {
+                        Some(line) => {
+                            received += line.len();
+                            if received > 2 * 1024 * 1024 {
+                                return Err(anyhow!("Codex completion output exceeded its limit"));
+                            }
+                            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                                continue;
+                            };
+                            if matches!(
+                                event.get("type").and_then(Value::as_str),
+                                Some("turn.failed" | "error")
+                            ) {
+                                return Err(anyhow!(
+                                    "Codex completion failed; check subscription availability and the selected model with Codex CLI"
+                                ));
+                            }
+                            if let Some(text) = answer_event(&event) {
+                                // Codex JSONL currently emits complete message chunks.
+                                if !content.is_empty() {
+                                    content.push_str("\n\n");
+                                    on_delta("\n\n");
+                                }
+                                content.push_str(text);
+                                on_delta(text);
+                            }
+                        }
+                        None => {
+                            // Stdout reached EOF
+                            break;
+                        }
+                    }
+                }
             }
         }
+
         if !child.wait().await?.success() || content.trim().is_empty() {
-            return Err(anyhow!("Codex completion returned no successful answer; update Codex CLI or check ChatGPT sign-in"));
+            return Err(anyhow!(
+                "Codex completion returned no successful answer; update Codex CLI or check ChatGPT sign-in"
+            ));
         }
-        Ok(Completion { content, tool_calls: Vec::new(), ..Default::default() })
-    }).await.context("Codex completion timed out")?;
+        Ok(Completion {
+            content,
+            tool_calls: Vec::new(),
+            ..Default::default()
+        })
+    })
+    .await
+    .context("Codex completion timed out")?;
     result
 }
 

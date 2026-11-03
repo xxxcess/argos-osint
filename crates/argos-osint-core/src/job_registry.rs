@@ -28,9 +28,10 @@ use crate::events::{NewEvent, Severity};
 /// Job kind for registry-owned rows (task-backed jobs keep their own kinds).
 pub const KIND: &str = "inproc";
 /// A process whose heartbeat is older than this is treated as gone.
-pub const PROCESS_STALE_SECS: i64 = 30;
+/// Three beat intervals, so one delayed beat does not look like a dead owner.
+pub const PROCESS_STALE_SECS: i64 = 90;
 /// How often the process heartbeat runs.
-pub const BEAT_INTERVAL: Duration = Duration::from_secs(5);
+pub const BEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// What to register. `id` defaults to a fresh unique id.
 #[derive(Clone, Debug, Default)]
@@ -174,7 +175,7 @@ pub fn raise_local_cancel(id: &str) -> bool {
     let live = live().lock().unwrap_or_else(|e| e.into_inner());
     match live.get(id) {
         Some(flag) => {
-            flag.store(true, Ordering::Relaxed);
+            crate::recon::cancel_with_notify(flag);
             true
         }
         None => false,
@@ -201,7 +202,7 @@ pub struct JobHandle {
     cancel: Arc<AtomicBool>,
     finished: bool,
     /// The row lives in the repository's `job` table (SurrealDB selected);
-    /// no SQLite connection is opened for it.
+    /// no legacy store connection is opened for it.
     surreal: bool,
 }
 
@@ -344,7 +345,7 @@ impl JobHandle {
             if let Ok(true) =
                 crate::storage::recon_jobs::set_job_progress(&repo, &id, &phase, done, total).await
             {
-                cancel.store(true, Ordering::Relaxed);
+                crate::recon::cancel_with_notify(&cancel);
             }
         });
     }
@@ -590,7 +591,8 @@ fn start_surreal_beat() -> Result<ProcessBeat> {
             while !flag.load(Ordering::Relaxed) {
                 std::thread::sleep(BEAT_INTERVAL);
                 ticks += 1;
-                let recover = ticks.is_multiple_of(12);
+                // Two 30s beats keep orphan recovery on the one-minute cadence.
+                let recover = ticks.is_multiple_of(2);
                 let me = owner.clone();
                 // A beat that cannot reach the database writes nothing;
                 // the next tick tries again.
@@ -673,7 +675,8 @@ async fn surreal_recover(repo: &crate::storage::repo::Repository, me: &str) -> R
                  { duration::millis(heartbeat_at - active_since) } ELSE { 0 },
                active_since = NONE, finished_at = heartbeat_at ?? <datetime>$now,
                updated_at = <datetime>$now
-             WHERE kind = $kind AND worker_owner != '' AND worker_owner != $me
+             WHERE (kind = $kind OR (kind = 'service' AND operation IN ['api_server', 'web_server']))
+               AND worker_owner != '' AND worker_owner != $me
                AND state IN ['running', 'queued'] AND worker_owner NOTINSIDE $fresh
              RETURN record::id(id) AS id, app, run_ref",
         )
@@ -724,4 +727,66 @@ pub fn begin_optional_with(db: &Path, spec: JobSpec, cancel: Arc<AtomicBool>) ->
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    #[cfg(feature = "embedded")]
+    #[tokio::test]
+    async fn traffic_services_recover_dead_owners_without_retiring_other_services() {
+        use crate::storage::{
+            home::{self, Layout, Mode, StorageConfig},
+            recon_jobs::{self, AppJob},
+            repo::Repository,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::new(dir.path());
+        home::save_config(
+            &layout,
+            &StorageConfig {
+                mode: Mode::Embedded,
+                port: None,
+            },
+        )
+        .unwrap();
+        let repo = Repository::open_home(&layout).await.unwrap();
+        crate::storage::processes::beat(repo.db(), "fresh", std::process::id(), chrono::Utc::now())
+            .await
+            .unwrap();
+        for (id, operation, owner) in [
+            ("api", "api_server", "gone"),
+            ("web", "web_server", "gone"),
+            ("live", "api_server", "fresh"),
+            ("index", "local_index", "gone"),
+        ] {
+            recon_jobs::begin_app_job(
+                &repo,
+                &AppJob {
+                    id,
+                    operation,
+                    app: "system",
+                    title: id,
+                    run_ref: "",
+                    resource_ref: "",
+                    parent: None,
+                },
+            )
+            .await
+            .unwrap();
+            repo.db().query("UPDATE type::record('job', $id) SET kind = 'service', worker_owner = $owner RETURN NONE").bind(("id", id.to_string())).bind(("owner", owner.to_string())).await.unwrap().check().unwrap();
+        }
+        assert_eq!(super::surreal_recover(&repo, "fresh").await.unwrap(), 2);
+        for (id, expected) in [
+            ("api", "failed"),
+            ("web", "failed"),
+            ("live", "running"),
+            ("index", "running"),
+        ] {
+            assert_eq!(
+                crate::storage::jobs_view::get_job(repo.db(), id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                expected
+            );
+        }
+    }
+}

@@ -1,6 +1,6 @@
 //! The Recon executor's writes on SurrealDB (`storage::recon_exec`):
 //! `add_answer`, `recover_runs`, the model operation ledger and the
-//! investigation strategies, against the SQLite `Store` behaviour. Both
+//! investigation strategies, against the legacy store behaviour. Both
 //! modes via `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
 

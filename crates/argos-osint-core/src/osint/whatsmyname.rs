@@ -470,9 +470,9 @@ where
     let valid_count = snapshot.sites.iter().filter(|s| s.valid).count();
     let skipped_count = snapshot.sites.len().saturating_sub(valid_count);
 
-    if let Some(active) = dataset::load_active_manifest(DATASET_NAME) {
+    if let Some(active) = dataset::load_active_manifest_async(DATASET_NAME).await {
         if active.active_version == snapshot.snapshot_hash {
-            dataset::update_last_checked(DATASET_NAME)?;
+            dataset::update_last_checked_async(DATASET_NAME).await?;
             on_phase("Dataset already up to date");
             return Ok(active);
         }
@@ -493,7 +493,9 @@ where
         schema_version: 1,
     };
 
-    let activated = dataset::store_and_activate(DATASET_NAME, "wmn-data.json", &bytes, manifest)?;
+    let activated =
+        dataset::store_and_activate_async(DATASET_NAME, "wmn-data.json", bytes.to_vec(), manifest)
+            .await?;
     reload_active_snapshot();
     drop(lease);
     on_phase("Dataset activated successfully");

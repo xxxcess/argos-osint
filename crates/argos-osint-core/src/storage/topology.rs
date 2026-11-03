@@ -1,8 +1,8 @@
 //! Brain topology on the async repository (migration phase 5):
 //! `Store::topology_snapshot` for the Claim, Actor, Inference, Actor-group,
 //! Article, Topic, Source and Link/Related seeds, walked breadth-first to
-//! depth 3 with the SQLite node, edge, receipt and admission rules. Admission,
-//! findings and the deterministic neighbourhood brief reuse the SQLite code
+//! depth 3 with the legacy store node, edge, receipt and admission rules. Admission,
+//! findings and the deterministic neighbourhood brief reuse the legacy store code
 //! (`brain_topology::admit`, `brain_neighborhood_brief::build`).
 //!
 //! The retained Intel display seeds read the repository's brief
@@ -218,6 +218,10 @@ struct Query<'a> {
     gaps: BTreeSet<String>,
     remaining_rows: usize,
     memories: HashMap<String, Option<MemoryRow>>,
+    body_revisions: HashMap<String, Option<(String, String, String)>>,
+    /// Brief detail only needs direct article bindings, not the graph walk.
+    binding: bool,
+    cancel: &'a tokio::sync::watch::Sender<()>,
 }
 
 impl Query<'_> {
@@ -347,6 +351,39 @@ impl Query<'_> {
                         aliases.push_back(old);
                     }
                 }
+                let mut r = stmt(
+                    self.tx
+                        .query("SELECT VALUE alias FROM brain_actor_alias WHERE actor_id = $a")
+                        .bind(("a", canonical.clone())),
+                )
+                .await?;
+                let names: Vec<String> = r.take(0)?;
+                let mut unique = Vec::new();
+                for name in names {
+                    if super::actor_catalog::lookup_in(&self.tx, &name)
+                        .await?
+                        .as_deref()
+                        == Some(canonical.as_str())
+                    {
+                        unique.push(crate::brain_actors::normalize_alias(&name));
+                    }
+                }
+                if !unique.is_empty() {
+                    let mut r = stmt(self.tx.query("SELECT VALUE actor_id FROM brain_actor_alias WHERE normalized IN $names AND type::record('brain_actor', actor_id).scope_key != $catalog ORDER BY actor_id LIMIT $limit")
+                        .bind(("names", unique))
+                        .bind(("catalog", crate::actor_catalog::SCOPE))
+                        .bind(("limit", (self.limit + 1) as i64))).await?;
+                    let legacy: Vec<String> = r.take(0)?;
+                    for id in self.bound(legacy) {
+                        let resolved = self.resolve(&id).await?;
+                        if resolved != id && resolved != canonical {
+                            continue;
+                        }
+                        if !out.member_ids.contains(&id) {
+                            out.member_ids.push(id);
+                        }
+                    }
+                }
                 out.member_ids.sort();
                 out.revision = actor.revision.to_string();
                 out.detail = format!("Canonical actor: {canonical}\nIdentity: {}", out.status);
@@ -372,6 +409,10 @@ impl Query<'_> {
         } else {
             TopologySeed::Claim(id.into())
         });
+        if self.binding {
+            // The brief consumes identity, kind and label, not graph detail.
+            return Ok(Some(out));
+        }
         match self.payload(id).await? {
             Some(MemoryPayload::Claim(p)) => {
                 out.status = if p.assessment.trim().is_empty()
@@ -924,6 +965,39 @@ impl Query<'_> {
         Ok(r.take(0)?)
     }
 
+    /// A body mention must still name the selected retained clean artifact.
+    async fn actor_spans(&mut self, article_id: &str, raw: &str) -> Result<Option<String>> {
+        let Ok(Value::Array(mut spans)) = serde_json::from_str(raw) else {
+            return Ok(Some(raw.to_owned()));
+        };
+        if !spans.iter().any(|span| span["field"] == "body") {
+            return Ok(Some(raw.to_owned()));
+        }
+        if !self.body_revisions.contains_key(article_id) {
+            let body = super::actor_catalog::clean_body_in(&self.tx, article_id).await?;
+            self.body_revisions.insert(
+                article_id.to_owned(),
+                body.map(|body| (body.source_id, body.revision, body.artifact_hash)),
+            );
+        }
+        let current = self.body_revisions.get(article_id).and_then(Option::as_ref);
+        let before = spans.len();
+        spans.retain(|span| {
+            span["field"] != "body"
+                || current.is_some_and(|(source, revision, hash)| {
+                    span["source_id"].as_str() == Some(source.as_str())
+                        && span["revision"].as_str() == Some(revision.as_str())
+                        && span["artifact_hash"].as_str() == Some(hash.as_str())
+                })
+        });
+        if spans.len() != before {
+            self.gaps.insert(format!(
+                "article:{article_id}: cleaned-body actor mention changed"
+            ));
+        }
+        Ok((!spans.is_empty()).then(|| Value::Array(spans).to_string()))
+    }
+
     async fn actor_neighbours(&mut self, n: &TopologyNode, out: &mut Vec<Adjacency>) -> Result<()> {
         for actor_id in n.member_ids.clone() {
             let mut r = stmt(
@@ -960,6 +1034,10 @@ impl Query<'_> {
                         row.provenance_json,
                     );
                     e.status = format!("recorded · {}", row.binding_state);
+                    e.actor_reference = Some(crate::brain_topology::ActorReference {
+                        role: row.role.clone(),
+                        binding_state: row.binding_state.clone(),
+                    });
                     e.rationale = format!("Recorded actor role: {}", row.role);
                     e.member_ids.push(actor_id.clone());
                     out.push((memory, e));
@@ -1010,6 +1088,10 @@ impl Query<'_> {
                         format!("memory_metadata:{mid}@{}", memory.revision),
                     );
                     e.status = format!("recorded · {state}");
+                    e.actor_reference = Some(crate::brain_topology::ActorReference {
+                        role: role.clone(),
+                        binding_state: state.clone(),
+                    });
                     e.rationale = format!("Recorded actor role: {role}");
                     e.member_ids.push(actor_id.clone());
                     out.push((memory, e));
@@ -1025,7 +1107,13 @@ impl Query<'_> {
             if let Some(cycle) = self.cycle() {
                 mentions.retain(|m| m.origin_kind == "article" && m.origin_scope == cycle);
             }
-            for m in self.bound(mentions) {
+            for mut m in self.bound(mentions) {
+                if m.origin_kind == "article" {
+                    let Some(spans) = self.actor_spans(&m.origin_id, &m.spans_json).await? else {
+                        continue;
+                    };
+                    m.spans_json = spans;
+                }
                 let (kind, scope, id, revision) = (
                     &m.origin_kind,
                     &m.origin_scope,
@@ -1093,6 +1181,10 @@ impl Query<'_> {
                 );
                 e.member_ids.push(row.actor_id);
                 e.status = format!("recorded · {}", row.binding_state);
+                e.actor_reference = Some(crate::brain_topology::ActorReference {
+                    role: row.role.clone(),
+                    binding_state: row.binding_state.clone(),
+                });
                 e.rationale = format!("Recorded actor role: {}", row.role);
                 out.push((actor, e));
             }
@@ -1118,6 +1210,10 @@ impl Query<'_> {
                     format!("memory_metadata:{}@{}", n.id, n.revision),
                 );
                 e.member_ids.push(reference.actor_id);
+                e.actor_reference = Some(crate::brain_topology::ActorReference {
+                    role: reference.role.clone(),
+                    binding_state: reference.binding_state.as_str().into(),
+                });
                 e.status = format!("recorded · {}", reference.binding_state.as_str());
                 out.push((actor, e));
             }
@@ -1585,6 +1681,9 @@ impl Query<'_> {
         n: &TopologyNode,
         out: &mut Vec<Adjacency>,
     ) -> Result<()> {
+        if self.cancel.is_closed() {
+            anyhow::bail!("Topology request cancelled");
+        }
         let mut r = stmt(
             self.tx
                 .query(
@@ -1599,7 +1698,11 @@ impl Query<'_> {
         mentions.sort_by(|a, b| {
             (&a.actor_id, &a.origin_revision).cmp(&(&b.actor_id, &b.origin_revision))
         });
-        for m in self.bound(mentions) {
+        for mut m in self.bound(mentions) {
+            let Some(spans) = self.actor_spans(&n.article_id, &m.spans_json).await? else {
+                continue;
+            };
+            m.spans_json = spans;
             let (aid, revision) = (&m.actor_id, &m.origin_revision);
             if !revision.is_empty() && *revision != n.revision {
                 self.gaps
@@ -1702,6 +1805,11 @@ impl Query<'_> {
                 }
                 out.push((c, e));
             }
+        }
+        if self.binding {
+            // Direct actors and evidence above are sufficient for brief links.
+            // Related article expansion belongs to the graph/Related readers.
+            return Ok(());
         }
         if let Some(t) = topic_node(&n.subtype) {
             out.push((
@@ -2042,8 +2150,8 @@ async fn group_root(
 
 /// The TUI memory check before a Brain memory opens the topology mapper:
 /// `Store::get_memory` plus `brain_kinds::memory_kind` on SurrealDB. `None`
-/// when the memory does not exist (whatever its lifecycle, as SQLite); a
-/// missing or unknown `memory_kind` reads as a Claim, as SQLite's legacy
+/// when the memory does not exist (whatever its lifecycle, as the legacy store); a
+/// missing or unknown `memory_kind` reads as a Claim, as the legacy store's
 /// untyped rows do.
 pub async fn memory_seed_kind(repo: &Repository, id: &str) -> Result<Option<MemoryKind>> {
     let mut r = stmt(
@@ -2063,18 +2171,59 @@ pub async fn topology_snapshot(
     seed: &TopologySeed,
     options: &TopologyOptions,
 ) -> Result<TopologySnapshot> {
+    snapshot_worker(repo, seed, options, false).await
+}
+
+/// Direct article bindings for a brief read. Skips the neighborhood walk that
+/// can hold a transaction until the HTTP deadline drops it.
+pub async fn brief_binding_snapshot(
+    repo: &Repository,
+    seed: &TopologySeed,
+) -> Result<TopologySnapshot> {
+    let options = TopologyOptions {
+        depth: 1,
+        max_nodes: 48,
+        max_edges: 64,
+        ..Default::default()
+    };
+    snapshot_worker(repo, seed, &options, true).await
+}
+
+async fn snapshot_worker(
+    repo: &Repository,
+    seed: &TopologySeed,
+    options: &TopologyOptions,
+    binding: bool,
+) -> Result<TopologySnapshot> {
     ensure!(
         options.continuation_token.is_none(),
         "Topology continuation is unavailable; refresh with a larger bounded limit"
     );
-    // Every read of one snapshot runs in one transaction, so a concurrent
-    // publish never shows half its writes. Errors keep their text.
-    let out = run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
-        snapshot_in(repo, tx, seed, options)
-            .await
-            .map_err(|e| TxError::Abort(format!("{e:#}")))
-    })
-    .await;
+    // The worker owns BEGIN through COMMIT/CANCEL. Dropping the receiver
+    // (HTTP timeout) is observed between statements. The in-flight statement
+    // is allowed to finish so its transaction is cancelled, not dropped.
+    let (caller, lifetime) = tokio::sync::watch::channel(());
+    let (finished, waiting) = tokio::sync::oneshot::channel();
+    let (repo, seed, options) = (repo.clone(), seed.clone(), options.clone());
+    tokio::spawn(async move {
+        let out = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+            let (repo, seed, options, caller) = (&repo, &seed, &options, &caller);
+            async move {
+                if caller.is_closed() {
+                    return Err(TxError::Abort("Topology request cancelled".into()));
+                }
+                snapshot_in(repo, tx, seed, options, binding, caller)
+                    .await
+                    .map_err(|e| TxError::Abort(format!("{e:#}")))
+            }
+        })
+        .await;
+        let _ = finished.send(out);
+    });
+    let out = waiting
+        .await
+        .map_err(|_| anyhow::anyhow!("Topology transaction worker stopped"))?;
+    drop(lifetime);
     match out {
         Ok(c) => Ok(c.value),
         Err(TxError::Abort(message)) => Err(anyhow::anyhow!(message)),
@@ -2087,6 +2236,8 @@ async fn snapshot_in(
     tx: Tx,
     seed: &TopologySeed,
     options: &TopologyOptions,
+    binding: bool,
+    cancel: &tokio::sync::watch::Sender<()>,
 ) -> Result<TopologySnapshot> {
     let changed: Option<i64> = {
         let mut r = stmt(
@@ -2105,7 +2256,10 @@ async fn snapshot_in(
         gaps: BTreeSet::new(),
         remaining_rows: options.max_nodes.saturating_mul(64).clamp(4096, 32768),
         memories: HashMap::new(),
+        body_revisions: HashMap::new(),
         tx,
+        binding,
+        cancel,
     };
     let mut snapshot = TopologySnapshot {
         seed: Some(seed.clone()),
@@ -2256,7 +2410,7 @@ async fn snapshot_in(
             name,
         } => {
             // Provisional only: the native-mention and canonical actor
-            // resolution of the SQLite seed are not ported.
+            // resolution of the legacy store seed are not ported.
             if let Some(article) = q.article_node(run_id, article_id, revision).await? {
                 let mut n = node(seed.key(), TopologyNodeKind::Entity, name.clone());
                 n.status = "retained source · provisional".into();
@@ -2326,6 +2480,9 @@ async fn snapshot_in(
     let candidate_limit = options.max_nodes.saturating_mul(8).clamp(256, 4096);
     let edge_limit = options.max_edges.saturating_mul(8).clamp(512, 8192);
     while let Some(id) = queue.pop_front() {
+        if q.cancel.is_closed() {
+            anyhow::bail!("Topology request cancelled");
+        }
         let current: TopologyNode = nodes[&id].clone();
         if current.min_hops >= depth {
             continue;
@@ -2391,6 +2548,11 @@ async fn snapshot_in(
     let exhausted = q.exhausted;
     let gaps = std::mem::take(&mut q.gaps);
     admit(&mut snapshot, nodes, edges, options, exhausted, gaps);
+    if binding {
+        // Brief decoration reads only the admitted nodes. Association payloads
+        // and the neighborhood summary are needed only by the graph page.
+        return Ok(snapshot);
+    }
     for n in snapshot.nodes.clone() {
         if n.is_root {
             continue;

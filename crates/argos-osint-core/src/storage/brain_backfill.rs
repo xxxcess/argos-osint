@@ -1,7 +1,7 @@
 //! The Brain backfill pool on SurrealDB (`brain_backfill` on the
 //! repository).
 //!
-//! SQLite's backfill migrates legacy tables (`recon_entities`,
+//! the legacy store's backfill migrates legacy tables (`recon_entities`,
 //! `investigation_entities`, `recon_thread_entities`, insight claims,
 //! derivation links, Intel leads) into the Brain registry. A SurrealDB store
 //! starts empty and binds those at write time (claim subjects at insight

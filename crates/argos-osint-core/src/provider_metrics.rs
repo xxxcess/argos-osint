@@ -140,7 +140,7 @@ pub async fn cache_capacity_rows_on(
 }
 
 /// [`capacity_snapshot`] on the SurrealDB repository; unavailable on a
-/// storage error, as on SQLite.
+/// storage error, as on the legacy store.
 #[cfg(feature = "surreal")]
 pub async fn capacity_snapshot_on(repo: &crate::storage::repo::Repository) -> CapacitySnapshot {
     crate::storage::profile_view::capacity_snapshot(repo.db())

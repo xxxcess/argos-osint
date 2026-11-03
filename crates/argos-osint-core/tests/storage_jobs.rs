@@ -549,6 +549,37 @@ async fn intel_brief_dependent_stage_runs_alone_in_its_job() {
     assert_eq!(d.job_id, chain.job_id);
 }
 
+#[tokio::test]
+async fn finished_intel_brief_is_not_left_running() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "brief_settle").await;
+    let now = Utc::now();
+    let chain = jobs::ensure_chain(
+        &db,
+        "art",
+        "rev1",
+        &[StageSpec {
+            operation: "only",
+            deps: vec![],
+        }],
+        now,
+    )
+    .await
+    .unwrap()
+    .value;
+    let task = claim(&db, "intel_brief", "w", now).await.unwrap();
+    jobs::commit_stage(&db, &task, "{}", "hash", now, "stage:only")
+        .await
+        .unwrap();
+    let job = argos_osint_core::storage::jobs_view::get_job(&db, &chain.job_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.state, "completed");
+}
+
 // --- site 1: reaper (tasks.rs:1385) ------------------------------------------
 
 #[tokio::test]

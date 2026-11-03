@@ -1,0 +1,11 @@
+# Focus the baseline on pure high-risk code; network and embedding tests stay offline.
+examine_globs = [
+  "crates/argos-osint-core/src/nlp/select.rs",
+  "crates/argos-osint-core/src/provider_attempt.rs",
+  "crates/argos-osint-core/src/provider_request.rs",
+  "crates/argos-osint-core/src/atlas_classify.rs",
+]
+test_package = ["argos-osint-core"]
+additional_cargo_args = ["--locked", "--lib", "--test", "proptest_nlp", "--test", "proptest_parser", "--test", "proptest_ranking", "--test", "proptest_classification", "--test", "proptest_provider_policy"]
+timeout_multiplier = 3.0
+output = ".agent-scratch/mutants"

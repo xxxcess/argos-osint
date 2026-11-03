@@ -10,10 +10,10 @@
 //!
 //! SurrealDB `task` rows have no message or blocked-reason columns, so the
 //! terminal message and `blocked_reason` live on the `insight_refresh_task`
-//! sidecar. Caller-supplied, because their inputs are still SQLite: the
+//! sidecar. Caller-supplied, because their inputs are withheld: the
 //! pipeline run (`execute`), live-evidence validation (`validate`) and the
 //! derivation context (the live Recon opt-in). `insight.recovery_error`
-//! events are returned rather than recorded (`events` is SQLite).
+//! events are returned rather than recorded (`events` is the legacy store).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

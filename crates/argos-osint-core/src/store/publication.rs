@@ -1,7 +1,7 @@
 //! Transactional Atlas publication, durable index outbox, revision-aware
 //! indexing and exact coverage verification (spec §3.2–§3.3).
 //!
-//! One SQLite transaction upserts canonical memories and claim/source links,
+//! One legacy store transaction upserts canonical memories and claim/source links,
 //! writes index-outbox rows for every missing or stale memory revision and
 //! persists a structured [`PublicationReceipt`]. Embedding and Lance writes run
 //! only after commit, through leased index tasks; [`Store::try_index_memory`]
@@ -174,7 +174,7 @@ impl MemoryChangeWatcher {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverageReport {
     pub required: usize,
-    /// Required memory ids with no SQLite row.
+    /// Required memory ids with no legacy store row.
     pub missing_rows: Vec<String>,
     /// Current revision recorded as indexed **and** id present in the serving index.
     pub indexed: Vec<String>,
@@ -284,7 +284,7 @@ impl Store {
     }
 
     /// Revision-aware upsert of one memory. Reads text + revision, embeds and
-    /// writes outside any SQLite write lock, verifies the exact id in the serving
+    /// writes outside any legacy store write lock, verifies the exact id in the serving
     /// index, then records the revision only if the memory still has it. A
     /// deleted memory has its vector removed (never resurrected); a revision that
     /// changed during the write returns `Pending` so the task re-runs on the

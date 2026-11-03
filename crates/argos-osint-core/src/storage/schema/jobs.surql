@@ -96,7 +96,7 @@ DEFINE FIELD IF NOT EXISTS retry_wait_ms ON task TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS error_category ON task TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS error_message ON task TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS result_ref ON task TYPE string DEFAULT '';
--- Replaces the SQLite partial index argos_tasks_queued_order.
+-- Replaces the legacy store's partial index `argos_tasks_queued_order`.
 DEFINE INDEX IF NOT EXISTS task_claim_order ON task FIELDS state, pool, priority, created_at;
 DEFINE INDEX IF NOT EXISTS task_lease ON task FIELDS state, lease_until;
 DEFINE INDEX IF NOT EXISTS task_job ON task FIELDS job, state;

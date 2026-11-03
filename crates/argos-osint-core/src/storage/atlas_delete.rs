@@ -10,7 +10,7 @@
 //! Article placeholder nodes and memory nodes left without edges are
 //! removed in the same transaction.
 //!
-//! Still with the caller (SQLite-only or not yet ported; see
+//! Still with the caller (legacy-store-only or not yet ported; see
 //! `.planning/2026-10-22-surrealdb/acceptance.md`): the NLP cache and
 //! `nlp_source_refs`, `brain_backfill_receipts` (step 4), the job retention
 //! sweep (`jobs::cleanup_batch`, its own idempotent transaction) and
@@ -25,7 +25,9 @@ use super::codec::encode;
 use super::graph::memory_node;
 use super::insight::{atlas_answer_id, atlas_brief_id};
 use super::jobs::{rid, run, take};
-use super::lifecycle::{reconcile_lifecycle_in, reconcile_sources_in, retire_origin_in};
+use super::lifecycle::{
+    reconcile_lifecycle_in, reconcile_sources_in, retire_article_occurrence_in, retire_origin_in,
+};
 use super::memory::{write_then_index, MemoryWrite};
 use super::publisher::Publisher;
 use super::tx::{Tx, TxError};
@@ -530,11 +532,16 @@ pub async fn delete_article(
                     .bind(("key", encode(&[&run_id, &article_id]))),
             )
             .await?;
-            let mut ids = reconcile_deleted_articles_in(&tx).await?;
+            let mut ids = retire_article_occurrence_in(&tx, &run_id, &article_id).await?;
+            ids.extend(reconcile_deleted_articles_in(&tx).await?);
             ids.extend(reconcile_lifecycle_in(&tx).await?);
             drop_orphan_nodes_in(&tx, &run_id, Some(&article_id), &[]).await?;
-            // `nlp::cache::remove_owner(conn, "article", id)` of the SQLite path.
-            super::insight::remove_nlp_owner_in(&tx, "article", &article_id).await?;
+            // `nlp::cache::remove_owner(conn, "article", id)` of the legacy store path.
+            let mut remaining = run(&tx, tx.query("RETURN count(SELECT id FROM atlas_article WHERE article_id = $article LIMIT 1)").bind(("article", article_id.clone()))).await?;
+            if take::<Option<usize>>(&mut remaining, 0)?.unwrap_or(0) == 0 {
+                // Bodies/artifacts are article-owned, shared by run occurrences.
+                super::insight::remove_nlp_owner_in(&tx, "article", &article_id).await?;
+            }
             Ok((ids, ()))
         })
     })
@@ -566,7 +573,19 @@ pub async fn prune_expired(
             let protected: Vec<String> = take(&mut r, 1)?;
             let mut ids = Vec::new();
             for run_id in &runs {
-                ids.extend(delete_cycle_memories_in(&tx, run_id).await?);
+                let mut rows = run(&tx, tx.query("SELECT VALUE article_id FROM atlas_article WHERE run_id = $run AND article_id NOTINSIDE $keep; RETURN count(SELECT id FROM atlas_article WHERE run_id = $run AND article_id INSIDE $keep LIMIT 1);")
+                    .bind(("run", run_id.clone())).bind(("keep", protected.clone()))).await?;
+                let removed: Vec<String> = take(&mut rows, 0)?;
+                let kept: Option<usize> = take(&mut rows, 1)?;
+                if kept.unwrap_or(0) == 0 {
+                    ids.extend(delete_cycle_memories_in(&tx, run_id).await?);
+                    ids.extend(retire_origin_in(&tx, "article", run_id).await?.1);
+                } else {
+                    // Protected occurrences retain their source contributions.
+                    for article_id in removed {
+                        ids.extend(retire_article_occurrence_in(&tx, run_id, &article_id).await?);
+                    }
+                }
                 run(
                     &tx,
                     tx.query(

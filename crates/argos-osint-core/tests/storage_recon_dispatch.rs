@@ -1,5 +1,5 @@
 //! The Recon storage dispatch (`recon::backend::ReconStore`): the same
-//! sequence of Recon writes and reads against SQLite and SurrealDB gives
+//! sequence of Recon writes and reads against the legacy store and SurrealDB gives
 //! the same observable results. Both modes via `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
 

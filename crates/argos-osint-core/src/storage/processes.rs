@@ -36,9 +36,10 @@ pub const ORPHANS_SURQL: &str = "SELECT record::id(id) AS id, record::id(root) A
      AND process_owner NOT IN $fresh LIMIT $n";
 
 /// Seconds after the last beat at which a process counts as gone.
-pub const PROCESS_STALE_SECS: i64 = 30;
+/// Three beat intervals, so one delayed beat does not look like a dead owner.
+pub const PROCESS_STALE_SECS: i64 = 90;
 /// Heartbeat interval.
-pub const BEAT_INTERVAL: Duration = Duration::from_secs(5);
+pub const BEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// Tasks recovered per transaction.
 pub const RECOVER_BATCH: i64 = 64;
 

@@ -440,7 +440,7 @@ fn refresh_in_background(user_agent: &str, _db_path: Option<std::path::PathBuf>)
         if let Ok(index) = fetch_index(&agent).await {
             {
                 // SurrealDB: the index lives in the repository's `app_state`;
-                // SQLite is never opened.
+                // The legacy store is never opened.
                 #[cfg(feature = "surreal")]
                 if let (Ok(repo), Ok(json)) = (
                     crate::storage::runtime::repository().await,

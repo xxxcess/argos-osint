@@ -64,7 +64,7 @@ impl BatchAdapter {
         }
         if let Some((db, key)) = &self.cache {
             let json = serde_json::to_string(&*valid).map_err(|e| e.to_string())?;
-            match crate::recon::backend::sqlite_path(db) {
+            match crate::recon::backend::legacy_side_store_path(db) {
                 Some(path) => {
                     let store = Store::open(path).map_err(|e| e.to_string())?;
                     store.app_state_set(key, &json).map_err(|e| e.to_string())?;
@@ -223,7 +223,7 @@ pub async fn execute(
         "{PROMPT_VERSION}:{run}:{revision}:{}",
         crate::nlp::cache::hash(&serde_json::to_string(&routes).unwrap_or_default())
     );
-    let sqlite_db = crate::recon::backend::sqlite_path(db);
+    let legacy_db = crate::recon::backend::legacy_side_store_path(db);
     // Per-batch cache writes run on either store (see `accept`).
     adapter.cache = Some((db.to_path_buf(), cache_key.clone()));
     let store = crate::atlas_store::AtlasStore::open(db).await.ok();
@@ -257,12 +257,12 @@ pub async fn execute(
         &adapter,
         cancel,
         None,
-        sqlite_db.as_deref(),
+        legacy_db.as_deref(),
     )
     .await;
     let receipt = adapter.receipt();
     let json = serde_json::to_string(&receipt).unwrap_or_default();
-    if sqlite_db.is_none() {
+    if legacy_db.is_none() {
         // Behind any queued per-batch writes, so the final receipt wins.
         cache_write_ordered(db.to_path_buf(), cache_key, json);
     } else if let Some(store) = &store {
@@ -272,7 +272,7 @@ pub async fn execute(
 }
 
 /// Queue a classifier cache write on the runtime's ordered queue (SurrealDB:
-/// `accept` cannot await). Best-effort, like the SQLite write it mirrors.
+/// `accept` cannot await). Best-effort, like the legacy store write it mirrors.
 fn cache_write_ordered(db: std::path::PathBuf, key: String, json: String) {
     let label = key.clone();
     let queued = crate::storage::runtime::spawn_ordered(async move {

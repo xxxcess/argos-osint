@@ -108,6 +108,8 @@ const s = StyleSheet.create({
     overflow: "visible",
   },
   filters: {
+    // Keep the day menu above Refresh when the header wraps to a second row.
+    zIndex: 1,
     flexDirection: "row",
     flexWrap: "wrap",
     alignItems: "center",

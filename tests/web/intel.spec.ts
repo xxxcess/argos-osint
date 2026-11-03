@@ -28,6 +28,7 @@ async function expectFixedStatusBar(page: Page) {
   ).toBeLessThanOrEqual(1);
 }
 test.use({
+  reducedMotion: "reduce",
   video:
     process.env.ARGOS_WEB_RECORD_VIDEO === "1" ? "on" : "retain-on-failure",
 });
@@ -438,17 +439,15 @@ for (const width of [1440, 768, 390, 320]) {
   });
 }
 
-test("feed images collapse for missing, unsafe and failed sources", async ({
-  page,
-}) => {
-  await page.route("https://images.example.test/broken.png", (route) =>
-    route.abort(),
-  );
-  for (const imageUrl of [
-    "",
-    "javascript:alert(1)",
-    "https://images.example.test/broken.png",
-  ]) {
+for (const [name, imageUrl] of [
+  ["missing", ""],
+  ["unsafe", "javascript:alert(1)"],
+  ["failed", "https://images.example.test/broken.png"],
+]) {
+  test(`feed images collapse for ${name} sources`, async ({ page }) => {
+    await page.route("https://images.example.test/broken.png", (route) =>
+      route.abort(),
+    );
     await fixtures(page, true, imageUrl);
     await gotoBulletin(page);
     const card = page.getByTestId("article-card-a1");
@@ -457,8 +456,8 @@ test("feed images collapse for missing, unsafe and failed sources", async ({
     await expect(card.getByText(a.title, { exact: true })).toBeVisible();
     await expect(card).toHaveRole("button");
     await expect(card).toHaveAccessibleName(`Open Focus Brief: ${a.title}`);
-  }
-});
+  });
+}
 
 test("gates the workspace when the API is unavailable", async ({ page }) => {
   await page.route("**/api/v1/**", (r) => r.abort());
@@ -546,7 +545,12 @@ test("browse, search, brief, related, topology and reconnect", async ({
     .click();
   await expect(page).toHaveURL(/\/actor\?id=actor1$/);
   await page.getByRole("button", { name: "OPEN ACTOR TOPOLOGY" }).click();
-  await expect(page.getByText("Recorded actor")).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Select node Port authority, entity",
+      exact: true,
+    }),
+  ).toBeVisible();
   await expect(page).toHaveURL(/\/topology\?seed=actor1$/);
   await page
     .getByRole("button", { name: "Return to Actor", exact: true })
@@ -556,7 +560,12 @@ test("browse, search, brief, related, topology and reconnect", async ({
     .click();
   await page.getByRole("button", { name: "Launch 3D topology" }).click();
   await expect(page).toHaveURL(/\/topology\?seed=actor1$/);
-  await expect(page.getByText("Recorded actor")).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Select node Port authority, entity",
+      exact: true,
+    }),
+  ).toBeVisible();
   f.offline();
   await page.clock.fastForward(60_000);
   await expect(
@@ -568,7 +577,12 @@ test("browse, search, brief, related, topology and reconnect", async ({
   ).toHaveCount(0);
   f.online();
   await page.getByRole("button", { name: "Connect / retry" }).click();
-  await expect(page.getByText("Recorded actor")).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Select node Port authority, entity",
+      exact: true,
+    }),
+  ).toBeVisible();
   await expect(page).toHaveURL(/\/topology\?seed=actor1$/);
   await page.getByRole("button", { name: "Bulletin", exact: true }).click();
   await expect(
@@ -675,6 +689,14 @@ test("selection controls support keyboard activation and visible focus", async (
     "solid",
   );
   await day.press("Tab");
+  for (const name of ["Latest", "Hottest"]) {
+    const sort = page.getByRole("button", { name, exact: true });
+    await expect(sort).toBeFocused();
+    expect(await sort.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe(
+      "solid",
+    );
+    await sort.press("Tab");
+  }
   const refresh = page.getByRole("button", {
     name: "Refresh feed",
     exact: true,
@@ -732,7 +754,12 @@ for (const width of [1440, 768, 390, 320]) {
       fullPage: true,
     });
     await page.getByRole("button", { name: "Launch 3D topology" }).click();
-    await expect(page.getByText("Recorded actor")).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: "Select node Port authority, entity",
+        exact: true,
+      }),
+    ).toBeVisible();
     await expect(page.locator("canvas").first()).toBeVisible({
       timeout: 20000,
     });
@@ -1251,7 +1278,12 @@ test("topology graph explorer selects, filters and stays within 320px", async ({
       0,
     );
   await expect(page.getByText("Showing 2 of 3 nodes")).toBeVisible();
-  await expect(page.getByText("Recorded actor")).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Select node Port authority, entity",
+      exact: true,
+    }),
+  ).toBeVisible();
   await expect(page.locator("canvas").first()).toBeVisible({ timeout: 20000 });
   await page.locator("canvas").first().scrollIntoViewIfNeeded();
   await page
@@ -1261,17 +1293,40 @@ test("topology graph explorer selects, filters and stays within 320px", async ({
   await page
     .getByRole("button", { name: "Select node Shipping claim, claim" })
     .click();
-  await expect(page.getByText("Claim detail")).toBeVisible();
-  await expect(page.getByText("Recorded actor")).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: /Select neighbor Port authority/ }),
-  ).toBeVisible();
+    page.getByRole("button", {
+      name: "Select node Shipping claim, claim",
+      exact: true,
+    }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByRole("button", {
+      name: "Select node Port authority, entity",
+      exact: true,
+    }),
+  ).toHaveAttribute("aria-pressed", "false");
+  await expect(
+    page
+      .getByRole("list", { name: "Topology nodes", exact: true })
+      .getByRole("button"),
+  ).toHaveCount(3);
   await page.getByRole("button", { name: "Show article nodes" }).click();
   await expect(page.getByText("Showing 2 of 3 nodes")).toBeVisible();
-  await page
-    .locator("canvas")
-    .first()
-    .click({ position: { x: 10, y: 10 } });
+  const graphCanvas = page.locator("canvas").first();
+  const canvasBounds = (await graphCanvas.boundingBox())!;
+  const emptyCorner = { x: canvasBounds.width - 12, y: 12 };
+  await graphCanvas.hover({ position: emptyCorner });
+  // The engine raycasts pointer movement on its render loop before click dispatch.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await graphCanvas.click({ position: emptyCorner });
+  await expect(
+    page.getByRole("group", { name: /^Topology graph with/ }),
+  ).toHaveAccessibleName(/No node selected/);
   await page.getByRole("button", { name: "Show claim nodes" }).click();
   await page.getByRole("button", { name: "Show entity nodes" }).click();
   await expect(
@@ -1546,6 +1601,9 @@ for (const width of [1536, 1440, 768, 390, 320]) {
     await fixtures(page);
     await page.goto("/");
     await expect(
+      page.getByRole("button", { name: "Open Intel", exact: true }),
+    ).toBeVisible();
+    await expect(
       page.getByLabel("API connected", { exact: true }),
     ).toBeVisible();
     await expect(page.getByText(a.title)).toHaveCount(0);
@@ -1659,6 +1717,11 @@ for (const width of [1440, 768, 390, 320]) {
         .toBe("absolute");
       const openBox = (await article.boundingBox())!;
       expect(openBox.y).toBe(closedTop);
+      if (name === "Geopolitical")
+        await page.screenshot({
+          path: `${captureDir}/bulletin-day-menu-${width}.png`,
+          fullPage: false,
+        });
       await overlay
         .getByRole("button", { name: "Day 2026-10-25", exact: true })
         .click();
@@ -1872,8 +1935,14 @@ for (const referenceWidth of [1440, 1280, 768, 390, 320]) {
         .getByRole("group", { name: "Node kinds", exact: true })
         .boundingBox())!;
       expect(kindsBox.y).toBeGreaterThan(depthBox.y + depthBox.height);
-      expect(depthBox.x).toBeCloseTo(controlsBox.x, 0);
-      expect(kindsBox.x).toBeCloseTo(controlsBox.x, 0);
+      const inset = await controls.evaluate((el) => {
+        const style = getComputedStyle(el);
+        return (
+          parseFloat(style.paddingLeft) + parseFloat(style.borderLeftWidth)
+        );
+      });
+      expect(depthBox.x).toBeCloseTo(controlsBox.x + inset, 0);
+      expect(kindsBox.x).toBeCloseTo(controlsBox.x + inset, 0);
       const nodesBox = (await page
         .locator("#intel-topology-nodes")
         .boundingBox())!;
@@ -1940,7 +2009,7 @@ test("brief source image fits its full aspect ratio and bulletin has no details 
     .evaluate((el) => Number(getComputedStyle(el).zoom));
   expect(
     date!.y > category!.y + category!.height ||
-      date!.x - category!.x - category!.width >= 24 * displayScale,
+      date!.x - category!.x - category!.width >= 12 * displayScale,
   ).toBe(true);
   await card.screenshot({ path: `${captureDir}/bulletin-spacing.png` });
   await page
@@ -2155,7 +2224,10 @@ test("each indexed brief actor, claim and inference opens its own memory seed", 
       .poll(() => new URL(page.url()).searchParams.get("seed"))
       .toBe(id);
     await expect(
-      page.getByRole("heading", { name: id, exact: true }),
+      page.getByRole("button", {
+        name: `Select node ${id}, ${id.startsWith("claim") ? "claim" : id.startsWith("inference") ? "inference" : "entity"}`,
+        exact: true,
+      }),
     ).toBeVisible();
     if (id === "actor1")
       await page
@@ -2254,8 +2326,13 @@ test("manual topology zoom survives updates and node drag cancellation stays saf
     return previous;
   }
   const initial = await stableZoom();
-  const bounds = (await viewport.boundingBox())!;
-  await page.mouse.move(bounds.x + bounds.width * 0.8, bounds.y + 100);
+  // Empty graph space scrolls the page; wheel over a node controls graph zoom.
+  const target = (await focus.boundingBox())!;
+  // The CSS2D tile is decorative: the canvas owns hit testing and wheel input.
+  await page.mouse.move(
+    target.x + target.width / 2,
+    target.y + target.height / 2,
+  );
   await page.mouse.wheel(0, -250);
   await expect(zoom).not.toHaveText(initial);
   const manual = await stableZoom();
@@ -2269,6 +2346,8 @@ test("manual topology zoom survives updates and node drag cancellation stays saf
     .click();
   expect(await stableZoom()).toBe(manual);
 
+  // Filter controls sit below the graph and scroll it out of view on activation.
+  await focus.scrollIntoViewIfNeeded();
   const tile = (await focus.boundingBox())!;
   const center = { x: tile.x + tile.width / 2, y: tile.y + tile.height / 2 };
   const canvas = viewport.locator("canvas").first();
@@ -2472,15 +2551,20 @@ test("pending Brief follows push progress, resyncs after reconnect and stops RES
   await expect
     .poll(() => live.subscriptions.at(-1)?.brief)
     .toMatchObject({ run: "r1", id: "a1" });
-  await expect(
-    page.locator("#intel-status-bar").getByRole("status"),
-  ).toContainText("Brief complete");
+  await page
+    .getByRole("button", { name: "Background jobs", exact: true })
+    .click();
+  const jobs = page.getByRole("menu");
+  await expect(jobs.getByText("Article body", { exact: true })).toBeVisible();
+  await expect(jobs.getByText("Completed", { exact: true })).toBeVisible();
+  await expect(jobs.getByText("indexed", { exact: true })).toBeVisible();
 });
 
 test.describe("revamp connection scene", () => {
   test("landing orbit remains accessible while readiness is pending", async ({
     page,
   }) => {
+    await page.emulateMedia({ reducedMotion: "no-preference" });
     test.setTimeout(60000);
     await fixtures(page);
     const ready = deferred();

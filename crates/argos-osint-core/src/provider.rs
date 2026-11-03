@@ -3469,43 +3469,62 @@ mod variant_tests {
     #[tokio::test]
     async fn catalog_variants_reach_unknown_models_without_refreshing_endpoint_evidence() {
         use crate::provider_capabilities::{self, AdapterId, CachedEvidence, CatalogEvidence};
-        let mut secret = account_secret(&crate::secrets::AuthFile::default(), "openrouter");
-        let catalog = serde_json::json!({"data":[{"id":"fixture/new-variant-model","reasoning":{"supported_efforts":["low","xhigh","max"]}}]});
-        let server =
-            crate::provider_attempt::mock::serve(vec![crate::provider_attempt::mock::Reply::Json(
-                200,
-                catalog.to_string(),
-            )])
+        for parameters in [None, Some(vec!["tools", "reasoning"]), Some(vec!["tools"])] {
+            let mut secret = account_secret(&crate::secrets::AuthFile::default(), "openrouter");
+            let catalog = serde_json::json!({"data":[{"id":"fixture/new-variant-model","reasoning":{"supported_efforts":["low","xhigh","max"]}}]});
+            let server = crate::provider_attempt::mock::serve(vec![
+                crate::provider_attempt::mock::Reply::Json(200, catalog.to_string()),
+            ])
             .await;
-        secret.base_url = server.base_url.clone();
-        secret.api_key = Some("fixture-only".into());
-        secret.model = "fixture/new-variant-model".into();
-        let key = provider_capabilities::cache_key(
-            AdapterId::OpenRouter,
-            &secret.base_url,
-            crate::provider_capabilities::ApiDialect::Chat,
-            &secret.model,
-            None,
-        );
-        provider_capabilities::store_cached(
-            None,
-            &key,
-            &CachedEvidence {
-                evidence: CatalogEvidence {
-                    supported_parameters: vec!["tools".into()],
-                    ..Default::default()
-                },
-                fetched_at: 123,
-            },
-        )
-        .unwrap();
-        let models = list_catalog(&secret).await.unwrap();
-        assert_eq!(models[0].id, secret.model);
-        let caps = provider_capabilities::for_secret(&secret);
-        assert_eq!(caps.reasoning.values, ["low", "max", "xhigh"]);
-        let cached = provider_capabilities::cached(None, &key).unwrap();
-        assert_eq!(cached.fetched_at, 123);
-        assert_eq!(cached.evidence.supported_parameters, ["tools"]);
+            secret.base_url = server.base_url.clone();
+            secret.api_key = Some("fixture-only".into());
+            secret.model = "fixture/new-variant-model".into();
+            let key = provider_capabilities::cache_key(
+                AdapterId::OpenRouter,
+                &secret.base_url,
+                crate::provider_capabilities::ApiDialect::Chat,
+                &secret.model,
+                None,
+            );
+            if let Some(parameters) = &parameters {
+                provider_capabilities::store_cached(
+                    None,
+                    &key,
+                    &CachedEvidence {
+                        evidence: CatalogEvidence {
+                            supported_parameters: parameters.iter().map(|p| (*p).into()).collect(),
+                            ..Default::default()
+                        },
+                        fetched_at: 123,
+                    },
+                )
+                .unwrap();
+            }
+            let models = list_catalog(&secret).await.unwrap();
+            assert_eq!(models[0].id, secret.model);
+            let caps = provider_capabilities::for_secret(&secret);
+            let expected = if parameters
+                .as_ref()
+                .is_some_and(|p| !p.contains(&"reasoning"))
+            {
+                Vec::new()
+            } else {
+                vec!["low", "max", "xhigh"]
+            };
+            assert_eq!(
+                caps.reasoning.values, expected,
+                "endpoint parameters: {parameters:?}"
+            );
+            let cached = provider_capabilities::cached(None, &key).unwrap();
+            assert_eq!(
+                cached.fetched_at,
+                if parameters.is_some() { 123 } else { 0 }
+            );
+            assert_eq!(
+                cached.evidence.supported_parameters,
+                parameters.unwrap_or_default()
+            );
+        }
     }
 
     #[test]

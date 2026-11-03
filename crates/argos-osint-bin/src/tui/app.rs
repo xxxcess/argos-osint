@@ -13067,7 +13067,7 @@ mod tests {
         assert!(app.logs.app.is_empty() && app.logs.search.is_empty());
         assert_eq!(app.logs.level, super::super::logs::LevelFilter::All);
         let messages: Vec<&str> = app.logs.rows.iter().map(|r| r.message.as_str()).collect();
-        assert_eq!(messages, ["phase 5 started"]);
+        assert_eq!(messages, ["Started: Test", "phase 5 started"]);
         app.set_focus(Target::LogLine(0));
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.module, Some(ModuleId::Jobs));

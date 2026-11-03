@@ -2,7 +2,7 @@ import React from "react";
 import { View } from "react-native";
 import { Skeleton } from "@argos/ui";
 import { intelColors as c, intelRadius } from "../../shell/intel-theme";
-import { bulletinThumb } from "./ArticleCard";
+import { bulletinCardMinHeight, bulletinThumb } from "./ArticleCard";
 export function BulletinSkeleton() {
   return (
     <View
@@ -15,7 +15,8 @@ export function BulletinSkeleton() {
           key={id}
           testID="bulletin-skeleton"
           style={{
-            padding: 20,
+            padding: 16,
+            minHeight: bulletinCardMinHeight,
             flexDirection: "row",
             gap: 12,
             backgroundColor: c.panel,
@@ -24,11 +25,11 @@ export function BulletinSkeleton() {
             borderRadius: intelRadius.card,
           }}
         >
-          <View style={{ flex: 1, gap: 12 }}>
-            <Skeleton width="45%" height={12} />
-            <Skeleton lines={2} height={28} />
-            <Skeleton lines={3} height={22} />
-            <Skeleton width="60%" height={20} />
+          <View style={{ flex: 1, gap: 6 }}>
+            <Skeleton width="45%" height={17} />
+            <Skeleton height={25} />
+            <Skeleton height={23} />
+            <Skeleton width="60%" height={21} />
           </View>
           <Skeleton width={bulletinThumb} height={bulletinThumb} radius={8} />
         </View>

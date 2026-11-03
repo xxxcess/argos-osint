@@ -8,6 +8,8 @@ import { TemperatureTag } from "../temperatureTag";
 
 /** One square for every bulletin image. The photo scales to fit inside it. */
 export const bulletinThumb = 120;
+/** Reserve the same row height while the thumbnail and article are loading. */
+export const bulletinCardMinHeight = bulletinThumb + 34;
 
 function safeImage(url: string) {
   try {
@@ -81,6 +83,7 @@ export function ArticleCard({
 }
 const s = StyleSheet.create({
   card: {
+    minHeight: bulletinCardMinHeight,
     flexDirection: "row",
     alignItems: "stretch",
     gap: 12,

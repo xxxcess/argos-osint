@@ -3,6 +3,8 @@
 //! passes, and a rerun finds nothing left.
 #![cfg(feature = "surreal")]
 
+#[path = "support/actor_catalog.rs"]
+mod actor_catalog_fixture;
 mod support;
 
 use argos_osint_core::atlas_metadata::{ArticleMention, ArticleMetadata, MetadataState};
@@ -50,6 +52,7 @@ async fn backfill_indexes_unreceipted_occurrences_within_the_budget() {
         return;
     };
     let repo = server.repo("argos", "brain_backfill").await;
+    actor_catalog_fixture::seed_actor_catalog(&repo, &["Jane Doe"]).await;
     bootstrap::ensure_schema(repo.db()).await.unwrap();
     lifecycle::apply_article_index_schema(repo.db())
         .await

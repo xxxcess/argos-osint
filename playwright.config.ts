@@ -8,6 +8,11 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   use: {
+    // Linux otherwise rasterizes small text with LCD color fringes while macOS
+    // uses grayscale. Keep shared screenshot baselines on the same text path.
+    launchOptions: {
+      args: ["--disable-lcd-text", "--font-render-hinting=none"],
+    },
     baseURL: `http://127.0.0.1:${port}`,
     viewport: { width: 1440, height: 1000 },
     trace: "retain-on-failure",

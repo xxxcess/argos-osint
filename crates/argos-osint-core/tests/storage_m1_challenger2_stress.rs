@@ -383,104 +383,179 @@ async fn stress_test_summary_flush_drain_with_heartbeat() {
     assert_eq!(out[0].tag, "cached_deterministic_no_secret");
 }
 
-/// Stress Test 6: Bounded Telemetry Queue (4096 capacity) enforces backpressure without blocking callers
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stress_test_spawn_ordered_bounded_backpressure_and_drain() {
-    let dir = tempfile::tempdir().unwrap();
-    let layout = Layout::new(dir.path());
-    home::save_config(
-        &layout,
-        &StorageConfig {
-            mode: Mode::Embedded,
-            port: None,
-        },
-    )
-    .unwrap();
-
-    let _ = runtime::init(layout);
-
-    assert_eq!(
-        runtime::ORDERED_QUEUE_CAPACITY,
-        4096,
-        "Capacity must be exactly 4096"
-    );
-
-    // Test non-blocking property: queueing 1000 items must be ultra-fast (<50ms)
-    let start = Instant::now();
-    let executed_counter = Arc::new(AtomicUsize::new(0));
-
-    for _ in 0..1000 {
-        let counter = executed_counter.clone();
-        let accepted = runtime::spawn_ordered(async move {
-            counter.fetch_add(1, Ordering::SeqCst);
-        });
-        assert!(accepted, "Should accept within 4096 capacity");
+/// Process-global storage cannot be reset or outlive the runtime that owns it.
+/// Run each fixture in its own test process and keep that runtime alive until
+/// all workers and ordered writes have stopped. Database startup is setup,
+/// outside the shutdown/queue latency measurements.
+fn with_owned_runtime(name: &str, check: impl FnOnce(&tokio::runtime::Runtime, &std::path::Path)) {
+    const CHILD: &str = "ARGOS_STRESS_RUNTIME_CHILD";
+    const FIXTURE_HOME: &str = "ARGOS_STRESS_RUNTIME_HOME";
+    if std::env::var(CHILD).as_deref() != Ok(name) {
+        // The parent removes the home only after the child has closed its DB.
+        let dir = tempfile::tempdir().expect("private runtime fixture home");
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", name, "--nocapture"])
+            .env(CHILD, name)
+            .env(FIXTURE_HOME, dir.path())
+            .env("ARGOS_HOME", dir.path())
+            .output()
+            .expect("run isolated runtime fixture");
+        assert!(
+            output.status.success(),
+            "{name} failed in its isolated process:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("fixture-completed"))
+                .expect("selected fixture actually ran"),
+            name,
+            "a successful child with no matching test is not verification"
+        );
+        return;
     }
-    let enqueue_time = start.elapsed();
+    let path =
+        std::path::PathBuf::from(std::env::var_os(FIXTURE_HOME).expect("owned fixture home"));
+    let layout = Layout::new(&path);
+    let mode = if std::env::var("ARGOS_SURREAL_MODE").as_deref() == Ok("server")
+        || !cfg!(feature = "embedded")
+    {
+        Mode::Server
+    } else {
+        Mode::Embedded
+    };
+    home::save_config(&layout, &StorageConfig { mode, port: None })
+        .expect("fixture storage config");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("fixture runtime");
+    rt.block_on(async {
+        runtime::init(layout.clone()).expect("initialize owned storage runtime");
+        let repo = runtime::repository()
+            .await
+            .expect("ready fixture repository");
+        assert_eq!(repo.mode(), Some(mode));
+    });
+    let panicked = Arc::new(AtomicBool::new(false));
+    let seen = panicked.clone();
+    let original = Arc::new(std::panic::take_hook());
+    let forward = original.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        seen.store(true, Ordering::SeqCst);
+        forward(info);
+    }));
+    check(&rt, &path);
+    rt.block_on(runtime::drain());
+    if mode == Mode::Server {
+        rt.block_on(argos_osint_core::storage::server::stop(&layout, true))
+            .expect("stop owned fixture server");
+    }
+    drop(rt);
+    std::panic::set_hook(Box::new(move |info| original(info)));
     assert!(
-        enqueue_time < Duration::from_millis(150),
-        "Enqueueing must be non-blocking: took {:?}",
-        enqueue_time
+        !panicked.load(Ordering::SeqCst),
+        "worker/runtime threads must terminate without panicking"
     );
+    std::fs::write(path.join("fixture-completed"), name).expect("record completed fixture");
+}
 
-    // Wait for drain
-    runtime::drain().await;
-    assert_eq!(
-        executed_counter.load(Ordering::SeqCst),
-        1000,
-        "All accepted tasks must execute on drain"
+/// Stress Test 6: bounded telemetry remains nonblocking and fully drains.
+#[test]
+fn stress_test_spawn_ordered_bounded_backpressure_and_drain() {
+    with_owned_runtime(
+        "stress_test_spawn_ordered_bounded_backpressure_and_drain",
+        |rt, _| {
+            rt.block_on(async {
+                assert_eq!(
+                    runtime::ORDERED_QUEUE_CAPACITY,
+                    4096,
+                    "Capacity must be exactly 4096"
+                );
+
+                // Enqueueing 1000 writes remains nonblocking within the 150ms budget.
+                let start = Instant::now();
+                let executed_counter = Arc::new(AtomicUsize::new(0));
+
+                for _ in 0..1000 {
+                    let counter = executed_counter.clone();
+                    let accepted = runtime::spawn_ordered(async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    });
+                    assert!(accepted, "Should accept within 4096 capacity");
+                }
+                let enqueue_time = start.elapsed();
+                assert!(
+                    enqueue_time < Duration::from_millis(150),
+                    "Enqueueing must be non-blocking: took {:?}",
+                    enqueue_time
+                );
+
+                // Wait for drain
+                runtime::drain().await;
+                assert_eq!(
+                    executed_counter.load(Ordering::SeqCst),
+                    1000,
+                    "All accepted tasks must execute on drain"
+                );
+            })
+        },
     );
 }
 
 /// Stress Test 7: WorkerPool::shutdown_all latency with real spawned drainers < 500ms
 #[test]
 fn stress_test_worker_pool_shutdown_latency_under_500ms() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().to_path_buf();
+    with_owned_runtime(
+        "stress_test_worker_pool_shutdown_latency_under_500ms",
+        |_, path| {
+            let path = path.to_path_buf();
+            for i in 0..5 {
+                let mut pools = Vec::new();
+                // Spawn 4 real summary pool drainers and 2 brain scope drainers
+                for p in 0..4 {
+                    pools.push(WorkerPool::spawn_summary_flush_drainer(
+                        path.clone(),
+                        format!("owner-sum-{i}-{p}"),
+                    ));
+                }
+                for p in 0..2 {
+                    pools.push(WorkerPool::spawn_brain_scope_drainer(
+                        path.clone(),
+                        format!("owner-scope-{i}-{p}"),
+                    ));
+                }
 
-    for i in 0..5 {
-        let mut pools = Vec::new();
-        // Spawn 4 real summary pool drainers and 2 brain scope drainers
-        for p in 0..4 {
-            pools.push(WorkerPool::spawn_summary_flush_drainer(
-                path.clone(),
-                format!("owner-sum-{i}-{p}"),
-            ));
-        }
-        for p in 0..2 {
-            pools.push(WorkerPool::spawn_brain_scope_drainer(
-                path.clone(),
-                format!("owner-scope-{i}-{p}"),
-            ));
-        }
+                let start = Instant::now();
+                WorkerPool::shutdown_all(pools);
+                let elapsed = start.elapsed();
 
-        let start = Instant::now();
-        WorkerPool::shutdown_all(pools);
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed < Duration::from_millis(500),
-            "Iteration {i}: WorkerPool::shutdown_all took {:?}, exceeding 500ms limit",
-            elapsed
-        );
-    }
+                assert!(
+                    elapsed < Duration::from_millis(500),
+                    "Iteration {i}: WorkerPool::shutdown_all took {:?}, exceeding 500ms limit",
+                    elapsed
+                );
+            }
+        },
+    );
 }
 
 /// Stress Test 8: WorkerPool Drop stops and joins cleanly without deadlocks
 #[test]
 fn stress_test_worker_pool_drop_joins_cleanly() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().to_path_buf();
-
-    for _ in 0..10 {
-        let pool = WorkerPool::spawn_summary_flush_drainer(path.clone(), "owner-drop".into());
-        let start = Instant::now();
-        drop(pool);
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(350),
-            "WorkerPool drop join must terminate promptly (<350ms): took {:?}",
-            elapsed
-        );
-    }
+    with_owned_runtime("stress_test_worker_pool_drop_joins_cleanly", |_, path| {
+        let path = path.to_path_buf();
+        for _ in 0..10 {
+            let pool = WorkerPool::spawn_summary_flush_drainer(path.clone(), "owner-drop".into());
+            let start = Instant::now();
+            drop(pool);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < Duration::from_millis(350),
+                "WorkerPool drop join must terminate promptly (<350ms): took {:?}",
+                elapsed
+            );
+        }
+    });
 }

@@ -187,7 +187,7 @@ pub fn claim_rows_from_output(
 }
 
 /// [`validate_retry`] on the selected store: under SurrealDB it runs
-/// `storage::insight_retry::validate_retry` and never opens SQLite.
+/// `storage::insight_retry::validate_retry` and never opens the legacy store.
 pub(crate) async fn validate_retry_at(
     _db_path: &std::path::Path,
     input: &PipelineInput,

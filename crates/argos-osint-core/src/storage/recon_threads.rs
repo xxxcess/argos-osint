@@ -1,6 +1,6 @@
 //! Recon investigations on SurrealDB (migration phase 5, Recon remainder
 //! part 1): the thread and message operations the Recon callers use on the
-//! SQLite `Store` (`new_thread`, `list_threads`, `rename_thread`,
+//! legacy `Store` (`new_thread`, `list_threads`, `rename_thread`,
 //! `set_recall_insights`, `save_draft`, `select_thread`/`last_thread`,
 //! `list_messages`, `add_message`), the thread entity links
 //! (`recon_thread_entities` → `recon_thread_entity`) and the tool
@@ -13,7 +13,7 @@
 //! (imports, `recon::put_message`) are never overtaken.
 //!
 //! Record keys: `recon_thread_entity` by `[thread, entity, source_call]`
-//! (an empty source call when none, as in SQLite), `osint_preference` by
+//! (an empty source call when none, as in the legacy store), `osint_preference` by
 //! tool id. Deleting a thread deletes its entity links (event).
 
 use anyhow::{anyhow, ensure, Result};
@@ -112,7 +112,7 @@ pub const LIST_LIMIT: i64 = 200;
 
 /// `Store::list_threads`: live threads whose title, or one of whose linked
 /// entities' canonical name, contains `search` (case-insensitive, as
-/// SQLite `LIKE`), newest update first, capped at [`LIST_LIMIT`].
+/// legacy store `LIKE`), newest update first, capped at [`LIST_LIMIT`].
 pub async fn list_threads(repo: &Repository, search: &str) -> Result<Vec<Thread>> {
     let mut r = repo
         .db()

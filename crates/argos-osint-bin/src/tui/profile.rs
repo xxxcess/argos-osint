@@ -1079,7 +1079,6 @@ pub struct ProfileView {
     pub period_popup: bool,
     pub picker_selection: usize,
     pub generation: u64,
-    pub loading: bool,
     pub snapshot_filters: Option<StatFilters>,
     pub section: Section,
     /// Focused widget index inside the focused section.
@@ -1125,7 +1124,6 @@ impl Default for ProfileView {
             period_popup: false,
             picker_selection: 0,
             generation: 0,
-            loading: false,
             snapshot_filters: None,
             section: Section::Intel,
             focus: 0,
@@ -1577,7 +1575,7 @@ fn draw_status_strip(frame: &mut Frame, app: &App, area: Rect) {
             "Stale · filters changed · awaiting refresh",
             theme::warn(),
         ))
-    } else if app.profile.loading {
+    } else if app.profile_refreshing() {
         Line::from(Span::styled(
             if app.profile.snapshot.is_some() {
                 format!(
@@ -1686,7 +1684,7 @@ fn draw_filter_strip(frame: &mut Frame, app: &App, area: Rect) {
                 "{}{}",
                 if let Some(error) = &app.profile.error {
                     format!("Stale · {error} · ")
-                } else if app.profile.loading {
+                } else if app.profile_refreshing() {
                     "Refreshing · ".into()
                 } else {
                     String::new()
@@ -1907,12 +1905,12 @@ fn open_selected_owner(app: &mut App) {
 }
 fn open_run_owner(app: &mut App, run_id: &str) {
     // The run lookup reads the repository on a plain worker thread
-    // (never the SQLite store); `ProfileRunOwner` opens the thread.
+    // (never the legacy store); `ProfileRunOwner` opens the thread.
     app.lookup_run_owner(run_id.to_string());
 }
 
 /// The run lookup's result: open its investigation, or say why not. Shared
-/// by the SQLite and SurrealDB paths.
+/// by the legacy and SurrealDB paths.
 pub(crate) fn open_run_thread(app: &mut App, outcome: Result<Option<String>, String>) {
     match outcome {
         Ok(Some(thread_id)) => {
@@ -2181,8 +2179,21 @@ fn count_kpi(label: &'static str, value: Option<u64>, note: String) -> Kpi {
         coverage: note,
     }
 }
+/// Placeholder for a panel while no snapshot exists: the last read error
+/// when there is one, so a failed read can never leave a stuck loading
+/// hint; otherwise the animated loading hint.
+fn awaiting_statistics(app: &App) -> Line<'static> {
+    match &app.profile.error {
+        Some(error) => Line::styled(format!("Stale · {error}"), theme::error()),
+        None => Line::raw(super::anim::loading("Loading statistics")),
+    }
+}
 fn kpis(app: &App) -> Vec<Kpi> {
     let Some(s) = app.profile.snapshot.as_ref() else {
+        let coverage = match &app.profile.error {
+            Some(error) => format!("Stale · {error}"),
+            None => super::anim::loading("Loading statistics"),
+        };
         let labels = if app.profile.all_apps {
             [
                 "Report completion",
@@ -2229,7 +2240,7 @@ fn kpis(app: &App) -> Vec<Kpi> {
             .map(|label| Kpi {
                 label,
                 value: "N/A".into(),
-                coverage: super::anim::loading("Loading statistics"),
+                coverage: coverage.clone(),
             })
             .collect();
     };
@@ -2515,7 +2526,7 @@ fn kpis(app: &App) -> Vec<Kpi> {
 }
 fn attention_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let Some(s) = &app.profile.snapshot else {
-        return vec![Line::raw(super::anim::loading("Loading statistics"))];
+        return vec![awaiting_statistics(app)];
     };
     if s.attention.is_empty() {
         return vec![
@@ -2620,7 +2631,7 @@ fn dashboard_lines(app: &App, w: &WidgetSpec, width: usize, height: usize) -> Ve
             if let Some(error) = &app.profile.error {
                 lines.insert(0, Line::styled(format!("Stale · {error}"), theme::warn()));
             }
-            if app.profile.loading {
+            if app.profile_refreshing() {
                 lines.insert(
                     0,
                     Line::styled("Refreshing · previous snapshot", theme::warn()),
@@ -3503,7 +3514,7 @@ fn report_datasets(app: &App, widget: &WidgetSpec) -> Vec<(&'static str, serde_j
 
 fn build_report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
     let Some(snapshot) = &app.profile.snapshot else {
-        return vec![Line::raw(super::anim::loading("Loading statistics"))];
+        return vec![awaiting_statistics(app)];
     };
     let rows = sorted_rows(app, widget, snapshot);
     let mut lines = Vec::new();
@@ -3588,7 +3599,7 @@ fn build_report_detail_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<
 }
 fn selected_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'static>> {
     let Some(snapshot) = &app.profile.snapshot else {
-        return vec![Line::raw(super::anim::loading("Loading statistics"))];
+        return vec![awaiting_statistics(app)];
     };
     let buckets = count_buckets(widget, snapshot);
     let selected = app
@@ -3609,7 +3620,7 @@ fn selected_lines(app: &App, widget: &WidgetSpec, width: u16) -> Vec<Line<'stati
     ];
     if let Some(error) = &app.profile.error {
         lines.push(Line::styled(format!("Stale · {error}"), theme::warn()));
-    } else if app.profile.loading {
+    } else if app.profile_refreshing() {
         lines.push(Line::styled(
             "Refreshing · showing previous snapshot",
             theme::dim(),
@@ -4120,6 +4131,9 @@ pub fn activate(app: &mut App, target: Target) {
             app.profile.tab = SystemTab::all()[index.min(2)];
             if app.profile.tab == SystemTab::Configs {
                 app.profile_config.open();
+            } else if app.profile.tab == SystemTab::Overview {
+                // Switching to Overview tab should refresh profile
+                app.profile_dirty = true;
             }
         }
         Target::ProfileApp(index) => {
@@ -4169,13 +4183,17 @@ pub fn activate(app: &mut App, target: Target) {
         Target::ProfileAction(2) => {
             app.profile.filters.clear();
             app.profile.invalidate();
+            app.refresh_profile_now();
         }
         Target::ProfileAction(3) => {
             app.profile.tab = SystemTab::Configs;
             app.profile_config.open();
             app.set_focus(Target::Field(super::app::FieldId::ProfileExportPath));
         }
-        Target::ProfileAction(4) => app.profile.loaded_at = None,
+        Target::ProfileAction(4) => {
+            app.profile.loaded_at = None;
+            app.refresh_profile_now();
+        }
         Target::ProfileAction(5) => {
             if let Some(snapshot) = app.profile.snapshot.as_ref() {
                 let w = view_spec("models.performance").unwrap();
@@ -4229,9 +4247,11 @@ pub fn activate(app: &mut App, target: Target) {
             if app.profile.period_popup {
                 app.profile.filters.period = profile_stats::Period::ALL[index.min(3)].clone();
                 app.profile.invalidate();
+                app.refresh_profile_now();
             } else if let Some(dimension) = app.profile.filter_popup {
                 if let Some(value) = app.profile.picker_choices().get(index).cloned() {
                     app.profile.set_filter(dimension, &value);
+                    app.refresh_profile_now();
                 }
             }
             app.profile.period_popup = false;
@@ -4462,6 +4482,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                                 app.profile.invalidate();
                                 app.profile.custom_period = false;
                                 app.profile.period_popup = false;
+                                app.refresh_profile_now();
                             }
                             _ => {
                                 app.profile.picker_error =

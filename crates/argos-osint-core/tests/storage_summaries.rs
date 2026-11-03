@@ -1,5 +1,5 @@
 //! The graph summary cache and the NewsAPI quota on SurrealDB
-//! (`storage::summaries`, `storage::atlas::quota_*`), against the SQLite
+//! (`storage::summaries`, `storage::atlas::quota_*`), against the legacy store
 //! `Store::save_graph_summary` / `atlas_quota_bump` behaviour.
 //! Both modes via `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]

@@ -18,6 +18,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          lfs: false
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -28,4 +29,4 @@ jobs:
       - name: Check workspace, lockfile and release manifest
         run: node scripts/release_check.mjs versions
       - name: Test agent tooling and release policy
-        run: node --test .opencode/tests/release-policy.test.mjs .opencode/tests/tools-registry.test.mjs .opencode/tests/planning-artifacts.test.mjs
+        run: node --test .opencode/tests/*.test.mjs

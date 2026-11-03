@@ -10,7 +10,7 @@
 //! snapshot readiness and assessed links. Index work and `memories_changed`
 //! join the same transaction through the outbox.
 //!
-//! Differences from SQLite, by design or pending:
+//! Differences from the legacy store, by design or pending (legacy store differences):
 //! - The caller passes the live Recon opt-in in [`DerivationContext`]
 //!   (`save_insights`, already rechecked) and the owner run's thread;
 //!   `recon_runs` is not on SurrealDB.
@@ -731,7 +731,7 @@ async fn bind_item_in(
     now: &str,
 ) -> Result<Vec<String>, TxError> {
     use super::actor_bind::{
-        add_memory_actor_ref_in, bind_claim_subject_in, bind_in, referenced, resolve_in,
+        add_memory_actor_ref_in, bind_claim_subject_in, referenced, resolve_in,
         update_claim_payload_in,
     };
     use crate::memory_metadata::{ActorRef, InferencePayload, MemoryKind, MemoryPayload};
@@ -740,7 +740,7 @@ async fn bind_item_in(
     let mut touched = Vec::new();
     if item.kind == "claim" {
         // `INSERT OR IGNORE INTO recon_entities`, so the subject's label
-        // comes from the stored entity, as on SQLite.
+        // comes from the stored entity, as on the legacy store.
         if let Some(e) = output.entities.iter().find(|e| e.id == item.subject) {
             super::entities::ensure_recon_entity_in(
                 tx,
@@ -768,7 +768,7 @@ async fn bind_item_in(
                 .first()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or(&entity.comparison_key);
-            let (bound, changed) = bind_in(
+            let Some((bound, changed)) = super::actor_bind::bind_optional_in(
                 tx,
                 &crate::brain_actors::BindRequest {
                     name,
@@ -780,7 +780,10 @@ async fn bind_item_in(
                 },
                 now,
             )
-            .await?;
+            .await?
+            else {
+                continue;
+            };
             touched.extend(changed);
             let role = if entity.id == item.subject {
                 "subject"
@@ -841,7 +844,43 @@ async fn bind_item_in(
                 _ => None,
             })
             .unwrap_or_default();
-        actors.retain(|a| a.role != "premise");
+        actors.retain(|a| a.role != "premise" && a.role != "mentioned");
+        // Direct mentions require a catalog-resolved entity inside this
+        // inference's cited source range; article co-occurrence is insufficient.
+        for entity in &output.entities {
+            if !referenced(entity, "", &inference.evidence_refs, |id| {
+                owner_kind == "article" && input.snapshot.entities.iter().any(|e| e.id == id)
+            }) {
+                continue;
+            }
+            let name = entity
+                .original_forms
+                .first()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(&entity.comparison_key);
+            let Some((bound, changed)) = super::actor_bind::bind_optional_in(
+                tx,
+                &crate::brain_actors::BindRequest {
+                    name,
+                    subtype: crate::brain_actors::parse_subtype(&entity.type_hint),
+                    scope: &scope,
+                    identifiers: &[],
+                    external: Some(("recon_entities", &entity.id)),
+                    provenance: serde_json::json!({"snapshot": snapshot_id, "inference": item.id}),
+                },
+                now,
+            )
+            .await?
+            else {
+                continue;
+            };
+            touched.extend(changed);
+            actors.push(ActorRef {
+                actor_id: bound.actor_id,
+                role: "mentioned".into(),
+                binding_state: bound.state,
+            });
+        }
         // Explicit premise associations, not independent support.
         for premise in &premises {
             let mut r = run(
@@ -896,7 +935,7 @@ async fn bind_item_in(
         .await?;
         run(
             tx,
-            tx.query("DELETE brain_memory_actor_ref WHERE memory_id = $m AND role = 'premise' RETURN NONE")
+            tx.query("DELETE brain_memory_actor_ref WHERE memory_id = $m AND role INSIDE ['premise', 'mentioned'] RETURN NONE")
                 .bind(("m", mid.to_string())),
         )
         .await?;

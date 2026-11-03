@@ -9,7 +9,7 @@ use argos_osint_core::storage::credits::*;
 use support::*;
 
 #[tokio::test]
-async fn holds_reconcile_release_and_reset_like_sqlite() {
+async fn holds_reconcile_release_and_reset_like_legacy() {
     let Some(server) = Server::start() else {
         return;
     };

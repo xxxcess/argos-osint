@@ -418,6 +418,44 @@ async fn memory_seeds_walk_their_own_neighbours() {
 }
 
 #[tokio::test]
+async fn brief_bindings_preserve_direct_identities_without_graph_payloads() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "brief_bindings").await;
+    let (_, claim) = seed(&repo).await;
+    let seed = TopologySeed::Article {
+        run_id: "r1".into(),
+        article_id: "a1".into(),
+        revision: String::new(),
+        originating_memory: None,
+    };
+    let graph = topology::topology_snapshot(&repo, &seed, &options(1, CycleScope::AllRetained))
+        .await
+        .expect("read article graph");
+    let bindings = topology::brief_binding_snapshot(&repo, &seed)
+        .await
+        .expect("read brief bindings");
+    assert_eq!(
+        ids(&bindings.nodes, |n| n.id.clone()),
+        ids(&graph.nodes, |n| n.id.clone())
+    );
+    assert!(bindings
+        .nodes
+        .iter()
+        .any(|n| n.topology_seed == Some(TopologySeed::Actor("act2".into()))));
+    assert!(bindings
+        .nodes
+        .iter()
+        .any(|n| n.topology_seed == Some(TopologySeed::Claim(claim.clone()))));
+    assert!(bindings.neighborhood_brief.is_none());
+    assert!(bindings.neighborhood_input.is_none());
+    assert!(bindings.associations.claims.is_empty());
+    assert!(bindings.associations.articles.is_empty());
+    assert!(graph.neighborhood_brief.is_some());
+}
+
+#[tokio::test]
 async fn article_topic_source_and_link_seeds() {
     let Some(server) = Server::start() else {
         return;

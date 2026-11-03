@@ -50,7 +50,7 @@ pub async fn apply_schema(db: &Surreal<Any>) -> Result<(), TxError> {
     Ok(())
 }
 
-/// Stable revision of a memory's indexed content (same as SQLite).
+/// Stable revision of a memory's indexed content (same as the legacy store).
 pub fn memory_revision(text: &str) -> String {
     crate::evidence::content_hash(text)
 }
@@ -161,7 +161,7 @@ pub async fn write_then_index(
         let nonce = nonce.clone();
         Box::pin(async move {
             let ids = write(tx.clone()).await?;
-            // As in SQLite: no touched memory, no `memories_changed` bump.
+            // As in the legacy store: no touched memory, no `memories_changed` bump.
             let changed = !ids.is_empty();
             let changes = index_changes_in(&tx, &ids, &nonce).await?;
             Ok(Wrote { changes, changed })

@@ -535,6 +535,13 @@ fn apply_catalog(caps: &mut ResolvedCapabilities, ev: &CatalogEvidence) {
                 caps.reasoning = ReasoningCaps::default();
             }
         }
+        // Model listings can enumerate variants before endpoint metadata has
+        // been fetched. Explicit endpoint parameter evidence above still wins.
+        AdapterId::OpenRouter => {
+            if let Some(reasoning) = &ev.reasoning {
+                caps.reasoning = reasoning.clone();
+            }
+        }
         AdapterId::Google if !ev.generation_methods.is_empty() => {
             let gen = ev.generation_methods.iter().any(|m| m == "generateContent");
             caps.generate_content = if gen {

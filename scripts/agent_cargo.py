@@ -20,6 +20,8 @@ def cargo_command(args):
 
 def cargo_env():
     env = os.environ.copy()
+    # Ordinary agent checks must not opt into live embedding/model tests.
+    env.pop("ARGOS_EMBED", None)
     env["CARGO_TARGET_DIR"] = str(TARGET_DIR)
     return env
 

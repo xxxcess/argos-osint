@@ -4,7 +4,7 @@
 //! [`legacy_receipt`] ports `atlas_memory::legacy_receipt`: a receipt for a
 //! run published before checkpoints existed, rebuilt from its stored
 //! claim/source links. Unrecoverable links are rejected with a reason and
-//! nothing is fabricated from a fingerprint. Unlike SQLite (reads outside,
+//! nothing is fabricated from a fingerprint. Unlike the legacy store (reads outside,
 //! writes in a later `BEGIN IMMEDIATE`), the reads, the index work and the
 //! `atlas_publication` row share one publisher transaction.
 //!
@@ -35,7 +35,7 @@ pub const LEGACY_REVISION: &str = "legacy";
 const DEAD: [&str; 3] = ["deleted", "retired", "rejected"];
 
 /// A run's distinct source links, pinned to `insight_source_call`'s
-/// `run_id` prefix. SQLite orders by first rowid; SurrealDB has no insertion
+/// `run_id` prefix. the legacy store orders by first rowid; SurrealDB has no insertion
 /// order, so links are ordered by fingerprint.
 pub const RUN_LINKS_SURQL: &str = "SELECT fingerprint, call_id FROM insight_source
     WHERE run_id = $run AND answer_id = $answer ORDER BY fingerprint, call_id";
@@ -599,7 +599,7 @@ struct StageRow {
 
 /// `brief_pipeline::stage_outputs` on SurrealDB: a chain's committed stage
 /// outputs by stage, through `stage_output_root`. Unparseable outputs are
-/// skipped, as in SQLite.
+/// skipped, as in the legacy store.
 pub async fn stage_outputs(
     db: &Surreal<Any>,
     job_id: &str,

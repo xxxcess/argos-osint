@@ -1,0 +1,465 @@
+/* Compact the complete browser UI while retaining a full-window shell. */
+/* Next's dev badge is outside the desk. Hide it even before a server restart. */
+nextjs-portal {
+  display: none !important;
+}
+html {
+  zoom: var(--intel-ui-scale, 0.75);
+}
+#intel-web-workspace {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+#intel-content-frame {
+  max-width: calc(1440px / var(--intel-ui-scale, 0.75));
+}
+/* Topology uses full-size type, controls and graph tiles inside the compact shell. */
+#intel-topology-workspace {
+  zoom: calc(1 / var(--intel-ui-scale, 0.75));
+  overflow: hidden;
+}
+/* Intel-only browser canvas; shared Argos/TUI tokens remain unchanged. */
+* {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: #34343a transparent;
+}
+html,
+body {
+  margin: 0;
+  height: 100%;
+  min-height: 100%;
+  background-color: #0b0b0c;
+  background-image:
+    radial-gradient(ellipse at 15% 10%, #171719 0%, transparent 45%),
+    radial-gradient(ellipse at 85% 90%, #101012 0%, transparent 50%);
+  background-attachment: fixed;
+  color: #ececee;
+  font-family:
+    var(--intel-body, Inter),
+    system-ui,
+    -apple-system,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+/* Page scrolling stays available; the bars stay hidden. */
+#intel-actor-scroll,
+#intel-actor-scroll *,
+#intel-brief-scroll,
+#intel-brief-scroll *,
+#intel-topology-workspace,
+#intel-topology-workspace * {
+  scrollbar-width: none;
+}
+#intel-actor-scroll::-webkit-scrollbar,
+#intel-actor-scroll *::-webkit-scrollbar,
+#intel-brief-scroll::-webkit-scrollbar,
+#intel-brief-scroll *::-webkit-scrollbar,
+#intel-topology-workspace::-webkit-scrollbar,
+#intel-topology-workspace *::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+/* Nodes and Connections keep the desk scrollbar. */
+#intel-topology-node-scroll,
+#intel-topology-connection-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #34343a transparent;
+}
+#intel-topology-node-scroll::-webkit-scrollbar,
+#intel-topology-connection-scroll::-webkit-scrollbar {
+  display: block;
+  width: 8px;
+  height: 8px;
+}
+#intel-topology-node-scroll::-webkit-scrollbar-thumb,
+#intel-topology-connection-scroll::-webkit-scrollbar-thumb {
+  background: #34343a;
+}
+/* Keep list wheel/trackpad scrolling inside its panel at either boundary. */
+#intel-topology-node-scroll,
+#intel-topology-connection-scroll {
+  overscroll-behavior: contain;
+  overflow-x: hidden;
+}
+#intel-topology-node-scroll [dir="auto"],
+#intel-topology-connection-scroll [dir="auto"] {
+  overflow-wrap: anywhere;
+}
+/* Resize layout synchronously, before RN's dimension subscription commits. */
+/* The graph engine retains its previous pixel width until RN onLayout runs.
+   Constrain its actual display boxes during that interval; onLayout still
+   updates the renderer buffer/camera through the ForceCanvas width contract. */
+#intel-topology-viewport > div {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+#intel-topology-graph .scene-container,
+#intel-topology-graph .scene-container canvas {
+  max-width: 100%;
+}
+@media (min-width: 1000px) {
+  #intel-content-frame {
+    padding-left: 46px;
+    padding-right: 46px;
+  }
+}
+@media (max-width: 899px) {
+  #intel-topology-layout {
+    flex-direction: column;
+    width: 100%;
+    max-width: 100%;
+  }
+  #intel-topology-graph {
+    flex: none;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+}
+@media (max-width: 1099px) {
+  #intel-status-details [id^="intel-status-metric-"],
+  #intel-status-clock {
+    display: none;
+  }
+}
+@media (max-width: 599px) {
+  #intel-status-app-label {
+    font-size: 12px;
+  }
+}
+@media (min-width: 1100px) {
+  #intel-status-details [id^="intel-status-metric-"],
+  #intel-status-clock,
+  #intel-status-api {
+    font-size: 18px;
+  }
+}
+@media (min-width: 600px) {
+  #intel-status-api {
+    font-size: 18px;
+  }
+}
+@media (min-width: 1400px) {
+  #intel-status-details {
+    gap: 40px;
+  }
+}
+body {
+  color-scheme: dark;
+}
+button,
+input,
+select {
+  font: inherit;
+}
+a {
+  color: #5fd39a;
+  text-decoration: underline;
+}
+input,
+select {
+  background: #111726;
+  border: 1px solid #2e3850;
+  border-radius: 8px;
+  color: #ececee;
+  min-width: 0;
+}
+:focus-visible {
+  outline: 2px solid #7fe0b4;
+  outline-offset: -2px;
+  box-shadow: 0 0 0 1px #7fe0b4;
+}
+::selection {
+  background: #2e3850;
+  color: #ececee;
+}
+/* Intel views only: browser motion/glow stays outside shared RN primitives. */
+#intel-home {
+  min-height: max(320px, calc(100vh - 128px));
+  min-height: max(320px, calc(100dvh - 128px));
+}
+#intel-bulletin {
+  animation: intel-enter 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes intel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+#intel-home [data-testid="intel-launcher-tile"] {
+  transition:
+    transform 120ms,
+    border-color 120ms,
+    box-shadow 120ms;
+}
+#intel-home [data-testid="intel-globe"] {
+  filter: drop-shadow(0 0 18px rgba(95, 211, 154, 0.35));
+  transition: filter 120ms;
+}
+#intel-home-launcher:is(:hover, :focus-visible)
+  [data-testid="intel-launcher-tile"] {
+  box-shadow: 0 0 18px rgba(95, 211, 154, 0.35);
+}
+#intel-home-launcher:is(:hover, :focus-visible) [data-testid="intel-globe"] {
+  filter: drop-shadow(0 0 24px rgba(95, 211, 154, 0.55));
+}
+[data-testid^="article-card-"] {
+  transition: border-color 120ms;
+}
+#intel-bulletin input:focus-visible {
+  border-color: rgba(95, 211, 154, 0.35);
+}
+[data-testid="bulletin-skeleton"] {
+  background-image: linear-gradient(
+    100deg,
+    transparent 25%,
+    rgba(95, 211, 154, 0.06) 50%,
+    transparent 75%
+  );
+  background-size: 200% 100%;
+  animation: intel-skeleton 1.2s linear infinite;
+}
+@keyframes intel-skeleton {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [role="progressbar"] svg {
+    animation: none !important;
+  }
+  #intel-bulletin,
+  [data-testid="bulletin-skeleton"] {
+    animation: none !important;
+  }
+  #intel-home [data-testid="intel-launcher-tile"],
+  [data-testid^="article-card-"] {
+    transition: none !important;
+    transform: none !important;
+  }
+  #intel-home [data-testid="intel-globe"] {
+    transition: none !important;
+  }
+}
+
+/* Topology remains a force-graph canvas; DOM tiles share its camera projection. */
+#intel-topology-grid {
+  background-image:
+    linear-gradient(rgba(63, 83, 119, 0.09) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(63, 83, 119, 0.09) 1px, transparent 1px),
+    radial-gradient(ellipse at 50% 45%, rgba(18, 29, 60, 0.35), transparent 70%);
+  background-size:
+    36px 36px,
+    36px 36px,
+    100% 100%;
+}
+.intel-topology-node {
+  display: flex !important;
+}
+
+@media (max-width: 599px) {
+  .intel-topology-node [data-tile="node"] {
+    width: 28px !important;
+    height: 28px !important;
+  }
+  .intel-topology-node[data-role="focus"] [data-tile="node"] {
+    width: 40px !important;
+    height: 40px !important;
+  }
+  .intel-topology-node-label {
+    max-width: 70px !important;
+    font-size: 8px !important;
+    padding: 3px 4px !important;
+  }
+}
+
+@media (max-width: 599px) {
+  .intel-topology-node[data-role="focus"] .intel-topology-node-label {
+    max-width: 96px !important;
+  }
+}
+
+@keyframes intel-topology-focus {
+  0%,
+  100% {
+    box-shadow:
+      0 0 5px var(--topology-node-color),
+      0 0 18px color-mix(in srgb, var(--topology-node-color) 30%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 10px var(--topology-node-color),
+      0 0 36px color-mix(in srgb, var(--topology-node-color) 65%, transparent);
+  }
+}
+.intel-topology-node[data-role="focus"] [data-tile="node"] {
+  animation: intel-topology-focus 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .intel-topology-node[data-role="focus"] [data-tile="node"] {
+    animation: none;
+  }
+}
+
+@keyframes intel-topology-arrive {
+  from {
+    transform: scale(0.78);
+    opacity: 0.65;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.intel-topology-node[data-role="focus"] [data-tile="node"] {
+  animation:
+    intel-topology-arrive 0.7s ease-out both,
+    intel-topology-focus 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .intel-topology-node[data-role="focus"] [data-tile="node"] {
+    animation: none;
+  }
+}
+
+/* @tag:intel-brief — matte reading/feed desk and preference-aware motion. */
+#intel-context-rail {
+  position: sticky;
+  top: 0;
+}
+#intel-feed-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-bottom: 12px;
+}
+@keyframes intel-desk-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+#intel-article-feed [data-testid^="article-card-"] {
+  transition:
+    background-color 120ms,
+    border-color 120ms;
+}
+#intel-feed-cards > :nth-child(-n + 8) {
+  animation: intel-desk-enter 200ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+#intel-feed-cards > :nth-child(1) {
+  animation-delay: 0ms;
+}
+#intel-feed-cards > :nth-child(2) {
+  animation-delay: 30ms;
+}
+#intel-feed-cards > :nth-child(3) {
+  animation-delay: 60ms;
+}
+#intel-feed-cards > :nth-child(4) {
+  animation-delay: 90ms;
+}
+#intel-feed-cards > :nth-child(5) {
+  animation-delay: 120ms;
+}
+#intel-feed-cards > :nth-child(6) {
+  animation-delay: 150ms;
+}
+#intel-feed-cards > :nth-child(7) {
+  animation-delay: 180ms;
+}
+#intel-feed-cards > :nth-child(8) {
+  animation-delay: 210ms;
+}
+
+.intel-topology-node,
+.intel-topology-node [data-tile="node"] {
+  transition:
+    opacity 200ms,
+    transform 200ms,
+    border-color 120ms;
+}
+@media (max-width: 899px) {
+  #intel-context-rail {
+    position: relative;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #intel-feed-cards > :nth-child(-n + 8) {
+    animation: none;
+  }
+  #intel-article-feed [data-testid^="article-card-"],
+  .intel-topology-node,
+  .intel-topology-node [data-tile="node"] {
+    transition: none;
+  }
+}
+
+@keyframes intel-skeleton-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+[data-testid="skeleton-line"] {
+  background-image: linear-gradient(
+    100deg,
+    transparent 20%,
+    rgba(255, 255, 255, 0.06) 50%,
+    transparent 80%
+  );
+  background-size: 200% 100%;
+  animation: intel-skeleton-shimmer 1.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-testid="skeleton-line"] {
+    animation: none;
+  }
+}
+
+#intel-landing .scene-container,
+#intel-landing canvas {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100%;
+}
+
+@keyframes intel-landing-status-cycle {
+  0% {
+    opacity: 0;
+  }
+  20%,
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+#intel-landing-status {
+  animation: intel-landing-status-cycle 3s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  #intel-landing-status {
+    animation: none;
+    opacity: 1;
+  }
+}

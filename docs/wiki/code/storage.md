@@ -14,6 +14,7 @@ SurrealDB is the only current backend. Default `embedded,nlp` features use Rocks
 | Memory publication and graph projection | [publisher.rs](../../../crates/argos-osint-core/src/storage/publisher.rs), [memory.rs](../../../crates/argos-osint-core/src/storage/memory.rs), [graph.rs](../../../crates/argos-osint-core/src/storage/graph.rs) |
 | Vector and lexical recall | [embeddings.rs](../../../crates/argos-osint-core/src/storage/embeddings.rs), [recall.rs](../../../crates/argos-osint-core/src/storage/recall.rs) |
 | Durable jobs | [jobs.rs](../../../crates/argos-osint-core/src/storage/jobs.rs) |
+| Jobs dashboard page | [jobs_view.rs](../../../crates/argos-osint-core/src/storage/jobs_view.rs), [jobs view contracts](../../../crates/argos-osint-core/tests/storage_jobs_view.rs) |
 | Contract verification | [tests/](../../../crates/argos-osint-core/tests), [shared harness](../../../crates/argos-osint-core/tests/support), [test_surreal.py](../../../scripts/test_surreal.py) |
 
 [![Current persistence](../../diagrams/persistence.svg)](../../diagrams/persistence.html)
@@ -44,3 +45,17 @@ SurrealQL statements, record IDs, indexes and transactions in current repository
 | NLP and summary cache | `nlp_artifact`, `nlp_source_ref`, `nlp_feature`, `derived_summary`, `summary_flush_request`; [nlp_cache.rs](../../../crates/argos-osint-core/src/storage/nlp_cache.rs), [summary_flush.rs](../../../crates/argos-osint-core/src/storage/summary_flush.rs) | [summary contracts](../../../crates/argos-osint-core/tests/storage_summary_flush.rs) |
 
 Stage completion and canonical publication are separate commits: `brief_stages::commit` first commits the leased stage output, then requests publication. A canonical publication failure rolls back that transaction and reports an index/publication failure without undoing completed extraction. Atlas phase-6 batching likewise does not create one 100-article transaction: each occurrence's relationships and receipt commit together, and successful occurrences remain available if another fails.
+
+The Jobs dashboard reads a bounded page of top-level ids before loading event, task and attempt metrics. Those page metrics are grouped by the selected ids. Running `api_server` and `web_server` rows rank ahead of ordinary work inside the active filters. A single job's event total covers that job and its immediate children, matching the page cohort. See [Intel web](intel-web.md#traffic-in-rust-jobs--logs).
+
+Topology snapshots keep their consistent transaction in a worker that owns `BEGIN` through `COMMIT`/`CANCEL`. If the awaiting caller is dropped (for example by the HTTP timeout), the worker stops traversal and awaits rollback through `run_tx`; dropping the request does not drop the open SDK transaction. This cleanup applies to topology snapshots, including brief navigation binding reads; other transaction callers retain their existing behavior. Brief navigation uses `brief_binding_snapshot` and returns after direct node admission; it skips graph-only topic/Related expansion, payload details, association hydration and neighborhood-summary generation.
+
+## Intel web read service
+
+The [UI-independent Intel service](../../../crates/argos-osint-core/src/intel_service.rs) supplies keyset article occurrence pages and brief projections to the [local HTTP API](intel-web.md). Bootstrap adds the `atlas_article_bulletin` category/time/ID index idempotently; record formats and schema version remain unchanged. The API host owns the repository and the CLI supervisor does not open it. Existing embedded locks/server leases therefore remain authoritative.
+
+## Actor catalog
+
+The [seeded actor catalog](actor-catalog.md) adds provenance-bearing catalog fields to `brain_actor` and the leased `brain_actor_seed:catalog` completion/progress receipt. Actor, alias, typed-memory and graph-node batches commit together. Existing schema version 1 is extended idempotently; no automatic data wipe or actor conversion runs at startup. A user-requested `storage reset --yes` removes data and the receipt while keeping configuration, credentials, models and datasets.
+
+Job/task creation, claim and completion now retain `job_event` lifecycle rows atomically with their transition. The per-job log reader combines those rows with `argos_event` for the same descendant cohort, ordered by time with deterministic ties; unscoped durable telemetry retains its sequence pagination. Clear events continues to clear the durable telemetry journal; job lifecycle history remains with its job until job cleanup.

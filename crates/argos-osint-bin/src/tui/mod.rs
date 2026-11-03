@@ -1,6 +1,5 @@
 mod anim;
 mod app;
-mod article_image;
 mod atlas_table;
 mod commands;
 pub mod components;
@@ -23,15 +22,24 @@ mod surreal_brain;
 mod surreal_intel;
 mod surreal_profile;
 mod surreal_recon;
-mod theme;
+pub(crate) mod theme;
 mod tool_catalog;
 pub mod topology;
 pub mod topology_layout;
 mod tracked;
 mod ui;
+pub(crate) mod wordmark;
 
+pub(crate) use app::run_with_shutdown;
 #[doc(hidden)]
 pub use app::testkit;
 pub use app::{run, App};
 #[doc(hidden)]
 pub use ui::draw;
+
+#[cfg(test)]
+mod jobs_tests;
+#[cfg(test)]
+mod logs_tests;
+#[cfg(test)]
+mod tool_catalog_tests;

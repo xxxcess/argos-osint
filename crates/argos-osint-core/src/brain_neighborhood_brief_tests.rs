@@ -37,6 +37,7 @@ fn edge(id: &str, from: &str, to: &str, kind: TopologyEdgeKind) -> TopologyEdge 
         member_ids: vec![],
         receipts: vec![format!("receipt-{id}")],
         rationale: String::new(),
+        actor_reference: None,
     }
 }
 

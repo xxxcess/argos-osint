@@ -1,5 +1,5 @@
 //! Canonical Brain publication of a completed intel brief kind on SurrealDB
-//! (SQLite `brief_canonical::publish_stage_on`).
+//! (legacy store `brief_canonical::publish_stage_on`).
 //!
 //! Claims and Inferences publish an article insight snapshot through the
 //! shared canonical publisher ([`super::insight::publish_snapshot_on`] with
@@ -179,7 +179,9 @@ async fn publish_kind(
             input.snapshot.generation = u32::try_from(generation).map_err(abort)?;
             input.snapshot.key = crate::nlp::cache::key(&serde_json::json!([
                 crate::intel_recon::brief_pipeline::CANONICAL_CONTRACT,
+                PUBLICATION_VERSION,
                 input.snapshot.source_refs,
+                input.snapshot.entities,
                 hash
             ]));
             for inference in &mut output.inferences {

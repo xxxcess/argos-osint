@@ -2,7 +2,7 @@
 //!
 //! When the process selected SurrealDB ([`on`]), the `Store` methods in
 //! `brain_browse`, `brain_topology_query` and `brain_actors` dispatch here
-//! instead of reading or writing the SQLite connection. Every function blocks
+//! instead of reading or writing the legacy store connection. Every function blocks
 //! on [`runtime::blocking`], so callers must be plain threads, never async
 //! code (the same rule as the TUI's `surreal_brain`). The reads reuse
 //! `browse`, `browse_assoc` and `topology`; the writes reuse `actor_bind`,
@@ -328,7 +328,7 @@ pub fn split_actor(from: &str) -> Result<()> {
                     &now,
                 )
                 .await?;
-                // Both revisions changed: re-index both, as SQLite bumps
+                // Both revisions changed: re-index both, as the legacy store bumps
                 // `memories_changed`.
                 changed.push(from);
                 changed.push(to);

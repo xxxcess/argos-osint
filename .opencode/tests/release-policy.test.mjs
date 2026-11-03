@@ -10,7 +10,8 @@ function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "argos-release-policy-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const path of ["Cargo.toml", "Cargo.lock", "version.txt", ".release-please-manifest.json", "release-please-config.json",
-    "crates/argos-osint-core/Cargo.toml", "crates/argos-osint-bin/Cargo.toml"]) {
+    "crates/argos-osint-core/Cargo.toml", "crates/argos-osint-bin/Cargo.toml",
+    "crates/argos-osint-api/Cargo.toml", "crates/argos-api-host/Cargo.toml"]) {
     const dest = join(root, path);
     mkdirSync(join(dest, ".."), { recursive: true });
     cpSync(join(ROOT, path), dest);

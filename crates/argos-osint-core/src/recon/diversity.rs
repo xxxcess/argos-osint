@@ -2,7 +2,7 @@
 //!
 //! Enforces the 2-distinct-eligible-tools policy per intelligence category,
 //! candidate preference ranking by independent upstream dataset,
-//! and persists coverage records in SQLite (`recon_coverage`).
+//! and persists coverage records in the legacy store (`recon_coverage`).
 
 use std::collections::{BTreeMap, HashSet};
 

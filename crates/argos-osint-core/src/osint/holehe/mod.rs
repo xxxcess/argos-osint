@@ -460,7 +460,7 @@ pub async fn lookup(
     client: &reqwest::Client,
     input: LookupInput,
     user_agent: Option<&str>,
-    cancel: &AtomicBool,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<LookupObservation> {
     let (email, domain) = normalize_email(&input.email)?;
     let max_sites = input.max_sites.unwrap_or(DEFAULT_MAX_SITES);
@@ -470,7 +470,7 @@ pub async fn lookup(
     let global = Arc::new(Semaphore::new(GLOBAL_CONCURRENCY));
     let per_host: Arc<Mutex<HashMap<String, Arc<Semaphore>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let cancel = Arc::new(AtomicBool::new(cancel.load(Ordering::Relaxed)));
+    let cancel = Arc::clone(cancel);
 
     let mut jobs = Vec::with_capacity(selected.len());
     for spec in selected {
@@ -712,5 +712,19 @@ mod tests {
         .await;
         assert_eq!(result.signal, CheckSignal::Inconclusive);
         assert_eq!(result.diagnostic, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn holehe_lookup_halts_immediately_when_flag_cancelled() {
+        let client = reqwest::Client::new();
+        let cancel = Arc::new(AtomicBool::new(true)); // Already cancelled
+        let input = LookupInput {
+            email: "test@example.org".into(),
+            services: Some(vec!["twitter".into(), "spotify".into()]),
+            max_sites: Some(2),
+        };
+        let obs = lookup(&client, input, None, &cancel).await.unwrap();
+        assert!(obs.cancelled, "lookup must detect cancelled flag");
+        assert_eq!(observation_status(&obs), "cancelled");
     }
 }

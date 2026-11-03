@@ -15,9 +15,9 @@ use super::logs::local_time;
 use super::theme;
 use super::ui::{contains, draw_button_state, draw_field, fit, inset, pane, ACTION_H, FIELD_H};
 
-/// Where the Jobs pane reads: the SQLite store, or the SurrealDB repository
-/// under a storage config (see `surreal_brain::SurrealJobs`). One pane never
-/// mixes the two.
+/// Where the Jobs pane reads: the SurrealDB repository under a storage
+/// config (see `surreal_brain::SurrealJobs`), or the process-local
+/// in-memory store. One pane never mixes the two.
 pub trait JobsSource {
     fn list(&self, filter: &JobFilter, limit: usize) -> anyhow::Result<Vec<JobRow>>;
     fn counts(&self) -> anyhow::Result<JobCounts>;
@@ -52,7 +52,7 @@ pub const WIDE: u16 = 100;
 pub struct JobsView {
     pub rows: Vec<JobRow>,
     pub sel: usize,
-    sel_id: Option<String>,
+    pub sel_id: Option<String>,
     pub scroll: u16,
     pub detail: Option<JobDetail>,
     pub detail_scroll: u16,
@@ -75,6 +75,109 @@ impl JobsView {
             app: self.app.clone(),
             text: self.search.trim().to_string(),
             ..Default::default()
+        }
+    }
+
+    /// A user changed the cohort. Old rows/detail must not masquerade as the
+    /// new filter while an asynchronous read is still in flight.
+    pub fn invalidate_filter(&mut self) {
+        self.rows.clear();
+        self.sel = 0;
+        self.sel_id = None;
+        self.scroll = 0;
+        self.detail = None;
+        self.detail_scroll = 0;
+        self.detail_open = false;
+        self.error = None;
+        self.loaded = false;
+    }
+
+    /// Immediately filter existing rows in-place based on the current filter settings.
+    /// Retains matching rows, preserves or clamps selection, synchronizes active detail,
+    /// and keeps loaded state so the UI updates immediately without flashing "Loading jobs".
+    pub fn apply_filter(&mut self) {
+        let filter = self.filter();
+        self.rows.retain(|row| filter.matches(row));
+
+        if let Some(id) = self.sel_id.as_ref() {
+            if let Some(index) = self.rows.iter().position(|row| &row.id == id) {
+                self.sel = index;
+            } else {
+                self.sel = self.sel.min(self.rows.len().saturating_sub(1));
+            }
+        } else {
+            self.sel = self.sel.min(self.rows.len().saturating_sub(1));
+        }
+        self.sel_id = self.rows.get(self.sel).map(|row| row.id.clone());
+
+        if let Some(row) = self.selected() {
+            if self.detail.as_ref().map(|d| &d.job.id) != Some(&row.id) {
+                let retryable = if row.state == "failed" || row.state == "partial" {
+                    1
+                } else {
+                    0
+                };
+                self.detail = Some(JobDetail {
+                    job: row.clone(),
+                    retryable,
+                    ..Default::default()
+                });
+                self.detail_scroll = 0;
+            }
+        } else {
+            self.detail = None;
+            self.detail_scroll = 0;
+            self.detail_open = false;
+        }
+    }
+
+    /// Optimistically prune rows matching a history clear filter so the
+    /// table and detail pane reflect the action immediately while the
+    /// authoritative repository reload completes. Service rows clear like
+    /// any other row when they hold a matching terminal state; running
+    /// service workers are retained by their own state.
+    pub fn prune_status(&mut self, status: JobStatusFilter) {
+        let states = status.states();
+        if states.is_empty() {
+            return;
+        }
+        let selected_id = self.selected().map(|row| row.id.clone());
+        self.rows
+            .retain(|row| !states.contains(&row.state.as_str()));
+        match status {
+            JobStatusFilter::Completed => self.counts.completed_recent = 0,
+            JobStatusFilter::Failed => self.counts.failed = 0,
+            _ => {}
+        }
+        if let Some(id) = selected_id {
+            if let Some(index) = self.rows.iter().position(|row| row.id == id) {
+                self.sel = index;
+            } else {
+                self.sel = self.sel.min(self.rows.len().saturating_sub(1));
+            }
+        } else {
+            self.sel = 0;
+        }
+        self.sel_id = self.rows.get(self.sel).map(|row| row.id.clone());
+
+        if let Some(row) = self.selected() {
+            if self.detail.as_ref().map(|d| &d.job.id) != Some(&row.id) {
+                let retryable = if row.state == "failed" || row.state == "partial" {
+                    1
+                } else {
+                    0
+                };
+                self.detail = Some(JobDetail {
+                    job: row.clone(),
+                    retryable,
+                    ..Default::default()
+                });
+                self.detail_scroll = 0;
+            }
+        } else {
+            self.detail = None;
+            self.detail_scroll = 0;
+            self.detail_open = false;
         }
     }
 
@@ -155,7 +258,24 @@ impl JobsView {
             .and_then(|id| self.rows.iter().position(|j| j.id == id))
             .unwrap_or(self.sel.min(self.rows.len().saturating_sub(1)));
         self.sel_id = self.rows.get(self.sel).map(|j| j.id.clone());
-        self.detail = snapshot.detail;
+        if snapshot.detail.as_ref().map(|d| &d.job.id) == self.sel_id.as_ref() {
+            self.detail = snapshot.detail;
+        } else if let Some(row) = self.selected() {
+            if self.detail.as_ref().map(|d| &d.job.id) != Some(&row.id) {
+                let retryable = if row.state == "failed" || row.state == "partial" {
+                    1
+                } else {
+                    0
+                };
+                self.detail = Some(JobDetail {
+                    job: row.clone(),
+                    retryable,
+                    ..Default::default()
+                });
+            }
+        } else {
+            self.detail = None;
+        }
     }
 
     pub fn move_by(&mut self, delta: i32, store: &impl JobsSource) {
@@ -549,7 +669,7 @@ pub fn detail_lines(detail: &JobDetail, now: chrono::DateTime<chrono::Utc>) -> V
     }
     if job.is_service() {
         lines.push(
-            "Long-lived service · stays available while Argos runs, including when idle.".into(),
+            "Long-lived service · stays listed while running or idle; terminal service jobs clear with history.".into(),
         );
         lines.push(
             "Elapsed is service age; individual tasks and attempts below show actual work.".into(),
@@ -933,5 +1053,190 @@ mod tests {
                 assert!(header.trim_end().ends_with("logs"), "{width}: {header}");
             }
         }
+    }
+
+    #[test]
+    fn test_apply_filter_in_place_immediate() {
+        use super::*;
+        use argos_osint_core::jobs_view::{JobRow, JobStatusFilter};
+
+        let mut view = JobsView {
+            rows: vec![
+                JobRow {
+                    id: "j1".into(),
+                    state: "running".into(),
+                    app: "intel".into(),
+                    title: "Intel gathering".into(),
+                    ..Default::default()
+                },
+                JobRow {
+                    id: "j2".into(),
+                    state: "completed".into(),
+                    app: "recon".into(),
+                    title: "Recon scan".into(),
+                    ..Default::default()
+                },
+            ],
+            loaded: true,
+            sel: 1,
+            sel_id: Some("j2".into()),
+            status: JobStatusFilter::Active,
+            ..Default::default()
+        };
+
+        view.apply_filter();
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].id, "j1");
+        assert_eq!(view.sel, 0);
+        assert_eq!(view.sel_id.as_deref(), Some("j1"));
+        assert!(view.loaded);
+        assert!(view.detail.is_some());
+        assert_eq!(view.detail.as_ref().unwrap().job.id, "j1");
+    }
+
+    #[test]
+    fn test_prune_status_preserves_active_detail_and_retry() {
+        use super::*;
+        use argos_osint_core::jobs_view::{JobDetail, JobRow, JobStatusFilter};
+
+        let mut view = JobsView {
+            rows: vec![
+                JobRow {
+                    id: "j-done".into(),
+                    state: "completed".into(),
+                    ..Default::default()
+                },
+                JobRow {
+                    id: "j-failed".into(),
+                    state: "failed".into(),
+                    title: "Failed job".into(),
+                    ..Default::default()
+                },
+            ],
+            sel: 0,
+            sel_id: Some("j-done".into()),
+            detail: Some(JobDetail {
+                job: JobRow {
+                    id: "j-done".into(),
+                    state: "completed".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        view.prune_status(JobStatusFilter::Completed);
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].id, "j-failed");
+        assert_eq!(view.sel, 0);
+        assert_eq!(view.sel_id.as_deref(), Some("j-failed"));
+        assert!(view.detail.is_some());
+        let detail = view.detail.as_ref().unwrap();
+        assert_eq!(detail.job.id, "j-failed");
+        assert_eq!(detail.retryable, 1);
+        assert!(
+            view.can_retry(),
+            "Retry button preserved on active remaining failed job"
+        );
+    }
+
+    #[test]
+    fn test_prune_status_clears_terminal_service_rows() {
+        use super::*;
+        use argos_osint_core::jobs_view::{JobRow, JobStatusFilter};
+
+        let service = |id: &str, state: &str| JobRow {
+            id: id.into(),
+            kind: "service".into(),
+            state: state.into(),
+            ..Default::default()
+        };
+        let mut view = JobsView {
+            rows: vec![
+                service("svc-run", "running"),
+                service("svc-failed", "failed"),
+                service("svc-done", "completed"),
+                service("svc-stopped", "cancelled"),
+                JobRow {
+                    id: "task-done".into(),
+                    state: "completed".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        // A running service worker survives every clear filter; terminal
+        // service rows clear exactly like task rows in the same state.
+        view.prune_status(JobStatusFilter::Completed);
+        assert!(!view.rows.iter().any(|r| r.id == "svc-done"));
+        assert!(!view.rows.iter().any(|r| r.id == "task-done"));
+        for kept in ["svc-run", "svc-failed", "svc-stopped"] {
+            assert!(
+                view.rows.iter().any(|r| r.id == kept),
+                "{kept} survives Clear completed"
+            );
+        }
+
+        view.prune_status(JobStatusFilter::Failed);
+        assert!(
+            !view.rows.iter().any(|r| r.id == "svc-failed"),
+            "failed service row is cleared by Clear failed"
+        );
+        assert!(view.rows.iter().any(|r| r.id == "svc-run"));
+        assert!(view.rows.iter().any(|r| r.id == "svc-stopped"));
+
+        view.prune_status(JobStatusFilter::Stopped);
+        assert!(
+            !view.rows.iter().any(|r| r.id == "svc-stopped"),
+            "stopped service row is cleared by Clear stopped"
+        );
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].id, "svc-run");
+        assert_eq!(view.sel, 0);
+        assert_eq!(view.sel_id.as_deref(), Some("svc-run"));
+    }
+
+    #[test]
+    fn test_accept_snapshot_guards_detail() {
+        use super::*;
+        use argos_osint_core::jobs_view::{JobDetail, JobRow};
+
+        let mut view = JobsView {
+            rows: vec![JobRow {
+                id: "j1".into(),
+                state: "running".into(),
+                ..Default::default()
+            }],
+            sel: 0,
+            sel_id: Some("j1".into()),
+            ..Default::default()
+        };
+
+        // Snapshot has detail for a different job
+        let snapshot = JobsView {
+            rows: vec![JobRow {
+                id: "j1".into(),
+                state: "running".into(),
+                ..Default::default()
+            }],
+            sel: 0,
+            sel_id: Some("j1".into()),
+            detail: Some(JobDetail {
+                job: JobRow {
+                    id: "other-job".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            loaded: true,
+            ..Default::default()
+        };
+
+        view.accept(snapshot, false);
+        assert_eq!(view.sel_id.as_deref(), Some("j1"));
+        assert!(view.detail.is_some());
+        assert_eq!(view.detail.as_ref().unwrap().job.id, "j1");
     }
 }

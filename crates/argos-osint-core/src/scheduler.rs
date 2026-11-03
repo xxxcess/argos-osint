@@ -1,4 +1,4 @@
-//! Elected single-owner scheduler for a shared SQLite state root (spec §4).
+//! Elected single-owner scheduler over the shared SurrealDB state root (spec §4).
 //!
 //! One process holds the `argos_scheduler_lease` row. Others observe only.
 //! Worker pools are separated by kind: LLM, network collect, local index.
@@ -251,6 +251,7 @@ pub fn process_owner() -> String {
 /// Background worker handle. Dropping / cancelling stops the loop.
 pub struct WorkerPool {
     stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl WorkerPool {
@@ -258,7 +259,7 @@ impl WorkerPool {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         // Under SurrealDB the index pool is the repository's; only the Atlas
-        // memory-phase refresh runs here, never reopening SQLite.
+        // memory-phase refresh runs here, never reopening the legacy store.
         #[cfg(feature = "surreal")]
         crate::storage::runtime::spawn(async move {
             while !flag.load(Ordering::Relaxed) {
@@ -274,7 +275,7 @@ impl WorkerPool {
             }
         });
         let _ = owner;
-        Self { stop }
+        Self { stop, handle: None }
     }
 
     /// Drains summarization flush tasks (summary pool only) while this process
@@ -282,12 +283,12 @@ impl WorkerPool {
     pub fn spawn_summary_flush_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("argos-summary-pool".into())
             .spawn(move || {
                 let _loops = 0u32;
                 let _schema_ready = false;
-                while !flag.load(Ordering::Relaxed) {
+                while !flag.load(Ordering::Acquire) {
                     let owner = owner.clone();
                     let drained = crate::storage::runtime::blocking(move |repo| async move {
                         if !surreal_elected(&repo, &owner).await? {
@@ -305,18 +306,23 @@ impl WorkerPool {
                     let busy = matches!(drained, Ok(n) if n > 0);
                     report_drainer(&db_path, "summary", drained);
                     if !busy {
-                        std::thread::sleep(Duration::from_millis(750));
+                        for _ in 0..3 {
+                            if flag.load(Ordering::Acquire) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
                     }
                 }
             })
             .ok();
-        Self { stop }
+        Self { stop, handle }
     }
 
     /// Spawn the default local pools (index + summary) for one state root.
     pub fn spawn_default(db_path: std::path::PathBuf) -> Vec<WorkerPool> {
         let owner = process_owner();
-        // Under a storage config nothing may open SQLite: each pool below
+        // Under a storage config nothing may open the legacy store: each pool below
         // has a repository drainer.
         #[cfg(feature = "surreal")]
         return vec![
@@ -339,7 +345,7 @@ impl WorkerPool {
     pub fn spawn_surreal_index_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        let _ = std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("argos-index".into())
             .spawn(move || {
                 let Some(embedder) = crate::storage::vectors::Embedder::local() else {
@@ -376,8 +382,9 @@ impl WorkerPool {
                         std::thread::sleep(Duration::from_millis(250));
                     }
                 }
-            });
-        Self { stop }
+            })
+            .ok();
+        Self { stop, handle }
     }
 
     /// Actor identity maintenance is separate from Atlas collection and never
@@ -385,7 +392,7 @@ impl WorkerPool {
     pub fn spawn_actor_dedup_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        let _ = std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("argos-actor-dedup".into())
             .spawn(move || {
                 let Ok(_runtime) = tokio::runtime::Builder::new_current_thread()
@@ -419,8 +426,9 @@ impl WorkerPool {
                         std::thread::sleep(Duration::from_millis(250));
                     }
                 }
-            });
-        Self { stop }
+            })
+            .ok();
+        Self { stop, handle }
     }
 
     /// Local, resumable Brain actor/relationship backfill over every retained
@@ -429,7 +437,7 @@ impl WorkerPool {
     pub fn spawn_brain_backfill_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        let _ = std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("argos-brain-backfill".into())
             .spawn(move || {
                 while !flag.load(Ordering::Acquire) {
@@ -455,13 +463,14 @@ impl WorkerPool {
                         std::thread::sleep(Duration::from_millis(250));
                     }
                 }
-            });
-        Self { stop }
+            })
+            .ok();
+        Self { stop, handle }
     }
 
     /// Dedicated Intel brief stage runner: a bounded two-slot drainer
     /// dispatches ready stages onto separate Tokio tasks. The multi-thread
-    /// runtime keeps lease heartbeats independent of blocking SQLite work.
+    /// runtime keeps lease heartbeats independent of blocking legacy-store work.
     pub fn spawn_intel_brief_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
         let db = db_path.clone();
         Self::spawn_intel_brief_drainer_with(
@@ -483,7 +492,7 @@ impl WorkerPool {
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        let _ = std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("argos-intel-brief".into())
             .spawn(move || {
                 let _runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -504,15 +513,16 @@ impl WorkerPool {
                 let config = crate::intel_recon::brief_stages::ExecConfig::default();
                 while !flag.load(Ordering::Acquire) {
                     // SurrealDB: elect on the repository's scheduler lease and
-                    // drain the repository's brief chains; never the SQLite file.
-                    let (owner, flag, config) = (owner.clone(), flag.clone(), config.clone());
+                    // drain the repository's brief chains; never the legacy store file.
+                    let (drain_owner, drain_flag, drain_config) =
+                        (owner.clone(), flag.clone(), config.clone());
                     report_drainer(
                         &db_path,
                         "intel-brief",
                         crate::storage::runtime::blocking(move |repo| async move {
                             let elected = crate::storage::jobs::try_elect(
                                 repo.db(),
-                                &owner,
+                                &drain_owner,
                                 DEFAULT_LEASE_SECS,
                                 chrono::Utc::now(),
                             )
@@ -526,7 +536,7 @@ impl WorkerPool {
                             let r = repo.clone();
                             crate::storage::brief_stages::drain_parallel(
                                 &repo,
-                                &format!("{owner}:intel-brief"),
+                                &format!("{drain_owner}:intel-brief"),
                                 move || {
                                     Box::new(
                                         crate::storage::brief_stages::SurrealRuntimeBackend::load(
@@ -538,23 +548,29 @@ impl WorkerPool {
                                                 + Send,
                                         >
                                 },
-                                &flag,
-                                &config,
+                                &drain_flag,
+                                &drain_config,
                                 crate::intel_recon::brief_stages::STAGE_SLOTS,
                             )
                             .await
                         }),
                     );
-                    std::thread::sleep(Duration::from_millis(750));
+                    for _ in 0..3 {
+                        if flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
                 }
-            });
-        Self { stop }
+            })
+            .ok();
+        Self { stop, handle }
     }
 
     pub fn spawn_insight_refresh_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        let _ = std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("argos-insight-refresh".into())
             .spawn(move || {
                 let Ok(_runtime) = tokio::runtime::Builder::new_current_thread()
@@ -566,15 +582,15 @@ impl WorkerPool {
                 while !flag.load(Ordering::Acquire) {
                     // SurrealDB: elect on the repository's scheduler lease and
                     // drive the shared refresh tasks there (startup recovery
-                    // included); never the SQLite file.
-                    let (owner, flag) = (owner.clone(), flag.clone());
+                    // included); never the legacy store file.
+                    let (drain_owner, drain_flag) = (owner.clone(), flag.clone());
                     report_drainer(
                         &db_path,
                         "insight-refresh",
                         crate::storage::runtime::blocking(move |repo| async move {
                             let elected = crate::storage::jobs::try_elect(
                                 repo.db(),
-                                &owner,
+                                &drain_owner,
                                 DEFAULT_LEASE_SECS,
                                 chrono::Utc::now(),
                             )
@@ -585,7 +601,7 @@ impl WorkerPool {
                             if !elected {
                                 return Ok(());
                             }
-                            // Same fence as the SQLite pools' sweep.
+                            // Same fence as the legacy store pools' sweep.
                             let _ =
                                 crate::storage::refresh::retire_atlas_insight_work(repo.db()).await;
                             let auth = crate::secrets::AuthFile::load().unwrap_or_default();
@@ -594,12 +610,12 @@ impl WorkerPool {
                             let (_, errors) = crate::storage::refresh_driver::recover_and_run(
                                 &repo,
                                 &settings,
-                                &flag,
+                                &drain_flag,
                                 || {
                                     crate::storage::refresh_driver::pipeline(
                                         &auth,
                                         &settings,
-                                        &flag,
+                                        &drain_flag,
                                         std::path::PathBuf::new(),
                                     )
                                 },
@@ -615,10 +631,16 @@ impl WorkerPool {
                             }
                         }),
                     );
-                    std::thread::sleep(Duration::from_secs(2));
+                    for _ in 0..8 {
+                        if flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
                 }
-            });
-        Self { stop }
+            })
+            .ok();
+        Self { stop, handle }
     }
 
     /// Dedicated Brain topology scope analysis drainer: executes inferences
@@ -626,7 +648,7 @@ impl WorkerPool {
     pub fn spawn_brain_scope_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        let _ = std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("argos-brain-scope".into())
             .spawn(move || {
                 let Ok(_runtime) = tokio::runtime::Builder::new_current_thread()
@@ -647,14 +669,42 @@ impl WorkerPool {
                             crate::storage::brain_scope::drain(&repo, &owner, &stop).await
                         }),
                     );
-                    std::thread::sleep(Duration::from_millis(750));
+                    for _ in 0..3 {
+                        if flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
                 }
-            });
-        Self { stop }
+            })
+            .ok();
+        Self { stop, handle }
     }
 
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop.store(true, Ordering::Release);
+    }
+
+    /// Explicitly stop and join the worker thread, blocking until clean termination.
+    pub fn join(mut self) {
+        self.stop();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+
+    /// Signal all worker pools to stop first, then join each thread.
+    /// Signaling all threads concurrently eliminates sequential sleep waits.
+    pub fn shutdown_all(pools: impl IntoIterator<Item = WorkerPool>) {
+        let mut pools: Vec<WorkerPool> = pools.into_iter().collect();
+        for pool in &pools {
+            pool.stop();
+        }
+        for pool in &mut pools {
+            if let Some(handle) = pool.handle.take() {
+                let _ = handle.join();
+            }
+        }
     }
 }
 
@@ -676,6 +726,9 @@ async fn surreal_elected(
 impl Drop for WorkerPool {
     fn drop(&mut self) {
         self.stop();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -748,5 +801,50 @@ mod tests {
     fn counting_runtime() -> Option<crate::recon::model_exec::RoleRuntime> {
         LOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         None
+    }
+
+    #[test]
+    fn worker_pool_shutdown_all_stops_and_joins_cleanly() {
+        let stop1 = Arc::new(AtomicBool::new(false));
+        let flag1 = stop1.clone();
+        let handle1 = std::thread::spawn(move || {
+            while !flag1.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let pool1 = WorkerPool {
+            stop: stop1,
+            handle: Some(handle1),
+        };
+
+        let stop2 = Arc::new(AtomicBool::new(false));
+        let flag2 = stop2.clone();
+        let handle2 = std::thread::spawn(move || {
+            while !flag2.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let pool2 = WorkerPool {
+            stop: stop2,
+            handle: Some(handle2),
+        };
+
+        WorkerPool::shutdown_all(vec![pool1, pool2]);
+    }
+
+    #[test]
+    fn worker_pool_join_stops_and_joins_cleanly() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let handle = std::thread::spawn(move || {
+            while !flag.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let pool = WorkerPool {
+            stop,
+            handle: Some(handle),
+        };
+        pool.join();
     }
 }

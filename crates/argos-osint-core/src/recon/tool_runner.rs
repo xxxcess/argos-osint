@@ -7,13 +7,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
-use tokio::sync::{watch, Mutex, Semaphore};
+use tokio::sync::{watch, Semaphore};
 
 use crate::osint::contracts::IntelligenceCategory;
 use crate::osint::{self, ProviderKeys, ToolDefinition, ToolResult};
@@ -101,6 +101,19 @@ impl ToolAttribution {
     }
 }
 
+/// RAII cleanup guard to remove cache_key from inflight map synchronously on drop.
+pub(crate) struct InflightGuard {
+    pub(crate) key: String,
+    pub(crate) map: Arc<Mutex<HashMap<String, watch::Receiver<Option<ToolResult>>>>>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        map.remove(&self.key);
+    }
+}
+
 /// Shared tool execution runner with concurrency bounding and deduplication.
 #[derive(Clone)]
 pub struct ToolRunner {
@@ -132,6 +145,31 @@ impl ToolRunner {
             inflight: Arc::new(Mutex::new(HashMap::new())),
             attribution: ToolAttribution::recon(),
         }
+    }
+
+    pub fn new_with_shared(
+        db_path: impl AsRef<Path>,
+        settings: SettingsFile,
+        keys: ProviderKeys,
+        concurrency: Arc<Semaphore>,
+        inflight: Arc<Mutex<HashMap<String, watch::Receiver<Option<ToolResult>>>>>,
+    ) -> Self {
+        Self {
+            db_path: db_path.as_ref().to_path_buf(),
+            settings,
+            keys,
+            concurrency,
+            inflight,
+            attribution: ToolAttribution::recon(),
+        }
+    }
+
+    pub fn concurrency_semaphore(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.concurrency)
+    }
+
+    pub fn inflight_map(&self) -> Arc<Mutex<HashMap<String, watch::Receiver<Option<ToolResult>>>>> {
+        Arc::clone(&self.inflight)
     }
 
     /// Replace the default attribution for calls that do not carry their own.
@@ -234,7 +272,7 @@ impl ToolRunner {
 
         // 2. In-flight deduplication
         let (tx, mut rx, is_leader) = {
-            let mut inflight = self.inflight.lock().await;
+            let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(existing_rx) = inflight.get(&cache_key) {
                 (None, existing_rx.clone(), false)
             } else {
@@ -283,20 +321,6 @@ impl ToolRunner {
         }
 
         // RAII cleanup guard to remove cache_key from inflight map
-        struct InflightGuard {
-            key: String,
-            map: Arc<Mutex<HashMap<String, watch::Receiver<Option<ToolResult>>>>>,
-        }
-        impl Drop for InflightGuard {
-            fn drop(&mut self) {
-                let key = self.key.clone();
-                let map = self.map.clone();
-                tokio::spawn(async move {
-                    let mut lock = map.lock().await;
-                    lock.remove(&key);
-                });
-            }
-        }
         let _guard = InflightGuard {
             key: cache_key.clone(),
             map: self.inflight.clone(),
@@ -371,7 +395,8 @@ impl ToolRunner {
         // Each tool runs under its own configured timeout, which stays below the
         // turn's outer deadline (spec §9 fix 6).
         let request_timeout = tool_timeout(def);
-        let exec_fut = executor.run_configured(canonical, inputs.clone(), ua, &self.keys);
+        let exec_fut =
+            executor.run_configured_with_cancel(canonical, inputs.clone(), ua, &self.keys, cancel);
         let mut timed_out = false;
         let result_outcome = tokio::select! {
             res = tokio::time::timeout(request_timeout, exec_fut) => match res {
@@ -462,7 +487,7 @@ impl ToolRunner {
 
         // 8. NewsAPI quota charge
         if !result.cached && canonical.starts_with("newsapi_") {
-            // One store: the SQLite `Store` or the repository, never both.
+            // One store: the legacy `Store` or the repository, never both.
             if let Ok(store) = ReconStore::open(&self.db_path).await {
                 let bucket = if osint::key_exhausted(&self.keys.newsapi)
                     && !self.keys.newsapi_fallback.trim().is_empty()
@@ -705,8 +730,15 @@ impl ToolRunner {
 }
 
 async fn wait_cancellation(cancel: &Arc<AtomicBool>) {
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
+    let guard = super::register_cancellation_notifier(cancel);
     while !cancel.load(Ordering::Relaxed) {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::select! {
+            _ = guard.notified() => {},
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+        }
     }
 }
 
@@ -1310,5 +1342,20 @@ mod tests {
             ToolRunner::invocation_id("crtsh_certificates", "key-a", ""),
             ToolRunner::invocation_id("crtsh_certificates", "key-b", "")
         );
+    }
+
+    #[test]
+    fn inflight_guard_synchronous_drop_cleans_map() {
+        let map = Arc::new(Mutex::new(HashMap::new()));
+        let (_tx, rx) = watch::channel(None);
+        map.lock().unwrap().insert("test_key".to_string(), rx);
+        assert!(map.lock().unwrap().contains_key("test_key"));
+        {
+            let _guard = InflightGuard {
+                key: "test_key".to_string(),
+                map: map.clone(),
+            };
+        }
+        assert!(!map.lock().unwrap().contains_key("test_key"));
     }
 }

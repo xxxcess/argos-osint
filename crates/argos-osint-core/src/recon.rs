@@ -3840,11 +3840,12 @@ pub(crate) fn unregister_cancellation_notifier(cancel: &Arc<AtomicBool>) {
 }
 
 #[cfg(test)]
-pub(crate) fn cancel_notifier_count() -> usize {
+fn cancel_waiter_count(cancel: &Arc<AtomicBool>) -> usize {
     cancel_notifier_map()
         .lock()
         .expect("cancel notifier mutex")
-        .len()
+        .get(&(Arc::as_ptr(cancel) as usize))
+        .map_or(0, |(_, count)| *count)
 }
 
 async fn wait_cancel(token: Arc<AtomicBool>) {
@@ -4663,72 +4664,82 @@ mod tests {
     #[tokio::test]
     async fn guard_synchronous_drop_unregisters_immediately() {
         let cancel = Arc::new(AtomicBool::new(false));
-        let initial = cancel_notifier_count();
+        assert_eq!(cancel_waiter_count(&cancel), 0);
         {
             let _guard = CancellationNotifierGuard::new(&cancel);
-            assert_eq!(cancel_notifier_count(), initial + 1);
+            assert_eq!(cancel_waiter_count(&cancel), 1);
         }
         assert_eq!(
-            cancel_notifier_count(),
-            initial,
-            "Guard drop must synchronously remove entry"
+            cancel_waiter_count(&cancel),
+            0,
+            "Guard drop must synchronously unregister its token"
         );
     }
 
     #[tokio::test]
     async fn wait_cancel_select_drop_cleans_up_without_leak() {
         let cancel = Arc::new(AtomicBool::new(false));
-        let initial = cancel_notifier_count();
-
-        // Simulate racing wait_cancel against a fast branch in tokio::select!
+        let unrelated = Arc::new(AtomicBool::new(false));
+        let unrelated_guard = CancellationNotifierGuard::new(&unrelated);
+        let mut waiter = Box::pin(wait_cancel(cancel.clone()));
+        // Prove registration happened before dropping the losing select branch.
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiter.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(cancel_waiter_count(&cancel), 1);
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(5)) => {},
-            _ = wait_cancel(cancel.clone()) => {},
+            biased;
+            _ = std::future::ready(()) => {},
+            _ = waiter => panic!("uncancelled waiter must remain pending"),
         }
-
         assert_eq!(
-            cancel_notifier_count(),
-            initial,
-            "wait_cancel dropped across tokio::select! must not leak entries in CANCEL_NOTIFIERS"
+            cancel_waiter_count(&cancel),
+            0,
+            "select drop must synchronously unregister the losing waiter"
         );
+        assert_eq!(
+            cancel_waiter_count(&unrelated),
+            1,
+            "cleanup must preserve unrelated waiters"
+        );
+        drop(unrelated_guard);
+        assert_eq!(cancel_waiter_count(&unrelated), 0);
     }
 
     #[tokio::test]
     async fn multiple_waiters_refcount_correctly() {
         let cancel = Arc::new(AtomicBool::new(false));
-        let initial = cancel_notifier_count();
         let g1 = CancellationNotifierGuard::new(&cancel);
         let g2 = CancellationNotifierGuard::new(&cancel);
-        assert_eq!(
-            cancel_notifier_count(),
-            initial + 1,
-            "Shared token must share single map entry"
+        assert!(
+            Arc::ptr_eq(g1.notify(), g2.notify()),
+            "waiters on one token share a notifier"
         );
-
+        assert_eq!(cancel_waiter_count(&cancel), 2);
         drop(g1);
         assert_eq!(
-            cancel_notifier_count(),
-            initial + 1,
-            "First guard drop must not remove shared entry"
+            cancel_waiter_count(&cancel),
+            1,
+            "first drop preserves the other waiter"
         );
-
         drop(g2);
         assert_eq!(
-            cancel_notifier_count(),
-            initial,
-            "Last guard drop must remove map entry"
+            cancel_waiter_count(&cancel),
+            0,
+            "last drop removes the token entry"
         );
     }
 
     #[tokio::test]
     async fn pre_cancelled_token_does_not_register() {
         let cancel = Arc::new(AtomicBool::new(true));
-        let initial = cancel_notifier_count();
         wait_cancel(cancel.clone()).await;
         assert_eq!(
-            cancel_notifier_count(),
-            initial,
-            "Pre-cancelled token must not register"
+            cancel_waiter_count(&cancel),
+            0,
+            "pre-cancelled token must not register"
         );
     }
 

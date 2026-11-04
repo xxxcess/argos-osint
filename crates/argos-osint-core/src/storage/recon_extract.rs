@@ -36,13 +36,20 @@ use super::tx::{Tx, TxError};
 use crate::osint::ToolResult;
 use crate::recon::Message;
 
-/// Full-text index for the recall stopgap (idempotent).
-pub const SCHEMA: &str = "DEFINE ANALYZER IF NOT EXISTS recon_recall TOKENIZERS class
-  FILTERS lowercase, ascii, snowball(english);
-DEFINE INDEX IF NOT EXISTS memory_text_search ON memory FIELDS text
+/// Full-text index for the recall stopgap (idempotent). The analyzer is
+/// defined separately, in [`ANALYZERS`].
+pub const SCHEMA: &str = "DEFINE INDEX IF NOT EXISTS memory_text_search ON memory FIELDS text
   FULLTEXT ANALYZER recon_recall BM25;
 DEFINE INDEX IF NOT EXISTS insight_claim_entity_predicate ON insight_claim
   FIELDS entity_id, predicate;";
+
+/// The memory recall analyzer. [`super::bootstrap::ensure_schema`] applies
+/// analyzer definitions ahead of the guarded schema transaction: a
+/// full-text index defined inside that transaction cannot resolve an
+/// analyzer defined in the same one when the indexed table already holds
+/// rows. [`SCHEMA`] depends on this being in place first.
+pub const ANALYZERS: &str = "DEFINE ANALYZER IF NOT EXISTS recon_recall TOKENIZERS class
+  FILTERS lowercase, ascii, snowball(english);\n";
 
 /// Most claims one answer contributes (as on the legacy store).
 pub const MAX_CLAIMS: usize = 5;

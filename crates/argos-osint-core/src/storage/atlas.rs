@@ -21,7 +21,8 @@ use crate::store::{AtlasArticleRow, AtlasRunRow};
 
 /// Atlas schema (idempotent). The v2 additions are additive `IF NOT EXISTS`
 /// definitions: `categories`/`admitted_at` with the membership and full-text
-/// indexes, and the admission/rejection tables. No migration ladder.
+/// indexes, and the admission/rejection tables. No migration ladder. The
+/// analyzer is defined separately, in [`ANALYZERS`].
 pub const SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS atlas_run SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS state ON atlas_run TYPE string;
 DEFINE FIELD IF NOT EXISTS phase ON atlas_run TYPE int DEFAULT 1;
@@ -56,7 +57,6 @@ DEFINE INDEX IF NOT EXISTS atlas_article_id ON atlas_article FIELDS article_id;
 DEFINE INDEX IF NOT EXISTS atlas_article_bulletin ON atlas_article FIELDS category, published_at, seen_at, article_id, run_id;
 DEFINE INDEX IF NOT EXISTS atlas_article_bulletin_all ON atlas_article FIELDS published_at, seen_at, article_id, run_id;
 DEFINE INDEX IF NOT EXISTS atlas_article_categories ON atlas_article FIELDS categories.*;
-DEFINE ANALYZER IF NOT EXISTS atlas_article_text TOKENIZERS class FILTERS lowercase, ascii;
 DEFINE INDEX IF NOT EXISTS atlas_article_title_search ON atlas_article FIELDS title FULLTEXT ANALYZER atlas_article_text BM25;
 DEFINE INDEX IF NOT EXISTS atlas_article_description_search ON atlas_article FIELDS description FULLTEXT ANALYZER atlas_article_text BM25;
 DEFINE TABLE IF NOT EXISTS atlas_admission SCHEMAFULL;
@@ -97,6 +97,16 @@ DEFINE FIELD IF NOT EXISTS detail_json ON atlas_repair TYPE string DEFAULT '{}';
 DEFINE FIELD IF NOT EXISTS job_id ON atlas_repair TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS updated_at ON atlas_repair TYPE string;";
 
+/// The article full-text analyzer. [`super::bootstrap::ensure_schema`]
+/// applies analyzer definitions ahead of the guarded schema transaction: a
+/// full-text index defined inside that transaction cannot resolve an
+/// analyzer defined in the same one when the indexed table already holds
+/// rows, which broke opening a schema-version 1 database. [`SCHEMA`]
+/// depends on this being in place first, in bootstrap and
+/// [`apply_schema`] alike.
+pub const ANALYZERS: &str =
+    "DEFINE ANALYZER IF NOT EXISTS atlas_article_text TOKENIZERS class FILTERS lowercase, ascii;\n";
+
 /// Runs newest first (`atlas_list_runs`); pinned to `atlas_run_started`.
 pub const LIST_RUNS_SURQL: &str = "SELECT record::id(id) AS id, state, phase, cursor_json, \
      stats_json, note, started_at, finished_at FROM atlas_run ORDER BY started_at DESC";
@@ -108,6 +118,7 @@ pub const LATEST_ARTICLE_SURQL: &str = "SELECT *, record::id(id) AS id FROM atla
      WHERE article_id = $article ORDER BY seen_at DESC LIMIT 1";
 
 pub async fn apply_schema(db: &Surreal<Any>) -> Result<(), TxError> {
+    db.query(ANALYZERS).await?.check()?;
     db.query(SCHEMA).await?.check()?;
     Ok(())
 }

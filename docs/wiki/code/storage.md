@@ -29,7 +29,7 @@ Run storage contracts through the harness; a skipped test is not a pass. Agents 
 
 ## Schema and runtime authority
 
-[Bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs) applies the registered module `SCHEMA` constants (including `.surql` files) in dependency order within one retryable transaction. It records `storage_meta:schema.version` and refuses a database newer than the build. The current constant is `storage::bootstrap::SCHEMA_VERSION` (currently 2, additive v1→v2), independent of the old `store::SCHEMA_VERSION` (43). The SurrealDB bootstrap does not import a legacy SQLite/LanceDB database or run its numbered migration ladder. See [bootstrap contracts](../../../crates/argos-osint-core/tests/storage_bootstrap.rs).
+[Bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs) first applies module `ANALYZER` constants as an idempotent `IF NOT EXISTS` batch outside the retryable transaction (resolving FULLTEXT analyzers against committed catalog state — SurrealDB 3.3.4), then applies all tables/fields/indexes plus schema version read/refusal/write within one retryable transaction. It records `storage_meta:schema.version` and refuses a database newer than the build. The current constant is `storage::bootstrap::SCHEMA_VERSION` (currently 2, additive v1→v2), independent of the old `store::SCHEMA_VERSION` (43). The SurrealDB bootstrap does not import a legacy SQLite/LanceDB database or run its numbered migration ladder. See [bootstrap contracts](../../../crates/argos-osint-core/tests/storage_bootstrap.rs).
 
 Schema v2 (SCHEMA_VERSION 1→2, additive, no wipe) adds these SurrealDB tables/indices:
 - `atlas_admission` — bounded private staging (state pending|evaluating|admitted|discarded|failed, terminal rows pruned)

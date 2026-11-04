@@ -2,12 +2,21 @@
 //! `Store::ensure_schema`.
 //!
 //! [`ensure_schema`] applies every storage module's schema, in dependency
-//! order, in one transaction, and records the schema version on
-//! `storage_meta:schema`. As in the legacy store (`user_version`), a database written
-//! by a newer build is refused and the transaction rolls back. Every definition
-//! is `IF NOT EXISTS`, so a re-run (or a concurrent bootstrap, which retries
-//! on conflict) is a no-op. There is no in-place migration ladder: the
-//! SurrealDB database starts fresh (wipe, no import; acceptance.md P4).
+//! order, and records the schema version on `storage_meta:schema` in one
+//! transaction. Analyzer definitions go first, as their own idempotent
+//! batch outside that transaction: a full-text index defined in a
+//! transaction cannot resolve an analyzer defined in the same one when the
+//! indexed table already holds rows (SurrealDB 3.x), which broke opening a
+//! version-1 database with `The analyzer 'atlas_article_text' does not
+//! exist`; fresh stores never saw it because their index has no rows to
+//! build. The analyzers are additive catalog entries with no data effect,
+//! so a refused (newer) database keeps at most those while the guarded
+//! definitions still roll back. As in the legacy store (`user_version`), a
+//! database written by a newer build is refused and the transaction rolls
+//! back. Every definition is `IF NOT EXISTS`, so a re-run (or a concurrent
+//! bootstrap, which retries on conflict) is a no-op. There is no in-place
+//! migration ladder: the SurrealDB database starts fresh (wipe, no import;
+//! acceptance.md P4).
 
 use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
@@ -92,7 +101,15 @@ pub struct Bootstrap {
 }
 
 /// Apply every schema and record [`SCHEMA_VERSION`] in one transaction.
+///
+/// Analyzer definitions run before that transaction (see the module docs):
+/// the guarded transaction still holds every table, field and index
+/// definition together with the version read, the newer-than-build refusal
+/// and the version write.
 pub async fn ensure_schema(db: &Surreal<Any>) -> Result<Bootstrap, TxError> {
+    for analyzers in analyzers() {
+        db.query(analyzers).await?.check()?;
+    }
     let mut sql = String::new();
     for (_, schema) in schemas() {
         sql.push_str(schema.trim().trim_end_matches(';'));
@@ -133,4 +150,34 @@ pub async fn ensure_schema(db: &Surreal<Any>) -> Result<Bootstrap, TxError> {
     })
     .await?;
     Ok(out.value)
+}
+
+/// Analyzer definitions from every module that has them, applied before the
+/// guarded schema transaction (see the module docs). Modules keep theirs in
+/// an `ANALYZERS` constant next to the full-text indexes that name them; a
+/// module adding one must be wired in here.
+fn analyzers() -> impl Iterator<Item = &'static str> {
+    [super::atlas::ANALYZERS, super::recon_extract::ANALYZERS]
+        .into_iter()
+        .filter(|analyzers| !analyzers.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_schemas_hold_no_analyzer_definitions() {
+        // An analyzer inside the guarded transaction cannot be resolved by
+        // a full-text index over existing rows (see `ensure_schema`), so
+        // every module keeps its analyzers in `ANALYZERS` instead.
+        for (name, schema) in schemas() {
+            assert!(
+                !schema.to_ascii_uppercase().contains("DEFINE ANALYZER"),
+                "{name}: analyzer definitions belong in the module's `ANALYZERS`, \
+                 applied ahead of the guarded transaction"
+            );
+        }
+        assert!(analyzers().count() >= 2, "analyzers went missing");
+    }
 }

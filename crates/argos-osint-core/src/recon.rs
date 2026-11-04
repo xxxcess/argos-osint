@@ -130,7 +130,8 @@ async fn investigation_title(
         ),
         chat("user", format!("<user_query>\n{source}\n</user_query>")),
     ];
-    let scope = model_exec::OperationScope::new("investigation-title", "recon");
+    let scope = model_exec::OperationScope::new("investigation-title", "recon_agent")
+        .with_format(model_exec::ResponseFormat::Prose);
     let cancel = Arc::new(AtomicBool::new(false));
     let titled = match model_exec::execute_chat(
         auth,
@@ -467,6 +468,9 @@ pub struct Plan {
     /// Latest turn-deadline breakdown (`Deadline 6m 10s: 11 calls, ~52k chars evidence`).
     #[serde(default)]
     pub deadline_note: String,
+    /// Completed replanning passes this turn. At most one material-gap replan runs.
+    #[serde(default, skip_serializing_if = "replans_is_zero")]
+    pub replans: u8,
 }
 
 /// A Recon-derived directive: a goal the turn has to meet, never a tool plan. `targets`
@@ -489,6 +493,18 @@ pub struct Directive {
     /// grounded-query rules; empty means the deterministic query is used.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub query: String,
+    /// Evidence the directive needs, from the plan's `Required evidence` field. Rust
+    /// never regenerates it: discovery and the material-gap decision read it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_evidence: Vec<String>,
+    /// Grounded query candidates from the plan's `Queries` field, produced once per
+    /// plan and reused by discovery instead of a second model call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queries: Vec<String>,
+    /// Earlier directive ids this directive waits for, from the plan's `Depends on`
+    /// field. Backward references only, so a plan checkpoint can never carry a cycle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 /// Where one tool input came from.
@@ -524,6 +540,27 @@ pub struct Binding {
     /// and derived-question handles. Hunter inputs require a primary-provider source.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_tool: String,
+    /// Catalog actor the value is associated with, when the evidence or the shared
+    /// catalog establishes the pairing. Empty when nothing ties the value to an actor:
+    /// appearance alone never proves ownership.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub actor: String,
+    /// Half-open byte span of the value's first occurrence in the observation that
+    /// yielded it, when known (both zero otherwise). Evidence stays verifiable.
+    #[serde(default, skip_serializing_if = "span_is_zero")]
+    pub span_start: usize,
+    #[serde(default, skip_serializing_if = "span_is_zero")]
+    pub span_end: usize,
+}
+
+/// Serde skip helper for the default unknown span (`0, 0`).
+fn span_is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+/// Serde skip helper for a zero replan count.
+fn replans_is_zero(value: &u8) -> bool {
+    *value == 0
 }
 
 /// One tool-picker request and its outcome.
@@ -1481,6 +1518,14 @@ fn page_needs_compact(value: &Value) -> bool {
     ) && value.to_string().chars().count() > PAGE_CONTEXT_CHARS
 }
 
+/// Whether any gathered result sits past the compaction size threshold. Compaction is
+/// threshold-only: results under the bound reach synthesis as they were observed.
+fn needs_evidence_compaction(results: &[(String, ToolResult)]) -> bool {
+    results
+        .iter()
+        .any(|(_, result)| page_needs_compact(&result.observations))
+}
+
 fn directive_goals_line(plan: &Plan) -> String {
     let goals: Vec<String> = plan
         .directives
@@ -1747,7 +1792,9 @@ async fn compact_page(
             ),
         ),
     ];
-    let scope = model_exec::OperationScope::new("compact-page", "summarization").with_run(run_id);
+    let scope = model_exec::OperationScope::new("compact-page", "recon_agent")
+        .with_run(run_id)
+        .with_format(model_exec::ResponseFormat::Prose);
     match model_exec::execute_chat(
         auth,
         settings,
@@ -1776,6 +1823,7 @@ async fn compact_page(
         Err(_) => Ok(page_excerpt(&result.observations)),
     }
 }
+#[cfg(test)]
 fn parse_json(text: &str) -> Result<Value> {
     let trimmed = text
         .trim()
@@ -2391,8 +2439,8 @@ impl Service {
         mut progress: impl FnMut(TurnEvent) + Send,
     ) -> Result<Run> {
         ensure!(!question.trim().is_empty(), "question is empty");
-        let recon_secret = provider::role_secret(&self.auth, &self.settings, "recon")?;
-        let synthesis_secret = provider::role_secret(&self.auth, &self.settings, "synthesis")?;
+        let recon_secret = provider::role_secret(&self.auth, &self.settings, "recon_agent")?;
+        let synthesis_secret = provider::role_secret(&self.auth, &self.settings, "recon_analyst")?;
         let picker_secret = provider::role_secret(&self.auth, &self.settings, "tool-picker")?;
         let store = ReconStore::open(&self.db_path).await?;
         let turn = store.add_message(tid, "user", question, None).await?;
@@ -2563,9 +2611,9 @@ impl Service {
             .unwrap_or((0, String::new()));
         let resume_gen = prev_gen + 1;
         let _ = store.begin_synthesis(rid, resume_gen, &last_draft).await;
-        let recon_secret = provider::role_secret(&self.auth, &self.settings, "recon")
+        let recon_secret = provider::role_secret(&self.auth, &self.settings, "recon_agent")
             .or_else(|_| snapshot_secret(&self.auth, &run.recon_model))?;
-        let synthesis_secret = provider::role_secret(&self.auth, &self.settings, "synthesis")
+        let synthesis_secret = provider::role_secret(&self.auth, &self.settings, "recon_analyst")
             .or_else(|_| snapshot_secret(&self.auth, &run.synthesis_model))?;
         ensure!(store.restart_run(rid).await?, "run could not restart");
         drop(store);
@@ -2926,11 +2974,9 @@ impl Service {
                 withheld
             }))
         };
-        let synthesis_results = if self.settings.nlp.mode != crate::nlp::Mode::Off
-            || results
-                .iter()
-                .any(|(_, result)| page_needs_compact(&result.observations))
-        {
+        let synthesis_results = if needs_evidence_compaction(results) {
+            // Compaction runs only at the size threshold: results under
+            // `PAGE_CONTEXT_CHARS` reach synthesis as they were observed.
             progress(TurnEvent::Stage("compacting evidence".into()));
             ReconStore::open(&self.db_path)
                 .await?
@@ -3041,8 +3087,9 @@ impl Service {
         }
         drop(store);
         let op_id = format!("{}-synthesis", run.id);
-        let scope = model_exec::OperationScope::new(&op_id, "synthesis")
+        let scope = model_exec::OperationScope::new(&op_id, "recon_analyst")
             .with_run(&run.id)
+            .with_format(model_exec::ResponseFormat::Prose)
             .with_generation(generation);
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
@@ -3117,7 +3164,8 @@ impl Service {
         if let Err(error) = validate_citations(&answer, results) {
             progress(TurnEvent::AnswerNote("fixing citations…".into()));
             let repair_op_id = format!("{}-synthesis-repair", run.id);
-            let repair_scope = model_exec::OperationScope::new(&repair_op_id, "synthesis")
+            let repair_scope = model_exec::OperationScope::new(&repair_op_id, "recon_analyst")
+                .with_format(model_exec::ResponseFormat::Prose)
                 .with_run(&run.id)
                 .with_generation(generation);
             let repair = [
@@ -3335,7 +3383,7 @@ impl Service {
         }
         drop(store);
         let packet:Vec<_>=evidence.iter().filter(|(_,r)|r.status=="completed").map(|(id,r)|json!({"id":id,"tool":r.tool_id,"source_url":r.source_url,"observations":packet_observation(&r.observations)})).collect();
-        let prompt="Extract at most 5 concise atomic investigation claims supported by the evidence. Return JSON object {\"claims\":[{\"entity\":string,\"namespace\":string,\"predicate\":string,\"object\":string,\"topic\":string,\"claim\":string,\"classification\":\"fact\"|\"inference\",\"confidence\":number,\"evidence_ids\":[string]}]}. Do not extract generic advice, prompt text, or unsupported identity links. The entity is investigated, not the user. evidence_ids must be ids from Evidence. When the answer does not cite gathered evidence, infer which Evidence items support each claim, put those ids in evidence_ids, and set classification to inference.";
+        let prompt = format!("Extract at most five concise atomic claims supported by original Evidence, never by the answer alone. Do not extract advice, prompt text or unsupported identity links. Subject is the investigated entity, not the user. Include Subject, Namespace, Predicate, Object, Topic, Classification (fact or inference), Statement and Evidence. Evidence lists only supplied Evidence IDs. Do not invent confidence scores.\n{}", provider::structured_text::instructions("claim"));
         let answer_view = crate::nlp::prepare_mode(
             crate::nlp::Source::derived(&answer.id, &answer.id, &answer.content),
             "claim-mining",
@@ -3347,7 +3395,7 @@ impl Service {
         )
         .await;
         let messages = [
-            chat("system", prompt.into()),
+            chat("system", prompt),
             chat(
                 "user",
                 format!(
@@ -3357,7 +3405,8 @@ impl Service {
                 ),
             ),
         ];
-        let mut scope = model_exec::OperationScope::new("extract-insights", "synthesis");
+        let mut scope = model_exec::OperationScope::new("extract-insights", "recon_analyst")
+            .with_structured_text();
         if let Some(run_id) = answer.run_id.as_deref() {
             scope = scope.with_run(run_id);
         }
@@ -3367,7 +3416,11 @@ impl Service {
             &self.settings,
             &scope,
             &messages,
-            |_| Ok(()),
+            |raw| {
+                parse_legacy_claim_text(raw, &packet)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            },
             &cancel,
             None,
             None,
@@ -3375,18 +3428,42 @@ impl Service {
             false,
         )
         .await?;
-        let root = parse_json(&text)?;
-        let mut claims = root
-            .get("claims")
-            .and_then(Value::as_array)
-            .cloned()
-            .ok_or_else(|| anyhow!("claims array missing"))?;
-        infer_uncited_evidence(&answer.content, evidence, &mut claims);
+        let claims = parse_legacy_claim_text(&text, &packet)?;
         ReconStore::open(&self.db_path)
             .await?
             .persist_claims(answer, evidence, &claims)
             .await
     }
+}
+
+fn parse_legacy_claim_text(raw: &str, evidence: &[Value]) -> Result<Vec<Value>> {
+    let document = provider::structured_text::parse(raw)?;
+    ensure!(document.blocks.len() <= 5, "legacy claim cap exceeded");
+    let offered = evidence
+        .iter()
+        .filter_map(|item| item["id"].as_str().map(str::to_owned))
+        .collect();
+    let mut claims = Vec::new();
+    for block in document.blocks {
+        ensure!(block.kind == "claim", "expected Claim block");
+        let refs = block.list("evidence");
+        provider::structured_text::references(&refs, &offered).map_err(anyhow::Error::msg)?;
+        ensure!(
+            !refs.is_empty()
+                && !block.field("subject").is_empty()
+                && !block.field("predicate").is_empty()
+                && !block.field("object").is_empty()
+                && matches!(block.field("classification"), "fact" | "inference"),
+            "incomplete claim"
+        );
+        claims.push(
+            json!({"entity":block.field("subject"),"namespace":block.field("namespace"),
+            "predicate":block.field("predicate"),"object":block.field("object"),
+            "topic":block.field("topic"),"claim":block.field("statement"),
+            "classification":block.field("classification"),"evidence_ids":refs}),
+        );
+    }
+    Ok(claims)
 }
 fn turn_clock(floor: u16, max_turn: u16) -> Arc<std::sync::Mutex<budget::TurnClock>> {
     let floor = u64::from(floor);
@@ -4027,6 +4104,25 @@ mod tests {
             },
         )
     }
+    #[test]
+    fn synthesis_compaction_runs_only_at_the_size_threshold() {
+        // Under the threshold the evidence reaches synthesis as observed.
+        let mut small = cited("call-a", "completed");
+        small.1.observations = json!({"evidence_form": "page", "markdown": "Jane Example"});
+        assert!(!needs_evidence_compaction(std::slice::from_ref(&small)));
+        // A page past PAGE_CONTEXT_CHARS crosses the threshold.
+        let mut large = cited("call-b", "completed");
+        large.1.observations = json!({
+            "evidence_form": "page",
+            "markdown": "Jane Example is CEO of Acme Robotics. ".repeat(80),
+        });
+        assert!(needs_evidence_compaction(&[small, large]));
+        // A large non-page observation never triggers compaction.
+        let mut snippet = cited("call-c", "completed");
+        snippet.1.observations = json!({"evidence_form": "snippet", "body": "x".repeat(9_000)});
+        assert!(!page_needs_compact(&snippet.1.observations));
+    }
+
     #[test]
     fn page_and_extract_evidence_stay_structured_in_the_packet() {
         let markdown = "Contact Jane Example at jane@acmerobotics.com. ".repeat(200);

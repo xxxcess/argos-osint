@@ -628,6 +628,8 @@ mod tests {
             seen_at: "".into(),
             author: "".into(),
             image_url: "".into(),
+            categories: Vec::new(),
+            admitted_at: String::new(),
         };
         let claims = vec![
             AtlasArticleClaim {
@@ -690,6 +692,8 @@ mod tests {
             seen_at: "".into(),
             author: "".into(),
             image_url: "".into(),
+            categories: Vec::new(),
+            admitted_at: String::new(),
         };
         let claim = |confidence: f64| AtlasArticleClaim {
             fingerprint: "f".into(),

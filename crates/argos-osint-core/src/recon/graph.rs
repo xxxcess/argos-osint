@@ -1146,6 +1146,7 @@ mod tests {
                     targets: vec!["person_name".into()],
                     done_when: "roles confirmed".into(),
                     query: String::new(),
+                    ..Directive::default()
                 },
                 Directive {
                     id: "d2".into(),

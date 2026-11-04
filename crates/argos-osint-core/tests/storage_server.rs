@@ -3,6 +3,7 @@
 //! Server mode only; run through `python3 scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
 
+use argos_osint_core::storage::bootstrap::SCHEMA_VERSION;
 use argos_osint_core::storage::home::{self, Layout};
 use argos_osint_core::storage::server::{self, ServerInfo};
 
@@ -24,7 +25,7 @@ async fn lifecycle_adopts_refuses_stale_and_wrong_identity_and_last_client_stops
     let layout = Layout::new(dir.path());
 
     let (opened, lease, info) = server::connect_server(&layout).await.unwrap();
-    assert_eq!(opened.bootstrap.version, 1);
+    assert_eq!(opened.bootstrap.version, SCHEMA_VERSION);
     assert!(server::pid_alive(info.pid));
     assert!(info.version.contains("3.3.4"), "{}", info.version);
     assert_eq!(

@@ -38,7 +38,8 @@ argos logout
 | Synthesis | Cited answers and claims |
 | Classifier | Atlas article categories and bounded article-cleanup decisions |
 | Summarization | Graph/path summaries |
-| Investigation harness | curator / resolver / assessor / controller |
+| **Canonical model roles** | **provider.rs canonical roles: recon_agent, recon_decisions, recon_analyst, atlas_evaluator, atlas_analyst, brain_summary** |
+| Investigation harness | curator / resolver / assessor / controller → archived (Phase 1) |
 
 Saving a role writes `config.toml` only. System log records `defaults.<role>: … -> …`. Provider list = accounts on this machine. Model list = what that account may call. A saved model id is kept if the live catalog is down.
 

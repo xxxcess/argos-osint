@@ -291,7 +291,7 @@ pub fn resolved_summary_route() -> (String, String) {
     crate::recon::model_exec::select_role_secret(
         &auth,
         &settings,
-        "summarization",
+        "brain_summary",
         crate::recon::model_exec::OperationFormat::Prose,
     )
     .map(|s| (s.kind, s.model))

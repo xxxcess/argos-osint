@@ -92,6 +92,16 @@ async fn storage_api_contracts() {
                 category: "geopolitical".into(),
                 published_at: format!("{today}T12:00:00Z"),
                 seen_at: format!("{today}T13:00:00Z"),
+                // Admitted v2 rows: the current query contract filters by
+                // ordered-tag membership, so the fixture carries the tags
+                // and the admission stamp. Legacy scalar-only rows are
+                // pending migration (an evaluator-model path) and stay out
+                // of this offline contract.
+                categories: ["geopolitical", "economic"]
+                    .iter()
+                    .map(|tag| tag.to_string())
+                    .collect(),
+                admitted_at: chrono::Utc::now().to_rfc3339(),
                 ..Default::default()
             },
         )
@@ -456,7 +466,8 @@ async fn storage_api_contracts() {
 }
 
 // Each contract owns its datastore; no process-wide ARGOS_HOME mutation.
-async fn isolated_api() -> (tempfile::TempDir, Router) {
+// The repository comes back so a contract can seed its own corpus.
+async fn isolated_api() -> (tempfile::TempDir, Repository, Router) {
     let dir = tempfile::tempdir().expect("isolated API directory");
     let repo = Repository::connect(
         &Target::Embedded {
@@ -468,24 +479,32 @@ async fn isolated_api() -> (tempfile::TempDir, Router) {
     .await
     .expect("embedded contract repository");
     let app = router(ApiState {
-        repo,
+        repo: repo.clone(),
         instance_id: "contract-instance".into(),
         port: 8080,
         origins: Arc::new(vec!["http://localhost:3000".into()]),
     });
-    (dir, app)
+    (dir, repo, app)
 }
 
 #[tokio::test]
 async fn capabilities_advertise_only_supported_features() {
-    let (_dir, app) = isolated_api().await;
+    let (_dir, _repo, app) = isolated_api().await;
     let (status, body) = call(&app, "GET", "/api/v1/capabilities", None, Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["api_version"], 1);
     assert_eq!(body["auth"], false);
     assert_eq!(
         body["features"],
-        json!(["bulletin", "brief", "related", "jobs", "topology", "live"])
+        json!([
+            "bulletin",
+            "brief",
+            "related",
+            "jobs",
+            "topology",
+            "live",
+            "article-search"
+        ])
     );
     assert_eq!(
         body["live"],
@@ -493,9 +512,107 @@ async fn capabilities_advertise_only_supported_features() {
     );
 }
 
+/// Runtime contract for the discovery search route: the `ArticleSearchPage`
+/// shape (matched_field/rank/excerpt/categories/revision/next_cursor) and the
+/// paired capabilities feature.
+#[tokio::test]
+async fn article_search_serves_the_discovery_page_contract() {
+    let (_dir, repo, app) = isolated_api().await;
+    atlas::insert_run(repo.db(), "r1", "{}", "{}")
+        .await
+        .unwrap();
+    let admitted = |id: &str, title: &str, published: &str| AtlasArticleRow {
+        run_id: "r1".into(),
+        id: id.into(),
+        title: title.into(),
+        description: "Fixture description".into(),
+        url: format!("https://example.test/{id}"),
+        source_name: "Fixture Wire".into(),
+        source_domain: "example.test".into(),
+        published_at: published.into(),
+        provider: "newsapi".into(),
+        temperature: 1.0,
+        category: "economic".into(),
+        seen_at: published.into(),
+        categories: ["economic", "military"]
+            .iter()
+            .map(|t| t.to_string())
+            .collect(),
+        admitted_at: chrono::Utc::now().to_rfc3339(),
+        ..Default::default()
+    };
+    for (id, title, published) in [
+        (
+            "lead-a",
+            "Harbor Union approves the merger",
+            "2026-01-04T00:00:00Z",
+        ),
+        (
+            "lead-b",
+            "Harbor Union rejects the merger",
+            "2026-01-03T00:00:00Z",
+        ),
+    ] {
+        atlas::upsert_article(repo.db(), &admitted(id, title, published))
+            .await
+            .unwrap();
+    }
+    let query = format!(
+        "/api/v1/articles/search?query={}&limit=1",
+        url::form_urlencoded::byte_serialize("harbor union".as_bytes()).collect::<String>()
+    );
+    let (status, page) = call(&app, "GET", &query, None, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let hits = page["hits"].as_array().expect("hits array");
+    assert_eq!(hits.len(), 1, "{page}");
+    for field in ["matched_field", "rank", "excerpt", "categories", "revision"] {
+        assert!(
+            hits[0].get(field).is_some(),
+            "hit misses {field}: {:?}",
+            hits[0]
+        );
+    }
+    assert_eq!(hits[0]["matched_field"], "title");
+    assert!(hits[0]["rank"].as_f64().is_some(), "rank is a number");
+    assert!(hits[0]["excerpt"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase()
+        .contains("harbor"));
+    assert_eq!(hits[0]["categories"], json!(["economic", "military"]));
+    assert_eq!(hits[0]["article_id"], "lead-a", "newest published first");
+    assert!(!page["revision"].as_str().unwrap_or_default().is_empty());
+    assert_eq!(page["diagnostic"], "");
+    assert_eq!(page["next_cursor"].as_str(), Some("1"));
+    let (status, next) = call(&app, "GET", &format!("{query}&cursor=1"), None, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{next}");
+    assert_eq!(next["hits"][0]["article_id"], "lead-b");
+    assert_eq!(next["next_cursor"], Value::Null, "the corpus is exhausted");
+    // A blank query is a validation error, not an empty success.
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/articles/search?query=%20",
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    // The route and the capability stay paired.
+    let (_, capabilities) = call(&app, "GET", "/api/v1/capabilities", None, Value::Null).await;
+    assert!(capabilities["features"]
+        .as_array()
+        .expect("features")
+        .iter()
+        .any(|feature| feature == "article-search"));
+}
+
 #[tokio::test]
 async fn missing_job_returns_public_error_without_internal_details() {
-    let (_dir, app) = isolated_api().await;
+    let (_dir, _repo, app) = isolated_api().await;
     let (status, body) = call(
         &app,
         "GET",
@@ -510,7 +627,7 @@ async fn missing_job_returns_public_error_without_internal_details() {
 
 #[tokio::test]
 async fn fresh_repository_has_verified_empty_jobs() {
-    let (_dir, app) = isolated_api().await;
+    let (_dir, _repo, app) = isolated_api().await;
     let (status, body) = call(&app, "GET", "/api/v1/jobs", None, Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({"rows": []}));
@@ -518,7 +635,7 @@ async fn fresh_repository_has_verified_empty_jobs() {
 
 #[tokio::test]
 async fn retrying_missing_job_is_idempotent() {
-    let (_dir, app) = isolated_api().await;
+    let (_dir, _repo, app) = isolated_api().await;
     for _ in 0..2 {
         let (status, body) = call(
             &app,
@@ -537,7 +654,7 @@ async fn retrying_missing_job_is_idempotent() {
 
 #[tokio::test]
 async fn untrusted_origin_cannot_retry_jobs() {
-    let (_dir, app) = isolated_api().await;
+    let (_dir, _repo, app) = isolated_api().await;
     let (status, body) = call(
         &app,
         "POST",

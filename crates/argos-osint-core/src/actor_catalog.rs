@@ -95,22 +95,74 @@ pub fn read(reader: impl Read) -> Result<Vec<Actor>> {
     Ok(actors)
 }
 
-/// Curated short forms tied to catalog source identifiers, never inferred surnames.
-/// Keep automatic matching and transactional binding on the same alias set.
+/// Curated short forms tied to catalog source identifiers, never inferred
+/// surnames. Keep automatic matching and transactional binding on the same
+/// alias set.
+pub(crate) const CURATED: &[(&str, &[&str])] = &[("os:Q22686", &["Trump"])];
+
 pub(crate) fn curated_aliases(source_id: &str) -> &'static [&'static str] {
-    match source_id {
-        "os:Q22686" => &["Trump"],
-        _ => &[],
-    }
+    CURATED
+        .iter()
+        .find(|(id, _)| *id == source_id)
+        .map_or(&[], |(_, aliases)| *aliases)
+}
+
+/// The curated source identifiers with a short form normalizing to
+/// `normalized` — the reverse lookup the alias search service uses to resolve
+/// a curated form even before the alias-table backfill ran.
+pub(crate) fn curated_sources_for(normalized: &str) -> Vec<&'static str> {
+    CURATED
+        .iter()
+        .filter(|(_, aliases)| {
+            aliases
+                .iter()
+                .any(|alias| brain_actors::normalize_alias(alias) == normalized)
+        })
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// Shortest normalized form the matcher may match automatically. One- and
+/// two-letter strings ("HU", "AI", "UK") collide across actors and headlines,
+/// so they are metadata only: never auto-bound, never a strong alias.
+pub const MIN_MATCH_CHARS: usize = 3;
+
+/// Whether a normalized alias/query is long enough to participate in
+/// automatic matching. Shared by the matcher and the discovery services so
+/// both apply the same risky-short-form guard.
+pub fn matchable_alias(normalized: &str) -> bool {
+    normalized.chars().count() >= MIN_MATCH_CHARS
+}
+
+/// Process-wide matcher-generation epoch. Every mutation that changes the
+/// catalog's matcher inputs (a completed reseed, a merge touching a catalog
+/// actor) bumps it; each repository compares its served matcher against this
+/// epoch and rebuilds single-flight when it moved. In-process only: a reseed
+/// in another process keeps its fresh cache per repository (unchanged
+/// posture), so this is invalidation signaling, not a distributed contract.
+static CATALOG_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The epoch the calling process has observed (see [`bump_catalog_epoch`]).
+pub fn catalog_epoch() -> u64 {
+    CATALOG_EPOCH.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Signal that catalog matcher inputs changed; repositories rebuild their
+/// cached matcher single-flight before its next use.
+pub fn bump_catalog_epoch() {
+    CATALOG_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 }
 
 /// Exact normalized word-boundary matching. Shared aliases stay ambiguous;
 /// weak_aliases are metadata only and never participate in automatic binding.
+/// The matcher carries the content revision it was built from, so discovery
+/// responses and receipts can pin the catalog generation they used.
 pub struct Matcher {
     actors: Vec<Actor>,
     patterns: AhoCorasick,
     owners: Vec<Vec<usize>>,
     aliases: BTreeMap<String, Vec<usize>>,
+    revision: String,
 }
 
 impl Matcher {
@@ -123,10 +175,19 @@ impl Matcher {
             );
         }
         let mut names: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+        let mut revision = String::new();
         for (index, actor) in actors.iter().enumerate() {
+            revision.push_str(&actor.id);
+            revision.push('\u{1f}');
+            revision.push_str(&actor.name);
+            revision.push('\u{1f}');
+            for alias in &actor.aliases {
+                revision.push_str(alias);
+                revision.push('\u{1f}');
+            }
             for alias in std::iter::once(&actor.name).chain(&actor.aliases) {
                 let key = brain_actors::normalize_alias(alias);
-                if key.chars().count() < 3 {
+                if !matchable_alias(&key) {
                     continue;
                 }
                 names.entry(format!(" {key} ")).or_default().insert(index);
@@ -144,7 +205,14 @@ impl Matcher {
                 .into_values()
                 .map(|o| o.into_iter().collect())
                 .collect(),
+            revision: crate::evidence::content_hash(&revision),
         })
+    }
+
+    /// Content revision of the catalog rows this matcher was built from;
+    /// equal across matchers built from the same catalog state.
+    pub fn revision(&self) -> &str {
+        &self.revision
     }
 
     /// Canonical article actors with byte offsets into the original title and
@@ -157,12 +225,16 @@ impl Matcher {
     }
 
     /// Resolve only NLP person/organization candidates against unique strong
-    /// catalog aliases. Unknown and ambiguous names never create identities.
+    /// catalog aliases, then add every unambiguous exact alias occurrence in
+    /// the body. Exact matching never needs NLP (Phase 4); NLP candidates
+    /// enrich the resolved spellings and mention spans. Unknown and ambiguous
+    /// names never create identities.
     pub fn body_actors(
         &self,
         text: &str,
         candidates: &[crate::nlp::EntityCandidate],
     ) -> Vec<ArticleActor> {
+        // The NLP-gated pass first: candidates anchored to their own spans.
         let mut found = Vec::new();
         for candidate in candidates {
             if !matches!(candidate.type_hint.as_str(), "person" | "organization") {
@@ -204,6 +276,10 @@ impl Matcher {
                 append_body_actors(&mut found, vec![resolved]);
             }
         }
+        // The NLP-off pass: the same word-boundary matcher that reads
+        // titles/descriptions reads the cleaned body. Unambiguous aliases
+        // bind; ambiguous and short ones never do.
+        append_body_actors(&mut found, self.fields(&[("body", text)]));
         found
     }
 
@@ -317,6 +393,44 @@ mod tests {
     }
 
     #[test]
+    fn two_letter_and_shorter_normalized_forms_never_auto_bind() {
+        let matcher = Matcher::new(vec![actor("one", "Harbor Union", &["HU", "AI"])]).unwrap();
+        let article = AtlasArticleRow {
+            title: "HU and AI met HU".into(),
+            ..Default::default()
+        };
+        assert!(
+            matcher.article_actors(&article).is_empty(),
+            "aliases below {MIN_MATCH_CHARS} chars are metadata only"
+        );
+        // A bare two-character name is guarded the same way.
+        let short = Matcher::new(vec![actor("one", "AI", &[])]).expect("matcher");
+        assert!(short
+            .article_actors(&AtlasArticleRow {
+                title: "AI summit".into(),
+                ..Default::default()
+            })
+            .is_empty());
+        assert!(!matchable_alias("hu"));
+        assert!(matchable_alias("hua"));
+    }
+
+    #[test]
+    fn matcher_revision_is_deterministic_per_catalog_state() {
+        let first = Matcher::new(vec![actor("one", "Harbor Union", &["Shared"])])
+            .expect("matcher")
+            .revision;
+        let same = Matcher::new(vec![actor("one", "Harbor Union", &["Shared"])])
+            .expect("matcher")
+            .revision;
+        let changed = Matcher::new(vec![actor("one", "Harbor Union", &["Shared", "Extra"])])
+            .expect("matcher")
+            .revision;
+        assert_eq!(first, same, "same catalog state, same revision");
+        assert_ne!(first, changed, "an alias change moves the revision");
+    }
+
+    #[test]
     fn curated_trump_title_binds_the_catalog_identity_without_surname_guessing() {
         let mut trump = actor("donald", "Donald Trump", &[]);
         trump.source_id = "os:Q22686".into();
@@ -370,13 +484,23 @@ mod tests {
     }
 
     #[test]
-    fn body_requires_nlp_person_or_organization_and_unique_existing_catalog_alias() {
+    fn body_matches_without_nlp_and_ambiguity_stays_unbound() {
         let matcher = Matcher::new(vec![
             actor("one", "Harbor Union", &["Harbor Union", "Shared"]),
             actor("two", "Other Group", &["Other Group", "Shared"]),
         ])
         .unwrap();
         let text = "é Harbor Union, Shared, Unknown Person, Other Group";
+        // NLP-off: the exact word-boundary pass binds unambiguous aliases.
+        let found = matcher.body_actors(text, &[]);
+        let ids: Vec<&str> = found.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["one", "two"], "unambiguous aliases bind without NLP");
+        let mention = &found[0].mentions[0];
+        assert_eq!(&text[mention.start_byte..mention.end_byte], "Harbor Union");
+        assert_eq!(mention.field, "body");
+        // With NLP, only person/organization candidates are resolved against
+        // unique strong catalog aliases; ambiguous, unknown and non-matching
+        // entities still stay unbound, and dedup keeps one identity per actor.
         let candidate = |form: &str, kind: &str| {
             let start = text.find(form).unwrap();
             crate::nlp::EntityCandidate {
@@ -390,11 +514,7 @@ mod tests {
                 }],
             }
         };
-        assert!(
-            matcher.body_actors(text, &[]).is_empty(),
-            "catalog substrings without NLP entities cannot supply body actors"
-        );
-        let found = matcher.body_actors(
+        let enriched = matcher.body_actors(
             text,
             &[
                 candidate("Harbor Union", "organization"),
@@ -404,13 +524,14 @@ mod tests {
             ],
         );
         assert_eq!(
-            found.len(),
-            1,
-            "ambiguous, unknown and non-person/org entities stay unbound"
+            enriched.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["one", "two"],
+            "NLP enriches but never expands beyond catalog aliases"
         );
-        assert_eq!(found[0].id, "one");
-        let mention = &found[0].mentions[0];
-        assert_eq!(&text[mention.start_byte..mention.end_byte], "Harbor Union");
+        assert!(enriched
+            .iter()
+            .flat_map(|a| &a.mentions)
+            .all(|m| text[m.start_byte..m.end_byte] == *m.original_text));
     }
 
     #[test]

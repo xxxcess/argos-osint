@@ -29,7 +29,14 @@ Run storage contracts through the harness; a skipped test is not a pass. Agents 
 
 ## Schema and runtime authority
 
-[Bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs) applies the registered module `SCHEMA` constants (including `.surql` files) in dependency order within one retryable transaction. It records `storage_meta:schema.version` and refuses a database newer than the build. The current constant is `storage::bootstrap::SCHEMA_VERSION` (currently 1), independent of the old `store::SCHEMA_VERSION` (43). The SurrealDB bootstrap does not import a legacy SQLite/LanceDB database or run its numbered migration ladder. See [bootstrap contracts](../../../crates/argos-osint-core/tests/storage_bootstrap.rs).
+[Bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs) applies the registered module `SCHEMA` constants (including `.surql` files) in dependency order within one retryable transaction. It records `storage_meta:schema.version` and refuses a database newer than the build. The current constant is `storage::bootstrap::SCHEMA_VERSION` (currently 2, additive v1→v2), independent of the old `store::SCHEMA_VERSION` (43). The SurrealDB bootstrap does not import a legacy SQLite/LanceDB database or run its numbered migration ladder. See [bootstrap contracts](../../../crates/argos-osint-core/tests/storage_bootstrap.rs).
+
+Schema v2 (SCHEMA_VERSION 1→2, additive, no wipe) adds these SurrealDB tables/indices:
+- `atlas_admission` — bounded private staging (state pending|evaluating|admitted|discarded|failed, terminal rows pruned)
+- `atlas_rejection` — minimal receipt keyed [article_id, input_hash, taxonomy_version]; reconsideration = no receipt for current hash+taxonomy
+- `atlas_article_categories` — categories.* non-unique (additive membership)
+- `atlas_article_title_search` + `atlas_article_description_search` — FULLTEXT BM25, analyzer `atlas_article_text`
+Legacy migration is resumable and admission-state-driven; published legacy rows keep historical scalar identity.
 
 [`Store`](../../../crates/argos-osint-core/src/store.rs) is a lightweight handle onto the process [runtime](../../../crates/argos-osint-core/src/storage/runtime.rs). `open_ui`, `open_light` and `open_profile_reader` do not establish separate SQLite or read-only database connections. The legacy `argos.db` path accepted by `Store::open` supplies its parent directory; the method does not open that file. Engine ownership and configuration belong to [open.rs](../../../crates/argos-osint-core/src/storage/open.rs).
 
@@ -49,6 +56,24 @@ Stage completion and canonical publication are separate commits: `brief_stages::
 The Jobs dashboard reads a bounded page of top-level ids before loading event, task and attempt metrics. Those page metrics are grouped by the selected ids. Running `api_server` and `web_server` rows rank ahead of ordinary work inside the active filters. A single job's event total covers that job and its immediate children, matching the page cohort. See [Intel web](intel-web.md#traffic-in-rust-jobs--logs).
 
 Topology snapshots keep their consistent transaction in a worker that owns `BEGIN` through `COMMIT`/`CANCEL`. If the awaiting caller is dropped (for example by the HTTP timeout), the worker stops traversal and awaits rollback through `run_tx`; dropping the request does not drop the open SDK transaction. This cleanup applies to topology snapshots, including brief navigation binding reads; other transaction callers retain their existing behavior. Brief navigation uses `brief_binding_snapshot` and returns after direct node admission; it skips graph-only topic/Related expansion, payload details, association hydration and neighborhood-summary generation.
+
+## Discovery services
+
+Three discovery services support catalog lookups, all keyed against the schema-v2 FULLTEXT indexes:
+
+- **`search_actor_names`** — exact normalized form → actor IDs + match reasons + revision; active canonical names only; collisions stay ambiguous; diagnostics: `catalog unavailable` / `query too short` / `unsupported type`; limit 1..=25.
+- **`search_actor_aliases`** — aliases with strength `curated`/`catalog`/`learned`, `alias_type`, `provenance`; ambiguous when >1 live owner; exact + bounded prefix tiers on the alias index; owner-union merge.
+- **`search_articles`** — new `storage/article_discovery.rs`: two per-field FULLTEXT BM25 statements on the schema-v2 title/description indexes; title weighted above description-only; deterministic ties; matched-field attribution; rank = BM25 of matched field — relevance is NOT confidence; bounded excerpt on original byte offsets; dedup by article id; cursor ≤4096, page ≤50; category-membership/day/source/run filters; related candidates exclude the seed and are not corroboration; stale/pending/discarded/deleted hits rejected by construction — canonical corpus is admitted-only.
+
+---
+
+## Index maintenance contract
+
+FULLTEXT + categories indexes are engine-maintained atomically with admission/delete transactions (deliberate choice over a new outbox record kind — no drain consumer would exist). Matcher rebuilds coalesced off async workers via process-wide `catalog_epoch` + `MatcherCache` (stale-epoch single-flight rebuild, RwLock old-or-new swap; epoch bumps on catalog seed and merges). Curated alias backfill with provenance at matcher load, idempotent. Incomplete catalog readiness is `catalog unavailable`, never empty success.
+
+NLP-off body matching: word-boundary exact pass always runs on cleaned bodies; NLP person/org pass is enrichment only (contract flip of the old "body requires NLP" rule).
+
+---
 
 ## Intel web read service
 

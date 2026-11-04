@@ -373,6 +373,7 @@ All model transports share [provider request scheduling](../concepts/providers.m
 - Tabs: Defaults, OpenRouter, Google, Nvidia. Defaults lists ordered fallbacks per role (Add / Delete / Move). Refresh model lives on provider tabs only.
 - Old Writer seeds Recon + Synthesis. Tool picker default (`openrouter` / `typesafe/jev-1.13`) seeds only when both fields empty. Empty `fallbacks` lists are added on migration.
 - Sign-in does not assign roles. Legacy OpenAI stays until replaced (Grok is removed); never sent to Google or Nvidia.
+- **Six canonical model roles**: `recon_agent`, `recon_decisions`, `recon_analyst`, `atlas_evaluator`, `atlas_analyst`, `brain_summary` (provider.rs). One-time `migrate_pipeline_roles` migration; `preserve_pipeline_settings` guards: non-TOML bodies pass through, blank role fields preserve archived routes, conflicting non-blank edits bail. `[nlp]` in transfer allowlist; schema-3 config transfer with `migration_exceptions` + `model_variants` inside `model_roles`. TUI Defaults and Model-roles screens edit these six canonical roles directly via `DefaultsRole::role_key()`/`settings_key()` returning canonical routes, with saving through `role_mut(role_key())`; the former Claim-Assessor editor now edits `atlas_analyst` (generation-only; incompatible-fallback gated), the Controller editor offers the Jev decisions model (`recon_decisions` transport), Evidence-Curator and Entity-Resolver editors are labeled ARCHIVED (caller-dependent, retired with `investigation_controller`), model-roles rows show inheritance via canonical keys (e.g. `← atlas_analyst`) and the fast preset follows `brain_summary`; legacy role keys are no longer written by the TUI (it is not a legacy writer).
 - Recon: list, then transcript. Synthesis answers store Brain memory ids used in the prompt. Markdown answer, raised prompt band, collapsed decision/tool rows. Untitled threads named from the first question.
 - Publisher / social / wiki / aggregator hosts stay citations or handles. They never become subject identifiers. Never sent to Hunter.
 - Catalog: 59 tools in `osint.rs` (15 categories). Primary adapters: `osint/providers.rs`. News/legal: `osint/news_legal.rs`.
@@ -502,6 +503,24 @@ Article Recon report execution is historical. `create_report_job`, resume/retry 
 | Index actors and articles (phase 6, `STAGE_ACTOR_ARTICLES=12`) | `atlas_actor_index::index_run`: Brain Actor binding, `mentioned_in` Link, ≤20 tentative Related, `atlas_article_index` receipt per occurrence; batches of ≤100 occurrences, each committed separately | Article occurrence |
 
 Completed requires successful required classification, settled enabled metadata and a current phase-6 receipt for every occurrence (zero-actor occurrences are receipted; a failed index write keeps the cycle partial and Resume runs phase 6 only). Atlas owns no actor registry: Brain Actor IDs are shared with Recon and claims, and Related reads (`related_global.rs`, `RelatedScope::AllRetained` by default, `ThisCycle` on the Related toggle) return one row per URL across retained cycles. Metadata failures produce warnings; valid `unk`, empty entities and unrated publishers succeed. Unresolved required IDs yield partial/failed/blocked. Legacy extraction/index telemetry remains explicitly historical. Old unfinished runs preserve categories and resume native metadata; historical `unk` provenance is flagged. Explicit historical CLI Repair/Verify rejects new cycles. The TUI has no Repair memories or startup publication.
+
+## Discovery-index overview
+
+Three discovery services power catalog lookups, all backed by schema-v2 SurrealDB FULLTEXT indexes:
+
+- **`search_actor_names`** — exact normalized form → actor IDs + match reasons + revision; active canonical names only; collisions stay ambiguous; diagnostics `catalog unavailable` / `query too short` / `unsupported type`; limit 1..=25.
+- **`search_actor_aliases`** — aliases with strength `curated`/`catalog`/`learned`, `alias_type`, `provenance`; ambiguous when >1 live owner; exact + bounded prefix tiers on the alias index; owner-union merge.
+- **`search_articles`** — two per-field FULLTEXT BM25 on schema-v2 title/description indexes; title weighted above description-only; deterministic ties; matched-field attribution; rank = BM25 of matched field — relevance is NOT confidence; bounded excerpt on original byte offsets; dedup by article id; cursor ≤4096, page ≤50; category-membership/day/source/run filters; related candidates exclude the seed and are not corroboration; stale/pending/discarded/deleted hits rejected by construction — canonical corpus is admitted-only.
+
+Index maintenance: FULLTEXT + categories indexes are engine-maintained atomically with admission/delete transactions. Matcher rebuilds coalesced off async workers via process-wide `catalog_epoch` + `MatcherCache` (stale-epoch single-flight rebuild, RwLock old-or-new swap; epoch bumps on catalog seed and merges). Curated alias backfill with provenance at matcher load, idempotent. Incomplete catalog readiness is `catalog unavailable`, never empty success.
+
+NLP-off body matching: word-boundary exact pass always runs on cleaned bodies; NLP person/org pass is enrichment only (contract flip of the old "body requires NLP" rule).
+
+Recon integration: turn-start and material-gap discovery now search BOTH actor and article indexes (recon/orchestrate.rs discover_catalog_articles / replan_discovery); lookup never creates actors or claims; Jev cannot override identity ambiguity.
+
+API: `GET /api/v1/articles/search` → `ArticleSearchPage` {hits with article id/revision, excerpt, matched_field, rank, categories/source, revision fingerprint, next_cursor}; capabilities feature `"article-search"`.
+
+Seven categories: `["geopolitical","economic","military","science","health","stability","technology"]` (as documented in intel-web.md).
 
 See [classification and Related articles](../concepts/atlas-classification-and-related-articles.md) for metadata storage, receipts, publisher scores, exact lineage, deletion and navigation. Country bands, native quotas, map, origins, history and retained headlines remain unchanged. Coverage replaces the current-cycle Insights pane.
 

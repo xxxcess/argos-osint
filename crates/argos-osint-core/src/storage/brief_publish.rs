@@ -51,6 +51,54 @@ async fn stage_receipt(
     Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
 }
 
+/// Whether a committed stage receipt already indexes exactly this
+/// publication: the retry path reuses it and never re-extracts.
+pub fn publication_current(existing: &IndexState, job_id: &str) -> bool {
+    existing.publication_version == PUBLICATION_VERSION
+        && existing.state == "indexed"
+        && existing.job_id == job_id
+}
+
+#[cfg(test)]
+mod publication_retry_tests {
+    use super::*;
+
+    fn receipt(state: &str, job: &str, version: u32) -> IndexState {
+        IndexState {
+            publication_version: version,
+            state: state.into(),
+            job_id: job.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A retry after a committed publication reuses the receipt; a failed
+    /// state, another job's receipt or an old publication version re-runs.
+    #[test]
+    fn retry_reuses_only_the_current_indexed_receipt() {
+        assert!(publication_current(
+            &receipt("indexed", "job-1", PUBLICATION_VERSION),
+            "job-1"
+        ));
+        assert!(!publication_current(
+            &receipt("failed", "job-1", PUBLICATION_VERSION),
+            "job-1"
+        ));
+        assert!(!publication_current(
+            &receipt("not_indexed", "job-1", PUBLICATION_VERSION),
+            "job-1"
+        ));
+        assert!(!publication_current(
+            &receipt("indexed", "job-2", PUBLICATION_VERSION),
+            "job-1"
+        ));
+        assert!(!publication_current(
+            &receipt("indexed", "job-1", PUBLICATION_VERSION - 1),
+            "job-1"
+        ));
+    }
+}
+
 async fn article_state(repo: &Repository, article_id: &str) -> Result<Option<IndexState>> {
     let mut r = repo
         .db()
@@ -93,10 +141,7 @@ pub async fn publish_stage(
     snapshot_hash: &str,
 ) -> Result<IndexState> {
     if let Some(existing) = stage_receipt(repo, job_id, operation).await? {
-        if existing.publication_version == PUBLICATION_VERSION
-            && existing.state == "indexed"
-            && existing.job_id == job_id
-        {
+        if publication_current(&existing, job_id) {
             return Ok(existing);
         }
     }

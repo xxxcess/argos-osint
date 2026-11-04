@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::brain_neighborhood_brief::{
-    output_schema, validate_generated, NeighborhoodBrief, NeighborhoodInput, PACKET_BYTES_MAX,
+    validate_generated, NeighborhoodBrief, NeighborhoodInput, PACKET_BYTES_MAX,
 };
 use crate::provider::ChatMessage;
 use crate::provider_adapters::ResponseContract;
@@ -157,9 +158,11 @@ pub fn build_request(input: &NeighborhoodInput, fingerprint: &str) -> SummaryReq
         required_fields: Vec::new(),
         model: fingerprint.to_string(),
         provider: "role-chain".into(),
-        prompt_version: SummarizationMode::TopologyNeighborhood
-            .prompt_version()
-            .into(),
+        prompt_version: format!(
+            "{}:{}",
+            SummarizationMode::TopologyNeighborhood.prompt_version(),
+            crate::provider::structured_text::VERSION
+        ),
         preprocessing: serde_json::json!({"output": "structured_brief"}),
         deterministic: None,
     }
@@ -171,7 +174,7 @@ pub fn route_fingerprint(runtime: &RoleRuntime) -> String {
     let (routes, secrets) = resolve_operation_routes(
         &runtime.auth,
         &runtime.settings,
-        "summarization",
+        "brain_summary",
         Some(OPERATION),
     );
     let rows: Vec<String> = routes
@@ -270,6 +273,28 @@ fn classify(error: &anyhow::Error) -> GenerationFailure {
     }
 }
 
+/// The classified answer of one summary generation.
+enum SummaryAnswer {
+    /// Explicit `Result: none` with its reason: a valid empty result, never
+    /// a rejection. The deterministic brief stays the served content.
+    Empty(String),
+    /// Section blocks converted to the cached Brief DTO.
+    Sections(Value),
+}
+
+fn summary_answer(raw: &str) -> anyhow::Result<SummaryAnswer> {
+    let document =
+        crate::provider::structured_text::parse(raw).map_err(|error| anyhow::anyhow!("{error}"))?;
+    if document.blocks.is_empty() {
+        return Ok(SummaryAnswer::Empty(
+            document.empty_reason.unwrap_or_default(),
+        ));
+    }
+    Ok(SummaryAnswer::Sections(
+        crate::provider::structured_text::summary_value(raw)?,
+    ))
+}
+
 /// Run one generation with the full Summarization role chain. The chain owns
 /// provider retries (Summarization attempt cap, summarization timeouts);
 /// nothing here retries. Output is buffered and validated whole.
@@ -281,12 +306,19 @@ pub async fn generate(
     req: &SummaryRequest,
     cancel: &Arc<AtomicBool>,
 ) -> Result<Generated, GenerationFailure> {
+    if !req
+        .prompt_version
+        .ends_with(crate::provider::structured_text::VERSION)
+    {
+        return Err(GenerationFailure::new(FailureKind::Rejected,
+            "legacy summary generation superseded; request a current text-contract generation (retained evidence and fallback are unchanged)"));
+    }
     let (input, fallback) = decode_request(req)
         .map_err(|e| GenerationFailure::new(FailureKind::Storage, e.to_string()))?;
     let (routes, _) = resolve_operation_routes(
         &runtime.auth,
         &runtime.settings,
-        "summarization",
+        "brain_summary",
         Some(OPERATION),
     );
     if routes.iter().all(|r| r.skip_reason.is_some()) {
@@ -299,8 +331,9 @@ pub async fn generate(
         ChatMessage {
             role: "system".into(),
             content: format!(
-                "{} Reply with one JSON object with arrays overview, connections, interpretation and limits; each item is {{\"text\": string, \"basis\": [packet refs such as N1 or E2 only; never record ids]}}.",
-                crate::summarization::system_prompt(SummarizationMode::TopologyNeighborhood)
+                "{} Use readable sections Overview, Connections, Interpretation, Limits, each as one or more complete text blocks. Text is prose and Basis lists packet references such as N1 or E2, never record IDs. Use the same fields for each section.\n{}",
+                crate::summarization::system_prompt(SummarizationMode::TopologyNeighborhood),
+                crate::provider::structured_text::instructions("overview")
             ),
             tool_call_id: None,
             tool_calls: vec![],
@@ -312,13 +345,11 @@ pub async fn generate(
             tool_calls: vec![],
         },
     ];
-    let mut scope = OperationScope::new(operation_id, "summarization")
+    let mut scope = OperationScope::new(operation_id, "brain_summary")
         .with_operation(OPERATION)
         .with_input_revision(&input.basis_key)
-        .for_summarization(ResponseContract::GeneratedJson {
-            name: "topology_neighborhood_brief".into(),
-            schema: Some(output_schema(&input)),
-        });
+        .for_summarization(ResponseContract::Prose)
+        .with_structured_text();
     if let Some((id, epoch)) = task {
         scope = scope.with_task(id).with_task_epoch(epoch);
     }
@@ -327,10 +358,14 @@ pub async fn generate(
         &runtime.settings,
         &scope,
         &messages,
-        |raw| {
-            validate_generated(&input, &fallback, raw)
-                .map(|_| ())
-                .map_err(|e| format!("brief rejected: {e}"))
+        |raw| match summary_answer(raw) {
+            Ok(SummaryAnswer::Empty(_)) => Ok(()),
+            Ok(SummaryAnswer::Sections(value)) => {
+                validate_generated(&input, &fallback, &value.to_string())
+                    .map(|_| ())
+                    .map_err(|e| format!("brief rejected: {e}"))
+            }
+            Err(error) => Err(format!("brief rejected: {error}")),
         },
         cancel,
         None,
@@ -340,7 +375,27 @@ pub async fn generate(
     )
     .await
     .map_err(|e| classify(&e))?;
-    let validated = validate_generated(&input, &fallback, &raw).map_err(|e| {
+    let converted = match summary_answer(&raw) {
+        // An explicit `Result: none` summary is a valid empty result, never a
+        // rejection: the deterministic brief remains the cached content and
+        // the audit note records why no generated sections exist.
+        Ok(SummaryAnswer::Empty(reason)) => {
+            return Ok(Generated {
+                brief: fallback,
+                route: "deterministic".into(),
+                requests: report.requests,
+                host_notes: vec![format!("explicit empty summary: {reason}")],
+            });
+        }
+        Ok(SummaryAnswer::Sections(converted)) => converted,
+        Err(error) => {
+            return Err(GenerationFailure::new(
+                FailureKind::Rejected,
+                error.to_string(),
+            ))
+        }
+    };
+    let validated = validate_generated(&input, &fallback, &converted.to_string()).map_err(|e| {
         GenerationFailure::new(FailureKind::Rejected, format!("brief rejected: {e}"))
     })?;
     let route = report
@@ -418,5 +473,36 @@ impl WatchLimits {
             max_poll_errors: 5,
             deadline: std::time::Duration::from_secs(per_attempt * cap + 60),
         }
+    }
+}
+
+#[cfg(test)]
+mod summary_answer_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_empty_summary_is_a_valid_empty_result() {
+        let raw = "argos-text-v1\nResult: none\nReason: The neighborhood has no recorded connections yet.";
+        match summary_answer(raw).expect("explicit empty parses") {
+            SummaryAnswer::Empty(reason) => {
+                assert!(reason.contains("no recorded connections"));
+            }
+            SummaryAnswer::Sections(_) => panic!("empty result misread as sections"),
+        }
+    }
+
+    #[test]
+    fn summary_sections_convert_and_malformed_output_is_rejected() {
+        let raw = "argos-text-v1\n## Overview\nText: Two actors connect here.\nBasis: N1; E2\nEnd";
+        match summary_answer(raw).expect("sections parse") {
+            SummaryAnswer::Sections(value) => {
+                assert_eq!(value["overview"][0]["basis"][0], "N1");
+            }
+            SummaryAnswer::Empty(_) => panic!("sections misread as empty"),
+        }
+        // A parse failure is never an empty success.
+        assert!(summary_answer("argos-text-v1\n## Overview\nText: no basis\nEnd").is_err());
+        assert!(summary_answer("not the text contract").is_err());
+        assert!(summary_answer("argos-text-v1").is_err());
     }
 }

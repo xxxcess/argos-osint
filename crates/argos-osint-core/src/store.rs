@@ -681,7 +681,9 @@ pub struct AtlasRunRow {
     pub finished_at: String,
 }
 
-/// One headline saved for an Atlas run. `category` is an OSINT tag or `unk`.
+/// One headline saved for an Atlas run. `category` is an OSINT tag or `unk`;
+/// it temporarily projects the first entry of `categories` until every reader
+/// consumes the ordered array.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AtlasArticleRow {
     pub run_id: String,
@@ -699,6 +701,24 @@ pub struct AtlasArticleRow {
     pub seen_at: String,
     pub author: String,
     pub image_url: String,
+    /// Ordered OSINT tags, most likely first (v2 admission: at least two when
+    /// admitted, never padded). Empty on legacy rows pending reclassification.
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// When admission committed. Empty for legacy rows not yet reclassified.
+    #[serde(default)]
+    pub admitted_at: String,
+}
+
+impl AtlasArticleRow {
+    /// The scalar category projected from the ordered tags. Legacy rows keep
+    /// their stored scalar until reclassification gives them an array.
+    pub fn projected_category(&self) -> &str {
+        self.categories
+            .first()
+            .map(String::as_str)
+            .unwrap_or(&self.category)
+    }
 }
 
 /// One span-checked claim the Atlas cycle writes into Brain. Serializable so the
@@ -778,6 +798,8 @@ mod tests {
             seen_at: "2000-01-01T00:00:00+00:00".into(),
             author: String::new(),
             image_url: String::new(),
+            categories: Vec::new(),
+            admitted_at: String::new(),
         }
     }
 }

@@ -96,14 +96,590 @@ pub(crate) async fn load_matcher(repo: &Repository) -> Result<Matcher> {
         .await?
         .check()?;
     let rows: Vec<String> = r.take(0)?;
-    tokio::task::spawn_blocking(move || {
-        let actors: Vec<Actor> = rows
-            .into_iter()
+    let actors: Vec<Actor> = tokio::task::spawn_blocking(move || {
+        rows.into_iter()
             .map(|s| serde_json::from_str(&s))
-            .collect::<std::result::Result<_, _>>()?;
-        Matcher::new(actors)
+            .collect::<std::result::Result<Vec<Actor>, _>>()
+    })
+    .await
+    .context("actor catalog parse worker")??;
+    backfill_curated_aliases(repo, &actors).await?;
+    tokio::task::spawn_blocking(move || Matcher::new(actors)).await?
+}
+
+/// Homes seeded before a curated short form existed lack its
+/// `brain_actor_alias` row, so binding lookups cannot resolve it. Backfill is
+/// idempotent and provenance-stamped: the desired rows are known from the
+/// loaded catalog, existence is checked by record id, and only missing rows
+/// are written in one transaction. Runs with the matcher rebuild (coalesced);
+/// the matcher itself is built from code-side curated forms and needs no
+/// rebuild for this.
+async fn backfill_curated_aliases(repo: &Repository, actors: &[Actor]) -> Result<usize> {
+    let mut desired: Vec<(surrealdb::types::RecordId, String, String, String, String)> = Vec::new();
+    for actor in actors {
+        for curated in actor_catalog::curated_aliases(&actor.source_id) {
+            let normalized = brain_actors::normalize_alias(curated);
+            if !actor_catalog::matchable_alias(&normalized)
+                || actor
+                    .aliases
+                    .iter()
+                    .any(|known| brain_actors::normalize_alias(known) == normalized)
+            {
+                continue;
+            }
+            desired.push((
+                surrealdb::types::RecordId::new(
+                    "brain_actor_alias",
+                    surrealdb::types::Array::from(vec![
+                        actor.id.clone(),
+                        normalized.clone(),
+                        "name".to_owned(),
+                    ]),
+                ),
+                actor.id.clone(),
+                (*curated).to_owned(),
+                normalized,
+                actor.source_id.clone(),
+            ));
+        }
+    }
+    if desired.is_empty() {
+        return Ok(0);
+    }
+    let mut missing = Vec::new();
+    for (id, ..) in &desired {
+        let mut r = repo
+            .db()
+            .query("RETURN record::exists($r)")
+            .bind(("r", id.clone()))
+            .await?
+            .check()?;
+        if r.take::<Option<bool>>(0)? != Some(true) {
+            missing.push(true);
+        } else {
+            missing.push(false);
+        }
+    }
+    let pending: Vec<_> = desired
+        .into_iter()
+        .zip(missing)
+        .filter(|(_, was_missing)| *was_missing)
+        .collect();
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let pending = pending.clone();
+        async move {
+            for ((id, actor_id, alias, normalized, source_id), _) in pending {
+                run(
+                    &tx,
+                    tx.query(
+                        "IF !record::exists($r) { CREATE $r SET actor_id = $a, \
+                          alias = $alias, normalized = $n, alias_type = 'name', \
+                          provenance_json = $p RETURN NONE; };",
+                    )
+                    .bind(("r", id))
+                    .bind(("a", actor_id))
+                    .bind(("alias", alias))
+                    .bind(("n", normalized))
+                    .bind((
+                        "p",
+                        serde_json::json!({"curated": true, "source_id": source_id}).to_string(),
+                    )),
+                )
+                .await?;
+            }
+            Ok(())
+        }
+    })
+    .await?;
+    Ok(pending.len())
+}
+
+// ---- Brain discovery: search_actor_names / search_actor_aliases ----------
+//
+// The two indexed actor services (spec Phase 4). Both read only the alias
+// index (`brain_actor_alias_normalized`), the catalog-id index
+// (`brain_actor_catalog`) and point reads — never a catalog scan — and both
+// report catalog readiness honestly: an unseeded catalog is `unavailable`,
+// not an empty match. Composition with the shared matcher and article
+// discovery happens in Recon's `discover_catalog_actors`/articles seams.
+
+/// Minimum and maximum results one service call may return.
+pub const ACTOR_SEARCH_LIMIT: std::ops::RangeInclusive<usize> = 1..=25;
+
+/// One active canonical actor a name resolved to.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ActorNameHit {
+    /// Canonical actor id (the memory id), redirect-resolved.
+    pub actor_id: String,
+    /// The catalog source identifier (e.g. `os:Q22686`), empty for
+    /// non-catalog actors.
+    pub catalog_id: String,
+    pub display_name: String,
+    pub subtype: String,
+    /// The actor row's live revision.
+    pub revision: i64,
+    /// `exact name` | `normalized form` | `curated form` | `name alias`.
+    pub reason: &'static str,
+}
+
+/// Result of [`search_actor_names`]. `matches` are unambiguous (at most one
+/// canonical actor owns the name); `collisions` lists every active owner when
+/// the name is shared — collisions stay ambiguous regardless of any ranking.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ActorNameSearch {
+    pub matches: Vec<ActorNameHit>,
+    pub collisions: Vec<ActorNameHit>,
+    /// `""` | `catalog unavailable` | `query too short` | `unsupported type`.
+    pub diagnostic: &'static str,
+    /// Catalog fingerprint the search ran against (`''` when unavailable).
+    pub revision: String,
+}
+
+impl ActorNameSearch {
+    /// Unavailable is not an empty success: callers surface the diagnostic.
+    pub fn unavailable(diagnostic: &'static str) -> Self {
+        Self {
+            matches: Vec::new(),
+            collisions: Vec::new(),
+            diagnostic,
+            revision: String::new(),
+        }
+    }
+}
+
+/// Identifiers the name service refuses: IPs, URLs, CVE and AS numbers are
+/// lookup keys, not actor names. Mirrors the Recon extraction shapes.
+pub fn unsupported_name_reason(name: &str) -> Option<&'static str> {
+    let trimmed = name.trim();
+    if trimmed.parse::<std::net::IpAddr>().is_ok() {
+        return Some("unsupported type");
+    }
+    if url::Url::parse(trimmed).is_ok_and(|u| matches!(u.scheme(), "http" | "https")) {
+        return Some("unsupported type");
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if upper.starts_with("CVE-")
+        || (upper.starts_with("AS")
+            && upper[2..].chars().all(|c| c.is_ascii_digit())
+            && upper.len() > 2)
+    {
+        return Some("unsupported type");
+    }
+    None
+}
+
+/// Why a matched alias row earns its reason, most specific first.
+fn name_reason(normalized: &str, display_name: &str, catalog: Option<&Actor>) -> &'static str {
+    if brain_actors::normalize_alias(display_name) == normalized {
+        "exact name"
+    } else if catalog.is_some_and(|actor| {
+        actor
+            .metadata
+            .get("name_normalized")
+            .is_some_and(|form| brain_actors::normalize_alias(form) == normalized)
+    }) {
+        "normalized form"
+    } else if catalog.is_some_and(|actor| {
+        crate::actor_catalog::curated_aliases(&actor.source_id)
+            .iter()
+            .any(|alias| brain_actors::normalize_alias(alias) == normalized)
+    }) {
+        "curated form"
+    } else {
+        "name alias"
+    }
+}
+
+/// Catalog fingerprint, or `''` before the first seed.
+async fn catalog_revision(db: &Surreal<Any>) -> Result<String> {
+    let mut r = db
+        .query("SELECT VALUE fingerprint FROM ONLY brain_actor_seed:catalog")
+        .await?
+        .check()?;
+    Ok(r.take::<Option<String>>(0)?.unwrap_or_default())
+}
+
+#[derive(SurrealValue)]
+struct ActorHead {
+    display_name: String,
+    subtype: String,
+    revision: i64,
+    catalog_id: String,
+    catalog_json: Option<String>,
+}
+
+/// `search_actor_names`: indexed exact resolution of one name over active
+/// canonical catalog identities. The candidate set comes from the
+/// `brain_actor_alias_normalized` index (plus the curated reverse lookup for
+/// homes the backfill has not covered yet); owners are redirect-resolved and
+/// filtered to active lifecycles.
+pub async fn search_actor_names(
+    repo: &Repository,
+    name: &str,
+    limit: usize,
+) -> Result<ActorNameSearch> {
+    if let Some(diagnostic) = unsupported_name_reason(name) {
+        return Ok(ActorNameSearch::unavailable(diagnostic));
+    }
+    let normalized = brain_actors::normalize_alias(name);
+    if !crate::actor_catalog::matchable_alias(&normalized) {
+        return Ok(ActorNameSearch::unavailable("query too short"));
+    }
+    if status(repo.db()).await?.needs_seed {
+        return Ok(ActorNameSearch::unavailable("catalog unavailable"));
+    }
+    let revision = catalog_revision(repo.db()).await?;
+    let limit = limit.clamp(*ACTOR_SEARCH_LIMIT.start(), *ACTOR_SEARCH_LIMIT.end());
+    let owned = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let normalized = normalized.clone();
+        async move {
+            let mut r = run(
+                &tx,
+                tx.query("SELECT VALUE actor_id FROM brain_actor_alias WHERE normalized = $n AND alias_type = 'name' LIMIT $limit")
+                    .bind(("n", normalized.clone()))
+                    .bind(("limit", limit as i64)),
+            )
+            .await?;
+            let mut ids: Vec<String> = take(&mut r, 0)?;
+            // Curated short forms normalize to a code-known source id; resolve
+            // them through the catalog-id index for homes the alias backfill
+            // has not covered yet (same fallback as `lookup_in`).
+            for source in crate::actor_catalog::curated_sources_for(&normalized) {
+                let mut r = run(
+                    &tx,
+                    tx.query("SELECT VALUE record::id(id) FROM brain_actor WHERE catalog_id = $source AND scope_key = $scope AND type::record('memory', record::id(id)).lifecycle = 'active' LIMIT 2")
+                        .bind(("source", source.to_string()))
+                        .bind(("scope", actor_catalog::SCOPE)),
+                )
+                .await?;
+                ids.extend(take::<Vec<String>>(&mut r, 0)?);
+            }
+            let mut heads: Vec<(String, Option<ActorHead>)> = Vec::new();
+            let mut seen = std::collections::BTreeSet::new();
+            for id in ids {
+                let canonical = super::actor_bind::resolve_in(&tx, &id).await?;
+                if !seen.insert(canonical.clone()) {
+                    continue;
+                }
+                let mut r = run(
+                    &tx,
+                    tx.query("SELECT display_name, subtype, revision, catalog_id, catalog_json FROM ONLY $a WHERE type::record('memory', $m).lifecycle = 'active'")
+                        .bind(("a", rid("brain_actor", &canonical)))
+                        .bind(("m", rid("memory", &canonical))),
+                )
+                .await?;
+                heads.push((canonical, take::<Option<ActorHead>>(&mut r, 0)?));
+            }
+            Ok(heads)
+        }
     })
     .await?
+    .value;
+    let mut hits: Vec<ActorNameHit> = owned
+        .into_iter()
+        .filter_map(|(actor_id, head)| {
+            let head = head?;
+            let catalog: Option<Actor> = head
+                .catalog_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok());
+            Some(ActorNameHit {
+                actor_id,
+                catalog_id: head.catalog_id,
+                display_name: head.display_name.clone(),
+                subtype: head.subtype,
+                revision: head.revision,
+                reason: name_reason(&normalized, &head.display_name, catalog.as_ref()),
+            })
+        })
+        .collect();
+    hits.sort_by(|a, b| a.actor_id.cmp(&b.actor_id));
+    Ok(if hits.len() == 1 {
+        ActorNameSearch {
+            matches: hits,
+            collisions: Vec::new(),
+            diagnostic: "",
+            revision,
+        }
+    } else {
+        ActorNameSearch {
+            matches: Vec::new(),
+            collisions: hits,
+            diagnostic: "",
+            revision,
+        }
+    })
+}
+
+/// One alias candidate with its strength, provenance and live owners.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct ActorAliasHit {
+    pub alias: String,
+    pub normalized: String,
+    /// Row type (today only `name`).
+    pub alias_type: String,
+    /// `curated` (code-vetted short form) | `catalog` (seeded catalog row) |
+    /// `learned` (bound at extraction time).
+    pub strength: &'static str,
+    /// The row's provenance JSON, verbatim.
+    pub provenance: serde_json::Value,
+    /// Canonical active owners; more than one is ambiguous and never
+    /// auto-binds.
+    pub owners: Vec<String>,
+    pub ambiguous: bool,
+    /// Lowest owner revision, or 0 when no owner is active.
+    pub revision: i64,
+}
+
+/// Result of [`search_actor_aliases`]: exact-normalized candidates plus
+/// bounded prefix candidates from the ordered alias index.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct ActorAliasSearch {
+    pub exact: Vec<ActorAliasHit>,
+    pub prefix: Vec<ActorAliasHit>,
+    /// `""` | `catalog unavailable` | `query too short` | `unsupported type`.
+    pub diagnostic: &'static str,
+    pub revision: String,
+}
+
+impl ActorAliasSearch {
+    pub fn unavailable(diagnostic: &'static str) -> Self {
+        Self {
+            exact: Vec::new(),
+            prefix: Vec::new(),
+            diagnostic,
+            revision: String::new(),
+        }
+    }
+}
+
+/// Alias strength from the row's provenance: curated backfills stamp
+/// `curated`, seeded catalog rows carry the CSV metadata (with its
+/// `actor_id`), everything else was learned at bind time.
+fn alias_strength(provenance: &serde_json::Value) -> &'static str {
+    if provenance
+        .get("curated")
+        .is_some_and(|v| v == &serde_json::Value::Bool(true))
+    {
+        "curated"
+    } else if provenance.get("actor_id").is_some() {
+        "catalog"
+    } else {
+        "learned"
+    }
+}
+
+/// The ordered-range end for `prefix` candidates: the smallest string that
+/// sorts after every string starting with `prefix`.
+fn prefix_end(prefix: &str) -> String {
+    let mut end = prefix.to_string();
+    match end.pop() {
+        Some(last) => {
+            end.push(char::from_u32(last as u32 + 1).unwrap_or(char::MAX));
+            end
+        }
+        None => end,
+    }
+}
+
+#[derive(SurrealValue)]
+struct AliasCandidateRow {
+    actor_id: String,
+    alias: String,
+    normalized: String,
+    alias_type: String,
+    provenance_json: String,
+}
+
+#[derive(SurrealValue)]
+struct OwnerRevision {
+    revision: i64,
+}
+
+/// Resolve one alias row's canonical active owner (if any) and finish its hit.
+/// Ambiguity is decided by the caller across the rows of one normalized form.
+async fn resolve_alias_row(
+    tx: &Tx,
+    row: AliasCandidateRow,
+) -> Result<(ActorAliasHit, Option<String>), TxError> {
+    let provenance: serde_json::Value =
+        serde_json::from_str(&row.provenance_json).unwrap_or(serde_json::Value::Null);
+    let canonical = super::actor_bind::resolve_in(tx, &row.actor_id).await?;
+    let mut r = run(
+        tx,
+        tx.query(
+            "SELECT revision FROM ONLY $a WHERE type::record('memory', $m).lifecycle = 'active'",
+        )
+        .bind(("a", rid("brain_actor", &canonical)))
+        .bind(("m", rid("memory", &canonical))),
+    )
+    .await?;
+    let active: Option<OwnerRevision> = take(&mut r, 0)?;
+    let (owner_present, revision) = match &active {
+        Some(owner) => (true, owner.revision),
+        None => (false, 0),
+    };
+    let hit = ActorAliasHit {
+        alias: row.alias,
+        normalized: row.normalized,
+        alias_type: row.alias_type,
+        strength: alias_strength(&provenance),
+        provenance,
+        owners: if owner_present {
+            vec![canonical.clone()]
+        } else {
+            Vec::new()
+        },
+        ambiguous: false,
+        revision,
+    };
+    Ok((hit, active.map(|_| canonical)))
+}
+
+/// Merge sibling rows of one normalized form into single hits whose `owners`
+/// list every distinct active canonical owner; `ambiguous` marks shared forms
+/// (collisions stay ambiguous regardless of rank).
+fn merge_alias_owners(hits: Vec<ActorAliasHit>, owners: Vec<Option<String>>) -> Vec<ActorAliasHit> {
+    let mut by_owner: Vec<(ActorAliasHit, Vec<String>)> = hits
+        .into_iter()
+        .zip(owners)
+        .map(|(hit, owner)| (hit, owner.into_iter().collect()))
+        .collect();
+    let mut merged: Vec<ActorAliasHit> = Vec::new();
+    for (hit, owners) in by_owner.drain(..) {
+        match merged
+            .iter_mut()
+            .find(|known| known.normalized == hit.normalized)
+        {
+            Some(known) => {
+                for owner in owners {
+                    if !known.owners.contains(&owner) {
+                        known.owners.push(owner);
+                    }
+                }
+                known.owners.sort();
+            }
+            None => merged.push(ActorAliasHit { owners, ..hit }),
+        }
+    }
+    for hit in &mut merged {
+        hit.ambiguous = hit.owners.len() > 1;
+    }
+    merged.sort_by(|a, b| a.normalized.cmp(&b.normalized).then(a.alias.cmp(&b.alias)));
+    merged
+}
+
+/// `search_actor_aliases`: alias candidates with strength, type, provenance
+/// and live owners. Exact matches use the `brain_actor_alias_normalized`
+/// index equality arm; prefix candidates use its ordered range arm, both
+/// bounded by `limit`. Ambiguous owners are reported, never resolved.
+pub async fn search_actor_aliases(
+    repo: &Repository,
+    name: &str,
+    limit: usize,
+) -> Result<ActorAliasSearch> {
+    if let Some(diagnostic) = unsupported_name_reason(name) {
+        return Ok(ActorAliasSearch::unavailable(diagnostic));
+    }
+    let normalized = brain_actors::normalize_alias(name);
+    if !crate::actor_catalog::matchable_alias(&normalized) {
+        return Ok(ActorAliasSearch::unavailable("query too short"));
+    }
+    if status(repo.db()).await?.needs_seed {
+        return Ok(ActorAliasSearch::unavailable("catalog unavailable"));
+    }
+    let revision = catalog_revision(repo.db()).await?;
+    let limit = limit.clamp(*ACTOR_SEARCH_LIMIT.start(), *ACTOR_SEARCH_LIMIT.end()) as i64;
+    let owned = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let normalized = normalized.clone();
+        async move {
+            let mut exact_rows: Vec<AliasCandidateRow> = {
+                let mut r = run(
+                    &tx,
+                    tx.query("SELECT actor_id, alias, normalized, alias_type, provenance_json FROM brain_actor_alias WHERE normalized = $n AND alias_type = 'name' LIMIT $limit")
+                        .bind(("n", normalized.clone()))
+                        .bind(("limit", limit)),
+                )
+                .await?;
+                take(&mut r, 0)?
+            };
+            // The curated reverse lookup covers homes before the backfill.
+            for source in crate::actor_catalog::curated_sources_for(&normalized) {
+                let mut r = run(
+                    &tx,
+                    tx.query("SELECT VALUE catalog_json FROM brain_actor WHERE catalog_id = $source AND scope_key = $scope AND type::record('memory', record::id(id)).lifecycle = 'active' LIMIT 2")
+                        .bind(("source", source.to_string()))
+                        .bind(("scope", actor_catalog::SCOPE)),
+                )
+                .await?;
+                for raw in take::<Vec<String>>(&mut r, 0)? {
+                    let Ok(actor) = serde_json::from_str::<Actor>(&raw) else {
+                        continue;
+                    };
+                    for curated in actor_catalog::curated_aliases(&actor.source_id) {
+                        if brain_actors::normalize_alias(curated) != normalized
+                            || exact_rows
+                                .iter()
+                                .any(|row| row.actor_id == actor.id)
+                        {
+                            continue;
+                        }
+                        exact_rows.push(AliasCandidateRow {
+                            actor_id: actor.id.clone(),
+                            alias: (*curated).to_owned(),
+                            normalized: normalized.clone(),
+                            alias_type: "name".into(),
+                            provenance_json: serde_json::json!({
+                                "curated": true, "source_id": actor.source_id
+                            })
+                            .to_string(),
+                        });
+                    }
+                }
+            }
+            let mut prefix_rows: Vec<AliasCandidateRow> = {
+                let mut r = run(
+                    &tx,
+                    tx.query("SELECT actor_id, alias, normalized, alias_type, provenance_json FROM brain_actor_alias WHERE normalized >= $p AND normalized < $end AND alias_type = 'name' LIMIT $limit")
+                        .bind(("p", normalized.clone()))
+                        .bind(("end", prefix_end(&normalized)))
+                        .bind(("limit", limit)),
+                )
+                .await?;
+                take(&mut r, 0)?
+            };
+            prefix_rows.retain(|row| row.normalized.starts_with(&normalized));
+            let mut exact_hits = Vec::new();
+            let mut exact_owners = Vec::new();
+            for row in exact_rows {
+                let (hit, owner) = resolve_alias_row(&tx, row).await?;
+                exact_hits.push(hit);
+                exact_owners.push(owner);
+            }
+            let mut prefix_hits = Vec::new();
+            let mut prefix_owners = Vec::new();
+            for row in prefix_rows {
+                let (hit, owner) = resolve_alias_row(&tx, row).await?;
+                prefix_hits.push(hit);
+                prefix_owners.push(owner);
+            }
+            Ok((
+                merge_alias_owners(exact_hits, exact_owners),
+                merge_alias_owners(prefix_hits, prefix_owners),
+            ))
+        }
+    })
+    .await?
+    .value;
+    Ok(ActorAliasSearch {
+        exact: owned.0,
+        prefix: owned.1,
+        diagnostic: "",
+        revision,
+    })
 }
 
 /// Current catalog actors for all article consumers, including before NLP
@@ -129,7 +705,10 @@ pub(crate) async fn metadata_article_actors(
     Ok(Some(repo.actor_matcher().await?.article_actors(article)))
 }
 
-/// Current metadata actors followed by actors detected in the retained clean body.
+/// Current metadata actors followed by actors detected in the retained clean
+/// body. Body matching never needs NLP: unambiguous catalog aliases bind
+/// exactly; NLP person/organization candidates enrich the resolved spellings
+/// when available.
 pub async fn article_actors(
     repo: &Repository,
     article: &crate::store::AtlasArticleRow,
@@ -159,9 +738,11 @@ pub(crate) async fn body_actors(
     if ready.take::<Option<String>>(0)?.as_deref() != Some("complete") {
         return Ok(None);
     }
-    let Some(candidates) = clean_body_candidates(repo, &clean).await? else {
-        return Ok(None);
-    };
+    // NLP-off matching is exact-only; an incomplete NLP result is retryable
+    // and only delays the enrichment, never the exact pass.
+    let candidates = clean_body_candidates(repo, &clean)
+        .await?
+        .unwrap_or_default();
     let matcher = repo.actor_matcher().await?;
     Ok(Some(
         tokio::task::spawn_blocking(move || matcher.body_actors(&clean.text, &candidates)).await?,
@@ -350,7 +931,10 @@ async fn ingest(
                 memory_kind: "actor".into(), payload_json: serde_json::to_string(&payload)?,
             });
             let mut keys = std::collections::BTreeSet::new();
-            for alias in &actor.aliases {
+            // The canonical display name is itself a name alias (the matcher
+            // treats `name` and `aliases` identically), so exact-name search
+            // and binding resolve actors that list no explicit alias.
+            for alias in std::iter::once(&actor.name).chain(&actor.aliases) {
                 let normalized = brain_actors::normalize_alias(alias);
                 if normalized.chars().count() < 3 || !keys.insert(normalized.clone()) {
                     continue;
@@ -400,6 +984,8 @@ async fn ingest(
     }
     repo.db().query("BEGIN; IF (SELECT VALUE owner FROM ONLY brain_actor_seed:catalog) != $owner OR (SELECT VALUE processed FROM ONLY brain_actor_seed:catalog) != $total { THROW 'actor seed completion lost ownership'; }; UPDATE brain_actor_seed:catalog SET status = 'complete', lease_until = '' RETURN NONE; COMMIT;")
         .bind(("owner", owner.to_owned())).bind(("total", progress.total)).await?.check()?;
+    // Matcher inputs changed: cached repositories rebuild single-flight.
+    crate::actor_catalog::bump_catalog_epoch();
     progress.complete = true;
     report(progress.clone());
     Ok(progress)
@@ -474,4 +1060,103 @@ pub(crate) async fn clean_body(repo: &Repository, article_id: &str) -> Result<Op
     })
     .await?
     .value)
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    #[test]
+    fn name_reasons_prefer_exact_then_normalized_then_curated() {
+        let catalog = Actor {
+            id: "catalog-actor-x".into(),
+            source_id: "os:Q1".into(),
+            name: "Harbor Union".into(),
+            subtype: "organization".into(),
+            aliases: vec!["harbor union".into()],
+            metadata: [("name_normalized".to_owned(), "harbor union".to_owned())]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(
+            name_reason("harbor union", "Harbor Union", None),
+            "exact name"
+        );
+        assert_eq!(
+            name_reason("harbor union", "Harbor Union", Some(&catalog)),
+            "exact name"
+        );
+        // A different spelling of the same catalog normalized form.
+        assert_eq!(
+            name_reason("harbor union", "HARBOR UNION LTD", Some(&catalog)),
+            "normalized form"
+        );
+        assert_eq!(
+            name_reason("other", "Harbor Union", Some(&catalog)),
+            "name alias"
+        );
+    }
+
+    #[test]
+    fn identifiers_are_unsupported_names_and_short_queries_are_guarded() {
+        for name in [
+            "10.0.0.1",
+            "https://example.com/a",
+            "CVE-2024-1234",
+            "AS14061",
+        ] {
+            assert_eq!(
+                unsupported_name_reason(name),
+                Some("unsupported type"),
+                "{name}"
+            );
+        }
+        assert_eq!(unsupported_name_reason("Harbor Union"), None);
+        let search = ActorNameSearch::unavailable("query too short");
+        assert!(search.matches.is_empty());
+        assert_eq!(search.diagnostic, "query too short");
+        assert_eq!(search.revision, "");
+    }
+
+    #[test]
+    fn alias_strength_reads_provenance_and_prefix_end_advances() {
+        let curated = serde_json::json!({"curated": true, "source_id": "os:Q22686"});
+        let catalog = serde_json::json!({"actor_id": "os:Q22686", "actor_name": "Donald Trump"});
+        let learned = serde_json::json!({"insight_claim": "fp"});
+        assert_eq!(alias_strength(&curated), "curated");
+        assert_eq!(alias_strength(&catalog), "catalog");
+        assert_eq!(alias_strength(&learned), "learned");
+        assert_eq!(alias_strength(&serde_json::Value::Null), "learned");
+        assert_eq!(prefix_end("harbor"), "harbos");
+        assert_eq!(prefix_end("münchen"), "müncheo");
+    }
+
+    #[test]
+    fn alias_owner_merging_marks_shared_forms_ambiguous() {
+        let hit = |alias: &str, normalized: &str| ActorAliasHit {
+            alias: alias.into(),
+            normalized: normalized.into(),
+            alias_type: "name".into(),
+            strength: "catalog",
+            provenance: serde_json::Value::Null,
+            owners: Vec::new(),
+            ambiguous: false,
+            revision: 1,
+        };
+        // Two rows for one normalized form (two actors): merged, ambiguous.
+        let merged = merge_alias_owners(
+            vec![hit("Shared", "shared"), hit("Shared", "shared")],
+            vec![Some("a".into()), Some("b".into())],
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].owners, ["a".to_owned(), "b".to_owned()]);
+        assert!(merged[0].ambiguous);
+        // One row, one owner: unambiguous.
+        let merged = merge_alias_owners(vec![hit("Solo", "solo")], vec![Some("a".into())]);
+        assert!(!merged[0].ambiguous);
+        // Retired owners drop out and ambiguity follows the live set.
+        let merged = merge_alias_owners(vec![hit("Shared", "shared")], vec![None]);
+        assert!(merged[0].owners.is_empty());
+        assert!(!merged[0].ambiguous, "no live owner is not an ambiguity");
+    }
 }

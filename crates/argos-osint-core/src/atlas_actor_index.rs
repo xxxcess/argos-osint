@@ -125,9 +125,12 @@ pub mod surreal {
                 body_ready,
             )
         });
+        // The ordered categories are part of the indexed unit: re-admission
+        // with different tags reindexes the occurrence.
         Ok(crate::brain_backfill::h(&json!([
             article.title,
             article.description,
+            article.categories,
             article.category,
             raw,
             clean_revision

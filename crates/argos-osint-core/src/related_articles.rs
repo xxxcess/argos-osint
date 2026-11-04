@@ -52,7 +52,13 @@ fn named(kind: &str) -> bool {
 fn recognized(category: &str) -> bool {
     matches!(
         category,
-        "geopolitical" | "economic" | "military" | "information" | "stability" | "technology"
+        "geopolitical"
+            | "economic"
+            | "military"
+            | "science"
+            | "health"
+            | "stability"
+            | "technology"
     )
 }
 
@@ -724,7 +730,13 @@ pub fn plan(
     Ok(out)
 }
 pub(crate) fn revision(a: &AtlasArticleRow) -> String {
-    crate::nlp::cache::hash(&format!("{}:{}", atlas_metadata::input_hash(a), a.category))
+    // The ordered categories are part of the pair's identity: a re-admission
+    // with different tags refreshes the planned pair revisions.
+    crate::nlp::cache::hash(&format!(
+        "{}:{}",
+        atlas_metadata::input_hash(a),
+        a.projected_category()
+    ))
 }
 pub(crate) fn canonical_url(raw: &str) -> String {
     reqwest::Url::parse(raw)
@@ -755,6 +767,8 @@ mod tests {
             seen_at: String::new(),
             author: String::new(),
             image_url: String::new(),
+            categories: Vec::new(),
+            admitted_at: String::new(),
         }
     }
     fn inventory(store: &Store, a: &AtlasArticleRow, key: &str, kind: &str) {

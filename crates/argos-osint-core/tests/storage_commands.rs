@@ -2,6 +2,7 @@
 //! picked by `ARGOS_SURREAL_MODE`. Run through `scripts/test_surreal.py`.
 #![cfg(feature = "surreal")]
 
+use argos_osint_core::storage::bootstrap::SCHEMA_VERSION;
 use argos_osint_core::storage::commands::{self, ResetPhase};
 use argos_osint_core::storage::home::{self, Layout, Mode};
 use argos_osint_core::storage::server;
@@ -92,7 +93,7 @@ async fn init_status_and_resumable_reset() {
     let st = commands::init(&layout, mode, None).await.unwrap();
     assert_eq!(st.mode, Some(mode));
     assert!(st.ready, "{st:?}");
-    assert_eq!(st.schema_version, Some(1));
+    assert_eq!(st.schema_version, Some(SCHEMA_VERSION));
     let other = match mode {
         Mode::Server => Mode::Embedded,
         Mode::Embedded => Mode::Server,
@@ -182,7 +183,7 @@ async fn open_home_needs_init_and_returns_a_bootstrapped_store() {
     home::save_config(&layout, &home::StorageConfig { mode, port: None }).unwrap();
     let store = home::open_home(&layout).await.unwrap();
     assert_eq!(store.mode, mode);
-    assert_eq!(store.opened.bootstrap.version, 1);
+    assert_eq!(store.opened.bootstrap.version, SCHEMA_VERSION);
     drop(store);
     if mode == Mode::Server {
         assert!(
@@ -205,7 +206,7 @@ async fn reset_then_open_home_bootstraps_a_fresh_schema() {
     commands::reset(&layout, true).await.unwrap();
 
     let store = home::open_home(&layout).await.unwrap();
-    assert_eq!(store.opened.bootstrap.version, 1);
+    assert_eq!(store.opened.bootstrap.version, SCHEMA_VERSION);
     let mut r = store
         .opened
         .db
@@ -218,7 +219,7 @@ async fn reset_then_open_home_bootstraps_a_fresh_schema() {
         .unwrap()
         .check()
         .unwrap();
-    assert_eq!(r.take::<Vec<i64>>(0usize).unwrap(), vec![1]);
+    assert_eq!(r.take::<Vec<i64>>(0usize).unwrap(), vec![SCHEMA_VERSION]);
     assert_eq!(r.take::<Option<i64>>(1usize).unwrap(), Some(0));
     assert_eq!(r.take::<Vec<String>>(2usize).unwrap().len(), 1);
     // Every module table is back (fresh schema, not a leftover).

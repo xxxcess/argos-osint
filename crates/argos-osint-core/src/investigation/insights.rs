@@ -8,7 +8,7 @@ use serde_json::Value;
 pub use crate::nlp::EntityCandidate;
 use crate::nlp::{cache::hash, spans::paragraphs, Span};
 
-pub const CONTRACT: &str = "insights-v3";
+pub const CONTRACT: &str = "insights-v4-text";
 pub const READINESS_POLICY: &str = "readiness-v2";
 pub const ARTICLE_CLAIM_LIMIT: usize = 8;
 pub const RECON_CLAIM_LIMIT: usize = 5;
@@ -228,28 +228,35 @@ pub fn evidence_with(
 /// Roles whose captured routes can affect insight work (fingerprints and
 /// supersession diagnostics).
 pub const INSIGHT_ROLES: [&str; 4] = [
-    "claim_assessor",
-    "synthesis",
-    "entity_resolver",
-    "evidence_curator",
+    "recon_decisions",
+    "recon_analyst",
+    "atlas_evaluator",
+    "atlas_analyst",
 ];
+
+fn analyst_role(input: &PipelineInput) -> &'static str {
+    if input.snapshot.owner_kind == "recon" {
+        "recon_analyst"
+    } else {
+        "atlas_analyst"
+    }
+}
 
 pub fn input_key(input: &PipelineInput, settings: &crate::provider::SettingsFile) -> String {
     let mut snapshot = input.snapshot.clone();
     snapshot.key.clear();
-    let mut roles = vec![
-        settings.defaults.resolve_role("claim_assessor").0,
-        settings.defaults.resolve_role("synthesis").0,
+    let roles = [
+        settings
+            .defaults
+            .resolve_role(super::insight_assessment::role_for_kind(
+                &input.snapshot.owner_kind,
+                "assessment",
+            ))
+            .0,
+        settings.defaults.resolve_role(analyst_role(input)).0,
     ];
-    if input.surface != "recon_report" || input.recall_enabled {
-        roles.push(settings.defaults.resolve_role("entity_resolver").0);
-    }
-    // Memory predicate/time relevance now runs on Evidence Curator.
-    if input.recall_enabled {
-        roles.push(settings.defaults.resolve_role("evidence_curator").0);
-    }
     crate::nlp::cache::key(
-        &serde_json::json!({"snapshot":snapshot,"evidence":input.evidence,"objective":input.objective,"surface":input.surface,"required":input.required_tasks_complete,"save_insights":input.save_insights,"recall_enabled":input.recall_enabled,"roles":roles,"nlp":settings.nlp,"contract":CONTRACT,"policy":READINESS_POLICY,"claim_prompt":hash(CLAIM_PROMPT),"inference_prompt":hash(INFERENCE_PROMPT)}),
+        &serde_json::json!({"snapshot":snapshot,"evidence":input.evidence,"objective":input.objective,"surface":input.surface,"required":input.required_tasks_complete,"save_insights":input.save_insights,"recall_enabled":input.recall_enabled,"roles":roles,"variants":settings.defaults.model_variants,"nlp":settings.nlp,"contract":CONTRACT,"policy":READINESS_POLICY,"claim_prompt":hash(CLAIM_PROMPT),"inference_prompt":hash(INFERENCE_PROMPT)}),
     )
 }
 
@@ -268,15 +275,199 @@ struct InferenceWindow {
     links: Vec<AssessedLink>,
 }
 
-fn parse_model_json(raw: &str) -> Result<Value> {
-    let raw = raw.trim();
-    let raw = raw
-        .strip_prefix("```json")
-        .or_else(|| raw.strip_prefix("```"))
-        .unwrap_or(raw);
-    Ok(serde_json::from_str(
-        raw.trim().strip_suffix("```").unwrap_or(raw.trim()).trim(),
-    )?)
+fn parse_stage_text(
+    raw: &str,
+    stage: &str,
+    dictionary: &std::collections::BTreeMap<String, EvidenceRef>,
+    input: &PipelineInput,
+) -> Result<Value> {
+    let document = crate::provider::structured_text::parse(raw)?;
+    let mut entities = Vec::new();
+    if stage == "extraction" {
+        for block in document
+            .blocks
+            .iter()
+            .filter(|block| block.kind == "identifier")
+        {
+            let ids = block.list("evidence");
+            ensure!(
+                ids.len() == 1,
+                "an Identifier must cite one original source"
+            );
+            let reference = dictionary
+                .get(&ids[0])
+                .ok_or_else(|| anyhow::anyhow!("unknown Identifier evidence"))?;
+            let source = input
+                .evidence
+                .iter()
+                .find(|source| source.validate_ref(reference))
+                .ok_or_else(|| anyhow::anyhow!("stale Identifier source"))?;
+            let value = block.field("value");
+            let actor = block.field("actor");
+            let quotation = block.field("quotation");
+            ensure!(
+                !value.is_empty()
+                    && !actor.is_empty()
+                    && quotation.contains(value)
+                    && quotation.contains(actor),
+                "Identifier must quote its value and actor"
+            );
+            let supplied = super::insight_wire::source_span(source, reference)?;
+            let mut mentions = Vec::new();
+            for (offset, _) in source.text.match_indices(quotation) {
+                if offset < supplied.start_byte || offset + quotation.len() > supplied.end_byte {
+                    continue;
+                }
+                for (inside, _) in quotation.match_indices(value) {
+                    let span = Span {
+                        start_byte: offset + inside,
+                        end_byte: offset + inside + value.len(),
+                    };
+                    if !mentions.contains(&span) {
+                        mentions.push(span);
+                    }
+                }
+            }
+            ensure!(
+                !mentions.is_empty() && mentions.len() <= 64,
+                "Identifier lacks bounded, literal source mentions"
+            );
+            let type_hint = match block.field("type") {
+                "person" | "person_name" => "person",
+                "org" | "org_name" => "org",
+                "place" => "place",
+                "unknown" => "unknown",
+                _ => anyhow::bail!("Identifier Type must be person, org, place or unknown"),
+            };
+            entities.push(EntityCandidate {
+                id: format!("{}:{}", reference.source_id, block.durable_id("entity")),
+                type_hint: type_hint.into(),
+                comparison_key: value.to_lowercase(),
+                original_forms: vec![value.into()],
+                mention_refs: mentions,
+            });
+        }
+    }
+    let mut claims = Vec::new();
+    let mut inferences = Vec::new();
+    let mut links = Vec::new();
+    for block in document.blocks {
+        let references = block
+            .list("evidence")
+            .iter()
+            .map(|id| {
+                dictionary
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("unknown evidence ID"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        ensure!(
+            !references.is_empty(),
+            "generated record needs original evidence"
+        );
+        match block.kind.as_str() {
+            "identifier" if stage == "extraction" => {}
+            "claim" if stage == "extraction" => claims.push(SourceClaim {
+                id: block.durable_id("claim"),
+                subject_ref: if let Some(ordinal) =
+                    block.field("subject").strip_prefix("identifier #")
+                {
+                    let index = ordinal
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|n| n.checked_sub(1))
+                        .ok_or_else(|| anyhow::anyhow!("invalid local Identifier reference"))?;
+                    entities
+                        .get(index)
+                        .ok_or_else(|| anyhow::anyhow!("unknown local Identifier reference"))?
+                        .id
+                        .clone()
+                } else {
+                    block.field("subject").into()
+                },
+                predicate: block.field("predicate").into(),
+                object: block.field("object").into(),
+                text: block.field("statement").into(),
+                polarity: block.field("polarity").into(),
+                modality: block.field("modality").into(),
+                attributed_to: block.field("attribution").into(),
+                temporal_scope: block.field("time").into(),
+                evidence_refs: references,
+                extraction_scope: block.field("scope").into(),
+                assessment: Assessment::default(),
+                support_receipts: vec![],
+            }),
+            "inference" if stage != "extraction" => {
+                let mut limitations = block.list("conditions");
+                // Explicit counterevidence is retained, never omitted by a DTO
+                // that predates the structured-text contract.
+                for id in block.list("counterevidence") {
+                    ensure!(dictionary.contains_key(&id), "unknown counterevidence ID");
+                    limitations.push(format!("Counterevidence: {id}"));
+                }
+                inferences.push(Inference {
+                    id: block.durable_id("inference"),
+                    text: block.field("conclusion").into(),
+                    entity_refs: block.list("entities"),
+                    premise_claim_ids: block.list("premises"),
+                    evidence_refs: references,
+                    rationale: block.field("rationale").into(),
+                    limitations,
+                    assessment: Assessment::default(),
+                    snapshot_key: input.snapshot.key.clone(),
+                });
+            }
+            "link" if stage != "extraction" => {
+                let endpoints = block
+                    .list("endpoints")
+                    .iter()
+                    .map(|endpoint| {
+                        let (kind, id) = endpoint
+                            .split_once(' ')
+                            .ok_or_else(|| anyhow::anyhow!("endpoint must be kind ID"))?;
+                        Ok(TypedEndpoint {
+                            kind: kind.into(),
+                            id: id.into(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                links.push(AssessedLink {
+                    id: block.durable_id("link"),
+                    typed_endpoints: endpoints,
+                    relation: block.field("relation").into(),
+                    evidence_refs: references,
+                    rationale: block.field("rationale").into(),
+                    assessment: Assessment::default(),
+                    snapshot_key: input.snapshot.key.clone(),
+                });
+            }
+            _ => anyhow::bail!("unexpected operation block"),
+        }
+    }
+    for link in &mut links {
+        for endpoint in &mut link.typed_endpoints {
+            if endpoint.kind == "inference" {
+                if let Some(ordinal) = endpoint.id.strip_prefix('#') {
+                    let index = ordinal
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|n| n.checked_sub(1))
+                        .ok_or_else(|| anyhow::anyhow!("invalid local Inference reference"))?;
+                    endpoint.id = inferences
+                        .get(index)
+                        .ok_or_else(|| anyhow::anyhow!("unknown local Inference reference"))?
+                        .id
+                        .clone();
+                }
+            }
+        }
+    }
+    Ok(if stage == "extraction" {
+        serde_json::json!({"entities":entities,"claims":claims,"limit_reached":false,"partial_enumeration":false})
+    } else {
+        serde_json::json!({"inferences":inferences,"links":links})
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -308,6 +499,12 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
             }
         }
     }
+    if let Some(object) = user.as_object_mut() {
+        object.remove("output_contract");
+    }
+    if stage == "merge" {
+        user["instruction"] = serde_json::json!("Reconcile proposals against this original source window. Preserve corrections, limitations, premise references, denials, speakers and dates. Proposals are derivations, never independent evidence. Return at most five Inference and eight Link text blocks, or explicit Result: none and Reason. Use only supplied original evidence IDs.");
+    }
     let mut evidence_ids = Vec::new();
     for (id, reference) in &dictionary {
         let source = input
@@ -328,6 +525,7 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
         hash(system),
         user,
         settings.defaults.resolve_role(role).0,
+        settings.defaults.model_variants,
         settings.nlp,
         CONTRACT
     ]));
@@ -354,7 +552,9 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
     let messages = [
         crate::provider::ChatMessage {
             role: "system".into(),
-            content: system.into(),
+            content: format!("{system}\n{}\n{}\nUse supplied entity IDs in Subject/Entities and supplied claim IDs in Premises. To add a missed source-local actor during extraction, emit an Identifier block with Type person/org/place/unknown, Value its exact source name, Actor the same name, Evidence one offered ID, and Quotation a literal source passage. A Claim may refer to that actor as 'identifier #1' (ordinal of Identifier blocks); Rust assigns durable IDs and source spans. Claim blocks must also supply Subject, Predicate, Object, Attribution, Modality, Polarity, Time and Scope. Inference blocks must also supply Entities and Rationale. Evidence and Counterevidence list the short evidence_ids below. Link Endpoints use 'kind ID' separated by semicolons. Entity/claim endpoints must use supplied IDs; for an Inference in this response use 'inference #1' (ordinal of Inference blocks).",
+                crate::provider::structured_text::instructions(if stage == "extraction" {"claim"} else {"inference"}),
+                crate::provider::structured_text::instructions(if stage == "extraction" {"identifier"} else {"link"})),
             tool_call_id: None,
             tool_calls: vec![],
         },
@@ -375,7 +575,8 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
     let telemetry = None::<&std::path::Path>;
     drop(store);
     let mut scope =
-        super::insight_assessment::operation_scope(&execution_id, role, input, &task_id);
+        super::insight_assessment::operation_scope(&execution_id, role, input, &task_id)
+            .with_structured_text();
     if input.snapshot.owner_kind == "recon" {
         scope = scope.with_run(&input.snapshot.owner_id);
     }
@@ -387,8 +588,7 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
         &scope,
         &messages,
         |raw| {
-            parse_model_json(raw)
-                .and_then(|value| super::insight_wire::hydrate(value, &dictionary, input))
+            parse_stage_text(raw, stage, &dictionary, input)
                 .and_then(|value| serde_json::from_value::<T>(value).map_err(Into::into))
                 .and_then(|value| validate(&value))
                 .map_err(|e| e.to_string())
@@ -405,12 +605,9 @@ async fn execute_stage<T: serde::de::DeserializeOwned + Serialize>(
     let store = super::exec_store::ExecStore::open(db_path).await?;
     match result {
         Ok((raw, report)) => {
-            let value: T = serde_json::from_value(super::insight_wire::hydrate(
-                parse_model_json(&raw)?,
-                &dictionary,
-                input,
-            )?)?;
-            let route = serde_json::json!({"route":report.effective_route,"model":report.effective_model,"requests":report.requests,"compiled_bytes":compiled_bytes,"elapsed_ms":started.elapsed().as_millis() as u64});
+            let value: T =
+                serde_json::from_value(parse_stage_text(&raw, stage, &dictionary, input)?)?;
+            let route = serde_json::json!({"route":report.effective_route,"model":report.effective_model,"requests":report.requests,"compiled_bytes":compiled_bytes,"elapsed_ms":started.elapsed().as_millis() as u64,"raw_text":raw,"parser":crate::provider::structured_text::VERSION,"prompt":hash(system),"owner":[input.snapshot.owner_kind,input.snapshot.owner_id],"operation":stage,"candidates":user,"model_variants":settings.defaults.model_variants});
             store
                 .finish(
                     &op_key,
@@ -554,7 +751,7 @@ pub async fn run_pipeline(
             input,
             "extraction",
             &index.to_string(),
-            "claim_assessor",
+            analyst_role(input),
             CLAIM_PROMPT,
             user,
             auth,
@@ -822,7 +1019,7 @@ pub async fn run_pipeline(
             input,
             "inference",
             &index.to_string(),
-            "synthesis",
+            analyst_role(input),
             INFERENCE_PROMPT,
             user,
             auth,
@@ -893,7 +1090,7 @@ pub async fn run_pipeline(
                 input,
                 "merge",
                 &index.to_string(),
-                "synthesis",
+                analyst_role(input),
                 INFERENCE_PROMPT,
                 user,
                 auth,
@@ -1202,9 +1399,7 @@ async fn admit_brain_evidence(
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     db_path: &std::path::Path,
 ) -> Result<()> {
-    use super::decisions::{
-        templates::template_entity_binding, DecisionPolicy, DecisionService, DecisionState,
-    };
+    use super::decisions::{templates::template_entity_binding, DecisionPolicy, DecisionState};
     let query = format!(
         "{} {} {}",
         input.objective,
@@ -1306,25 +1501,24 @@ async fn admit_brain_evidence(
             drop(store);
             let mut scope = super::insight_assessment::operation_scope(
                 &execution_id,
-                "entity_resolver",
+                super::insight_assessment::role_for_kind(&input.snapshot.owner_kind, "identity"),
                 input,
                 &task_id,
             );
             if input.snapshot.owner_kind == "recon" {
                 scope = scope.with_run(&input.snapshot.owner_id);
             }
-            let result = DecisionService::new()
-                .evaluate_shared(
-                    auth,
-                    settings,
-                    &scope,
-                    &template_entity_binding(),
-                    &state,
-                    &DecisionPolicy::default(),
-                    cancel,
-                    telemetry,
-                )
-                .await;
+            let result = crate::recon::model_exec::evaluate_text_choices(
+                auth,
+                settings,
+                &scope,
+                &template_entity_binding(),
+                &state,
+                &DecisionPolicy::default(),
+                cancel,
+                telemetry,
+            )
+            .await;
             if let Err(error) = &result {
                 if cancel.load(std::sync::atomic::Ordering::Acquire)
                     || !error
@@ -2071,6 +2265,88 @@ pub(super) fn activity_sink(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_text_identifiers_keep_literal_mentions_and_host_owned_ids() {
+        let evidence = source("body:a", "publisher:a");
+        let input = PipelineInput {
+            snapshot: snapshot("recon", "fixture", 1, std::slice::from_ref(&evidence)),
+            evidence: vec![evidence.clone()],
+            objective: "Verify Acme's opening".into(),
+            surface: "recon".into(),
+            required_tasks_complete: true,
+            save_insights: false,
+            recall_enabled: false,
+        };
+        let dictionary =
+            std::collections::BTreeMap::from([("e1".into(), evidence.reference.clone())]);
+        let raw = "argos-text-v1\n## Identifier\nType: org\nValue: Acme\nActor: Acme\nEvidence: e1\nQuotation: Acme allegedly opened in 2020.\nEnd\n## Claim\nStatement: Acme allegedly opened in 2020.\nSubject: identifier #1\nPredicate: opened\nObject: site\nAttribution: source\nModality: alleged\nPolarity: positive\nTime: 2020\nScope: this source window\nEvidence: e1\nEnd";
+        let window: ClaimWindow = serde_json::from_value(
+            parse_stage_text(raw, "extraction", &dictionary, &input)
+                .expect("grounded actor and claim"),
+        )
+        .expect("typed window");
+        assert_eq!(window.claims[0].subject_ref, window.entities[0].id);
+        assert!(window.entities[0].id.starts_with("body:a:entity:"));
+        assert!(valid_entity(&window.entities[0], &evidence));
+        validate_claim(&window.claims[0], &window.entities, &input.evidence)
+            .expect("source-bound claim");
+        assert!(parse_stage_text(
+            &raw.replace(
+                "Quotation: Acme allegedly opened in 2020.",
+                "Quotation: Acme opened secretly."
+            ),
+            "extraction",
+            &dictionary,
+            &input
+        )
+        .is_err());
+        assert!(parse_stage_text(
+            &raw.replace("identifier #1", "identifier #99"),
+            "extraction",
+            &dictionary,
+            &input
+        )
+        .is_err());
+        assert!(parse_stage_text(
+            &raw.replace("Evidence: e1", "Evidence: fabricated"),
+            "extraction",
+            &dictionary,
+            &input
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn structured_text_links_resolve_local_inference_ordinals_without_model_ids() {
+        let evidence = source("body:a", "publisher:a");
+        let input = PipelineInput {
+            snapshot: snapshot("recon", "fixture", 1, std::slice::from_ref(&evidence)),
+            evidence: vec![evidence.clone()],
+            objective: "Verify Acme".into(),
+            surface: "recon".into(),
+            required_tasks_complete: true,
+            save_insights: false,
+            recall_enabled: false,
+        };
+        let dictionary = std::collections::BTreeMap::from([("e1".into(), evidence.reference)]);
+        let raw = "argos-text-v1\n## Inference\nConclusion: The opening is uncertain.\nPremises: c1\nEvidence: e1\nEntities: entity:a\nConditions: none\nCounterevidence: none\nRationale: The source includes a denial.\nEnd\n## Link\nEndpoints: entity entity:a; inference #1\nRelation: supports\nEvidence: e1\nRationale: Source denial qualifies the conclusion.\nEnd";
+        let result: InferenceWindow = serde_json::from_value(
+            parse_stage_text(raw, "inference", &dictionary, &input).expect("local reference"),
+        )
+        .expect("typed inferences");
+        assert_eq!(
+            result.links[0].typed_endpoints[1].id,
+            result.inferences[0].id
+        );
+        assert!(parse_stage_text(
+            &raw.replace("inference #1", "inference #9"),
+            "inference",
+            &dictionary,
+            &input
+        )
+        .is_err());
+    }
     #[tokio::test]
     async fn extraction_inherits_or_overrides_routes_and_skips_decisions_only_chat() {
         use crate::provider_attempt::mock;

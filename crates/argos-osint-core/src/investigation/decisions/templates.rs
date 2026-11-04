@@ -29,7 +29,7 @@ pub fn template_mode() -> DecisionContract {
 /// 2. directive_alignment: Does candidate.objective advance task.objective for this subject?
 pub fn template_directive_alignment() -> DecisionContract {
     DecisionContract::new(
-        "investigation_controller",
+        "recon_decisions",
         "directive_alignment",
         TEMPLATE_VERSION,
         ["task", "candidate", "subject"],
@@ -75,7 +75,7 @@ pub fn template_tool_selection(eligible_tool_candidates: &[(&str, &str)]) -> Dec
 /// 4. scarce_provider_need: Is distinctive provider evidence needed beyond retained evidence and adequate eligible alternatives?
 pub fn template_scarce_provider_need() -> DecisionContract {
     DecisionContract::new(
-        "investigation_controller",
+        "recon_decisions",
         "scarce_provider_need",
         TEMPLATE_VERSION,
         ["task", "candidate", "evidence", "computed_checks"],
@@ -95,7 +95,7 @@ pub fn template_scarce_provider_need() -> DecisionContract {
 /// 5. evidence_relevance: Does this passage address the intended subject and directive?
 pub fn template_evidence_relevance() -> DecisionContract {
     DecisionContract::new(
-        "evidence_curator",
+        "recon_decisions",
         "evidence_relevance",
         TEMPLATE_VERSION,
         ["subject", "candidate", "evidence"],
@@ -116,7 +116,7 @@ pub fn template_evidence_relevance() -> DecisionContract {
 /// 6. extraction_fidelity: Is the proposed observation faithful to the cited passage?
 pub fn template_extraction_fidelity() -> DecisionContract {
     DecisionContract::new(
-        "evidence_curator",
+        "recon_decisions",
         "extraction_fidelity",
         TEMPLATE_VERSION,
         ["candidate", "evidence"],
@@ -137,7 +137,7 @@ pub fn template_extraction_fidelity() -> DecisionContract {
 /// 7. entity_binding: Does supplied evidence establish the intended identity?
 pub fn template_entity_binding() -> DecisionContract {
     DecisionContract::new(
-        "entity_resolver",
+        "recon_decisions",
         "entity_binding",
         TEMPLATE_VERSION,
         ["subject", "candidate", "evidence"],
@@ -157,7 +157,7 @@ pub fn template_entity_binding() -> DecisionContract {
 /// 8. claim_relation: How does the exact passage bear on the claim’s qualifiers and time scope?
 pub fn template_claim_relation() -> DecisionContract {
     DecisionContract::new(
-        "claim_assessor",
+        "recon_decisions",
         "claim_relation",
         TEMPLATE_VERSION,
         ["candidate", "evidence"],
@@ -179,7 +179,7 @@ pub fn template_claim_relation() -> DecisionContract {
 /// 9. handoff_adequacy: Are material findings, uncertainty and unfinished work preserved?
 pub fn template_handoff_adequacy() -> DecisionContract {
     DecisionContract::new(
-        "investigation_controller",
+        "recon_decisions",
         "handoff_adequacy",
         TEMPLATE_VERSION,
         ["task", "candidate", "evidence"],
@@ -214,7 +214,7 @@ pub fn template_next_action(offered_tasks: &[(&str, &str)]) -> DecisionContract 
     ));
 
     DecisionContract::new(
-        "investigation_controller",
+        "recon_decisions",
         "next_action",
         TEMPLATE_VERSION,
         ["task", "evidence", "missing_context"],
@@ -230,7 +230,7 @@ pub fn template_next_action(offered_tasks: &[(&str, &str)]) -> DecisionContract 
 /// 11. resolution: Is the required answer established, disputed, incomplete or blocked?
 pub fn template_resolution() -> DecisionContract {
     DecisionContract::new(
-        "investigation_controller",
+        "recon_decisions",
         "resolution",
         TEMPLATE_VERSION,
         ["task", "evidence", "computed_checks"],
@@ -252,7 +252,7 @@ pub fn template_resolution() -> DecisionContract {
 /// 12. publication: Is the conclusion faithful to assessed evidence and uncertainty?
 pub fn template_publication() -> DecisionContract {
     DecisionContract::new(
-        "claim_assessor",
+        "recon_decisions",
         "publication",
         TEMPLATE_VERSION,
         ["candidate", "evidence", "missing_context"],
@@ -294,11 +294,7 @@ pub fn template_insight_batch(
         }
     }
     DecisionContract::new(
-        if items.iter().all(|(_, kind)| kind == "identity") {
-            "entity_resolver"
-        } else {
-            "claim_assessor"
-        },
+        "recon_decisions",
         "insight_batch",
         "insights-v3",
         ["candidate", "evidence"],

@@ -26,6 +26,8 @@ fn article() -> AtlasArticleRow {
         seen_at: "2026-10-22T01:00:00Z".into(),
         author: String::new(),
         image_url: String::new(),
+        categories: Vec::new(),
+        admitted_at: String::new(),
     }
 }
 

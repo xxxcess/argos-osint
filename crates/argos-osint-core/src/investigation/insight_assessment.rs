@@ -10,8 +10,7 @@ use anyhow::{ensure, Result};
 use serde_json::{json, Value};
 
 use super::decisions::{
-    templates::template_insight_batch, ContractAdapter, DecisionPolicy, DecisionService,
-    DecisionState,
+    templates::template_insight_batch, ContractAdapter, DecisionPolicy, DecisionState,
 };
 use super::insights::{Assessment, EvidenceLocation, EvidenceRef, PipelineInput, REQUEST_BYTES};
 use crate::recon::model_exec::{DecisionsAdapter, ModelOperationError, OperationScope};
@@ -89,7 +88,8 @@ fn compile(
             == ids.len(),
         "duplicate assessment item IDs"
     );
-    let contract = template_insight_batch(&ids, &mut policy);
+    let mut contract = template_insight_batch(&ids, &mut policy);
+    contract.role_id = role_for_kind(&input.snapshot.owner_kind, "assessment").into();
     let refs: Vec<_> = items.iter().flat_map(|i| i.refs.clone()).collect();
     let dictionary = dictionary(input, &refs)?;
     let candidates: Vec<_> = items.iter().enumerate().map(|(index,i)| json!({"id":format!("q{index}"),"item_id":i.id,"kind":i.kind,"text":i.text,"evidence_ids":i.refs.iter().map(|r|crate::nlp::cache::key(&json!(r))).collect::<Vec<_>>()})).collect();
@@ -188,22 +188,22 @@ fn partition_item(input: &PipelineInput, item: &Item) -> Result<Vec<Item>> {
 /// recalled-memory identity admission → Entity Resolver; memory
 /// predicate/time relevance → Evidence Curator; source claim fidelity,
 /// relation and publication checks → Claim Assessor.
-pub(crate) fn role_for_kind(kind: &str) -> &'static str {
-    match kind {
-        "identity" | "memory_identity" => "entity_resolver",
-        "memory_relevance" => "evidence_curator",
-        _ => "claim_assessor",
+pub(crate) fn role_for_kind(owner: &str, _kind: &str) -> &'static str {
+    if owner == "recon" {
+        "recon_decisions"
+    } else {
+        "atlas_evaluator"
     }
 }
 
 /// End of the bounded batch starting at `offset`: at most [`BATCH_LIMIT`]
-/// items, all requiring the same role.
-pub(super) fn role_batch_end(items: &[Item], offset: usize) -> usize {
-    let role = role_for_kind(&items[offset].kind);
+/// items, all requiring the same owner's decision role.
+pub(super) fn role_batch_end(owner: &str, items: &[Item], offset: usize) -> usize {
+    let role = role_for_kind(owner, &items[offset].kind);
     offset
         + items[offset..(offset + BATCH_LIMIT).min(items.len())]
             .iter()
-            .take_while(|item| role_for_kind(&item.kind) == role)
+            .take_while(|item| role_for_kind(owner, &item.kind) == role)
             .count()
 }
 
@@ -238,8 +238,8 @@ pub(super) async fn assess(
         ensure!(!cancel.load(Ordering::Acquire), "cancelled");
         // Partition batches by the role each item requires so a mixed batch
         // never resolves Claim Assessor for identity/relevance items.
-        let role = role_for_kind(&items[offset].kind);
-        let mut end = role_batch_end(items, offset);
+        let role = role_for_kind(&input.snapshot.owner_kind, &items[offset].kind);
+        let mut end = role_batch_end(&input.snapshot.owner_kind, items, offset);
         let (contract, state, policy) = loop {
             let compiled = compile(input, &items[offset..end])?;
             if fits(&compiled.0, &compiled.1) {
@@ -329,11 +329,10 @@ pub(super) async fn assess(
         if input.snapshot.owner_kind == "recon" {
             scope = scope.with_run(&input.snapshot.owner_id);
         }
-        let evaluated = DecisionService::new()
-            .evaluate_shared(
-                auth, settings, &scope, &contract, &state, &policy, cancel, telemetry,
-            )
-            .await;
+        let evaluated = crate::recon::model_exec::evaluate_text_choices(
+            auth, settings, &scope, &contract, &state, &policy, cancel, telemetry,
+        )
+        .await;
         let mut assessments = BTreeMap::new();
         let (status, error, route) = match evaluated {
             Ok((result, outcomes)) => {
@@ -451,11 +450,9 @@ mod role_partition_tests {
 
     #[test]
     fn assessment_kinds_route_to_their_owning_roles() {
-        assert_eq!(role_for_kind("identity"), "entity_resolver");
-        assert_eq!(role_for_kind("memory_identity"), "entity_resolver");
-        assert_eq!(role_for_kind("memory_relevance"), "evidence_curator");
         for kind in ["claim", "inference", "link", "corroboration", "publication"] {
-            assert_eq!(role_for_kind(kind), "claim_assessor", "{kind}");
+            assert_eq!(role_for_kind("recon", kind), "recon_decisions", "{kind}");
+            assert_eq!(role_for_kind("atlas", kind), "atlas_evaluator", "{kind}");
         }
     }
 
@@ -477,23 +474,15 @@ mod role_partition_tests {
         let mut offset = 0;
         let mut batches = vec![];
         while offset < items.len() {
-            let end = role_batch_end(&items, offset);
-            batches.push((role_for_kind(&items[offset].kind), end - offset));
+            let end = role_batch_end("recon", &items, offset);
+            batches.push((role_for_kind("recon", &items[offset].kind), end - offset));
             offset = end;
         }
-        assert_eq!(
-            batches,
-            vec![
-                ("claim_assessor", 2),
-                ("entity_resolver", 2),
-                ("evidence_curator", 1),
-                ("claim_assessor", 1)
-            ]
-        );
+        assert_eq!(batches, vec![("recon_decisions", 6)]);
         let many: Vec<Item> = (0..19)
             .map(|i| Item::new(&format!("c{i}"), "claim", "t", &[]))
             .collect();
-        assert_eq!(role_batch_end(&many, 0), BATCH_LIMIT);
-        assert_eq!(role_batch_end(&many, 16), 19);
+        assert_eq!(role_batch_end("recon", &many, 0), BATCH_LIMIT);
+        assert_eq!(role_batch_end("recon", &many, 16), 19);
     }
 }

@@ -201,6 +201,19 @@ impl ConfigLock {
     /// and returns that error: the targets never hold a mix of revisions.
     pub fn commit_files(&self, files: &[CommitFile]) -> Result<u64> {
         validate_batch(files)?;
+        let files: Vec<CommitFile> = files
+            .iter()
+            .map(|file| {
+                let mut file = file.clone();
+                if file.slot == "settings" && file.path.exists() {
+                    file.body = crate::provider::preserve_pipeline_settings(
+                        &file.body,
+                        &fs::read_to_string(&file.path)?,
+                    )?;
+                }
+                Ok(file)
+            })
+            .collect::<Result<_>>()?;
         // Argos rewrote config files: drop the cached auth redaction set on
         // every exit path (commit or rollback).
         let _auth_cache = crate::secrets::AuthCacheReset;

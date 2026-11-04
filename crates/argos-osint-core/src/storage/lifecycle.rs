@@ -167,7 +167,9 @@ pub(crate) fn resolve(map: &HashMap<String, String>, id: &str) -> String {
     cur
 }
 
-/// Merge `from` into `to`. Aborts when it would make a cycle.
+/// Merge `from` into `to`. Aborts when it would make a cycle. A merge
+/// touching a catalog-scope actor changes matcher inputs, so the cached
+/// matcher epoch is bumped (repositories rebuild single-flight).
 pub async fn add_redirect_in(tx: &Tx, from: &str, to: &str, now: &str) -> Result<(), TxError> {
     let map = redirects(tx).await?;
     if from == to || resolve(&map, to) == from {
@@ -183,6 +185,19 @@ pub async fn add_redirect_in(tx: &Tx, from: &str, to: &str, now: &str) -> Result
             .bind(("now", now.to_string())),
     )
     .await?;
+    let mut r = run(
+        tx,
+        tx.query("SELECT VALUE scope_key FROM brain_actor WHERE record::id(id) IN $ids AND scope_key = $scope")
+            .bind((
+                "ids",
+                vec![from.to_string(), to.to_string()],
+            ))
+            .bind(("scope", crate::actor_catalog::SCOPE)),
+    )
+    .await?;
+    if !take::<Vec<String>>(&mut r, 0)?.is_empty() {
+        crate::actor_catalog::bump_catalog_epoch();
+    }
     Ok(())
 }
 

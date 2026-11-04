@@ -222,17 +222,30 @@ fn one_batch() -> ContextBatch {
 fn chat_decisions_reject_unknown_missing_duplicate_ids_and_labels() {
     let batch = one_batch();
     let adapter = ContextDecisions { batch: &batch };
-    let labels = adapter.parse_chat(r#"{"items":[{"id":"b1","relevance":"support"},{"id":"b2","relevance":"counterevidence"}]}"#).unwrap();
+    let labeled = |pairs: &[(&str, &str)]| {
+        let mut raw = String::from("argos-text-v1\n");
+        for (id, label) in pairs {
+            raw.push_str(&format!(
+                "## Decision\nQuestion: {id}\nChoice: {label}\nEnd\n"
+            ));
+        }
+        raw
+    };
+    let labels = adapter
+        .parse_chat(&labeled(&[("b1", "support"), ("b2", "counterevidence")]))
+        .unwrap();
     assert_eq!(batch.selected(&labels).unwrap().len(), 2);
-    for raw in [
-        r#"{"items":[{"id":"b1","relevance":"support"}]}"#,
-        r#"{"items":[{"id":"b1","relevance":"support"},{"id":"unknown","relevance":"context"}]}"#,
-        r#"{"items":[{"id":"b1","relevance":"support"},{"id":"b1","relevance":"context"}]}"#,
-        r#"{"items":[{"id":"b1","relevance":"support"},{"id":"b2","relevance":"faithful"}]}"#,
+    for pairs in [
+        vec![("b1", "support")],
+        vec![("b1", "support"), ("unknown", "context")],
+        vec![("b1", "support"), ("b1", "context")],
+        vec![("b1", "support"), ("b2", "faithful")],
     ] {
-        assert!(adapter.parse_chat(raw).is_err(), "{raw}");
+        assert!(adapter.parse_chat(&labeled(&pairs)).is_err(), "{pairs:?}");
     }
-    let labels = adapter.parse_chat(r#"{"items":[{"id":"b1","relevance":"irrelevant"},{"id":"b2","relevance":"counterevidence"}]}"#).unwrap();
+    let labels = adapter
+        .parse_chat(&labeled(&[("b1", "irrelevant"), ("b2", "counterevidence")]))
+        .unwrap();
     assert_eq!(batch.selected(&labels).unwrap()[0].id, "b2");
 }
 

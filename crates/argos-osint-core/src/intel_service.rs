@@ -9,11 +9,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-pub const CATEGORIES: [&str; 6] = [
+pub const CATEGORIES: [&str; 7] = [
     "geopolitical",
     "economic",
     "military",
-    "information",
+    "science",
+    "health",
     "stability",
     "technology",
 ];
@@ -69,8 +70,41 @@ pub struct ArticlePage {
     pub revision: String,
 }
 
-/// Keyset pagination over article occurrences, ordered deterministically. No
-/// list_runs/list_articles loop and no offset scan. Search stays inside the selected day and category.
+/// Deduplicate article occurrences by identity, newest occurrence first
+/// (published/seen descending, then id): the deduplicated All/catalog order.
+pub(crate) fn dedup_newest(mut rows: Vec<AtlasArticleRow>) -> Vec<AtlasArticleRow> {
+    rows.sort_by(|a, b| {
+        b.published_at
+            .cmp(&a.published_at)
+            .then_with(|| b.seen_at.cmp(&a.seen_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut identities = std::collections::HashSet::new();
+    rows.retain(|row| identities.insert(row.id.clone()));
+    rows
+}
+
+/// Membership counts over deduplicated identities: per-category counts
+/// overlap (one article counts in every tag it carries) and the `all` key is
+/// the distinct admitted total.
+pub(crate) fn overlap_counts(rows: &[AtlasArticleRow]) -> std::collections::BTreeMap<String, u64> {
+    let mut counts = std::collections::BTreeMap::new();
+    for row in rows {
+        for tag in &row.categories {
+            *counts.entry(tag.clone()).or_default() += 1;
+        }
+        if !row.categories.is_empty() {
+            *counts.entry("all".to_string()).or_default() += 1;
+        }
+    }
+    counts
+}
+
+/// Keyset pagination over one retained day's admitted articles, deduplicated
+/// by identity (the newest occurrence of an article id wins), ordered
+/// deterministically. A day's rows are bounded by retention, so the fetch
+/// loads the day once and dedupes in Rust; category filters use ordered-array
+/// membership, and per-category counts overlap while All totals deduplicate.
 pub async fn articles(repo: &Repository, q: &ArticleQuery) -> Result<ArticlePage> {
     q.validate()?;
     let hottest = q.sort == "hottest";
@@ -93,57 +127,88 @@ pub async fn articles(repo: &Repository, q: &ArticleQuery) -> Result<ArticlePage
         )
     };
     let n = q.limit.unwrap_or(30);
-    // Keep the single-category predicate separate rather than hiding it in an
-    // OR, so the category-first index remains available to the query planner.
-    let category_filter = if q.category == "all" {
-        ""
-    } else {
-        "AND category = $category"
+    // Category membership over the ordered tags; All means admitted (the
+    // canonical corpus carries at least one tag) and deduplicates identity.
+    let member = |a: &AtlasArticleRow| {
+        if q.category == "all" {
+            !a.categories.is_empty()
+        } else {
+            a.categories.iter().any(|tag| tag == &q.category)
+        }
     };
-    let time_after = "published_at < $p OR (published_at = $p AND seen_at < $s)
-           OR (published_at = $p AND seen_at = $s AND article_id > $a)
-           OR (published_at = $p AND seen_at = $s AND article_id = $a AND run_id > $r)";
-    let (after_filter, ordering) = if hottest {
-        (
-            format!("temperature < $heat OR (temperature = $heat AND ({time_after}))"),
-            "temperature DESC, published_at DESC, seen_at DESC, article_id, run_id",
-        )
-    } else {
-        (
-            time_after.to_owned(),
-            "published_at DESC, seen_at DESC, article_id, run_id",
-        )
-    };
-    let sql = format!(
-        "SELECT * FROM atlas_article WHERE
+    let sql = "SELECT * FROM atlas_article WHERE
           run_id IN (SELECT VALUE record::id(id) FROM atlas_run WHERE started_at >= $start AND started_at < $end)
-          {category_filter}
-         AND ($search = '' OR string::contains(string::lowercase(string::concat(title, ' ', description, ' ', source_name, ' ', source_domain, ' ', url)), $search))
-         AND ($first OR {after_filter})
-          ORDER BY {ordering} LIMIT $limit"
-    );
+          AND ($search = '' OR string::contains(string::lowercase(string::concat(title, ' ', description, ' ', source_name, ' ', source_domain, ' ', url)), $search))
+          ORDER BY published_at DESC, seen_at DESC, article_id, run_id";
     let mut response = repo
         .db()
         .query(sql)
-        .bind(("category", q.category.clone()))
         .bind(("start", q.day.clone()))
         .bind(("end", format!("{}~", q.day)))
         .bind(("search", q.search.trim().to_lowercase()))
-        .bind(("first", q.cursor.is_none()))
-        .bind(("heat", heat))
-        .bind(("p", after.0))
-        .bind(("s", after.1))
-        .bind(("a", after.2))
-        .bind(("r", after.3))
-        .bind(("limit", (n + 1) as i64))
         .await?
         .check()?;
     let raw: Vec<crate::storage::atlas::ArticleRow> = response.take(0)?;
-    let mut rows: Vec<AtlasArticleRow> = raw.into_iter().map(Into::into).collect();
-    let more = rows.len() > n;
-    rows.truncate(n);
+    let mut rows: Vec<AtlasArticleRow> = dedup_newest(raw.into_iter().map(Into::into).collect());
+    rows.retain(member);
+    if hottest {
+        // The fetch orders newest-first; the hot ordering re-sorts the
+        // deduplicated page set by temperature first, ties deterministic.
+        rows.sort_by(|a, b| {
+            b.temperature
+                .partial_cmp(&a.temperature)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.published_at.cmp(&a.published_at))
+                .then_with(|| b.seen_at.cmp(&a.seen_at))
+                .then_with(|| a.id.cmp(&b.id))
+                .then_with(|| a.run_id.cmp(&b.run_id))
+        });
+    }
+    // The keyset cursor is the last emitted row's sort tuple; a row passes
+    // when it sorts strictly after it. Hot ordering puts temperature first.
+    use std::cmp::Reverse;
+    let mut page: Vec<AtlasArticleRow> = Vec::new();
+    for row in &rows {
+        let passed = if q.cursor.is_none() {
+            true
+        } else if hottest {
+            (
+                Reverse(row.temperature),
+                Reverse(row.published_at.as_str()),
+                Reverse(row.seen_at.as_str()),
+                row.id.as_str(),
+                row.run_id.as_str(),
+            ) > (
+                Reverse(heat),
+                Reverse(after.0.as_str()),
+                Reverse(after.1.as_str()),
+                after.2.as_str(),
+                after.3.as_str(),
+            )
+        } else {
+            (
+                Reverse(row.published_at.as_str()),
+                Reverse(row.seen_at.as_str()),
+                row.id.as_str(),
+                row.run_id.as_str(),
+            ) > (
+                Reverse(after.0.as_str()),
+                Reverse(after.1.as_str()),
+                after.2.as_str(),
+                after.3.as_str(),
+            )
+        };
+        if passed {
+            page.push(row.clone());
+        }
+        if page.len() > n {
+            break;
+        }
+    }
+    let more = page.len() > n;
+    page.truncate(n);
     let next_cursor = if more {
-        rows.last()
+        page.last()
             .map(|a| {
                 if hottest {
                     serde_json::to_string(&(
@@ -161,15 +226,18 @@ pub async fn articles(repo: &Repository, q: &ArticleQuery) -> Result<ArticlePage
     } else {
         None
     };
-    let revision = crate::nlp::cache::hash(&serde_json::to_string(&rows)?);
+    let revision = crate::nlp::cache::hash(&serde_json::to_string(&page)?);
     Ok(ArticlePage {
-        rows,
+        rows: page,
         next_cursor,
         revision,
     })
 }
 
-/// Article totals for one retained day, keyed by stored category.
+/// Article totals for one retained day, deduplicated by identity (the newest
+/// occurrence of an article id wins). Per-category counts overlap — an
+/// article with several tags counts in each; the `all` key is the distinct
+/// admitted total.
 pub async fn category_counts(
     repo: &Repository,
     day: &str,
@@ -180,19 +248,16 @@ pub async fn category_counts(
     let mut response = repo
         .db()
         .query(
-            "SELECT VALUE category FROM atlas_article WHERE
+            "SELECT * FROM atlas_article WHERE
               run_id IN (SELECT VALUE record::id(id) FROM atlas_run WHERE started_at >= $start AND started_at < $end)",
         )
         .bind(("start", day.to_string()))
         .bind(("end", format!("{day}~")))
         .await?
         .check()?;
-    let rows: Vec<String> = response.take(0)?;
-    let mut counts = std::collections::BTreeMap::new();
-    for category in rows {
-        *counts.entry(category).or_default() += 1;
-    }
-    Ok(counts)
+    let raw: Vec<crate::storage::atlas::ArticleRow> = response.take(0)?;
+    let rows: Vec<AtlasArticleRow> = dedup_newest(raw.into_iter().map(Into::into).collect());
+    Ok(overlap_counts(&rows))
 }
 
 pub async fn article(repo: &Repository, run: &str, id: &str) -> Result<Option<AtlasArticleRow>> {
@@ -200,6 +265,16 @@ pub async fn article(repo: &Repository, run: &str, id: &str) -> Result<Option<At
         bail!("invalid article identifier");
     }
     Ok(atlas::article(repo.db(), run, id).await?)
+}
+
+/// `search_articles`: discovery-compatible article search (Phase 4). The
+/// storage service owns the indexed query; this wrapper is the validation
+/// and projection seam for the API.
+pub async fn article_search(
+    repo: &Repository,
+    q: &crate::storage::article_discovery::ArticleSearchQuery,
+) -> Result<crate::storage::article_discovery::ArticleSearchPage> {
+    crate::storage::article_discovery::search_articles(repo, q).await
 }
 
 /// Immutable projection shared by any non-terminal client. Retained publication,
@@ -648,9 +723,87 @@ pub(crate) fn extracted_graph(
 }
 
 #[cfg(test)]
+mod membership_tests {
+    use super::*;
+
+    fn row(id: &str, run: &str, seen: &str, categories: &[&str]) -> AtlasArticleRow {
+        AtlasArticleRow {
+            run_id: run.into(),
+            id: id.into(),
+            title: "Headline".into(),
+            description: String::new(),
+            url: "https://example.com".into(),
+            country: "us".into(),
+            source_name: "Wire".into(),
+            source_domain: "example.com".into(),
+            published_at: "2026-11-03T00:00:00+00:00".into(),
+            provider: "newsapi".into(),
+            temperature: 1.0,
+            category: categories.first().copied().unwrap_or("unk").into(),
+            seen_at: seen.into(),
+            author: String::new(),
+            image_url: String::new(),
+            categories: categories.iter().map(|tag| tag.to_string()).collect(),
+            admitted_at: "2026-11-03T01:00:00+00:00".into(),
+        }
+    }
+
+    #[test]
+    fn dedup_keeps_the_newest_occurrence_of_each_identity() {
+        let rows = vec![
+            row(
+                "a",
+                "run-1",
+                "2026-11-03T02:00:00+00:00",
+                &["science", "health"],
+            ),
+            row("b", "run-1", "2026-11-03T02:00:00+00:00", &["military"]),
+            // The same article retained again by a newer run: dedup drops it.
+            row("a", "run-2", "2026-11-03T03:00:00+00:00", &["science"]),
+        ];
+        let deduped = dedup_newest(rows);
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].id, "a");
+        assert_eq!(deduped[0].run_id, "run-2", "the newest occurrence wins");
+        assert_eq!(deduped[0].categories, ["science"]);
+    }
+
+    #[test]
+    fn per_category_counts_overlap_and_all_deduplicates_identity() {
+        let rows = vec![
+            row("a", "run-1", "t1", &["science", "health"]),
+            row("b", "run-1", "t2", &["science", "technology", "military"]),
+            // A second occurrence of `a` never inflates any count.
+            row("a", "run-2", "t3", &["science", "health"]),
+        ];
+        let deduped = dedup_newest(rows);
+        let counts = overlap_counts(&deduped);
+        assert_eq!(counts["science"], 2);
+        assert_eq!(counts["health"], 1);
+        assert_eq!(counts["military"], 1);
+        assert_eq!(counts["technology"], 1);
+        assert_eq!(counts["all"], 2, "All deduplicates identity");
+        // Legacy rows without tags are pending migration: never counted.
+        let legacy = vec![row("c", "run-1", "t4", &[])];
+        let counts = overlap_counts(&dedup_newest(legacy));
+        assert!(!counts.contains_key("all"));
+    }
+
+    #[test]
+    fn membership_filters_use_array_tags_not_the_scalar() {
+        let article = row("a", "run-1", "t1", &["science", "health"]);
+        assert!(article.categories.iter().any(|tag| tag == "science"));
+        assert!(!article.categories.iter().any(|tag| tag == "information"));
+        // The scalar projects the first tag for existing readers.
+        assert_eq!(article.projected_category(), "science");
+        let legacy = row("c", "run-1", "t4", &[]);
+        assert_eq!(legacy.projected_category(), "unk");
+    }
+}
+
+#[cfg(test)]
 mod extracted_graph_tests {
     use super::extracted_graph;
-
     #[test]
     fn extracted_items_are_navigable_before_indexing() {
         let graph = extracted_graph(

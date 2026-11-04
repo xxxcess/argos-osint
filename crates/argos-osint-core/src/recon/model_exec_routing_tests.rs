@@ -254,8 +254,9 @@ async fn jev_with_missing_key_is_a_capability_skip_not_a_chat_request() {
 #[tokio::test]
 async fn brief_fidelity_falls_back_to_chat_with_the_stage_budget() {
     use crate::intel_recon::brief_fidelity::{FidelityDecisions, FidelityItem, FIDELITY_TOKENS};
+    // The chat fallback is the labeled-choices text contract (never JSON).
     let server = mock::serve(vec![mock::ok_json(
-        r#"{"items":[{"id":"c1","fidelity":"faithful"}]}"#,
+        "argos-text-v1\n## Decision\nQuestion: item_0\nChoice: faithful\nEnd",
         "stop",
     )])
     .await;
@@ -359,10 +360,10 @@ fn json_validator(raw: &str) -> Result<(), String> {
 }
 
 // §7 wire budget: a 4-route interactive operation whose every answer fails
-// validation sends at most 6 requests — each route's reserved initial
-// dispatch plus the shared allowance of two repairs.
+// validation sends at most 5 requests — each route's reserved initial
+// dispatch plus one shared targeted text correction.
 #[tokio::test]
-async fn interactive_generation_is_bounded_to_six_dispatches_across_four_routes() {
+async fn interactive_generation_is_bounded_to_five_dispatches_across_four_routes() {
     let server = mock::serve(vec![mock::ok_json("not json", "stop")]).await;
     let auth = auth(&server.base_url, Some("or-fixture"));
     let settings = synthesis_chain(
@@ -387,19 +388,15 @@ async fn interactive_generation_is_bounded_to_six_dispatches_across_four_routes(
     .await
     .unwrap_err();
     let error = error.downcast_ref::<ModelOperationError>().unwrap();
-    assert_eq!(error.requests, 6);
-    assert_eq!(server.hits(), 6);
+    assert_eq!(error.requests, 5);
+    assert_eq!(server.hits(), 5);
     let routes: Vec<u32> = error
         .history
         .iter()
         .filter(|h| h.dispatched)
         .map(|h| h.route_index)
         .collect();
-    assert_eq!(
-        routes,
-        [0, 0, 1, 1, 2, 3],
-        "repairs drew the shared allowance"
-    );
+    assert_eq!(routes, [0, 0, 1, 2, 3], "repairs drew the shared allowance");
 }
 
 // §7: one transport call is one HTTP request; the unsupported-option

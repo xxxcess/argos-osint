@@ -743,6 +743,8 @@ mod tests {
             seen_at: String::new(),
             author: String::new(),
             image_url: String::new(),
+            categories: Vec::new(),
+            admitted_at: String::new(),
         }
     }
     #[tokio::test]

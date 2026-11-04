@@ -45,9 +45,11 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// Portable schema 2 adds operation-override role references and an optional
 /// route `account_id`. Export picks schema 1 unless either feature is used.
 pub const SCHEMA_VERSION_ROUTING: u32 = 2;
+/// Schema 3 carries independent pipeline roles and reasoning variants.
+pub const SCHEMA_VERSION_PIPELINES: u32 = 3;
 
 fn supported_schema(version: u64) -> bool {
-    version == u64::from(SCHEMA_VERSION) || version == u64::from(SCHEMA_VERSION_ROUTING)
+    (u64::from(SCHEMA_VERSION)..=u64::from(SCHEMA_VERSION_PIPELINES)).contains(&version)
 }
 /// A document larger than this is refused before it is parsed.
 pub const MAX_DOCUMENT_BYTES: usize = 1 << 20;
@@ -80,6 +82,10 @@ pub const TOOL_CREDENTIAL_PROVIDERS: &[&str] = &[
 /// them, so the document is rejected rather than routed into a transport that
 /// silently degrades.
 pub const GENERAL_ROLES: &[&str] = &[
+    "recon_agent",
+    "recon_analyst",
+    "atlas_analyst",
+    "brain_summary",
     "recon",
     "synthesis",
     "classifier",
@@ -90,7 +96,13 @@ pub const GENERAL_ROLES: &[&str] = &[
     "investigation_controller",
 ];
 /// Roles that serve typed decisions, and therefore need a decisions model.
-pub const DECISION_ROLES: &[&str] = &["tool_picker", "decision_model", "decision_fallback"];
+pub const DECISION_ROLES: &[&str] = &[
+    "recon_decisions",
+    "atlas_evaluator",
+    "tool_picker",
+    "decision_model",
+    "decision_fallback",
+];
 
 /// Root fields a document must carry.
 const ROOT_REQUIRED: &[&str] = &[
@@ -147,6 +159,14 @@ const ROLE_KEYS: &[&str] = &[
 ];
 /// Every role key a `model_roles` object may carry.
 const ROLE_FIELDS: &[&str] = &[
+    "recon_agent",
+    "recon_decisions",
+    "recon_analyst",
+    "atlas_evaluator",
+    "atlas_analyst",
+    "brain_summary",
+    "model_variants",
+    "migration_exceptions",
     "recon",
     "synthesis",
     "tool_picker",
@@ -400,6 +420,24 @@ pub struct RoleAssignment {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoleDocument {
+    #[serde(default, skip_serializing_if = "Supplied::is_absent")]
+    pub recon_agent: Supplied<RoleAssignment>,
+    #[serde(default, skip_serializing_if = "Supplied::is_absent")]
+    pub recon_decisions: Supplied<RoleAssignment>,
+    #[serde(default, skip_serializing_if = "Supplied::is_absent")]
+    pub recon_analyst: Supplied<RoleAssignment>,
+    #[serde(default, skip_serializing_if = "Supplied::is_absent")]
+    pub atlas_evaluator: Supplied<RoleAssignment>,
+    #[serde(default, skip_serializing_if = "Supplied::is_absent")]
+    pub atlas_analyst: Supplied<RoleAssignment>,
+    #[serde(default, skip_serializing_if = "Supplied::is_absent")]
+    pub brain_summary: Supplied<RoleAssignment>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_variants: std::collections::BTreeMap<String, crate::request_policy::ReasoningEffort>,
+    /// Non-secret operator-review notes produced by pipeline migration, so a
+    /// transferred profile surfaces the same review work on the target machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migration_exceptions: Vec<String>,
     pub recon: RoleAssignment,
     pub synthesis: RoleAssignment,
     pub tool_picker: RoleAssignment,
@@ -452,9 +490,19 @@ impl ProfileConfig {
 }
 
 impl RoleDocument {
+    pub fn pipeline_entries(&self) -> [(&'static str, &Supplied<RoleAssignment>); 6] {
+        [
+            ("recon_agent", &self.recon_agent),
+            ("recon_decisions", &self.recon_decisions),
+            ("recon_analyst", &self.recon_analyst),
+            ("atlas_evaluator", &self.atlas_evaluator),
+            ("atlas_analyst", &self.atlas_analyst),
+            ("brain_summary", &self.brain_summary),
+        ]
+    }
     /// Every role key with its assignment, in documentation order.
     pub fn entries(&self) -> Vec<(&'static str, &RoleAssignment)> {
-        vec![
+        let mut entries = vec![
             ("recon", &self.recon),
             ("synthesis", &self.synthesis),
             ("tool_picker", &self.tool_picker),
@@ -465,7 +513,13 @@ impl RoleDocument {
             ("claim_assessor", &self.claim_assessor),
             ("investigation_controller", &self.investigation_controller),
             ("decision_model", &self.decision_model),
-        ]
+        ];
+        for (role, supplied) in self.pipeline_entries() {
+            if let Supplied::Value(assignment) = supplied {
+                entries.push((role, assignment));
+            }
+        }
+        entries
     }
 }
 
@@ -1346,7 +1400,15 @@ fn check_role_compatibility(
     }
 }
 
-const GENERATIVE_ONLY_ROLES: &[&str] = &["recon", "synthesis", "summarization"];
+const GENERATIVE_ONLY_ROLES: &[&str] = &[
+    "recon_agent",
+    "recon_analyst",
+    "atlas_analyst",
+    "brain_summary",
+    "recon",
+    "synthesis",
+    "summarization",
+];
 
 fn check_route_reference(
     route: &Route,
@@ -1388,7 +1450,11 @@ fn validate_roles(value: Option<&Value>, ctx: &RoleCtx, issues: &mut Vec<ConfigI
             check_route_reference(route, &ctx.provider_ids, pointer, issues);
         }
     };
-    for key in ROLE_KEYS.iter().copied() {
+    for key in ROLE_KEYS
+        .iter()
+        .copied()
+        .chain(provider::CANONICAL_ROLE_KEYS)
+    {
         let pointer = child("/model_roles", key);
         match obj.get(key) {
             None | Some(Value::Null) => {}
@@ -1401,6 +1467,29 @@ fn validate_roles(value: Option<&Value>, ctx: &RoleCtx, issues: &mut Vec<ConfigI
             ),
             Some(_) => issues.push(issue(&pointer, "must be a role assignment object")),
         }
+    }
+    if let Some(variants) = obj.get("model_variants") {
+        if ctx.schema < u64::from(SCHEMA_VERSION_PIPELINES)
+            || serde_json::from_value::<
+                std::collections::BTreeMap<String, crate::request_policy::ReasoningEffort>,
+            >(variants.clone())
+            .is_err()
+        {
+            issues.push(issue(
+                "/model_roles/model_variants",
+                "requires a reasoning-variant map in schema 3",
+            ));
+        }
+    }
+    if ctx.schema < u64::from(SCHEMA_VERSION_PIPELINES)
+        && provider::CANONICAL_ROLE_KEYS
+            .iter()
+            .any(|role| obj.contains_key(*role))
+    {
+        issues.push(issue(
+            "/model_roles",
+            "pipeline roles require schema_version 3",
+        ));
     }
     if let Some(value) = obj.get("decision_fallback") {
         let pointer = child("/model_roles", "decision_fallback");
@@ -1467,7 +1556,12 @@ fn validate_role_reference(
     }
     match o.get("route_role") {
         Some(Value::String(role)) => {
-            if let Err(message) = provider::OperationOverride::role(role).check() {
+            let legacy = ctx.schema < u64::from(SCHEMA_VERSION_PIPELINES)
+                && provider::LEGACY_ROLE_KEYS.contains(&role.as_str());
+            if let Err(message) = provider::OperationOverride::role(role)
+                .check()
+                .or_else(|error| if legacy { Ok(()) } else { Err(error) })
+            {
                 issues.push(issue(&here, message));
             }
         }
@@ -1565,10 +1659,28 @@ fn validate_config(config: &ProfileConfig, warnings: &mut Vec<ConfigIssue>) -> V
             issues.push(issue(&pointer, "is not a known operation"));
         }
         if let PortableOverride::Route(r) = o {
-            if let Err(message) = provider::OperationOverride::Route(r.clone()).check() {
+            let legacy = config.schema_version < SCHEMA_VERSION_PIPELINES
+                && provider::LEGACY_ROLE_KEYS.contains(&r.route_role.as_str());
+            if let Err(message) = provider::OperationOverride::Route(r.clone())
+                .check()
+                .or_else(|error| if legacy { Ok(()) } else { Err(error) })
+            {
                 issues.push(issue(&child(&pointer, "route_role"), message));
             }
         }
+    }
+    if config.schema_version < SCHEMA_VERSION_PIPELINES
+        && (config
+            .model_roles
+            .pipeline_entries()
+            .iter()
+            .any(|(_, supplied)| !supplied.is_absent())
+            || !config.model_roles.model_variants.is_empty())
+    {
+        issues.push(issue(
+            "/schema_version",
+            "pipeline roles and model variants require schema_version 3",
+        ));
     }
     let mut ids: Vec<String> = Vec::new();
     for (index, provider) in config.providers.iter().enumerate() {
@@ -1806,6 +1918,9 @@ pub fn export_document(
     auth: &AuthFile,
     quotas: &QuotaSettingsFile,
 ) -> ProfileConfig {
+    let mut captured = settings.clone();
+    captured.defaults.migrate_pipeline_roles();
+    let settings = &captured;
     let mut providers: Vec<ProviderEntry> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for (id, secret) in &auth.accounts {
@@ -1837,6 +1952,50 @@ pub fn export_document(
         providers,
         tool_credentials: tool_credential_entries(settings),
         model_roles: RoleDocument {
+            recon_agent: settings
+                .defaults
+                .recon_agent
+                .as_ref()
+                .map(role_assignment)
+                .map(Supplied::Value)
+                .unwrap_or_default(),
+            recon_decisions: settings
+                .defaults
+                .recon_decisions
+                .as_ref()
+                .map(role_assignment)
+                .map(Supplied::Value)
+                .unwrap_or_default(),
+            recon_analyst: settings
+                .defaults
+                .recon_analyst
+                .as_ref()
+                .map(role_assignment)
+                .map(Supplied::Value)
+                .unwrap_or_default(),
+            atlas_evaluator: settings
+                .defaults
+                .atlas_evaluator
+                .as_ref()
+                .map(role_assignment)
+                .map(Supplied::Value)
+                .unwrap_or_default(),
+            atlas_analyst: settings
+                .defaults
+                .atlas_analyst
+                .as_ref()
+                .map(role_assignment)
+                .map(Supplied::Value)
+                .unwrap_or_default(),
+            brain_summary: settings
+                .defaults
+                .brain_summary
+                .as_ref()
+                .map(role_assignment)
+                .map(Supplied::Value)
+                .unwrap_or_default(),
+            model_variants: settings.defaults.model_variants.clone(),
+            migration_exceptions: settings.defaults.migration_exceptions.clone(),
             recon: role_assignment(&settings.defaults.recon),
             synthesis: role_assignment(&settings.defaults.synthesis),
             tool_picker: role_assignment(&settings.defaults.tool_picker),
@@ -1865,6 +2024,15 @@ pub fn export_document(
     // importing ordinary exports.
     if document.uses_routing_features() {
         document.schema_version = SCHEMA_VERSION_ROUTING;
+    }
+    if document
+        .model_roles
+        .pipeline_entries()
+        .iter()
+        .any(|(_, supplied)| !supplied.is_absent())
+        || !document.model_roles.model_variants.is_empty()
+    {
+        document.schema_version = SCHEMA_VERSION_PIPELINES;
     }
     document
 }
@@ -2201,7 +2369,40 @@ pub fn apply_import(
         apply_tool_slot(&entry.fallback, settings, &entry.provider, true);
     }
     for (role, assignment) in plan.config.model_roles.entries() {
-        apply_role(assignment, settings.defaults.role_mut(role));
+        if !provider::CANONICAL_ROLE_KEYS.contains(&role) {
+            let migrated = settings.defaults.recon_agent.is_some();
+            if let Some(target) = settings.defaults.legacy_role_mut(role) {
+                let previous = target.clone();
+                apply_role(assignment, Some(&mut *target));
+                if migrated && *target != previous {
+                    settings.defaults.migration_exceptions.push(format!(
+                        "{role}: legacy import archived; explicit pipeline settings retained"
+                    ));
+                }
+            }
+        } else {
+            apply_role(assignment, settings.defaults.role_mut(role));
+        }
+    }
+    for (role, supplied) in plan.config.model_roles.pipeline_entries() {
+        if matches!(supplied, Supplied::Removed) {
+            *settings
+                .defaults
+                .role_mut(role)
+                .expect("known pipeline role") = ModelAssignment::default();
+        }
+    }
+    settings
+        .defaults
+        .model_variants
+        .extend(plan.config.model_roles.model_variants.clone());
+    for exception in &plan.config.model_roles.migration_exceptions {
+        if !settings.defaults.migration_exceptions.contains(exception) {
+            settings
+                .defaults
+                .migration_exceptions
+                .push(exception.clone());
+        }
     }
     match &plan.config.model_roles.decision_fallback {
         Some(assignment) => {
@@ -2213,8 +2414,12 @@ pub fn apply_import(
         // An absent or null decision fallback means none configured.
         None => settings.defaults.decision_fallback = None,
     }
-    // Overrides are replaced as a whole: an absent key inherits its role.
-    settings.defaults.operation_overrides.clear();
+    // Preserve replacement semantics for operations a document's schema knows,
+    // while a legacy writer cannot erase newer operation keys.
+    settings.defaults.operation_overrides.retain(|key, _| {
+        plan.config.schema_version < SCHEMA_VERSION_PIPELINES
+            && !provider::LEGACY_BRIEF_OPERATIONS.contains(&key.as_str())
+    });
     for (key, o) in &plan.config.model_roles.operation_overrides {
         match o {
             // A reference is stored as-is; the referenced role is untouched.
@@ -2232,10 +2437,13 @@ pub fn apply_import(
                         .defaults
                         .operation_overrides
                         .insert(key.clone(), target.into());
+                } else {
+                    settings.defaults.operation_overrides.remove(key);
                 }
             }
         }
     }
+    settings.defaults.migrate_pipeline_roles();
     for setting in &plan.config.rate_limits {
         quotas.upsert(setting.clone());
     }

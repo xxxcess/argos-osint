@@ -10,6 +10,7 @@ Tags connect a documented concern to its implementation across directory boundar
 | `@tag:recon-bindings` | [Bindings](code/core.md#recon) | [tool_io.rs](../../crates/argos-osint-core/src/recon/investigation/tool_io.rs) |
 | `@tag:intel-brief` | [Intel](code/core.md#intel) | [brief_pipeline.rs](../../crates/argos-osint-core/src/intel_recon/brief_pipeline.rs) |
 | `@tag:atlas-collection` | [Atlas](code/core.md#atlas) | [atlas.rs](../../crates/argos-osint-core/src/atlas.rs) |
+| `@tag:discovery-services` | [Discovery services](code/storage.md) | [article_discovery.rs](../../crates/argos-osint-core/src/storage/article_discovery.rs), [actor_catalog.rs](../../crates/argos-osint-core/src/storage/actor_catalog.rs) |
 | `@tag:brain-memory` | [Brain](code/core.md#brain) | [brain.rs](../../crates/argos-osint-core/src/brain.rs) |
 | `@tag:osint-providers` | [Providers](code/core.md#providers-and-tool-adapters) | [providers.rs](../../crates/argos-osint-core/src/osint/providers.rs) |
 | `@tag:surreal-storage` | [Storage](code/storage.md) | [storage/mod.rs](../../crates/argos-osint-core/src/storage/mod.rs) |

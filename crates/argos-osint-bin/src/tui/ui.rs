@@ -4755,10 +4755,7 @@ pub(crate) fn field_placeholder(app: &App, field: FieldId) -> String {
                     | FieldId::SynthesisProvider
                     | FieldId::ClassifierProvider
                     | FieldId::SummarizationProvider
-                    | FieldId::EvidenceCuratorProvider
-                    | FieldId::EntityResolverProvider
                     | FieldId::ClaimAssessorProvider
-                    | FieldId::InvestigationControllerProvider
             ) {
                 "Choose a provider".into()
             } else {
@@ -11502,6 +11499,9 @@ mod tests {
                     inferred: false,
                     unverified: false,
                     source_tool: String::new(),
+                    actor: String::new(),
+                    span_start: 0,
+                    span_end: 0,
                 },
                 Binding {
                     kind: "handle".into(),
@@ -11512,6 +11512,9 @@ mod tests {
                     inferred: true,
                     unverified: false,
                     source_tool: String::new(),
+                    actor: String::new(),
+                    span_start: 0,
+                    span_end: 0,
                 },
                 Binding {
                     kind: "handle".into(),
@@ -11522,6 +11525,9 @@ mod tests {
                     inferred: false,
                     unverified: true,
                     source_tool: String::new(),
+                    actor: String::new(),
+                    span_start: 0,
+                    span_end: 0,
                 },
                 Binding {
                     kind: "url".into(),
@@ -11532,6 +11538,9 @@ mod tests {
                     inferred: false,
                     unverified: false,
                     source_tool: String::new(),
+                    actor: String::new(),
+                    span_start: 0,
+                    span_end: 0,
                 },
             ],
             binding_notes: vec!["s1 firecrawl_search: rules found 1; Recon model added 0".into()],

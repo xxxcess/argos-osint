@@ -15,8 +15,12 @@ use surrealdb::Surreal;
 use super::jobs::{run, take};
 use super::tx::{run_tx, RetryPolicy, TxError};
 
-/// SurrealDB schema version this build writes.
-pub const SCHEMA_VERSION: i64 = 1;
+/// SurrealDB schema version this build writes. v2 adds the Atlas admission
+/// staging and rejection-receipt tables plus the canonical `categories`
+/// array, `admitted_at`, the `categories.*` membership index and the two
+/// article full-text indexes — all additive `IF NOT EXISTS` definitions, so
+/// opening a v1 database upgrades it in place without a wipe.
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Module schemas in apply order: counters before the outbox; the graph
 /// before lifecycle (which indexes `brain_graph_node`); Atlas before its

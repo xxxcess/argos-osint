@@ -19,7 +19,7 @@
   <main>
     <div class="eyebrow">Architecture</div>
     <h1>Models and roles</h1>
-    <p class="lede">auth.json holds accounts. config.toml holds independent role assignments. Saving a key never writes a default. Legacy OpenAI stays until the user reassigns them.</p>
+    <p class="lede">auth.json holds accounts. config.toml holds independent role assignments. Saving a key never writes a default. Legacy OpenAI stays until the user reassigns them. Six canonical model roles: recon_agent, recon_decisions, recon_analyst, atlas_evaluator, atlas_analyst, brain_summary (provider.rs). One-time migrate_pipeline_roles migration; preserve_pipeline_settings guards: non-TOML bodies pass through, blank role fields preserve archived routes, conflicting non-blank edits bail. TUI Defaults/Model-roles screens edit these six canonical roles directly via canonical keys (recon_agent, recon_decisions, recon_analyst, atlas_evaluator, atlas_analyst, brain_summary); the former Claim-Assessor editor now targets atlas_analyst (generation-only; incompatible-fallback gated), Evidence-Curator and Entity-Resolver are labeled ARCHIVED (caller-dependent, retired with investigation_controller), model-roles rows show inheritance via canonical keys (e.g. ← atlas_analyst), and the fast preset follows brain_summary.</p>
     <div class="frame">
       <svg role="img" aria-labelledby="model-roles-title model-roles-desc" viewBox="0 0 800 312" xmlns="http://www.w3.org/2000/svg">
         <title id="model-roles-title">Models and roles</title>

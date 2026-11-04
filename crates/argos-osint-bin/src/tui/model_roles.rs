@@ -1,4 +1,7 @@
-//! Reusable editor state and presentation for the 9 logical model roles.
+//! Reusable editor state and presentation for the Defaults tab's role
+//! editors. The five pipeline editors drive the six canonical routes (the
+//! Tool picker and Controller editors share `recon_decisions`); the
+//! curator/resolver editors keep their archived caller-dependent fields.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
@@ -23,57 +26,57 @@ pub struct RoleMetadata {
 pub const ROLE_METADATA: [RoleMetadata; 9] = [
     RoleMetadata {
         role: DefaultsRole::Recon,
-        name: "Recon (Planner)",
+        name: "Recon agent",
         purpose: "Formulates directives, query decomposition, and task dependencies.",
         default_inheritance: None,
     },
     RoleMetadata {
         role: DefaultsRole::ToolPicker,
         name: "Tool picker",
-        purpose: "Selects next eligible OSINT tool and argument bindings.",
+        purpose: "Selects next eligible OSINT tool and bounded decision gates.",
         default_inheritance: Some("OpenRouter Jev"),
     },
     RoleMetadata {
         role: DefaultsRole::Synthesis,
-        name: "Synthesis",
-        purpose: "Generates structured assessments, final briefings, and executive summaries.",
+        name: "Recon analyst",
+        purpose: "Generates findings, claims and inferences, and the final report.",
         default_inheritance: None,
     },
     RoleMetadata {
         role: DefaultsRole::Classifier,
-        name: "Classifier",
-        purpose: "OSINT taxonomy classification and tag assignment.",
+        name: "Atlas evaluator",
+        purpose: "OSINT taxonomy classification, fidelity and support decisions.",
         default_inheritance: Some("OpenRouter Jev"),
     },
     RoleMetadata {
         role: DefaultsRole::Summarization,
-        name: "Summarization",
-        purpose: "Evidence compression and source-grounded views.",
-        default_inheritance: Some("Synthesis"),
+        name: "Brain summary",
+        purpose: "Shared neighborhood and knowledge summaries.",
+        default_inheritance: None,
     },
     RoleMetadata {
         role: DefaultsRole::EvidenceCurator,
         name: "Evidence curator",
-        purpose: "Extracts source-linked passages, observations, and temporal dates.",
+        purpose: "Archived caller-dependent assignment; extraction maps to its pipeline analyst.",
         default_inheritance: Some("Recon"),
     },
     RoleMetadata {
         role: DefaultsRole::EntityResolver,
         name: "Entity resolver",
-        purpose: "Correlates cross-platform identifiers and resolves entity conflicts.",
+        purpose: "Archived caller-dependent assignment; resolution is deterministic.",
         default_inheritance: Some("Classifier"),
     },
     RoleMetadata {
         role: DefaultsRole::ClaimAssessor,
-        name: "Claim assessor",
-        purpose: "Evaluates per-claim verification, stances, and citations.",
-        default_inheritance: Some("Synthesis"),
+        name: "Atlas analyst",
+        purpose: "Metadata claims, body-grounded inferences, related leads and news prose.",
+        default_inheritance: None,
     },
     RoleMetadata {
         role: DefaultsRole::InvestigationController,
-        name: "Investigation controller",
-        purpose: "Verifies checkpoints, stopping conditions, and next-task dispatch.",
-        default_inheritance: Some("Recon"),
+        name: "Controller",
+        purpose: "Archived controller editor; routes to Recon decisions.",
+        default_inheritance: None,
     },
 ];
 
@@ -112,7 +115,7 @@ pub fn role_presentation(app: &App, role: DefaultsRole) -> RolePresentationInfo 
         .copied()
         .unwrap_or(ROLE_METADATA[0]);
 
-    let (assignment, inherited_from) = app.settings.defaults.resolve_role(role.settings_key());
+    let (assignment, inherited_from) = app.settings.defaults.resolve_role(role.role_key());
     let explicit_provider = app.field(role.provider_field()).trim().to_string();
     let explicit_model = app.field(role.model_field()).trim().to_string();
     let is_explicit = !explicit_provider.is_empty() && !explicit_model.is_empty();
@@ -181,7 +184,7 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
             ),
         );
     }
-    // Left pane: 9 roles scrollable list
+    // Left pane: six roles, scrollable list
     let items: Vec<ListItem> = DefaultsRole::ALL
         .iter()
         .skip(start)
@@ -270,7 +273,10 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
         theme::accent(),
     )));
 
-    if let Some(transport) = if sel_info.meta.role == DefaultsRole::ToolPicker {
+    if let Some(transport) = if matches!(
+        sel_info.meta.role,
+        DefaultsRole::ToolPicker | DefaultsRole::InvestigationController
+    ) {
         Some(provider::picker_transport(&sel_info.resolved_model))
     } else {
         None
@@ -295,7 +301,7 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
         let marker = if row.key == selected_key { "▸" } else { " " };
         let style = if row.key == selected_key {
             theme::accent()
-        } else if row.role == sel_info.meta.role.settings_key() {
+        } else if row.role == sel_info.meta.role.role_key() {
             theme::text()
         } else {
             theme::dim()
@@ -314,7 +320,7 @@ pub fn draw_model_roles_view(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
     details_lines.push(Line::from(Span::styled(
-        "Op ▸ select · Save/Reset op edit · preset: Claims, Links → Summarization",
+        "Op ▸ select · Save/Reset op edit · preset: Claims, Links → Brain summary",
         theme::dim(),
     )));
 
@@ -433,8 +439,11 @@ mod brief_operation_tests {
     #[test]
     fn rows_show_inheritance_and_overrides() {
         let mut d = provider::RoleDefaults::default();
-        d.synthesis.provider = "openrouter".into();
-        d.synthesis.model = "openai/gpt-4o".into();
+        // Brief operations inherit from their canonical logical role
+        // (`atlas_analyst` for Inferences), never from a legacy field.
+        let analyst = d.role_mut("atlas_analyst").expect("canonical slot");
+        analyst.provider = "openrouter".into();
+        analyst.model = "openai/gpt-4o".into();
         d.operation_overrides.insert(
             provider::OP_LINKS_GENERATE.into(),
             provider::ModelAssignment {
@@ -457,26 +466,32 @@ mod brief_operation_tests {
             .find(|r| r.key == provider::OP_INFERENCES_GENERATE)
             .unwrap();
         assert!(!inf.overridden);
-        assert!(inf.render().contains("← synthesis"));
+        assert!(inf.render().contains("← atlas_analyst"));
+        assert!(inf.render().contains("openai/gpt-4o"));
     }
 
     #[test]
-    fn fast_preset_rows_follow_summarization_and_reset_keeps_it() {
+    fn fast_preset_rows_follow_brain_summary_and_reset_keeps_it() {
         let mut d = provider::RoleDefaults::default();
-        d.summarization.provider = "openrouter".into();
-        d.summarization.model = "nvidia/nemotron-3-super-120b-a12b:free".into();
+        let summary = d.role_mut("brain_summary").expect("canonical slot");
+        summary.provider = "openrouter".into();
+        summary.model = "nvidia/nemotron-3-super-120b-a12b:free".into();
         d.apply_fast_preset();
         assert!(d.fast_preset_applied());
-        d.summarization.model = "google/gemma-4-31b-it:free".into();
+        let summary = d.role_mut("brain_summary").expect("canonical slot");
+        summary.model = "google/gemma-4-31b-it:free".into();
         let rows = brief_operation_rows(&d);
         let claims = rows
             .iter()
             .find(|r| r.key == provider::OP_CLAIMS_GENERATE)
             .unwrap();
         assert_eq!(claims.model, "google/gemma-4-31b-it:free");
-        assert!(claims.render().contains("→ summarization (linked)"));
+        assert!(claims.render().contains("→ brain_summary (linked)"));
         assert!(d.reset_fast_preset());
         assert!(d.operation_overrides.is_empty());
-        assert_eq!(d.summarization.model, "google/gemma-4-31b-it:free");
+        assert_eq!(
+            d.role("brain_summary").unwrap().model,
+            "google/gemma-4-31b-it:free"
+        );
     }
 }

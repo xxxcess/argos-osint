@@ -1,11 +1,13 @@
 //! Atlas run storage on SurrealDB (P3): `atlas_run`, `atlas_article`,
-//! `atlas_quota`, `atlas_checkpoint` and `atlas_repair`, the SurrealDB side
-//! of `atlas_runs`, `atlas_articles`, `atlas_quota`,
-//! `argos_atlas_checkpoints` and `argos_atlas_repairs`.
+//! `atlas_quota`, `atlas_checkpoint`, `atlas_repair`, plus the admission
+//! staging table `atlas_admission` and the rejection receipt table
+//! `atlas_rejection` (schema v2).
 //!
 //! Record keys: `atlas_run` by run id, `atlas_article` by
 //! `[run_id, article_id]`, `atlas_quota` by `[provider, day]`,
-//! `atlas_checkpoint` by `[run_id, revision]`, `atlas_repair` by run id.
+//! `atlas_checkpoint` by `[run_id, revision]`, `atlas_repair` by run id,
+//! `atlas_admission` by `[run_id, article_id]`, and `atlas_rejection` by
+//! `[article_id, input_hash, taxonomy_version]`.
 
 use surrealdb::engine::any::Any;
 use surrealdb::types::SurrealValue;
@@ -17,7 +19,9 @@ use super::jobs::{run, take};
 use super::tx::{run_tx, RetryPolicy, TxError};
 use crate::store::{AtlasArticleRow, AtlasRunRow};
 
-/// Atlas schema (idempotent).
+/// Atlas schema (idempotent). The v2 additions are additive `IF NOT EXISTS`
+/// definitions: `categories`/`admitted_at` with the membership and full-text
+/// indexes, and the admission/rejection tables. No migration ladder.
 pub const SCHEMA: &str = "DEFINE TABLE IF NOT EXISTS atlas_run SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS state ON atlas_run TYPE string;
 DEFINE FIELD IF NOT EXISTS phase ON atlas_run TYPE int DEFAULT 1;
@@ -41,6 +45,9 @@ DEFINE FIELD IF NOT EXISTS published_at ON atlas_article TYPE string;
 DEFINE FIELD IF NOT EXISTS provider ON atlas_article TYPE string;
 DEFINE FIELD IF NOT EXISTS temperature ON atlas_article TYPE float;
 DEFINE FIELD IF NOT EXISTS category ON atlas_article TYPE string DEFAULT 'unk';
+DEFINE FIELD IF NOT EXISTS categories ON atlas_article TYPE array DEFAULT [];
+DEFINE FIELD IF NOT EXISTS categories.* ON atlas_article TYPE string;
+DEFINE FIELD IF NOT EXISTS admitted_at ON atlas_article TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS seen_at ON atlas_article TYPE string;
 DEFINE FIELD IF NOT EXISTS author ON atlas_article TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS image_url ON atlas_article TYPE string DEFAULT '';
@@ -48,6 +55,32 @@ DEFINE INDEX IF NOT EXISTS atlas_article_run ON atlas_article FIELDS run_id;
 DEFINE INDEX IF NOT EXISTS atlas_article_id ON atlas_article FIELDS article_id;
 DEFINE INDEX IF NOT EXISTS atlas_article_bulletin ON atlas_article FIELDS category, published_at, seen_at, article_id, run_id;
 DEFINE INDEX IF NOT EXISTS atlas_article_bulletin_all ON atlas_article FIELDS published_at, seen_at, article_id, run_id;
+DEFINE INDEX IF NOT EXISTS atlas_article_categories ON atlas_article FIELDS categories.*;
+DEFINE ANALYZER IF NOT EXISTS atlas_article_text TOKENIZERS class FILTERS lowercase, ascii;
+DEFINE INDEX IF NOT EXISTS atlas_article_title_search ON atlas_article FIELDS title FULLTEXT ANALYZER atlas_article_text BM25;
+DEFINE INDEX IF NOT EXISTS atlas_article_description_search ON atlas_article FIELDS description FULLTEXT ANALYZER atlas_article_text BM25;
+DEFINE TABLE IF NOT EXISTS atlas_admission SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS run_id ON atlas_admission TYPE string;
+DEFINE FIELD IF NOT EXISTS article_id ON atlas_admission TYPE string;
+DEFINE FIELD IF NOT EXISTS payload_json ON atlas_admission TYPE string;
+DEFINE FIELD IF NOT EXISTS input_hash ON atlas_admission TYPE string;
+DEFINE FIELD IF NOT EXISTS source_revision ON atlas_admission TYPE string;
+DEFINE FIELD IF NOT EXISTS state ON atlas_admission TYPE string;
+DEFINE FIELD IF NOT EXISTS attempts ON atlas_admission TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS last_error ON atlas_admission TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS taxonomy_version ON atlas_admission TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON atlas_admission TYPE string;
+DEFINE FIELD IF NOT EXISTS updated_at ON atlas_admission TYPE string;
+DEFINE INDEX IF NOT EXISTS atlas_admission_state ON atlas_admission FIELDS state, updated_at;
+DEFINE INDEX IF NOT EXISTS atlas_admission_article ON atlas_admission FIELDS article_id;
+DEFINE INDEX IF NOT EXISTS atlas_admission_hash ON atlas_admission FIELDS input_hash;
+DEFINE TABLE IF NOT EXISTS atlas_rejection SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS article_id ON atlas_rejection TYPE string;
+DEFINE FIELD IF NOT EXISTS input_hash ON atlas_rejection TYPE string;
+DEFINE FIELD IF NOT EXISTS taxonomy_version ON atlas_rejection TYPE string;
+DEFINE FIELD IF NOT EXISTS source_revision ON atlas_rejection TYPE string;
+DEFINE FIELD IF NOT EXISTS reason ON atlas_rejection TYPE string;
+DEFINE FIELD IF NOT EXISTS rejected_at ON atlas_rejection TYPE string;
 DEFINE TABLE IF NOT EXISTS atlas_quota SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS used ON atlas_quota TYPE int DEFAULT 0;
 DEFINE TABLE IF NOT EXISTS atlas_checkpoint SCHEMAFULL;
@@ -124,6 +157,10 @@ pub(crate) struct ArticleRow {
     provider: String,
     temperature: f64,
     category: String,
+    /// Missing on rows written before schema v2 (legacy scalar only).
+    categories: Option<Vec<String>>,
+    /// Missing on rows written before schema v2.
+    admitted_at: Option<String>,
     seen_at: String,
     author: String,
     image_url: String,
@@ -131,6 +168,13 @@ pub(crate) struct ArticleRow {
 
 impl From<ArticleRow> for AtlasArticleRow {
     fn from(r: ArticleRow) -> Self {
+        let categories = r.categories.unwrap_or_default();
+        // Legacy rows keep their stored scalar until the resumable
+        // migration writes the array; v2 rows project the first tag.
+        let category = match categories.first() {
+            Some(first) => first.clone(),
+            None => r.category,
+        };
         AtlasArticleRow {
             run_id: r.run_id,
             id: r.article_id,
@@ -143,10 +187,12 @@ impl From<ArticleRow> for AtlasArticleRow {
             published_at: r.published_at,
             provider: r.provider,
             temperature: r.temperature,
-            category: r.category,
+            category,
             seen_at: r.seen_at,
             author: r.author,
             image_url: r.image_url,
+            categories,
+            admitted_at: r.admitted_at.unwrap_or_default(),
         }
     }
 }
@@ -306,7 +352,9 @@ pub async fn run_days(db: &Surreal<Any>) -> Result<Vec<String>, TxError> {
     Ok(days)
 }
 
-/// `atlas_upsert_article`: insert or replace every column.
+/// `atlas_upsert_article`: insert or replace every column. `category` is
+/// stored as the projection of `categories` (first tag), so legacy bulletin
+/// readers keep their semantics.
 pub async fn upsert_article(db: &Surreal<Any>, row: &AtlasArticleRow) -> Result<(), TxError> {
     exec(
         db,
@@ -326,7 +374,9 @@ pub async fn upsert_article(db: &Surreal<Any>, row: &AtlasArticleRow) -> Result<
                     published_at: row.published_at.clone(),
                     provider: row.provider.clone(),
                     temperature: row.temperature,
-                    category: row.category.clone(),
+                    category: row.projected_category().to_string(),
+                    categories: Some(row.categories.clone()),
+                    admitted_at: Some(row.admitted_at.clone()),
                     seen_at: row.seen_at.clone(),
                     author: row.author.clone(),
                     image_url: row.image_url.clone(),
@@ -336,7 +386,8 @@ pub async fn upsert_article(db: &Surreal<Any>, row: &AtlasArticleRow) -> Result<
     .await
 }
 
-/// `atlas_set_category`.
+/// `atlas_set_category` (legacy scalar setter; the scalar projects the first
+/// tag on v2 rows, so callers pass the projected tag).
 pub async fn set_category(
     db: &Surreal<Any>,
     run_id: &str,
@@ -532,10 +583,13 @@ pub async fn repair_status(db: &Surreal<Any>, run_id: &str) -> Result<Option<Str
     Ok(r.take::<Option<String>>(0)?)
 }
 
-/// `atlas_articles_for_intel`: one category's articles from runs started on
-/// `day` (`YYYY-MM-DD`), optionally filtered by a case-insensitive `query`
-/// over title, description, source and URL; newest published first, one row
-/// per article id (the newest run's).
+/// `atlas_articles_for_intel`: one category's admitted articles from runs
+/// started on `day` (`YYYY-MM-DD`), optionally filtered by a
+/// case-insensitive `query` over title, description, source and URL; newest
+/// published first, one row per article id (the newest run's). Filters use
+/// ordered-category membership (`categories CONTAINS` semantics in Rust;
+/// the `categories.*` index serves it in Phase 4's indexed queries); `all`
+/// means every admitted article (non-empty tags), deduplicated by identity.
 pub async fn articles_for_intel(
     db: &Surreal<Any>,
     category: &str,
@@ -543,12 +597,18 @@ pub async fn articles_for_intel(
     query: &str,
 ) -> Result<Vec<AtlasArticleRow>, TxError> {
     let q = query.trim().to_ascii_lowercase();
+    let all = category == "all";
     let mut rows = Vec::new();
     for run in list_runs(db).await? {
         if run.started_at.get(..10) != Some(day) {
             continue;
         }
         for a in list_articles(db, &run.id).await? {
+            let member = if all {
+                !a.categories.is_empty()
+            } else {
+                a.categories.iter().any(|tag| tag == category)
+            };
             let hit = q.is_empty()
                 || [
                     &a.title,
@@ -559,7 +619,7 @@ pub async fn articles_for_intel(
                 ]
                 .iter()
                 .any(|f| f.to_ascii_lowercase().contains(&q));
-            if a.category == category && hit {
+            if member && hit {
                 rows.push(a);
             }
         }
@@ -573,4 +633,313 @@ pub async fn articles_for_intel(
     let mut seen = std::collections::HashSet::new();
     rows.retain(|r| seen.insert(r.id.clone()));
     Ok(rows)
+}
+
+// ---- admission staging (schema v2) -------------------------------------
+
+/// Admission states. `pending`/`evaluating`/`failed` are live staging rows;
+/// `admitted` and `discarded` are terminal and the row is deleted as soon as
+/// the canonical row or rejection receipt commits, so the staging table
+/// stays bounded.
+pub const ADMISSION_RETRY_STATES: [&str; 2] = ["pending", "failed"];
+
+/// One bounded staging row. The payload carries the fetched article until
+/// admission; the row itself never holds derived indices.
+#[derive(Clone, Debug, SurrealValue)]
+pub struct AdmissionRow {
+    pub run_id: String,
+    pub article_id: String,
+    pub payload_json: String,
+    pub input_hash: String,
+    pub source_revision: String,
+    pub state: String,
+    pub attempts: i64,
+    pub last_error: String,
+    pub taxonomy_version: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl AdmissionRow {
+    /// The staged article payload.
+    pub fn article(&self) -> Result<AtlasArticleRow, TxError> {
+        serde_json::from_str(&self.payload_json)
+            .map_err(|e| TxError::Abort(format!("admission payload {}: {e}", self.article_id)))
+    }
+}
+
+/// Stage one fetched article for admission. The row key is
+/// `[run_id, article_id]`; re-staging the same input is idempotent and a
+/// changed input hash or taxonomy replaces the row as a fresh `pending`
+/// attempt. Returns true when a new row was created.
+pub async fn stage_article(
+    db: &Surreal<Any>,
+    row: &AtlasArticleRow,
+    source_revision: &str,
+    taxonomy_version: &str,
+) -> Result<bool, TxError> {
+    let payload = serde_json::to_string(row)
+        .map_err(|e| TxError::Abort(format!("admission payload: {e}")))?;
+    let hash = crate::atlas_metadata::input_hash(row);
+    let mut r = db
+        .query(
+            "LET $r = type::record('atlas_admission', $key);
+             LET $same = ((SELECT VALUE input_hash FROM ONLY $r) ?? '') = $hash
+               AND ((SELECT VALUE taxonomy_version FROM ONLY $r) ?? '') = $tax;
+             -- Re-staging the same input is a no-op; a changed input hash or
+             -- taxonomy replaces the row as a fresh pending attempt (the
+             -- record may exist, so UPSERT).
+             IF $same { RETURN false } ELSE {
+               UPSERT $r CONTENT {
+                 run_id: $run, article_id: $article, payload_json: $payload,
+                 input_hash: $hash, source_revision: $revision, state: 'pending',
+                 attempts: 0, last_error: '', taxonomy_version: $tax,
+                 created_at: $now, updated_at: $now
+               } RETURN NONE;
+               RETURN true
+             };",
+        )
+        .bind(("key", encode(&[&row.run_id, &row.id])))
+        .bind(("run", row.run_id.to_string()))
+        .bind(("article", row.id.to_string()))
+        .bind(("payload", payload))
+        .bind(("hash", hash))
+        .bind(("revision", source_revision.to_string()))
+        .bind(("tax", taxonomy_version.to_string()))
+        .bind(("now", now()))
+        .await?
+        .check()?;
+    Ok(r.take::<Option<bool>>(2)?.unwrap_or(false))
+}
+
+/// Live staging rows of one run, oldest update first.
+pub async fn admission_rows(db: &Surreal<Any>, run_id: &str) -> Result<Vec<AdmissionRow>, TxError> {
+    let mut r = db
+        .query(
+            "SELECT run_id, article_id, payload_json, input_hash, source_revision, state, \
+             attempts, last_error, taxonomy_version, created_at, updated_at, record::id(id) AS id \
+             FROM atlas_admission WHERE run_id = $run ORDER BY updated_at, article_id",
+        )
+        .bind(("run", run_id.to_string()))
+        .await?
+        .check()?;
+    Ok(r.take(0)?)
+}
+
+/// One staging row.
+pub async fn admission_row(
+    db: &Surreal<Any>,
+    run_id: &str,
+    article_id: &str,
+) -> Result<Option<AdmissionRow>, TxError> {
+    let mut r = db
+        .query(
+            "SELECT run_id, article_id, payload_json, input_hash, source_revision, state, \
+             attempts, last_error, taxonomy_version, created_at, updated_at, record::id(id) AS id \
+             FROM ONLY type::record('atlas_admission', $key)",
+        )
+        .bind(("key", encode(&[run_id, article_id])))
+        .await?
+        .check()?;
+    Ok(r.take::<Option<AdmissionRow>>(0)?)
+}
+
+/// Retryable staging work across runs (`pending`/`failed`), oldest update
+/// first; pinned to `atlas_admission_state`.
+pub const ADMISSION_WORK_SURQL: &str = "SELECT run_id, article_id, payload_json, input_hash, \
+     source_revision, state, attempts, last_error, taxonomy_version, created_at, updated_at, \
+     record::id(id) AS id FROM atlas_admission WHERE state INSIDE $states \
+     ORDER BY updated_at, article_id";
+
+/// Bounded upper bound on work claimed per pass.
+pub const ADMISSION_WORK_LIMIT: usize = 512;
+
+pub async fn admission_work(db: &Surreal<Any>) -> Result<Vec<AdmissionRow>, TxError> {
+    let mut r = db
+        .query(format!("{ADMISSION_WORK_SURQL} LIMIT $limit"))
+        .bind(("states", ADMISSION_RETRY_STATES.to_vec()))
+        .bind(("limit", ADMISSION_WORK_LIMIT as i64))
+        .await?
+        .check()?;
+    Ok(r.take(0)?)
+}
+
+/// Reset rows left in `evaluating` by an interrupted cycle so they retry.
+pub async fn admission_reset_stale(db: &Surreal<Any>) -> Result<(), TxError> {
+    exec(
+        db,
+        db.query(
+            "UPDATE atlas_admission SET state = 'pending', updated_at = $now \
+             WHERE state = 'evaluating' RETURN NONE",
+        )
+        .bind(("now", now())),
+    )
+    .await
+}
+
+/// Mark one staged row evaluating, guarded by its input hash. False when the
+/// row moved on (re-staged with new input or already terminal).
+pub async fn admission_begin(
+    db: &Surreal<Any>,
+    run_id: &str,
+    article_id: &str,
+    input_hash: &str,
+) -> Result<bool, TxError> {
+    let mut r = db
+        .query(
+            "UPDATE type::record('atlas_admission', $key) SET state = 'evaluating', \
+             updated_at = $now WHERE input_hash = $hash AND state INSIDE $states \
+             RETURN VALUE state",
+        )
+        .bind(("key", encode(&[run_id, article_id])))
+        .bind(("hash", input_hash.to_string()))
+        .bind(("states", ADMISSION_RETRY_STATES.to_vec()))
+        .bind(("now", now()))
+        .await?
+        .check()?;
+    Ok(r.take::<Vec<String>>(0)?
+        .first()
+        .is_some_and(|s| s == "evaluating"))
+}
+
+/// Record a retryable failure: attempts increment and the row stays staged.
+pub async fn admission_failed(
+    db: &Surreal<Any>,
+    run_id: &str,
+    article_id: &str,
+    input_hash: &str,
+    error: &str,
+) -> Result<(), TxError> {
+    exec(
+        db,
+        db.query(
+            "UPDATE ONLY type::record('atlas_admission', $key) SET state = 'failed', \
+             attempts += 1, last_error = $error, updated_at = $now \
+             WHERE input_hash = $hash RETURN NONE",
+        )
+        .bind(("key", encode(&[run_id, article_id])))
+        .bind(("hash", input_hash.to_string()))
+        .bind(("error", error.chars().take(300).collect::<String>()))
+        .bind(("now", now())),
+    )
+    .await
+}
+
+/// Commit admission: the canonical article row (ordered `categories`, scalar
+/// projecting the first tag, `admitted_at` stamped) and the staging row's
+/// deletion commit together, so a crash leaves either the staged row or the
+/// admitted article, never both and never neither. The staging delete is
+/// guarded by the evaluated input hash: a concurrent re-stage survives.
+pub async fn admission_admit(
+    db: &Surreal<Any>,
+    row: &AtlasArticleRow,
+    input_hash: &str,
+    _taxonomy_version: &str,
+) -> Result<(), TxError> {
+    // The ordered-tags ceiling is a storage invariant, not just a parser
+    // rule: an over-cap payload is a retryable failure, never a write.
+    if row.categories.len() > crate::atlas::MAX_ADMISSION_TAGS {
+        return Err(TxError::Abort(format!(
+            "admission {}: {} categories exceed the {} cap",
+            row.id,
+            row.categories.len(),
+            crate::atlas::MAX_ADMISSION_TAGS
+        )));
+    }
+    if row.categories.len() < crate::atlas::MIN_ADMISSION_TAGS {
+        return Err(TxError::Abort(format!(
+            "admission {}: {} categories are below the {} minimum",
+            row.id,
+            row.categories.len(),
+            crate::atlas::MIN_ADMISSION_TAGS
+        )));
+    }
+    let canonical = ArticleRow {
+        run_id: row.run_id.clone(),
+        article_id: row.id.clone(),
+        title: row.title.clone(),
+        description: row.description.clone(),
+        url: row.url.clone(),
+        country: row.country.clone(),
+        source_name: row.source_name.clone(),
+        source_domain: row.source_domain.clone(),
+        published_at: row.published_at.clone(),
+        provider: row.provider.clone(),
+        temperature: row.temperature,
+        category: row.projected_category().to_string(),
+        categories: Some(row.categories.clone()),
+        admitted_at: Some(now()),
+        seen_at: row.seen_at.clone(),
+        author: row.author.clone(),
+        image_url: row.image_url.clone(),
+    };
+    exec(
+        db,
+        db.query(
+            "BEGIN TRANSACTION;
+               UPSERT type::record('atlas_article', $key) CONTENT $row RETURN NONE;
+               DELETE type::record('atlas_admission', $staging)
+                 WHERE input_hash = $hash RETURN NONE;
+             COMMIT TRANSACTION;",
+        )
+        .bind(("key", encode(&[&row.run_id, &row.id])))
+        .bind(("row", canonical))
+        .bind(("staging", encode(&[&row.run_id, &row.id])))
+        .bind(("hash", input_hash.to_string())),
+    )
+    .await
+}
+
+/// Commit a discard: the minimal rejection receipt and the staging row's
+/// deletion commit together. The canonical row (a legacy occurrence being
+/// reclassified) is deleted by the caller through lifecycle cleanup.
+pub async fn admission_discard(
+    db: &Surreal<Any>,
+    run_id: &str,
+    article_id: &str,
+    input_hash: &str,
+    source_revision: &str,
+    taxonomy_version: &str,
+    reason: &str,
+) -> Result<(), TxError> {
+    exec(
+        db,
+        db.query(
+            "BEGIN TRANSACTION;
+               UPSERT type::record('atlas_rejection', $receipt) SET
+                 article_id = $article, input_hash = $hash,
+                 taxonomy_version = $tax, source_revision = $revision,
+                 reason = $reason, rejected_at = $now RETURN NONE;
+               DELETE type::record('atlas_admission', $staging) RETURN NONE;
+             COMMIT TRANSACTION;",
+        )
+        .bind((
+            "receipt",
+            encode(&[article_id, input_hash, taxonomy_version]),
+        ))
+        .bind(("article", article_id.to_string()))
+        .bind(("hash", input_hash.to_string()))
+        .bind(("tax", taxonomy_version.to_string()))
+        .bind(("revision", source_revision.to_string()))
+        .bind(("reason", reason.chars().take(300).collect::<String>()))
+        .bind(("staging", encode(&[run_id, article_id])))
+        .bind(("now", now())),
+    )
+    .await
+}
+
+/// The reconsideration predicate: true when the current input hash and
+/// taxonomy version carry no rejection receipt, so the payload is evaluated.
+pub async fn rejection_exists(
+    db: &Surreal<Any>,
+    article_id: &str,
+    input_hash: &str,
+    taxonomy_version: &str,
+) -> Result<bool, TxError> {
+    let mut r = db
+        .query("RETURN record::exists(type::record('atlas_rejection', $key))")
+        .bind(("key", encode(&[article_id, input_hash, taxonomy_version])))
+        .await?
+        .check()?;
+    Ok(r.take::<Option<bool>>(0)? == Some(true))
 }

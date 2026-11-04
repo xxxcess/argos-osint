@@ -20,6 +20,7 @@ pub mod actor_catalog;
 pub mod actor_dedup;
 pub mod actor_dossier;
 pub mod article_body;
+pub mod article_discovery;
 pub mod atlas;
 pub mod atlas_delete;
 pub mod atlas_memory;

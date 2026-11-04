@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::secrets::{DeviceEndpoints, ProviderSecret};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -24,7 +24,7 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCall>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -452,8 +452,128 @@ impl ModelAssignment {
     }
 }
 
+pub mod structured_text;
+
+/// Preserve pipeline fields omitted by a legacy settings writer. An old writer
+/// cannot choose which pipeline an ambiguous legacy-role edit should affect.
+/// Called under the configuration write lock before publishing settings.
+pub(crate) fn preserve_pipeline_settings(incoming: &str, existing: &str) -> Result<String> {
+    let (mut next, previous) = match (
+        toml::from_str::<toml::Value>(incoming),
+        toml::from_str::<toml::Value>(existing),
+    ) {
+        (Ok(next), Ok(previous)) => (next, previous),
+        // A body that is not TOML on either side cannot be merged; write it as
+        // received instead of failing an unrelated settings commit.
+        _ => return Ok(incoming.to_owned()),
+    };
+    let Some(old) = previous.get("defaults").and_then(toml::Value::as_table) else {
+        return Ok(incoming.to_owned());
+    };
+    let has_pipeline = CANONICAL_ROLE_KEYS.iter().any(|key| old.contains_key(*key));
+    if !has_pipeline {
+        return Ok(incoming.to_owned());
+    }
+    let table = next
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("settings must be a table"))?;
+    let defaults = table
+        .entry("defaults")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("defaults must be a table"))?;
+    let legacy_writer = !CANONICAL_ROLE_KEYS
+        .iter()
+        .any(|key| defaults.contains_key(*key));
+    if legacy_writer {
+        // A legacy writer cannot choose which pipeline an ambiguous legacy-role
+        // edit should affect: a blank field preserves the archived route, and a
+        // conflicting edit is refused instead of silently remapped.
+        let blank = |value: &toml::Value| {
+            ["provider", "model"].iter().all(|field| {
+                value
+                    .get(field)
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+            })
+        };
+        for key in LEGACY_ROLE_KEYS
+            .into_iter()
+            .chain(["decision_model", "decision_fallback"])
+        {
+            let Some(previous) = old.get(key) else {
+                continue;
+            };
+            match defaults.get(key) {
+                Some(value) if !blank(value) && value != previous => {
+                    anyhow::bail!("legacy role edit is ambiguous after pipeline migration; update an explicit pipeline role");
+                }
+                _ => {
+                    defaults.insert(key.to_owned(), previous.clone());
+                }
+            }
+        }
+    }
+    for key in CANONICAL_ROLE_KEYS.into_iter().chain([
+        "archived_controller",
+        "archived_operation_overrides",
+        "migration_exceptions",
+        "text_contract_version",
+    ]) {
+        if let Some(value) = old.get(key) {
+            defaults
+                .entry(key.to_owned())
+                .or_insert_with(|| value.clone());
+        }
+    }
+    for key in ["model_variants", "operation_overrides"] {
+        if let Some(previous_map) = old.get(key).and_then(toml::Value::as_table) {
+            let map = defaults
+                .entry(key.to_owned())
+                .or_insert_with(|| toml::Value::Table(Default::default()))
+                .as_table_mut()
+                .ok_or_else(|| anyhow!("{key} must be a table"))?;
+            if legacy_writer {
+                for (name, value) in previous_map {
+                    map.entry(name.clone()).or_insert_with(|| value.clone());
+                }
+            }
+        }
+    }
+    // Prefer the canonical archive field if an old client echoed its old name.
+    if defaults.contains_key("archived_controller") {
+        defaults.remove("investigation_controller");
+    }
+    Ok(toml::to_string_pretty(&next)?)
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RoleDefaults {
+    /// Independent pipeline routes. `None` is legacy input awaiting one-time migration;
+    /// an explicitly empty assignment is unconfigured, never planner inheritance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recon_agent: Option<ModelAssignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recon_decisions: Option<ModelAssignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recon_analyst: Option<ModelAssignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atlas_evaluator: Option<ModelAssignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atlas_analyst: Option<ModelAssignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brain_summary: Option<ModelAssignment>,
+    /// Non-secret exceptions requiring operator review after migration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migration_exceptions: Vec<String>,
+    /// Generation contract captured with routing in durable work snapshots.
+    #[serde(default)]
+    pub text_contract_version: String,
+    /// Retired operation settings retained for inspection, never dispatched.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub archived_operation_overrides: std::collections::BTreeMap<String, OperationOverride>,
     /// Explicit reasoning variants keyed by role/provider/model. Older settings inherit policy defaults.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub model_variants: std::collections::BTreeMap<String, crate::request_policy::ReasoningEffort>,
@@ -479,8 +599,12 @@ pub struct RoleDefaults {
     /// Per-claim verification and citation evaluation. Empty inherits Synthesis.
     #[serde(default)]
     pub claim_assessor: ModelAssignment,
-    /// Checkpoints, next-task decisions, stopping conditions. Empty inherits Recon.
-    #[serde(default)]
+    /// Archived legacy controller assignment; never used by runtime dispatch.
+    #[serde(
+        default,
+        rename = "archived_controller",
+        alias = "investigation_controller"
+    )]
     pub investigation_controller: ModelAssignment,
     /// Default model for finite decision roles and semantic gates. Seeded to OpenRouter Jev.
     #[serde(default)]
@@ -504,10 +628,27 @@ pub const OP_CLAIMS_GENERATE: &str = "intel_brief_claims.generate";
 pub const OP_INFERENCES_GENERATE: &str = "intel_brief_inferences.generate";
 pub const OP_LINKS_GENERATE: &str = "intel_brief_links.generate";
 pub const OP_INFERENCES_ASSESS: &str = "intel_brief_inferences.assess";
+pub const OP_INFERENCES_DEDUP: &str = "intel_brief_inferences.select";
+pub(crate) const LEGACY_BRIEF_OPERATIONS: [&str; 4] = [
+    OP_CLAIMS_GENERATE,
+    OP_INFERENCES_GENERATE,
+    OP_INFERENCES_ASSESS,
+    OP_LINKS_GENERATE,
+];
 
-/// The operator's nine canonical role keys (spec §2). Only these may be the
+/// The operator's six canonical pipeline role keys. Only these may be the
 /// target of an operation override's `route_role` reference.
-pub const CANONICAL_ROLE_KEYS: [&str; 9] = [
+pub const CANONICAL_ROLE_KEYS: [&str; 6] = [
+    "recon_agent",
+    "recon_decisions",
+    "recon_analyst",
+    "atlas_evaluator",
+    "atlas_analyst",
+    "brain_summary",
+];
+
+/// Exact schema-1/2 role references accepted only as migration input.
+pub(crate) const LEGACY_ROLE_KEYS: [&str; 9] = [
     "recon",
     "tool_picker",
     "synthesis",
@@ -590,8 +731,11 @@ impl<'de> Deserialize<'de> for OperationOverride {
                     "an operation override is either an assignment or {route_role}, not both",
                 )
             })?;
+            let legacy = LEGACY_ROLE_KEYS.contains(&r.route_role.as_str());
             let o = Self::Route(r);
-            o.check().map_err(D::Error::custom)?;
+            if !legacy {
+                o.check().map_err(D::Error::custom)?;
+            }
             return Ok(o);
         }
         serde_json::from_value(value)
@@ -604,11 +748,16 @@ impl<'de> Deserialize<'de> for OperationOverride {
 pub const FAST_PRESET_OPERATIONS: [&str; 2] = [OP_CLAIMS_GENERATE, OP_LINKS_GENERATE];
 
 /// Overridable brief operations: (key, label, inherited logical role).
-pub const BRIEF_OPERATIONS: [(&str, &str, &str); 4] = [
-    (OP_CLAIMS_GENERATE, "Claims", "claim_assessor"),
-    (OP_INFERENCES_GENERATE, "Inferences", "synthesis"),
-    (OP_INFERENCES_ASSESS, "Inference support", "claim_assessor"),
-    (OP_LINKS_GENERATE, "Links", "synthesis"),
+pub const BRIEF_OPERATIONS: [(&str, &str, &str); 5] = [
+    (OP_CLAIMS_GENERATE, "Claims", "atlas_analyst"),
+    (OP_INFERENCES_GENERATE, "Inferences", "atlas_analyst"),
+    (OP_INFERENCES_ASSESS, "Inference support", "atlas_evaluator"),
+    (OP_LINKS_GENERATE, "Links", "atlas_analyst"),
+    (
+        OP_INFERENCES_DEDUP,
+        "Inference selection",
+        "atlas_evaluator",
+    ),
 ];
 
 /// Logical role an operation key inherits, if it is a known operation.
@@ -693,6 +842,12 @@ pub fn picker_transport(model: &str) -> &'static str {
 /// Canonical role name, or `None` for an unknown role.
 pub fn role_name(role: &str) -> Option<&'static str> {
     match role.trim().to_ascii_lowercase().as_str() {
+        "recon_agent" => Some("recon_agent"),
+        "recon_decisions" => Some("recon_decisions"),
+        "recon_analyst" => Some("recon_analyst"),
+        "atlas_evaluator" => Some("atlas_evaluator"),
+        "atlas_analyst" => Some("atlas_analyst"),
+        "brain_summary" => Some("brain_summary"),
         "recon" | "planner" => Some("recon"),
         "synthesis" => Some("synthesis"),
         "tool-picker" | "tool_picker" | "toolpicker" | "picker" => Some("tool_picker"),
@@ -701,15 +856,138 @@ pub fn role_name(role: &str) -> Option<&'static str> {
         "evidence_curator" | "evidence-curator" | "curator" => Some("evidence_curator"),
         "entity_resolver" | "entity-resolver" | "resolver" => Some("entity_resolver"),
         "claim_assessor" | "claim-assessor" | "assessor" => Some("claim_assessor"),
-        "investigation_controller" | "investigation-controller" | "controller" => {
-            Some("investigation_controller")
-        }
         "decision_model" | "decision-model" | "decision" => Some("decision_model"),
         _ => None,
     }
 }
 
+fn legacy_pipeline_role(role: &str) -> Option<&'static str> {
+    match role {
+        "recon" | "planner" => Some("recon_agent"),
+        "tool_picker" | "tool-picker" | "picker" => Some("recon_decisions"),
+        "synthesis" => Some("recon_analyst"),
+        "classifier" => Some("atlas_evaluator"),
+        "summarization" | "summary" => Some("brain_summary"),
+        _ => None,
+    }
+}
+
+/// Canonical runtime route for unambiguous legacy aliases. Caller-dependent
+/// curator/resolver/assessor names must be resolved by their pipeline caller.
+pub fn pipeline_role_name(role: &str) -> Option<&'static str> {
+    legacy_pipeline_role(role)
+        .or_else(|| role_name(role).filter(|name| CANONICAL_ROLE_KEYS.contains(name)))
+}
+
 impl RoleDefaults {
+    /// Freeze resolved legacy routes once. Later legacy imports cannot overwrite
+    /// an independent pipeline assignment, including an explicitly cleared one.
+    pub fn migrate_pipeline_roles(&mut self) -> bool {
+        let mut changed = false;
+        if self.text_contract_version.is_empty() {
+            self.text_contract_version = structured_text::VERSION.into();
+            changed = true;
+        }
+        let legacy_overrides: Vec<_> = self
+            .operation_overrides
+            .iter()
+            .filter_map(|(key, entry)| {
+                entry
+                    .route_role()
+                    .filter(|role| !CANONICAL_ROLE_KEYS.contains(role))
+                    .map(|role| (key.clone(), role.to_owned(), entry.clone()))
+            })
+            .collect();
+        for (key, role, entry) in legacy_overrides {
+            if role == "investigation_controller" {
+                self.operation_overrides.remove(&key);
+                self.archived_operation_overrides.insert(key.clone(), entry);
+                self.migration_exceptions
+                    .push(format!("{key}: retired controller override archived"));
+            } else {
+                let (assignment, inherited) = self.resolve_legacy_role(&role);
+                let prefix = format!("{}|", inherited.unwrap_or(&role));
+                let variants: Vec<_> = self
+                    .model_variants
+                    .iter()
+                    .filter_map(|(variant, value)| {
+                        variant
+                            .strip_prefix(&prefix)
+                            .map(|suffix| (format!("{key}|{suffix}"), *value))
+                    })
+                    .collect();
+                self.model_variants.extend(variants);
+                self.operation_overrides
+                    .insert(key, OperationOverride::Assignment(assignment));
+            }
+            changed = true;
+        }
+        for (new, old) in [
+            ("recon_agent", "recon"),
+            ("recon_decisions", "tool_picker"),
+            ("recon_analyst", "synthesis"),
+            ("atlas_evaluator", "classifier"),
+            ("atlas_analyst", "synthesis"),
+            ("brain_summary", "summarization"),
+        ] {
+            if self.role(new).is_some() {
+                continue;
+            }
+            let (assignment, inherited) = self.resolve_legacy_role(old);
+            let variant_role = inherited.unwrap_or(old);
+            let prefix = format!("{variant_role}|");
+            let variants: Vec<_> = self
+                .model_variants
+                .iter()
+                .filter_map(|(key, value)| {
+                    key.strip_prefix(&prefix)
+                        .map(|suffix| (format!("{new}|{suffix}"), *value))
+                })
+                .collect();
+            for (key, value) in variants {
+                self.model_variants.entry(key).or_insert(value);
+            }
+            *self.pipeline_slot(new).expect("known pipeline role") = Some(assignment);
+            changed = true;
+        }
+        if changed {
+            for (name, assignment) in [
+                ("evidence_curator", &self.evidence_curator),
+                ("entity_resolver", &self.entity_resolver),
+                ("claim_assessor", &self.claim_assessor),
+            ] {
+                if !assignment.provider.is_empty() || !assignment.model.is_empty() {
+                    self.migration_exceptions.push(format!(
+                        "{name}: archived caller-dependent assignment; review pipeline routes"
+                    ));
+                }
+            }
+            if !self.investigation_controller.model.is_empty() {
+                self.migration_exceptions.push(
+                    "investigation_controller: retired assignment archived, never dispatched"
+                        .into(),
+                );
+            }
+            if !self.decision_model.model.is_empty() && self.decision_model != self.tool_picker {
+                self.migration_exceptions.push("decision_model: legacy assignment retained for inspection; review independent decision routes".into());
+            }
+            self.migration_exceptions.sort();
+            self.migration_exceptions.dedup();
+        }
+        changed
+    }
+
+    fn pipeline_slot(&mut self, role: &str) -> Option<&mut Option<ModelAssignment>> {
+        match role {
+            "recon_agent" => Some(&mut self.recon_agent),
+            "recon_decisions" => Some(&mut self.recon_decisions),
+            "recon_analyst" => Some(&mut self.recon_analyst),
+            "atlas_evaluator" => Some(&mut self.atlas_evaluator),
+            "atlas_analyst" => Some(&mut self.atlas_analyst),
+            "brain_summary" => Some(&mut self.brain_summary),
+            _ => None,
+        }
+    }
     /// A variant applies only to the exact role and route selected by the operator.
     pub fn variant_key(role: &str, provider: &str, model: &str) -> String {
         format!(
@@ -725,6 +1003,9 @@ impl RoleDefaults {
         role: &str,
         secret: &ProviderSecret,
     ) -> Option<crate::request_policy::ReasoningEffort> {
+        let role = legacy_pipeline_role(role)
+            .filter(|new| self.role(new).is_some())
+            .unwrap_or(role);
         self.model_variants
             .get(&Self::variant_key(
                 role,
@@ -735,10 +1016,38 @@ impl RoleDefaults {
             .filter(|v| *v != crate::request_policy::ReasoningEffort::Default)
     }
 
+    /// Effective operation variant, including a copied legacy override variant
+    /// or an explicit route-role reference's variant.
+    pub fn operation_variant(
+        &self,
+        operation: Option<&str>,
+        role: &str,
+        secret: &ProviderSecret,
+    ) -> Option<crate::request_policy::ReasoningEffort> {
+        if let Some(operation) = operation {
+            if let Some(variant) = self.model_variant(operation, secret) {
+                return Some(variant);
+            }
+            if let Some(reference) = self
+                .operation_overrides
+                .get(operation)
+                .and_then(OperationOverride::route_role)
+            {
+                return self.model_variant(reference, secret);
+            }
+        }
+        self.model_variant(role, secret)
+    }
+
     /// Removes every Grok (xAI) route from every role, the decision fallback and
     /// the operation overrides. Returns the number of routes dropped.
     pub fn drop_removed_providers(&mut self) -> usize {
         let mut dropped = 0;
+        for role in CANONICAL_ROLE_KEYS {
+            if let Some(Some(assignment)) = self.pipeline_slot(role) {
+                dropped += assignment.drop_removed();
+            }
+        }
         for role in [
             &mut self.recon,
             &mut self.synthesis,
@@ -765,7 +1074,18 @@ impl RoleDefaults {
     }
 
     pub fn role(&self, role: &str) -> Option<&ModelAssignment> {
+        if let Some(new) = legacy_pipeline_role(role) {
+            if let Some(assignment) = self.role(new) {
+                return Some(assignment);
+            }
+        }
         match role_name(role)? {
+            "recon_agent" => self.recon_agent.as_ref(),
+            "recon_decisions" => self.recon_decisions.as_ref(),
+            "recon_analyst" => self.recon_analyst.as_ref(),
+            "atlas_evaluator" => self.atlas_evaluator.as_ref(),
+            "atlas_analyst" => self.atlas_analyst.as_ref(),
+            "brain_summary" => self.brain_summary.as_ref(),
             "recon" => Some(&self.recon),
             "synthesis" => Some(&self.synthesis),
             "classifier" => Some(&self.classifier),
@@ -774,13 +1094,33 @@ impl RoleDefaults {
             "evidence_curator" => Some(&self.evidence_curator),
             "entity_resolver" => Some(&self.entity_resolver),
             "claim_assessor" => Some(&self.claim_assessor),
-            "investigation_controller" => Some(&self.investigation_controller),
             "decision_model" => Some(&self.decision_model),
             _ => None,
         }
     }
 
     pub fn role_mut(&mut self, role: &str) -> Option<&mut ModelAssignment> {
+        if role == "investigation_controller" {
+            return None;
+        }
+        if let Some(new) = legacy_pipeline_role(role) {
+            if self.role(new).is_some() {
+                return self.pipeline_slot(new).and_then(Option::as_mut);
+            }
+        }
+        if CANONICAL_ROLE_KEYS.contains(&role) {
+            return self
+                .pipeline_slot(role)
+                .map(|slot| slot.get_or_insert_with(ModelAssignment::default));
+        }
+        self.legacy_role_mut(role)
+    }
+
+    /// Import-only access to archived legacy settings, never a runtime route.
+    pub(crate) fn legacy_role_mut(&mut self, role: &str) -> Option<&mut ModelAssignment> {
+        if role == "investigation_controller" {
+            return Some(&mut self.investigation_controller);
+        }
         match role_name(role)? {
             "recon" => Some(&mut self.recon),
             "synthesis" => Some(&mut self.synthesis),
@@ -790,7 +1130,6 @@ impl RoleDefaults {
             "evidence_curator" => Some(&mut self.evidence_curator),
             "entity_resolver" => Some(&mut self.entity_resolver),
             "claim_assessor" => Some(&mut self.claim_assessor),
-            "investigation_controller" => Some(&mut self.investigation_controller),
             "decision_model" => Some(&mut self.decision_model),
             _ => None,
         }
@@ -798,9 +1137,21 @@ impl RoleDefaults {
 
     /// Returns the resolved assignment for a role, along with the role it inherited from (if inherited).
     pub fn resolve_role(&self, role: &str) -> (ModelAssignment, Option<&'static str>) {
+        if let Some(new) = legacy_pipeline_role(role) {
+            if let Some(assignment) = self.role(new) {
+                return (assignment.clone(), None);
+            }
+        }
+        if CANONICAL_ROLE_KEYS.contains(&role) {
+            return (self.role(role).cloned().unwrap_or_default(), None);
+        }
+        self.resolve_legacy_role(role)
+    }
+
+    fn resolve_legacy_role(&self, role: &str) -> (ModelAssignment, Option<&'static str>) {
         let is_empty =
             |a: &ModelAssignment| a.provider.trim().is_empty() && a.model.trim().is_empty();
-        match role_name(role).unwrap_or("recon") {
+        match role_name(role).unwrap_or("") {
             "evidence_curator" => {
                 if is_empty(&self.evidence_curator) {
                     (self.recon.clone(), Some("recon"))
@@ -820,13 +1171,6 @@ impl RoleDefaults {
                     (self.synthesis.clone(), Some("synthesis"))
                 } else {
                     (self.claim_assessor.clone(), None)
-                }
-            }
-            "investigation_controller" => {
-                if is_empty(&self.investigation_controller) {
-                    (self.recon.clone(), Some("recon"))
-                } else {
-                    (self.investigation_controller.clone(), None)
                 }
             }
             "summarization" => {
@@ -854,7 +1198,7 @@ impl RoleDefaults {
             "synthesis" => (self.synthesis.clone(), None),
             "classifier" => (self.classifier.clone(), None),
             "tool_picker" => (self.tool_picker.clone(), None),
-            _ => (self.recon.clone(), None),
+            _ => (ModelAssignment::default(), None),
         }
     }
 
@@ -894,7 +1238,7 @@ impl RoleDefaults {
     pub fn apply_fast_preset(&mut self) {
         for key in FAST_PRESET_OPERATIONS {
             self.operation_overrides
-                .insert(key.to_string(), OperationOverride::role("summarization"));
+                .insert(key.to_string(), OperationOverride::role("brain_summary"));
         }
     }
 
@@ -907,7 +1251,7 @@ impl RoleDefaults {
                 .operation_overrides
                 .get(key)
                 .and_then(OperationOverride::route_role)
-                == Some("summarization")
+                == Some("brain_summary")
             {
                 self.operation_overrides.remove(key);
                 changed = true;
@@ -921,7 +1265,7 @@ impl RoleDefaults {
             self.operation_overrides
                 .get(*k)
                 .and_then(OperationOverride::route_role)
-                == Some("summarization")
+                == Some("brain_summary")
         })
     }
 
@@ -1220,7 +1564,17 @@ pub fn role_secret(
     role: &str,
 ) -> Result<ProviderSecret> {
     let name = role_name(role).ok_or_else(|| anyhow!("unknown role: {role}"))?;
-    let (assignment, _) = settings.defaults.resolve_role(name);
+    let mut defaults = settings.defaults.clone();
+    defaults.migrate_pipeline_roles();
+    let name = pipeline_role_name(name).unwrap_or(name);
+    let (assignment, _) = defaults.resolve_role(name);
+    if CANONICAL_ROLE_KEYS.contains(&name)
+        || legacy_pipeline_role(name).is_some_and(|new| settings.defaults.role(new).is_some())
+    {
+        let mut secret = route_secret(auth, &assignment.as_route());
+        secret.model = assignment.model;
+        return Ok(secret);
+    }
     let legacy = writer_secret(auth, settings);
     let mut secret = if assignment.provider.is_empty() {
         legacy
@@ -2397,6 +2751,7 @@ impl SettingsFile {
             settings.defaults.seed_classifier();
             settings.defaults.seed_decision_model();
             settings.defaults.inherit_summarization_from_synthesis();
+            settings.defaults.migrate_pipeline_roles();
             settings
         };
         if !path.exists() {
@@ -2421,38 +2776,44 @@ impl SettingsFile {
             settings.writer_model.clone()
         };
         let mut migrated = dropped > 0;
-        for role in [
-            &mut settings.defaults.recon,
-            &mut settings.defaults.synthesis,
-        ] {
-            if role.provider.is_empty() && !legacy_provider.is_empty() {
-                role.provider = legacy_provider.clone();
+        let legacy_roles_missing = CANONICAL_ROLE_KEYS
+            .iter()
+            .any(|role| settings.defaults.role(role).is_none());
+        if legacy_roles_missing {
+            for role in [
+                &mut settings.defaults.recon,
+                &mut settings.defaults.synthesis,
+            ] {
+                if role.provider.is_empty() && !legacy_provider.is_empty() {
+                    role.provider = legacy_provider.clone();
+                    migrated = true;
+                }
+                if role.model.is_empty() && !legacy_model.is_empty() {
+                    role.model = legacy_model.clone();
+                    migrated = true;
+                }
+            }
+            // The tool picker is seeded on its own and never from the legacy writer.
+            if settings.defaults.seed_tool_picker() {
                 migrated = true;
             }
-            if role.model.is_empty() && !legacy_model.is_empty() {
-                role.model = legacy_model.clone();
+            let mutated = settings.defaults.seed_classifier()
+                | settings.defaults.seed_decision_model()
+                | settings.defaults.inherit_summarization_from_synthesis();
+            if mutated {
                 migrated = true;
             }
-        }
-        // The tool picker is seeded on its own and never from the legacy writer.
-        if settings.defaults.seed_tool_picker() {
-            migrated = true;
-        }
-        let mutated = settings.defaults.seed_classifier()
-            | settings.defaults.seed_decision_model()
-            | settings.defaults.inherit_summarization_from_synthesis();
-        if mutated {
-            migrated = true;
-        }
-        if let Some(fb) = settings.defaults.decision_fallback.clone() {
-            let route = fb.as_route();
-            if !route.model.trim().is_empty()
-                && !settings.defaults.decision_model.is_duplicate(&route)
-                && settings.defaults.decision_model.add_fallback(route).is_ok()
-            {
-                migrated = true;
+            if let Some(fb) = settings.defaults.decision_fallback.clone() {
+                let route = fb.as_route();
+                if !route.model.trim().is_empty()
+                    && !settings.defaults.decision_model.is_duplicate(&route)
+                    && settings.defaults.decision_model.add_fallback(route).is_ok()
+                {
+                    migrated = true;
+                }
             }
         }
+        migrated |= settings.defaults.migrate_pipeline_roles();
         // Bump the old product default (200) to the current monthly Firecrawl allowance.
         if settings.recon_limits.firecrawl_credits == 200 {
             settings.recon_limits.firecrawl_credits = default_firecrawl_credits();
@@ -2469,6 +2830,7 @@ impl SettingsFile {
                             | "writer_provider"
                             | "modality"
                             | "defaults"
+                            | "nlp"
                             | "osint_user_agent"
                             | "firecrawl_api_key"
                             | "hunter_api_key"
@@ -2518,7 +2880,11 @@ impl SettingsFile {
     /// created 0600, written, flushed, fsynced, atomically renamed) and bypasses
     /// the cross-file lock by design.
     pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
-        crate::secrets::write_private(path, &toml::to_string_pretty(self)?)
+        let mut body = toml::to_string_pretty(self)?;
+        if path.exists() {
+            body = preserve_pipeline_settings(&body, &std::fs::read_to_string(path)?)?;
+        }
+        crate::secrets::write_private(path, &body)
     }
 
     /// Writes settings, auth and quota settings as one all-or-nothing configuration revision.
@@ -2529,6 +2895,116 @@ impl SettingsFile {
         quotas: &crate::config_transfer::QuotaSettingsFile,
     ) -> Result<u64> {
         crate::config_transfer::commit_profile_config(self, auth, quotas)
+    }
+}
+
+#[cfg(test)]
+mod pipeline_role_migration_tests {
+    use super::*;
+
+    fn assignment(model: &str) -> ModelAssignment {
+        ModelAssignment {
+            provider: "local".into(),
+            model: model.into(),
+            fallbacks: vec![ModelRoute {
+                provider: "local".into(),
+                model: format!("{model}-fallback"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pipeline_migration_copies_routes_variants_once_and_isolates_owners() {
+        let mut defaults = RoleDefaults {
+            recon: assignment("planner"),
+            synthesis: assignment("writer"),
+            tool_picker: assignment("picker"),
+            classifier: assignment("evaluator"),
+            ..Default::default()
+        };
+        defaults.model_variants.insert(
+            RoleDefaults::variant_key("synthesis", "local", "writer"),
+            crate::request_policy::ReasoningEffort::High,
+        );
+        assert!(defaults.migrate_pipeline_roles());
+        assert_eq!(
+            defaults.resolve_role("atlas_analyst").0,
+            assignment("writer")
+        );
+        assert_eq!(
+            defaults.resolve_role("recon_analyst").0,
+            assignment("writer")
+        );
+        assert_eq!(
+            defaults.resolve_role("brain_summary").0,
+            assignment("writer")
+        );
+        assert_eq!(
+            defaults.model_variants["atlas_analyst|local|writer"],
+            crate::request_policy::ReasoningEffort::High
+        );
+        *defaults.role_mut("recon_analyst").expect("canonical role") = assignment("recon-only");
+        defaults.synthesis = assignment("legacy-change");
+        assert!(!defaults.migrate_pipeline_roles());
+        assert_eq!(
+            defaults.resolve_role("atlas_analyst").0,
+            assignment("writer")
+        );
+        assert_eq!(
+            defaults.resolve_role("recon_analyst").0,
+            assignment("recon-only")
+        );
+        assert_eq!(
+            defaults.resolve_role("unknown").0,
+            ModelAssignment::default()
+        );
+    }
+
+    #[test]
+    fn pipeline_migration_archives_controller_and_preserves_explicit_operations() {
+        let raw = "[investigation_controller]\nprovider='local'\nmodel='old-controller'\n";
+        let mut defaults: RoleDefaults = toml::from_str(raw).expect("legacy controller input");
+        defaults
+            .operation_overrides
+            .insert(OP_CLAIMS_GENERATE.into(), assignment("explicit").into());
+        defaults.operation_overrides.insert(
+            OP_LINKS_GENERATE.into(),
+            OperationOverride::role("investigation_controller"),
+        );
+        defaults.migrate_pipeline_roles();
+        assert_eq!(
+            defaults
+                .resolve_operation(Some(OP_CLAIMS_GENERATE), "atlas_analyst")
+                .0,
+            assignment("explicit")
+        );
+        assert!(defaults
+            .archived_operation_overrides
+            .contains_key(OP_LINKS_GENERATE));
+        assert!(!defaults.migration_exceptions.is_empty());
+        assert!(role_name("investigation_controller").is_none());
+        let saved = toml::to_string(&defaults).expect("archive serialization");
+        assert!(saved.contains("[archived_controller]"));
+        assert!(!saved.contains("[investigation_controller]"));
+    }
+
+    #[test]
+    fn pipeline_settings_legacy_save_preserves_new_fields_or_rejects_ambiguity() {
+        let old = "[defaults.recon]\nprovider='local'\nmodel='planner'\n[defaults.atlas_analyst]\nprovider='local'\nmodel='atlas'\n[defaults.model_variants]\n'atlas_analyst|local|atlas'='high'\n";
+        let legacy = "[defaults.recon]\nprovider='local'\nmodel='planner'\n";
+        let merged = preserve_pipeline_settings(legacy, old).expect("unrelated legacy save");
+        let parsed: toml::Value = toml::from_str(&merged).expect("merged settings");
+        assert_eq!(
+            parsed["defaults"]["atlas_analyst"]["model"].as_str(),
+            Some("atlas")
+        );
+        assert_eq!(
+            parsed["defaults"]["model_variants"]["atlas_analyst|local|atlas"].as_str(),
+            Some("high")
+        );
+        assert!(preserve_pipeline_settings(&legacy.replace("planner", "different"), old).is_err());
     }
 }
 
@@ -3347,15 +3823,12 @@ model = 'imported-recon'
     #[test]
     fn role_defaults_round_trip_through_settings() {
         const ROLES: &[&str] = &[
-            "recon",
-            "synthesis",
-            "tool_picker",
-            "classifier",
-            "summarization",
-            "evidence_curator",
-            "entity_resolver",
-            "claim_assessor",
-            "investigation_controller",
+            "recon_agent",
+            "recon_decisions",
+            "recon_analyst",
+            "atlas_evaluator",
+            "atlas_analyst",
+            "brain_summary",
             "decision_model",
         ];
         let mut settings = SettingsFile::default();
@@ -3395,6 +3868,7 @@ model = 'imported-recon'
             account: String::new(),
             fallbacks: Vec::new(),
         });
+        settings.defaults.migrate_pipeline_roles();
         let before = toml::to_string_pretty(&settings.defaults).unwrap();
 
         let dir = tempfile::tempdir().unwrap();

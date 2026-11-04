@@ -1,45 +1,45 @@
 <svg role="img" aria-labelledby="intel-brief-chain-title intel-brief-chain-desc" viewBox="0 0 900 540" xmlns="http://www.w3.org/2000/svg">
-<title id="intel-brief-chain-title">Intel brief: claim-specific analysis and staged publication</title>
-<desc id="intel-brief-chain-desc">Visit or Reload attaches to one durable generation. Full article and metadata Claims are independent roots. Local NLP matches detected actor names, observed spellings and each claim's event terms to original body sentences, preserving nearby attribution and corrections. For each claim, bounded Classifier decisions select support, context and counterevidence. Synthesis receives one claim, associated actors and selected original sentences; each fully classified claim receives an analysis request or reuses a validated analysis, including empty-evidence analyses that may return no inference. No full article chunks are sent for inference generation. Fidelity and bounded semantic selection retain at most five inferences. Links follows. After fenced stage completion, Claims, Inferences and Links each request a separate canonical publication transaction, with only that stage's kind replaced and indexed. Later failure preserves earlier published kinds. Exact memory revision acknowledgments distinguish Published from Indexed. Cancellation and stale leases prevent commits. Validated context batches and generated analyses are checkpointed independently. A failed classifier batch withholds its claim, without cancelling independent claims. The stage completes with warnings when some claims succeed; Links uses only validated inferences. Retry re-asks only missing batches and analyses; all claims failing remains a failure.</desc>
-<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#4f5d75"/></marker></defs>
-<rect width="900" height="540" fill="#f5f5f5"/>
-<g fill="none" stroke="#4f5d75" marker-end="url(#arrow)">
-<path d="M164 136 H184 V72 H204"/>
-<path d="M184 136 V180 H204"/>
-<path d="M384 72 H424"/>
-<path d="M384 168 H404 V88 H424"/>
-<path d="M522 104 V148"/>
-<path d="M384 180 H424"/>
-<path d="M620 180 H640 V144 H660"/>
-<path d="M758 184 V252"/>
-<path d="M294 212 V380"/>
-<path d="M856 144 H880 V472 H524 V460"/>
-<path d="M758 316 V356 H572 V380"/>
-<path d="M600 420 H660"/>
-</g>
-<g font-family="Geist,system-ui,sans-serif" font-size="13" text-anchor="middle" fill="#2d3142">
-<rect x="24" y="104" width="140" height="64" rx="6" fill="#fff" stroke="#2d3142"/>
-<text x="94" y="131">Visit / Reload</text><text x="94" y="150" font-size="11" fill="#4f5d75">durable generation</text>
-<rect x="204" y="40" width="180" height="64" rx="6" fill="#fff" stroke="#2d3142"/>
-<text x="294" y="67">Full article · root</text><text x="294" y="86" font-size="11" fill="#4f5d75">clean body + sentence index</text>
-<rect x="204" y="148" width="180" height="64" rx="6" fill="#fff" stroke="#2d3142"/>
-<text x="294" y="175">Claims · root</text><text x="294" y="194" font-size="11" fill="#4f5d75">metadata + extraction fidelity</text>
-<rect x="424" y="40" width="196" height="64" rx="6" fill="#fff" stroke="#2d3142"/>
-<text x="522" y="67">Local actor / event matches</text><text x="522" y="86" font-size="11" fill="#4f5d75">original sentences + qualifiers</text>
-<rect x="424" y="148" width="196" height="80" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/>
-<text x="522" y="172">Classifier · per claim</text><text x="522" y="192" font-size="11" fill="#4f5d75">support / context / counterevidence</text><text x="522" y="212" font-size="11" fill="#4f5d75">durable validated batches</text>
-<rect x="660" y="104" width="196" height="96" rx="6" fill="#fff" stroke="#2d3142"/>
-<text x="758" y="128">Synthesis · per claim</text><text x="758" y="148" font-size="11" fill="#4f5d75">claim + actors + selected evidence</text><text x="758" y="168" font-size="11" fill="#4f5d75">fidelity · semantic dedup ≤5</text><text x="758" y="188" font-size="11" fill="#4f5d75">per-claim checkpoints</text>
-<rect x="660" y="252" width="196" height="64" rx="6" fill="#fff" stroke="#2d3142"/>
-<text x="758" y="279">Links</text><text x="758" y="298" font-size="11" fill="#4f5d75">related metadata shortlist ≤12</text>
-<rect x="204" y="380" width="396" height="80" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/>
-<text x="402" y="405">Three fenced publication points</text><text x="402" y="425" font-size="11" fill="#4f5d75">Claims → Inferences → Links · replace only completed kind</text><text x="402" y="445" font-size="11" fill="#4f5d75">shared canonical publisher · preserve prior kinds on failure</text>
-<rect x="660" y="380" width="196" height="80" rx="6" fill="#fff" stroke="#2d3142"/>
-<text x="758" y="405">Brain + index outbox</text><text x="758" y="425" font-size="11" fill="#4f5d75">stage-scoped index work</text><text x="758" y="445" font-size="11" fill="#4f5d75">exact revision acknowledgments</text>
-</g>
-<g font-family="Geist Mono,ui-monospace,monospace" font-size="10" fill="#4f5d75">
-<text x="306" y="300">Claims publish</text><text x="686" y="220">analysis complete</text>
-</g>
-<text x="450" y="492" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="10" fill="#4f5d75">captured routes · generation + lease fencing · stable sentence IDs and UTF-8 spans · no full-body inference fallback</text>
-<text x="450" y="518" text-anchor="middle" font-family="Instrument Serif,serif" font-size="16" font-style="italic" fill="#2d3142">A later failure keeps earlier results published; unsupported outlooks remain withheld.</text>
+ <title id="intel-brief-chain-title">Intel brief: claim-specific analysis and staged publication</title>
+ <desc id="intel-brief-chain-desc">Visit or Reload attaches to one durable generation. Full article and metadata Claims are independent roots. Local NLP matches detected actor names, observed spellings and each claim's event terms to original body sentences, preserving nearby attribution and corrections. For each claim, bounded Classifier decisions select support, context and counterevidence. Synthesis receives one claim, associated actors and selected original sentences; each fully classified claim receives an analysis request or reuses a validated analysis, including empty-evidence analyses that may return no inference. No full article chunks are sent for inference generation. Fidelity and bounded semantic selection retain at most five inferences. Links follows. After fenced stage completion, Claims, Inferences and Links each request a separate canonical publication transaction, with only that stage's kind replaced and indexed. Later failure preserves earlier published kinds. Exact memory revision acknowledgments distinguish Published from Indexed. Cancellation and stale leases prevent commits. Validated context batches and generated analyses are checkpointed independently. A failed classifier batch withholds its claim, without cancelling independent claims. The stage completes with warnings when some claims succeed; Links uses only validated inferences. Retry re-asks only missing batches and analyses; all claims failing remains a failure. Structured text templates version `argos-text-v1` govern Plan/Identifier/Claim/Inference/Related generation; `insights-v4-text` and `brief-contracts-v2-text` replace legacy JSON checkpoints. OP_INFERENCES_DEDUP (`intel_brief_inferences.select`) is a fifth Brief operation as a bounded TextChoiceAdapter decision gate. Receipts capture outcome + raw-attempt diagnostics; stage_revisions and route_key are version-pinned. Legacy JSON checkpoints are explicitly superseded.</desc>
+ <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#4f5d75"/></marker></defs>
+ <rect width="900" height="540" fill="#f5f5f5"/>
+ <g fill="none" stroke="#4f5d75" marker-end="url(#arrow)">
+ <path d="M164 136 H184 V72 H204"/>
+ <path d="M184 136 V180 H204"/>
+ <path d="M384 72 H424"/>
+ <path d="M384 168 H404 V88 H424"/>
+ <path d="M522 104 V148"/>
+ <path d="M384 180 H424"/>
+ <path d="M620 180 H640 V144 H660"/>
+ <path d="M758 184 V252"/>
+ <path d="M294 212 V380"/>
+ <path d="M856 144 H880 V472 H524 V460"/>
+ <path d="M758 316 V356 H572 V380"/>
+ <path d="M600 420 H660"/>
+ </g>
+ <g font-family="Geist,system-ui,sans-serif" font-size="13" text-anchor="middle" fill="#2d3142">
+ <rect x="24" y="104" width="140" height="64" rx="6" fill="#fff" stroke="#2d3142"/>
+ <text x="94" y="131">Visit / Reload</text><text x="94" y="150" font-size="11" fill="#4f5d75">durable generation</text>
+ <rect x="204" y="40" width="180" height="64" rx="6" fill="#fff" stroke="#2d3142"/>
+ <text x="294" y="67">Full article · root</text><text x="294" y="86" font-size="11" fill="#4f5d75">clean body + sentence index</text>
+ <rect x="204" y="148" width="180" height="64" rx="6" fill="#fff" stroke="#2d3142"/>
+ <text x="294" y="175">Claims · root</text><text x="294" y="194" font-size="11" fill="#4f5d75">metadata + extraction fidelity</text>
+ <rect x="424" y="40" width="196" height="64" rx="6" fill="#fff" stroke="#2d3142"/>
+ <text x="522" y="67">Local actor / event matches</text><text x="522" y="86" font-size="11" fill="#4f5d75">original sentences + qualifiers</text>
+ <rect x="424" y="148" width="196" height="80" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/>
+ <text x="522" y="172">Classifier · per claim</text><text x="522" y="192" font-size="11" fill="#4f5d75">support / context / counterevidence</text><text x="522" y="212" font-size="11" fill="#4f5d75">durable validated batches</text>
+ <rect x="660" y="104" width="196" height="96" rx="6" fill="#fff" stroke="#2d3142"/>
+ <text x="758" y="128">Synthesis · per claim</text><text x="758" y="148" font-size="11" fill="#4f5d75">claim + actors + selected evidence</text><text x="758" y="168" font-size="11" fill="#4f5d75">fidelity · semantic dedup ≤5</text><text x="758" y="188" font-size="11" fill="#4f5d75">per-claim checkpoints</text>
+ <rect x="660" y="252" width="196" height="64" rx="6" fill="#fff" stroke="#2d3142"/>
+ <text x="758" y="279">Links</text><text x="758" y="298" font-size="11" fill="#4f5d75">related metadata shortlist ≤12</text>
+ <rect x="204" y="380" width="396" height="80" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36"/>
+ <text x="402" y="405">Three fenced publication points</text><text x="402" y="425" font-size="11" fill="#4f5d75">Claims → Inferences → Links · replace only completed kind</text><text x="402" y="445" font-size="11" fill="#4f5d75">shared canonical publisher · preserve prior kinds on failure</text>
+ <rect x="660" y="380" width="196" height="80" rx="6" fill="#fff" stroke="#2d3142"/>
+ <text x="758" y="405">Brain + index outbox</text><text x="758" y="425" font-size="11" fill="#4f5d75">stage-scoped index work</text><text x="758" y="445" font-size="11" fill="#4f5d75">exact revision acknowledgments</text>
+ </g>
+ <g font-family="Geist Mono,ui-monospace,monospace" font-size="10" fill="#4f5d75">
+ <text x="306" y="300">Claims publish</text><text x="686" y="220">analysis complete</text>
+ </g>
+ <text x="450" y="492" text-anchor="middle" font-family="Geist Mono,ui-monospace,monospace" font-size="10" fill="#4f5d75">captured routes · generation + lease fencing · stable sentence IDs and UTF-8 spans · no full-body inference fallback</text>
+ <text x="450" y="518" text-anchor="middle" font-family="Instrument Serif,serif" font-size="16" font-style="italic" fill="#2d3142">A later failure keeps earlier results published; unsupported outlooks remain withheld.</text>
 </svg>

@@ -155,7 +155,9 @@ mod tests {
 
         let doc = export_document(&settings, &auth, &quotas);
 
-        assert_eq!(doc.schema_version, SCHEMA_VERSION);
+        // Migration copies every resolved legacy route into its pipeline role,
+        // so a current export always carries the pipeline schema.
+        assert_eq!(doc.schema_version, SCHEMA_VERSION_PIPELINES);
         assert!(doc.exported_at.is_some(), "export stamps RFC3339");
         assert_eq!(doc.providers.len(), 2, "one entry per configured account");
         assert_eq!(
@@ -316,6 +318,9 @@ mod tests {
         let quotas = QuotaSettingsFile {
             settings: vec![rate_limit_entry("openrouter")],
         };
+        // A current export normalizes legacy roles once; capture the source
+        // after that one-time migration so the round trip is verbatim.
+        settings.defaults.migrate_pipeline_roles();
         let before = toml::to_string_pretty(&settings.defaults).unwrap();
 
         let doc = export_document(&settings, &auth, &quotas);
@@ -336,7 +341,7 @@ mod tests {
         let after = toml::to_string_pretty(&restored.defaults).unwrap();
         assert_eq!(
             before, after,
-            "every role and ordered fallback survives verbatim"
+            "every role, pipeline copy, variant and ordered fallback survives verbatim"
         );
     }
 
@@ -365,6 +370,8 @@ mod tests {
             crate::provider::OP_INFERENCES_ASSESS.into(),
             assignment("openrouter", "openai/gpt-4o-mini", &[]).into(),
         );
+        settings.defaults.migrate_pipeline_roles();
+        let before = toml::to_string_pretty(&settings.defaults).unwrap();
         let auth = inline_account("openrouter", "fake-key-1");
         let quotas = QuotaSettingsFile {
             settings: vec![rate_limit_entry("openrouter")],
@@ -387,10 +394,7 @@ mod tests {
                 "{role}"
             );
         }
-        assert_eq!(
-            toml::to_string_pretty(&settings.defaults).unwrap(),
-            toml::to_string_pretty(&restored.defaults).unwrap()
-        );
+        assert_eq!(before, toml::to_string_pretty(&restored.defaults).unwrap());
         // Resetting the override leaves every role primary untouched.
         assert!(restored
             .defaults
@@ -793,7 +797,13 @@ mod tests {
         let mut quotas = QuotaSettingsFile::default();
         apply_import(&plan, &mut settings, &mut auth, &mut quotas).unwrap();
         for (role, chain) in chains {
-            let a = settings.defaults.role_mut(role).unwrap().clone();
+            // The retired controller imports into its archived slot, never a
+            // runtime route; every live role resolves through its pipeline.
+            let a = if role == "investigation_controller" {
+                settings.defaults.legacy_role_mut(role).unwrap().clone()
+            } else {
+                settings.defaults.role_mut(role).unwrap().clone()
+            };
             let got: Vec<(String, String)> = a
                 .chain()
                 .into_iter()
@@ -807,8 +817,8 @@ mod tests {
         }
         let exported = export_document(&settings, &auth, &quotas);
         assert_eq!(
-            exported.schema_version, SCHEMA_VERSION,
-            "no schema-2 feature in use"
+            exported.schema_version, SCHEMA_VERSION_PIPELINES,
+            "migrated pipeline routes always export as schema 3"
         );
     }
 
@@ -844,9 +854,11 @@ mod tests {
         );
         let quotas = QuotaSettingsFile::default();
         let doc = export_document(&settings, &auth, &quotas);
-        assert_eq!(doc.schema_version, SCHEMA_VERSION_ROUTING);
+        // Pipeline routes are populated by migration, so the export is schema 3
+        // even when the operator only used schema-2 features.
+        assert_eq!(doc.schema_version, SCHEMA_VERSION_PIPELINES);
         let text = serialize_document(&doc).unwrap();
-        assert!(text.contains(r#""route_role": "summarization""#), "{text}");
+        assert!(text.contains(r#""route_role": "brain_summary""#), "{text}");
         assert!(text.contains(r#""account_id": "openrouter-work""#));
         let raw: serde_json::Value = serde_json::from_str(&text).unwrap();
         for (key, o) in raw["model_roles"]["operation_overrides"]
@@ -878,11 +890,16 @@ mod tests {
             restored_auth.accounts.contains_key("openrouter-work"),
             "the account-map key is preserved, not collapsed onto its kind"
         );
-        // A linked override follows the current Summarization chain.
-        restored.defaults.summarization.model = "google/gemma-4-31b-it:free".into();
+        // A linked override follows the current Brain Summary chain; the
+        // archived Summarization field no longer routes runtime work.
+        restored
+            .defaults
+            .role_mut("brain_summary")
+            .expect("pipeline role")
+            .model = "google/gemma-4-31b-it:free".into();
         let (a, overridden) = restored
             .defaults
-            .resolve_operation(Some(provider::OP_CLAIMS_GENERATE), "claim_assessor");
+            .resolve_operation(Some(provider::OP_CLAIMS_GENERATE), "atlas_analyst");
         assert!(overridden);
         assert_eq!(a.model, "google/gemma-4-31b-it:free");
         // Reset removes the key and never touches the referenced role.
@@ -890,7 +907,7 @@ mod tests {
             .defaults
             .reset_operation(provider::OP_CLAIMS_GENERATE));
         assert_eq!(
-            restored.defaults.summarization.model,
+            restored.defaults.role("brain_summary").unwrap().model,
             "google/gemma-4-31b-it:free"
         );
     }

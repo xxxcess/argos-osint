@@ -54,6 +54,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/days", get(days))
         .route("/api/v1/actors/detail", get(actor_dossier::read))
         .route("/api/v1/articles", get(articles))
+        .route("/api/v1/articles/search", get(article_search))
         .route("/api/v1/articles/counts", get(article_counts))
         .route("/api/v1/articles/detail", get(detail))
         .route("/api/v1/articles/related", get(related))
@@ -200,7 +201,7 @@ async fn ready(State(s): State<ApiState>) -> ApiResult {
 }
 async fn capabilities() -> Json<Value> {
     Json(
-        json!({"api_version":1,"categories":intel::CATEGORIES,"auth":false,"features":["bulletin","brief","related","jobs","topology","live"],"live":{"path":"/api/v1/live","channels":["metrics","brief"],"version":1}}),
+        json!({"api_version":1,"categories":intel::CATEGORIES,"auth":false,"features":["bulletin","brief","related","jobs","topology","live","article-search"],"live":{"path":"/api/v1/live","channels":["metrics","brief"],"version":1}}),
     )
 }
 async fn days(State(s): State<ApiState>) -> ApiResult {
@@ -221,6 +222,19 @@ async fn articles(State(s): State<ApiState>, Query(q): Query<intel::ArticleQuery
     q.validate().map_err(|_| bad())?;
     Ok(Json(
         serde_json::to_value(intel::articles(&s.repo, &q).await.map_err(internal)?)
+            .map_err(internal)?,
+    ))
+}
+/// Discovery-compatible article search (`search_articles`): admitted
+/// titles/descriptions as separate full-text fields with matched-field
+/// attribution, weighted ranks and bounded pages.
+async fn article_search(
+    State(s): State<ApiState>,
+    Query(q): Query<argos_osint_core::storage::article_discovery::ArticleSearchQuery>,
+) -> ApiResult {
+    q.validate().map_err(|_| bad())?;
+    Ok(Json(
+        serde_json::to_value(intel::article_search(&s.repo, &q).await.map_err(internal)?)
             .map_err(internal)?,
     ))
 }

@@ -196,3 +196,220 @@ async fn article_lookups_use_their_indexes() {
         assert!(!p.contains("Iterate Table"), "{sql}: {p}");
     }
 }
+
+#[tokio::test]
+async fn admission_stages_admits_and_discards_with_receipts() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "atlas_admission").await;
+    let tax = argos_osint_core::atlas::TAXONOMY_VERSION;
+
+    // Stage → idempotent re-stage keeps one pending row.
+    let staged = article("r1", "a", "2026-01-02");
+    assert!(atlas::stage_article(&db, &staged, "rev-1", tax)
+        .await
+        .unwrap());
+    assert!(!atlas::stage_article(&db, &staged, "rev-1", tax)
+        .await
+        .unwrap());
+    let rows = atlas::admission_rows(&db, "r1").await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].state.as_str(), rows[0].attempts), ("pending", 0));
+
+    // Evaluating resets when a cycle dies mid-batch, so it retries.
+    let hash = rows[0].input_hash.clone();
+    assert!(atlas::admission_begin(&db, "r1", "a", &hash).await.unwrap());
+    atlas::admission_reset_stale(&db).await.unwrap();
+    let rows = atlas::admission_rows(&db, "r1").await.unwrap();
+    assert_eq!(rows[0].state.as_str(), "pending");
+
+    // Admit: canonical ordered categories with the scalar projecting the
+    // first tag; the staging row is pruned in the same transaction. The
+    // two-tag minimum and seven-tag ceiling are storage invariants.
+    let mut admitted = staged.clone();
+    admitted.categories = vec!["science".into(), "health".into()];
+    atlas::admission_admit(&db, &admitted, &hash, tax)
+        .await
+        .unwrap();
+    assert!(atlas::admission_rows(&db, "r1").await.unwrap().is_empty());
+    let canonical = atlas::article(&db, "r1", "a")
+        .await
+        .unwrap()
+        .expect("admitted article is canonical");
+    assert_eq!(canonical.categories, ["science", "health"]);
+    assert_eq!(canonical.category, "science");
+    assert!(!canonical.admitted_at.is_empty());
+    // Over the ceiling: refused, never written.
+    let mut padded = staged.clone();
+    padded.categories = (0..8).map(|n| format!("tag{n}")).collect();
+    assert!(atlas::admission_admit(&db, &padded, &hash, tax)
+        .await
+        .is_err());
+    // Below the minimum: refused as well.
+    let mut single = staged.clone();
+    single.categories = vec!["science".into()];
+    assert!(atlas::admission_admit(&db, &single, &hash, tax)
+        .await
+        .is_err());
+
+    // Discard: a minimal rejection receipt; reconsideration requires a
+    // changed input or taxonomy.
+    let staged2 = article("r1", "b", "2026-01-02");
+    atlas::stage_article(&db, &staged2, "rev-2", tax)
+        .await
+        .unwrap();
+    let rows = atlas::admission_rows(&db, "r1").await.unwrap();
+    let (id2, hash2, revision2) = (
+        rows[0].article_id.clone(),
+        rows[0].input_hash.clone(),
+        rows[0].source_revision.clone(),
+    );
+    assert!(!atlas::rejection_exists(&db, &id2, &hash2, tax)
+        .await
+        .unwrap());
+    atlas::admission_discard(
+        &db,
+        "r1",
+        &id2,
+        &hash2,
+        &revision2,
+        tax,
+        "fewer than two fitting categories",
+    )
+    .await
+    .unwrap();
+    assert!(atlas::admission_rows(&db, "r1").await.unwrap().is_empty());
+    assert!(atlas::rejection_exists(&db, &id2, &hash2, tax)
+        .await
+        .unwrap());
+    assert!(!atlas::rejection_exists(&db, &id2, "changed-input", tax)
+        .await
+        .unwrap());
+    assert!(
+        !atlas::rejection_exists(&db, &id2, &hash2, "atlas-taxonomy-v1")
+            .await
+            .unwrap()
+    );
+    assert!(atlas::article(&db, "r1", &id2).await.unwrap().is_none());
+
+    // A retryable failure keeps the input privately staged with its error.
+    let staged3 = article("r1", "c", "2026-01-02");
+    atlas::stage_article(&db, &staged3, "rev-3", tax)
+        .await
+        .unwrap();
+    let rows = atlas::admission_rows(&db, "r1").await.unwrap();
+    let (id3, hash3) = (rows[0].article_id.clone(), rows[0].input_hash.clone());
+    atlas::admission_begin(&db, "r1", &id3, &hash3)
+        .await
+        .unwrap();
+    atlas::admission_failed(&db, "r1", &id3, &hash3, "all routes blocked")
+        .await
+        .unwrap();
+    let rows = atlas::admission_rows(&db, "r1").await.unwrap();
+    assert_eq!(
+        (
+            rows[0].state.as_str(),
+            rows[0].attempts,
+            rows[0].last_error.as_str()
+        ),
+        ("failed", 1, "all routes blocked")
+    );
+    let work = atlas::admission_work(&db).await.unwrap();
+    assert_eq!(work.len(), 1, "failed rows stay retryable");
+}
+
+#[tokio::test]
+async fn article_views_filter_by_category_membership_and_dedup_identity() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "atlas_membership").await;
+    atlas::insert_run(&db, "r1", "{}", "{}").await.unwrap();
+    let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let mut science = article("r1", "a", "2026-01-02");
+    science.categories = vec!["science".into(), "health".into()];
+    atlas::upsert_article(&db, &science).await.unwrap();
+    let mut military = article("r1", "b", "2026-01-02");
+    military.categories = vec!["military".into()];
+    atlas::upsert_article(&db, &military).await.unwrap();
+    // A legacy row without v2 tags is pending migration: excluded from All.
+    let legacy = article("r1", "c", "2026-01-02");
+    atlas::upsert_article(&db, &legacy).await.unwrap();
+
+    let science_view = atlas::articles_for_intel(&db, "science", &day, "")
+        .await
+        .unwrap();
+    assert_eq!(
+        science_view
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a"]
+    );
+    let all = atlas::articles_for_intel(&db, "all", &day, "")
+        .await
+        .unwrap();
+    assert_eq!(
+        all.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        ["a", "b"],
+        "All is the admitted corpus with tags; legacy rows wait for migration"
+    );
+}
+
+#[tokio::test]
+async fn article_category_and_fulltext_indexes_are_defined() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "atlas_search_indexes").await;
+    // Index definitions live on their table: `INFO FOR DB` maps every table
+    // to its bare `DEFINE TABLE` string in SurrealDB 3.3.4 and never lists
+    // indexes, so the table info is the catalog to introspect.
+    let mut r = db
+        .query("INFO FOR TABLE atlas_article")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let info: Option<serde_json::Value> = r
+        .take::<Option<surrealdb::types::Value>>(0usize)
+        .unwrap()
+        .map(|v| v.into_json_value());
+    let info = info.expect("table info").to_string();
+    for index in [
+        "atlas_article_categories",
+        "atlas_article_title_search",
+        "atlas_article_description_search",
+    ] {
+        assert!(info.contains(index), "missing index {index}");
+    }
+}
+
+/// The membership predicate `filters()` builds for a named category
+/// (storage/article_discovery.rs), pinned so the plan can be inspected.
+const MEMBERSHIP_SURQL: &str = "SELECT * FROM atlas_article WHERE categories CONTAINS $category";
+
+#[tokio::test]
+async fn category_membership_filters_use_the_categories_index() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "atlas_membership_plans").await;
+    let mut r = db
+        .query(format!("{MEMBERSHIP_SURQL} EXPLAIN FULL"))
+        .bind(("category", "science".to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let p = format!("{:?}", r.take::<surrealdb::types::Value>(0).unwrap());
+    assert!(
+        p.contains("atlas_article_categories"),
+        "membership must scan the categories index: {p}"
+    );
+    assert!(
+        !p.contains("TableScan"),
+        "membership must not fall back to a table scan: {p}"
+    );
+}

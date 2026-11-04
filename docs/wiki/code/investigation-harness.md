@@ -26,7 +26,31 @@ Defaults live under **Models → Defaults**. Empty derived roles inherit. Explic
 | `evidence_curator` | Source-linked passages | Inherits `recon` |
 | `entity_resolver` | Identity conflicts | Inherits `classifier` |
 | `claim_assessor` | Verdicts and citations | Inherits `synthesis` |
-| `investigation_controller` | Checkpoints and dispatch | Inherits `recon` |
+
+## Catalog projection
+
+59 tools in 14 intelligence categories. `hunter_tech_lookup` aliases `hunter_technologies`.
+
+**Phase 2 loop semantics** (Recon loop):
+- Mode classification is local-first: explicit prompt signals resolve with zero model calls; the `recon_decisions` bounded gate runs only when consequential; gate failures surface as diagnostics in plan binding_notes (no silent fallback).
+- Plan artifacts produced once per plan: `Directive` carries required_evidence / queries / depends_on; dependencies restricted to earlier directive ids; opening discovery reuses the plan's query candidates (no second generation call); Jev picker request state carries directive depends_on.
+- Typed bindings gained actor association + original byte spans (span_start/span_end, half-open); actor association set only on subject-owned handles; appearance alone never proves ownership; model extraction quotes verified source evidence.
+- Missing inputs trigger one grounded discovery attempt per starved step; material-gap replan runs at most once per turn; fallback stops on repeated no progress (4 consecutive settled calls); compaction is threshold-only (NLP mode no longer forces compaction); turn-start catalog actor discovery note/binding seeding.
+
+1. Web Discovery
+2. News & Events
+3. Publisher Context
+4. Legal & Litigation
+5. Corporate & Organizations
+6. Professional Identity
+7. Social Content
+8. Public Account Corroboration
+9. Domain & Infrastructure
+10. Historical Web
+11. Software & Code
+12. Geography & Places
+13. Bitcoin & Blockchain
+14. Vulnerabilities & Cyber
 
 ## Catalog projection
 
@@ -94,5 +118,9 @@ See [NLP coverage](../concepts/nlp-preprocessing.md) and the [shared harness](..
 Atlas uses [classification-only collection and Related articles](../concepts/atlas-classification-and-related-articles.md). Its local shared mentions are tentative browsing leads, separate from investigative claims, assessed Links and evidence confidence. Current Atlas stages count article metadata; historical memory units retain legacy labels.
 
 ## Progress, supersession and publication
+
+*Deprecated: `investigation_controller` retired and archived as `archived_controller` / `archived_operation_overrides` / `migration_exceptions` (Phase 1 role split). Old curator/resolver/assessor operations map by caller and task: bounded assessments → that pipeline's decision role; extraction → its analyst.*
+
+Intel and Jobs show one status sequence: Queued → Waiting for output (or Waiting for decision) → Receiving output → Validating → Published → Indexed, with explicit Stalled, Retry wait and failure states; header receipt is never shown as model activity and no fake percentages or token counts are shown. Notable activity transitions are logged as `insight.activity` events (never per delta). When a source body, completed report, captured role route or preparation contract changes, the owner's generation advances: older queued tasks become `superseded` immediately and running tasks are retired at admission, pre-send, the 30s heartbeat (dropping the in-flight request) or the publication fence. Supersession is intentional retirement — no error category, refunded attempt, no owner error — with reason and replacement link in `insight_supersession` and an `insight.superseded` event; Jobs detail reads `Superseded · replaced by <job> · <reason>`. Visits, polling, heartbeats and progress never create generations. Index-only repair after publication drains the canonical outbox without new model calls. Figures: [Intel brief chain](../../diagrams/intel-brief-chain.html), [persistence](../../diagrams/persistence.html).
 
 Intel and Jobs show one status sequence: Queued → Waiting for output (or Waiting for decision) → Receiving output → Validating → Published → Indexed, with explicit Stalled, Retry wait and failure states; header receipt is never shown as model activity and no fake percentages or token counts are shown. Notable activity transitions are logged as `insight.activity` events (never per delta). When a source body, completed report, captured role route or preparation contract changes, the owner's generation advances: older queued tasks become `superseded` immediately and running tasks are retired at admission, pre-send, the 30s heartbeat (dropping the in-flight request) or the publication fence. Supersession is intentional retirement — no error category, refunded attempt, no owner error — with reason and replacement link in `insight_supersession` and an `insight.superseded` event; Jobs detail reads `Superseded · replaced by <job> · <reason>`. Visits, polling, heartbeats and progress never create generations. Index-only repair after publication drains the canonical outbox without new model calls. Figures: [Intel brief chain](../../diagrams/intel-brief-chain.html), [persistence](../../diagrams/persistence.html).

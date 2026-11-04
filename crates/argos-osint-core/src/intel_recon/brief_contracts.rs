@@ -20,7 +20,7 @@ pub const EMPTY_REASON_WORDS: usize = 25;
 pub const LEAD_WHY_WORDS: usize = 40;
 
 /// Contract schema version (part of stage revisions once wired).
-pub const BRIEF_CONTRACT_VERSION: &str = "brief-contracts-v1";
+pub const BRIEF_CONTRACT_VERSION: &str = "brief-contracts-v2-text";
 
 pub const MODALITIES: [&str; 4] = ["asserted", "alleged", "denied", "uncertain"];
 pub const POLARITIES: [&str; 2] = ["positive", "negative"];

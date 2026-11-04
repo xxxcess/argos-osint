@@ -2438,7 +2438,15 @@ pub fn accept_bindings(candidates: Vec<Binding>, observation: &str) -> Vec<Bindi
             continue;
         }
         let lower = value.to_ascii_lowercase();
-        let occurs = haystack.contains(&lower)
+        // Half-open byte span of the first contiguous occurrence in the observation.
+        // The ASCII lowercasing keeps byte offsets stable, so the span indexes the
+        // original observation and the quoted evidence stays verifiable. Values that
+        // only occur discontiguously (name parts, address pieces) stay unspanned.
+        let (span_start, span_end) = match haystack.find(&lower) {
+            Some(start) if !lower.is_empty() => (start, start + lower.len()),
+            _ => (0, 0),
+        };
+        let occurs = span_end > span_start
             || match binding.kind.as_str() {
                 "address" | COORDINATES_KIND => lower
                     .split(',')
@@ -2481,7 +2489,12 @@ pub fn accept_bindings(candidates: Vec<Binding>, observation: &str) -> Vec<Bindi
         }) {
             continue;
         }
-        kept.push(Binding { value, ..binding });
+        kept.push(Binding {
+            span_start,
+            span_end,
+            value,
+            ..binding
+        });
     }
     kept
 }
@@ -2510,7 +2523,10 @@ pub fn rule_bindings(
     let mut keyed_values = Vec::new();
     keyed(row, observations, "", &mut keyed_values);
     let mut candidates: Vec<Binding> = Vec::new();
-    let mut push = |kind: &str, value: &str, qualifier: &str| {
+    // Actor association: only the subject-ownership rule proves a handle belongs to
+    // the subject, so only handles carry an actor here; other kinds stay empty
+    // because appearance alone never proves ownership.
+    let mut push = |kind: &str, value: &str, qualifier: &str, actor: &str| {
         candidates.push(Binding {
             kind: kind.into(),
             value: value.into(),
@@ -2518,6 +2534,7 @@ pub fn rule_bindings(
             qualifier: qualifier.into(),
             source_tool: row.tool.into(),
             unverified: kind == "handle" && row.unverified_handles,
+            actor: actor.into(),
             ..Binding::default()
         });
     };
@@ -2538,7 +2555,7 @@ pub fn rule_bindings(
                 for text in &texts {
                     for handle in super::super::extract_social_handles(std::slice::from_ref(text)) {
                         if owned_handle(&subject, &handle.handle, &hits, row.profile_of_input) {
-                            push("handle", &handle.handle, &handle.platform);
+                            push("handle", &handle.handle, &handle.platform, &subject);
                         }
                     }
                 }
@@ -2546,7 +2563,7 @@ pub fn rule_bindings(
                     keyed_values.iter().filter(|(kind, _, _)| *kind == "handle")
                 {
                     if owned_handle(&subject, value, &hits, row.profile_of_input) {
-                        push(kind, value, qualifier);
+                        push(kind, value, qualifier, &subject);
                     }
                 }
             }
@@ -2560,32 +2577,32 @@ pub fn rule_bindings(
                     .iter()
                     .filter(|entity| entity.selected && entity.entity_type == wanted)
                 {
-                    push(kind, &entity.canonical_name, "");
+                    push(kind, &entity.canonical_name, "", "");
                 }
                 for (_, value, _) in keyed_values.iter().filter(|(item, _, _)| item == kind) {
                     if row.profile_of_input
                         || related(&subject, value)
                         || hits.is_empty() && *kind == "person_name"
                     {
-                        push(kind, value, "");
+                        push(kind, value, "", "");
                     }
                 }
             }
             "domain" => {
                 for domain in &own_domains {
-                    push("domain", domain, "");
+                    push("domain", domain, "", "");
                 }
                 if hits.is_empty() {
                     for text in &texts {
                         for domain in domains_in(text) {
                             if !social_or_publisher(&domain) {
-                                push("domain", &domain, "");
+                                push("domain", &domain, "", "");
                             }
                         }
                     }
                 }
                 for (_, value, _) in keyed_values.iter().filter(|(item, _, _)| *item == "domain") {
-                    push("domain", value.trim_start_matches("*."), "");
+                    push("domain", value.trim_start_matches("*."), "", "");
                 }
             }
             "url" => {
@@ -2607,45 +2624,45 @@ pub fn rule_bindings(
                     for text in &texts {
                         for value in kind_in(text, "url") {
                             if wanted(&value) {
-                                push(URL_KIND, &value, "");
+                                push(URL_KIND, &value, "", "");
                             }
                         }
                     }
                 } else {
                     for hit in hits.iter().filter(|hit| wanted(&hit.url)).take(5) {
-                        push(URL_KIND, &hit.url, "");
+                        push(URL_KIND, &hit.url, "", "");
                     }
                 }
                 for (_, value, _) in keyed_values.iter().filter(|(item, _, _)| *item == URL_KIND) {
-                    push(URL_KIND, value, "");
+                    push(URL_KIND, value, "", "");
                 }
             }
             "email" => texts
                 .iter()
                 .flat_map(|text| emails_in(text))
-                .for_each(|email| push("email", &email, "")),
+                .for_each(|email| push("email", &email, "", "")),
             "ip" => texts
                 .iter()
                 .flat_map(|text| kind_in(text, "ip"))
-                .for_each(|ip| push("ip", &ip, "")),
+                .for_each(|ip| push("ip", &ip, "", "")),
             "cve" => texts
                 .iter()
                 .flat_map(|text| kind_in(text, "cve"))
-                .for_each(|cve| push("cve", &cve, "")),
+                .for_each(|cve| push("cve", &cve, "", "")),
             "wallet" => texts
                 .iter()
                 .flat_map(|text| bitcoins_in(text))
-                .for_each(|wallet| push("wallet", &wallet, "")),
+                .for_each(|wallet| push("wallet", &wallet, "", "")),
             "package" => texts
                 .iter()
                 .flat_map(|text| packages_in(text))
-                .for_each(|package| push("package", &package, "")),
+                .for_each(|package| push("package", &package, "", "")),
             "address" => {
                 for (_, value, _) in keyed_values
                     .iter()
                     .filter(|(item, _, _)| *item == "address")
                 {
-                    push("address", value, "");
+                    push("address", value, "", "");
                 }
             }
             PLATFORM_ID_KIND => {
@@ -2654,7 +2671,7 @@ pub fn rule_bindings(
                     .filter(|(item, _, _)| *item == PLATFORM_ID_KIND)
                 {
                     if !qualifier.is_empty() {
-                        push(PLATFORM_ID_KIND, value, qualifier);
+                        push(PLATFORM_ID_KIND, value, qualifier, "");
                     }
                 }
             }
@@ -2664,7 +2681,7 @@ pub fn rule_bindings(
                 found
                     .iter()
                     .take(3)
-                    .for_each(|value| push(COORDINATES_KIND, value, ""));
+                    .for_each(|value| push(COORDINATES_KIND, value, "", ""));
             }
             _ => {}
         }

@@ -210,10 +210,20 @@ fn test_role_defaults_inheritance_hierarchy() {
     assert_eq!(assessor.provider, "openai");
     assert_eq!(assessor.model, "gpt-4.5");
 
-    // 4. Investigation Controller inherits Recon
-    let (controller, parent) = defaults.resolve_role("investigation_controller");
-    assert_eq!(parent, Some("recon"));
-    assert_eq!(controller.provider, "openrouter");
+    // 4. The Investigation Controller role is retired: its archived settings are
+    //    never dispatched and the bounded decisions route is Recon Decisions.
+    assert!(defaults.role("investigation_controller").is_none());
+    defaults.recon_decisions = Some(ModelAssignment {
+        provider: "openrouter".into(),
+        model: "typesafe/jev-1.13".into(),
+        ..Default::default()
+    });
+    let (decisions, parent) = defaults.resolve_role("recon_decisions");
+    assert_eq!(parent, None);
+    assert_eq!(
+        (decisions.provider.as_str(), decisions.model.as_str()),
+        ("openrouter", "typesafe/jev-1.13")
+    );
 
     // 5. Summarization inherits Synthesis
     let (summary, parent) = defaults.resolve_role("summarization");

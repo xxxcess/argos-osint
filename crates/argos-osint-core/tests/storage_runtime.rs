@@ -3,6 +3,7 @@
 //! Runs in the mode picked by `ARGOS_SURREAL_MODE`.
 #![cfg(feature = "surreal")]
 
+use argos_osint_core::storage::bootstrap::SCHEMA_VERSION;
 use argos_osint_core::storage::home::{self, Layout, Mode, StorageConfig};
 use argos_osint_core::storage::{runtime, server};
 
@@ -53,7 +54,9 @@ async fn one_entry_point_serves_async_and_plain_thread_callers() {
     .join()
     .unwrap()
     .unwrap();
-    assert_eq!(version, vec![1]);
+    // The plain thread reads the recorded schema version; v2 is the current
+    // bootstrap contract (`storage_meta:schema.version`, see bootstrap.rs).
+    assert_eq!(version, vec![SCHEMA_VERSION]);
 
     // Bounded spawn_ordered preserves order and bounds under the shared runtime.
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));

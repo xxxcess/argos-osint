@@ -727,7 +727,6 @@ pub struct DiscoveryQuery {
     pub angle: String,
 }
 
-#[allow(dead_code)]
 pub fn complementary_queries(question: &str, strategy: &str) -> [DiscoveryQuery; 2] {
     let subject = subject_of(question);
     let identity = clip_query(&format!("{subject} official name identifiers"));
@@ -770,6 +769,38 @@ pub fn complementary_queries(question: &str, strategy: &str) -> [DiscoveryQuery;
 
 /// Query role for the associated-accounts search.
 pub const ACCOUNTS: &str = "accounts";
+
+/// The two discovery queries for mandatory broad discovery, reusing the plan's grounded
+/// query candidates first (produced once per plan) and the deterministic complementary
+/// queries only to fill the remaining slot. The first plan query takes the identity
+/// slot, the second the investigative (or accounts) slot with its fallback role and
+/// angle.
+pub fn plan_discovery_queries(
+    question: &str,
+    strategy: &str,
+    plan_queries: &[String],
+) -> [DiscoveryQuery; 2] {
+    let fallback = complementary_queries(question, strategy);
+    let mut queries = fallback.clone();
+    let mut plan = plan_queries
+        .iter()
+        .map(|query| query.trim().to_string())
+        .filter(|query| !query.is_empty());
+    for index in [0usize, 1] {
+        let Some(query) = plan.next() else {
+            break;
+        };
+        queries[index] = DiscoveryQuery {
+            role: fallback[index].role.clone(),
+            query,
+            angle: fallback[index].angle.clone(),
+        };
+    }
+    if !distinct_queries(&queries[0].query, &queries[1].query) {
+        return fallback;
+    }
+    queries
+}
 
 /// Discovery for a person or organization searches for associated online accounts
 /// second and extracts their handles. Topics, events, places, products, and technical
@@ -3269,7 +3300,7 @@ pub use tool_io::prompt_dates;
 pub use tool_io::SearchQueryArtifact;
 pub use tool_io::{
     accept_bindings, bind_arguments, catalog_inputs, consumers_of, dependencies, dependency,
-    domains_in, input_kinds, known_kind, output_kinds, packages_in, per_platform_targets, pickable,
+    domains_in, input_kinds, output_kinds, packages_in, per_platform_targets, pickable,
     plausible_person_name, question_platforms, rule_bindings, tool_row, unmet_kinds, unmet_needs,
     vet_model_bindings, BINDING_KINDS, COORDINATES_KIND, URL_KIND,
 };

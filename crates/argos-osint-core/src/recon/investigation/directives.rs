@@ -787,6 +787,7 @@ fn directive(
         targets: targets.iter().map(|kind| kind.to_string()).collect(),
         done_when: done_when.into(),
         query: String::new(),
+        ..Directive::default()
     }
 }
 
@@ -1073,7 +1074,29 @@ pub fn parse_directives_with(
         if !parsed.query.is_empty() && !grounded_query(&parsed.query, &parsed.entities, &[]) {
             parsed.query.clear();
         }
+        // The plan's query candidates and evidence needs are produced once per plan.
+        // A query that fails the grounded rules is dropped (the deterministic query
+        // covers discovery); needs are kept verbatim for the material-gap decision.
+        parsed
+            .queries
+            .retain(|query| grounded_query(query, &parsed.entities, &[]));
+        // The first surviving candidate is the directive's query when it lacks one, so
+        // the candidate list keeps the remaining alternatives only.
+        if parsed.query.is_empty() {
+            parsed.query = parsed.queries.first().cloned().unwrap_or_default();
+        }
+        parsed.queries.retain(|query| *query != parsed.query);
         directives.push(parsed);
+        // Directive dependencies point at earlier directives only; the parser never
+        // accepts a forward or unknown reference.
+        let served = directives.len() - 1;
+        let earlier_ids: Vec<String> = directives[..served]
+            .iter()
+            .map(|item| item.id.clone())
+            .collect();
+        directives[served]
+            .depends_on
+            .retain(|id| earlier_ids.contains(id));
     }
     for kind in prompt_targets(question) {
         if !directives.iter().any(|item| item.targets.contains(&kind)) {

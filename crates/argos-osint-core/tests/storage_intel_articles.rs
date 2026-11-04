@@ -54,19 +54,34 @@ async fn all_pages_preserve_global_order_and_occurrence_identity() {
             .check()
             .expect("set run day");
     }
-    for (run, id, category, published, seen) in [
-        ("r1", "new", "economic", "2026-01-04", "2026-01-04"),
-        ("r1", "z", "military", "2026-01-03", "2026-01-04"),
-        ("r1", "a", "economic", "2026-01-03", "2026-01-03"),
-        ("r2", "a", "military", "2026-01-03", "2026-01-03"),
-        ("r1", "b", "technology", "2026-01-03", "2026-01-03"),
-        ("r1", "uncategorized", "unk", "2026-01-01", "2026-01-01"),
-        ("old", "excluded", "economic", "2026-01-05", "2026-01-05"),
+    for (run, id, categories, published, seen) in [
+        ("r1", "new", vec!["economic"], "2026-01-04", "2026-01-04"),
+        ("r1", "z", vec!["military"], "2026-01-03", "2026-01-04"),
+        (
+            "r1",
+            "a",
+            vec!["economic", "military"],
+            "2026-01-03",
+            "2026-01-03",
+        ),
+        // A newer occurrence of the same identity: All deduplicates to it.
+        ("r2", "a", vec!["economic"], "2026-01-03", "2026-01-05"),
+        ("r1", "b", vec!["technology"], "2026-01-03", "2026-01-03"),
+        // A legacy row without v2 tags is pending migration: not admitted.
+        ("r1", "uncategorized", vec![], "2026-01-01", "2026-01-01"),
+        (
+            "old",
+            "excluded",
+            vec!["economic"],
+            "2026-01-05",
+            "2026-01-05",
+        ),
     ] {
         let row = AtlasArticleRow {
             run_id: run.into(),
             id: id.into(),
-            category: category.into(),
+            category: categories.first().copied().unwrap_or("unk").into(),
+            categories: categories.iter().map(|tag| tag.to_string()).collect(),
             published_at: published.into(),
             seen_at: seen.into(),
             title: format!("fixture {id}"),
@@ -91,15 +106,9 @@ async fn all_pages_preserve_global_order_and_occurrence_identity() {
     }
     assert_eq!(
         occurrences,
-        [
-            ("new", "r1"),
-            ("z", "r1"),
-            ("a", "r1"),
-            ("a", "r2"),
-            ("b", "r1"),
-            ("uncategorized", "r1")
-        ]
-        .map(|(id, run)| (id.to_string(), run.to_string()))
+        [("new", "r1"), ("a", "r2"), ("z", "r1"), ("b", "r1")]
+            .map(|(id, run)| (id.to_string(), run.to_string())),
+        "All deduplicates identity (newest occurrence wins) and excludes pending migration"
     );
 
     let mut filtered = query("economic");
@@ -110,9 +119,10 @@ async fn all_pages_preserve_global_order_and_occurrence_identity() {
     assert_eq!(
         page.rows
             .iter()
-            .map(|row| row.id.as_str())
+            .map(|row| (row.id.as_str(), row.run_id.as_str()))
             .collect::<Vec<_>>(),
-        ["new", "a"]
+        [("new", "r1"), ("a", "r2")],
+        "category filters use array membership on the newest occurrence"
     );
     assert!(page.next_cursor.is_none());
     filtered.search = "missing".into();
@@ -148,6 +158,7 @@ async fn hottest_pages_order_the_entire_day_with_stable_temperature_ties() {
                 run_id: "r".into(),
                 id: id.into(),
                 category: "military".into(),
+                categories: vec!["military".into()],
                 title: id.into(),
                 temperature: heat,
                 published_at: date.into(),

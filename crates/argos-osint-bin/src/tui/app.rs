@@ -176,12 +176,13 @@ pub enum IntelPage {
     Briefing,
 }
 
-/// Six OSINT classification tabs shown in Intel (excludes `unk`).
+/// Seven OSINT classification tabs shown in Intel (excludes `unk`).
 pub const INTEL_CATEGORIES: &[&str] = &[
     "geopolitical",
     "economic",
     "military",
-    "information",
+    "science",
+    "health",
     "stability",
     "technology",
 ];
@@ -192,7 +193,8 @@ pub fn intel_category_short(id: &str) -> &'static str {
         "geopolitical" => "Geopolitical",
         "economic" => "Economic",
         "military" => "Military",
-        "information" => "Information",
+        "science" => "Science",
+        "health" => "Health",
         "stability" => "Stability",
         "technology" => "Tech",
         _ => "Unk",
@@ -405,58 +407,62 @@ pub enum DefaultsRole {
 }
 
 impl DefaultsRole {
-    pub const ALL: [DefaultsRole; 9] = [
+    /// The editors the Defaults tab shows: the six canonical pipeline
+    /// routes. Archived caller-dependent editors stay defined above for
+    /// legacy keys and labels but are not selectable here.
+    pub const ALL: [DefaultsRole; 6] = [
         DefaultsRole::Recon,
         DefaultsRole::ToolPicker,
         DefaultsRole::Synthesis,
         DefaultsRole::Classifier,
         DefaultsRole::Summarization,
-        DefaultsRole::EvidenceCurator,
-        DefaultsRole::EntityResolver,
         DefaultsRole::ClaimAssessor,
-        DefaultsRole::InvestigationController,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            DefaultsRole::Recon => "Recon",
+            DefaultsRole::Recon => "Recon agent",
             DefaultsRole::ToolPicker => "Tool picker",
-            DefaultsRole::Synthesis => "Synthesis",
-            DefaultsRole::Classifier => "Classifier",
-            DefaultsRole::Summarization => "Summarization",
+            DefaultsRole::Synthesis => "Recon analyst",
+            DefaultsRole::Classifier => "Atlas evaluator",
+            DefaultsRole::Summarization => "Brain summary",
             DefaultsRole::EvidenceCurator => "Evidence curator",
             DefaultsRole::EntityResolver => "Entity resolver",
-            DefaultsRole::ClaimAssessor => "Claim assessor",
+            DefaultsRole::ClaimAssessor => "Atlas analyst",
             DefaultsRole::InvestigationController => "Controller",
         }
     }
 
-    /// The settings key the Logs entry names when this role changes.
+    /// The settings key the Logs entry names when this role changes. It is
+    /// the canonical pipeline route the editor drives (or the archived
+    /// caller-dependent field for curator/resolver editors).
     pub fn settings_key(self) -> &'static str {
         match self {
-            DefaultsRole::Recon => "defaults.recon",
-            DefaultsRole::ToolPicker => "defaults.tool_picker",
-            DefaultsRole::Synthesis => "defaults.synthesis",
-            DefaultsRole::Classifier => "defaults.classifier",
-            DefaultsRole::Summarization => "defaults.summarization",
+            DefaultsRole::Recon => "defaults.recon_agent",
+            DefaultsRole::ToolPicker => "defaults.recon_decisions",
+            DefaultsRole::Synthesis => "defaults.recon_analyst",
+            DefaultsRole::Classifier => "defaults.atlas_evaluator",
+            DefaultsRole::Summarization => "defaults.brain_summary",
             DefaultsRole::EvidenceCurator => "defaults.evidence_curator",
             DefaultsRole::EntityResolver => "defaults.entity_resolver",
-            DefaultsRole::ClaimAssessor => "defaults.claim_assessor",
-            DefaultsRole::InvestigationController => "defaults.investigation_controller",
+            DefaultsRole::ClaimAssessor => "defaults.atlas_analyst",
+            DefaultsRole::InvestigationController => "defaults.recon_decisions",
         }
     }
 
+    /// The role key this editor reads and writes: the six canonical pipeline
+    /// routes, with archived caller-dependent editors keeping their own keys.
     pub fn role_key(self) -> &'static str {
         match self {
-            DefaultsRole::Recon => "recon",
-            DefaultsRole::ToolPicker => "tool-picker",
-            DefaultsRole::Synthesis => "synthesis",
-            DefaultsRole::Classifier => "classifier",
-            DefaultsRole::Summarization => "summarization",
+            DefaultsRole::Recon => "recon_agent",
+            DefaultsRole::ToolPicker => "recon_decisions",
+            DefaultsRole::Synthesis => "recon_analyst",
+            DefaultsRole::Classifier => "atlas_evaluator",
+            DefaultsRole::Summarization => "brain_summary",
             DefaultsRole::EvidenceCurator => "evidence_curator",
             DefaultsRole::EntityResolver => "entity_resolver",
-            DefaultsRole::ClaimAssessor => "claim_assessor",
-            DefaultsRole::InvestigationController => "investigation_controller",
+            DefaultsRole::ClaimAssessor => "atlas_analyst",
+            DefaultsRole::InvestigationController => "recon_decisions",
         }
     }
 
@@ -1557,16 +1563,15 @@ impl App {
         let memory_total = 0;
         let auth = AuthFile::load()?;
         let settings = SettingsFile::load()?;
-        let recon_default = provider::role_secret(&auth, &settings, "recon")?;
-        let picker_default = provider::role_secret(&auth, &settings, "tool-picker")?;
-        let synthesis_default = provider::role_secret(&auth, &settings, "synthesis")?;
-        let classifier_default = provider::role_secret(&auth, &settings, "classifier")?;
-        let summarization_default = provider::role_secret(&auth, &settings, "summarization")?;
+        let recon_default = provider::role_secret(&auth, &settings, "recon_agent")?;
+        let picker_default = provider::role_secret(&auth, &settings, "recon_decisions")?;
+        let synthesis_default = provider::role_secret(&auth, &settings, "recon_analyst")?;
+        let classifier_default = provider::role_secret(&auth, &settings, "atlas_evaluator")?;
+        let summarization_default = provider::role_secret(&auth, &settings, "brain_summary")?;
         let curator_default = provider::role_secret(&auth, &settings, "evidence_curator")?;
         let resolver_default = provider::role_secret(&auth, &settings, "entity_resolver")?;
-        let assessor_default = provider::role_secret(&auth, &settings, "claim_assessor")?;
-        let controller_default =
-            provider::role_secret(&auth, &settings, "investigation_controller")?;
+        let assessor_default = provider::role_secret(&auth, &settings, "atlas_analyst")?;
+        let controller_default = provider::role_secret(&auth, &settings, "recon_decisions")?;
         let router = provider::account_secret(&auth, "openrouter");
         let (provider_tx, provider_rx) = unbounded_channel();
         let (work_tx, work_rx) = unbounded_channel();
@@ -3222,23 +3227,23 @@ impl App {
     }
 
     fn reload_configuration_fields(&mut self) {
-        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "recon") {
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "recon_agent") {
             self.recon_provider = provider::effective_kind(&secret);
             self.recon_model = secret.model;
         }
-        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "tool-picker") {
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "recon_decisions") {
             self.picker_provider = provider::effective_kind(&secret);
             self.picker_model = secret.model;
         }
-        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "synthesis") {
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "recon_analyst") {
             self.synthesis_provider = provider::effective_kind(&secret);
             self.synthesis_model = secret.model;
         }
-        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "classifier") {
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "atlas_evaluator") {
             self.classifier_provider = provider::effective_kind(&secret);
             self.classifier_model = secret.model;
         }
-        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "summarization") {
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "brain_summary") {
             self.summarization_provider = provider::effective_kind(&secret);
             self.summarization_model = secret.model;
         }
@@ -3250,13 +3255,11 @@ impl App {
             self.entity_resolver_provider = provider::effective_kind(&secret);
             self.entity_resolver_model = secret.model;
         }
-        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "claim_assessor") {
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "atlas_analyst") {
             self.claim_assessor_provider = provider::effective_kind(&secret);
             self.claim_assessor_model = secret.model;
         }
-        if let Ok(secret) =
-            provider::role_secret(&self.auth, &self.settings, "investigation_controller")
-        {
+        if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "recon_decisions") {
             self.investigation_controller_provider = provider::effective_kind(&secret);
             self.investigation_controller_model = secret.model;
         }
@@ -4870,6 +4873,8 @@ impl App {
             seen_at: feed.seen_at.clone(),
             author: feed.author.clone(),
             image_url: feed.image_url.clone(),
+            categories: Vec::new(),
+            admitted_at: String::new(),
         }
     }
 
@@ -5134,7 +5139,7 @@ impl App {
             ..osint::ProviderKeys::default()
         };
         let feed = self.atlas_feed.clone();
-        let classifier = provider::role_secret(&self.auth, &self.settings, "classifier").ok();
+        let classifier = provider::role_secret(&self.auth, &self.settings, "atlas_evaluator").ok();
         let tx = self.work_tx.clone();
         let user_agent =
             osint::effective_user_agent(Some(&self.settings.osint_user_agent)).to_string();
@@ -6450,7 +6455,10 @@ impl App {
         // generation-only roles need every added route to complete chat.
         if !matches!(
             self.defaults_role,
-            DefaultsRole::Recon | DefaultsRole::Synthesis | DefaultsRole::Summarization
+            DefaultsRole::Recon
+                | DefaultsRole::Synthesis
+                | DefaultsRole::Summarization
+                | DefaultsRole::ClaimAssessor
         ) {
             return None;
         }
@@ -6773,7 +6781,7 @@ impl App {
             }
         }
         let key = provider::RoleDefaults::variant_key(
-            self.defaults_role.settings_key(),
+            self.defaults_role.role_key(),
             &self.role_provider(),
             &secret.model,
         );
@@ -6894,7 +6902,7 @@ impl App {
                     return;
                 };
                 let key = provider::RoleDefaults::variant_key(
-                    self.defaults_role.settings_key(),
+                    self.defaults_role.role_key(),
                     &self.role_provider(),
                     &self.role_model(),
                 );
@@ -8993,17 +9001,7 @@ impl App {
         let assignment = self
             .settings
             .defaults
-            .role_mut(match role {
-                DefaultsRole::Recon => "recon",
-                DefaultsRole::ToolPicker => "tool-picker",
-                DefaultsRole::Synthesis => "synthesis",
-                DefaultsRole::Classifier => "classifier",
-                DefaultsRole::Summarization => "summarization",
-                DefaultsRole::EvidenceCurator => "evidence_curator",
-                DefaultsRole::EntityResolver => "entity_resolver",
-                DefaultsRole::ClaimAssessor => "claim_assessor",
-                DefaultsRole::InvestigationController => "investigation_controller",
-            })
+            .role_mut(role.role_key())
             .ok_or_else(|| anyhow::anyhow!("unknown role"))?;
         let before = format!("{} / {}", assignment.provider, assignment.model);
         assignment.provider = kind.clone();
@@ -9017,34 +9015,20 @@ impl App {
             );
         }
         Ok(match role {
-            DefaultsRole::Recon => format!("Recon: {after}"),
+            DefaultsRole::Recon => format!("Recon agent: {after}"),
             DefaultsRole::ToolPicker => format!(
                 "Tool picker: {after} ({})",
                 provider::picker_transport(&model)
             ),
-            DefaultsRole::Synthesis => "Synthesis default saved".into(),
+            DefaultsRole::Synthesis => format!("Recon analyst: {after}"),
             DefaultsRole::Classifier => format!(
-                "Classifier: {after} ({})",
+                "Atlas evaluator: {after} ({})",
                 provider::picker_transport(&model)
             ),
-            DefaultsRole::Summarization => {
-                let inherited = self
-                    .settings
-                    .defaults
-                    .summarization
-                    .provider
-                    .trim()
-                    .is_empty()
-                    && self.settings.defaults.summarization.model.trim().is_empty();
-                if inherited {
-                    format!("Summarization: {after} (inherits Synthesis)")
-                } else {
-                    format!("Summarization: {after}")
-                }
-            }
+            DefaultsRole::Summarization => format!("Brain summary: {after}"),
             DefaultsRole::EvidenceCurator => format!("Evidence curator: {after}"),
             DefaultsRole::EntityResolver => format!("Entity resolver: {after}"),
-            DefaultsRole::ClaimAssessor => format!("Claim assessor: {after}"),
+            DefaultsRole::ClaimAssessor => format!("Atlas analyst: {after}"),
             DefaultsRole::InvestigationController => format!("Controller: {after}"),
         })
     }
@@ -11049,8 +11033,10 @@ fn role_model_items(
     catalog: &[ListedModel],
 ) -> Vec<ChoiceItem> {
     let mut items = Vec::new();
-    let picker = matches!(role, DefaultsRole::ToolPicker | DefaultsRole::Classifier)
-        && provider == "openrouter";
+    let picker = matches!(
+        role,
+        DefaultsRole::ToolPicker | DefaultsRole::Classifier | DefaultsRole::InvestigationController
+    ) && provider == "openrouter";
     if picker {
         for (id, label) in provider::DECISIONS_MODELS {
             items.push(ChoiceItem {
@@ -11981,6 +11967,8 @@ mod tests {
                     provider: "newsapi".into(),
                     temperature: 0.88,
                     category: "geopolitical".into(),
+                    categories: vec!["geopolitical".into()],
+                    admitted_at: String::new(),
                     seen_at: now.clone(),
                     author: String::new(),
                     image_url: String::new(),
@@ -12133,15 +12121,22 @@ mod tests {
         let mut router = provider::account_secret(&app.auth, "openrouter");
         router.api_key = Some("router-key".into());
         app.auth.set_account(router);
-        app.settings.defaults.recon.provider = "local".into();
-        app.settings.defaults.recon.model = "llama3.2".into();
-        app.settings.defaults.synthesis.provider = "openrouter".into();
-        app.settings.defaults.synthesis.model = "openrouter/free".into();
         app.recon_provider = "local".into();
         app.recon_model = "llama3.2".into();
         app.synthesis_provider = "openrouter".into();
         app.synthesis_model = "openrouter/free".into();
         let auth_before = serde_json::to_string(&app.auth).unwrap();
+        // Canonical pipeline routes seeded independently of the picker.
+        *app.settings.defaults.role_mut("recon_agent").unwrap() = provider::ModelAssignment {
+            provider: "local".into(),
+            model: "llama3.2".into(),
+            ..Default::default()
+        };
+        *app.settings.defaults.role_mut("recon_analyst").unwrap() = provider::ModelAssignment {
+            provider: "openrouter".into(),
+            model: "openrouter/free".into(),
+            ..Default::default()
+        };
 
         click(&mut app, Target::App(ModuleId::Providers.index()));
         click(&mut app, Target::ProviderTab(ProviderPage::Defaults));
@@ -12182,19 +12177,28 @@ mod tests {
 
         click(&mut app, Target::Button(ButtonId::SavePicker));
         assert!(app.status.contains("decisions"), "{}", app.status);
-        assert_eq!(app.settings.defaults.tool_picker.provider, "openrouter");
-        assert_eq!(app.settings.defaults.tool_picker.model, "typesafe/jev-1.13");
-        assert_eq!(app.settings.defaults.recon.provider, "local");
-        assert_eq!(app.settings.defaults.recon.model, "llama3.2");
-        assert_eq!(app.settings.defaults.synthesis.provider, "openrouter");
-        assert_eq!(app.settings.defaults.synthesis.model, "openrouter/free");
+        let decisions = app
+            .settings
+            .defaults
+            .role("recon_decisions")
+            .expect("decisions route");
+        assert_eq!(decisions.provider, "openrouter");
+        assert_eq!(decisions.model, "typesafe/jev-1.13");
+        assert_eq!(
+            app.settings.defaults.role("recon_agent").unwrap().provider,
+            "local"
+        );
+        assert_eq!(
+            app.settings.defaults.role("recon_analyst").unwrap().model,
+            "openrouter/free"
+        );
         assert_eq!(app.recon_model, "llama3.2");
         assert_eq!(app.synthesis_model, "openrouter/free");
         assert!(events(&app)
             .iter()
-            .any(|line| line.message.starts_with("defaults.tool_picker:")));
+            .any(|line| line.message.starts_with("defaults.recon_decisions:")));
         let saved = std::fs::read_to_string(&app.settings_path).unwrap();
-        assert!(saved.contains("[defaults.tool_picker]"), "{saved}");
+        assert!(saved.contains("[defaults.recon_decisions]"), "{saved}");
         assert!(saved.contains("typesafe/jev-1.13"));
         assert!(!saved.contains("router-key"));
         assert!(!app.auth_path.exists());
@@ -12299,27 +12303,51 @@ mod tests {
         app.fallback_popup_sel = 0;
         click(&mut app, Target::Button(ButtonId::ConfirmAddFallback));
         assert_eq!(app.overlay, Overlay::None);
-        assert_eq!(app.settings.defaults.recon.fallbacks.len(), 1);
         assert_eq!(
-            app.settings.defaults.recon.fallbacks[0].model,
+            app.settings
+                .defaults
+                .role("recon_agent")
+                .unwrap()
+                .fallbacks
+                .len(),
+            1
+        );
+        assert_eq!(
+            app.settings.defaults.role("recon_agent").unwrap().fallbacks[0].model,
             "gemini-2.5-pro"
         );
         app.overlay = Overlay::AddFallback;
         app.fallback_popup_tab = ProviderPage::Google;
         app.fallback_popup_sel = 1;
         click(&mut app, Target::Button(ButtonId::ConfirmAddFallback));
-        assert_eq!(app.settings.defaults.recon.fallbacks.len(), 2);
+        assert_eq!(
+            app.settings
+                .defaults
+                .role("recon_agent")
+                .unwrap()
+                .fallbacks
+                .len(),
+            2
+        );
         click(&mut app, Target::Button(ButtonId::FallbackItem(1)));
         click(&mut app, Target::Button(ButtonId::MoveFallbackUp));
         assert_eq!(
-            app.settings.defaults.recon.fallbacks[0].model,
+            app.settings.defaults.role("recon_agent").unwrap().fallbacks[0].model,
             "gemini-flash"
         );
         click(&mut app, Target::Button(ButtonId::FallbackItem(1)));
         click(&mut app, Target::Button(ButtonId::DeleteFallback));
-        assert_eq!(app.settings.defaults.recon.fallbacks.len(), 1);
         assert_eq!(
-            app.settings.defaults.recon.fallbacks[0].model,
+            app.settings
+                .defaults
+                .role("recon_agent")
+                .unwrap()
+                .fallbacks
+                .len(),
+            1
+        );
+        assert_eq!(
+            app.settings.defaults.role("recon_agent").unwrap().fallbacks[0].model,
             "gemini-flash"
         );
         let saved = std::fs::read_to_string(&app.settings_path).unwrap();
@@ -13244,7 +13272,11 @@ mod tests {
             .position(|i| i.id == "medium")
             .unwrap();
         app.apply_choice(index);
-        let key = provider::RoleDefaults::variant_key("synthesis", "nvidia", &app.role_model());
+        let key = provider::RoleDefaults::variant_key(
+            DefaultsRole::Synthesis.role_key(),
+            "nvidia",
+            &app.role_model(),
+        );
         assert_eq!(
             app.settings.defaults.model_variants[&key].as_str(),
             "medium"
@@ -13321,10 +13353,7 @@ mod tests {
             return;
         };
         std::fs::create_dir_all(&dir).unwrap();
-        for role in [
-            DefaultsRole::ClaimAssessor,
-            DefaultsRole::InvestigationController,
-        ] {
+        for role in [DefaultsRole::ClaimAssessor] {
             let mut app = app();
             app.screen = Rect::new(0, 0, 140, 40);
             app.google_key = "google-key".into();
@@ -13692,7 +13721,7 @@ mod tests {
         let (a, overridden) = app
             .settings
             .defaults
-            .resolve_operation(Some(provider::OP_LINKS_GENERATE), "synthesis");
+            .resolve_operation(Some(provider::OP_LINKS_GENERATE), "atlas_analyst");
         assert!(overridden, "{o:?}");
         assert_eq!(a.model, "google/gemma-4-31b-it:free");
         // Role defaults are untouched.
@@ -13715,7 +13744,10 @@ mod tests {
         );
         assert!(app.settings.defaults.operation_overrides.is_empty());
         let text = buffer_text(&render(&mut app, 160, 50));
-        assert!(text.contains("Source: inherited from synthesis"), "{text}");
+        assert!(
+            text.contains("Source: inherited from atlas_analyst"),
+            "{text}"
+        );
     }
 
     /// Phase 4 screens: Defaults per-operation editor and a brief with both
@@ -15295,6 +15327,8 @@ mod tests {
                 temperature: 1.0,
                 category: "stability".into(),
                 seen_at: "2026-10-01T00:01:00Z".into(),
+                categories: Vec::new(),
+                admitted_at: String::new(),
             })
             .unwrap();
         app.select(ModuleId::Atlas.index());
@@ -15372,6 +15406,8 @@ mod tests {
                     provider: "newsapi".into(),
                     temperature: 1.0,
                     category: "economic".into(),
+                    categories: vec!["economic".into()],
+                    admitted_at: String::new(),
                     seen_at: format!("2026-10-01T00:{index:02}:00Z"),
                 })
                 .unwrap();
@@ -15975,6 +16011,8 @@ mod tests {
                 temperature: 1.0,
                 category: "stability".into(),
                 seen_at: String::new(),
+                categories: Vec::new(),
+                admitted_at: String::new(),
             },
             AtlasArticleRow {
                 run_id: "r".into(),
@@ -15992,6 +16030,8 @@ mod tests {
                 temperature: 1.0,
                 category: "stability".into(),
                 seen_at: String::new(),
+                categories: Vec::new(),
+                admitted_at: String::new(),
             },
         ];
         app.intel_sel = 0;
@@ -16509,6 +16549,8 @@ mod tests {
             seen_at: String::new(),
             author: String::new(),
             image_url: String::new(),
+            categories: Vec::new(),
+            admitted_at: String::new(),
         });
         app.overlay = Overlay::Block {
             title: "Run 1 Jan".into(),
@@ -16583,6 +16625,8 @@ mod tests {
             temperature: 0.8,
             category: "stability".into(),
             seen_at: String::new(),
+            categories: Vec::new(),
+            admitted_at: String::new(),
         };
         app.intel_articles = vec![article];
         app.intel_sel = 0;
@@ -16907,6 +16951,8 @@ mod tests {
             temperature: 0.8,
             category: "stability".into(),
             seen_at: String::new(),
+        categories: Vec::new(),
+        admitted_at: String::new(),
         }
     }
 
@@ -18353,6 +18399,8 @@ mod tests {
                 run_id: "fixture".into(), id: "fixture-article".into(), title: "Article text and browser actions keep a long headline fully visible by wrapping across several preview rows instead of truncating it".into(), description: "Deterministic text-only article preview. Visit article site opens the source URL. Secondary stories remain reachable.".into(),
                 url: "https://example.com/article".into(), country: "US".into(), source_name: "Fixture".into(), source_domain: "example.com".into(), published_at: "2026-10-10T12:00:00Z".into(), provider: "fixture".into(), temperature: 0.5,
                 category: "world".into(), seen_at: "2026-10-10T12:00:00Z".into(), author: "Fixture author".into(), image_url: "https://example.com/image.png".into(),
+            categories: Vec::new(),
+            admitted_at: String::new(),
             });
             app.intel_sel = app.intel_articles.len() - 1;
             render(&mut app, width, height);

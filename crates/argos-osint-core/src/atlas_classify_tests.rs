@@ -75,13 +75,14 @@ async fn server(
                     .collect()
             } else {
                 assert!(headers.starts_with("POST /api/v1/chat/completions "));
-                let rows: Value =
+                let compiled: Value =
                     serde_json::from_str(request["messages"][1]["content"].as_str().unwrap())
                         .unwrap();
-                rows.as_array()
+                compiled["questions"]
+                    .as_object()
                     .unwrap()
-                    .iter()
-                    .map(|r| r["article_id"].as_str().unwrap().into())
+                    .keys()
+                    .cloned()
                     .collect()
             };
             if partial_first && attempt == 0 {
@@ -90,15 +91,30 @@ async fn server(
             let response = if native {
                 let answers: serde_json::Map<String, Value> = ids
                     .iter()
-                    .map(|id| (id.clone(), json!({"type":"choice","choice":"unk"})))
+                    .map(|id| {
+                        // Rank 1 is the miss (`unk`); later ranks stop.
+                        let choice = if id.ends_with("#category_1") {
+                            "unk"
+                        } else {
+                            "done"
+                        };
+                        (id.clone(), json!({"type":"choice","choice":choice}))
+                    })
                     .collect();
                 json!({"id":"loopback","answers":answers,"model":"typesafe/jev-1.13"})
             } else {
-                let rows: Vec<_> = ids
-                    .iter()
-                    .map(|id| json!({"article_id":id,"category":"unk"}))
-                    .collect();
-                json!({"id":"loopback","choices":[{"message":{"role":"assistant","content":serde_json::to_string(&rows).unwrap()},"finish_reason":"stop"}]})
+                let mut content = String::from("argos-text-v1\n");
+                for id in &ids {
+                    let choice = if id.ends_with("#category_1") {
+                        "unk"
+                    } else {
+                        "done"
+                    };
+                    content.push_str(&format!(
+                        "## Decision\nQuestion: {id}\nChoice: {choice}\nEnd\n"
+                    ));
+                }
+                json!({"id":"loopback","choices":[{"message":{"role":"assistant","content":content},"finish_reason":"stop"}]})
             };
             capture.lock().unwrap().push(request);
             let body = response.to_string();
@@ -127,22 +143,30 @@ async fn server(
 #[test]
 fn partial_native_receipt_recompiles_missing_ids_for_both_transports() {
     let adapter = BatchAdapter::new(vec![article(1), article(2)]);
-    let partial: DecisionsResponse =
-        serde_json::from_value(json!({"answers":{"a1":{"type":"choice","choice":"economic"}}}))
-            .unwrap();
+    let ranks = crate::atlas::RANKED_PICKS;
+    let mut answers = serde_json::Map::new();
+    for rank in 1..=ranks {
+        let choice = if rank == 1 { "unk" } else { "done" };
+        answers.insert(
+            format!("a1#category_{rank}"),
+            json!({"type":"choice","choice":choice}),
+        );
+    }
+    let partial: DecisionsResponse = serde_json::from_value(json!({"answers":answers})).unwrap();
     assert!(adapter.parse_native(&partial).is_err());
-    assert_eq!(adapter.receipt()["a1"], "economic");
+    assert_eq!(adapter.receipt()["a1"], "unk");
     let (_, questions) = adapter.compile_native();
-    assert_eq!(
-        questions.as_object().unwrap().keys().collect::<Vec<_>>(),
-        vec!["a2"]
-    );
-    let rows: Value = serde_json::from_str(&adapter.compile_chat()[1].content).unwrap();
-    assert_eq!(rows.as_array().unwrap().len(), 1);
-    assert_eq!(rows[0]["article_id"], "a2");
-    assert!(adapter
-        .parse_chat(r#"[{"article_id":"a2","category":"unk"}]"#)
-        .is_ok());
+    let keys: Vec<String> = questions.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(keys.len(), ranks);
+    assert!(keys.iter().all(|key| key.starts_with("a2#category_")));
+    let mut labeled = String::from("argos-text-v1\n");
+    for rank in 1..=ranks {
+        let choice = if rank == 1 { "unk" } else { "done" };
+        labeled.push_str(&format!(
+            "## Decision\nQuestion: a2#category_{rank}\nChoice: {choice}\nEnd\n"
+        ));
+    }
+    assert!(adapter.parse_chat(&labeled).is_ok());
 }
 
 async fn run_phase6(db: &std::path::Path, run: &str) -> crate::atlas::Stop {

@@ -4,7 +4,7 @@ Follow root [AGENTS.md](../AGENTS.md); user instructions take precedence. Preser
 
 ## Agent Operation Chain
 
-**coordinator / orchestrator → architect or rust-coder/react-coder**; the owner delegates implementation, docs and the verification gate.
+**coordinator / orchestrator → architect or rust-coder/react-coder**; the owner delegates implementation, docs and the verification gate. Coders must consult the architect before implementing significant changes (new functionality or a significant change within a file); the consult returns decisions applied before review/test/audit. **Exception:** this consult requirement does not apply to non-significant, conformant edits that do not alter architecture, behavior, or integration boundaries.
 
 Choose the smallest team; existing authorization bypasses repeat intake:
 
@@ -13,7 +13,7 @@ Choose the smallest team; existing authorization bypasses repeat intake:
 | **coordinator** | Decompose, provide context, select team, record constraints | No source edits; owns `.planning/` intake |
 | **orchestrator** | Split units, select tier, hand off to architects | Only `.planning/` writes; delegate implementation, docs, tests/builds, substantive review and forensic audit |
 | **architect** | Investigate scope, gaps, perf/security | No children or source edits; return decisions |
-| **rust-coder** / **react-coder** | Implement; return contract, docs and verification needs | No children; parent owns gate |
+| **rust-coder** / **react-coder** | Implement; return contract, docs and verification needs | No children; must consult architect before significant changes; parent owns gate |
 | **tester** | Host-native embedded checks first (`--storage embedded`) | No full platform CI locally |
 | **auditor** | Binary veto (`INTEGRITY_VIOLATION` blocks completion) | Forensic integrity, no facade code |
 | **reviewer** | Standards review | `APPROVE` required |

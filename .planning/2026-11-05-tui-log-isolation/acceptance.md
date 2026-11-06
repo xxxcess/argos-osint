@@ -12,7 +12,15 @@ The previously completed Atlas implementation and agent guidance are committed a
 
 ## Verification
 
-Status: pending final focused verification. Do not interpret planned commands below as passed.
+Status: focused verification complete on the code committed in `f70fd37`.
+
+- **PASS:** 8 focused tests (7 binary-library and 1 core-library), no failures or selected-test skips. API library tests had zero matches and are not counted as executed coverage.
+- **PASS:** workspace/all-target Clippy with warnings denied; formatting.
+- **PASS:** one complete fresh embedded Atlas replay with 4 admitted occurrences and 4 scripted acquisition calls, with coverage assertions before metadata and actors. The explicitly selected ignored replay ran and passed; other library targets had zero matches.
+- **PASS:** fixture capture reran the live-coverage test; all 4 emitted PNGs were opened and inspected at 140×44 and 100×36. Classification 8/12 becomes 12/12 with the later entity/publisher/Related counts before completion. All labels and the current stage remain visible, with no overlap or clipping.
+- **PASS:** maintained documentation links and authored whitespace checks. Relevant production/test source hashes stayed unchanged through verification and capture.
+
+The initial rebuild took 53m15s; focused-check wall time was 3280.884s including compilation/startup/teardown. Clippy took 528.734s. macOS reported CPU speed limits of 22 and 20 during the build. A package-only replay selected another core artifact despite matching crate feature names; that redundant compile was stopped before execution, and the workspace replay reused the verified graph (28.56s build, 21.66s test). Interrupted attempts are not passes.
 
 Focused native checks use `target/agents`, default embedded/NLP/classifier features, locked dependencies, two build jobs, two test threads and private homes:
 
@@ -31,7 +39,7 @@ python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked -- -D w
 One explicit fresh isolated replay exercises the public Atlas cycle and asserts classification/metadata/publisher/Related snapshots are visible before actor processing. Set `ARGOS_HOME` and `ARGOS_BENCH_HOME` to the same new absolute temporary directory, `ARGOS_BENCH_MODE=fresh` and `ARGOS_BENCH_CALIBRATION=off`, then run:
 
 ```sh
-python3 scripts/agent_cargo.py test -p argos-osint-core --features fixtures \
+python3 scripts/agent_cargo.py test --workspace --lib \
   --test classifier_cycle_benchmark --locked offline_fixed_whole_cycle_benchmark \
   -- --ignored --exact --nocapture
 cargo fmt --all -- --check
@@ -41,7 +49,9 @@ This is functional replay evidence, not a new comparable performance cohort. The
 
 The prior complete native gate belongs to that earlier implementation. It is not represented as having executed these later fixes. The follow-up uses focused behavior, public-cycle, Clippy, formatting and visual checks; the full native matrix has not been repeated. Server/all-platform matrices, local mutation execution, live providers and opt-in embedding checks are not run for this follow-up.
 
-Maintained contracts: [CLI/TUI interface](../../../docs/wiki/code/interfaces.md) and [Atlas completion/recovery](../../../docs/wiki/concepts/atlas-classification-and-related-articles.md#completion-recovery-and-compatibility). Existing diagrams remain accurate because stage ownership and data flow are unchanged.
+The images are deterministic TestBackend event-delivery fixtures, not live-terminal photographs. Their empty origin/feed state and Run button are fixture setup; active service ownership is covered separately. They verify presentation, while the public-cycle observer verifies actual event order and committed counts. The captures remain labelled as previews because the full native gate was not rerun for this follow-up.
+
+Maintained contracts: [CLI/TUI interface](../../docs/wiki/code/interfaces.md) and [Atlas completion/recovery](../../docs/wiki/concepts/atlas-classification-and-related-articles.md#completion-recovery-and-compatibility). Existing pipeline/shell diagrams remain accurate: stage ownership and layout are unchanged, and those figures do not enumerate individual diagnostic producers.
 
 ## Applying the change
 

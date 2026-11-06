@@ -19,9 +19,11 @@ use super::{ClassifierError, Provenance};
 use crate::atlas_taxonomy::DomainId;
 
 /// Exact runtime seed filename; no wildcard or actor-corpus fallback.
-pub const DATASET_FILE_NAME: &str = "argos_atlas_strategic_domains.csv";
+pub const DATASET_FILE_NAME: &str = "argos_atlas_strategic_domains_v2.csv";
 /// Version whose complete release invariants are mandatory.
 pub const SEED_DATASET_VERSION: &str = "strategic-domains-v1-seed-1";
+/// Distinct-scenario corpus with four permanent partitions and one/two-tag admission.
+pub const DISTINCT_DATASET_VERSION: &str = "strategic-domains-v2-distinct-1";
 /// Maximum exact input bytes, including BOM and line endings.
 pub const MAX_CSV_BYTES: u64 = 128 * 1024 * 1024;
 /// Maximum raw record bytes, including quoting and embedded newlines.
@@ -139,17 +141,18 @@ pub struct DatasetResolution {
 #[non_exhaustive]
 pub enum CsvProfile {
     DeliveredSeedV1,
+    DeliveredDistinctV2,
     SyntheticDevelopment,
 }
-/// Actual row/family counts. Split arrays are train, calibration, test.
+/// Actual row/family counts. Split arrays are train, calibration, development, test.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct DatasetSummary {
     pub rows: u64,
     pub families: u64,
-    pub split_rows: [u64; 3],
-    pub split_families: [u64; 3],
-    pub positive_rows: [[u64; 6]; 3],
+    pub split_rows: [u64; 4],
+    pub split_families: [u64; 4],
+    pub positive_rows: [[u64; 6]; 4],
     pub dataset_sha256: String,
 }
 /// Fully validated rows and canonical U2 hashes, ready for training/evaluation.
@@ -683,6 +686,7 @@ pub fn parse_csv(resolution: &DatasetResolution) -> Result<ParsedDataset, Datase
         dataset_sha256: hash.clone(),
         train_split_sha256: hashes.train_split_sha256,
         calibration_split_sha256: hashes.calibration_split_sha256,
+        development_split_sha256: hashes.development_split_sha256,
         test_split_sha256: hashes.test_split_sha256,
         family_assignment_sha256: hashes.family_assignment_sha256,
     };
@@ -691,6 +695,8 @@ pub fn parse_csv(resolution: &DatasetResolution) -> Result<ParsedDataset, Datase
         resolution: resolution.clone(),
         profile: if version == SEED_DATASET_VERSION {
             CsvProfile::DeliveredSeedV1
+        } else if version == DISTINCT_DATASET_VERSION {
+            CsvProfile::DeliveredDistinctV2
         } else {
             CsvProfile::SyntheticDevelopment
         },
@@ -785,13 +791,14 @@ fn decode_csv(
     let mut version = String::new();
     let mut ids = BTreeSet::new();
     let mut titles = BTreeSet::new();
+    let mut descriptions = BTreeSet::new();
     let mut families: BTreeMap<String, Family> = BTreeMap::new();
     let mut summary = DatasetSummary {
         rows: 0,
         families: 0,
-        split_rows: [0; 3],
-        split_families: [0; 3],
-        positive_rows: [[0; 6]; 3],
+        split_rows: [0; 4],
+        split_families: [0; 4],
+        positive_rows: [[0; 6]; 4],
         dataset_sha256: String::new(),
     };
     let mut text_bytes = 0;
@@ -842,7 +849,23 @@ fn decode_csv(
             return Err(invalid("dataset_version", "mixed_dataset_version"));
         }
         let release = version == SEED_DATASET_VERSION;
-        if !titles.insert(values[1].trim().to_string()) && release {
+        let distinct = version == DISTINCT_DATASET_VERSION;
+        // Small independently authored corpora have explicit schema/policy versions.
+        // Unknown versions cannot inherit an admission policy by accident.
+        if !matches!(
+            version.as_str(),
+            SEED_DATASET_VERSION
+                | DISTINCT_DATASET_VERSION
+                | "synthetic-development-v1"
+                | "synthetic-development-v2"
+        ) {
+            return Err(invalid("dataset_version", "unsupported_dataset_version"));
+        }
+        let modern = distinct || version == "synthetic-development-v2";
+        if !descriptions.insert(values[2].trim().to_string()) && distinct {
+            return Err(invalid("description", "duplicate_description"));
+        }
+        if !titles.insert(values[1].trim().to_string()) && (release || distinct) {
             return Err(invalid("title", "duplicate_title"));
         }
         if values[1].trim().is_empty() || values[2].trim().is_empty() {
@@ -892,7 +915,8 @@ fn decode_csv(
         let (split, split_index) = match values[11] {
             "train" => (Split::Train, 0),
             "calibration" => (Split::Calibration, 1),
-            "test" => (Split::Test, 2),
+            "development" if modern => (Split::Development, 2),
+            "test" => (Split::Test, 3),
             _ => return Err(invalid("split", "unsupported_split")),
         };
         let mut labels = BTreeSet::new();
@@ -905,7 +929,7 @@ fn decode_csv(
                 }
             }
         }
-        if labels.len() > 2 {
+        if labels.len() > 2 && !modern {
             return Err(invalid("domain_labels", "annotation_mismatch"));
         }
         let editorial: BTreeSet<_> = [values[4], values[5]]
@@ -914,7 +938,12 @@ fn decode_csv(
             .map(str::to_string)
             .collect();
         let expected: BTreeSet<_> = labels.iter().map(|d| d.as_str().to_string()).collect();
-        if editorial != expected
+        if (labels.len() <= 2 && editorial != expected)
+            || (labels.len() > 2
+                && (editorial.len() != 2
+                    || !editorial.is_subset(&expected)
+                    || values[4].is_empty()
+                    || values[5].is_empty()))
             || (labels.is_empty() && (!values[4].is_empty() || !values[5].is_empty()))
             || (labels.len() == 1 && (values[4].is_empty() || !values[5].is_empty()))
             || (labels.len() == 2
@@ -931,12 +960,14 @@ fn decode_csv(
                 "out_of_scope",
                 matches!(values[8], "out_of_scope" | "hard_negative"),
             ),
-            1 => (
+            1 if !modern => (
                 "reject",
                 "insufficient_domains",
                 values[8] == "single_domain_boundary",
             ),
-            _ => ("admit", "", values[8] == "cross_domain"),
+            1 => ("admit", "", values[8] == "single_domain_boundary"),
+            2 => ("admit", "", values[8] == "cross_domain"),
+            _ => ("admit", "", values[8] == "multi_domain"),
         };
         if values[16] != admission || values[17] != reason || !valid_difficulty {
             return Err(invalid(
@@ -1010,6 +1041,8 @@ fn decode_csv(
     summary.families = families.len() as u64;
     if version == SEED_DATASET_VERSION {
         validate_release(&summary, &families)?;
+    } else if version == DISTINCT_DATASET_VERSION {
+        validate_distinct_release(&summary, &families)?;
     }
     Ok((rows, version, summary))
 }
@@ -1031,17 +1064,17 @@ fn validate_release(
 ) -> Result<(), DatasetError> {
     release_count("rows", 1700, summary.rows)?;
     release_count("families", 220, summary.families)?;
-    for (i, expected) in [1130, 285, 285].into_iter().enumerate() {
+    for (i, expected) in [1130, 285, 0, 285].into_iter().enumerate() {
         release_count(&format!("split_{i}_rows"), expected, summary.split_rows[i])?;
     }
-    for (i, expected) in [142, 39, 39].into_iter().enumerate() {
+    for (i, expected) in [142, 39, 0, 39].into_iter().enumerate() {
         release_count(
             &format!("split_{i}_families"),
             expected,
             summary.split_families[i],
         )?;
     }
-    for (i, expected) in [190, 55, 55].into_iter().enumerate() {
+    for (i, expected) in [190, 55, 0, 55].into_iter().enumerate() {
         for (d, actual) in summary.positive_rows[i].iter().enumerate() {
             release_count(
                 &format!("split_{i}_domain_{d}_positives"),
@@ -1051,7 +1084,7 @@ fn validate_release(
         }
     }
     let mut focused = [0; 6];
-    let mut pairs: BTreeMap<(usize, usize), [u64; 3]> = BTreeMap::new();
+    let mut pairs: BTreeMap<(usize, usize), [u64; 4]> = BTreeMap::new();
     let mut negatives = 0;
     for family in families.values() {
         let positive: Vec<_> = family
@@ -1089,20 +1122,81 @@ fn validate_release(
     }
     for one in 0..6 {
         for two in one + 1..6 {
-            let counts = pairs.get(&(one, two)).copied().unwrap_or([0; 3]);
+            let counts = pairs.get(&(one, two)).copied().unwrap_or([0; 4]);
             release_count(
                 &format!("pair_{one}_{two}_families"),
                 4,
                 counts.iter().sum(),
             )?;
             for (split, count) in counts.iter().enumerate() {
-                if *count == 0 {
+                if split != 2 && *count == 0 {
                     return Err(DatasetError::ReleaseCounts {
                         invariant: format!("pair_{one}_{two}_split_{split}_presence"),
                         expected: 1,
                         actual: 0,
                     });
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The delivered v2 corpus is one row per independently authored scenario.
+fn validate_distinct_release(
+    summary: &DatasetSummary,
+    families: &BTreeMap<String, Family>,
+) -> Result<(), DatasetError> {
+    release_count("rows", 1020, summary.rows)?;
+    release_count("families", 1020, summary.families)?;
+    for (split, expected) in [440, 230, 165, 185].into_iter().enumerate() {
+        release_count(
+            &format!("split_{split}_rows"),
+            expected,
+            summary.split_rows[split],
+        )?;
+        release_count(
+            &format!("split_{split}_families"),
+            expected,
+            summary.split_families[split],
+        )?;
+        for (domain, actual) in summary.positive_rows[split].iter().enumerate() {
+            release_count(
+                &format!("split_{split}_domain_{domain}_positives"),
+                [80, 40, 30, 40][split],
+                *actual,
+            )?;
+        }
+    }
+    let mut counts: BTreeMap<Vec<usize>, [u64; 4]> = BTreeMap::new();
+    for family in families.values() {
+        release_count("scenario_variants", 1, family.variants)?;
+        let labels: Vec<_> = family
+            .membership
+            .iter()
+            .enumerate()
+            .filter_map(|(index, label)| (*label == LabelMembership::Present).then_some(index))
+            .collect();
+        counts.entry(labels).or_default()[family.split] += 1;
+    }
+    let check = |labels: Vec<usize>, expected: [u64; 4]| -> Result<(), DatasetError> {
+        let actual = counts.get(&labels).copied().unwrap_or_default();
+        for split in 0..4 {
+            release_count(
+                &format!("labels_{labels:?}_split_{split}"),
+                expected[split],
+                actual[split],
+            )?;
+        }
+        Ok(())
+    };
+    check(vec![], [50, 20, 15, 15])?;
+    for first in 0..6 {
+        check(vec![first], [50, 30, 20, 20])?;
+        for second in first + 1..6 {
+            check(vec![first, second], [6, 2, 2, 2])?;
+            for third in second + 1..6 {
+                check(vec![first, second, third], [0, 0, 0, 1])?;
             }
         }
     }

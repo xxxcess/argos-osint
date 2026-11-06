@@ -10,6 +10,9 @@ use argos_osint_core::classifier::readiness::{
 use argos_osint_core::classifier::training::SyntheticActivation;
 use argos_osint_core::classifier::{ClassifierError, ClassifierStatus};
 use tempfile::TempDir;
+// Test homes share the actual process runtime reservation budget. Individual
+// tests still exercise their own concurrency; unrelated fits are serialized.
+static RUNTIME_CASES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn request(root: &Path) -> DatasetRequest {
     let mut request = DatasetRequest::default();
@@ -64,7 +67,7 @@ fn csv(root: &Path) -> DatasetRequest {
                     String::new(),
                     "synthetic".into(),
                     "single_domain_boundary".into(),
-                    "synthetic-management-fixture-v1".into(),
+                    "synthetic-development-v1".into(),
                     "Never model features".into(),
                     split.into(),
                     format!("family-{split}-{index}"),
@@ -85,6 +88,7 @@ fn csv(root: &Path) -> DatasetRequest {
 
 #[tokio::test]
 async fn construction_and_missing_status_do_not_create_home_or_start_storage() {
+    let _runtime_case = RUNTIME_CASES.lock().await;
     let root = TempDir::new().expect("isolated root");
     let selected = request(root.path());
     let home = ClassifierHome::new(selected.home.clone());
@@ -120,6 +124,7 @@ async fn construction_and_missing_status_do_not_create_home_or_start_storage() {
 #[cfg(feature = "classifier")]
 #[tokio::test]
 async fn status_hashes_without_parsing_csv_and_first_fit_is_available() {
+    let _runtime_case = RUNTIME_CASES.lock().await;
     let root = TempDir::new().expect("isolated root");
     let mut selected = request(root.path());
     let path = root.path().join("not-csv.csv");
@@ -144,6 +149,7 @@ async fn status_hashes_without_parsing_csv_and_first_fit_is_available() {
 #[cfg(feature = "classifier")]
 #[tokio::test]
 async fn corrupt_active_pointer_is_invalid_not_missing_or_ready() {
+    let _runtime_case = RUNTIME_CASES.lock().await;
     let root = TempDir::new().expect("isolated root");
     let selected = request(root.path());
     fs::create_dir_all(selected.home.join("classifier")).expect("classifier fixture directory");
@@ -166,6 +172,7 @@ async fn corrupt_active_pointer_is_invalid_not_missing_or_ready() {
 
 #[tokio::test]
 async fn invalid_ids_and_unknown_jobs_never_traverse_paths_or_initialize_home() {
+    let _runtime_case = RUNTIME_CASES.lock().await;
     let root = TempDir::new().expect("isolated root");
     let selected = request(root.path());
     let home = ClassifierHome::new(selected.home.clone());
@@ -197,6 +204,7 @@ async fn invalid_ids_and_unknown_jobs_never_traverse_paths_or_initialize_home() 
 #[cfg(feature = "classifier")]
 #[tokio::test]
 async fn invalid_manual_request_ids_are_rejected_before_file_or_writer_work() {
+    let _runtime_case = RUNTIME_CASES.lock().await;
     let root = TempDir::new().expect("isolated root");
     let selected = request(root.path());
     let home = ClassifierHome::new(selected.home.clone());
@@ -242,6 +250,7 @@ async fn finished(home: &ClassifierHome, id: &str) -> TrainingJob {
 #[cfg(feature = "classifier")]
 #[tokio::test]
 async fn configured_save_directory_survives_restart_and_csv_removal() {
+    let _runtime_case = RUNTIME_CASES.lock().await;
     let root = TempDir::new().expect("isolated configuration and artifacts");
     let selected = csv(root.path());
     fs::create_dir_all(&selected.home).unwrap();
@@ -341,6 +350,7 @@ async fn configured_save_directory_survives_restart_and_csv_removal() {
 #[cfg(feature = "classifier")]
 #[tokio::test]
 async fn manual_training_preserves_candidate_only_consent_and_idempotent_replay() {
+    let _runtime_case = RUNTIME_CASES.lock().await;
     let root = TempDir::new().expect("isolated synthetic home");
     let selected = csv(root.path());
     let home = ClassifierHome::new(selected.home.clone());
@@ -401,6 +411,7 @@ async fn manual_training_preserves_candidate_only_consent_and_idempotent_replay(
 #[cfg(feature = "classifier")]
 #[tokio::test]
 async fn explicit_activation_enables_pinning_and_evaluation_does_not_write_model_data() {
+    let _runtime_case = RUNTIME_CASES.lock().await;
     let root = TempDir::new().expect("isolated synthetic home");
     let selected = csv(root.path());
     let home = ClassifierHome::new(selected.home.clone());
@@ -429,7 +440,7 @@ async fn explicit_activation_enables_pinning_and_evaluation_does_not_write_model
         .expect("real held-out family evaluation");
     assert_eq!(report.model.model_id, pinned.snapshot.model_id);
     assert_eq!(report.metrics.complete_families, 6);
-    assert_eq!(report.dataset.split_families, [6, 6, 6]);
+    assert_eq!(report.dataset.split_families, [6, 6, 0, 6]);
     assert_eq!(
         fs::read(&pointer).expect("pointer after evaluation"),
         before
@@ -445,6 +456,7 @@ async fn explicit_activation_enables_pinning_and_evaluation_does_not_write_model
 
 #[tokio::test]
 async fn cycle_preflight_requires_saved_revision_only_for_resumed_admission() {
+    let _runtime_case = RUNTIME_CASES.lock().await;
     use argos_osint_core::classifier::readiness::{
         preflight_cycle, CyclePreflightError, CycleRequirement,
     };
@@ -495,6 +507,7 @@ fn activation_view_uses_the_single_tagged_wire_contract() {
 #[cfg(feature = "classifier")]
 #[tokio::test]
 async fn malformed_prior_does_not_prevent_candidate_results_or_reset_activation_lineage() {
+    let _runtime_case = RUNTIME_CASES.lock().await;
     let root = TempDir::new().expect("isolated synthetic home");
     let selected = csv(root.path());
     let home = ClassifierHome::new(selected.home.clone());
@@ -559,5 +572,67 @@ async fn malformed_prior_does_not_prevent_candidate_results_or_reset_activation_
     let state = home.refresh_integrity(&selected).await.unwrap();
     assert!(state.can_train);
     assert!(!state.can_infer);
+    home.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "classifier")]
+#[tokio::test]
+async fn dataset_content_changes_offer_retraining_without_invalidating_the_saved_model() {
+    let _runtime_case = RUNTIME_CASES.lock().await;
+    let root = TempDir::new().unwrap();
+    let selected = csv(root.path());
+    let home = ClassifierHome::new(selected.home.clone());
+    let accepted = home
+        .start_training(ManualTrainRequest::new(
+            selected.clone(),
+            "dataset-change-model".into(),
+            SyntheticActivation::ExplicitOptIn,
+        ))
+        .await
+        .unwrap();
+    let job = finished(&home, &accepted.job_id).await;
+    assert_eq!(
+        job.state,
+        TrainingJobState::Completed,
+        "{:?}",
+        job.diagnostic
+    );
+    let pointer = selected.home.join("classifier/active.json");
+    let before = fs::read(&pointer).unwrap();
+    let path = selected.explicit_file.as_ref().unwrap();
+    let bytes = fs::read(path).unwrap();
+    let initial = home.refresh_integrity(&selected).await.unwrap();
+    assert_eq!(initial.dataset.change, "unchanged");
+    assert!(!initial.retraining_available);
+    assert!(initial.can_infer);
+    fs::write(path, &bytes).unwrap();
+    let identical = home.refresh_integrity(&selected).await.unwrap();
+    assert_eq!(
+        identical.dataset.change, "unchanged",
+        "metadata changes alone must not trigger retraining"
+    );
+    let mut changed = bytes.clone();
+    changed.extend_from_slice(b"\n");
+    fs::write(path, changed).unwrap();
+    let status = home.refresh_integrity(&selected).await.unwrap();
+    assert_eq!(status.dataset.change, "changed");
+    assert!(status.retraining_available);
+    assert!(status.can_infer);
+    assert_eq!(
+        fs::read(&pointer).unwrap(),
+        before,
+        "a readiness prompt must not replace the active model"
+    );
+    fs::remove_file(path).unwrap();
+    let missing = home.refresh_integrity(&selected).await.unwrap();
+    assert!(
+        missing.can_infer,
+        "saved inference does not depend on retaining its training CSV"
+    );
+    assert!(
+        !missing.retraining_available,
+        "missing CSV is not a positive change detection"
+    );
+    assert_eq!(fs::read(pointer).unwrap(), before);
     home.shutdown().await.unwrap();
 }

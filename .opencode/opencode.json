@@ -14,7 +14,7 @@
   "agents": {
     "coordinator": {
       "mode": "all",
-      "model": "opencode/glm-5.3-flash#high",
+      "model": "opencode/glm-5.3-flash-free#high",
       "permissions": [
         {
           "action": "read",

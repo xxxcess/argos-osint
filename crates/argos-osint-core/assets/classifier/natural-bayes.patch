@@ -17,17 +17,27 @@
    }
  
    static async loadFrom (key, stemmer, storageBackend) {
-@@ -54,10 +48,6 @@
+@@ -54,9 +48,17 @@
    }
  
    static async loadFrom (key, stemmer, storageBackend) {
 -    const classifier = await Classifier.loadFrom(key, storageBackend)
 -    return BayesClassifier.restore(classifier, stemmer)
 -  }
--}
++    const model = this.classifier
++    return ['present', 'absent'].map(label => {
++      let result = Math.log(model.classTotals[label] / model.totalExamples)
++      for (let i = indices.length - 1; i >= 0; i--) {
++        const count = model.classFeatures[label][indices[i]] || model.smoothing
++        result += Math.log(count / model.classTotals[label])
++      }
++      return result
++    })
++  }
++
+ }
  
  module.exports = BayesClassifier
- 
 
 --- a/natural/lib/natural/classifiers/classifier.js
 +++ b/natural/lib/natural/classifiers/classifier.js
@@ -130,7 +140,7 @@
    }
  
    textToFeatures (observation) {
-@@ -98,24 +95,11 @@
+@@ -98,90 +95,76 @@
    }
  
    textToFeatures (observation) {
@@ -152,66 +162,34 @@
 -  train () {
 -    const totalDocs = this.docs.length
 -    for (let i = this.lastAdded; i < totalDocs; i++) {
-+    const totalDocs = this.docs.length
-+    const limit = (typeof maxDocs === 'number' && maxDocs > 0)
-+      ? Math.min(totalDocs, this.lastAdded + maxDocs)
-+      : totalDocs
-+    for (let i = this.lastAdded; i < limit; i++) {
-       const features = this.textToFeatures(this.docs[i].text)
-       this.classifier.addExample(features, this.docs[i].label)
-       this.emit('trainedWithDocument', { index: i, total: totalDocs, doc: this.docs[i] })
-@@ -121,8 +105,12 @@
-       this.emit('trainedWithDocument', { index: i, total: totalDocs, doc: this.docs[i] })
-       this.lastAdded++
-     }
+-      const features = this.textToFeatures(this.docs[i].text)
+-      this.classifier.addExample(features, this.docs[i].label)
+-      this.emit('trainedWithDocument', { index: i, total: totalDocs, doc: this.docs[i] })
+-      this.lastAdded++
+-    }
 -    this.classifier.train()
 -    this.emit('doneTraining', true)
-+    if (this.lastAdded >= totalDocs) {
-+      this.classifier.train()
-+      this.emit('doneTraining', true)
-+      return true
-+    }
-+    return false
-   }
- 
-   retrain () {
-@@ -126,6 +114,10 @@
-   }
- 
-   retrain () {
-+    this.trainStep()
-+  }
-+
-+  retrain () {
-     this.classifier = new (this.classifier.constructor)()
-     this.lastAdded = 0
-     this.train()
-@@ -141,6 +133,21 @@
- 
-   static restore (classifier, stemmer) {
-     classifier.stemmer = stemmer || PorterStemmer
-+    if (!Array.isArray(classifier.featureOrder) || classifier.featureOrder.length === 0 || new Set(classifier.featureOrder).size !== classifier.featureOrder.length) {
-+      throw new Error('feature_order_mismatch')
-+    }
-+    if (!Array.isArray(classifier.featureIndex) || classifier.featureIndex.length !== classifier.featureOrder.length || classifier.featureIndex.some((binding, index) => !binding || binding.index !== index || binding.token !== classifier.featureOrder[index])) {
-+      throw new Error('feature_order_mismatch')
-+    }
-+    if (classifier.features && (Object.keys(classifier.features).length !== classifier.featureOrder.length || classifier.featureOrder.some(token => !Object.prototype.hasOwnProperty.call(classifier.features, token)))) {
-+      throw new Error('feature_order_mismatch')
-+    }
-+    if (!classifier.features && classifier.featureOrder) {
-+      classifier.features = {}
-+      for (let i = 0; i < classifier.featureOrder.length; i++) {
-+        classifier.features[classifier.featureOrder[i]] = 1
-+      }
-+    }
-     return classifier
-   }
- 
-@@ -144,13 +151,10 @@
-     return classifier
-   }
- 
+-  }
+-
+-  retrain () {
+-    this.classifier = new (this.classifier.constructor)()
+-    this.lastAdded = 0
+-    this.train()
+-  }
+-
+-  getClassifications (observation) {
+-    return this.classifier.getClassifications(this.textToFeatures(observation))
+-  }
+-
+-  classify (observation) {
+-    return this.classifier.classify(this.textToFeatures(observation))
+-  }
+-
+-  static restore (classifier, stemmer) {
+-    classifier.stemmer = stemmer || PorterStemmer
+-    return classifier
+-  }
+-
 -  save (filename, callback) {
 -    const data = JSON.stringify(this)
 -    const classifier = this
@@ -221,17 +199,7 @@
 -      }
 -    })
 -  }
-+  setOptions (options) {
-+    this.keepStops = !!(options.keepStops)
-+  }
-+}
-+
-+module.exports = Classifier
- 
-@@ -154,34 +158,3 @@
-     })
-   }
- 
+-
 -  static load (filename, stemmer, callback) {
 -    if (!callback) {
 -      return
@@ -263,10 +231,171 @@
 -
 -module.exports = Classifier
 -
++    const totalDocs = this.docs.length
++    const limit = (typeof maxDocs === 'number' && maxDocs > 0)
++      ? Math.min(totalDocs, this.lastAdded + maxDocs)
++      : totalDocs
++    if (!this.trainingLookup || this.trainingLookup.size !== this.featureOrder.length) {
++      if (!Array.isArray(this.featureIndex) || this.featureIndex.length !== this.featureOrder.length) { throw new Error('feature_order_mismatch') }
++      this.trainingLookup = new Map(this.featureOrder.map((token, index) => {
++        const binding = this.featureIndex[index]
++        if (!binding || binding.token !== token || binding.index !== index) { throw new Error('feature_order_mismatch') }
++        return [token, index]
++      }))
++    }
++    for (let i = this.lastAdded; i < limit; i++) {
++      const indices = Array.from(new Set(this.docs[i].text))
++        .filter(token => this.trainingLookup.has(token))
++        .map(token => this.trainingLookup.get(token)).sort((a, b) => a - b)
++      this.classifier.addExampleActive(indices, this.docs[i].label)
++      this.emit('trainedWithDocument', { index: i, total: totalDocs, doc: this.docs[i] })
++      this.lastAdded++
++    }
++    if (this.lastAdded >= totalDocs) {
++      this.classifier.train()
++      this.emit('doneTraining', true)
++      return true
++    }
++    return false
++  }
++
++  train () {
++    this.trainStep()
++  }
++
++  retrain () {
++    this.classifier = new (this.classifier.constructor)()
++    this.lastAdded = 0
++    this.train()
++  }
++
++  getClassifications (observation) {
++    return this.classifier.getClassifications(this.textToFeatures(observation))
++  }
++
++  classify (observation) {
++    return this.classifier.classify(this.textToFeatures(observation))
++  }
++
++  static restore (classifier, stemmer) {
++    classifier.stemmer = stemmer || PorterStemmer
++    if (!Array.isArray(classifier.featureOrder) || classifier.featureOrder.length === 0 || new Set(classifier.featureOrder).size !== classifier.featureOrder.length) {
++      throw new Error('feature_order_mismatch')
++    }
++    if (!Array.isArray(classifier.featureIndex) || classifier.featureIndex.length !== classifier.featureOrder.length || classifier.featureIndex.some((binding, index) => !binding || binding.index !== index || binding.token !== classifier.featureOrder[index])) {
++      throw new Error('feature_order_mismatch')
++    }
++    if (classifier.features && (Object.keys(classifier.features).length !== classifier.featureOrder.length || classifier.featureOrder.some(token => !Object.prototype.hasOwnProperty.call(classifier.features, token)))) {
++      throw new Error('feature_order_mismatch')
++    }
++    if (!classifier.features && classifier.featureOrder) {
++      classifier.features = {}
++      for (let i = 0; i < classifier.featureOrder.length; i++) {
++        classifier.features[classifier.featureOrder[i]] = 1
++      }
++    }
++    return classifier
++  }
++
++  setOptions (options) {
++    this.keepStops = !!(options.keepStops)
++  }
++}
++
++module.exports = Classifier
++
+
+--- a/natural/lib/natural/tfidf/tfidf.js
++++ b/natural/lib/natural/tfidf/tfidf.js
+@@ -24,7 +24,6 @@
+ const Tokenizer = require('../tokenizers/regexp_tokenizer').WordTokenizer
+ let tokenizer = new Tokenizer()
+ let stopwords = require('../util/stopwords').words
+-const fs = require('fs')
+ 
+ // Returns a frequency map of word to frequency
+ // Key is the document key and stored in the map that is returned as __keys
+@@ -61,24 +60,6 @@
+ }
+ 
+ // backwards compatibility for < node 0.10
+-function isEncoding (encoding) {
+-  if (typeof Buffer.isEncoding !== 'undefined') { return Buffer.isEncoding(encoding) }
+-  switch ((encoding + '').toLowerCase()) {
+-    case 'hex':
+-    case 'utf8':
+-    case 'utf-8':
+-    case 'ascii':
+-    case 'binary':
+-    case 'base64':
+-    case 'ucs2':
+-    case 'ucs-2':
+-    case 'utf16le':
+-    case 'utf-16le':
+-    case 'raw':
+-      return true
+-  }
+-  return false
+-}
+ 
+ class TfIdf {
+   constructor (deserialized) {
+@@ -159,25 +140,6 @@
+ 
+   // If restoreCache is set to true, all terms idf scores currently cached will be recomputed.
+   // Otherwise, the cache will just be wiped clean
+-  addFileSync (path, encoding, key, restoreCache) {
+-    if (!encoding) { encoding = 'utf8' }
+-    if (!isEncoding(encoding)) { throw new Error('Invalid encoding: ' + encoding) }
+-
+-    const document = fs.readFileSync(path, encoding)
+-    this.documents.push(buildDocument(document, key))
+-
+-    // make sure the cache is invalidated when new documents arrive
+-    if (restoreCache === true) {
+-      for (const term in this._idfCache) {
+-        // invoking idf with the force option set will
+-        // force a recomputation of the idf, and it will
+-        // automatically refresh the cache value.
+-        this.idf(term, true)
+-      }
+-    } else {
+-      this._idfCache = Object.create(null)
+-    }
+-  }
+ 
+   tfidf (terms, d) {
+     const _this = this
 
 --- a/apparatus/lib/apparatus/classifier/bayes_classifier.js
 +++ b/apparatus/lib/apparatus/classifier/bayes_classifier.js
-@@ -73,16 +73,17 @@
+@@ -69,6 +69,25 @@
+     }
+ }
+ 
++function addExampleActive(indices, label) {
++    if (!this.classFeatures[label]) {
++        this.classFeatures[label] = {};
++        this.classTotals[label] = 1;
++    }
++    this.totalExamples++;
++    this.classTotals[label]++;
++    var i = indices.length;
++    while (i--) {
++        var index = indices[i];
++        if (this.classFeatures[label][index]) {
++            this.classFeatures[label][index]++;
++        } else {
++            this.classFeatures[label][index] = 1 + this.smoothing;
++        }
++    }
++}
++BayesClassifier.prototype.addExampleActive = addExampleActive;
++
+ function train() {
+ 
+ }
+@@ -73,16 +92,17 @@
  
  }
  
@@ -294,7 +423,7 @@
                  prob += Math.log(count / this.classTotals[label]);
              }
          }
-@@ -87,10 +88,8 @@
+@@ -87,10 +107,8 @@
              }
          }
      } else {
@@ -307,7 +436,7 @@
              prob += Math.log(count / this.classTotals[label]);
          }
      }
-@@ -94,10 +93,6 @@
+@@ -94,10 +112,6 @@
              prob += Math.log(count / this.classTotals[label]);
          }
      }
@@ -318,7 +447,7 @@
      return prob;
  }
  
-@@ -101,32 +96,62 @@
+@@ -101,32 +115,62 @@
      return prob;
  }
  

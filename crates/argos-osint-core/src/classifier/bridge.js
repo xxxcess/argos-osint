@@ -30,12 +30,12 @@
     'scientific',
   ];
 
-  const BRIDGE_VERSION = 'argos-classifier-bridge-v1';
+  const BRIDGE_VERSION = 'argos-classifier-bridge-v2';
   const PAYLOAD_SCHEMA_VERSION = 'classifier-payload-v1';
   const TAXONOMY_VERSION = 'strategic-domains-v1';
-  const FEATURE_SCHEMA_VERSION = 'classifier-features-v2';
+  const FEATURE_SCHEMA_VERSION = 'classifier-features-v3';
   const ALGORITHM_VERSION = 'natural-bayes-binary-ovr-v1';
-  const PREPROCESSING_VERSION = 'natural-en-keepstops-v1';
+  const PREPROCESSING_VERSION = 'natural-en-phrases-v2';
 
   // In-memory model registry: model_id -> ModelContext
   const models = new Map();
@@ -103,6 +103,14 @@
       for (const row of rows) {
         if (!row || !validIdentifier(row.row_id) || typeof row.title !== 'string' || typeof row.description !== 'string' || utf8Bytes(row.title) + utf8Bytes(row.description) > 32768 || !Array.isArray(row.membership) || row.membership.length !== 6 || row.membership.some(value => !['Present','Absent','Unknown'].includes(value))) throw new Error('invalid_training_row');
       }
+      if(req.phase==='vocabulary') {
+        const prepared=globalThis.argosClassifierVocabulary.collect(ctx,rows,req.feature_policy);
+        return JSON.stringify({version:'1',request_id:req.request_id,...prepared,errors:[]});
+      }
+      if(req.phase==='freeze_vocabulary') {
+        const manifest=globalThis.argosClassifierVocabulary.freeze(ctx);
+        return JSON.stringify({version:'1',request_id:req.request_id,vocabulary_frozen:true,terms:manifest.terms.length,documents:manifest.training_documents,errors:[]});
+      }
       for (let domain = 0; domain < 6; domain++) {
         const added = rows.filter(row => row.membership[domain] !== 'Unknown').length;
         if (ctx.classifiers[domain].classifier.totalExamples - 1 + ctx.classifiers[domain].docs.length - ctx.classifiers[domain].lastAdded + added > 50000) throw new Error('training_document_bound');
@@ -114,6 +122,9 @@
       let tokenBytes = 0;
       let vocabNew = 0;
 
+      // Only compiled addDocument can mutate this append-only order. Audit the
+      // existing prefix once per batch, then audit the complete result once.
+      ctx.classifiers.forEach((classifier,index)=>requireFeatureOrder(classifier,DOMAIN_IDS[index]));
       for (const row of rows) {
         if (!row || typeof row !== 'object') {
           skipped++;
@@ -127,7 +138,7 @@
         }
 
         // Tokenize text exactly once for all 6 domains
-        const tokens = ctx.stemmer.tokenizeAndStem(text, true);
+        const tokens = globalThis.argosClassifierVocabulary.trainingFeatures(ctx,row).map(feature => feature.id);
         if (tokens.length === 0) {
           skipped++;
           continue;
@@ -143,7 +154,7 @@
         for (let d = 0; d < 6; d++) {
           const mem = membership[d];
           const classifier = ctx.classifiers[d];
-          const prevOrderLen = requireFeatureOrder(classifier, DOMAIN_IDS[d]).length;
+          const prevOrderLen = classifier.featureOrder.length;
 
           if (mem === 'Present') {
             classifier.addDocument(tokens, 'present');
@@ -154,7 +165,7 @@
           }
           // If 'Unknown', omitted entirely (masked partial label)
 
-          const newOrderLen = requireFeatureOrder(classifier, DOMAIN_IDS[d]).length;
+          const newOrderLen = classifier.featureOrder.length;
           if (newOrderLen > 100000) throw new Error('training_feature_bound');
           if (newOrderLen > prevOrderLen) {
             vocabNew += newOrderLen - prevOrderLen;
@@ -169,9 +180,7 @@
         }
       }
 
-      const vocabSizes = ctx.classifiers.map((c) =>
-        (() => { if (!Array.isArray(c.featureOrder)) throw new Error('feature_order_mismatch'); return c.featureOrder.length; })()
-      );
+      const vocabSizes = ctx.classifiers.map((classifier,index)=>requireFeatureOrder(classifier,DOMAIN_IDS[index]).length);
 
       return JSON.stringify({
         version: req.version || '1',
@@ -223,7 +232,12 @@
       }
       if (fitted > 0) ctx.fitStep++;
       const allDone = !pendingFit(ctx);
-      const vocabSizes = ctx.classifiers.map((classifier, index) => requireFeatureOrder(classifier, DOMAIN_IDS[index]).length);
+      // No order mutation is permitted while a fitting round is pending.
+      // The batch audited all bindings; trainStep validates each changed order.
+      const vocabSizes = ctx.classifiers.map(classifier=>{
+        if(!Array.isArray(classifier.featureOrder) || !Array.isArray(classifier.featureIndex) || classifier.featureOrder.length!==classifier.featureIndex.length)throw new Error('feature_order_mismatch');
+        return classifier.featureOrder.length;
+      });
       const frozenLen = vocabSizes.reduce((total, size) => total + size, 0);
 
       return JSON.stringify({
@@ -269,7 +283,8 @@
 
       for (const item of items) {
         const text = ((item.title || '') + ' ' + (item.description || '')).trim();
-        const tokens = ctx.stemmer.tokenizeAndStem(text, true);
+        const featureSpans = globalThis.argosClassifierVocabulary.features(ctx,item.title || '', item.description || '');
+        const tokens = featureSpans.map(feature => feature.id);
         const uniqueTokens = Array.from(new Set(tokens));
 
         const domainScores = [];
@@ -278,24 +293,31 @@
           const domain = DOMAIN_IDS[d];
           const classifier = ctx.classifiers[d];
 
-          // Known vs OOV features against this model's vocabulary
-          let knownCount = 0;
-          let oovCount = 0;
-          const featuresMap = classifier.features || {};
-
-          for (const tok of uniqueTokens) {
-            if (featuresMap[tok] !== undefined) {
-              knownCount++;
-            } else {
-              oovCount++;
-            }
+          // Validate vocabulary once per changed order, then traverse only active IDs.
+          ctx.lookups ||= [];
+          if (!ctx.lookups[d] || ctx.lookups[d].size !== classifier.featureOrder.length) {
+            const order = requireFeatureOrder(classifier, domain);
+            ctx.lookups[d] = new Map(order.map((token,index)=>[token,index]));
           }
-
-          // Evaluate log scores
-          const presentLog = classifier.logScore(tokens, 'present');
-          const absentLog = classifier.logScore(tokens, 'absent');
+          const lookup = ctx.lookups[d];
+          const active = tokens.filter(token=>lookup.has(token)).map(token=>lookup.get(token)).sort((a,b)=>a-b);
+          const [presentLog, absentLog] = classifier.logScoresActive(active);
           const rawLogOdds = presentLog - absentLog;
-
+          const model = classifier.classifier;
+          const prior = Math.log(model.classTotals.present/model.classTotals.absent);
+          const contributions = featureSpans.filter(feature=>lookup.has(feature.id)).map(feature=>{
+            const index=lookup.get(feature.id);
+            const positive=(model.classFeatures.present[index]||model.smoothing)/model.classTotals.present;
+            const negative=(model.classFeatures.absent[index]||model.smoothing)/model.classTotals.absent;
+            return {...feature, contribution:Math.log(positive)-Math.log(negative)};
+          });
+          const support=[];
+          // A phrase and its overlapping unigram count as one support span.
+          for (const feature of contributions.filter(f=>f.contribution>1e-12).sort((a,b)=>b.contribution-a.contribution)) {
+            if (!support.some(other=>other.field===feature.field && other.start_byte<feature.end_byte && feature.start_byte<other.end_byte)) support.push(feature);
+          }
+          const knownCount=support.length;
+          const oovCount=tokens.length-active.length;
           domainScores.push({
             domain,
             present_log_score: presentLog,
@@ -303,6 +325,9 @@
             raw_log_odds: rawLogOdds,
             known_feature_count: knownCount,
             oov_count: oovCount,
+            support: {positive_spans:knownCount, negative_features:contributions.filter(f=>f.contribution< -1e-12).length, vocabulary_matches:active.length, oov_fraction:tokens.length ? oovCount/tokens.length : 1, active_phrases:contributions.filter(f=>f.phrase).length, class_prior:prior,
+              positive:(item.explain ? contributions : []).filter(f=>f.contribution>0).sort((a,b)=>b.contribution-a.contribution).slice(0,8),
+              negative:(item.explain ? contributions : []).filter(f=>f.contribution<0).sort((a,b)=>a.contribution-b.contribution).slice(0,8)},
           });
         }
 
@@ -350,6 +375,7 @@
         domainsObj[domain] = {
           feature_order: requireFeatureOrder(classifier, domain),
           feature_index: classifier.featureIndex,
+          document_frequency: classifier.featureOrder.map(token=>classifier.features[token]),
           class_features: apparatus.classFeatures || {},
           class_totals: apparatus.classTotals || {},
           total_examples: apparatus.totalExamples || 1,
@@ -364,6 +390,7 @@
         taxonomy_version: TAXONOMY_VERSION,
         algorithm_version: ALGORITHM_VERSION,
         preprocessing_version: PREPROCESSING_VERSION,
+        feature_policy: ctx.vocabulary?.manifest || null,
         domains: domainsObj,
       };
 
@@ -457,7 +484,7 @@
         c.featureIndex = featureIndex;
         c.features = {};
         for (let i = 0; i < featureOrder.length; i++) {
-          c.features[featureOrder[i]] = 1;
+          c.features[featureOrder[i]] = dData.document_frequency ? dData.document_frequency[i] : 1;
         }
 
         c.classifier.classFeatures = dData.class_features || {};
@@ -488,6 +515,7 @@
         round: 0,
         fitStep: 0,
       };
+      globalThis.argosClassifierVocabulary.restore(ctx,payload.feature_policy);
       models.set(modelId, ctx);
 
       return JSON.stringify({

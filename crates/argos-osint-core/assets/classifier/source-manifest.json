@@ -6,6 +6,10 @@
       "tarball_sha256": "05094a3b7c6750e942b943758288ca193249a96cc1105f25c4eeb35c2df60040",
       "integrity": "sha512-NEZgLOCFZVWpzEVaDz+ZyPhWGZQKHS2Gmxqzex5/WVgwkkzUDodZ2fFyqeOXpxIbxnYsvkRc+RuDkV+hAdzVRg=="
     },
+    "underscore": {
+      "version": "1.13.8",
+      "license_file": "upstream/underscore/LICENSE"
+    },
     "apparatus": {
       "version": "0.0.10",
       "gitHead": "861cf4cbb0775e2fd12ffaf30d01b7d8f9497e12",
@@ -17,19 +21,27 @@
     "esbuild_version": "0.21.5",
     "node_version": "v24.22.1",
     "bundle_file": "natural-classifier.js",
-    "bundle_sha256": "7aae167cdb6a27473be18f89ba88e5ede39a27b2252f3a216026a770447a047a",
-    "bundle_bytes": 10378
+    "bundle_sha256": "db11da2ea61182ed36bfcd207b5b0fb6310b110430638ce47b0e37ecdb792646",
+    "bundle_bytes": 37740
   },
   "adaptation": {
     "patch_file": "natural-bayes.patch",
-    "patch_sha256": "1fd8a55033b8dbe3037be2e78338634754ccf9f0d4ffb4453c59328842db7816",
+    "patch_sha256": "4aa6a11578471b60a14616c625b280e416f7b5affd47e6495491f4819abb2208",
     "adapter_file": "natural-bayes.adapt.js",
-    "adapter_sha256": "85e041294425eebd0f68eada161e4be184dac8ec7dab1905682ed67a0c6a5fc2",
+    "adapter_sha256": "0a19c975be5ab2a62441cbaec8ebc0b1bac5c1a2a9bebe8217e5e8a4edb7d45d",
     "transform_version": "v2-feature-index"
   },
+  "vocabulary": {
+    "version": "natural-en-phrases-v2",
+    "sha256": "21d5dafb833171670aa9b31aa81b381ada2768d742f1945fda7f924eaa1d3ab7"
+  },
+  "features": {
+    "version": "natural-en-phrases-v2",
+    "sha256": "35d5429f6ddec60a3524f81366faac0ac20a053dda719c7ad85d6b2630a27a09"
+  },
   "bridge": {
-    "version": "argos-classifier-bridge-v1",
-    "sha256": "d4a84acad0c34ab2a4e36e942c881b361a27ec9cb525d4f71f6af5be91933b52"
+    "version": "argos-classifier-bridge-v2",
+    "sha256": "055678ab7d2f3b36105a0f8c4bad58acbd9d08ccf5ceb8ecb9800cb871a9b963"
   },
   "files": [
     {
@@ -66,6 +78,46 @@
       "path": "natural/lib/natural/util/stopwords.js",
       "sha256": "a4eeca8d529f2cd8ba2c5f3175c4beb741413a4d27a9c107cf76f281d8f576f0",
       "bytes": 2529
+    },
+    {
+      "path": "natural/lib/natural/ngrams/ngrams.js",
+      "sha256": "a4ad1bcbe0a4cf1a4a0b52459aee9b8f58b72d9a2c826d0c51b84500d2ce1cc4",
+      "bytes": 4455
+    },
+    {
+      "path": "natural/lib/natural/tokenizers/regexp_tokenizer.js",
+      "sha256": "47da2c61691d5ccc6ccfa0a86f7eb0d66b796b3e3dbed4438c4bd20b81564126",
+      "bytes": 3271
+    },
+    {
+      "path": "natural/lib/natural/tokenizers/orthography_matchers.js",
+      "sha256": "a5a262c34f8a8d9e5fecb3fce06cbd155cf57ea5af726000322c78b61b0d8296",
+      "bytes": 1378
+    },
+    {
+      "path": "natural/lib/natural/tfidf/tfidf.js",
+      "sha256": "4a71dc53884d47a841568a5db2fee684284242ab92e7340fe52d963f9525a9b9",
+      "bytes": 7875
+    },
+    {
+      "path": "natural/lib/natural/distance/dice_coefficient.js",
+      "sha256": "f31e59dad00b3235022a062326846cc1d552ff502e723b355714b77924e5cd13",
+      "bytes": 2211
+    },
+    {
+      "path": "natural/lib/natural/distance/jaro-winkler_distance.js",
+      "sha256": "e5e9b901e0ee5854211133858a30081e10a8386ffd8f165420d68091f7741abb",
+      "bytes": 4578
+    },
+    {
+      "path": "underscore/underscore-node-f.cjs",
+      "sha256": "26972b130bb455e31eb9c767eb440b567a567ec38e7e9219607b49ecd21bb09a",
+      "bytes": 68204
+    },
+    {
+      "path": "underscore/LICENSE",
+      "sha256": "92905fb54f5d168a27e6d5dc7c2197020add11842be4c70689d084bae3bfe37a",
+      "bytes": 1139
     },
     {
       "path": "apparatus/lib/apparatus/classifier/bayes_classifier.js",

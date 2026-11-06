@@ -19,15 +19,16 @@ Taxonomy version: `strategic-domains-v1`.
 
 The feature-independent `atlas_taxonomy` module owns these exact IDs. Domains are attributes and filters, not six permanent Brain nodes. A domain is not a reliability grade, actor threat rating, event probability or proof of a relationship.
 
-## Exact-two classifier policy
+## Primary and optional secondary policy
 
-The engine records all six independent scores. If at least two domains pass their own calibrated threshold and informative-feature checks, it publishes exactly the top two, with stable domain-ID tie breaks. A strong first domain never manufactures a weak second domain. Synthetic activation does not bypass the gates.
+The engine records all six independent scores. It applies independent relevance and discriminative-support gates first, then publishes one primary and an optional second eligible domain. Equal scores are recorded as ambiguous rather than evidence of primary dominance. Exactly two tied eligible domains preserve both; competing second-slot ties retain an unambiguous primary only, and an ambiguous primary among more than two candidates abstains. A strong first domain never manufactures a weak second domain. Synthetic activation does not bypass the gates.
 
 | Input/result | Classifier outcome |
 | --- | --- |
 | Two qualifying domains | Admit that pair |
-| Three or more qualifying domains | Admit exactly the top two |
-| Fewer than two supported qualifying domains | Reject for insufficient domains |
+| Three or more qualifying domains | Select at most two; record ties and abstain when primary ranking is ambiguous |
+| One supported qualifying domain | Admit that primary domain |
+| No supported qualifying domain | Reject for insufficient domains |
 | Blank, unsupported-language or wholly OOV input | Explicit corresponding rejection receipt |
 | Missing/broken model, queue or storage fault | Operational failure, not an article label |
 | Unknown provider membership | Omit that example from the affected binary model's fit |
@@ -48,8 +49,14 @@ The exact CSV header set is:
 sample_id,title,description,domain_labels,primary_domain,secondary_domain,subcategories,source_kind,difficulty,dataset_version,annotation_notes,split,scenario_group,language,synthetic,labels_complete,expected_admission,rejection_reason
 ```
 
-Only title and description are model features. The delivered version contains 1,700 synthetic rows in 220 scenario families; variants of one family share one partition and complete membership. Train/calibration/test rows are 1,130/285/285; independent families are 142/39/39. Label annotations, IDs, fictional metadata, split and notes never become features or live Brain evidence.
+Only title and description are model features. The frozen v1 version contains 1,700 synthetic rows in 220 scenario families; variants of one family share one partition and complete membership. Train/calibration/test rows are 1,130/285/285; independent families are 142/39/39. Label annotations, IDs, fictional metadata, split and notes never become features or live Brain evidence.
 
-Rows with no labels are explicit negatives for all six binary models; single-domain examples remain valid training material despite failing live exact-two admission. Partial provider labels use a separate masked typed pipeline. A CSV claiming `reviewed_real` is rejected; an unverified text field cannot confer independent review approval.
+Rows with no labels are explicit negatives for all six binary models; single-domain examples can be admitted under the current policy; the frozen v1 annotation contract retains its original exact-two expectations. Partial provider labels use a separate masked typed pipeline. A CSV claiming `reviewed_real` is rejected; an unverified text field cannot confer independent review approval.
 
 The seed supports development and explicit **Synthetic baseline** activation. Its correlated row count does not prove production accuracy, and it cannot authorize automatic promotion. See [dataset resolution and validation](../code/classifier.md#dataset-resolution-and-validation).
+
+## Versioned v2 dataset and policy
+
+The default `argos_atlas_strategic_domains_v2.csv` contains 1,020 distinct scenarios, with Train/Calibration/Development/Test counts 440/230/165/185. Complete memberships allow 0–6 domains. Editorial annotations never replace the complete truth set. The frozen original CSV keeps its v1 exact-two interpretation when explicitly selected. Dataset versions are allowlisted; unknown versions fail.
+
+The taxonomy IDs remain `strategic-domains-v1`; admission is versioned separately as `primary-optional-secondary-v2`, receipts as `classifier-receipt-v2`, and domain context as `domain-context-v2`. Legacy exact-two receipts are explicitly decoded as legacy and cannot authorize current publication. Synthetic baseline provenance remains visible regardless of synthetic evaluation scores.

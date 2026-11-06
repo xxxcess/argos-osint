@@ -14,7 +14,7 @@ use crate::investigation::insights::EvidenceRef;
 use crate::memory_metadata::EndpointRef;
 
 /// Immutable input policy included in brief and summary revisions.
-pub const DOMAIN_CONTEXT_VERSION: &str = "domain-context-v1";
+pub const DOMAIN_CONTEXT_VERSION: &str = "domain-context-v2";
 /// Canonical typed relationship validation contract.
 pub const LINK_VALIDATION_VERSION: &str = "domain-link-validation-v1";
 /// Hard summary packet ceiling, separate from topology exploration limits.
@@ -323,21 +323,25 @@ impl DomainSource {
 #[non_exhaustive]
 pub struct DomainAdmission {
     pub taxonomy_version: String,
-    pub selected_pair: [DomainId; 2],
+    pub selected_domains: Vec<DomainId>,
     pub receipt_sha256: String,
 }
 impl DomainAdmission {
     /// Requires current taxonomy, distinct domains and a bound receipt digest.
     pub fn new(
         taxonomy: &str,
-        selected_pair: [DomainId; 2],
+        selected_domains: impl Into<Vec<DomainId>>,
         receipt_sha256: String,
     ) -> Result<Self, ContractError> {
         if taxonomy != TAXONOMY_VERSION {
             return Err(ContractError::InvalidField("admission.taxonomy_version"));
         }
-        if selected_pair[0] == selected_pair[1] {
-            return Err(ContractError::InvalidField("admission.selected_pair"));
+        let selected_domains = selected_domains.into();
+        if selected_domains.is_empty()
+            || selected_domains.len() > 2
+            || (selected_domains.len() == 2 && selected_domains[0] == selected_domains[1])
+        {
+            return Err(ContractError::InvalidField("admission.selected_domains"));
         }
         if receipt_sha256.len() != 64
             || !receipt_sha256
@@ -348,7 +352,7 @@ impl DomainAdmission {
         }
         Ok(Self {
             taxonomy_version: taxonomy.into(),
-            selected_pair,
+            selected_domains,
             receipt_sha256,
         })
     }
@@ -417,7 +421,7 @@ impl DomainPacket {
         let domains = admission
             .as_ref()
             .map(|a| {
-                a.selected_pair
+                a.selected_domains
                     .iter()
                     .map(|id| DomainDefinition {
                         id: *id,
@@ -497,13 +501,19 @@ impl DomainPacket {
             Some(admission) => {
                 DomainAdmission::new(
                     &admission.taxonomy_version,
-                    admission.selected_pair,
+                    admission.selected_domains.clone(),
                     admission.receipt_sha256.clone(),
                 )?;
-                if self.domains.len() != 2 || self.unavailable_reason.is_some() {
+                if self.domains.len() != admission.selected_domains.len()
+                    || self.unavailable_reason.is_some()
+                {
                     return Err(ContractError::InvalidField("packet.domains"));
                 }
-                for (scope, id) in self.domains.iter().zip(admission.selected_pair) {
+                for (scope, id) in self
+                    .domains
+                    .iter()
+                    .zip(admission.selected_domains.iter().copied())
+                {
                     if scope.id != id
                         || scope.name != id.display_name()
                         || scope.definition != id.definition()

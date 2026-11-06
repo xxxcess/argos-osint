@@ -21,7 +21,7 @@ use crate::classifier::readiness::{CyclePermit, CycleRequirement};
 use crate::classifier::ClassifierError;
 use crate::store::AtlasArticleRow;
 
-pub const PUBLICATION_VERSION: &str = "atlas-admission-publication-v3";
+pub const PUBLICATION_VERSION: &str = "atlas-admission-publication-v4";
 pub const PAGE_VERSION: &str = "atlas-admission-page-v1";
 pub const FOREGROUND_PAGE_ROWS: usize = 512;
 pub const COMMIT_BATCH_ROWS: usize = 64;
@@ -87,6 +87,7 @@ DEFINE FIELD IF NOT EXISTS captured_json ON atlas_classification_derivative TYPE
 DEFINE FIELD IF NOT EXISTS output_revision ON atlas_classification_derivative TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS last_activation ON atlas_classification_derivative TYPE string DEFAULT '';
 DEFINE INDEX IF NOT EXISTS atlas_derivative_work ON atlas_classification_derivative FIELDS state, run_id, article_id;
+DEFINE INDEX IF NOT EXISTS atlas_derivative_occurrence_stage ON atlas_classification_derivative FIELDS run_id, article_id, stage, input_revision, receipt_key;
 DEFINE TABLE IF NOT EXISTS atlas_classifier_run SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS owner ON atlas_classifier_run TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS epoch ON atlas_classifier_run TYPE int DEFAULT 0;
@@ -445,6 +446,22 @@ fn finish_classification_view(
     {
         return Err(AdmissionError::InvalidReceipt {
             code: "projection_identity_mismatch".into(),
+        });
+    }
+    if matches!(
+        projection.publication_version.as_str(),
+        "atlas-admission-publication-v1"
+            | "atlas-admission-publication-v2"
+            | "atlas-admission-publication-v3"
+    ) {
+        return Ok(ClassificationView {
+            schema_version: "atlas-classification-view-v1".into(),
+            occurrence: key.clone(),
+            taxonomy_version: projection.taxonomy_version,
+            admission_state: "legacy".into(),
+            publication_version: projection.publication_version,
+            receipt: None,
+            legacy: true,
         });
     }
     if projection.taxonomy_version != crate::atlas_taxonomy::TAXONOMY_VERSION
@@ -1148,6 +1165,7 @@ async fn stage_in(tx: &super::tx::Tx, input: StageWrite) -> Result<Option<StageR
         now,
     } = input;
     let key = codec::encode(&[&row.run_id, &row.id]);
+    let occurrence = OccurrenceKey::new(&row.run_id, &row.id);
     let mut response=tx_query(tx,"{
                 UPSERT type::record('atlas_classifier_guard',$run_guard) SET updated_at=<datetime>$now RETURN NONE;
                 UPSERT type::record('atlas_classifier_guard',$source_guard) SET updated_at=<datetime>$now RETURN NONE;
@@ -1173,9 +1191,11 @@ async fn stage_in(tx: &super::tx::Tx, input: StageWrite) -> Result<Option<StageR
                 .bind(("provenance",provenance_json)).bind(("hash",source_hash)).bind(("classifier_hash",classifier_hash)).bind(("source_revision",source_revision)).bind(("taxonomy",taxonomy)).bind(("publication",PUBLICATION_VERSION))
                 .bind(("owned",owned)).bind(("owner",owner)).bind(("epoch",epoch)).bind(("now",now.to_rfc3339()))
                 .await?.check()?;
-    response
-        .take::<Option<StageReply>>(0)
-        .map_err(TxError::from)
+    let reply = response.take::<Option<StageReply>>(0)?;
+    if reply.as_ref().is_some_and(|reply| reply.changed) {
+        crate::atlas_derivative_worker::enqueue_cleanup_in(tx, &occurrence, now).await?;
+    }
+    Ok(reply)
 }
 async fn stage_on_db(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
@@ -2398,7 +2418,15 @@ async fn commit_prepared_outcomes(
                     "retry"=>if item.retry_code=="cancelled" {ItemCommit::Cancelled {occurrence:item.claim.occurrence.clone()}} else {ItemCommit::Retryable {occurrence:item.claim.occurrence.clone(),code:item.retry_code.clone()}},
                     "receipt_conflict"=>return Err(TxError::Abort(format!("classifier_receipt_conflict:{index}"))),
                     _=>return Err(TxError::Abort("unknown_item_commit_reply".into())),
-                };result.push(outcome);
+                };
+                if matches!(outcome,ItemCommit::Committed {..}|ItemCommit::AlreadyCommitted {..}) {
+                    if let Some(receipt)=&item.receipt { super::atlas_derivative_status::invalidate_in(&tx,&item.claim.occurrence,&item.receipt_key,receipt.receipt.is_admitted()).await?; }
+                    crate::atlas_derivative_worker::enqueue_cleanup_in(&tx,&item.claim.occurrence,now).await?;
+                }
+                if matches!(outcome,ItemCommit::Committed {..}|ItemCommit::AlreadyCommitted {..}) && item.receipt.as_ref().is_some_and(|receipt|receipt.receipt.is_admitted()) {
+                    crate::atlas_derivative_worker::enqueue_in(&tx,&item.claim.occurrence,&item.receipt_key,now).await?;
+                }
+                result.push(outcome);
             }
             Ok(result)
         }
@@ -3906,7 +3934,7 @@ fn prepare_publication(
     latest: Option<ArticleMetadata>,
 ) -> Result<PreparedPublication, TxError> {
     let mut row = serde_json::Value::Null;
-    let admitted = receipt.receipt.selected_pair.is_some();
+    let admitted = receipt.receipt.is_admitted();
     let mut metadata = if admitted {
         Some(
             latest
@@ -3918,7 +3946,8 @@ fn prepare_publication(
     } else {
         latest
     };
-    if let Some(pair) = receipt.receipt.selected_pair {
+    if receipt.receipt.is_admitted() {
+        let pair = &receipt.receipt.selected_domains;
         article.categories = pair
             .iter()
             .map(|domain| domain.as_str().to_owned())
@@ -4757,6 +4786,28 @@ pub(crate) async fn commit_prepared_maintenance_in(
             }
         });
     }
+    for (item, result) in prepared.iter().zip(&results) {
+        if matches!(
+            result,
+            ItemCommit::Committed { .. } | ItemCommit::AlreadyCommitted { .. }
+        ) {
+            let admitted = item
+                .receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt.receipt.is_admitted());
+            super::atlas_derivative_status::invalidate_in(
+                tx,
+                &item.claim.occurrence,
+                &item.key,
+                admitted,
+            )
+            .await?;
+            crate::atlas_derivative_worker::enqueue_in(tx, &item.claim.occurrence, &item.key, now)
+                .await?;
+            crate::atlas_derivative_worker::enqueue_cleanup_in(tx, &item.claim.occurrence, now)
+                .await?;
+        }
+    }
     Ok(results)
 }
 
@@ -5086,6 +5137,7 @@ impl DerivativeStage {
 #[non_exhaustive]
 pub enum DerivativeFence {
     Cycle(RunClaim),
+    Job(Box<crate::atlas_derivative_worker::JobFence>),
     Maintenance(Box<MaintenancePublicationFence>),
     NativeRefresh(NativeRefreshFence),
 }
@@ -5093,6 +5145,7 @@ impl DerivativeFence {
     fn identity(&self) -> (&str, u64) {
         match self {
             Self::Cycle(run) => (&run.owner, run.epoch),
+            Self::Job(job) => job.identity(),
             Self::Maintenance(fence) => (&fence.task.lease_owner, fence.task.lease_epoch as u64),
             Self::NativeRefresh(fence) => (&fence.identity, 1),
         }
@@ -5104,6 +5157,7 @@ impl DerivativeFence {
         dispatch: bool,
     ) -> Result<bool, TxError> {
         match self {
+            Self::Job(job) => job.check_in(tx, now, !dispatch).await,
             Self::NativeRefresh(fence) => Ok(!fence.sources.is_empty()),
             Self::Maintenance(fence) => {
                 if dispatch {
@@ -5122,6 +5176,7 @@ impl DerivativeFence {
     fn contains(&self, key: &OccurrenceKey) -> bool {
         match self {
             Self::Cycle(run) => run.run_id == key.run_id,
+            Self::Job(job) => job.contains(key),
             Self::Maintenance(fence) => fence.scope.contains(key),
             Self::NativeRefresh(fence) => fence.sources.contains_key(key),
         }
@@ -5138,11 +5193,15 @@ pub struct DerivativeSnapshot {
     pub admission_state: String,
     pub metadata_sha256: String,
     pub body: Option<BodyRevision>,
+    #[serde(default)]
+    pub catalog_epoch: i64,
 }
 impl DerivativeSnapshot {
     pub fn revision(&self, stage: DerivativeStage) -> Result<String, TxError> {
         let json = serde_json::to_vec(&(
-            "atlas-native-input-v1",
+            "atlas-native-input-v2",
+            super::lifecycle::RECONCILE_VERSION,
+            self.catalog_epoch,
             stage,
             crate::atlas_metadata::ENTITY_VERSION,
             crate::atlas_metadata::PRIOR_VERSION,
@@ -5224,7 +5283,7 @@ pub struct DerivativeBatchReport {
     pub states: Vec<DerivativeWorkState>,
 }
 
-async fn derivative_source_guards_in(
+pub(crate) async fn derivative_source_guards_in(
     tx: &super::tx::Tx,
     keys: &[OccurrenceKey],
 ) -> Result<(), TxError> {
@@ -5258,6 +5317,14 @@ pub(crate) async fn derivative_snapshots_in(
     TxError,
 > {
     derivative_source_guards_in(tx, keys).await?;
+    super::jobs::bump(tx, "job_guard", "atlas-derivative-catalog-input").await?;
+    let mut catalog = tx
+        .query("RETURN (SELECT VALUE epoch FROM ONLY atlas_derivative_catalog:current) ?? 0;")
+        .await?
+        .check()?;
+    let catalog_epoch = catalog
+        .take::<Option<i64>>(0)?
+        .ok_or_else(|| TxError::Abort("catalog_epoch_missing".into()))?;
     let articles = super::atlas::articles_many_in(tx, keys).await?;
     let rows: Vec<_> = articles.values().cloned().collect();
     let sources = retained_source_fences_many_in(tx, &rows).await?;
@@ -5292,14 +5359,11 @@ pub(crate) async fn derivative_snapshots_in(
                 || receipt.key.input_revision != source.native_input_revision
                 || receipt
                     .receipt
-                    .selected_pair
-                    .map(|pair| {
-                        pair.iter()
-                            .map(|domain| domain.as_str().to_owned())
-                            .collect::<Vec<_>>()
-                    })
-                    .as_ref()
-                    != Some(&article.categories))
+                    .selected_domains
+                    .iter()
+                    .map(|domain| domain.as_str().to_owned())
+                    .collect::<Vec<_>>()
+                    != article.categories)
         {
             continue;
         }
@@ -5312,6 +5376,7 @@ pub(crate) async fn derivative_snapshots_in(
             admission_state: view.admission_state.clone(),
             metadata_sha256: crate::classifier::artifact::sha256_hex(&metadata_json),
             body: bodies.get(&key.article_id).cloned(),
+            catalog_epoch,
         };
         out.insert(key, (snapshot, article.clone(), native));
     }
@@ -5358,6 +5423,13 @@ pub async fn claim_derivatives(
         let(identity,activation_epoch)=fence.identity();let activation=codec::encode(&[identity,&activation_epoch.to_string()]);
         let mut claims=Vec::new();
         for work in work {
+            // The outside adoption probe is only an optimization. Another
+            // publisher may have committed a cleanup cursor since that read;
+            // never let the revision-reset claim discard its durable frontier.
+            if stage == DerivativeStage::Reconcile
+                && crate::atlas_derivative_worker::has_owed_cleanup_in(&tx, &work.occurrence).await? {
+                continue;
+            }
             let Some((snapshot,article,metadata))=snapshots.remove(&work.occurrence)else{continue;};
             if snapshot.receipt_key!=work.receipt_key {continue;}
             if let DerivativeFence::NativeRefresh(native)=&fence {if native.sources.get(&work.occurrence)!=Some(&(snapshot.source.clone(),snapshot.receipt_key.clone())) {continue;}}
@@ -5369,9 +5441,11 @@ pub async fn claim_derivatives(
             let revision=snapshot.revision(stage)?;
             let output_current = stage != DerivativeStage::Actors
                 || actor_outputs.get(&work.occurrence) == Some(&revision);
-            let mut response=tx_query(&tx,"{LET $row=(SELECT * FROM ONLY $key);IF $row=NONE OR ($row.state='complete' AND $row.output_revision=$revision AND ($row.disposition_json!='{\"kind\":\"current\"}' OR $output_current)) OR ($row.owner!='' AND $row.lease_until> <datetime>$now) OR ($row.last_activation=$activation AND $row.output_revision=$revision AND $row.last_error!='' AND $row.checkpoint_json='') {RETURN NONE;};UPDATE $key SET owner=$owner,epoch=(epoch??0)+1,lease_until=<datetime>$until,state='evaluating',disposition_json='',checkpoint_json=IF $row.state='complete' {''} ELSE {$row.checkpoint_json ?? ''},captured_json=$snapshot,output_revision=$revision,last_activation=$activation,updated_at=<datetime>$now RETURN NONE;LET $new=(SELECT epoch,IF bytes::len(type::bytes(checkpoint_json))<=16384 {checkpoint_json} ELSE {NONE} AS checkpoint_json FROM ONLY $key);RETURN $new;}")
+            let mut response=tx_query(&tx,"{LET $row=(SELECT * FROM ONLY $key);IF $row=NONE OR ($row.state='complete' AND $row.output_revision=$revision AND ($row.disposition_json!='{\"kind\":\"current\"}' OR $output_current)) OR ($row.owner!='' AND $row.lease_until> <datetime>$now) OR ($row.last_activation=$activation AND $row.output_revision=$revision AND $row.last_error!='' AND $row.checkpoint_json='') {RETURN NONE;};UPDATE $key SET owner=$owner,epoch=(epoch??0)+1,lease_until=<datetime>$until,state='evaluating',disposition_json='',checkpoint_json=IF $row.state='complete' OR $row.output_revision!=$revision {''} ELSE {$row.checkpoint_json ?? ''},captured_json=$snapshot,output_revision=$revision,last_activation=$activation,updated_at=<datetime>$now RETURN NONE;LET $new=(SELECT epoch,IF bytes::len(type::bytes(checkpoint_json))<=16384 {checkpoint_json} ELSE {NONE} AS checkpoint_json FROM ONLY $key);RETURN $new;}")
                 .bind(("key",derivative_record(&work.receipt_key,stage))).bind(("owner",identity.to_owned())).bind(("activation",activation.clone())).bind(("revision",revision.clone())).bind(("output_current",output_current)).bind(("snapshot",serde_json::to_string(&snapshot).map_err(|_|TxError::Abort("derivative_snapshot_json".into()))?)).bind(("now",now.to_rfc3339())).bind(("until",(now+Duration::seconds(CLAIM_LEASE_SECS)).to_rfc3339())).await?.check()?;
             if let Some(reply)=response.take::<Option<DerivativeLeaseReply>>(0)? {
+                let stale_stages=if stage==DerivativeStage::Reconcile {vec![DerivativeStage::Reconcile]}else{vec![DerivativeStage::Actors,DerivativeStage::Reconcile]};
+                super::atlas_derivative_status::reset_in(&tx,&work.occurrence,&work.receipt_key,&stale_stages).await?;
                 claims.push(DerivativeClaim {work,stage,owner:identity.into(),epoch:u64::try_from(reply.epoch).map_err(|_|TxError::Abort("negative_derivative_epoch".into()))?,snapshot,input_revision:revision,checkpoint_json:reply.checkpoint_json.ok_or_else(||TxError::Abort("derivative_checkpoint_oversized".into()))?,article,metadata});
             }
         }
@@ -5461,6 +5535,7 @@ pub(crate) async fn complete_derivative_in(
     };
     tx_query(tx,"UPDATE $key SET state=$state,output_revision=$revision,checkpoint_json=$checkpoint,last_error=$error,disposition_json=$disposition,owner='',lease_until=NONE,updated_at=<datetime>$now RETURN NONE;")
         .bind(("key",derivative_record(&claim.work.receipt_key,claim.stage))).bind(("state",disposition.state().to_owned())).bind(("disposition",serde_json::to_string(disposition).map_err(|_|TxError::Abort("derivative_disposition_json".into()))?)).bind(("revision",revision)).bind(("checkpoint",checkpoint.to_owned())).bind(("error",disposition.code().to_owned())).bind(("now",now.to_rfc3339())).await?.check()?;
+    super::atlas_derivative_status::publish_in(tx, claim, disposition).await?;
     Ok(true)
 }
 
@@ -5499,6 +5574,11 @@ pub(crate) async fn release_derivative(
     claim: &DerivativeClaim,
     disposition: DerivativeDisposition,
 ) -> Result<DerivativeDisposition, AdmissionError> {
+    if disposition.terminal() || disposition.code().len() > 256 {
+        return Err(AdmissionError::InvalidPage {
+            code: "derivative_release_disposition".into(),
+        });
+    }
     let fence = fence.clone();
     let claim = claim.clone();
     let output = disposition.clone();
@@ -5507,9 +5587,22 @@ pub(crate) async fn release_derivative(
         let claim = claim.clone();
         let disposition = disposition.clone();
         async move {
-            if !complete_derivative_in(&tx, &fence, &claim, &disposition, "", Utc::now()).await? {
+            let now = Utc::now();
+            if complete_derivative_in(&tx, &fence, &claim, &disposition, "", now).await? {
+                return Ok(disposition);
+            }
+            // Pausing/cancelling the root revokes publication authority, but
+            // must not strand this worker's child claim until lease expiry.
+            // An uncertain commit or a newer owner fails this exact CAS.
+            if !derivative_lease_in(&tx, &claim, now).await? {
                 return Ok(DerivativeDisposition::StaleInput);
             }
+            tx_query(&tx, "UPDATE $key SET state='pending',owner='',lease_until=NONE,disposition_json=$disposition,last_error=$error,updated_at=<datetime>$now RETURN NONE;")
+                .bind(("key", derivative_record(&claim.work.receipt_key, claim.stage)))
+                .bind(("disposition", serde_json::to_string(&disposition).map_err(|_| TxError::Abort("derivative_disposition_json".into()))?))
+                .bind(("error", disposition.code().to_owned()))
+                .bind(("now", now.to_rfc3339()))
+                .await?.check()?;
             Ok(disposition)
         }
     })
@@ -5602,7 +5695,24 @@ async fn process_derivative_stages(
             .filter(|work| eligible.contains(&work.occurrence))
             .cloned()
             .collect();
-        let claims = claim_derivatives(owner, fence, &selected, stage, Utc::now()).await?;
+        let mut ready = Vec::with_capacity(selected.len());
+        for item in selected {
+            if matches!(stage, DerivativeStage::Actors | DerivativeStage::Reconcile)
+                && process_owed_cleanup(owner, fence, &item, cancel).await?
+            {
+                eligible.remove(&item.occurrence);
+                report.items.push(DerivativeItemReport {
+                    work: item,
+                    stage,
+                    disposition: DerivativeDisposition::Retryable {
+                        code: "published_cleanup_continuation".into(),
+                    },
+                });
+            } else {
+                ready.push(item);
+            }
+        }
+        let claims = claim_derivatives(owner, fence, &ready, stage, Utc::now()).await?;
         let stage_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         struct CancelStage(Arc<std::sync::atomic::AtomicBool>);
         impl Drop for CancelStage {
@@ -5653,6 +5763,99 @@ async fn process_derivative_stages(
     .map_err(|_| TxError::Abort("negative_derivative_remaining".into()))?;
     report.states = derivative_states(owner, fence, work).await?;
     Ok(report)
+}
+
+/// Adopt owed published cleanup through this caller's live current capability.
+/// Old receipt/stage ownership never authorizes new native material publication.
+async fn process_owed_cleanup(
+    owner: &AdmissionOwner,
+    fence: &DerivativeFence,
+    work: &DerivativeWork,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<bool, AdmissionError> {
+    let mut response = owner.query("RETURN count(SELECT id FROM atlas_classification_derivative WITH INDEX atlas_derivative_occurrence_stage WHERE run_id=$run AND article_id=$article AND stage='reconcile' AND state!='complete' AND (checkpoint_json CONTAINS '\"frontier_kind\":\"reconcile\"' OR checkpoint_json CONTAINS '\"frontier_kind\":\"reconcile_restart\"') LIMIT 1)>0;")
+        .bind(("run",work.occurrence.run_id.clone())).bind(("article",work.occurrence.article_id.clone())).await.map_err(TxError::from)?.check().map_err(TxError::from)?;
+    if response.take::<Option<bool>>(0).map_err(TxError::from)? != Some(true) {
+        return Ok(false);
+    }
+    if cancel.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+    let (fence, work) = (fence.clone(), work.clone());
+    let output = Arc::new(std::sync::Mutex::new(None));
+    let slot = output.clone();
+    let cleanup_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct CancelCleanup(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for CancelCleanup {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let _stop = CancelCleanup(cleanup_cancel.clone());
+    let transaction_cancel = cleanup_cancel.clone();
+    let write: super::memory::MemoryWrite = Arc::new(move |tx| {
+        let (fence, work, slot, cancel) = (
+            fence.clone(),
+            work.clone(),
+            slot.clone(),
+            transaction_cancel.clone(),
+        );
+        Box::pin(async move {
+            if cancel.load(Ordering::Acquire) {
+                return Err(TxError::Abort("cleanup_cancelled".into()));
+            }
+            if !fence.contains(&work.occurrence) || !fence.check_in(&tx, Utc::now(), false).await? {
+                return Err(TxError::Abort("cleanup_current_authority_lost".into()));
+            }
+            let snapshots = derivative_snapshots_in(
+                &tx,
+                std::slice::from_ref(&work.occurrence),
+                DerivativeStage::Actors,
+            )
+            .await?;
+            let Some((snapshot, _, _)) = snapshots.get(&work.occurrence) else {
+                return Err(TxError::Abort("cleanup_current_source_missing".into()));
+            };
+            if snapshot.receipt_key != work.receipt_key {
+                return Err(TxError::Abort("cleanup_current_receipt_changed".into()));
+            }
+            if let DerivativeFence::NativeRefresh(native) = &fence {
+                if native.sources.get(&work.occurrence)
+                    != Some(&(snapshot.source.clone(), snapshot.receipt_key.clone()))
+                {
+                    return Err(TxError::Abort("cleanup_current_source_changed".into()));
+                }
+            }
+            let progress =
+                crate::atlas_derivative_worker::cleanup_one_in(&tx, &work.occurrence).await?;
+            if cancel.load(Ordering::Acquire) {
+                return Err(TxError::Abort("cleanup_cancelled".into()));
+            }
+            *slot
+                .lock()
+                .map_err(|_| TxError::Abort("cleanup_result_poisoned".into()))? =
+                Some(progress.is_some());
+            Ok(progress.map_or_else(Vec::new, |progress| progress.changed_memory_ids))
+        })
+    });
+    let mut processing = Box::pin(super::memory::write_then_index(
+        owner.repository().publisher(),
+        write,
+    ));
+    loop {
+        tokio::select! {
+            result = &mut processing => { result?; break; },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                if cancel.load(Ordering::Acquire) { cleanup_cancel.store(true, Ordering::Release); }
+            }
+        }
+    }
+    let result = output
+        .lock()
+        .map_err(|_| TxError::Abort("cleanup_result_poisoned".into()))?
+        .take()
+        .ok_or_else(|| TxError::Abort("cleanup_result_missing".into()))?;
+    Ok(result)
 }
 
 async fn process_claimed_derivatives(
@@ -5743,14 +5946,25 @@ async fn process_claimed_derivatives(
             };
             match result {
                 Ok(disposition) => disposition,
-                Err(_) => {
+                Err(error) => {
+                    let code = match error.downcast_ref::<TxError>() {
+                        Some(TxError::Abort(code))
+                            if code.len() <= 128
+                                && code
+                                    .bytes()
+                                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') =>
+                        {
+                            code.clone()
+                        }
+                        Some(TxError::Contention { .. }) => "native_publication_contention".into(),
+                        Some(TxError::PublisherDropped) => "native_commit_uncertain".into(),
+                        _ => "native_stage_failed".into(),
+                    };
                     release_derivative(
                         owner,
                         fence,
                         &claim,
-                        DerivativeDisposition::Retryable {
-                            code: "native_stage_failed".into(),
-                        },
+                        DerivativeDisposition::Retryable { code },
                     )
                     .await?
                 }
@@ -5923,7 +6137,29 @@ async fn derivative_states(
     Ok(owned_tx(owner, RetryPolicy::default(), move |tx| {
         let work = work.clone();
         let fence = fence.clone();
-        async move { derivative_states_in(&tx, &fence, &work, Utc::now()).await }
+        async move {
+            let states = derivative_states_in(&tx, &fence, &work, Utc::now()).await?;
+            // Explicit compatibility refreshes also publish current readiness;
+            // they do not pass through the independent worker's next-stage audit.
+            for row in &states {
+                for stage in &row.stages {
+                    if matches!(
+                        stage.stage,
+                        DerivativeStage::Actors | DerivativeStage::Reconcile
+                    ) && stage.disposition == Some(DerivativeDisposition::Current)
+                    {
+                        super::atlas_derivative_status::audit_current_in(
+                            &tx,
+                            &row.work.occurrence,
+                            &row.work.receipt_key,
+                            stage.stage,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            Ok(states)
+        }
     })
     .await?
     .value)
@@ -5945,7 +6181,7 @@ pub(crate) async fn maintenance_derivative_states_in(
     )
     .await
 }
-async fn derivative_states_in(
+pub(crate) async fn derivative_states_in(
     tx: &super::tx::Tx,
     fence: &DerivativeFence,
     work: &[DerivativeWork],
@@ -6310,4 +6546,243 @@ pub(crate) async fn cycle_derivative_work(
             )
         })
         .collect())
+}
+
+/// Bounded current-source handoff for later native input changes. Historical or
+/// rejected occurrences cannot gain new admission authority through this path.
+pub(crate) async fn refresh_handoff_in(
+    tx: &super::tx::Tx,
+    keys: &[OccurrenceKey],
+    trigger: &str,
+    now: DateTime<Utc>,
+) -> Result<(), TxError> {
+    if keys.len() > 8 {
+        return Err(TxError::Abort("derivative_refresh_page_bound".into()));
+    }
+    let snapshots = derivative_snapshots_in(tx, keys, DerivativeStage::Actors).await?;
+    for (key, (snapshot, _, _)) in snapshots {
+        if snapshot.admission_state != "admitted" {
+            continue;
+        }
+        super::atlas_derivative_status::reset_in(
+            tx,
+            &key,
+            &snapshot.receipt_key,
+            &[DerivativeStage::Actors, DerivativeStage::Reconcile],
+        )
+        .await?;
+        crate::atlas_derivative_worker::enqueue_revision_in(
+            tx,
+            &key,
+            &snapshot.receipt_key,
+            trigger,
+            now,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// A source-fenced actor publication generation, independent of deferred cleanup.
+#[derive(Debug, Clone)]
+pub(crate) struct NativeActorGeneration {
+    pub input_revision: String,
+    pub publication_batch: String,
+}
+/// Readers require both the exact current native revision and its publication
+/// stamp. Old inventory can remain stored for bounded reconciliation without
+/// remaining visible as a current native relationship.
+pub(crate) async fn native_actor_generations_many_in(
+    tx: &super::tx::Tx,
+    keys: &[OccurrenceKey],
+) -> Result<std::collections::BTreeMap<OccurrenceKey, NativeActorGeneration>, TxError> {
+    if keys.len() > 64 {
+        return Err(TxError::Abort("native_generation_read_bound".into()));
+    }
+    let snapshots = derivative_snapshots_in(tx, keys, DerivativeStage::Actors).await?;
+    let mut result = std::collections::BTreeMap::new();
+    if snapshots.is_empty() {
+        return Ok(result);
+    }
+    let mut sql = String::new();
+    for index in 0..keys.len() {
+        sql.push_str(&format!("SELECT input_revision,index_checksum,actor_coverage,IF bytes::len(type::bytes(publication_batch ?? ''))<=256 {{publication_batch ?? ''}} ELSE {{''}} AS publication_batch FROM ONLY $index{index};"));
+    }
+    let mut query = tx_query(tx, sql);
+    for (index, key) in keys.iter().enumerate() {
+        query = query.bind((
+            format!("index{index}"),
+            super::jobs::rid("atlas_article_index", &key.record_id()),
+        ));
+    }
+    let mut response = query.await?.check()?;
+    #[derive(SurrealValue)]
+    struct Output {
+        input_revision: String,
+        index_checksum: String,
+        actor_coverage: String,
+        publication_batch: String,
+    }
+    for (index, key) in keys.iter().enumerate() {
+        let Some((snapshot, _, _)) = snapshots
+            .get(key)
+            .filter(|(snapshot, _, _)| snapshot.admission_state == "admitted")
+        else {
+            continue;
+        };
+        let Some(output) = response.take::<Option<Output>>(index)? else {
+            continue;
+        };
+        if !output.publication_batch.is_empty()
+            && output.input_revision == snapshot.revision(DerivativeStage::Actors)?
+            && output.index_checksum
+                == crate::atlas_actor_index::checksum(
+                    &output.input_revision,
+                    &output.actor_coverage,
+                )
+        {
+            result.insert(
+                key.clone(),
+                NativeActorGeneration {
+                    input_revision: output.input_revision,
+                    publication_batch: output.publication_batch,
+                },
+            );
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(all(test, feature = "embedded"))]
+mod derivative_release_tests {
+    use super::*;
+    #[tokio::test]
+    async fn lost_root_releases_only_its_live_child_and_preserves_uncertain_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = super::super::repo::Repository::connect(
+            &super::super::open::Target::Embedded {
+                path: directory.path().join("storage"),
+            },
+            "argos",
+            "derivative_release",
+        )
+        .await
+        .unwrap();
+        let owner = AdmissionOwner::new(repo.clone());
+        let key = OccurrenceKey::new("revoked-root", "fixture");
+        // Intentionally unadmitted: these rows test cleanup ownership, never
+        // successful native publication or source authority.
+        let snapshot = DerivativeSnapshot {
+            source: RetainedSourceFence {
+                occurrence: key.clone(),
+                native_input_revision: 1,
+                source_hash: "s".into(),
+                classifier_input_hash: "i".into(),
+                provenance: OccurrenceProvenance {
+                    provider: "fixture".into(),
+                    url: String::new(),
+                    source_domain: String::new(),
+                    source_name: String::new(),
+                    published_at: String::new(),
+                    seen_at: String::new(),
+                    language: None,
+                    observation_ids: Vec::new(),
+                },
+            },
+            receipt_key: "fixture".into(),
+            admission_state: "pending".into(),
+            metadata_sha256: "m".into(),
+            body: None,
+            catalog_epoch: 0,
+        };
+        let fence = DerivativeFence::Cycle(RunClaim {
+            run_id: key.run_id.clone(),
+            owner: "old-owner".into(),
+            epoch: 1,
+            revision: 1,
+        });
+        for case in ["owned", "expired", "new-owner", "committed"] {
+            let receipt = format!("cleanup-{case}");
+            let claim = DerivativeClaim {
+                work: DerivativeWork::new(key.clone(), receipt.clone()),
+                stage: DerivativeStage::Actors,
+                owner: "old-owner".into(),
+                epoch: 1,
+                snapshot: snapshot.clone(),
+                input_revision: "revision".into(),
+                checkpoint_json: "checkpoint".into(),
+                article: AtlasArticleRow::default(),
+                metadata: None,
+            };
+            repo.db().query("CREATE $key SET run_id=$run,article_id='fixture',stage='actors',input_revision=1,receipt_key=$receipt,state=$state,owner=$owner,epoch=$epoch,output_revision='revision',checkpoint_json='checkpoint',disposition_json=$disposition,lease_until=<datetime>$until,updated_at=time::now();")
+                .bind(("key",derivative_record(&receipt,DerivativeStage::Actors))).bind(("run",key.run_id.clone())).bind(("receipt",receipt.clone()))
+                .bind(("state",if case=="committed" {"complete"}else{"evaluating"})).bind(("owner",if case=="new-owner" {"new-owner"}else if case=="committed" {""}else{"old-owner"}))
+                .bind(("epoch",if case=="new-owner" {2i64}else{1i64})).bind(("disposition",if case=="committed" {"{\"kind\":\"current\"}"}else{""}))
+                .bind(("until",(Utc::now()+Duration::seconds(if case=="expired" {-60}else{60})).to_rfc3339())).await.unwrap().check().unwrap();
+            let result = release_derivative(
+                &owner,
+                &fence,
+                &claim,
+                DerivativeDisposition::Retryable {
+                    code: "cancelled".into(),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result,
+                if case == "owned" {
+                    DerivativeDisposition::Retryable {
+                        code: "cancelled".into(),
+                    }
+                } else {
+                    DerivativeDisposition::StaleInput
+                }
+            );
+            #[derive(SurrealValue)]
+            struct State {
+                owner: String,
+                state: String,
+                checkpoint_json: String,
+                disposition_json: String,
+            }
+            let state: State = repo
+                .db()
+                .query("SELECT owner,state,checkpoint_json,disposition_json FROM ONLY $key;")
+                .bind(("key", derivative_record(&receipt, DerivativeStage::Actors)))
+                .await
+                .unwrap()
+                .check()
+                .unwrap()
+                .take::<Option<State>>(0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(state.checkpoint_json, "checkpoint");
+            assert_eq!(
+                state.owner,
+                if case == "owned" || case == "committed" {
+                    ""
+                } else if case == "new-owner" {
+                    "new-owner"
+                } else {
+                    "old-owner"
+                }
+            );
+            assert_eq!(
+                state.state,
+                if case == "owned" {
+                    "pending"
+                } else if case == "committed" {
+                    "complete"
+                } else {
+                    "evaluating"
+                }
+            );
+            if case == "committed" {
+                assert_eq!(state.disposition_json, "{\"kind\":\"current\"}");
+            }
+        }
+        owner.shutdown().await.unwrap();
+        repo.publisher().shutdown().await;
+    }
 }

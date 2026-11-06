@@ -714,11 +714,11 @@ async fn paged_admission_preserves_siblings_replay_bytes_and_other_runs() {
         atlas_classify::OccurrenceKey::new("main", &long_id).record_id()
     );
     assert_eq!(
-        long_view.receipt.selected_pair,
-        Some([
+        long_view.receipt.selected_domains,
+        vec![
             argos_osint_core::atlas_taxonomy::DomainId::Economic,
             argos_osint_core::atlas_taxonomy::DomainId::Human
-        ])
+        ]
     );
     // Persisted operational retry work is distinct from ownership loss.
     for id in ["retry-busy", "retry-timeout"] {

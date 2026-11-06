@@ -63,7 +63,7 @@ async fn offline_fixed_current_classifier_benchmark() {
                 assert_eq!(receipts.len(), size);
                 for receipt in receipts {
                     assert!(receipt.rejection_reason.is_none(), "fixed admitted workload changed");
-                    let pair = receipt.selected_pair.unwrap();
+                    let pair = receipt.selected_domains.clone();
                     assert_ne!(pair[0],pair[1]);
                     actual_pairs.insert(receipt.occurrence_id, pair);
                 }

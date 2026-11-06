@@ -3392,7 +3392,6 @@ fn origins_room(app: &App) -> usize {
 fn insights_room(app: &App) -> usize {
     inset(atlas_live_areas(app, chrome(app.screen, app).body).2)
         .height
-        .saturating_sub(2)
         .max(1) as usize
 }
 
@@ -3418,9 +3417,13 @@ fn atlas_cycle_stats_scroll_max(app: &App) -> u16 {
         .iter()
         .filter(|row| row.articles > 0)
         .collect();
-    super::atlas_table::origins_lines(&origins, &stats, inner.width)
-        .len()
-        .saturating_sub(atlas_cycle_stats_room(app))
+    let table_lines = if origins.is_empty() {
+        1
+    } else {
+        super::atlas_table::origins_lines(&origins, &stats, inner.width).len()
+    };
+    (cycle_stats_prefix(&stats, inner.width).len() + table_lines)
+        .saturating_sub(inner.height as usize)
         .min(u16::MAX as usize) as u16
 }
 
@@ -3446,11 +3449,11 @@ fn selected_cycle_stats(app: &App) -> atlas::RunStats {
 }
 
 fn insights_scroll_max(app: &App) -> u16 {
-    app.atlas_stats
-        .insights
-        .rows
+    let inner = inset(atlas_live_areas(app, chrome(app.screen, app).body).2);
+    atlas_coverage_lines(app, inner.width)
         .len()
-        .saturating_sub(insights_room(app)) as u16
+        .saturating_sub(inner.height as usize)
+        .min(u16::MAX as usize) as u16
 }
 
 fn atlas_runs_room(app: &App) -> usize {
@@ -3467,7 +3470,6 @@ fn atlas_runs_room(app: &App) -> usize {
 fn atlas_cycle_stats_room(app: &App) -> usize {
     inset(atlas_runs_areas(chrome(app.screen, app).body).2)
         .height
-        .saturating_sub(3)
         .max(1) as usize
 }
 
@@ -10072,7 +10074,7 @@ fn draw_atlas(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_atlas_coverage(frame: &mut Frame, app: &App, area: Rect) {
+fn atlas_coverage_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let coverage = &app.atlas_stats.coverage;
     let mut lines = vec![
         Line::from(Span::styled(
@@ -10113,6 +10115,24 @@ fn draw_atlas_coverage(frame: &mut Frame, app: &App, area: Rect) {
             theme::accent(),
         )),
     ];
+    if let Some(status) = &coverage.actor_readiness {
+        lines.insert(
+            1,
+            Line::from(format!(
+                "Actors {}/{} {}",
+                status.processed, status.eligible, status.state
+            )),
+        );
+    }
+    if let Some(status) = &coverage.reconciliation_readiness {
+        lines.insert(
+            2,
+            Line::from(format!(
+                "Reconcile {}/{} {}",
+                status.processed, status.eligible, status.state
+            )),
+        );
+    }
     if coverage.legacy_unknown > 0 {
         lines.insert(
             1,
@@ -10125,6 +10145,11 @@ fn draw_atlas_coverage(frame: &mut Frame, app: &App, area: Rect) {
             )),
         );
     }
+    super::components::measured_lines(lines, width)
+}
+
+fn draw_atlas_coverage(frame: &mut Frame, app: &App, area: Rect) {
+    let lines = atlas_coverage_lines(app, inset(area).width);
     frame.render_widget(
         Paragraph::new(lines)
             .block(pane(" coverage "))
@@ -10312,6 +10337,51 @@ fn news_cycle_line(
     ])
 }
 
+fn cycle_stats_prefix(stats: &atlas::RunStats, width: u16) -> Vec<Line<'static>> {
+    let coverage = &stats.coverage;
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "Articles {} · classified {} · Related {} pairs",
+            stats.article_total(),
+            coverage.classified,
+            coverage.related_pairs
+        ),
+        theme::dim(),
+    ))];
+    if argos_osint_core::atlas_work::is_collection_contract(&stats.contract_version) {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Entities {} · publisher priors {} · warnings {}",
+                coverage.entities_available, coverage.publishers_available, coverage.warnings
+            ),
+            theme::dim(),
+        )));
+        if let Some(status) = &coverage.actor_readiness {
+            lines.push(Line::from(format!(
+                "Actors {}/{} {} · {} failed",
+                status.processed, status.eligible, status.state, status.failed
+            )));
+        } else if stats.contract_version == argos_osint_core::atlas_work::COLLECTION_CONTRACT {
+            lines.push(Line::from(format!(
+                "Actors {}/{} · {} failed",
+                coverage.actor_indexed, coverage.admitted, coverage.actor_index_failed
+            )));
+        }
+        if let Some(status) = &coverage.reconciliation_readiness {
+            lines.push(Line::from(format!(
+                "Reconcile {}/{} {} · {} failed",
+                status.processed, status.eligible, status.state, status.failed
+            )));
+        }
+    } else {
+        lines.push(Line::from(format!(
+            "Legacy memory publication · {}",
+            stats.memories.line()
+        )));
+    }
+    super::components::measured_lines(lines, width)
+}
+
 fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
     let stats = selected_cycle_stats(app);
     let origins: Vec<&atlas::OriginStat> = stats
@@ -10319,37 +10389,7 @@ fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .filter(|row| row.articles > 0)
         .collect();
-    let summary = format!(
-        "Articles {} · classified {} · Related {} pairs",
-        stats.article_total(),
-        stats.coverage.classified,
-        stats.coverage.related_pairs
-    );
-    let coverage = if argos_osint_core::atlas_work::is_collection_contract(&stats.contract_version)
-    {
-        let mut line = format!(
-            "Entities {} · publisher priors {} · warnings {}",
-            stats.coverage.entities_available,
-            stats.coverage.publishers_available,
-            stats.coverage.warnings
-        );
-        // Phase 6 (v2): Brain actor indexing coverage.
-        if stats.contract_version == argos_osint_core::atlas_work::COLLECTION_CONTRACT {
-            line.push_str(&format!(
-                " · actors {}/{}{}",
-                stats.coverage.actor_indexed,
-                stats.coverage.articles,
-                if stats.coverage.actor_index_failed > 0 {
-                    format!(" · {} failed", stats.coverage.actor_index_failed)
-                } else {
-                    String::new()
-                }
-            ));
-        }
-        line
-    } else {
-        format!("Legacy memory publication · {}", stats.memories.line())
-    };
+    let prefix = cycle_stats_prefix(&stats, inset(area).width);
     app.layout
         .borrow_mut()
         .register(Target::AtlasCycleStats, area);
@@ -10362,10 +10402,7 @@ fn draw_atlas_cycle_stats(frame: &mut Frame, app: &App, area: Rect) {
             scroll: app.scrolls.origins as usize,
             title: " stats ",
             empty: "No country statistics for this cycle.",
-            prefix: vec![
-                Line::from(Span::styled(summary, theme::dim())),
-                Line::from(Span::styled(coverage, theme::dim())),
-            ],
+            prefix,
             focused: app.focus == Target::AtlasCycleStats,
         },
     );

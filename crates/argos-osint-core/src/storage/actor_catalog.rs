@@ -974,8 +974,10 @@ async fn ingest(
             let data = data.clone(); let owner = owner.to_owned(); let next = next.clone(); let now = now.clone();
             async move {
                 run(&tx, tx.query("IF (SELECT VALUE owner FROM ONLY brain_actor_seed:catalog) != $owner { THROW 'actor seed lease changed'; }; INSERT IGNORE INTO brain_actor $actors RETURN NONE; INSERT IGNORE INTO memory $memories RETURN NONE; INSERT IGNORE INTO brain_actor_alias $aliases RETURN NONE; INSERT IGNORE INTO brain_graph_node $graph RETURN NONE; UPDATE brain_actor_seed:catalog SET processed = $done, aliases = $alias_count, updated_at = $now, lease_until = $lease RETURN NONE;")
-                    .bind(("owner", owner)).bind(("actors", data.0.clone())).bind(("memories", data.1.clone())).bind(("aliases", data.2.clone())).bind(("graph", data.3.clone()))
+                    .bind(("owner", owner.clone())).bind(("actors", data.0.clone())).bind(("memories", data.1.clone())).bind(("aliases", data.2.clone())).bind(("graph", data.3.clone()))
                     .bind(("done", next.processed)).bind(("alias_count", next.aliases)).bind(("now", now)).bind(("lease", (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()))).await?;
+                super::jobs::bump(&tx,"job_guard","atlas-derivative-catalog-input").await?;
+                super::atlas_derivative_invalidation::enqueue_in(&tx,None,&format!("seed:{owner}:{}",next.processed),chrono::Utc::now()).await?;
                 Ok(())
             }
         }).await.map_err(|e| anyhow::anyhow!("actor seed batch: {e}"))?;
@@ -1305,6 +1307,7 @@ async fn verify_body_heads_in(
         let mut source = crate::nlp::Source::derived(&head.source_id, &head.revision, "");
         source.prose_hash = head.artifact_hash.clone();
         let feature = crate::nlp::cache::feature_key(&source, &source.context());
+        super::jobs::bump(tx, "job_guard", &format!("nlp-feature:{feature}")).await?;
         feature_keys.push(feature);
         sql.push_str(&format!("SELECT crypto::sha256(text) AS actual_hash,string::trim(text)!='' AS nonempty FROM ONLY $artifact{index};"));
         if crate::nlp::configured_mode() == crate::nlp::Mode::Off {

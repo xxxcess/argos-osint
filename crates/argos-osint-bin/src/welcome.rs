@@ -88,6 +88,13 @@ pub(crate) fn run_with_notice(
         }
     }
     let needs_classifier = classifier.is_none_or(|status| !status.can_infer);
+    let retrain_changed = classifier.is_some_and(|status| {
+        status.can_infer
+            && status.can_train
+            && status.retraining_available
+            && status.dataset.change == "changed"
+            && status.dataset.hash_check == "verified"
+    });
     let classifier_notice = classifier.map(|status| {
         let model = status
             .active_model
@@ -111,12 +118,18 @@ pub(crate) fn run_with_notice(
         _ => None,
     };
     if io::stdin().is_terminal() && io::stdout().is_terminal() {
-        return terminal::run(existing, notice.as_deref(), needs_seed, needs_classifier);
+        return terminal::run(
+            existing,
+            notice.as_deref(),
+            needs_seed,
+            needs_classifier,
+            retrain_changed,
+        );
     }
     if let Some(notice) = notice {
         eprintln!("{notice}");
     }
-    Ok(configure_seed(
+    Ok(configure_launcher(
         &mut Lines {
             input: &mut io::stdin().lock(),
             output: &mut io::stdout().lock(),
@@ -124,6 +137,7 @@ pub(crate) fn run_with_notice(
         existing,
         needs_seed,
         needs_classifier,
+        retrain_changed,
     )?)
 }
 
@@ -202,11 +216,22 @@ fn append_dataset_file(args: &mut Vec<String>, selection: &str) {
     }
 }
 
+#[cfg(test)]
 fn configure_seed(
     ui: &mut impl Prompts,
     existing: Option<&str>,
     needs_seed: bool,
     needs_classifier: bool,
+) -> io::Result<Option<Selection>> {
+    configure_launcher(ui, existing, needs_seed, needs_classifier, false)
+}
+
+fn configure_launcher(
+    ui: &mut impl Prompts,
+    existing: Option<&str>,
+    needs_seed: bool,
+    needs_classifier: bool,
+    retrain_changed: bool,
 ) -> io::Result<Option<Selection>> {
     macro_rules! prompt {
         ($label:expr, $default:expr, $valid:expr) => {
@@ -238,21 +263,41 @@ fn configure_seed(
     if needs_seed {
         choices.push_str("  4. Seed DB\n");
     }
-    if needs_classifier {
+    if needs_classifier || retrain_changed {
         choices.push_str("  5. Train and save classifier\n");
     }
     choices.push_str("  q. Quit\n");
     ui.message(&choices)?;
-    let service = prompt!("Choose a service", "", |value: &str| {
-        let value = value.to_ascii_lowercase();
-        (!needs_classifier
-            && matches!(
-                value.as_str(),
-                "1" | "tui" | "2" | "api" | "api server" | "server" | "3" | "web"
-            ))
-            || (needs_classifier && matches!(value.as_str(), "5" | "train" | "train classifier"))
-            || (needs_seed && matches!(value.as_str(), "4" | "seed" | "seed db"))
-    });
+    let retrain_now = if retrain_changed {
+        ui.message("Classifier dataset has changed since training. Keep the saved model or retrain a synthetic baseline.")?;
+        prompt!(
+            "Retrain classifier now? [yes/no]",
+            "no",
+            |value: &str| matches!(
+                value.to_ascii_lowercase().as_str(),
+                "y" | "yes" | "n" | "no"
+            )
+        )
+        .to_ascii_lowercase()
+        .starts_with('y')
+    } else {
+        false
+    };
+    let service = if retrain_now {
+        "5".to_owned()
+    } else {
+        prompt!("Choose a service", "", |value: &str| {
+            let value = value.to_ascii_lowercase();
+            (!needs_classifier
+                && matches!(
+                    value.as_str(),
+                    "1" | "tui" | "2" | "api" | "api server" | "server" | "3" | "web"
+                ))
+                || ((needs_classifier || retrain_changed)
+                    && matches!(value.as_str(), "5" | "train" | "train classifier"))
+                || (needs_seed && matches!(value.as_str(), "4" | "seed" | "seed db"))
+        })
+    };
     if matches!(
         service.to_ascii_lowercase().as_str(),
         "5" | "train" | "train classifier"
@@ -413,6 +458,52 @@ mod tests {
             .unwrap()
             .unwrap()
     }
+    #[test]
+    fn changed_dataset_can_retrain_or_keep_the_saved_classifier() {
+        let mut input = std::io::Cursor::new(b"yes\n\n");
+        let mut output = Vec::new();
+        let selection = configure_launcher(
+            &mut Lines {
+                input: &mut input,
+                output: &mut output,
+            },
+            Some("embedded"),
+            false,
+            false,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            selection.args,
+            [
+                "argos",
+                "classifier",
+                "train",
+                "--activate-synthetic-baseline"
+            ]
+        );
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("dataset has changed"));
+        let mut input = std::io::Cursor::new(b"no\n1\n\n\n");
+        let mut output = Vec::new();
+        let selection = configure_launcher(
+            &mut Lines {
+                input: &mut input,
+                output: &mut output,
+            },
+            Some("embedded"),
+            false,
+            false,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(selection.args.iter().any(|arg| arg == "--tui"));
+        assert!(!selection.args.iter().any(|arg| arg == "train"));
+    }
+
     #[test]
     fn initial_classifier_setup_is_conditional_and_precedes_service_selection() {
         for needs_seed in [false, true] {

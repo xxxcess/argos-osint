@@ -184,8 +184,12 @@ pub async fn read(repo: &Repository, requested: &str) -> Result<Option<ActorDoss
                 article: None,
             });
         } else if node.kind == TopologyNodeKind::Article
-            && relationship.kind == TopologyEdgeKind::MentionedIn
+            && (relationship.kind == TopologyEdgeKind::MentionedIn
+                || (relationship.kind == TopologyEdgeKind::Link
+                    && relationship.label == "mentioned_in"))
         {
+            // Topology merges native mentions with their materialized Link.
+            // Its validated relation remains an article association in either form.
             if let Some(article) = snapshot
                 .associations
                 .articles

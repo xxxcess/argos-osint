@@ -46,6 +46,7 @@ fn gates() -> GateSet {
     GateSet {
         version: CALIBRATION_VERSION.into(),
         domains: DomainId::ALL.map(|domain| DomainCalibration {
+            sigmoid: None,
             domain,
             knots: vec![
                 CalibrationKnot {
@@ -131,8 +132,8 @@ fn a_cached_computation_reapplies_language_and_rebuilds_occurrence_identity() {
     let admitted = calibration::apply_gates(&english, &scores, &model, &gates()).unwrap();
     let rejected = calibration::apply_gates(&french, &scores, &model, &gates()).unwrap();
     assert_eq!(
-        admitted.selected_pair,
-        Some([DomainId::Governance, DomainId::Security])
+        admitted.selected_domains,
+        vec![DomainId::Governance, DomainId::Security]
     );
     assert_eq!(
         rejected.rejection_reason,

@@ -1045,10 +1045,10 @@ pub async fn discover_link_candidates_after(
             ..Default::default()
         },
     };
-    let mentions = if actors.is_empty() || cursor.actor_done {
-        Vec::new()
+    let actor_page = if actors.is_empty() || cursor.actor_done {
+        super::atlas::CurrentActorMentionPage::default()
     } else {
-        super::atlas::current_actor_mentions(
+        super::atlas::current_actor_mentions_page(
             repo,
             &actors,
             &crate::atlas_classify::OccurrenceKey::new(&article.run_id, &article.id),
@@ -1057,14 +1057,11 @@ pub async fn discover_link_candidates_after(
         )
         .await?
     };
-    let actor_raw = mentions.len();
-    let actor_after = mentions.last().map(|mention| {
-        [
-            mention.origin_scope.clone(),
-            mention.origin_id.clone(),
-            mention.actor_id.clone(),
-        ]
-    });
+    let actor_raw = actor_page.fetched;
+    let actor_after = actor_page.after;
+    let actor_more = actor_page.has_more;
+    let mentions = actor_page.rows;
+    let filtered_actor_count = actor_raw.saturating_sub(mentions.len());
     let mut seen = std::collections::BTreeSet::new();
     let keys: Vec<_> = mentions
         .iter()
@@ -1079,7 +1076,7 @@ pub async fn discover_link_candidates_after(
         .into_values()
         .collect();
     rows.sort_by(|a, b| (&a.run_id, &a.id).cmp(&(&b.run_id, &b.id)));
-    let excluded_or_missing = actor_unique.saturating_sub(rows.len());
+    let excluded_or_missing = filtered_actor_count + actor_unique.saturating_sub(rows.len());
     // An excluded actor hit must not suppress a separately authorized text hit.
     seen = rows
         .iter()
@@ -1116,7 +1113,7 @@ pub async fn discover_link_candidates_after(
             ..Default::default()
         });
     }
-    let actor_done = cursor.actor_done || actor_raw < 50;
+    let actor_done = cursor.actor_done || !actor_more;
     let text_done = cursor.text_done || !text.truncated;
     let next_cursor = if actor_done && text_done {
         None
@@ -1358,10 +1355,7 @@ pub async fn inputs_for_article_with_auth(
                     "admitted domain context belongs to a different metadata revision"
                 ));
             }
-            let pair = stored
-                .receipt
-                .selected_pair
-                .ok_or_else(|| anyhow!("admitted domain context lacks its domain pair"))?;
+            let pair = stored.receipt.selected_domains.clone();
             Some(DomainAdmission::new(
                 &view.taxonomy_version,
                 pair,

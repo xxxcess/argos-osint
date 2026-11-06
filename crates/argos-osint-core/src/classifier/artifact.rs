@@ -46,7 +46,7 @@ use tempfile::NamedTempFile;
 
 /// Version of the manifest schema written by this contract. Artifacts
 /// declaring another schema are [`ClassifierError::Incompatible`].
-pub const MANIFEST_SCHEMA_VERSION: &str = "classifier-manifest-v1";
+pub const MANIFEST_SCHEMA_VERSION: &str = "classifier-manifest-v2";
 
 /// Version of the data-only model payload envelope checked by
 /// [`validate_artifact`].
@@ -54,7 +54,7 @@ pub const PAYLOAD_SCHEMA_VERSION: &str = "classifier-payload-v1";
 
 /// Version of the per-domain feature-schema contract (explicit feature
 /// order) shared by the payload and this manifest.
-pub const FEATURE_SCHEMA_VERSION: &str = "classifier-features-v2";
+pub const FEATURE_SCHEMA_VERSION: &str = "classifier-features-v3";
 
 /// Upper bound for `manifest.json` / `active.json` files.
 pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
@@ -71,9 +71,11 @@ pub const MAX_FEATURES_PER_DOMAIN: usize = 1_000_000;
 /// Legacy placeholder constant retained for compatibility.
 pub const NO_BUNDLE_SHA256: &str = "no-classifier-bundle-compiled";
 
-/// Real SHA-256 of the compiled Natural classifier bundle.
-pub const COMPILED_BUNDLE_SHA256: &str =
-    "7aae167cdb6a27473be18f89ba88e5ede39a27b2252f3a216026a770447a047a";
+// Generated identity is checked alongside the bundle by the build tool.
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/classifier/bundle-identity.rs"
+));
 
 /// Returns the SHA-256 of the Natural classifier bundle compiled into this build.
 #[must_use]
@@ -92,7 +94,7 @@ const ACTIVE_FILE: &str = "active.json";
 
 /// Top-level keys a model payload may carry. Anything else is rejected:
 /// the payload is data only.
-const PAYLOAD_TOP_LEVEL_KEYS: [&str; 7] = [
+const PAYLOAD_TOP_LEVEL_KEYS: [&str; 8] = [
     "schema_version",
     "feature_schema_version",
     "bridge_version",
@@ -100,6 +102,7 @@ const PAYLOAD_TOP_LEVEL_KEYS: [&str; 7] = [
     "algorithm_version",
     "preprocessing_version",
     "domains",
+    "feature_policy",
 ];
 
 /// Object keys that would enable prototype pollution or code smuggling when
@@ -235,6 +238,8 @@ pub struct ModelManifest {
     /// SHA-256 of the calibration split.
     pub calibration_split_sha256: String,
     /// SHA-256 of the test split.
+    #[serde(default)]
+    pub development_split_sha256: String,
     pub test_split_sha256: String,
     /// SHA-256 of the family-assignment table (permanent partitions).
     pub family_assignment_sha256: String,
@@ -754,6 +759,7 @@ impl ArtifactStore {
             || stored.dataset_sha256 != active.dataset_sha256
             || stored.train_split_sha256 != active.train_split_sha256
             || stored.calibration_split_sha256 != active.calibration_split_sha256
+            || stored.development_split_sha256 != active.development_split_sha256
             || stored.test_split_sha256 != active.test_split_sha256
             || stored.family_assignment_sha256 != active.family_assignment_sha256
             || stored.taxonomy_version != active.taxonomy_version
@@ -1498,6 +1504,23 @@ pub fn validate_artifact(
         "preprocessing_version",
         &manifest.preprocessing_version,
     )?;
+    let vocabulary = match top.get("feature_policy") {
+        Some(value) if !value.is_null() => {
+            let vocabulary: super::feature_policy::FrozenVocabulary =
+                serde_json::from_value(value.clone()).map_err(|_| {
+                    ClassifierError::InvalidArtifact("invalid_frozen_vocabulary".into())
+                })?;
+            vocabulary.validate()?;
+            Some(
+                vocabulary
+                    .terms
+                    .into_iter()
+                    .map(|term| term.id)
+                    .collect::<HashSet<_>>(),
+            )
+        }
+        _ => None,
+    };
     let domains = top
         .get("domains")
         .and_then(serde_json::Value::as_object)
@@ -1543,6 +1566,14 @@ pub fn validate_artifact(
                     domain.as_str()
                 ))
             })?;
+            if vocabulary
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains(token))
+            {
+                return Err(ClassifierError::InvalidArtifact(
+                    "feature_outside_frozen_vocabulary".into(),
+                ));
+            }
             if !seen.insert(token) {
                 return Err(ClassifierError::InvalidArtifact(format!(
                     "domain `{}` has a duplicate feature-order entry",
@@ -1837,6 +1868,7 @@ fn parse_repair_manifest(bytes: &[u8], immutable: bool) -> Result<RepairManifest
         "dataset_sha256",
         "train_split_sha256",
         "calibration_split_sha256",
+        "development_split_sha256",
         "test_split_sha256",
         "family_assignment_sha256",
         "taxonomy_version",
@@ -1871,7 +1903,9 @@ fn parse_repair_manifest(bytes: &[u8], immutable: bool) -> Result<RepairManifest
     let header: RepairManifestHeader = serde_json::from_value(value.clone()).map_err(|error| {
         ClassifierError::InvalidArtifact(format!("repair manifest identity: {error}"))
     })?;
-    if header.schema_version != MANIFEST_SCHEMA_VERSION {
+    if header.schema_version != MANIFEST_SCHEMA_VERSION
+        && header.schema_version != "classifier-manifest-v1"
+    {
         return Err(ClassifierError::Incompatible(
             "unknown repair manifest structural schema".into(),
         ));
@@ -1899,10 +1933,17 @@ fn parse_repair_manifest(bytes: &[u8], immutable: bool) -> Result<RepairManifest
         "dataset_sha256",
         "train_split_sha256",
         "calibration_split_sha256",
+        "development_split_sha256",
         "test_split_sha256",
         "family_assignment_sha256",
         "bundle_sha256",
     ] {
+        if key == "development_split_sha256"
+            && header.schema_version == "classifier-manifest-v1"
+            && value.get(key).is_none()
+        {
+            continue;
+        }
         let text = value[key].as_str().ok_or_else(invalid)?;
         require_sha256_hex(text, key)?;
     }
@@ -2114,6 +2155,10 @@ fn validate_manifest_shape(manifest: &ModelManifest) -> Result<(), ClassifierErr
     require_sha256_hex(
         &manifest.calibration_split_sha256,
         "calibration_split_sha256",
+    )?;
+    require_sha256_hex(
+        &manifest.development_split_sha256,
+        "development_split_sha256",
     )?;
     require_sha256_hex(&manifest.test_split_sha256, "test_split_sha256")?;
     require_sha256_hex(
@@ -2475,7 +2520,7 @@ mod commit_fault_tests {
             "schema_version":MANIFEST_SCHEMA_VERSION,"activation_generation":1,"model_id":"commit-fixture",
             "previous_model_id":null,"activated_at":"2026-01-01T00:00:00Z","model_sha256":"0".repeat(64),
             "manifest_sha256":"1".repeat(64),"report_sha256":"2".repeat(64),"dataset_sha256":"3".repeat(64),
-            "train_split_sha256":"4".repeat(64),"calibration_split_sha256":"5".repeat(64),"test_split_sha256":"6".repeat(64),
+            "train_split_sha256":"4".repeat(64),"calibration_split_sha256":"5".repeat(64),"development_split_sha256":"7".repeat(64),"test_split_sha256":"6".repeat(64),
             "family_assignment_sha256":"7".repeat(64),"taxonomy_version":TAXONOMY_VERSION,"domains":DomainId::ALL,
             "algorithm_version":ALGORITHM_VERSION,"preprocessing_version":PREPROCESSING_VERSION,"feature_schema_version":FEATURE_SCHEMA_VERSION,
             "admission_policy_version":ADMISSION_POLICY_VERSION,"natural_version":"8.2.6","apparatus_version":"0.0.10",

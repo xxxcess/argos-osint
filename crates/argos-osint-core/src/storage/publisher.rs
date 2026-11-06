@@ -12,6 +12,7 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::Utc;
 use futures_util::future::BoxFuture;
@@ -84,7 +85,7 @@ type Reply = oneshot::Sender<Result<Committed<Published>, TxError>>;
 /// Handle to a process's publisher task. Cloning shares the task.
 #[derive(Clone)]
 pub struct Publisher {
-    queue: mpsc::Sender<(Write, Reply)>,
+    queue: mpsc::Sender<(Write, Reply, Instant)>,
     stop: Arc<Notify>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
@@ -93,7 +94,7 @@ impl Publisher {
     /// Start the publisher on `db`. Run one per process; a second one works
     /// but its batches conflict with the first's (resolved by `run_tx`).
     pub fn spawn(db: Surreal<Any>) -> Publisher {
-        let (queue, rx) = mpsc::channel::<(Write, Reply)>(QUEUE_CAP);
+        let (queue, rx) = mpsc::channel::<(Write, Reply, Instant)>(QUEUE_CAP);
         let stop = Arc::new(Notify::new());
         let task = tokio::spawn(run(db, rx, stop.clone()));
         Publisher {
@@ -108,7 +109,7 @@ impl Publisher {
     pub async fn publish(&self, write: Write) -> Result<Committed<Published>, TxError> {
         let (tx, rx) = oneshot::channel();
         self.queue
-            .send((write, tx))
+            .send((write, tx, Instant::now()))
             .await
             .map_err(|_| TxError::PublisherStopped)?;
         rx.await.map_err(|_| TxError::PublisherDropped)?
@@ -128,7 +129,7 @@ impl Publisher {
     }
 }
 
-async fn run(db: Surreal<Any>, mut rx: mpsc::Receiver<(Write, Reply)>, stop: Arc<Notify>) {
+async fn run(db: Surreal<Any>, mut rx: mpsc::Receiver<(Write, Reply, Instant)>, stop: Arc<Notify>) {
     let mut closing = false;
     loop {
         let first = tokio::select! {
@@ -149,7 +150,16 @@ async fn run(db: Surreal<Any>, mut rx: mpsc::Receiver<(Write, Reply)>, stop: Arc
                 Err(_) => break,
             }
         }
-        let (writes, replies): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+        let execution_started = Instant::now();
+        let max_queue_wait_us = batch
+            .iter()
+            .map(|(_, _, queued)| queued.elapsed().as_micros() as u64)
+            .max()
+            .unwrap_or_default();
+        let (writes, replies): (Vec<_>, Vec<_>) = batch
+            .into_iter()
+            .map(|(write, reply, _)| (write, reply))
+            .unzip();
         // Per-write panics are caught in `commit`; this backstop keeps the
         // loop alive if anything else in the batch path panics.
         let results = match AssertUnwindSafe(publish_batch(&db, &writes))
@@ -169,6 +179,7 @@ async fn run(db: Surreal<Any>, mut rx: mpsc::Receiver<(Write, Reply)>, stop: Arc
                     .collect()
             }
         };
+        tracing::debug!(target:"argos::atlas_derivatives",batch_size=writes.len(),max_queue_wait_us,execution_us=execution_started.elapsed().as_micros() as u64,"publisher_batch");
         for (reply, result) in replies.into_iter().zip(results) {
             // A dropped waiter still had its write committed.
             let _ = reply.send(result);

@@ -367,21 +367,59 @@ async fn historical_job_reopens_with_64_row_activations_originals_and_policy_der
     assert!(untouched.legacy && untouched.receipt.is_none());
     let after = atlas::list_runs(repo.db()).await.unwrap();
     assert_eq!(original.len(), after.len());
+    #[derive(SurrealValue)]
+    struct StoredRunSnapshot {
+        stats_json: String,
+        cursor_json: String,
+        state: String,
+    }
     for (before, after) in original.iter().zip(&after) {
+        // Current readiness is a read-time projection. Check the durable
+        // historical checkpoint itself for byte-for-byte preservation.
+        let mut response = repo
+            .db()
+            .query("SELECT stats_json,cursor_json,state FROM ONLY type::record('atlas_run',$run);")
+            .bind(("run", before.id.clone()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let stored = response
+            .take::<Option<StoredRunSnapshot>>(0)
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            (
-                &before.id,
-                &before.stats_json,
-                &before.cursor_json,
-                &before.state
-            ),
-            (
-                &after.id,
-                &after.stats_json,
-                &after.cursor_json,
-                &after.state
-            ),
+            (&before.stats_json, &before.cursor_json, &before.state),
+            (&stored.stats_json, &stored.cursor_json, &stored.state),
             "historical work must not rewrite original cycle state/stats/pin"
+        );
+        assert_eq!(
+            (&before.id, &before.cursor_json, &before.state),
+            (&after.id, &after.cursor_json, &after.state)
+        );
+        let original_stats: serde_json::Value = serde_json::from_str(&before.stats_json).unwrap();
+        let mut projected_stats: serde_json::Value =
+            serde_json::from_str(&after.stats_json).unwrap();
+        if before.id == "selected" {
+            assert_eq!(
+                projected_stats["coverage"]["actor_readiness"]["state"],
+                "ready"
+            );
+            assert_eq!(
+                projected_stats["coverage"]["actor_readiness"]["eligible"],
+                0
+            );
+        }
+        for key in [
+            "actor_readiness",
+            "reconciliation_readiness",
+            "derivative_progress",
+        ] {
+            projected_stats["coverage"][key] = original_stats["coverage"][key].clone();
+        }
+        assert_eq!(
+            original_stats, projected_stats,
+            "current readiness must not alter other historical statistics or the model pin"
         );
     }
     assert!(

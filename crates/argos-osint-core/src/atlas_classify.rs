@@ -492,6 +492,7 @@ mod local {
             RejectionReason::WhollyOov => "wholly_oov",
             RejectionReason::InsufficientDomains => "insufficient_domains",
             RejectionReason::OutOfScope => "out_of_scope",
+            RejectionReason::AmbiguousRanking => "ambiguous_ranking",
         }
     }
     fn operational_code(error: &ClassifierError) -> &'static str {

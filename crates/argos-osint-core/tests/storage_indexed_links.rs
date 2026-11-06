@@ -1,10 +1,13 @@
 //! Indexed cross-cycle discovery uses real current admission, never legacy labels.
 #![cfg(all(feature = "embedded", feature = "classifier"))]
+#[path = "support/actor_catalog.rs"]
+mod catalog;
 #[path = "fixtures/classifier/admission-support.rs"]
 mod fixture;
 
 use argos_osint_core::atlas::{Cursor, RunStats};
 use argos_osint_core::atlas_classify::{self, AdmissionContext, ComputationCache, MonotonicClock};
+use argos_osint_core::atlas_derivative_worker;
 use argos_osint_core::classifier::readiness::{self, CycleRequirement};
 use argos_osint_core::classifier::WorkControl;
 use argos_osint_core::intel_recon::brief_stages::{self, StageContext};
@@ -14,7 +17,7 @@ use argos_osint_core::storage::{atlas, brief_stages as stages, classifier_admiss
 use argos_osint_core::store::AtlasArticleRow;
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc};
 
 #[tokio::test]
 async fn current_cross_cycle_indexes_bound_raw_windows_and_preserve_unicode_occurrences() {
@@ -29,6 +32,24 @@ async fn current_cross_cycle_indexes_bound_raw_windows_and_preserve_unicode_occu
     )
     .await
     .unwrap();
+    catalog::seed_actor_catalog(&repo, &["Jane Doe"]).await;
+    argos_osint_core::storage::recon_threads::set_tool_enabled(
+        &repo,
+        argos_osint_core::osint::wikipedia_rsp::TOOL_ID,
+        false,
+    )
+    .await
+    .unwrap();
+    // Flush startup policy/catalog discovery before creating the cohort.
+    for _ in 0..8 {
+        atlas_derivative_worker::drain_one(
+            &repo,
+            "indexed-startup",
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+    }
     let owner = admission::AdmissionOwner::new(repo.clone());
     let permit =
         readiness::preflight_cycle(&fixture.home, CycleRequirement::FreshAcquisition, None)
@@ -61,7 +82,7 @@ async fn current_cross_cycle_indexes_bound_raw_windows_and_preserve_unicode_occu
             run_id: run_id.into(),
             id: format!("报告|{index:03}"),
             title: if index < 62 {
-                format!("Ballot patrol common district {index}")
+                format!("Ballot patrol common Jane Doe district {index}")
             } else {
                 "Banana pastry marzipan".into()
             },
@@ -119,6 +140,29 @@ async fn current_cross_cycle_indexes_bound_raw_windows_and_preserve_unicode_occu
             }
         );
     }
+    // Admission alone cannot certify native actor mentions. Build real current
+    // metadata, required Related inputs and actor output through independent jobs.
+    let mut current_actor = None;
+    for _ in 0..768 {
+        repo.db().query("UPDATE task SET next_eligible_at=d'2000-01-01T00:00:00Z' WHERE pool='atlas_derivatives' AND state='queued' RETURN NONE;").await.unwrap().check().unwrap();
+        atlas_derivative_worker::drain_one(
+            &repo,
+            "indexed-native",
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        let mut response = repo.db().query("RETURN count(SELECT id FROM brain_actor_mention WHERE origin_scope=$run AND native_input_revision!='' AND publication_batch!=''); SELECT VALUE actor_id FROM brain_actor_mention WHERE origin_scope=$run AND native_input_revision!='' AND publication_batch!='' LIMIT 1; SELECT VALUE last_error FROM atlas_derivative_job WHERE run_id=$run AND last_error!='' AND !string::ends_with(last_error,'continuation') LIMIT 1;").bind(("run",run_id.to_owned())).await.unwrap().check().unwrap();
+        let count = response.take::<Option<i64>>(0).unwrap().unwrap_or_default();
+        let actors: Vec<String> = response.take(1).unwrap();
+        let failures: Vec<String> = response.take(2).unwrap();
+        assert!(failures.is_empty(), "native fixture blocker: {failures:?}");
+        if count == 62 {
+            current_actor = actors.into_iter().next();
+            break;
+        }
+    }
+    let current_actor = current_actor.expect("62 real current native actor publications");
     // More historical mentions than the old raw limit sort before every current
     // occurrence. None can displace a current hit or masquerade as a new domain.
     for index in 0..60 {
@@ -135,8 +179,8 @@ async fn current_cross_cycle_indexes_bound_raw_windows_and_preserve_unicode_occu
         rows.push(row);
     }
     for (index, row) in rows.iter().enumerate() {
-        repo.db().query("CREATE type::record('brain_actor_mention',$id) SET actor_id='fixture-actor',origin_kind='article',origin_scope=$run,origin_id=$article,origin_revision='metadata-v1',created_at=$now RETURN NONE")
-            .bind(("id",format!("mention-{index}"))).bind(("run",row.run_id.clone())).bind(("article",row.id.clone())).bind(("now",now.to_rfc3339())).await.unwrap().check().unwrap();
+        repo.db().query("CREATE type::record('brain_actor_mention',$id) SET actor_id=$actor,origin_kind='article',origin_scope=$run,origin_id=$article,origin_revision='metadata-v1',created_at=$now RETURN NONE")
+            .bind(("id",format!("mention-{index}"))).bind(("actor",current_actor.clone())).bind(("run",row.run_id.clone())).bind(("article",row.id.clone())).bind(("now",now.to_rfc3339())).await.unwrap().check().unwrap();
     }
     let seed = AtlasArticleRow {
         id: "never-repeats".into(),
@@ -146,7 +190,7 @@ async fn current_cross_cycle_indexes_bound_raw_windows_and_preserve_unicode_occu
         ..Default::default()
     };
     let context = StageContext {
-        metadata_snapshot: json!({"actors":[{"id":"fixture-actor"}]}),
+        metadata_snapshot: json!({"actors":[{"id":current_actor}]}),
         ..Default::default()
     };
     let first = stages::discover_link_candidates(&repo, &context, &seed)
@@ -197,6 +241,73 @@ async fn current_cross_cycle_indexes_bound_raw_windows_and_preserve_unicode_occu
             .await
             .is_err()
     );
+    // A real later body revision passes the cheap stored publication stamp,
+    // then fails the authoritative current-input audit. Keep scanning after it.
+    let revised = &rows[0];
+    let body = argos_osint_core::storage::article_body::ensure(
+        &repo,
+        &revised.id,
+        &revised.run_id,
+        &revised.url,
+        &revised.source_domain,
+        &revised.source_name,
+    )
+    .await
+    .unwrap();
+    let content = "A later retained fixture body changes the native input revision.";
+    let content_hash = argos_osint_core::classifier::artifact::sha256_hex(content.as_bytes());
+    argos_osint_core::storage::article_body::commit(
+        &repo,
+        &body.id,
+        content,
+        &content_hash,
+        "complete",
+        "Offline body revision",
+        &revised.url,
+        "fixture",
+        true,
+    )
+    .await
+    .unwrap();
+    let retained_body = argos_osint_core::storage::article_body::by_id(&repo, &body.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut source = argos_osint_core::nlp::Source::derived(
+        &body.id,
+        &retained_body.body_version.to_string(),
+        content,
+    );
+    source.attempt_id = "indexed-body-change".into();
+    source.raw_hash = Some(content_hash);
+    for transform in [
+        "validated-baseline-v1",
+        argos_osint_core::intel_recon::clean_body::TRANSFORM,
+    ] {
+        argos_osint_core::storage::pipeline_inputs::register(
+            &repo,
+            "article",
+            &revised.id,
+            &source,
+            Some(content),
+            transform,
+        )
+        .await
+        .unwrap();
+    }
+    let after_body = stages::discover_link_candidates(&repo, &context, &seed)
+        .await
+        .unwrap();
+    assert_eq!(after_body.coverage["actor_fetched"], 50);
+    assert!(
+        after_body.coverage["excluded_or_missing_actor_candidates"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    let continuation: serde_json::Value =
+        serde_json::from_str(after_body.coverage["next_cursor"].as_str().unwrap()).unwrap();
+    assert_eq!(continuation["actor_done"], false);
     owner.shutdown().await.unwrap();
     fixture.home.shutdown().await.unwrap();
 }

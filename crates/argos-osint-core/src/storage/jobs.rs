@@ -98,10 +98,10 @@ pub const CLAIM_CANDIDATES_SURQL: &str = "SELECT record::id(id) AS id, priority,
      record::id(job) AS job_id, record::id(root) AS root_id, operation, pool, input_hash, \
      array::len(deps) AS dep_count, deps.state AS dep_states, \
      (job.cancel_requested OR array::any(job.ancestors.cancel_requested)) AS cancelled, \
-     (job.created_at >= <datetime>$fresh_after OR operation IN ['atlas_admission_reclassify','classifier_calibrate']) AS fresh, \
+     (job.created_at >= <datetime>$fresh_after OR operation IN ['atlas_admission_reclassify','classifier_calibrate','atlas_derivative','classifier_learn']) AS fresh, \
      record::exists(type::record('job_retirement', record::id(root))) AS retired \
      FROM task WHERE state = 'queued' AND pool = $pool AND next_eligible_at <= <datetime>$now \
-     AND (operation NOT IN ['atlas_admission_reclassify','classifier_calibrate'] OR \
+     AND (operation NOT IN ['atlas_admission_reclassify','classifier_calibrate','atlas_derivative','classifier_learn'] OR \
        (job.state IN ['queued','running','reconciling'] AND !job.stopped)) \
      ORDER BY priority, created_at LIMIT $k START $start";
 
@@ -1668,7 +1668,7 @@ async fn tree_busy(tx: &Tx, root: &str, protect_active_jobs: bool) -> Result<boo
             "RETURN count(SELECT id FROM task WHERE root = $r AND state = 'running') \
              + count(SELECT id FROM job WHERE root = $r AND (kind = 'service' OR $protect_active_jobs) \
                AND state IN ['running', 'queued', 'retry_scheduled', 'waiting', 'blocked']) \
-             + count(SELECT id FROM job WHERE root=$r AND operation IN ['atlas_admission_reclassify','classifier_calibrate'] AND state NOT IN ['completed','failed','cancelled'])",
+             + count(SELECT id FROM job WHERE root=$r AND operation IN ['atlas_admission_reclassify','classifier_calibrate','atlas_derivative','classifier_learn'] AND state NOT IN ['completed','failed','cancelled'])",
         )
         .bind(("r", rid("job", root)))
         .bind(("protect_active_jobs", protect_active_jobs)),
@@ -1721,7 +1721,7 @@ pub async fn cleanup_batch(
                 tx.query(
                     "SELECT VALUE record::id(id) FROM job WHERE parent = NONE \
                      AND kind != 'service' AND created_at < <datetime>$cutoff \
-                     AND !(operation IN ['atlas_admission_reclassify','classifier_calibrate'] AND state NOT IN ['completed','failed','cancelled']) \
+                     AND !(operation IN ['atlas_admission_reclassify','classifier_calibrate','atlas_derivative','classifier_learn'] AND state NOT IN ['completed','failed','cancelled']) \
                      ORDER BY created_at LIMIT $n",
                 )
                 .bind(("cutoff", cutoff))

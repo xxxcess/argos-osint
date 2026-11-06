@@ -16,9 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 
-use super::artifact::{
-    self, ActivationReason, ArtifactStore, DomainThreshold, ModelId, ModelManifest,
-};
+use super::artifact::{self, ActivationReason, ArtifactStore, ModelId, ModelManifest};
 use super::calibration::{
     self, ActivationAuthorizationDecision, ActivationOutcome, DomainAcceptance, EvaluationMetrics,
     ScoredFamily,
@@ -76,6 +74,8 @@ pub struct ProvenanceSummary {
     pub dataset_version: String,
     pub dataset_sha256: String,
     pub review_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_dataset_sha256: Option<String>,
 }
 impl From<&Provenance> for ProvenanceSummary {
     fn from(value: &Provenance) -> Self {
@@ -94,6 +94,22 @@ impl From<&Provenance> for ProvenanceSummary {
                 dataset_sha256,
                 Some(review_reference.clone()),
             ),
+            Provenance::ApprovedProvider {
+                dataset_version,
+                dataset_sha256,
+                ..
+            } => ("approved_provider", dataset_version, dataset_sha256, None),
+            Provenance::MixedTraining {
+                dataset_version,
+                dataset_sha256,
+                review_reference,
+                ..
+            } => (
+                "mixed_training",
+                dataset_version,
+                dataset_sha256,
+                Some(review_reference.clone()),
+            ),
         };
         Self {
             kind: kind.into(),
@@ -101,6 +117,13 @@ impl From<&Provenance> for ProvenanceSummary {
             dataset_version: version.clone(),
             dataset_sha256: hash.clone(),
             review_reference: review,
+            seed_dataset_sha256: match value {
+                Provenance::MixedTraining {
+                    seed_dataset_sha256,
+                    ..
+                } => Some(seed_dataset_sha256.clone()),
+                _ => None,
+            },
         }
     }
 }
@@ -1121,7 +1144,16 @@ fn refresh_probe(
             Ok(hash) => {
                 value.dataset.hash_check = "verified".into();
                 value.dataset.change = match value.active_model.as_ref() {
-                    Some(model) if model.provenance.dataset_sha256 == hash => "unchanged",
+                    Some(model)
+                        if model
+                            .provenance
+                            .seed_dataset_sha256
+                            .as_deref()
+                            .unwrap_or(&model.provenance.dataset_sha256)
+                            == hash =>
+                    {
+                        "unchanged"
+                    }
                     Some(_) => "changed",
                     None => "unknown",
                 }
@@ -1637,53 +1669,7 @@ fn train_sync(
         return Err(error);
     }
     control.check_active()?;
-    let identity = super::compiled_identity()?;
-    let report_bytes = artifact::bounded_json_bytes(&candidate.report)?;
-    let manifest = ModelManifest {
-        schema_version: artifact::MANIFEST_SCHEMA_VERSION.into(),
-        activation_generation: 0,
-        model_id: model_id.clone(),
-        previous_model_id: None,
-        activated_at: String::new(),
-        model_sha256: artifact::sha256_hex(candidate.payload.as_bytes()),
-        manifest_sha256: String::new(),
-        report_sha256: artifact::sha256_hex(&report_bytes),
-        dataset_sha256: parsed.corpus.dataset_sha256.clone(),
-        train_split_sha256: parsed.corpus.train_split_sha256.clone(),
-        calibration_split_sha256: parsed.corpus.calibration_split_sha256.clone(),
-        test_split_sha256: parsed.corpus.test_split_sha256.clone(),
-        family_assignment_sha256: parsed.corpus.family_assignment_sha256.clone(),
-        taxonomy_version: super::TAXONOMY_VERSION.into(),
-        domains: super::DomainId::ALL.to_vec(),
-        algorithm_version: super::ALGORITHM_VERSION.into(),
-        preprocessing_version: super::PREPROCESSING_VERSION.into(),
-        feature_schema_version: artifact::FEATURE_SCHEMA_VERSION.into(),
-        admission_policy_version: super::ADMISSION_POLICY_VERSION.into(),
-        natural_version: identity.natural_version,
-        apparatus_version: identity.apparatus_version,
-        bundle_sha256: identity.bundle_sha256,
-        bridge_version: identity.bridge_version,
-        bridge_sha256: identity.bridge_sha256,
-        adapter_sha256: identity.adapter_sha256,
-        source_manifest_sha256: identity.source_manifest_sha256,
-        smoothing: 1.0,
-        thresholds: candidate
-            .report
-            .gate_set
-            .domains
-            .iter()
-            .map(|d| DomainThreshold {
-                domain: d.domain,
-                threshold: d.threshold,
-            })
-            .collect(),
-        class_counts: candidate.report.class_counts.to_vec(),
-        family_counts: candidate.report.family_counts.to_vec(),
-        metrics: serde_json::to_value(&candidate.report)
-            .map_err(|_| invalid_artifact("training_report_serialization_failed"))?,
-        provenance: train_request.provenance.clone(),
-        activation_reason: ActivationReason::ManualSeed,
-    };
+    let manifest = training::candidate_manifest(&parsed.corpus, &train_request, &candidate)?;
     let validated =
         store.write_candidate(&lease, &manifest, &candidate.payload, &candidate.report)?;
     job.candidate_model_id = Some(model_id.as_str().into());

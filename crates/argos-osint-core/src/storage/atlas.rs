@@ -356,7 +356,9 @@ pub async fn park_running(db: &Surreal<Any>) -> Result<(), TxError> {
 pub async fn list_runs(db: &Surreal<Any>) -> Result<Vec<AtlasRunRow>, TxError> {
     let mut r = db.query(LIST_RUNS_SURQL).await?.check()?;
     let rows: Vec<RunRow> = r.take(0)?;
-    Ok(rows.into_iter().map(Into::into).collect())
+    let mut runs = rows.into_iter().map(Into::into).collect::<Vec<_>>();
+    super::atlas_derivative_status::enrich_runs(db, &mut runs).await?;
+    Ok(runs)
 }
 
 /// `atlas_latest_run`.
@@ -366,7 +368,9 @@ pub async fn latest_run(db: &Surreal<Any>) -> Result<Option<AtlasRunRow>, TxErro
         .await?
         .check()?;
     let rows: Vec<RunRow> = r.take(0)?;
-    Ok(rows.into_iter().next().map(Into::into))
+    let mut runs = rows.into_iter().map(Into::into).collect::<Vec<_>>();
+    super::atlas_derivative_status::enrich_runs(db, &mut runs).await?;
+    Ok(runs.into_iter().next())
 }
 
 /// One exact durable checkpoint without loading run history.
@@ -1260,6 +1264,8 @@ pub struct CurrentActorMention {
     pub origin_scope: String,
     pub origin_id: String,
     pub origin_revision: String,
+    pub native_input_revision: String,
+    pub publication_batch: String,
 }
 impl CurrentActorMention {
     pub fn occurrence(&self) -> crate::atlas_classify::OccurrenceKey {
@@ -1276,6 +1282,30 @@ pub async fn current_actor_mentions(
     limit: usize,
     after: Option<&[String; 3]>,
 ) -> Result<Vec<CurrentActorMention>, TxError> {
+    Ok(
+        current_actor_mentions_page(repo, actor_ids, seed, limit, after)
+            .await?
+            .rows,
+    )
+}
+
+/// The scan cursor survives post-read source validation, including empty pages.
+/// A stale source must not make a bounded actor window appear exhausted.
+#[derive(Default)]
+pub(crate) struct CurrentActorMentionPage {
+    pub rows: Vec<CurrentActorMention>,
+    pub fetched: usize,
+    pub after: Option<[String; 3]>,
+    pub has_more: bool,
+}
+
+pub(crate) async fn current_actor_mentions_page(
+    repo: &super::repo::Repository,
+    actor_ids: &[String],
+    seed: &crate::atlas_classify::OccurrenceKey,
+    limit: usize,
+    after: Option<&[String; 3]>,
+) -> Result<CurrentActorMentionPage, TxError> {
     if actor_ids.len() > 64
         || actor_ids
             .iter()
@@ -1290,10 +1320,13 @@ pub async fn current_actor_mentions(
         return Err(TxError::Abort("actor_article_discovery_bounds".into()));
     }
     if actor_ids.is_empty() || limit == 0 {
-        return Ok(vec![]);
+        return Ok(CurrentActorMentionPage::default());
     }
     let occurrence="type::record('atlas_article',string::concat(<string>bytes::len(type::bytes($parent.origin_scope)),':',$parent.origin_scope,'|',<string>bytes::len(type::bytes($parent.origin_id)),':',$parent.origin_id))";
-    let sql=format!("SELECT actor_id,origin_scope,origin_id,origin_revision FROM brain_actor_mention WITH INDEX brain_actor_mention_actor WHERE actor_id INSIDE $actors AND origin_kind='article' AND !(origin_scope=$seed_run AND origin_id=$seed_article) AND bytes::len(type::bytes(origin_scope))<=512 AND bytes::len(type::bytes(origin_id))<=512 AND bytes::len(type::bytes(actor_id))<=512 AND bytes::len(type::bytes(origin_revision))<=512 AND ($first OR origin_scope<$after_run OR (origin_scope=$after_run AND origin_id>$after_article) OR (origin_scope=$after_run AND origin_id=$after_article AND actor_id>$after_actor)) AND count(SELECT id FROM atlas_article WHERE id={occurrence} AND ({CURRENT_ADMISSION_FILTER}) LIMIT 1)>0 ORDER BY origin_scope DESC,origin_id,actor_id LIMIT $limit");
+    let index="type::record('atlas_article_index',string::concat(<string>bytes::len(type::bytes($parent.origin_scope)),':',$parent.origin_scope,'|',<string>bytes::len(type::bytes($parent.origin_id)),':',$parent.origin_id))";
+    // Cheap exact publication stamps exclude legacy/superseded rows before
+    // LIMIT. The transaction below still audits the full current source/input.
+    let sql=format!("SELECT actor_id,origin_scope,origin_id,origin_revision,(native_input_revision ?? '') AS native_input_revision,(publication_batch ?? '') AS publication_batch FROM brain_actor_mention WITH INDEX brain_actor_mention_actor WHERE actor_id INSIDE $actors AND origin_kind='article' AND (native_input_revision ?? '')!='' AND (publication_batch ?? '')!='' AND !(origin_scope=$seed_run AND origin_id=$seed_article) AND bytes::len(type::bytes(origin_scope))<=512 AND bytes::len(type::bytes(origin_id))<=512 AND bytes::len(type::bytes(actor_id))<=512 AND bytes::len(type::bytes(origin_revision))<=512 AND ($first OR origin_scope<$after_run OR (origin_scope=$after_run AND origin_id>$after_article) OR (origin_scope=$after_run AND origin_id=$after_article AND actor_id>$after_actor)) AND count(SELECT id FROM atlas_article_index WHERE id={index} AND input_revision=$parent.native_input_revision AND publication_batch=$parent.publication_batch LIMIT 1)>0 AND count(SELECT id FROM atlas_article WHERE id={occurrence} AND ({CURRENT_ADMISSION_FILTER}) LIMIT 1)>0 ORDER BY origin_scope DESC,origin_id,actor_id LIMIT $limit");
     let mut query = super::classifier_admission::db_query(repo.db(), sql)
         .bind(("actors", actor_ids.to_vec()))
         .bind(("seed_run", seed.run_id.clone()))
@@ -1312,7 +1345,45 @@ pub async fn current_actor_mentions(
         .bind(("after_article", after[1].clone()))
         .bind(("after_actor", after[2].clone()));
     let mut response = query.await?.check()?;
-    Ok(response.take(0)?)
+    let rows: Vec<CurrentActorMention> = response.take(0)?;
+    let fetched = rows.len();
+    let after = rows.last().map(|row| {
+        [
+            row.origin_scope.clone(),
+            row.origin_id.clone(),
+            row.actor_id.clone(),
+        ]
+    });
+    let rows = super::tx::run_tx(repo.db(), super::tx::RetryPolicy::default(), move |tx| {
+        let rows = rows.clone();
+        async move {
+            let keys: Vec<_> = rows.iter().map(CurrentActorMention::occurrence).collect();
+            let mut visibility = super::native_visibility::NativeVisibility::new(tx);
+            visibility.prefetch(&keys).await?;
+            let mut current = Vec::new();
+            for row in rows {
+                if visibility
+                    .mention_current(
+                        &row.occurrence(),
+                        &row.native_input_revision,
+                        &row.publication_batch,
+                    )
+                    .await?
+                {
+                    current.push(row);
+                }
+            }
+            Ok(current)
+        }
+    })
+    .await?
+    .value;
+    Ok(CurrentActorMentionPage {
+        rows,
+        fetched,
+        after,
+        has_more: fetched == limit,
+    })
 }
 
 /// Indexed thin current-occurrence paging for native refresh/backfill. Strong

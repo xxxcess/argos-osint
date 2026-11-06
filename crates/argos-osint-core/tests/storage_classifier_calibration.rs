@@ -475,3 +475,219 @@ async fn empty_terminal_is_completed_without_model_and_observed_terminal_is_bloc
     );
     home.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn actual_review_import_and_approval_queue_and_fit_one_durable_candidate() {
+    use argos_osint_core::atlas_taxonomy::DomainId;
+    use argos_osint_core::classifier::review::ReviewDecision;
+    use argos_osint_core::storage::{classifier_learning as learning, classifier_review as review};
+    let _serial = fixture::serial().await;
+    let installed = tokio::task::spawn_blocking(fixture::install).await.unwrap();
+    let repo = Repository::connect(
+        &Target::Embedded {
+            path: installed.directory.path().join("review-learning-db"),
+        },
+        "argos",
+        "review_learning",
+    )
+    .await
+    .unwrap();
+    let active = std::fs::read(installed.directory.path().join("classifier/active.json")).unwrap();
+    let ctx = context("review-cohort");
+    let news:Vec<_>=(0u64..400).map(|index| {
+        let distinctive=(0..40).map(|word|format!("w{:016x}",index*64+word)).collect::<Vec<_>>().join(" ");
+        serde_json::json!({"article_id":format!("story-{index}"),"link":format!("https://fixture.invalid/story-{index}"),"language":"en","source_name":"Fixture","category":["business","crime","politics","health","environment","science"],"title":distinctive,"description":"Fictional parliament discusses a military operation, central bank measures, hospital care, water pollution and laboratory research."})
+    }).collect();
+    let capture = capture::capture_categories(
+        ProviderFormat::NewsDataV1,
+        "https://newsdata.io/api/1/latest",
+        &serde_json::json!({"results":news}),
+        &ctx,
+    );
+    assert_eq!(capture.observations.len(), 400);
+    for batch in capture.observations.chunks(64) {
+        calibration::capture(&repo, &ctx, batch).await.unwrap();
+    }
+    finish(&repo, &installed.home, &ctx.cycle_id, true).await;
+    calibration::drain_one(
+        &repo,
+        &installed.home,
+        "review-monitor",
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        count(&repo, "classifier_learning_job").await,
+        0,
+        "uncertified labels only monitor"
+    );
+    let mut exchange = review::export(&repo, &ctx.cycle_id).await.unwrap();
+    assert_eq!(
+        exchange.items.len(),
+        400,
+        "distinct lexical fixtures cannot collapse into one family"
+    );
+    assert!(
+        exchange
+            .items
+            .iter()
+            .filter(|item| item.split == argos_osint_core::classifier::training::Split::Train)
+            .count()
+            >= 100
+    );
+    let annotated = argos_osint_core::storage::classifier_review_diagnostics::export(
+        &repo,
+        &installed.home,
+        &ctx.cycle_id,
+        8,
+    )
+    .await
+    .unwrap();
+    assert_eq!(annotated.review.items.len(), 8);
+    assert!(annotated
+        .review
+        .items
+        .iter()
+        .all(|item| item.decision == ReviewDecision::Unreviewed && item.domains.is_empty()));
+    assert!(!annotated.diagnostics.replays.is_empty());
+    for replay in &annotated.diagnostics.replays {
+        let item = annotated
+            .review
+            .items
+            .iter()
+            .find(|item| item.observation.observation_id == replay.observation_id)
+            .unwrap();
+        assert_ne!(
+            item.split,
+            argos_osint_core::classifier::training::Split::Test
+        );
+        assert_eq!(replay.payload_sha256, item.payload_sha256);
+        assert_eq!(replay.receipt.scores.len(), 6);
+    }
+    let roundtrip: argos_osint_core::classifier::review::ReviewExchange =
+        serde_json::from_value(serde_json::to_value(&annotated).unwrap()).unwrap();
+    assert_eq!(
+        roundtrip.items, annotated.review.items,
+        "diagnostic sidecars do not mint human labels"
+    );
+    for item in &mut exchange.items {
+        item.decision = ReviewDecision::Complete;
+        item.domains = DomainId::ALL.to_vec();
+    }
+    assert_eq!(
+        review::import(&repo, &installed.home, &exchange, "isolated-human-review")
+            .await
+            .unwrap(),
+        400
+    );
+    assert_eq!(
+        review::import(&repo, &installed.home, &exchange, "isolated-human-review")
+            .await
+            .unwrap(),
+        0,
+        "exact review replay is idempotent"
+    );
+    let mut conflict = exchange.clone();
+    conflict.items[0].domains.clear();
+    assert!(
+        review::import(&repo, &installed.home, &conflict, "isolated-human-review")
+            .await
+            .is_err()
+    );
+    let approval = review::approve_mapping(&repo, &installed.home, "isolated-mapping-review")
+        .await
+        .unwrap();
+    assert!(approval
+        .domains
+        .iter()
+        .all(|rule| rule.true_positive_families >= 20 && rule.false_positive_families == 0));
+    let next = context("post-review-cycle");
+    let mut next_observation = capture.observations[0].clone();
+    next_observation.cycle_ids = vec![next.cycle_id.clone()];
+    next_observation.fetched_at = next.fetched_at.clone();
+    calibration::capture(&repo, &next, &[next_observation])
+        .await
+        .unwrap();
+    finish(&repo, &installed.home, &next.cycle_id, true).await;
+    calibration::drain_one(
+        &repo,
+        &installed.home,
+        "learning-trigger",
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(count(&repo, "classifier_learning_job").await, 1);
+    assert_eq!(
+        learning::drain_one(
+            &repo,
+            &installed.home,
+            "candidate-worker",
+            Arc::new(AtomicBool::new(false))
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    let mut response = repo
+        .db()
+        .query("SELECT VALUE result_json FROM classifier_learning_job;")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let results: Vec<String> = response.take(0).unwrap();
+    let result: serde_json::Value = serde_json::from_str(&results[0]).unwrap();
+    assert_eq!(result["state"], "candidate_retained", "{result}");
+    assert_eq!(result["promoted"], false);
+    assert!(count(&repo, "classifier_learning_used").await >= 100);
+    assert_eq!(
+        std::fs::read(installed.directory.path().join("classifier/active.json")).unwrap(),
+        active,
+        "candidate fitting never confers activation authority"
+    );
+    assert_eq!(
+        learning::drain_one(
+            &repo,
+            &installed.home,
+            "candidate-restart",
+            Arc::new(AtomicBool::new(false))
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    let mut changed = exchange.clone();
+    let mut edited = changed
+        .items
+        .iter()
+        .find(|item| item.split == argos_osint_core::classifier::training::Split::Development)
+        .unwrap()
+        .clone();
+    edited.revision += 1;
+    edited.decision = ReviewDecision::Abstain;
+    edited.domains.clear();
+    changed.items = vec![edited];
+    assert_eq!(
+        review::import(
+            &repo,
+            &installed.home,
+            &changed,
+            "corrected-development-review"
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        count(&repo, "classifier_mapping_approval").await,
+        0,
+        "revised Development truth invalidates its mapping approval atomically"
+    );
+    assert_eq!(
+        std::fs::read(installed.directory.path().join("classifier/active.json")).unwrap(),
+        active
+    );
+    installed.home.shutdown().await.unwrap();
+}

@@ -28,6 +28,7 @@ fn gates() -> GateSet {
     GateSet {
         version: CALIBRATION_VERSION.into(),
         domains: DomainId::ALL.map(|domain| DomainCalibration {
+            sigmoid: None,
             domain,
             knots: vec![
                 CalibrationKnot {
@@ -146,6 +147,7 @@ fn corpus() -> TrainingCorpus {
         dataset_sha256: "0".repeat(64),
         train_split_sha256: hashes.train_split_sha256,
         calibration_split_sha256: hashes.calibration_split_sha256,
+        development_split_sha256: hashes.development_split_sha256,
         test_split_sha256: hashes.test_split_sha256,
         family_assignment_sha256: hashes.family_assignment_sha256,
     }
@@ -175,6 +177,14 @@ impl ClassifierWorker for MalformedScores {
         let mut response = base;
         match operation {
             BridgeOperation::TrainBatch => {
+                if req["phase"] == "vocabulary" {
+                    response["prepared"] = req["rows"].as_array().unwrap().len().into();
+                    return Ok(response.to_string());
+                }
+                if req["phase"] == "freeze_vocabulary" {
+                    response["vocabulary_frozen"] = true.into();
+                    return Ok(response.to_string());
+                }
                 response["accepted"] = serde_json::json!(req["rows"].as_array().unwrap().len());
                 response["skipped"] = 0.into();
                 response["token_bytes"] = 10.into();
@@ -423,6 +433,11 @@ fn automatic_promotion_requires_reviewed_independent_baseline_and_runtime_eviden
     let metrics = calibration::evaluate(&rows, &gates()).unwrap();
     assert!(metrics.domains.iter().all(|domain| domain.accepted));
     assert_eq!(metrics.exact_pair_families, 60);
+    assert_eq!(metrics.selection.primary_rank_ambiguous, 60);
+    assert_eq!(
+        metrics.selection.secondary_evaluated, 0,
+        "tied supported pairs do not establish arbitrary secondary roles"
+    );
     let valid = PromotionEvidence {
         candidate_model_id: ModelId::parse("candidate").unwrap(),
         candidate_payload_sha256: "a".repeat(64),
@@ -431,6 +446,7 @@ fn automatic_promotion_requires_reviewed_independent_baseline_and_runtime_eviden
         independent_review_reference: "independent review".into(),
         reviewed_corpus_sha256: "d".repeat(64),
         family_assignment_sha256: "e".repeat(64),
+        development_split_sha256: "d".repeat(64),
         baseline_model_id: Some(ModelId::parse("baseline").unwrap()),
         baseline_active_generation: Some(1),
         candidate: metrics.clone(),
@@ -451,6 +467,11 @@ fn automatic_promotion_requires_reviewed_independent_baseline_and_runtime_eviden
             .collect(),
         training_family_ids: vec![FamilyId::parse("train-only").unwrap()],
         threshold_fit_family_ids: vec![FamilyId::parse("fit-only").unwrap()],
+        threshold_fit_family_provenance: vec![(
+            FamilyId::parse("fit-only").unwrap(),
+            Provenance::reviewed_real("reviewed-fit", "d".repeat(64), "independent review"),
+        )],
+        calibration_split_sha256: "f".repeat(64),
         split: Split::Development,
         runtime: Some(RuntimeComparison {
             hardware_id: "fixture hardware".into(),
@@ -821,6 +842,7 @@ fn family_identifiers_reject_unicode_controls_and_keep_byte_boundary() {
 struct TracePackedWorker {
     inner: Box<dyn ClassifierWorker>,
     batches: Vec<(usize, Vec<String>)>,
+    prepared: Vec<(usize, Vec<String>)>,
     terminal_calls: usize,
 }
 #[cfg(feature = "classifier")]
@@ -833,15 +855,28 @@ impl ClassifierWorker for TracePackedWorker {
     ) -> Result<String, ClassifierError> {
         if operation == BridgeOperation::TrainBatch {
             let value: serde_json::Value = serde_json::from_str(request).unwrap();
-            self.batches.push((
-                request.len(),
-                value["rows"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|row| row["row_id"].as_str().unwrap().into())
-                    .collect(),
-            ));
+            if value["phase"] == "vocabulary" {
+                self.prepared.push((
+                    request.len(),
+                    value["rows"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|row| row["row_id"].as_str().unwrap().into())
+                        .collect(),
+                ));
+            }
+            if value["phase"].as_str().is_none() {
+                self.batches.push((
+                    request.len(),
+                    value["rows"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|row| row["row_id"].as_str().unwrap().into())
+                        .collect(),
+                ));
+            }
         }
         self.inner.call(operation, request, control)
     }
@@ -887,6 +922,16 @@ fn escaped_training_rows_split_by_exact_wire_bytes_without_loss() {
             row.sample_id = format!("escaped-{index:02}");
             row.family_id = FamilyId::parse(&row.sample_id).unwrap();
             row.title = title.clone();
+            // Preserve the exact escaped wire size while providing actual
+            // discriminative Train evidence to the vocabulary selector.
+            row.title.replace_range(
+                ..9,
+                if index % 2 == 0 {
+                    "Balloting"
+                } else {
+                    "Patissery"
+                },
+            );
             row.description.clear();
             row.membership = [if index % 2 == 0 {
                 LabelMembership::Present
@@ -915,6 +960,7 @@ fn escaped_training_rows_split_by_exact_wire_bytes_without_loss() {
         let mut worker = TracePackedWorker {
             inner,
             batches: Vec::new(),
+            prepared: Vec::new(),
             terminal_calls: 0,
         };
         let mut progress = Vec::new();
@@ -931,6 +977,16 @@ fn escaped_training_rows_split_by_exact_wire_bytes_without_loss() {
             <= training::MAX_TRAINING_ENVELOPE_BYTES
             && !rows.is_empty()
             && rows.len() <= 32));
+        assert!(worker.prepared.iter().all(|(bytes, rows)| *bytes
+            <= training::MAX_TRAINING_ENVELOPE_BYTES
+            && rows.len() <= 32));
+        let prepared = worker
+            .prepared
+            .iter()
+            .flat_map(|(_, rows)| rows.iter().cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(prepared.len(), 32);
+        assert_eq!(prepared.into_iter().collect::<BTreeSet<_>>(), expected);
         let emitted = worker
             .batches
             .iter()

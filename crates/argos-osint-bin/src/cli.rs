@@ -116,6 +116,36 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ClassifierCommand {
+    /// Export saved run receipts and bounded exact-pin/lexical review diagnostics.
+    Diagnostics {
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = 128)]
+        limit: usize,
+    },
+    /// Inspect or control independently owned Atlas indexing/reconciliation.
+    DerivativeJob {
+        #[arg(long)]
+        job_id: String,
+        #[arg(long,value_enum,default_value_t=HistoryAction::Status)]
+        action: HistoryAction,
+    },
+    /// Export/import human labels bound to captured observations.
+    Review {
+        #[command(subcommand)]
+        command: ClassifierReviewCommand,
+    },
+    /// Explain the saved model's behavior; feature contributions are not evidence.
+    Explain {
+        #[arg(long)]
+        title: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show truthful local readiness without opening storage.
     Status {
         #[arg(long)]
@@ -154,6 +184,28 @@ enum ClassifierCommand {
         job_id: String,
         #[arg(long, value_enum, default_value_t = HistoryAction::Status)]
         action: HistoryAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ClassifierReviewCommand {
+    Export {
+        #[arg(long)]
+        run: String,
+        #[arg(long, default_value_t = 128)]
+        limit: usize,
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+    },
+    Import {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        review_reference: String,
+    },
+    ApproveMapping {
+        #[arg(long)]
+        review_reference: String,
     },
 }
 
@@ -746,6 +798,47 @@ async fn classifier_command(command: ClassifierCommand) -> Result<()> {
     let home = ClassifierHome::new(request.home.clone());
     let result = async {
         match command {
+            ClassifierCommand::DerivativeJob {job_id,action} => {
+                let action=match action {HistoryAction::Status=>"status",HistoryAction::Pause=>"pause",HistoryAction::Resume=>"resume",HistoryAction::Cancel=>"cancel"};
+                let result=tokio::task::spawn_blocking(move ||argos_osint_core::storage::runtime::blocking(move|repo|async move {argos_osint_core::atlas_derivative_worker::control(&repo,&job_id,action).await})).await??;
+                print_json(&result)
+            }
+            ClassifierCommand::Diagnostics {run,file,limit} => {
+                let diagnostic_home=home.clone();
+                tokio::task::spawn_blocking(move ||argos_osint_core::storage::runtime::blocking(move |repo|async move {
+                    let export=argos_osint_core::storage::classifier_review_diagnostics::export(&repo,&diagnostic_home,&run,limit).await?;
+                    if let Some(file)=file {let bytes=serde_json::to_vec_pretty(&export.diagnostics)?;tokio::task::spawn_blocking(move||std::fs::write(file,bytes)).await??;Ok(())}else{print_json(&export.diagnostics)}
+                })).await?
+            }
+            ClassifierCommand::Review {command} => {
+                let review_home=home.clone();
+                tokio::task::spawn_blocking(move ||argos_osint_core::storage::runtime::blocking(move |repo|async move {
+                    match command {
+                        ClassifierReviewCommand::Export {run,file,limit}=>{
+                            let exchange=argos_osint_core::storage::classifier_review_diagnostics::export(&repo,&review_home,&run,limit).await?;
+                            if let Some(file)=file {let bytes=serde_json::to_vec_pretty(&exchange)?;tokio::task::spawn_blocking(move ||std::fs::write(file,bytes)).await??;Ok(())}else{print_json(&exchange)}
+                        }
+                        ClassifierReviewCommand::Import {file,review_reference}=>{
+                            use std::io::Read;
+                            let bytes=tokio::task::spawn_blocking(move ||->std::io::Result<Vec<u8>> {let mut bytes=Vec::new();std::fs::File::open(file)?.take((argos_osint_core::classifier::review::MAX_REVIEW_BYTES+1) as u64).read_to_end(&mut bytes)?;Ok(bytes)}).await??;
+                            if bytes.len()>argos_osint_core::classifier::review::MAX_REVIEW_BYTES {return Err(anyhow!("review_import_byte_bound"));}
+                            let exchange=serde_json::from_slice(&bytes)?;
+                            let imported=argos_osint_core::storage::classifier_review::import(&repo,&review_home,&exchange,&review_reference).await?;
+                            print_json(&serde_json::json!({"imported":imported,"review_reference":review_reference}))
+                        }
+                        ClassifierReviewCommand::ApproveMapping {review_reference}=>print_json(&argos_osint_core::storage::classifier_review::approve_mapping(&repo,&review_home,&review_reference).await?),
+                    }
+                })).await?
+            }
+            ClassifierCommand::Explain {title,description,json:_} => {
+                let pinned=home.pin(None).await?;
+                let mut input=argos_osint_core::classifier::ClassifyInput::new("explain",title,description,Some("en".into()));
+                input.explain=true;
+                let snapshot=pinned.snapshot.clone();
+                let manifest_sha256=pinned.manifest_sha256.clone();
+                let receipts=tokio::task::spawn_blocking(move ||pinned.service.classify_batch(vec![input])).await??;
+                print_json(&serde_json::json!({"schema_version":"classifier-explanation-v2","interpretation":"Model behavior, not proof or causality.","model":snapshot,"manifest_sha256":manifest_sha256,"ranking_reasons":receipts.iter().map(|receipt|receipt.ranking_reason()).collect::<Vec<_>>(),"receipts":receipts}))
+            }
             ClassifierCommand::Status { json } => {
                 let status = home.refresh_integrity(&request).await?;
                 if json {

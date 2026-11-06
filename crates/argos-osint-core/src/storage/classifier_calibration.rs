@@ -38,6 +38,7 @@ DEFINE FIELD IF NOT EXISTS disposition ON classifier_observation TYPE string DEF
 DEFINE FIELD IF NOT EXISTS mapping_json ON classifier_observation TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS family_id ON classifier_observation TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS first_seen ON classifier_observation TYPE datetime;
+DEFINE INDEX IF NOT EXISTS classifier_observation_family ON classifier_observation FIELDS family_id,first_seen;
 DEFINE TABLE IF NOT EXISTS classifier_observation_origin SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS cycle_id ON classifier_observation_origin TYPE string;
 DEFINE FIELD IF NOT EXISTS sequence ON classifier_observation_origin TYPE int;
@@ -656,6 +657,21 @@ async fn process_task(
         }
         .into();
     }
+    if report.state == "completed" && after >= job.watermark {
+        report.reason = match super::classifier_learning::consider(owner, home).await {
+            Ok("unapproved_mapping_monitor_only") => "insufficient_reviewed_evidence".into(),
+            Ok(reason) => reason.into(),
+            Err(TxError::Abort(code))
+                if code.len() <= 128
+                    && code
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') =>
+            {
+                code
+            }
+            Err(_) => "learning_capture_failed".into(),
+        };
+    }
     let terminal = report.state != "queued";
     let captured = (task, report, after, job.activation);
     admission::owned_tx(owner,RetryPolicy::default(),move|tx| {
@@ -753,7 +769,8 @@ async fn monitor_in(
         reason = "retention_capacity";
     }
     let keep = reason == "monitoring";
-    let mapping = provider_labels::map_labels(observation, None)
+    let approval = super::classifier_review::active_approval_in(tx).await?;
+    let mapping = provider_labels::map_labels(observation, approval.as_ref())
         .map_err(|_| invalid("provider_mapping_invalid"))?;
     if keep {
         let family = family.as_ref().expect("monitoring has a family");

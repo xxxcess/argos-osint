@@ -37,7 +37,7 @@ pub const SCHEMA_VERSION: i64 = 3;
 /// before refresh. The event logs (`argos_event`, `investigation_event`)
 /// stand alone; telemetry writes use `profile_view`'s tables, with
 /// `telemetry_meta` after them.
-pub fn schemas() -> [(&'static str, &'static str); 40] {
+pub fn schemas() -> [(&'static str, &'static str); 45] {
     [
         ("counters", super::counters::SCHEMA),
         ("outbox", super::outbox::SCHEMA),
@@ -58,6 +58,13 @@ pub fn schemas() -> [(&'static str, &'static str); 40] {
             "atlas_admission_maintenance",
             super::atlas_admission_maintenance::SCHEMA,
         ),
+        ("classifier_review", super::classifier_review::SCHEMA),
+        ("classifier_learning", super::classifier_learning::SCHEMA),
+        ("atlas_derivatives", crate::atlas_derivative_worker::SCHEMA),
+        (
+            "atlas_derivative_status",
+            super::atlas_derivative_status::SCHEMA,
+        ),
         ("intel", super::intel::SCHEMA),
         ("brief", super::brief::SCHEMA),
         ("lifecycle", super::lifecycle::SCHEMA),
@@ -74,6 +81,10 @@ pub fn schemas() -> [(&'static str, &'static str); 40] {
         ("pipeline_inputs", super::pipeline_inputs::SCHEMA),
         ("article_body", super::article_body::SCHEMA),
         ("nlp_cache", super::nlp_cache::SCHEMA),
+        (
+            "atlas_derivative_invalidation",
+            super::atlas_derivative_invalidation::SCHEMA,
+        ),
         ("pipeline_exec", super::pipeline_exec::SCHEMA),
         ("profile_view", super::profile_view::SCHEMA),
         ("telemetry", super::telemetry::SCHEMA),

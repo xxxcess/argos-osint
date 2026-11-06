@@ -1,6 +1,11 @@
 //! Calibration, gates, monotone isotonic regression, evaluation metrics,
 //! and activation authorization for Argos classifier models.
 
+#[path = "calibration_threshold.rs"]
+mod calibration_threshold;
+#[path = "sigmoid_optimizer.rs"]
+mod sigmoid_optimizer;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -36,7 +41,7 @@ pub const PRECISION_TARGET_NUMERATOR: u64 = 9;
 pub const PRECISION_TARGET_DENOMINATOR: u64 = 10;
 
 /// Canonical schema version for isotonic domain calibration.
-pub const CALIBRATION_VERSION: &str = "domain-isotonic-family-v1";
+pub const CALIBRATION_VERSION: &str = "domain-calibration-family-v2";
 
 /// Maximum weak-training families per provider per activation (256).
 pub const MAX_WEAK_FAMILIES_PER_PROVIDER: usize = 256;
@@ -64,6 +69,9 @@ pub struct CalibrationKnot {
 /// Fitted calibration parameters and gate threshold for a single domain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DomainCalibration {
+    /// Optional monotone sigmoid slope/intercept, mutually exclusive with knots.
+    #[serde(default)]
+    pub sigmoid: Option<[f64; 2]>,
     pub domain: DomainId,
     pub knots: Vec<CalibrationKnot>,
     pub threshold: f64,
@@ -111,6 +119,7 @@ pub enum EvidenceFailure {
     MissingBaselineComparison,
     PrecisionRegression,
     MacroF1Regression,
+    SelectedQualityRegression,
     IncreasedFalseAdmission,
     InvalidSelectedPair,
     RuntimeBudgetRegression,
@@ -137,6 +146,8 @@ pub struct DomainAcceptance {
 /// Macro evaluation metrics across all six domains.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvaluationMetrics {
+    #[serde(default)]
+    pub selection: SelectionMetrics,
     pub domains: [DomainAcceptance; 6],
     pub macro_f1: f64,
     pub complete_families: u64,
@@ -147,6 +158,29 @@ pub struct EvaluationMetrics {
     pub single_domain_families: u64,
     pub invalid_selected_pairs: u64,
     pub coverage: f64,
+}
+
+/// Selected-tag quality is separate from independent binary gate confusion.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SelectionMetrics {
+    pub primary_correct: u64,
+    pub primary_rank_ambiguous: u64,
+    pub primary_evaluated: u64,
+    pub secondary_correct: u64,
+    pub secondary_evaluated: u64,
+    #[serde(default)]
+    pub conditional_secondary_correct: u64,
+    #[serde(default)]
+    pub conditional_secondary_evaluated: u64,
+    #[serde(default)]
+    pub secondary_rank_ambiguous: u64,
+    pub valid_selected_sets: u64,
+    pub single_domain_retained: u64,
+    pub selected_memberships: u64,
+    pub true_selected_memberships: u64,
+    pub truth_memberships: u64,
+    pub multi_domain_families: u64,
+    pub multi_domain_selected_valid: u64,
 }
 
 /// The result of an isotonic calibration fit round.
@@ -248,6 +282,8 @@ pub struct PromotionEvidence {
     pub independent_review_reference: String,
     pub reviewed_corpus_sha256: String,
     pub family_assignment_sha256: String,
+    #[serde(default)]
+    pub development_split_sha256: String,
     pub baseline_model_id: Option<ModelId>,
     pub baseline_active_generation: Option<u64>,
     pub candidate: EvaluationMetrics,
@@ -259,6 +295,10 @@ pub struct PromotionEvidence {
     pub evaluation_family_provenance: Vec<(FamilyId, Provenance)>,
     pub training_family_ids: Vec<FamilyId>,
     pub threshold_fit_family_ids: Vec<FamilyId>,
+    #[serde(default)]
+    pub threshold_fit_family_provenance: Vec<(FamilyId, Provenance)>,
+    #[serde(default)]
+    pub calibration_split_sha256: String,
     pub split: Split,
     pub runtime: Option<RuntimeComparison>,
 }
@@ -420,8 +460,19 @@ fn validate_domain_calibration(calibration: &DomainCalibration) -> Result<(), Cl
     if !calibration.threshold.is_finite()
         || !(0.0..=DISABLED_THRESHOLD).contains(&calibration.threshold)
         || calibration.min_informative_features == 0
+        || calibration.min_informative_features > super::feature_policy::MAX_FEATURES
     {
         return Err(invalid_calibration("invalid_domain_gate"));
+    }
+    if let Some([slope, intercept]) = calibration.sigmoid {
+        if !slope.is_finite()
+            || !intercept.is_finite()
+            || !(0.0..=100.0).contains(&slope)
+            || intercept.abs() > 100.0
+            || !calibration.knots.is_empty()
+        {
+            return Err(invalid_calibration("invalid_sigmoid_parameters"));
+        }
     }
     let mut previous: Option<&CalibrationKnot> = None;
     for knot in &calibration.knots {
@@ -457,6 +508,8 @@ fn validate_raw(
 ) -> Result<(), ClassifierError> {
     for (domain, score) in DomainId::ALL.iter().zip(raw) {
         if *domain != score.domain
+            || score.known_feature_count > super::feature_policy::MAX_FEATURES
+            || score.oov_count > super::feature_policy::MAX_FEATURES
             || !score.present_log_score.is_finite()
             || !score.absent_log_score.is_finite()
             || !score.raw_log_odds.is_finite()
@@ -508,19 +561,17 @@ pub fn score(raw_log_odds: f64, calibration: &DomainCalibration) -> Result<f64, 
     }
 
     validate_domain_calibration(calibration)?;
+    if let Some([slope, intercept]) = calibration.sigmoid {
+        return Ok(sigmoid(slope * raw_log_odds + intercept));
+    }
     let Some(last) = calibration.knots.last() else {
         return Ok(0.0);
     };
 
-    // Piecewise constant lookup: first knot with raw_log_odds <= knot.raw_upper
-    for knot in &calibration.knots {
-        if raw_log_odds <= knot.raw_upper {
-            return Ok(knot.relevance.clamp(0.0, 1.0));
-        }
-    }
-
-    // If beyond the highest upper bound, clamp to the last knot's relevance
-    Ok(last.relevance)
+    let index = calibration
+        .knots
+        .partition_point(|knot| knot.raw_upper < raw_log_odds);
+    Ok(calibration.knots.get(index).unwrap_or(last).relevance)
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +627,7 @@ pub fn fit(
 
         if pairs.is_empty() {
             domain_calibrations.push(DomainCalibration {
+                sigmoid: None,
                 domain: *domain,
                 knots: Vec::new(),
                 threshold: DISABLED_THRESHOLD,
@@ -633,58 +685,17 @@ pub fn fit(
             })
             .collect();
 
-        // Threshold search: choose distinct relevance score that maximizes accepted families
-        // subject to precision >= 90% (10 * TP >= 9 * (TP + FP))
-        let mut candidate_thresholds: Vec<f64> = knots.iter().map(|k| k.relevance).collect();
-        candidate_thresholds.sort_by(f64::total_cmp);
-        candidate_thresholds.dedup();
-
-        let mut best_threshold = DISABLED_THRESHOLD;
-        let mut max_accepted_families = 0u64;
-
-        for t in candidate_thresholds.into_iter().rev() {
-            let temp_calib = DomainCalibration {
-                domain: *domain,
-                knots: knots.clone(),
-                threshold: t,
-                min_informative_features: 1,
-            };
-
-            let mut tp = 0u64;
-            let mut fp = 0u64;
-
-            for row in rows {
-                let m = row.membership[domain_idx];
-                let raw_score = row.raw[domain_idx];
-                if raw_score.known_feature_count >= 1 {
-                    let rel = score(raw_score.raw_log_odds, &temp_calib)?;
-                    if rel >= t {
-                        if m == LabelMembership::Present {
-                            tp += 1;
-                        } else if m == LabelMembership::Absent {
-                            fp += 1;
-                        }
-                    }
-                }
-            }
-
-            let accepted = tp + fp;
-            if accepted > 0
-                && 10 * tp >= 9 * accepted
-                && (accepted > max_accepted_families
-                    || (accepted == max_accepted_families && t > best_threshold))
-            {
-                max_accepted_families = accepted;
-                best_threshold = t;
-            }
-        }
-
-        domain_calibrations.push(DomainCalibration {
+        let mut calibration = DomainCalibration {
+            sigmoid: None,
             domain: *domain,
             knots,
-            threshold: best_threshold,
+            threshold: DISABLED_THRESHOLD,
             min_informative_features: 1,
-        });
+        };
+        let (threshold, support) = calibration_threshold::select(rows, domain_idx, &calibration)?;
+        calibration.threshold = threshold;
+        calibration.min_informative_features = support;
+        domain_calibrations.push(calibration);
     }
 
     let gates = GateSet {
@@ -811,6 +822,7 @@ pub fn evaluate(
     let mut single_domain_families = 0;
     let mut invalid_selected_pairs = 0;
     let mut admitted = 0u64;
+    let mut selection = SelectionMetrics::default();
     let model_id = ModelId::parse("evaluation")
         .ok_or_else(|| invalid_calibration("invalid_evaluation_model_id"))?;
     for row in rows {
@@ -819,6 +831,10 @@ pub fn evaluate(
             .iter()
             .filter(|m| **m == LabelMembership::Present)
             .count();
+        selection.truth_memberships += truth_count as u64;
+        if truth_count >= 3 {
+            selection.multi_domain_families += 1;
+        }
         if truth_count == 0 {
             out_of_scope_families += 1;
         }
@@ -832,12 +848,21 @@ pub fn evaluate(
             Some("en".into()),
         );
         let receipt = apply_gates(&input, &row.raw, &model_id, gates)?;
-        if let Some(pair) = receipt.selected_pair {
+        if receipt.is_admitted() {
+            let pair = &receipt.selected_domains;
             admitted += 1;
             if truth_count == 0 {
                 false_oos_admissions += 1;
             }
-            if truth_count == 1 {
+            if truth_count == 1
+                && pair.iter().any(|domain| {
+                    row.membership[DomainId::ALL
+                        .iter()
+                        .position(|id| id == domain)
+                        .expect("canonical domain")]
+                        != LabelMembership::Present
+                })
+            {
                 false_single_domain_admissions += 1;
             }
             let both_true = pair.iter().all(|domain| {
@@ -846,15 +871,52 @@ pub fn evaluate(
                     .position(|d| d == domain)
                     .is_some_and(|idx| row.membership[idx] == LabelMembership::Present)
             });
-            if pair[0] == pair[1] || !both_true {
+            let is_true = |domain: &DomainId| {
+                row.membership[DomainId::ALL
+                    .iter()
+                    .position(|id| id == domain)
+                    .expect("canonical domain")]
+                    == LabelMembership::Present
+            };
+            selection.selected_memberships += pair.len() as u64;
+            selection.true_selected_memberships +=
+                pair.iter().filter(|id| is_true(id)).count() as u64;
+            if receipt.primary_rank_ambiguous {
+                selection.primary_rank_ambiguous += 1;
+            } else {
+                selection.primary_evaluated += 1;
+                selection.primary_correct += u64::from(is_true(&pair[0]));
+            }
+            if receipt.ranking_reason() == "secondary_rank_ambiguous_primary_only" {
+                selection.secondary_rank_ambiguous += 1;
+            }
+            if pair.len() == 2 && !receipt.primary_rank_ambiguous {
+                selection.secondary_evaluated += 1;
+                selection.secondary_correct += u64::from(is_true(&pair[1]));
+                if is_true(&pair[0]) {
+                    selection.conditional_secondary_evaluated += 1;
+                    selection.conditional_secondary_correct += u64::from(is_true(&pair[1]));
+                }
+            }
+            if both_true {
+                selection.valid_selected_sets += 1;
+                if truth_count == 1 {
+                    selection.single_domain_retained += 1;
+                }
+                if truth_count >= 3 {
+                    selection.multi_domain_selected_valid += 1;
+                }
+            }
+            if !both_true {
                 invalid_selected_pairs += 1;
-            } else if truth_count == 2 {
+            } else if truth_count == 2 && pair.len() == 2 {
                 exact_pair_families += 1;
             }
         }
     }
 
     Ok(EvaluationMetrics {
+        selection,
         domains: [
             acceptances[0].clone(),
             acceptances[1].clone(),
@@ -879,18 +941,14 @@ pub fn evaluate(
     })
 }
 
-/// Applies calibrated gate thresholds and selects the top-two domains.
-///
-/// If calibrated scores tie, ties are broken using `DomainId.as_str()` lexical
-/// ascending order (e.g. `[Economic, Environmental]`), NOT canonical enum order.
-///
+/// Constructs a receipt, preserving ambiguity rather than claiming dominance.
 fn make_receipt(
     input: &ClassifyInput,
     model_id: &ModelId,
     gates: &GateSet,
     raw: &[RawDomainScore; 6],
     scores: Vec<DomainScore>,
-    selected_pair: Option<[DomainId; 2]>,
+    selected_domains: Vec<DomainId>,
     rejection_reason: Option<RejectionReason>,
 ) -> ClassificationReceipt {
     let mut receipt = ClassificationReceipt::new(
@@ -899,13 +957,15 @@ fn make_receipt(
         model_id.as_str(),
     );
     receipt.scores = scores;
-    receipt.selected_pair = selected_pair;
+    receipt.selected_domains = selected_domains;
+    receipt.primary_rank_ambiguous = super::select_domains(&receipt.scores).1;
     receipt.rejection_reason = rejection_reason;
     receipt.raw_diagnostics = Some(RawDiagnostics {
         schema_version: "classifier-raw-diagnostics-v1".into(),
         calibration_version: gates.version.clone(),
         domains: *raw,
         provider: None,
+        support: Vec::new(),
     });
     receipt
 }
@@ -956,7 +1016,7 @@ pub fn apply_gates(
             gates,
             raw,
             scores,
-            None,
+            Vec::new(),
             Some(RejectionReason::Blank),
         ));
     }
@@ -984,7 +1044,7 @@ pub fn apply_gates(
                 gates,
                 raw,
                 scores,
-                None,
+                Vec::new(),
                 Some(RejectionReason::UnsupportedLanguage),
             ));
         }
@@ -1011,37 +1071,10 @@ pub fn apply_gates(
             gates,
             raw,
             scores,
-            None,
+            Vec::new(),
             Some(RejectionReason::WhollyOov),
         ));
     }
-
-    // 4. Compute calibrated relevance for all 6 domains
-    let mut domain_scores = Vec::with_capacity(6);
-    for (idx, domain_calib) in gates.domains.iter().enumerate() {
-        let rel = score(raw[idx].raw_log_odds, domain_calib)?;
-        let passes = raw[idx].known_feature_count >= domain_calib.min_informative_features
-            && rel >= domain_calib.threshold;
-        domain_scores.push((domain_calib.domain, rel, passes));
-    }
-
-    // Sort ranked candidates:
-    // 1. Calibrated relevance descending
-    // 2. Lexical ascending order of domain name: DomainId.as_str()
-    domain_scores.sort_by(|a, b| {
-        b.1.total_cmp(&a.1)
-            .then_with(|| a.0.as_str().cmp(b.0.as_str()))
-    });
-
-    // Check top 2 domains
-    let top1 = domain_scores[0];
-    let top2 = domain_scores[1];
-
-    let (selected_pair, rejection_reason) = if top1.2 && top2.2 {
-        (Some([top1.0, top2.0]), None)
-    } else {
-        (None, Some(RejectionReason::InsufficientDomains))
-    };
 
     // Build receipt domain scores in canonical DomainId::ALL order
     let canonical_scores: Vec<DomainScore> = DomainId::ALL
@@ -1064,13 +1097,14 @@ pub fn apply_gates(
         })
         .collect::<Result<_, ClassifierError>>()?;
 
+    let (selected_domains, _, rejection_reason) = super::select_domains(&canonical_scores);
     Ok(make_receipt(
         input,
         model_id,
         gates,
         raw,
         canonical_scores,
-        selected_pair,
+        selected_domains,
         rejection_reason,
     ))
 }
@@ -1321,6 +1355,36 @@ fn validate_metrics(metrics: &EvaluationMetrics) -> Result<(), ClassifierError> 
     Ok(())
 }
 
+/// Independent selected-tag quality, excluding arbitrary roles in tied pairs.
+/// Integer comparisons avoid rounding a small regression into equality.
+pub(crate) fn selection_nonregression(
+    candidate: &EvaluationMetrics,
+    baseline: &EvaluationMetrics,
+) -> bool {
+    let c = &candidate.selection;
+    let b = &baseline.selection;
+    let precision = |cp: u64, cn: u64, bp: u64, bn: u64| {
+        bn == 0 || cn > 0 && u128::from(cp) * u128::from(bn) >= u128::from(bp) * u128::from(cn)
+    };
+    c.truth_memberships == b.truth_memberships
+        && candidate.exact_pair_families >= baseline.exact_pair_families
+        && c.true_selected_memberships >= b.true_selected_memberships
+        && c.valid_selected_sets >= b.valid_selected_sets
+        && c.single_domain_retained >= b.single_domain_retained
+        && precision(
+            c.primary_correct,
+            c.primary_evaluated,
+            b.primary_correct,
+            b.primary_evaluated,
+        )
+        && precision(
+            c.conditional_secondary_correct,
+            c.conditional_secondary_evaluated,
+            b.conditional_secondary_correct,
+            b.conditional_secondary_evaluated,
+        )
+}
+
 /// Evaluates quality criteria to determine whether a candidate model is eligible
 /// for automatic promotion.
 ///
@@ -1341,11 +1405,15 @@ pub fn assess_promotion(
         }
     };
     let valid_hash = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
-    if !matches!(evidence.provenance, Provenance::ReviewedReal { .. })
-        || evidence.split != Split::Development
+    if !matches!(
+        evidence.provenance,
+        Provenance::ReviewedReal { .. } | Provenance::MixedTraining { .. }
+    ) || evidence.split != Split::Development
         || evidence.independent_review_reference.trim().is_empty()
         || !valid_hash(&evidence.reviewed_corpus_sha256)
         || !valid_hash(&evidence.family_assignment_sha256)
+        || !valid_hash(&evidence.development_split_sha256)
+        || !valid_hash(&evidence.calibration_split_sha256)
         || !valid_hash(&evidence.candidate_payload_sha256)
         || !valid_hash(&evidence.candidate_report_sha256)
     {
@@ -1374,6 +1442,19 @@ pub fn assess_promotion(
         }
     }
     if evaluated_sources != eval_set {
+        fail(EvidenceFailure::MissingReviewedRealEvidence);
+    }
+    let mut fitted_sources = BTreeSet::new();
+    for (family, provenance) in &evidence.threshold_fit_family_provenance {
+        if !fitted_sources.insert(family)
+            || !fit_set.contains(family)
+            || super::training::validate_provenance(provenance).is_err()
+            || !matches!(provenance,Provenance::ReviewedReal {dataset_sha256,review_reference,..} if dataset_sha256==&evidence.reviewed_corpus_sha256 && review_reference==&evidence.independent_review_reference)
+        {
+            fail(EvidenceFailure::MissingReviewedRealEvidence);
+        }
+    }
+    if fit_set.is_empty() || fitted_sources != fit_set {
         fail(EvidenceFailure::MissingReviewedRealEvidence);
     }
     if evidence.candidate.complete_families != eval_set.len() as u64
@@ -1428,6 +1509,9 @@ pub fn assess_promotion(
             || evidence.candidate.macro_f1 < base.macro_f1
         {
             fail(EvidenceFailure::MacroF1Regression);
+        }
+        if !selection_nonregression(&evidence.candidate, base) {
+            fail(EvidenceFailure::SelectedQualityRegression);
         }
         // Denominators are required identical above, so integer counts compare the rates exactly.
         if evidence.candidate.false_oos_admissions > base.false_oos_admissions
@@ -1759,6 +1843,9 @@ pub fn authorize_activation(
             || promo.candidate_payload_sha256 != payload_sha256
             || promo.candidate_report_sha256 != report_sha256
             || promo.provenance != candidate.manifest.provenance
+            || promo.development_split_sha256 != candidate.manifest.development_split_sha256
+            || promo.calibration_split_sha256 != candidate.manifest.calibration_split_sha256
+            || promo.family_assignment_sha256 != candidate.manifest.family_assignment_sha256
             || promo.baseline_model_id.as_ref().map(ModelId::as_str) != expected_prior_id.as_deref()
             || promo.baseline_active_generation != expected_prior_generation
         {
@@ -1799,6 +1886,84 @@ pub fn authorize_activation(
     }
 }
 
+fn sigmoid(value: f64) -> f64 {
+    if value >= 0.0 {
+        1.0 / (1.0 + (-value).exp())
+    } else {
+        let e = value.exp();
+        e / (1.0 + e)
+    }
+}
+
+/// Fits only complete Calibration families using bounded, regularized monotone
+/// optimization. Missing positive/negative evidence disables the domain.
+pub fn fit_sigmoid(rows: &[ScoredFamily]) -> Result<CalibrationFit, ClassifierError> {
+    validate_representatives(rows, true)?;
+    let mut domains = Vec::new();
+    for (index, domain) in DomainId::ALL.into_iter().enumerate() {
+        let pairs: Vec<_> = rows
+            .iter()
+            .filter(|row| row.raw[index].known_feature_count > 0)
+            .map(|row| {
+                (
+                    row.raw[index].raw_log_odds,
+                    f64::from(row.membership[index] == LabelMembership::Present),
+                )
+            })
+            .collect();
+        let positives = pairs.iter().filter(|(_, label)| *label == 1.0).count();
+        if positives == 0 || positives == pairs.len() {
+            domains.push(DomainCalibration {
+                domain,
+                sigmoid: None,
+                knots: Vec::new(),
+                threshold: DISABLED_THRESHOLD,
+                min_informative_features: 1,
+            });
+            continue;
+        }
+        let parameters = sigmoid_optimizer::fit(&pairs)?;
+        let mut calibration = DomainCalibration {
+            domain,
+            sigmoid: Some(parameters),
+            knots: Vec::new(),
+            threshold: DISABLED_THRESHOLD,
+            min_informative_features: 1,
+        };
+        let (threshold, support) = calibration_threshold::select(rows, index, &calibration)?;
+        calibration.threshold = threshold;
+        calibration.min_informative_features = support;
+        validate_domain_calibration(&calibration)?;
+        domains.push(calibration);
+    }
+    let gates = GateSet {
+        version: CALIBRATION_VERSION.into(),
+        domains: domains
+            .try_into()
+            .map_err(|_| invalid_calibration("sigmoid_domain_count"))?,
+    };
+    let metrics = evaluate(rows, &gates)?;
+    Ok(CalibrationFit { gates, metrics })
+}
+
+/// Mean squared calibration error on the explicitly selected evaluation partition.
+pub fn brier_score(rows: &[ScoredFamily], gates: &GateSet) -> Result<Option<f64>, ClassifierError> {
+    validate_representatives(rows, false)?;
+    validate_gates(gates)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut total = 0.0;
+    for row in rows {
+        for (index, calibration) in gates.domains.iter().enumerate() {
+            let prediction = score(row.raw[index].raw_log_odds, calibration)?;
+            let truth = f64::from(row.membership[index] == LabelMembership::Present);
+            total += (prediction - truth).powi(2);
+        }
+    }
+    Ok(Some(total / (rows.len() * 6) as f64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1820,6 +1985,7 @@ mod tests {
     #[test]
     fn test_isotonic_knot_evaluation() {
         let calib = DomainCalibration {
+            sigmoid: None,
             domain: DomainId::Economic,
             knots: vec![
                 CalibrationKnot {
@@ -1846,7 +2012,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lexical_tie_breaking_order() {
+    fn test_six_way_tie_abstains_without_arbitrary_primary() {
         // When all 6 domains have identical calibrated score of 0.9,
         // selection must sort by DomainId.as_str() ascending:
         // economic ("economic") then environmental ("environmental")
@@ -1857,6 +2023,7 @@ mod tests {
         let gates = GateSet {
             version: CALIBRATION_VERSION.into(),
             domains: DomainId::ALL.map(|d| DomainCalibration {
+                sigmoid: None,
                 domain: d,
                 knots: knots.clone(),
                 threshold: 0.8,
@@ -1874,10 +2041,12 @@ mod tests {
         let model_id = ModelId::parse("model-tie").unwrap();
 
         let receipt = apply_gates(&input, &raw, &model_id, &gates).unwrap();
-        assert!(receipt.rejection_reason.is_none());
-        let pair = receipt.selected_pair.expect("pair must be selected");
-        assert_eq!(pair[0], DomainId::Economic);
-        assert_eq!(pair[1], DomainId::Environmental);
+        assert_eq!(
+            receipt.rejection_reason,
+            Some(RejectionReason::AmbiguousRanking)
+        );
+        assert!(receipt.selected_domains.is_empty());
+        receipt.validate().unwrap();
     }
 
     #[test]
@@ -1889,6 +2058,7 @@ mod tests {
         let gates = GateSet {
             version: CALIBRATION_VERSION.into(),
             domains: DomainId::ALL.map(|d| DomainCalibration {
+                sigmoid: None,
                 domain: d,
                 knots: knots.clone(),
                 threshold: 0.8,
@@ -1901,10 +2071,7 @@ mod tests {
         let model_id = ModelId::parse("model-sub").unwrap();
 
         let receipt = apply_gates(&input, &raw, &model_id, &gates).unwrap();
-        assert_eq!(receipt.selected_pair, None);
-        assert_eq!(
-            receipt.rejection_reason,
-            Some(RejectionReason::InsufficientDomains)
-        );
+        assert!(receipt.selected_domains.is_empty());
+        assert_eq!(receipt.rejection_reason, Some(RejectionReason::OutOfScope));
     }
 }

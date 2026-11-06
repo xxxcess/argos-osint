@@ -72,7 +72,7 @@ fn csv(root: &Path) -> DatasetRequest {
                     String::new(),
                     "synthetic".into(),
                     "single_domain_boundary".into(),
-                    "synthetic-management-fixture-v1".into(),
+                    "synthetic-development-v1".into(),
                     "Never model features".into(),
                     split.into(),
                     format!("family-{split}-{index}"),

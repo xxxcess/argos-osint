@@ -83,19 +83,18 @@ pub async fn put(
         "bridge_hash":hash(include_str!("../nlp/bridge.js")),
         "policy":"paragraph-4096-8192-overlap-v1"})
     .to_string();
-    repo.db()
-        .query(
-            "UPSERT $f SET prose_hash = $ph, version_context_json = $vc,
-               annotations_json = $aj, byte_len = $len, last_access = $now RETURN NONE",
-        )
-        .bind(("f", rid("nlp_feature", &a.feature_key)))
-        .bind(("ph", a.prose_hash.clone()))
-        .bind(("vc", version))
-        .bind(("len", json.len() as i64))
-        .bind(("aj", json))
-        .bind(("now", now()))
-        .await?
-        .check()?;
+    let (feature, prose) = (a.feature_key.clone(), a.prose_hash.clone());
+    let revision = format!("{feature}:{}", hash(&json));
+    super::tx::run_tx(repo.db(),super::tx::RetryPolicy::default(),move |tx| {
+        let (feature,prose,json,version,revision)=(feature.clone(),prose.clone(),json.clone(),version.clone(),revision.clone());
+        async move {
+            super::jobs::bump(&tx,"job_guard",&format!("nlp-feature:{feature}")).await?;
+            tx.query("UPSERT $f SET prose_hash=$ph,version_context_json=$vc,annotations_json=$aj,byte_len=$len,last_access=$now RETURN NONE;")
+                .bind(("f",rid("nlp_feature",&feature))).bind(("ph",prose.clone())).bind(("vc",version)).bind(("len",json.len() as i64)).bind(("aj",json)).bind(("now",now())).await?.check()?;
+            super::atlas_derivative_invalidation::enqueue_prose_in(&tx,&prose,&revision,chrono::Utc::now()).await?;
+            Ok(())
+        }
+    }).await?;
     evict(repo).await
 }
 
@@ -131,13 +130,24 @@ async fn evict(repo: &Repository) -> Result<()> {
             break;
         }
         total -= row.byte_len;
-        doomed.push(rid("nlp_feature", &row.id));
+        doomed.push(row.id);
     }
-    repo.db()
-        .query("FOR $f IN $doomed { DELETE $f RETURN NONE; };")
-        .bind(("doomed", doomed))
-        .await?
-        .check()?;
+    for page in doomed.chunks(16) {
+        let page = page.to_vec();
+        super::tx::run_tx(repo.db(),super::tx::RetryPolicy::default(),move|tx| {let page=page.clone();async move {
+            for feature in page {
+                let id=feature.clone();
+                super::jobs::bump(&tx,"job_guard",&format!("nlp-feature:{id}")).await?;
+                let mut response=tx.query("SELECT prose_hash,crypto::sha256(annotations_json) AS revision FROM ONLY $f;").bind(("f",rid("nlp_feature",&feature))).await?.check()?;
+                #[derive(SurrealValue)] struct Prior {prose_hash:String,revision:String}
+                if let Some(prior)=response.take::<Option<Prior>>(0)? {
+                    tx.query("DELETE $f RETURN NONE;").bind(("f",rid("nlp_feature",&feature))).await?.check()?;
+                    super::atlas_derivative_invalidation::enqueue_prose_in(&tx,&prior.prose_hash,&format!("evicted:{id}:{}",prior.revision),chrono::Utc::now()).await?;
+                }
+            }
+            Ok(())
+        }}).await?;
+    }
     Ok(())
 }
 

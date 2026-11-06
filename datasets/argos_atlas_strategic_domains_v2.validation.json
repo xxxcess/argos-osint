@@ -1,0 +1,25 @@
+{
+  "schema_version": "classifier-corpus-validation-v2",
+  "dataset_version": "strategic-domains-v2-distinct-1",
+  "sha256": "625f10150ba413f2fcae49ef425f9829004daaf9e69e49eecf66f7598de80d93",
+  "rows": 1020,
+  "splits": {
+    "train": 440,
+    "test": 185,
+    "calibration": 230,
+    "development": 165
+  },
+  "unique": {
+    "sample_id": 1020,
+    "title": 1020,
+    "description": 1020,
+    "scenario_group": 1020
+  },
+  "label_cardinalities": {
+    "1": 720,
+    "2": 180,
+    "0": 100,
+    "3": 20
+  },
+  "scope": "Structural inventory only. No model trained, labels tuned, or test quality measured."
+}

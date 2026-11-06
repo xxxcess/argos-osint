@@ -1,5 +1,5 @@
 //! The launcher uses the same semantic palette as the investigation TUI.
-use super::{configure_seed, Prompts, Selection};
+use super::{configure_launcher, Prompts, Selection};
 use crate::tui::theme;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
@@ -9,7 +9,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
-    text::{Line, Span},
+    text::Line,
     widgets::{Paragraph, Wrap},
     Frame, Terminal,
 };
@@ -35,6 +35,7 @@ pub(super) fn run(
     notice: Option<&str>,
     needs_seed: bool,
     needs_classifier: bool,
+    retrain_changed: bool,
 ) -> anyhow::Result<Option<Selection>> {
     enable_raw_mode()?;
     let _restore = Restore;
@@ -61,7 +62,13 @@ pub(super) fn run(
         if prompts.notice.is_empty() {
             prompts.notice = initial_notice.clone();
         }
-        let selection = configure_seed(&mut prompts, existing, needs_seed, needs_classifier)?;
+        let selection = configure_launcher(
+            &mut prompts,
+            existing,
+            needs_seed,
+            needs_classifier,
+            retrain_changed,
+        )?;
         if !prompts.navigation.back_requested {
             return Ok(selection);
         }
@@ -192,6 +199,11 @@ impl Question {
                 ("4", "Seed DB"),
                 ("5", "Train and save classifier"),
             ]
+        } else if label.starts_with("Retrain classifier now?") {
+            vec![
+                ("no", "Keep saved classifier"),
+                ("yes", "Retrain and save classifier"),
+            ]
         } else if label.starts_with("Web profile") {
             vec![("dev", "Development"), ("installed", "Built static app")]
         } else if label.starts_with("API [") {
@@ -277,6 +289,46 @@ impl Question {
         shown
     }
 
+    fn summary_lines(history: &[String], notice: &str, width: usize) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        for (value, style) in history
+            .iter()
+            .map(|value| (value.as_str(), theme::dim()))
+            .chain((!notice.is_empty()).then(|| {
+                (
+                    notice,
+                    if notice.to_ascii_lowercase().contains("fail")
+                        || notice.to_ascii_lowercase().contains("error")
+                    {
+                        theme::error()
+                    } else {
+                        theme::muted()
+                    },
+                )
+            }))
+        {
+            for paragraph in value.split('\n') {
+                let mut line = String::new();
+                for word in paragraph.split_whitespace() {
+                    if !line.is_empty() && line.width() + 1 + word.width() > width {
+                        lines.push(Line::styled(std::mem::take(&mut line), style));
+                    }
+                    if !line.is_empty() {
+                        line.push(' ');
+                    }
+                    for character in word.chars() {
+                        if line.width() + character.width().unwrap_or(0) > width {
+                            lines.push(Line::styled(std::mem::take(&mut line), style));
+                        }
+                        line.push(character);
+                    }
+                }
+                lines.push(Line::styled(line, style));
+            }
+        }
+        lines
+    }
+
     fn draw(&mut self, frame: &mut Frame, history: &[String], notice: &str) {
         let area = frame.area();
         frame.render_widget(Paragraph::new("").style(theme::text()), area);
@@ -310,7 +362,12 @@ impl Question {
             self.choices.len() as u16 * item_height + 4
         };
         let brand_height = if large { 8 } else { 3 };
-        let summary_height = (history.len() + usize::from(!notice.is_empty())).min(8) as u16;
+        let lines = Self::summary_lines(
+            history,
+            notice,
+            usize::from(area.width.saturating_sub(6)).max(1),
+        );
+        let summary_height = lines.len().min(8) as u16;
         let content_height = brand_height + card_height + summary_height + 4;
         let height = content_height.min(area.height.saturating_sub(2));
         let width = area.width.saturating_sub(4);
@@ -430,20 +487,6 @@ impl Question {
         }
         let summary = parts[2].inner(ratatui::layout::Margin::new(1, 1));
         let room = summary.height as usize;
-        let mut lines: Vec<Line<'_>> = history
-            .iter()
-            .map(|value| Line::from(vec![Span::styled(value, theme::dim())]))
-            .collect();
-        if !notice.is_empty() {
-            let style = if notice.to_ascii_lowercase().contains("fail")
-                || notice.to_ascii_lowercase().contains("error")
-            {
-                theme::error()
-            } else {
-                theme::muted()
-            };
-            lines.push(Line::styled(notice, style));
-        }
         let start = lines.len().saturating_sub(room + self.history_scroll);
         frame.render_widget(
             Paragraph::new(lines.into_iter().skip(start).take(room).collect::<Vec<_>>()).centered(),
@@ -744,6 +787,12 @@ mod tests {
                     (|v: &str| matches!(v, "4" | "5")) as fn(&str) -> bool,
                 ),
                 (
+                    "dataset-changed",
+                    "Retrain classifier now? [yes/no]",
+                    "no",
+                    (|v: &str| matches!(v, "yes" | "no")) as fn(&str) -> bool,
+                ),
+                (
                     "dataset",
                     "Classifier CSV path (auto for configured/default)",
                     "/data/article training.csv",
@@ -784,6 +833,9 @@ mod tests {
                 if name != "service" {
                     history.push("Service: Web".into());
                 }
+                if name == "dataset-changed" {
+                    history.push("The selected classifier dataset has changed since the active model was trained. Keep the saved model or retrain a synthetic baseline.".into());
+                }
                 if name == "terminal" {
                     history.extend(
                         [
@@ -799,6 +851,26 @@ mod tests {
                 terminal
                     .draw(|frame| question.draw(frame, &history, ""))
                     .unwrap();
+                if width >= 40 && name == "dataset-changed" {
+                    let buffer = terminal.backend().buffer();
+                    let visible = (0..height)
+                        .map(|y| {
+                            (0..width)
+                                .map(|x| buffer[(x, y)].symbol())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let visible = visible.split_whitespace().collect::<Vec<_>>().join(" ");
+                    assert!(
+                        visible.contains("dataset has changed since the active model was trained."),
+                        "{width}x{height}: {visible}"
+                    );
+                    assert!(
+                        visible.contains("retrain a synthetic baseline."),
+                        "{width}x{height}: {visible}"
+                    );
+                }
                 if width >= 40 && matches!(name, "dataset" | "actor-dataset") {
                     let buffer = terminal.backend().buffer();
                     let text = (0..height)

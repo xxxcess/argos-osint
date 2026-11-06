@@ -196,16 +196,30 @@ fn duplicated_training_tokens_do_not_change_fitted_binary_counts() {
     let mut first = support::Fixture::new("single-token-recipe");
     let mut second = support::Fixture::new("repeated-token-recipe");
     let rows = support::recipe()["rows"].clone();
-    let mut repeated = rows.clone();
-    for row in repeated.as_array_mut().unwrap() {
-        let title = row["title"].as_str().unwrap();
-        row["title"] = format!("{title} {title}").into();
-        let description = row["description"].as_str().unwrap();
-        row["description"] = format!("{description} {description}").into();
-    }
-    first.fit(rows);
-    second.fit(repeated);
-    assert_eq!(first.payload(), second.payload());
+    let repeat_rows = |separator: &str| {
+        let mut repeated = rows.clone();
+        for row in repeated.as_array_mut().unwrap() {
+            let title = row["title"].as_str().unwrap();
+            row["title"] = format!("{title}{separator}{title}").into();
+            let description = row["description"].as_str().unwrap();
+            row["description"] = format!("{description}{separator}{description}").into();
+        }
+        repeated
+    };
+    first.fit(rows.clone());
+    // Repeating the same phrases across a hard boundary changes occurrence
+    // frequency, but must preserve every binary count, binding and prior.
+    second.fit(repeat_rows("\n"));
+    let original = first.payload();
+    assert_eq!(original, second.payload());
+    drop(first);
+    drop(second);
+
+    // Adjacent copies introduce a real bigram at their join. They are distinct
+    // feature sets, so the unigram-era equality assertion does not apply.
+    let mut adjacent = support::Fixture::new("adjacent-repeat-recipe");
+    adjacent.fit(repeat_rows(" "));
+    assert_ne!(original, adjacent.payload());
 }
 
 fn pad(path: &Path, limit: u64) {

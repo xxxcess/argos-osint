@@ -28,6 +28,7 @@ pub mod atlas_calibration;
 pub mod atlas_classify;
 #[cfg(test)]
 mod atlas_classify_tests;
+pub mod atlas_derivative_worker;
 pub mod atlas_insights;
 pub mod atlas_memory;
 pub mod atlas_metadata;

@@ -111,6 +111,7 @@ impl Candidate {
         let gates = GateSet {
             version: CALIBRATION_VERSION.into(),
             domains: DomainId::ALL.map(|domain| DomainCalibration {
+                sigmoid: None,
                 domain,
                 knots: vec![],
                 threshold: 2.0,
@@ -126,7 +127,7 @@ impl Candidate {
             .map(|domain| serde_json::json!({"domain":domain.as_str(),"accepted_families":0}))
             .collect();
         let report=serde_json::from_value(serde_json::json!({
-            "schema_version":"classifier-training-report-v1","request_id":"fixture-activation","model_id":fixture.model,
+            "schema_version":argos_osint_core::classifier::training::TRAINING_REPORT_SCHEMA_VERSION,"request_id":"fixture-activation","model_id":fixture.model,
             "provenance":provenance,"class_counts":class_counts,"family_counts":family_counts,
             "calibration":gates,"evaluation":evaluation,"domain_decisions":evaluation.domains,
         })).unwrap();
@@ -138,7 +139,7 @@ impl Candidate {
             "previous_model_id":null,"activated_at":"","manifest_sha256":"",
             "model_sha256":artifact::sha256_hex(payload.as_bytes()),"report_sha256":artifact::sha256_hex(report_bytes.as_bytes()),
             "dataset_sha256":"0".repeat(64),"train_split_sha256":"1".repeat(64),"calibration_split_sha256":"2".repeat(64),
-            "test_split_sha256":"3".repeat(64),"family_assignment_sha256":"4".repeat(64),
+            "development_split_sha256":"7".repeat(64),"test_split_sha256":"3".repeat(64),"family_assignment_sha256":"4".repeat(64),
             "taxonomy_version":TAXONOMY_VERSION,"domains":DomainId::ALL,"algorithm_version":classifier::ALGORITHM_VERSION,
             "preprocessing_version":classifier::PREPROCESSING_VERSION,"feature_schema_version":artifact::FEATURE_SCHEMA_VERSION,
             "admission_policy_version":classifier::ADMISSION_POLICY_VERSION,"natural_version":identity.natural_version,

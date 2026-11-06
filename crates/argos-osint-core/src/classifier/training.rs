@@ -47,7 +47,7 @@ pub const MAX_TRAINING_FEATURES_PER_DOMAIN: usize = 100_000;
 pub const MAX_RETAINED_DOCUMENTS_PER_DOMAIN: usize = 50_000;
 
 /// Schema version for classifier training reports.
-pub const TRAINING_REPORT_SCHEMA_VERSION: &str = "classifier-training-report-v1";
+pub const TRAINING_REPORT_SCHEMA_VERSION: &str = "classifier-training-report-v2";
 
 /// Policy version for deterministic family representative deduplication.
 pub const REPRESENTATIVE_POLICY_VERSION: &str = "family-representative-v1";
@@ -193,6 +193,7 @@ pub struct DatasetRow {
 pub struct CorpusHashes {
     pub train_split_sha256: String,
     pub calibration_split_sha256: String,
+    pub development_split_sha256: String,
     pub test_split_sha256: String,
     pub family_assignment_sha256: String,
 }
@@ -204,6 +205,7 @@ pub struct TrainingCorpus {
     pub dataset_sha256: String,
     pub train_split_sha256: String,
     pub calibration_split_sha256: String,
+    pub development_split_sha256: String,
     pub test_split_sha256: String,
     pub family_assignment_sha256: String,
 }
@@ -286,6 +288,8 @@ pub struct TrainedCandidate {
 /// Detailed evaluation and calibration report for a candidate model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrainingReport {
+    #[serde(default)]
+    pub calibrator_comparison: Vec<CalibratorComparison>,
     pub schema_version: String,
     pub request_id: String,
     pub model_id: ModelId,
@@ -294,8 +298,28 @@ pub struct TrainingReport {
     pub family_counts: [DomainFamilyCount; 6],
     #[serde(rename = "calibration")]
     pub gate_set: GateSet,
+    /// Calibration-fit diagnostics are not independent quality evidence.
+    #[serde(default)]
+    pub fit_diagnostics: Option<EvaluationMetrics>,
+    #[serde(default = "default_evaluation_split")]
+    pub evaluation_split: Split,
     pub evaluation: EvaluationMetrics,
     pub domain_decisions: [DomainAcceptance; 6],
+}
+
+/// Development comparison; never derived from Test or reported as real review.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalibratorComparison {
+    pub kind: String,
+    pub development_brier: Option<f64>,
+    pub development_macro_f1: Option<f64>,
+    pub selected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+fn default_evaluation_split() -> Split {
+    Split::Calibration
 }
 
 /// High-level training outcome combining report and activation authorization result.
@@ -322,6 +346,8 @@ pub struct PreprocessingPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrainingRow {
     pub row_id: String,
+    #[serde(default)]
+    pub feature_input_hash: String,
     pub title: String,
     pub description: String,
     pub membership: [LabelMembership; 6],
@@ -404,6 +430,7 @@ pub fn corpus_hashes(rows: &[DatasetRow]) -> Result<CorpusHashes, ClassifierErro
     let mut train_rows = Vec::new();
     let mut calib_rows = Vec::new();
     let mut test_rows = Vec::new();
+    let mut development_rows = Vec::new();
     let mut family_splits: BTreeMap<&FamilyId, Split> = BTreeMap::new();
 
     for row in rows {
@@ -426,7 +453,7 @@ pub fn corpus_hashes(rows: &[DatasetRow]) -> Result<CorpusHashes, ClassifierErro
         match row.split {
             Split::Train => train_rows.push(row),
             Split::Calibration => calib_rows.push(row),
-            Split::Development => {}
+            Split::Development => development_rows.push(row),
             Split::Test => test_rows.push(row),
         }
     }
@@ -438,6 +465,8 @@ pub fn corpus_hashes(rows: &[DatasetRow]) -> Result<CorpusHashes, ClassifierErro
 
     let train_split_sha256 = hash_split_rows("train", &train_rows);
     let calibration_split_sha256 = hash_split_rows("calibration", &calib_rows);
+    development_rows.sort_by(|a, b| a.sample_id.cmp(&b.sample_id));
+    let development_split_sha256 = hash_split_rows("development", &development_rows);
     let test_split_sha256 = hash_split_rows("test", &test_rows);
 
     // Family assignment hash: sorted distinct (family_id, split) pairs
@@ -456,6 +485,7 @@ pub fn corpus_hashes(rows: &[DatasetRow]) -> Result<CorpusHashes, ClassifierErro
     Ok(CorpusHashes {
         train_split_sha256,
         calibration_split_sha256,
+        development_split_sha256,
         test_split_sha256,
         family_assignment_sha256,
     })
@@ -512,6 +542,16 @@ fn hash_split_rows(split_name: &str, rows: &[&DatasetRow]) -> String {
 }
 
 /// Validates source attribution metadata before it is used for model or quality claims.
+fn valid_source_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+fn invalid_source() -> ClassifierError {
+    ClassifierError::InvalidTrainingData {
+        row_id: None,
+        reason: "invalid_source_provenance".into(),
+    }
+}
+
 pub(crate) fn validate_provenance(provenance: &Provenance) -> Result<(), ClassifierError> {
     let (version, hash, review) = match provenance {
         Provenance::SyntheticBaseline {
@@ -523,6 +563,36 @@ pub(crate) fn validate_provenance(provenance: &Provenance) -> Result<(), Classif
             dataset_sha256,
             review_reference,
         } => (dataset_version, dataset_sha256, Some(review_reference)),
+        Provenance::ApprovedProvider {
+            dataset_version,
+            dataset_sha256,
+            mapping_approval_sha256,
+        } => {
+            if !valid_source_hash(mapping_approval_sha256) {
+                return Err(invalid_source());
+            }
+            (dataset_version, dataset_sha256, None)
+        }
+        Provenance::MixedTraining {
+            dataset_version,
+            dataset_sha256,
+            seed_dataset_sha256,
+            reviewed_corpus_sha256,
+            review_reference,
+            mapping_approval_sha256,
+        } => {
+            if ![
+                seed_dataset_sha256,
+                reviewed_corpus_sha256,
+                mapping_approval_sha256,
+            ]
+            .into_iter()
+            .all(|hash| valid_source_hash(hash))
+            {
+                return Err(invalid_source());
+            }
+            (dataset_version, dataset_sha256, Some(review_reference))
+        }
     };
     if version.trim().is_empty()
         || version.len() > 256
@@ -721,6 +791,15 @@ pub fn validate_corpus(corpus: &TrainingCorpus) -> Result<(), ClassifierError> {
             ),
         });
     }
+    if computed_hashes.development_split_sha256 != corpus.development_split_sha256 {
+        return Err(ClassifierError::InvalidTrainingData {
+            row_id: None,
+            reason: format!(
+                "development_split_sha256 mismatch: expected `{}`, computed `{}`",
+                corpus.development_split_sha256, computed_hashes.development_split_sha256
+            ),
+        });
+    }
     if computed_hashes.test_split_sha256 != corpus.test_split_sha256 {
         return Err(ClassifierError::InvalidTrainingData {
             row_id: None,
@@ -815,7 +894,9 @@ pub fn train_candidate<W: ClassifierWorker + ?Sized>(
     validate_provenance(&request.provenance)?;
     let request_hash = match &request.provenance {
         Provenance::SyntheticBaseline { dataset_sha256, .. }
-        | Provenance::ReviewedReal { dataset_sha256, .. } => dataset_sha256,
+        | Provenance::ReviewedReal { dataset_sha256, .. }
+        | Provenance::MixedTraining { dataset_sha256, .. } => dataset_sha256,
+        Provenance::ApprovedProvider { .. } => return Err(invalid_source()),
     };
     if request_hash != &corpus.dataset_sha256
         || (matches!(request.provenance, Provenance::ReviewedReal { .. })
@@ -843,6 +924,7 @@ pub fn train_candidate<W: ClassifierWorker + ?Sized>(
     prog.stage = TrainingStage::Collecting;
     let mut train_families: BTreeMap<&FamilyId, &DatasetRow> = BTreeMap::new();
     let mut calib_families: BTreeMap<&FamilyId, &DatasetRow> = BTreeMap::new();
+    let mut development_families: BTreeMap<&FamilyId, &DatasetRow> = BTreeMap::new();
 
     for row in &corpus.rows {
         match row.split {
@@ -864,7 +946,13 @@ pub fn train_candidate<W: ClassifierWorker + ?Sized>(
                     calib_families.insert(&row.family_id, row);
                 }
             }
-            Split::Development | Split::Test => {}
+            Split::Development => {
+                let representative = development_families.entry(&row.family_id).or_insert(row);
+                if row.sample_id < representative.sample_id {
+                    *representative = row;
+                }
+            }
+            Split::Test => {}
         }
     }
 
@@ -874,8 +962,84 @@ pub fn train_candidate<W: ClassifierWorker + ?Sized>(
     prog.rows_total = train_reps.len() as u64;
     progress(&prog);
 
+    if !train_reps.iter().any(|row| {
+        row.membership
+            .iter()
+            .any(|label| *label != LabelMembership::Unknown)
+    }) {
+        return Err(ClassifierError::InvalidTrainingData {
+            row_id: None,
+            reason: "no_supervised_training_families".into(),
+        });
+    }
     // 3. Batch training rounds
     prog.stage = TrainingStage::Fitting;
+    // Vocabulary sees Train-family representatives only. Retain their encoded
+    // features in the bounded worker until fit, avoiding a second tokenization.
+    let mut prepared_offset = 0;
+    let mut prepared_round = 0u64;
+    while prepared_offset < train_reps.len() {
+        control.check_active()?;
+        let mut count = (train_reps.len() - prepared_offset).min(TRAINING_BATCH_SIZE);
+        let (request_json, prepared_count) = loop {
+            let rows: Vec<_> = train_reps[prepared_offset..prepared_offset + count]
+                .iter()
+                .filter(|row| {
+                    row.membership
+                        .iter()
+                        .any(|label| *label != LabelMembership::Unknown)
+                })
+                .map(|row| TrainingRow {
+                    row_id: row.sample_id.clone(),
+                    feature_input_hash: super::ClassifyInput::new(
+                        "vocabulary",
+                        &row.title,
+                        &row.description,
+                        None,
+                    )
+                    .input_hash,
+                    title: row.title.clone(),
+                    description: row.description.clone(),
+                    membership: row.membership,
+                })
+                .collect();
+            let length = rows.len();
+            let envelope = serde_json::json!({"version":"1","request_id":operation_id(request,"prepareVocabulary",prepared_round,"0"),"model_id":request.model_id,"phase":"vocabulary","rows":rows});
+            let encoded = serde_json::to_string(&envelope)
+                .map_err(|_| ClassifierError::InvalidArtifact("vocabulary_envelope".into()))?;
+            if encoded.len() <= MAX_TRAINING_ENVELOPE_BYTES {
+                break (encoded, length);
+            }
+            if count == 1 {
+                return Err(ClassifierError::ModelTooLarge);
+            }
+            count = count.div_ceil(2);
+        };
+        if prepared_count > 0 {
+            let response = worker.call(BridgeOperation::TrainBatch, &request_json, control)?;
+            let response: serde_json::Value = serde_json::from_str(&response)
+                .map_err(|_| ClassifierError::InvalidArtifact("vocabulary_response".into()))?;
+            if response["prepared"].as_u64() != Some(prepared_count as u64) {
+                return Err(ClassifierError::BridgeProtocol {
+                    operation: "trainBatch".into(),
+                    code: "vocabulary_preparation_failed".into(),
+                });
+            }
+        }
+        prepared_offset += count;
+        prepared_round += 1;
+    }
+    let freeze = serde_json::json!({"version":"1","request_id":operation_id(request,"freezeVocabulary",0,"0"),"model_id":request.model_id,"phase":"freeze_vocabulary","rows":[]});
+    let frozen = worker.call(BridgeOperation::TrainBatch, &freeze.to_string(), control)?;
+    let frozen: serde_json::Value = serde_json::from_str(&frozen)
+        .map_err(|_| ClassifierError::InvalidArtifact("vocabulary_freeze_response".into()))?;
+    if frozen["vocabulary_frozen"] != true {
+        return Err(ClassifierError::BridgeProtocol {
+            operation: "trainBatch".into(),
+            code: "vocabulary_freeze_failed".into(),
+        });
+    }
+
     let mut next_row = 0usize;
     let mut round: u64 = 0;
     let mut rows_seen: u64 = 0;
@@ -911,6 +1075,13 @@ pub fn train_candidate<W: ClassifierWorker + ?Sized>(
             }
             let training_row = TrainingRow {
                 row_id: row.sample_id.clone(),
+                feature_input_hash: super::ClassifyInput::new(
+                    "vocabulary",
+                    &row.title,
+                    &row.description,
+                    None,
+                )
+                .input_hash,
                 title: row.title.clone(),
                 description: row.description.clone(),
                 membership: row.membership,
@@ -1142,10 +1313,12 @@ pub fn train_candidate<W: ClassifierWorker + ?Sized>(
         "request_id": operation_id(request, "serializeModel", 0, "0"),
         "model_id": request.model_id.as_str(),
     });
+    let mut artifact_control = control.clone();
+    artifact_control.execution_timeout = control.artifact_execution_timeout;
     let payload = worker.call(
         BridgeOperation::SerializeModel,
         &serialize_req.to_string(),
-        control,
+        &artifact_control,
     )?;
 
     // 5. Calibration & Evaluation on Calibration split
@@ -1153,7 +1326,10 @@ pub fn train_candidate<W: ClassifierWorker + ?Sized>(
     prog.stage = TrainingStage::Calibrating;
     progress(&prog);
 
-    let mut calib_reps: Vec<&DatasetRow> = calib_families.into_values().collect();
+    let mut calib_reps: Vec<&DatasetRow> = calib_families
+        .into_values()
+        .chain(development_families.into_values())
+        .collect();
     calib_reps.sort_by(|a, b| a.sample_id.cmp(&b.sample_id));
 
     let mut scored_families = Vec::with_capacity(calib_reps.len());
@@ -1255,16 +1431,91 @@ pub fn train_candidate<W: ClassifierWorker + ?Sized>(
     }
 
     // Fit isotonic transform and gate set
-    let calibration_fit = super::calibration::fit(&scored_families, &CalibrationPolicy)?;
-    let evaluation_metrics =
-        super::calibration::evaluate(&scored_families, &calibration_fit.gates)?;
+    let calibration_rows: Vec<_> = scored_families
+        .iter()
+        .filter(|row| row.split == Split::Calibration)
+        .cloned()
+        .collect();
+    let development_rows: Vec<_> = scored_families
+        .iter()
+        .filter(|row| row.split == Split::Development)
+        .cloned()
+        .collect();
+    let mut calibration_fit = super::calibration::fit(&calibration_rows, &CalibrationPolicy)?;
+    let isotonic_brier =
+        super::calibration::brier_score(&development_rows, &calibration_fit.gates)?;
+    let mut calibrator_comparison = vec![CalibratorComparison {
+        kind: "isotonic".into(),
+        failure: None,
+        development_brier: isotonic_brier,
+        development_macro_f1: None,
+        selected: true,
+    }];
+    if !development_rows.is_empty() {
+        let baseline = super::calibration::evaluate(&development_rows, &calibration_fit.gates)?;
+        calibrator_comparison[0].development_macro_f1 = Some(baseline.macro_f1);
+        match super::calibration::fit_sigmoid(&calibration_rows) {
+            Ok(candidate) => {
+                let candidate_metrics =
+                    super::calibration::evaluate(&development_rows, &candidate.gates)?;
+                let candidate_brier =
+                    super::calibration::brier_score(&development_rows, &candidate.gates)?;
+                let choose = candidate_brier
+                    .zip(isotonic_brier)
+                    .is_some_and(|(a, b)| a < b)
+                    && candidate_metrics.macro_f1 >= baseline.macro_f1
+                    && super::calibration::selection_nonregression(&candidate_metrics, &baseline)
+                    && candidate_metrics.false_oos_admissions <= baseline.false_oos_admissions
+                    && candidate_metrics.invalid_selected_pairs <= baseline.invalid_selected_pairs
+                    && candidate_metrics
+                        .domains
+                        .iter()
+                        .zip(&baseline.domains)
+                        .all(|(a, b)| !b.accepted || a.accepted);
+                calibrator_comparison.push(CalibratorComparison {
+                    kind: "regularized_monotone_sigmoid".into(),
+                    failure: None,
+                    development_brier: candidate_brier,
+                    development_macro_f1: Some(candidate_metrics.macro_f1),
+                    selected: choose,
+                });
+                if choose {
+                    calibrator_comparison[0].selected = false;
+                    calibration_fit = candidate;
+                }
+            }
+            Err(ClassifierError::InvalidCalibrationData { reason, .. }) => {
+                calibrator_comparison.push(CalibratorComparison {
+                    kind: "regularized_monotone_sigmoid".into(),
+                    development_brier: None,
+                    development_macro_f1: None,
+                    selected: false,
+                    failure: Some(reason),
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    // Legacy corpora have no Development partition: identify their evaluation as
+    // fit-only instead of claiming independent support. Never open Test here.
+    let evaluation_split = if development_rows.is_empty() {
+        Split::Calibration
+    } else {
+        Split::Development
+    };
+    let evaluation_rows = if development_rows.is_empty() {
+        &calibration_rows
+    } else {
+        &development_rows
+    };
+    let evaluation_metrics = super::calibration::evaluate(evaluation_rows, &calibration_fit.gates)?;
 
     // 6. Restore smoke check
     control.check_active()?;
     prog.stage = TrainingStage::ValidatingRestore;
     progress(&prog);
 
-    worker.restore_completed_candidate(&request.model_id, &payload, control)?;
+    worker.restore_completed_candidate(&request.model_id, &payload, &artifact_control)?;
 
     // Compute class and family counts
     let mut class_counts = core::array::from_fn(|idx| DomainClassCount {
@@ -1295,6 +1546,7 @@ pub fn train_candidate<W: ClassifierWorker + ?Sized>(
     progress(&prog);
 
     let report = TrainingReport {
+        calibrator_comparison,
         schema_version: TRAINING_REPORT_SCHEMA_VERSION.into(),
         request_id: request.request_id.clone(),
         model_id: request.model_id.clone(),
@@ -1302,6 +1554,8 @@ pub fn train_candidate<W: ClassifierWorker + ?Sized>(
         class_counts,
         family_counts,
         gate_set: calibration_fit.gates,
+        fit_diagnostics: Some(calibration_fit.metrics),
+        evaluation_split,
         evaluation: evaluation_metrics.clone(),
         domain_decisions: evaluation_metrics.domains,
     };
@@ -1373,6 +1627,7 @@ mod tests {
         let h = corpus_hashes(&rows).unwrap_or(CorpusHashes {
             train_split_sha256: "0".repeat(64),
             calibration_split_sha256: "0".repeat(64),
+            development_split_sha256: "0".repeat(64),
             test_split_sha256: "0".repeat(64),
             family_assignment_sha256: "0".repeat(64),
         });
@@ -1382,6 +1637,7 @@ mod tests {
             dataset_sha256: "a".repeat(64),
             train_split_sha256: h.train_split_sha256,
             calibration_split_sha256: h.calibration_split_sha256,
+            development_split_sha256: h.development_split_sha256,
             test_split_sha256: h.test_split_sha256,
             family_assignment_sha256: h.family_assignment_sha256,
         };
@@ -1412,4 +1668,62 @@ mod packing_bound_tests {
             assert_eq!(header.request_id.len(), "trainBatch:".len() + 64);
         }
     }
+}
+
+/// Builds the immutable manifest identically for manual and durable candidates.
+pub fn candidate_manifest(
+    corpus: &TrainingCorpus,
+    request: &TrainRequest,
+    candidate: &TrainedCandidate,
+) -> Result<super::artifact::ModelManifest, ClassifierError> {
+    let identity = super::compiled_identity()?;
+    let report_bytes = super::artifact::bounded_json_bytes(&candidate.report)?;
+    let manifest = super::artifact::ModelManifest {
+        schema_version: super::artifact::MANIFEST_SCHEMA_VERSION.into(),
+        activation_generation: 0,
+        model_id: request.model_id.clone(),
+        previous_model_id: None,
+        activated_at: String::new(),
+        model_sha256: super::artifact::sha256_hex(candidate.payload.as_bytes()),
+        manifest_sha256: String::new(),
+        report_sha256: super::artifact::sha256_hex(&report_bytes),
+        dataset_sha256: corpus.dataset_sha256.clone(),
+        train_split_sha256: corpus.train_split_sha256.clone(),
+        calibration_split_sha256: corpus.calibration_split_sha256.clone(),
+        development_split_sha256: corpus.development_split_sha256.clone(),
+        test_split_sha256: corpus.test_split_sha256.clone(),
+        family_assignment_sha256: corpus.family_assignment_sha256.clone(),
+        taxonomy_version: super::TAXONOMY_VERSION.into(),
+        domains: super::DomainId::ALL.to_vec(),
+        algorithm_version: super::ALGORITHM_VERSION.into(),
+        preprocessing_version: super::PREPROCESSING_VERSION.into(),
+        feature_schema_version: super::artifact::FEATURE_SCHEMA_VERSION.into(),
+        admission_policy_version: super::ADMISSION_POLICY_VERSION.into(),
+        natural_version: identity.natural_version,
+        apparatus_version: identity.apparatus_version,
+        bundle_sha256: identity.bundle_sha256,
+        bridge_version: identity.bridge_version,
+        bridge_sha256: identity.bridge_sha256,
+        adapter_sha256: identity.adapter_sha256,
+        source_manifest_sha256: identity.source_manifest_sha256,
+        smoothing: 1.0,
+        thresholds: candidate
+            .report
+            .gate_set
+            .domains
+            .iter()
+            .map(|d| super::artifact::DomainThreshold {
+                domain: d.domain,
+                threshold: d.threshold,
+            })
+            .collect(),
+        class_counts: candidate.report.class_counts.to_vec(),
+        family_counts: candidate.report.family_counts.to_vec(),
+        metrics: serde_json::to_value(&candidate.report).map_err(|_| {
+            ClassifierError::InvalidArtifact("training_report_serialization_failed".into())
+        })?,
+        provenance: request.provenance.clone(),
+        activation_reason: super::artifact::ActivationReason::ManualSeed,
+    };
+    Ok(manifest)
 }

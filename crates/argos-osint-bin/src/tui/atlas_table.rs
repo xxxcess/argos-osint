@@ -288,34 +288,18 @@ pub fn draw_origins(frame: &mut Frame, view: OriginsView<'_>) {
         title.to_string()
     };
     frame.render_widget(pane(&title), area);
-    let mut inner = inset(area);
+    let inner = inset(area);
     if inner.width <= 2 || inner.height == 0 {
         return;
     }
-    if !prefix.is_empty() {
-        let prefix_h = (prefix.len() as u16).min(inner.height);
-        frame.render_widget(
-            Paragraph::new(prefix),
-            Rect {
-                height: prefix_h,
-                ..inner
-            },
-        );
-        inner.y = inner.y.saturating_add(prefix_h);
-        inner.height = inner.height.saturating_sub(prefix_h);
-    }
-    if inner.height == 0 {
-        return;
-    }
+    // Prefix telemetry and table rows share one measured scroll extent. This
+    // keeps readiness reachable when a compact viewport cannot show both.
+    let mut rendered = prefix;
     if origins.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(empty.to_string(), theme::dim()))),
-            inner,
-        );
-        return;
+        rendered.push(Line::from(Span::styled(empty.to_string(), theme::dim())));
+    } else {
+        rendered.extend(origins_lines(origins, stats, inner.width));
     }
-
-    let rendered = origins_lines(origins, stats, inner.width);
     let skip = scroll.min(rendered.len().saturating_sub(1));
     let visible: Vec<Line<'static>> = rendered.into_iter().skip(skip).collect();
     frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), inner);

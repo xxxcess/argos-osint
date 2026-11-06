@@ -48,6 +48,7 @@ DEFINE FIELD IF NOT EXISTS origin_id ON brain_actor_mention TYPE string;
 DEFINE FIELD IF NOT EXISTS origin_revision ON brain_actor_mention TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS spans_json ON brain_actor_mention TYPE string DEFAULT '[]';
 DEFINE FIELD IF NOT EXISTS publication_batch ON brain_actor_mention TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS native_input_revision ON brain_actor_mention TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS created_at ON brain_actor_mention TYPE string;
 DEFINE INDEX IF NOT EXISTS brain_actor_mention_actor ON brain_actor_mention FIELDS actor_id;
 DEFINE INDEX IF NOT EXISTS brain_actor_mention_origin ON brain_actor_mention FIELDS origin_kind, origin_scope, origin_id;
@@ -110,6 +111,11 @@ pub struct SupportBatch {
 }
 
 impl SupportBatch {
+    /// Returns the operational generation only to this transaction's owner.
+    pub(crate) fn publication_id(&self, tx: &Tx) -> Result<&str, TxError> {
+        self.check_owner(tx)?;
+        Ok(&self.nonce)
+    }
     /// Creates one batch inside a transaction attempt. Recreate it on retry;
     /// clones share the actual owner and the once gate within that attempt.
     pub fn new(tx: &Tx) -> Self {
@@ -800,6 +806,7 @@ DEFINE FIELD IF NOT EXISTS run_id ON atlas_article_index TYPE string;
 DEFINE FIELD IF NOT EXISTS article_id ON atlas_article_index TYPE string;
 DEFINE FIELD IF NOT EXISTS input_revision ON atlas_article_index TYPE string;
 DEFINE FIELD IF NOT EXISTS index_checksum ON atlas_article_index TYPE string;
+DEFINE FIELD IF NOT EXISTS publication_batch ON atlas_article_index TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS actor_coverage ON atlas_article_index TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS indexed_at ON atlas_article_index TYPE string;
 DEFINE INDEX IF NOT EXISTS atlas_article_index_run ON atlas_article_index FIELDS run_id;";
@@ -816,6 +823,7 @@ pub struct ArticleIndexRow {
     pub input_revision: String,
     pub index_checksum: String,
     pub actor_coverage: String,
+    pub publication_batch: String,
 }
 
 /// Receipts of one run (checksums are checked by the caller).
@@ -825,7 +833,7 @@ pub async fn article_index_receipts(
 ) -> Result<Vec<ArticleIndexRow>, TxError> {
     let mut r = db
         .query(
-            "SELECT article_id, input_revision, index_checksum, actor_coverage \
+            "SELECT article_id, input_revision, index_checksum, actor_coverage, (publication_batch ?? '') AS publication_batch \
              FROM atlas_article_index WHERE run_id = $run",
         )
         .bind(("run", run_id.to_string()))
@@ -842,7 +850,11 @@ pub async fn put_article_index_in(
     row: &ArticleIndexRow,
     now: &str,
 ) -> Result<(), TxError> {
-    if run_id.is_empty() || article_id.is_empty() {
+    if run_id.is_empty()
+        || article_id.is_empty()
+        || row.publication_batch.is_empty()
+        || row.publication_batch.len() > 256
+    {
         return Err(TxError::Abort("atlas_article_index: empty id".into()));
     }
     run(
@@ -850,7 +862,7 @@ pub async fn put_article_index_in(
         tx.query(
             "UPSERT type::record('atlas_article_index', $key) SET run_id = $run, \
              article_id = $article, input_revision = $rev, index_checksum = $sum, \
-             actor_coverage = $cov, indexed_at = $now RETURN NONE",
+             actor_coverage = $cov,publication_batch=$publication, indexed_at = $now RETURN NONE",
         )
         .bind(("key", super::codec::encode(&[run_id, article_id])))
         .bind(("run", run_id.to_string()))
@@ -858,6 +870,7 @@ pub async fn put_article_index_in(
         .bind(("rev", row.input_revision.clone()))
         .bind(("sum", row.index_checksum.clone()))
         .bind(("cov", row.actor_coverage.clone()))
+        .bind(("publication", row.publication_batch.clone()))
         .bind(("now", now.to_string())),
     )
     .await?;
@@ -1434,7 +1447,7 @@ async fn source_guards_in(
             "RETURN crypto::sha256(type::string([
                (SELECT input_revision, source_revision, classification_receipt_key, admission_state
                   FROM ONLY $article),
-               (SELECT input_revision, index_checksum FROM ONLY $index),
+               (SELECT input_revision, index_checksum,publication_batch FROM ONLY $index),
                (SELECT input_hash, metadata_json FROM ONLY $metadata),
                (SELECT owner_kind, owner_id, desired_generation, active_snapshot_id, lifecycle
                   FROM insight_owner_state WITH INDEX insight_owner_scope
@@ -1668,6 +1681,10 @@ async fn put_frontier_in(
     work: &ReconcileWork,
     refresh: bool,
 ) -> Result<(), TxError> {
+    if generation < 0 {
+        return Err(reconcile_error("negative_frontier_generation"));
+    }
+
     let identity = work.identity();
     let json = reconcile_json(work)?;
     if json.len() > RECONCILE_ITEM_BYTES {
@@ -1709,9 +1726,15 @@ async fn next_frontier_in(
     phase: &str,
     generation: i64,
 ) -> Result<Option<ReconcileWork>, TxError> {
-    // A fixed priority prefix makes every LIMIT1 probe index-ordered.
-    // A generation range sorted by priority could materialize the frontier.
-    // Twelve probes share one SDK issue and return at most12 rows.
+    if generation < 0 {
+        return Err(reconcile_error("negative_frontier_generation"));
+    }
+    let started = std::time::Instant::now();
+    // Frontier writers only create nonnegative generations. At generation0,
+    // no older-generation obligation can exist; retain all six current-work
+    // probes and every source/support fence. Later generations keep the full
+    // lazy-reset search. Each fixed priority prefix stays index-ordered.
+    let statement_count = if generation == 0 { 6usize } else { 12usize };
     let mut sql = String::new();
     for priority in 0..=5 {
         sql.push_str(&format!(
@@ -1721,15 +1744,19 @@ async fn next_frontier_in(
                  generation,priority
                FROM lifecycle_reconcile_frontier WITH INDEX lifecycle_reconcile_pending
                WHERE receipt_key=$receipt AND phase=$phase AND priority={priority}
-                 AND state='pending' AND generation=$generation ORDER BY identity LIMIT 1;
-             SELECT identity,
+                 AND state='pending' AND generation=$generation ORDER BY identity LIMIT 1;"
+        ));
+        if generation > 0 {
+            sql.push_str(&format!(
+                "SELECT identity,
                  IF bytes::len(type::bytes(payload_json))<=131072 {{payload_json}} ELSE {{NONE}} AS payload_json,
                  IF bytes::len(type::bytes(initial_json))<=131072 {{initial_json}} ELSE {{NONE}} AS initial_json,
                  generation,priority
                FROM lifecycle_reconcile_frontier WITH INDEX lifecycle_reconcile_generation
                WHERE receipt_key=$receipt AND phase=$phase AND priority={priority}
                  AND generation<$generation ORDER BY generation,identity LIMIT 1;"
-        ));
+            ));
+        }
     }
     let mut result = super::classifier_admission::tx_query(tx, sql)
         .bind(("receipt", receipt.to_string()))
@@ -1738,7 +1765,7 @@ async fn next_frontier_in(
         .await?
         .check()?;
     let mut rows = Vec::new();
-    for index in 0..12 {
+    for index in 0..statement_count {
         rows.extend(take::<Vec<FrontierRow>>(&mut result, index)?);
     }
     let mut decoded = Vec::new();
@@ -1756,6 +1783,7 @@ async fn next_frontier_in(
         decoded.push(work);
     }
     decoded.sort_by_key(|work| (work.priority(), work.identity()));
+    tracing::debug!(target:"argos::atlas_derivatives",statement_count=statement_count as u64,query_us=started.elapsed().as_micros() as u64,candidates=decoded.len(),"reconcile_frontier_probe");
     Ok(decoded.into_iter().next())
 }
 
@@ -1767,6 +1795,10 @@ async fn finish_frontier_in(
     work: &ReconcileWork,
     done: bool,
 ) -> Result<(), TxError> {
+    if generation < 0 {
+        return Err(reconcile_error("negative_frontier_generation"));
+    }
+
     let json = reconcile_json(work)?;
     if json.len() > RECONCILE_ITEM_BYTES {
         return Err(reconcile_error("frontier_item_too_large"));
@@ -3017,21 +3049,27 @@ async fn reconcile_relationship_in(
         .await?;
         return Ok(Vec::new());
     }
+    let ingest_cleanup = cleanup_eligible && ingest_memory_writable_in(tx, memory_id).await?;
     let mut unsupported = false;
     for endpoint in endpoints {
         if !endpoint_supported_in(tx, endpoint).await? {
             unsupported = true;
         }
-        if let Some(MutationIntent::Refresh {
-            source_revision, ..
-        }) = refresh_for(guards, endpoint)
-        {
-            if !endpoint.revision.is_empty() && &endpoint.revision != source_revision {
-                unsupported = true;
+        // A source refresh may retire only captured ingest inventory. A pin,
+        // analyst edit or validation gives a relationship its own authority;
+        // changing the article revision alone must not retire that evidence.
+        if ingest_cleanup {
+            if let Some(MutationIntent::Refresh {
+                source_revision, ..
+            }) = refresh_for(guards, endpoint)
+            {
+                if !endpoint.revision.is_empty() && &endpoint.revision != source_revision {
+                    unsupported = true;
+                }
             }
         }
     }
-    if cleanup_eligible && ingest_memory_writable_in(tx, memory_id).await? {
+    if ingest_cleanup {
         let payload = memory.payload_json.as_deref().and_then(|raw| {
             serde_json::from_str::<crate::memory_metadata::MemoryPayload>(raw).ok()
         });
@@ -3517,6 +3555,7 @@ async fn run_reconcile_in(
     budget: usize,
     caller_mutated: bool,
 ) -> Result<ReconcileProgress, TxError> {
+    let started = std::time::Instant::now();
     let mut guards = head.guards()?;
     if source_guards_in(tx, scope).await? != guards.sources {
         return Err(reconcile_error("source_conflict_restart_required"));
@@ -3541,9 +3580,11 @@ async fn run_reconcile_in(
     let batch = SupportBatch::new(tx);
     let mut changed = BTreeSet::new();
     let mut examined = 0;
+    let mut drained = false;
     while examined + 16 <= budget {
         let Some(mut work) = next_frontier_in(tx, receipt, "reconcile", guards.generation).await?
         else {
+            drained = true;
             break;
         };
         let (done, cost, ids) = reconcile_step_in(
@@ -3566,9 +3607,10 @@ async fn run_reconcile_in(
     guards.own_changes = caller_mutated || !changed.is_empty();
     guards.sources = source_guards_in(tx, scope).await?;
     guards.fence = support_fence_in(tx).await?;
-    let pending = next_frontier_in(tx, receipt, "reconcile", guards.generation)
-        .await?
-        .is_some();
+    let pending = !drained
+        && next_frontier_in(tx, receipt, "reconcile", guards.generation)
+            .await?
+            .is_some();
     head.phase = if pending || guards.own_changes {
         if restarted {
             "reconcile_restart"
@@ -3585,6 +3627,7 @@ async fn run_reconcile_in(
         .ok_or_else(|| reconcile_error("revision_exhausted"))?;
     head.guards_json = reconcile_json(&guards)?;
     save_head_in(tx, receipt, &head).await?;
+    tracing::debug!(target:"argos::atlas_derivatives",examined=examined as u64,restarted,pending,elapsed_us=started.elapsed().as_micros() as u64,"reconcile_page");
     Ok(ReconcileProgress {
         changed_memory_ids: changed.into_iter().collect(),
         next: (head.phase != "done").then(|| head.cursor(receipt)),
@@ -3673,6 +3716,68 @@ pub async fn reconcile_affected_in(
         }
         _ => Err(reconcile_error("phase_corrupt")),
     }
+}
+
+/// Resumes already published inventory cleanup under the caller's current
+/// source/task fence. This capability cannot capture or publish native output.
+/// The original mutation and initial frontier remain authoritative only while
+/// that publication's exact batch is still the occurrence's stored index.
+pub(crate) async fn resume_published_in(
+    tx: &Tx,
+    scope: &ReconcileScope,
+    cursor: &ReconcileCursor,
+) -> Result<ReconcileProgress, TxError> {
+    let (receipt, scope, mut head) = load_head_in(tx, scope, Some(cursor)).await?;
+    if head.phase == "done" {
+        return Ok(ReconcileProgress {
+            changed_memory_ids: Vec::new(),
+            next: None,
+            examined: 0,
+        });
+    }
+    if !matches!(head.phase.as_str(), "reconcile" | "reconcile_restart") {
+        return Err(reconcile_error("cleanup_requires_published_frontier"));
+    }
+    let [ReconcileKey::Source { run_id, article_id }] = scope.keys.as_slice() else {
+        return Err(reconcile_error("cleanup_scope"));
+    };
+    let mut guards = head.guards()?;
+    let key = super::codec::encode(&[run_id, article_id]);
+    let Some(MutationIntent::Refresh { batch, .. }) = guards.mutations.get(&key) else {
+        return Err(reconcile_error("cleanup_requires_refresh_mutation"));
+    };
+    let mut current = super::classifier_admission::tx_query(
+        tx,
+        "RETURN (SELECT VALUE publication_batch FROM ONLY $index)=$batch;",
+    )
+    .bind(("index", rid("atlas_article_index", &key)))
+    .bind(("batch", batch.clone()))
+    .await?
+    .check()?;
+    if batch.is_empty() || take::<Option<bool>>(&mut current, 0)? != Some(true) {
+        return Err(reconcile_error("cleanup_publication_superseded"));
+    }
+    let sources = source_guards_in(tx, &scope).await?;
+    let fence = support_fence_in(tx).await?;
+    if sources != guards.sources || fence != guards.fence {
+        // The source/publication barrier permits adoption of the old cleanup,
+        // never its native inputs. Lazy generation reset replays initial work,
+        // preserving captured actors/relationships already removed from storage.
+        guards.sources = sources;
+        guards.fence = fence;
+        guards.generation = guards
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| reconcile_error("generation_exhausted"))?;
+        guards.own_changes = false;
+        head.revision = head
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| reconcile_error("revision_exhausted"))?;
+        head.phase = "reconcile_restart".into();
+        head.guards_json = reconcile_json(&guards)?;
+    }
+    run_reconcile_in(tx, &receipt, &scope, head, RECONCILE_STEP_IDENTITIES, false).await
 }
 
 /// Runs one bounded affected step through the real publisher and index outbox.

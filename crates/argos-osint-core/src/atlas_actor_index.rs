@@ -1,11 +1,11 @@
-//! Atlas phase 6, "Index actors and articles" (contract `atlas-collection-v2`).
+//! Independently leased Atlas actor publication and lifecycle reconciliation.
 //!
 //! Every retained article occurrence is bound through Brain (actors, mention
 //! receipts, `mentioned_in` Links, ≤ [`crate::brain_actors::RELATED_PER_ARTICLE`]
 //! Related records) and receives an `atlas_article_index` receipt in the same
-//! transaction. Transactions hold at most [`BATCH`] occurrences; a failed unit
-//! rolls back alone and leaves no receipt, so the run cannot report phase 6
-//! complete and a resume redoes only the missing occurrences.
+//! transaction. A failed occurrence rolls back alone and leaves no receipt.
+//! Collection completion depends on the durable handoff; current actor and
+//! reconciliation readiness are tracked separately and resume independently.
 use anyhow::Result;
 
 use crate::brain_actors::IDENTITY_INDEX_VERSION;
@@ -13,7 +13,7 @@ use crate::brain_actors::IDENTITY_INDEX_VERSION;
 pub(crate) use surreal::process_derivative_claims;
 
 pub const BATCH: usize = 64;
-pub const INDEX_CONTRACT: &str = "atlas-actor-index-v6-metadata-first";
+pub const INDEX_CONTRACT: &str = "atlas-actor-index-v7-publication-generation";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IndexReport {
@@ -37,7 +37,7 @@ impl IndexReport {
     }
 }
 
-fn checksum(revision: &str, coverage: &str) -> String {
+pub(crate) fn checksum(revision: &str, coverage: &str) -> String {
     crate::nlp::cache::hash(&format!(
         "{INDEX_CONTRACT}|{IDENTITY_INDEX_VERSION}|{revision}|{coverage}"
     ))
@@ -191,7 +191,10 @@ pub mod surreal {
         Ok(lifecycle::article_index_receipts(repo.db(), run_id)
             .await?
             .into_iter()
-            .filter(|row| row.index_checksum == checksum(&row.input_revision, &row.actor_coverage))
+            .filter(|row| {
+                !row.publication_batch.is_empty()
+                    && row.index_checksum == checksum(&row.input_revision, &row.actor_coverage)
+            })
             .map(|row| (row.article_id, row.input_revision))
             .collect())
     }
@@ -203,6 +206,7 @@ pub mod surreal {
         input_revision: Option<String>,
         index_checksum: Option<String>,
         actor_coverage: Option<String>,
+        publication_batch: Option<String>,
     }
 
     const RECEIPTS_MANY_SQL: &str = "SELECT
@@ -210,7 +214,8 @@ pub mod surreal {
         IF bytes::len(type::bytes(article_id))<=512 {article_id} ELSE {NONE} AS article_id,
         IF bytes::len(type::bytes(input_revision))<=512 {input_revision} ELSE {NONE} AS input_revision,
         IF bytes::len(type::bytes(index_checksum))<=64 {index_checksum} ELSE {NONE} AS index_checksum,
-        IF bytes::len(type::bytes(actor_coverage))<=4096 {actor_coverage} ELSE {NONE} AS actor_coverage
+        IF bytes::len(type::bytes(actor_coverage))<=4096 {actor_coverage} ELSE {NONE} AS actor_coverage,
+        IF bytes::len(type::bytes(publication_batch ?? ''))<=256 {publication_batch ?? ''} ELSE {NONE} AS publication_batch
         FROM $records;";
 
     fn receipt_records(
@@ -234,13 +239,22 @@ pub mod surreal {
     > {
         let mut out = std::collections::BTreeMap::new();
         for row in rows {
-            let (Some(run), Some(article), Some(revision), Some(digest), Some(coverage)) = (
+            let (
+                Some(run),
+                Some(article),
+                Some(revision),
+                Some(digest),
+                Some(coverage),
+                Some(batch),
+            ) = (
                 row.run_id,
                 row.article_id,
                 row.input_revision,
                 row.index_checksum,
                 row.actor_coverage,
-            ) else {
+                row.publication_batch,
+            )
+            else {
                 // Invalid or oversized output is missing work, not proof that
                 // the occurrence is already indexed. The native writer repairs it.
                 continue;
@@ -249,7 +263,7 @@ pub mod surreal {
             if !keys.contains(&key) {
                 return Err(TxError::Abort("actor_receipt_correlation".into()));
             }
-            if digest == checksum(&revision, &coverage) {
+            if !batch.is_empty() && digest == checksum(&revision, &coverage) {
                 out.insert(key, revision);
             }
         }
@@ -595,6 +609,14 @@ pub mod surreal {
                     if !classifier_admission::check_derivative_in(&tx, &fence, &claim, now).await? {
                         return Err(TxError::Abort("actor_derivative_stale".into()));
                     }
+                    if crate::atlas_derivative_worker::publication_blocked_in(
+                        &tx,
+                        &claim.work.occurrence,
+                    )
+                    .await?
+                    {
+                        return Err(TxError::Abort("published_cleanup_continuation".into()));
+                    }
                     if let Some(body) = &claim.snapshot.body {
                         if !crate::storage::actor_catalog::fence_body_candidates_in(
                             &tx,
@@ -657,6 +679,8 @@ pub mod surreal {
                         &now.to_rfc3339(),
                     )
                     .await?;
+                    tx.query("UPDATE brain_actor_mention SET native_input_revision=$revision WHERE origin_kind='article' AND origin_scope=$run AND origin_id=$article AND publication_batch=$batch RETURN NONE;")
+                        .bind(("revision",claim.input_revision.clone())).bind(("run",claim.article.run_id.clone())).bind(("article",claim.article.id.clone())).bind(("batch",batch.publication_id(&tx)?.to_owned())).await?.check()?;
                     // Candidate source/metadata guards are acquired and compared
                     // before creating each tentative relation in this transaction.
                     let keys: Vec<_> = candidates.keys().cloned().collect();
@@ -695,7 +719,9 @@ pub mod surreal {
                             target:EndpointRef::Article {run_id:article.run_id.clone(),article_id:article.id.clone(),revision:snapshot.source.source_hash.clone()},shared_actors:Vec::new(),
                             basis:format!("shared mentions: {} (identity unconfirmed)",shared.join(", ")),
                             interpretation:"Articles mention actors with the same name; identity is not established.".into(),verification_gap:"Confirm both mentions refer to the same entity.".into(),
-                            source_revisions:vec![format!("ingest:{}/{}:{}",claim.article.run_id,claim.article.id,claim.snapshot.source.source_hash)],
+                            source_revisions:vec![format!("ingest:{}/{}:{}",claim.article.run_id,claim.article.id,claim.snapshot.source.source_hash),
+                                crate::storage::codec::encode(&["native-related-v1",&claim.work.occurrence.record_id(),&claim.snapshot.revision(classifier_admission::DerivativeStage::Related)?]),
+                                crate::storage::codec::encode(&["native-related-v1",&key.record_id(),&snapshot.revision(classifier_admission::DerivativeStage::Related)?])],
                         };
                         let mut keys =
                             [endpoint_key(&related.source), endpoint_key(&related.target)];
@@ -721,6 +747,7 @@ pub mod surreal {
                             input_revision: claim.input_revision.clone(),
                             index_checksum: checksum(&claim.input_revision, &coverage),
                             actor_coverage: coverage,
+                            publication_batch: batch.publication_id(&tx)?.to_owned(),
                         },
                         &now.to_rfc3339(),
                     )
@@ -730,7 +757,24 @@ pub mod surreal {
                     if let Some(next) = progress.next {
                         let checkpoint = serde_json::to_string(&next)
                             .map_err(|_| TxError::Abort("actor_reconcile_checkpoint".into()))?;
-                        crate::storage::jobs::run(&tx,tx.query("UPDATE $key SET checkpoint_json=$checkpoint,state='pending' WHERE owner='' RETURN NONE;").bind(("key",classifier_admission::derivative_record(&claim.work.receipt_key,classifier_admission::DerivativeStage::Reconcile))).bind(("checkpoint",checkpoint))).await?;
+                        // Bind the handed-off frontier to the exact derivative
+                        // revision now. A later claim must not discard this
+                        // committed cleanup as an uninitialized old revision.
+                        let reconcile_revision = claim
+                            .snapshot
+                            .revision(classifier_admission::DerivativeStage::Reconcile)?;
+                        let captured = serde_json::to_string(&claim.snapshot)
+                            .map_err(|_| TxError::Abort("actor_reconcile_snapshot".into()))?;
+                        let disposition =
+                            serde_json::to_string(&DerivativeDisposition::Retryable {
+                                code: "reconcile_continuation".into(),
+                            })
+                            .map_err(|_| TxError::Abort("actor_reconcile_disposition".into()))?;
+                        let mut response = crate::storage::jobs::run(&tx,tx.query("UPDATE $key SET checkpoint_json=$checkpoint,state='pending',output_revision=$revision,captured_json=$snapshot,disposition_json=$disposition,last_error='reconcile_continuation',last_activation='',owner='',epoch+=1,lease_until=NONE WHERE owner='' OR lease_until=NONE OR lease_until<=time::now() RETURN VALUE receipt_key;").bind(("key",classifier_admission::derivative_record(&claim.work.receipt_key,classifier_admission::DerivativeStage::Reconcile))).bind(("checkpoint",checkpoint)).bind(("revision",reconcile_revision)).bind(("snapshot",captured)).bind(("disposition",disposition))).await?;
+                        let updated: Vec<String> = response.take(0)?;
+                        if updated != vec![claim.work.receipt_key.clone()] {
+                            return Err(TxError::Abort("actor_reconcile_handoff_lost".into()));
+                        }
                     }
                     if cancel.load(std::sync::atomic::Ordering::Acquire) {
                         return Err(TxError::Abort("actor_publication_cancelled".into()));
@@ -751,7 +795,30 @@ pub mod surreal {
                 })
             });
             let result = write_then_index(repo.publisher(), write).await;
-            let disposition = if result.is_ok() {
+            let disposition = if let Err(error) = result {
+                let code = match error {
+                    TxError::Abort(code)
+                        if !code.is_empty()
+                            && code.len() <= 128
+                            && code
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') =>
+                    {
+                        code
+                    }
+                    TxError::Contention { .. } => "actor_publication_contention".into(),
+                    TxError::PublisherDropped => "actor_publication_commit_uncertain".into(),
+                    TxError::PublisherStopped => "actor_publisher_stopped".into(),
+                    _ => "actor_publication_failed".into(),
+                };
+                classifier_admission::release_derivative(
+                    owner,
+                    &release_fence,
+                    &release_claim,
+                    DerivativeDisposition::Retryable { code },
+                )
+                .await?
+            } else {
                 let mut response = owner
                     .query("SELECT VALUE state FROM ONLY $key")
                     .bind((
@@ -770,16 +837,6 @@ pub mod surreal {
                         code: "actor_capture_continuation".into(),
                     }
                 }
-            } else {
-                classifier_admission::release_derivative(
-                    owner,
-                    &release_fence,
-                    &release_claim,
-                    DerivativeDisposition::Retryable {
-                        code: "actor_publication_failed".into(),
-                    },
-                )
-                .await?
             };
             out.insert(result_key, disposition);
         }

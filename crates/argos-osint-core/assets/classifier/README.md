@@ -22,12 +22,19 @@ Natural 8.2.6 (gitHead `e5bb63d6af741209e71691ae8702e91664d61c29`) and Apparatus
 
 The upstream MIT license is retained in `LICENSE`. Runtime checks bundle and bridge checksums before initialization. These assets are embedded only by the optional `classifier` feature.
 
+## Phrase and vocabulary policy
+
+The shared `classifier/features.js` policy `natural-en-phrases-v2` tokenizes title and description separately with pinned Natural RegexpTokenizer. It protects identifiers/acronyms, preserves UTF-8 byte spans and negation, and emits unambiguous binary unigram and adjacent-bigram IDs. Punctuation and field boundaries break phrases. Noise filtering follows phrase formation.
+
+`classifier/vocabulary.js` prepares Train representatives, freezes document frequency/IDF and discriminative vocabulary selection, and reuses their prepared features during fitting. Natural TF-IDF is diagnostic/selection data; Bayes receives binary presence. Held-out inference cannot update these statistics. The bundle includes Natural NGrams, RegexpTokenizer and TF-IDF plus pinned underscore 1.13.8 and its license. TF-IDF filesystem methods are removed. Sparse scoring visits active indices in the same summation order as dense upstream scoring. Sparse binary fitting updates the same Apparatus counts and prior pseudo-examples without scanning a dense vector. Full independent feature-binding audits run at batch boundaries, serialization and restore, with constant-time shape checks between rows. Upstream parameter/count/score parity covers repeated sparse fitting rounds.
+
 ## Wire protocol and support
 
 All five bridge methods accept and return JSON strings. Rust passes data through
 function arguments, never interpolated JavaScript. Requests carry `version`,
 `request_id` and `model_id`. Failures carry top-level `error` and `code`, plus diagnostic strings in `errors[]`.
 
+- `trainBatch` preparation phases `vocabulary` and `freeze_vocabulary` carry bounded Train rows plus `feature_input_hash`, and return separately validated preparation/freeze telemetry. The fitting phase remains:
 - `trainBatch`: `rows[].{row_id,title,description,membership}` where membership
   contains six Present/Absent/Unknown entries; Unknown contributes no example to
   that binary model. Response: `accepted`, `skipped`, `token_bytes`,
@@ -36,9 +43,9 @@ function arguments, never interpolated JavaScript. Requests carry `version`,
   `done`, `frozen_order_length` (sum of six vocabularies), `fit_step`, `round`, `fitted_memberships[6]`, `vocabulary_sizes[6]`, `feature_order_revisions[6]`, `errors[]`. Pending rounds exclude further collection, inference and serialization; completed finish is a no-op.
 - `classifyBatch`: `items[].{id,title,description,language}`. Response:
   `items[].{id,results[]}`; each result has `domain`, `present_log_score`,
-  `absent_log_score`, `raw_log_odds`, `known_feature_count`, `oov_count`.
+  `absent_log_score`, `raw_log_odds`, `known_feature_count`, `oov_count`, and bounded discriminative-support diagnostics. Explicit `explain` requests add strongest positive/negative contributions and original spans.
 - `serializeModel`: response is directly the data-only model envelope with
-  `feature_schema_version:"classifier-features-v2"` and `domains.<id>.{feature_order,feature_index,class_features,class_totals,total_examples,smoothing}`.
+  `feature_schema_version:"classifier-features-v3"` a frozen `feature_policy`, and `domains.<id>.{feature_order,feature_index,class_features,class_totals,total_examples,smoothing}`.
 - `restoreModel`: request `artifact` contains that envelope (object or JSON
   string). Response `restored_model_id` identifies the restored model.
 
@@ -46,7 +53,7 @@ Apparatus `class_totals.present` and `.absent` include one prior pseudo-example
 per class; manifest class counts record actual fitted rows and must equal the
 respective totals minus one. Scoring retains upstream binary feature presence,
 priors and smoothing. The present minus absent log score is a raw signal;
-Rust calibrates each domain independently before selecting exactly two domains.
+Rust calibrates each domain independently before selecting one primary and an optional secondary.
 
 Feature order and independent `{token,index}` bindings are appended during real training and persisted per binary model. Missing bindings, mismatched order, missing order,
 duplicates or indices outside that order fail with `feature_order_mismatch`.
@@ -73,7 +80,7 @@ identities with 64MiB of exact serialized identity/digest/response bytes, withou
 eviction. It reserves identity bytes plus a 1024-byte closed telemetry reply
 before mutation; malformed or oversized replies discard the candidate. Identical
 replays return the exact cached response and consume no new entry. The worst
-50,000-row all-six-label corpus with full 32-row envelopes needs 20,313 train/finish identities. Adaptive splitting by the actual escaped JSON envelope and per-round fitting can add calls; the general bound from the 64MiB corpus limit and closed DTO frames remains below 23,000 identities. Host map and
+50,000-row all-six-label corpus with full 32-row envelopes needs 20,313 train/finish identities. Adaptive splitting by the actual escaped JSON envelope and per-round fitting can add calls; the general bound including vocabulary preparation/freezing from the 64MiB corpus limit and closed DTO frames remains below 26,000 identities. Host map and
 string allocation overhead is additional to these serialized bytes and the
 QuickJS heap/stack reservation; this is not a physical RSS cap.
 

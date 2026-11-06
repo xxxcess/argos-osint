@@ -1493,6 +1493,7 @@ mod conflict_tests {
                 version: crate::classifier::calibration::CALIBRATION_VERSION.into(),
                 domains: crate::atlas_taxonomy::DomainId::ALL.map(|domain| {
                     crate::classifier::calibration::DomainCalibration {
+                        sigmoid: None,
                         domain,
                         knots: Vec::new(),
                         threshold: 2.0,

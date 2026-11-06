@@ -190,9 +190,25 @@ async fn articles_match_catalog_aliases_without_nlp_and_never_create_unknown_ide
         .await
         .expect("actor dossier")
         .expect("actor exists");
+    if dossier.loaded_briefs != 1 {
+        let current = argos_osint_core::storage::atlas::current_actor_mentions(
+            &repo,
+            &["fixture-actor-0".into()],
+            &argos_osint_core::atlas_classify::OccurrenceKey::new("probe", "none"),
+            100,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut raw = repo.db().query("SELECT origin_revision,native_input_revision,publication_batch FROM brain_actor_mention; SELECT input_revision,publication_batch,index_checksum FROM atlas_article_index; SELECT record::id(id) AS id,lifecycle,lifecycle_ingest_batch,memory_kind FROM memory WHERE memory_kind INSIDE ['link','related'];").await.unwrap().check().unwrap();
+        let mentions: Vec<serde_json::Value> = raw.take(0).unwrap();
+        let indexes: Vec<serde_json::Value> = raw.take(1).unwrap();
+        let links: Vec<serde_json::Value> = raw.take(2).unwrap();
+        eprintln!("native current={} expected_article_revision={} mentions={mentions:?} indexes={indexes:?} links={links:?}",current.len(),argos_osint_core::atlas_metadata::input_hash(&article));
+    }
     assert_eq!(
         dossier.loaded_briefs, 1,
-        "indexing checksum must not masquerade as an article revision"
+        "indexing checksum must not masquerade as an article revision: {dossier:#?}"
     );
     assert_eq!(
         dossier.briefs[0].node.revision,
@@ -784,8 +800,8 @@ async fn cleaned_body_actors_append_bind_insights_and_fence_changed_acquisitions
         .unwrap()
         .unwrap();
     assert_eq!(
-        metadata.loaded_briefs, 2,
-        "metadata mentions remain valid while body cleanup is pending"
+        metadata.loaded_briefs, 0,
+        "an unvalidated body acquisition invalidates the whole native generation"
     );
     cleaned.attempt_id = "acq-2".into();
     pipeline_inputs::register(
@@ -798,6 +814,19 @@ async fn cleaned_body_actors_append_bind_insights_and_fence_changed_acquisitions
     )
     .await
     .unwrap();
+    surreal::index_article_occurrences(&repo, &article.id)
+        .await
+        .unwrap();
+    for actor in ["fixture-actor-0", "fixture-actor-1"] {
+        let restored = argos_osint_core::storage::actor_dossier::read(&repo, actor)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored.loaded_briefs, 2,
+            "current source validation and native refresh restore both occurrences"
+        );
+    }
     argos_osint_core::storage::atlas_delete::delete_article(repo.publisher(), "run", &article.id)
         .await
         .unwrap();

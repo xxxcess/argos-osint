@@ -42,7 +42,7 @@ const PHASE1_MAX_PAGES: usize = 5;
 /// Current classifier facets. Historical labels never establish membership.
 pub const CATEGORY_IDS: &[&str] = &crate::atlas_taxonomy::DOMAIN_IDS;
 pub use crate::atlas_taxonomy::TAXONOMY_VERSION;
-pub const MIN_ADMISSION_TAGS: usize = 2;
+pub const MIN_ADMISSION_TAGS: usize = 1;
 pub const MAX_ADMISSION_TAGS: usize = 2;
 pub fn category_tag(id: &str) -> &'static str {
     crate::atlas_taxonomy::DomainId::parse(id)
@@ -644,6 +644,13 @@ pub struct CoverageStats {
     /// Phase 6 (v2): occurrences with a current `atlas_article_index` receipt.
     #[serde(default)]
     pub actor_indexed: u32,
+    #[serde(default)]
+    pub actor_readiness: Option<crate::storage::atlas_derivative_status::StageReadiness>,
+    #[serde(default)]
+    pub reconciliation_readiness: Option<crate::storage::atlas_derivative_status::StageReadiness>,
+    #[serde(default)]
+    pub derivative_progress: Option<crate::storage::atlas_derivative_status::Summary>,
+
     /// Phase 6 occurrences indexed with zero bindable actors.
     #[serde(default)]
     pub actor_zero: u32,
@@ -2928,16 +2935,6 @@ where
         emit(AtlasEvent::Stats(Box::new(stats.clone())));
     }
 
-    // Local actor/metadata processing runs after admission admits the
-    // canonical rows. Dropping an invocation cancels any admitted NLP work;
-    // no detached cycle worker survives Pause.
-    struct NativeCancel(Arc<AtomicBool>);
-    impl Drop for NativeCancel {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Relaxed);
-        }
-    }
-    let native_cancel = NativeCancel(Arc::new(AtomicBool::new(false)));
     let admission_paused = if cursor.phase == 3 {
         track(3);
         tel.enter_stage(crate::atlas_work::stage_label(crate::atlas_work::STAGE_CLASSIFICATION),"article",&stats);
@@ -2959,60 +2956,13 @@ where
         cursor.phase=4;cursor.leg="metadata".into();
         save(&store,&run_id,&cursor,&stats).await?;
     }
-    // Native stages consume only bounded receipt work from this run. Their
-    // output and derivative checkpoint commit under the same publication fence.
-    use crate::storage::classifier_admission::{self as native,DerivativeFence,DerivativeStage};
-    let native_fence=DerivativeFence::Cycle(store.run_claim().cloned().ok_or_else(||anyhow!("native stages require the cycle lease"))?);
-    // Older saved phase-5/6 runs may already have durable metadata while their
-    // checkpoint still reports zero coverage. Repair the restored snapshot
-    // before announcing the first resumed native stage.
-    let mut native_summary = if resume && cursor.phase > 4 {
-        let committed=native::native_run_summary(repo,&run_id).await?;
-        stats.coverage.apply_native_summary(&committed);
-        emit(AtlasEvent::Stats(Box::new(stats.clone())));
-        Some(committed)
-    } else { None };
-    for (phase,stage,label,unit) in [(4,DerivativeStage::Metadata,"metadata","article"),(5,DerivativeStage::Related,"related","pair"),(6,DerivativeStage::Actors,"actors","article"),(6,DerivativeStage::Reconcile,"reconcile","identity")] {
-        if cursor.phase>phase {continue;}
-        track(phase);tel.enter_stage(label,unit,&stats);
-        emit(AtlasEvent::Status(format!("Processing {label}")));
-        loop {
-            if cycle_paused(tracker,pause){
-                native_cancel.0.store(true,Ordering::Release);
-                let committed=native::native_run_summary(repo,&run_id).await?;
-                stats.coverage.apply_native_summary(&committed);
-                return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;
-            }
-            let batch=native::cycle_derivative_work(&db_owner,&claim,stage).await?;
-            if batch.is_empty(){break;}
-            let mut pending =
-                native::process_derivative_stage(&db_owner, &native_fence, &batch, stage, &native_cancel.0);
-            let report=loop {tokio::select! {
-                result=&mut pending=>break result?,
-                _=tokio::time::sleep(std::time::Duration::from_millis(25))=>{if cycle_paused(tracker,pause){native_cancel.0.store(true,Ordering::Release);}},
-            }};
-            if native_cancel.0.load(Ordering::Acquire){
-                let committed=native::native_run_summary(repo,&run_id).await?;
-                stats.coverage.apply_native_summary(&committed);
-                return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;
-            }
-            if report.items.is_empty(){break;}
-        }
-        // The bounded work report carries dispositions, not entity/article or
-        // Related-pair counts. Reconcile once per stage, never once per item,
-        // and expose only committed output before announcing the next stage.
-        let committed=native::native_run_summary(repo,&run_id).await?;
-        stats.coverage.apply_native_summary(&committed);
-        native_summary=Some(committed);
-        cursor.phase=phase;cursor.leg=label.into();save(&store,&run_id,&cursor,&stats).await?;
-        emit(AtlasEvent::Stats(Box::new(stats.clone())));
-    }
-    let native_summary=match native_summary {
-        Some(summary)=>summary,
-        None=>native::native_run_summary(repo,&run_id).await?,
-    };
+    // Admission commits each independent derivative job atomically. Collection
+    // completion never waits for metadata, related leads, actors or graph pages.
+    // A resumed legacy phase also ends here; its durable receipts are reconciled
+    // by the independent scheduler.
+    let native_summary=crate::storage::classifier_admission::native_run_summary(repo,&run_id).await?;
     stats.coverage.apply_native_summary(&native_summary);
-    let actor_index_incomplete=native_summary.pending>0;
+    let actor_index_incomplete=false;
     if let Some(baseline)=tel.classifier_db_start {tel.classifier_metrics["atlas.db"]=ClassifierDbSample::read(&db_owner.metrics()).delta(baseline);}
     // Completion depends on admission, never on Brain indexing. Staged work
     // counts as the fetched set; canonical rows are the admitted set.
@@ -3035,7 +2985,7 @@ where
         stats.coverage.publishers_available,
         stats.coverage.related_pairs,
         stats.coverage.actor_indexed,
-        stats.coverage.articles,
+        stats.coverage.admitted,
         stats.coverage.actor_zero,
         stats.coverage.actor_index_failed,
         stats.coverage.acquisition_failures,
@@ -3366,11 +3316,11 @@ async fn process_admission_chunk(
         match result {
             ItemCommit::Committed { .. } => {
                 if let ItemClassification::Evaluated { claim, receipt } = outcome {
-                    if let Some(pair) = receipt.receipt.selected_pair {
+                    if let Some(primary) = receipt.receipt.selected_domains.first() {
                         stats.coverage.admitted = stats.coverage.admitted.saturating_add(1);
                         emit(AtlasEvent::Classified {
                             id: claim.occurrence.article_id.clone(),
-                            category: pair[0].as_str().into(),
+                            category: primary.as_str().into(),
                         });
                     } else {
                         stats.coverage.discarded = stats.coverage.discarded.saturating_add(1);
@@ -3887,7 +3837,7 @@ mod tests {
             CATEGORY_IDS,
             crate::atlas_taxonomy::DomainId::ALL.map(crate::atlas_taxonomy::DomainId::as_str)
         );
-        assert_eq!((MIN_ADMISSION_TAGS, MAX_ADMISSION_TAGS), (2, 2));
+        assert_eq!((MIN_ADMISSION_TAGS, MAX_ADMISSION_TAGS), (1, 2));
         assert_eq!(normalize_category(" Governance "), "governance");
         assert_eq!(normalize_category("science"), "unk");
         assert_eq!(normalize_category("military"), "unk");

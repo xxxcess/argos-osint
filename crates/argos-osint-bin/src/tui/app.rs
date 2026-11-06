@@ -16422,6 +16422,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn atlas_derivative_readiness_uses_admitted_denominators_after_collection() {
+        use argos_osint_core::storage::atlas_derivative_status::StageReadiness;
+        let mut app = app();
+        app.select(ModuleId::Atlas.index());
+        app.atlas_page = AtlasPage::Live;
+        app.compact_pages[ModuleId::Atlas.index()] = 1;
+        let mut stats = atlas::RunStats {
+            contract_version: argos_osint_core::atlas_work::COLLECTION_CONTRACT.into(),
+            ..Default::default()
+        };
+        stats.coverage.articles = 172;
+        stats.coverage.classified = 172;
+        stats.coverage.admitted = 16;
+        stats.coverage.actor_indexed = 6;
+        stats.coverage.actor_readiness = Some(StageReadiness {
+            state: "pending".into(),
+            processed: 6,
+            eligible: 16,
+            failed: 0,
+        });
+        stats.coverage.reconciliation_readiness = Some(StageReadiness {
+            state: "pending".into(),
+            processed: 4,
+            eligible: 16,
+            failed: 0,
+        });
+        app.on_atlas(atlas::AtlasEvent::Stats(Box::new(stats)));
+        app.on_atlas(atlas::AtlasEvent::Status(
+            "Collection completed; derivatives pending".into(),
+        ));
+        for (width, height) in [(140, 44), (100, 36), (80, 24)] {
+            let painted = buffer_text(&render(&mut app, width, height));
+            assert!(painted.contains("Actors 6/16 pending"), "{painted}");
+            assert!(painted.contains("Reconcile 4/16 pending"), "{painted}");
+            assert!(!painted.contains("Actors 6/172"), "{painted}");
+            if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
+                dump_cells(
+                    &mut app,
+                    &dir,
+                    &format!("atlas-derivative-readiness-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+        }
+    }
+
     fn sample_headline(index: usize) -> atlas::FeedArticle {
         atlas::FeedArticle {
             id: format!("art-{index}"),

@@ -31,9 +31,17 @@ pub mod calibration;
 pub mod dataset;
 #[cfg(feature = "classifier")]
 pub(crate) mod engine;
+pub mod feature_policy;
+pub mod learning;
+#[cfg(feature = "classifier")]
+pub(crate) mod promotion;
 pub mod provider_capture;
 pub mod provider_labels;
 pub mod readiness;
+pub mod review;
+#[cfg(feature = "classifier")]
+pub(crate) mod runtime_proof;
+pub mod similarity;
 pub mod training;
 
 pub use crate::atlas_taxonomy::{DomainId, TAXONOMY_VERSION};
@@ -80,21 +88,20 @@ pub const RUNTIME_STACK_LIMIT_BYTES: usize = 1024 * 1024;
 /// compatible with this algorithm.
 pub const ALGORITHM_VERSION: &str = "natural-bayes-binary-ovr-v1";
 
-/// Versioned preprocessing policy applied identically by the training
-/// oracle and the runtime tokenizer: `keepStops=true` — meaningful
-/// negation, acronyms and numbers are kept.
-pub const PREPROCESSING_VERSION: &str = "natural-en-keepstops-v1";
+/// Versioned phrase feature policy shared by training and inference.
+/// Meaningful negation, acronyms, identifiers and numbers are preserved;
+/// grammatical noise is filtered after adjacent phrase formation.
+pub const PREPROCESSING_VERSION: &str = "natural-en-phrases-v2";
 
-/// Version of the admission policy: exactly two independently gated
-/// domains (`MIN = MAX = 2`), each passing its own calibrated threshold and
-/// informative-feature check.
-pub const ADMISSION_POLICY_VERSION: &str = "exact-two-independent-gates-v1";
+/// Version of admission: one independently eligible primary and an optional
+/// supported secondary, with explicit ambiguity handling.
+pub const ADMISSION_POLICY_VERSION: &str = "primary-optional-secondary-v2";
 
 /// Version of the receipt schema produced by the classifier.
-pub const RECEIPT_SCHEMA_VERSION: &str = "classifier-receipt-v1";
+pub const RECEIPT_SCHEMA_VERSION: &str = "classifier-receipt-v2";
 
 /// Version of the JavaScript bridge protocol.
-pub const BRIDGE_VERSION: &str = "argos-classifier-bridge-v1";
+pub const BRIDGE_VERSION: &str = "argos-classifier-bridge-v2";
 
 /// Versioned scheme of [`ClassifyInput::input_hash`]: a SHA-256 over a
 /// version tag plus length-delimited title and description bytes.
@@ -319,10 +326,12 @@ pub enum RejectionReason {
     UnsupportedLanguage,
     /// No known features were found in the input.
     WhollyOov,
-    /// Fewer than two domains pass their independent gates.
+    /// No domain passes its independent eligibility gate.
     InsufficientDomains,
     /// The input is out of scope for strategic-domain admission.
     OutOfScope,
+    /// No primary can be selected without arbitrary tie-breaking.
+    AmbiguousRanking,
 }
 
 /// One article to classify. Text is English title + description only.
@@ -340,6 +349,9 @@ pub struct ClassifyInput {
     /// title and description bytes) hashed with `sha256_hex`.
     /// Cache receipts and identical computations by this hash.
     pub input_hash: String,
+    /// Explicitly requested bounded feature explanations, excluded from input identity.
+    #[serde(default)]
+    pub explain: bool,
 }
 
 impl ClassifyInput {
@@ -368,6 +380,7 @@ impl ClassifyInput {
             description,
             language,
             input_hash: artifact::sha256_hex(&framed),
+            explain: false,
         }
     }
 }
@@ -438,6 +451,8 @@ pub struct RawDiagnostics {
     pub calibration_version: String,
     pub domains: [RawDomainScore; 6],
     pub provider: Option<ProviderLabelDiagnostics>,
+    #[serde(default)]
+    pub support: Vec<feature_policy::DomainSupport>,
 }
 
 /// Diagnostics from upstream provider topic mapping.
@@ -456,7 +471,7 @@ pub struct ProviderLabelDiagnostics {
 }
 
 /// Durable outcome for one input: six ordered scores, the selected
-/// two-domain pair or an explicit rejection reason, and every version the
+/// primary/optional-secondary tags or an explicit rejection reason, and every version the
 /// decision depended on (schema [`RECEIPT_SCHEMA_VERSION`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -468,8 +483,10 @@ pub struct ClassificationReceipt {
     /// Exactly six scores, one per [`DomainId`], in [`DomainId::ALL`] order.
     /// Never normalized to sum to one.
     pub scores: Vec<DomainScore>,
-    /// The exactly-two admitted domains, ranked first then second.
-    pub selected_pair: Option<[DomainId; 2]>,
+    /// Zero domains for rejection; one primary and an optional secondary for admission.
+    pub selected_domains: Vec<DomainId>,
+    /// Both selected domains qualify equally; their order is serialization only.
+    pub primary_rank_ambiguous: bool,
     /// Why the input was rejected, when it was not admitted.
     pub rejection_reason: Option<RejectionReason>,
     pub taxonomy_version: String,
@@ -538,35 +555,34 @@ impl ClassificationReceipt {
         {
             return Err(invalid());
         }
-        let mut ranked: Vec<&DomainScore> = self.scores.iter().collect();
-        ranked.sort_by(|first, second| {
-            second
-                .calibrated_score
-                .total_cmp(&first.calibrated_score)
-                .then_with(|| first.domain.as_str().cmp(second.domain.as_str()))
-        });
-        match self.selected_pair {
-            Some(pair)
-                if self.rejection_reason.is_none()
-                    && pair == [ranked[0].domain, ranked[1].domain]
-                    && ranked[0].passes_gate
-                    && ranked[1].passes_gate => {}
-            None if self.rejection_reason.is_some() => {
-                if ranked[0].passes_gate && ranked[1].passes_gate {
-                    return Err(invalid());
-                }
-                if matches!(self.rejection_reason, Some(RejectionReason::WhollyOov))
-                    && self
-                        .scores
-                        .iter()
-                        .any(|score| score.informative_features != 0)
-                {
+        let (selected, ambiguous, reason) = select_domains(&self.scores);
+        if self.selected_domains != selected
+            || self.primary_rank_ambiguous != ambiguous
+            || self.selected_domains.is_empty() != self.rejection_reason.is_some()
+            || (!selected.is_empty() && self.rejection_reason.is_some())
+            || (matches!(
+                self.rejection_reason,
+                Some(RejectionReason::AmbiguousRanking)
+            ) != matches!(reason, Some(RejectionReason::AmbiguousRanking)))
+            || (matches!(self.rejection_reason, Some(RejectionReason::WhollyOov))
+                && self
+                    .scores
+                    .iter()
+                    .any(|score| score.informative_features != 0))
+        {
+            return Err(invalid());
+        }
+        if let Some(diagnostics) = &self.raw_diagnostics {
+            if !diagnostics.support.is_empty() && diagnostics.support.len() != 6 {
+                return Err(invalid());
+            }
+            for (support, raw) in diagnostics.support.iter().zip(&diagnostics.domains) {
+                support.validate()?;
+                if support.positive_spans != raw.known_feature_count {
                     return Err(invalid());
                 }
             }
-            _ => return Err(invalid()),
-        }
-        if let Some(diagnostics) = &self.raw_diagnostics {
+
             if diagnostics.schema_version != "classifier-raw-diagnostics-v1"
                 || diagnostics.calibration_version != calibration::CALIBRATION_VERSION
             {
@@ -614,7 +630,8 @@ impl ClassificationReceipt {
             occurrence_id: occurrence_id.into(),
             input_hash: input_hash.into(),
             scores,
-            selected_pair: None,
+            selected_domains: Vec::new(),
+            primary_rank_ambiguous: false,
             rejection_reason: None,
             taxonomy_version: TAXONOMY_VERSION.into(),
             model_id: model_id.into(),
@@ -631,11 +648,117 @@ impl ClassificationReceipt {
         self.scores.iter().find(|score| score.domain == domain)
     }
 
-    /// Whether the receipt admits exactly two domains and carries no
+    /// Explains the ranking after eligibility. Stable display order never
+    /// manufactures primary evidence when eligible scores are tied.
+    #[must_use]
+    pub fn ranking_reason(&self) -> &'static str {
+        if self.primary_rank_ambiguous {
+            return "primary_rank_ambiguous";
+        }
+        if self.rejection_reason == Some(RejectionReason::AmbiguousRanking) {
+            return "ambiguous_primary_abstention";
+        }
+        let mut eligible: Vec<_> = self
+            .scores
+            .iter()
+            .filter(|score| score.passes_gate)
+            .collect();
+        eligible.sort_by(|a, b| b.calibrated_score.total_cmp(&a.calibrated_score));
+        if eligible.len() >= 3
+            && (eligible[1].calibrated_score - eligible[2].calibrated_score).abs() <= 1e-12
+            && self.selected_domains.len() == 1
+        {
+            return "secondary_rank_ambiguous_primary_only";
+        }
+        if self.rejection_reason == Some(RejectionReason::WhollyOov) {
+            return "wholly_oov";
+        }
+        if self.is_admitted() {
+            if self.selected_domains.len() == 1 {
+                "only_one_supported_domain"
+            } else {
+                "primary_and_secondary_supported"
+            }
+        } else {
+            "explicit_rejection"
+        }
+    }
+
+    /// Whether the receipt admits one or two domains and carries no
     /// rejection reason.
     #[must_use]
     pub fn is_admitted(&self) -> bool {
-        self.selected_pair.is_some() && self.rejection_reason.is_none()
+        !self.selected_domains.is_empty()
+            && self.selected_domains.len() <= 2
+            && self.rejection_reason.is_none()
+    }
+}
+
+/// Eligibility precedes ranking. Equal scores never establish primary dominance.
+pub(crate) fn select_domains(
+    scores: &[DomainScore],
+) -> (Vec<DomainId>, bool, Option<RejectionReason>) {
+    let mut eligible: Vec<_> = scores.iter().filter(|score| score.passes_gate).collect();
+    eligible.sort_by(|a, b| {
+        b.calibrated_score
+            .total_cmp(&a.calibrated_score)
+            .then_with(|| a.domain.cmp(&b.domain))
+    });
+    let Some(first) = eligible.first() else {
+        return (Vec::new(), false, Some(RejectionReason::OutOfScope));
+    };
+    let tied = |a: f64, b: f64| (a - b).abs() <= 1e-12;
+    let top_ties = eligible
+        .iter()
+        .take_while(|score| tied(score.calibrated_score, first.calibrated_score))
+        .count();
+    if top_ties > 1 {
+        if eligible.len() == 2 {
+            return (
+                eligible.iter().map(|score| score.domain).collect(),
+                true,
+                None,
+            );
+        }
+        return (Vec::new(), false, Some(RejectionReason::AmbiguousRanking));
+    }
+    let mut selected = vec![first.domain];
+    if let Some(second) = eligible.get(1) {
+        if eligible
+            .get(2)
+            .is_none_or(|third| !tied(second.calibrated_score, third.calibrated_score))
+        {
+            selected.push(second.domain);
+        }
+    }
+    (selected, false, None)
+}
+
+/// A historical receipt is readable evidence, never current-policy authority.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecodedReceipt {
+    Current(Box<ClassificationReceipt>),
+    LegacyExactTwo(serde_json::Value),
+}
+/// Decodes an explicitly versioned receipt without converting its old decisions.
+pub fn decode_receipt(json: &str) -> Result<DecodedReceipt, ClassifierError> {
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|_| ClassifierError::InvalidArtifact("receipt_json".into()))?;
+    match value["receipt_schema_version"].as_str() {
+        Some(RECEIPT_SCHEMA_VERSION) => {
+            let receipt: ClassificationReceipt = serde_json::from_value(value)
+                .map_err(|_| ClassifierError::InvalidArtifact("receipt_json".into()))?;
+            receipt.validate()?;
+            Ok(DecodedReceipt::Current(Box::new(receipt)))
+        }
+        Some("classifier-receipt-v1")
+            if value["policy_version"] == "exact-two-independent-gates-v1" =>
+        {
+            Ok(DecodedReceipt::LegacyExactTwo(value))
+        }
+        _ => Err(ClassifierError::Incompatible(
+            "receipt schema requires migration".into(),
+        )),
     }
 }
 
@@ -653,6 +776,21 @@ pub enum Provenance {
         dataset_version: String,
         dataset_sha256: String,
         review_reference: String,
+    },
+    /// Approved partial provider labels remain weak evidence, never human review.
+    ApprovedProvider {
+        dataset_version: String,
+        dataset_sha256: String,
+        mapping_approval_sha256: String,
+    },
+    /// Aggregate identity preserves the independent source kinds of its rows.
+    MixedTraining {
+        dataset_version: String,
+        dataset_sha256: String,
+        seed_dataset_sha256: String,
+        reviewed_corpus_sha256: String,
+        review_reference: String,
+        mapping_approval_sha256: String,
     },
 }
 
@@ -690,6 +828,8 @@ impl Provenance {
         match self {
             Provenance::SyntheticBaseline { .. } => "Synthetic baseline",
             Provenance::ReviewedReal { .. } => "Reviewed real",
+            Provenance::ApprovedProvider { .. } => "Approved weak provider labels",
+            Provenance::MixedTraining { .. } => "Mixed training; reviewed evaluation required",
         }
     }
 }
@@ -1085,6 +1225,8 @@ pub struct WorkControl {
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub queue_timeout: std::time::Duration,
     pub execution_timeout: std::time::Duration,
+    /// Separate bounded serialization/restore budget; inference keeps its own ceiling.
+    pub artifact_execution_timeout: std::time::Duration,
     pub overall_deadline: std::time::Instant,
 }
 
@@ -1097,6 +1239,7 @@ impl WorkControl {
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             queue_timeout: std::time::Duration::from_secs(5),
             execution_timeout: std::time::Duration::from_secs(2),
+            artifact_execution_timeout: std::time::Duration::from_secs(10),
             overall_deadline: std::time::Instant::now() + std::time::Duration::from_secs(1800),
         }
     }
@@ -1125,6 +1268,11 @@ impl Default for WorkControl {
 
 /// Generic worker interface for candidate training, evaluation, and bridge operations.
 pub trait ClassifierWorker: Send {
+    /// Actual sampled runtime observations; uninstrumented workers abstain.
+    fn performance(&self) -> Result<ClassifierPerformance, ClassifierError> {
+        Err(ClassifierError::Unavailable)
+    }
+
     fn call(
         &mut self,
         operation: BridgeOperation,

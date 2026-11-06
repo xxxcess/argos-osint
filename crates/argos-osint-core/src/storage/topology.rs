@@ -84,6 +84,7 @@ struct MemoryRow {
     payload_json: String,
     source_json: String,
     created_at: String,
+    native_ingest_batch: String,
 }
 
 #[derive(Debug, Clone, SurrealValue)]
@@ -115,6 +116,8 @@ struct MentionRow {
     origin_id: String,
     origin_revision: String,
     spans_json: String,
+    native_input_revision: String,
+    publication_batch: String,
 }
 
 #[derive(Debug, Clone, SurrealValue)]
@@ -191,6 +194,8 @@ struct ArticleMentionRow {
     actor_id: String,
     origin_revision: String,
     spans_json: String,
+    native_input_revision: String,
+    publication_batch: String,
 }
 
 #[derive(Debug, Clone, SurrealValue)]
@@ -219,6 +224,7 @@ struct Query<'a> {
     remaining_rows: usize,
     memories: HashMap<String, Option<MemoryRow>>,
     body_revisions: HashMap<String, Option<(String, String, String)>>,
+    native: super::native_visibility::NativeVisibility,
     /// Brief detail only needs direct article bindings, not the graph walk.
     binding: bool,
     cancel: &'a tokio::sync::watch::Sender<()>,
@@ -256,7 +262,7 @@ impl Query<'_> {
             self.tx
                 .query(
                     "SELECT text, category, pinned, lifecycle, memory_kind, payload_json, source_json,
-                        time::format(created_at, '%+') AS created_at
+                        time::format(created_at, '%+') AS created_at,(lifecycle_ingest_batch ?? '') AS native_ingest_batch
                  FROM ONLY type::record('memory', $id)",
                 )
                 .bind(("id", id.to_string())),
@@ -698,10 +704,26 @@ impl Query<'_> {
         &mut self,
         id: &str,
     ) -> Result<Option<(TopologyNode, TopologyNode, TopologyEdge)>> {
-        if self.memory(id).await?.map(|m| m.lifecycle).as_deref() != Some("active") {
+        let Some(memory) = self
+            .memory(id)
+            .await?
+            .filter(|memory| memory.lifecycle == "active")
+        else {
+            return Ok(None);
+        };
+        let Some(payload) = self.payload(id).await? else {
+            return Ok(None);
+        };
+        if !self
+            .native
+            .memory_current(id, &payload, &memory.native_ingest_batch)
+            .await?
+        {
+            self.gaps
+                .insert(format!("{id}: native relationship generation pending"));
             return Ok(None);
         }
-        let (source, target, mut e) = match self.payload(id).await? {
+        let (source, target, mut e) = match Some(payload) {
             Some(MemoryPayload::Link(p)) => {
                 let mut e = edge(id.into(), "", "", TopologyEdgeKind::Link, id.into());
                 e.label = p.relation;
@@ -771,6 +793,32 @@ impl Query<'_> {
                 return Ok(true);
             }
         }
+        let endpoints = match self.payload(link).await? {
+            Some(MemoryPayload::Link(link)) => vec![link.source, link.target],
+            Some(MemoryPayload::Related(related)) => vec![related.source, related.target],
+            _ => Vec::new(),
+        };
+        for endpoint in endpoints {
+            match endpoint {
+                EndpointRef::Article {
+                    run_id, article_id, ..
+                } if !(n.kind == TopologyNodeKind::Article
+                    && run_id == n.run_id
+                    && article_id == n.article_id)
+                    && run_id == cycle =>
+                {
+                    return Ok(true);
+                }
+                EndpointRef::Memory { memory_id, .. }
+                    if memory_id != n.id
+                        && !n.member_ids.contains(&memory_id)
+                        && self.memory_in_cycle(&memory_id, cycle).await? =>
+                {
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
         Ok(false)
     }
 
@@ -800,21 +848,39 @@ impl Query<'_> {
             vec![reference]
         };
         for reference in references {
-            let mut r = stmt(
-                self.tx
-                    .query(
-                        "SELECT memory_id, origin FROM brain_memory_endpoint
-                     WHERE endpoint_kind = $k AND ref_id = $r",
-                    )
-                    .bind(("k", kind.to_string()))
-                    .bind(("r", reference)),
-            )
-            .await?;
+            let endpoint = match kind {
+                "article" => super::graph::endpoint_node(&EndpointRef::Article {
+                    run_id: origin.clone(),
+                    article_id: reference.clone(),
+                    revision: n.revision.clone(),
+                }),
+                "source" => super::graph::endpoint_node(&EndpointRef::Source {
+                    origin: origin.clone(),
+                    source_id: reference.clone(),
+                    revision: n.revision.clone(),
+                }),
+                _ => super::graph::memory_node(&reference),
+            };
+            let mut r=stmt(self.tx.query("SELECT memory_id,origin FROM brain_memory_endpoint WITH INDEX brain_memory_endpoint_ref WHERE endpoint_kind=$kind AND ref_id=$reference LIMIT $cap; SELECT owner FROM brain_graph_edge WITH INDEX brain_graph_edge_input WHERE in=$node AND meaning INSIDE ['link','related'] LIMIT $cap; SELECT owner FROM brain_graph_edge WITH INDEX brain_graph_edge_output WHERE out=$node AND meaning INSIDE ['link','related'] LIMIT $cap;")
+                .bind(("kind",kind.to_owned())).bind(("reference",reference)).bind(("node",super::jobs::rid("brain_graph_node",&endpoint))).bind(("cap",(self.limit+1) as i64))).await?;
             let rows: Vec<EndpointMemoryRow> = r.take(0)?;
+            #[derive(SurrealValue)]
+            struct Owner {
+                owner: String,
+            }
+            let outgoing: Vec<Owner> = r.take(1)?;
+            let incoming: Vec<Owner> = r.take(2)?;
+            if [rows.len(), outgoing.len(), incoming.len()]
+                .into_iter()
+                .any(|len| len > self.limit)
+            {
+                self.exhausted = false;
+            }
             let ids: BTreeSet<String> = rows
                 .into_iter()
-                .filter(|e| origin.is_empty() || e.origin == origin)
-                .map(|e| e.memory_id)
+                .filter(|endpoint| origin.is_empty() || endpoint.origin == origin)
+                .map(|endpoint| endpoint.memory_id)
+                .chain(outgoing.into_iter().chain(incoming).map(|edge| edge.owner))
                 .collect();
             let mut links = Vec::new();
             for id in ids {
@@ -1107,8 +1173,34 @@ impl Query<'_> {
             if let Some(cycle) = self.cycle() {
                 mentions.retain(|m| m.origin_kind == "article" && m.origin_scope == cycle);
             }
-            for mut m in self.bound(mentions) {
+            let mentions = self.bound(mentions);
+            let keys: Vec<_> = mentions
+                .iter()
+                .filter(|m| m.origin_kind == "article" && !m.native_input_revision.is_empty())
+                .map(|m| crate::atlas_classify::OccurrenceKey::new(&m.origin_scope, &m.origin_id))
+                .collect();
+            self.native.prefetch(&keys).await?;
+            for mut m in mentions {
                 if m.origin_kind == "article" {
+                    if !m.native_input_revision.is_empty()
+                        && !self
+                            .native
+                            .mention_current(
+                                &crate::atlas_classify::OccurrenceKey::new(
+                                    &m.origin_scope,
+                                    &m.origin_id,
+                                ),
+                                &m.native_input_revision,
+                                &m.publication_batch,
+                            )
+                            .await?
+                    {
+                        self.gaps.insert(format!(
+                            "article:{}/{}: stale native mention generation",
+                            m.origin_scope, m.origin_id
+                        ));
+                        continue;
+                    }
                     let Some(spans) = self.actor_spans(&m.origin_id, &m.spans_json).await? else {
                         continue;
                     };
@@ -1142,6 +1234,9 @@ impl Query<'_> {
                             m.spans_json
                         ),
                     );
+                    if m.origin_kind == "article" && m.native_input_revision.is_empty() {
+                        e.status = "retained".into();
+                    }
                     e.member_ids.push(actor_id.clone());
                     out.push((other, e));
                 }
@@ -1687,7 +1782,7 @@ impl Query<'_> {
         let mut r = stmt(
             self.tx
                 .query(
-                    "SELECT actor_id, origin_revision, spans_json FROM brain_actor_mention
+                    "SELECT actor_id, origin_revision, spans_json,(native_input_revision ?? '') AS native_input_revision,(publication_batch ?? '') AS publication_batch FROM brain_actor_mention
                  WHERE origin_kind = 'article' AND origin_scope = $r AND origin_id = $a",
                 )
                 .bind(("r", n.run_id.clone()))
@@ -1698,7 +1793,20 @@ impl Query<'_> {
         mentions.sort_by(|a, b| {
             (&a.actor_id, &a.origin_revision).cmp(&(&b.actor_id, &b.origin_revision))
         });
-        for mut m in self.bound(mentions) {
+        let mentions = self.bound(mentions);
+        let key = crate::atlas_classify::OccurrenceKey::new(&n.run_id, &n.article_id);
+        self.native.prefetch(std::slice::from_ref(&key)).await?;
+        for mut m in mentions {
+            if !m.native_input_revision.is_empty()
+                && !self
+                    .native
+                    .mention_current(&key, &m.native_input_revision, &m.publication_batch)
+                    .await?
+            {
+                self.gaps
+                    .insert(format!("{}: stale native mention generation", n.id));
+                continue;
+            }
             let Some(spans) = self.actor_spans(&n.article_id, &m.spans_json).await? else {
                 continue;
             };
@@ -1723,6 +1831,9 @@ impl Query<'_> {
                         n.run_id, n.article_id, m.spans_json
                     ),
                 );
+                if m.native_input_revision.is_empty() {
+                    e.status = "retained".into();
+                }
                 e.member_ids.push(aid.clone());
                 out.push((a, e));
             }
@@ -2268,6 +2379,7 @@ async fn snapshot_in(
         remaining_rows: options.max_nodes.saturating_mul(64).clamp(4096, 32768),
         memories: HashMap::new(),
         body_revisions: HashMap::new(),
+        native: super::native_visibility::NativeVisibility::new(tx.clone()),
         tx,
         binding,
         cancel,

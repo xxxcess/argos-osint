@@ -255,6 +255,39 @@ pub struct WorkerPool {
 }
 
 impl WorkerPool {
+    /// Independent derivative ownership; never inherits a collection lease.
+    #[cfg(feature = "surreal")]
+    pub fn spawn_atlas_derivative_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let handle = std::thread::Builder::new()
+            .name("argos-atlas-derivatives".into())
+            .spawn(move || {
+                while !flag.load(Ordering::Acquire) {
+                    let (worker, cancel) = (owner.clone(), flag.clone());
+                    let result = crate::storage::runtime::blocking(move |repo| async move {
+                        if !surreal_elected(&repo, &worker).await? {
+                            return Ok(0);
+                        }
+                        crate::atlas_derivative_worker::drain_one(&repo, &worker, cancel).await
+                    });
+                    report_drainer(&db_path, "atlas-derivatives", result);
+                    // Always yield between activations, including continuation pages.
+                    for _ in 0..4 {
+                        if flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                }
+            })
+            .expect("spawn Atlas derivative worker");
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
     /// Historical admission has an independent owner, stop signal and retained
     /// thread handle. It never resets another pool's tasks or worker leases.
     #[cfg(feature = "surreal")]
@@ -346,10 +379,18 @@ impl WorkerPool {
                         if !surreal_elected(&repo, &owner).await? {
                             return Ok(0);
                         }
-                        Ok(crate::storage::classifier_calibration::drain_one(
+                        let monitored = crate::storage::classifier_calibration::drain_one(
+                            &repo,
+                            &home,
+                            &owner,
+                            cancel.clone(),
+                        )
+                        .await?;
+                        let learned = crate::storage::classifier_learning::drain_one(
                             &repo, &home, &owner, cancel,
                         )
-                        .await?)
+                        .await?;
+                        Ok(monitored + learned)
                     });
                     let busy = matches!(result, Ok(count) if count > 0);
                     report_drainer(&db_path, "classifier-calibration", result);
@@ -445,6 +486,7 @@ impl WorkerPool {
         #[cfg(feature = "surreal")]
         return vec![
             Self::spawn_surreal_index_drainer(db_path.clone(), owner.clone()),
+            Self::spawn_atlas_derivative_drainer(db_path.clone(), owner.clone()),
             Self::spawn_summary_flush_drainer(db_path.clone(), owner.clone()),
             Self::spawn_insight_refresh_drainer(db_path.clone(), owner.clone()),
             Self::spawn_brain_backfill_drainer(db_path.clone(), owner.clone()),

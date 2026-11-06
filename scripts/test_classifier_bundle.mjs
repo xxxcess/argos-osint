@@ -70,6 +70,11 @@ async function main() {
     'BundleStemmer must have tokenizeAndStem'
   );
 
+  for(const [left,right] of [['Assembly approves budget','Assembly approves budget'],['Hospital will open on Friday','Hospital will not open on Friday'],['Reported 12 cases','Reported 21 cases'],['A','B'],['Council monitors flood','council  monitors flood']]) {
+    assert.equal(sandbox.argosNaturalBayes.DiceCoefficient(left,right),natural.DiceCoefficient(left,right));
+    assert.equal(sandbox.argosNaturalBayes.JaroWinklerDistance(left,right,{ignoreCase:true}),natural.JaroWinklerDistance(left,right,{ignoreCase:true}));
+  }
+
   // 5. Test tokenization parity
   log('  4. Testing tokenization and stemming parity...');
   const tokenizationCases = [
@@ -120,6 +125,9 @@ async function main() {
   // Train both
   upstreamClassifier.train();
   bundleClassifier.train();
+  assert.deepStrictEqual(bundleClassifier.classifier.classFeatures,upstreamClassifier.classifier.classFeatures,'Sparse fitting must preserve upstream binary feature counts');
+  assert.deepStrictEqual(bundleClassifier.classifier.classTotals,upstreamClassifier.classifier.classTotals);
+  assert.equal(bundleClassifier.classifier.totalExamples,upstreamClassifier.classifier.totalExamples);
 
   // Test feature extraction parity across unseen test phrases
   const testPhrases = [
@@ -209,6 +217,90 @@ async function main() {
       );
     }
   }
+
+  log('  9. Testing phrase boundaries, frozen features and sparse score parity...');
+  new Function('globalThis', fs.readFileSync(path.join(REPO_ROOT,'crates/argos-osint-core/src/classifier/features.js'),'utf8'))(sandbox);
+  const features=sandbox.argosClassifierFeatures;
+  const extract=(title,description='')=>features.extract(title,description);
+  for (const text of ['This was the','are the','was in','the and of','those are the','it was in the']) assert.deepStrictEqual(extract(text),[],`Neutral-only phrases cannot become support: ${text}`);
+  assert.ok(extract('are not').some(feature=>feature.id==='u:"not"'),'Noise filtering must preserve negation');
+  for (const [title,description] of [['armed','strike'],['armed. Strike',''],['armed, strike',''],['armed; strike',''],['armed\nstrike',''],['armed\r\nstrike',''],['armed\u2029strike','']]) {
+    assert.ok(!extract(title,description).some(feature=>feature.id==='b:["arm","strike"]'), 'No phrase may cross a field or punctuation boundary');
+  }
+  assert.ok(extract('armed strike').some(feature=>feature.id==='b:["arm","strike"]'));
+  assert.ok(extract('the and of').length===0, 'Function words alone cannot establish support');
+  const special=extract("NATO denies CVE-2026-1234 isn't resolved; U.S. teams re-test 42 systems");
+  for (const id of ['u:"nato"','u:"cve-2026-1234"','u:"not"','u:"u.s."','u:"42"']) assert.ok(special.some(feature=>feature.id===id), id);
+  const unicode='é NATO';
+  const span=extract(unicode).find(feature=>feature.id==='u:"nato"');
+  assert.equal(span.start_byte,Buffer.byteLength('é '));
+  assert.equal(span.end_byte,Buffer.byteLength(unicode));
+  assert.deepStrictEqual(sandbox.argosNaturalBayes.NGrams.bigrams(['a','b','c']),natural.NGrams.bigrams(['a','b','c']));
+  const frozen=new sandbox.argosNaturalBayes.TfIdf();
+  assert.equal(frozen.addFileSync,undefined,'Runtime must not expose filesystem entry points');
+  const oracle=new natural.TfIdf();
+  for (const tokens of [['u:"ballot"','b:["arm","strike"]'],['u:"ballot"','u:"poll"']]) {frozen.addDocument(tokens);oracle.addDocument(tokens);}
+  for (const token of ['u:"ballot"','u:"poll"']) assert.equal(frozen.idf(token),oracle.idf(token));
+  for (const phrase of testPhrases) {
+    const tokens=BundleStemmer.tokenizeAndStem(phrase,true);
+    const ids=bundleClassifier.featureOrder.map((feature,index)=>tokens.includes(feature)?index:-1).filter(index=>index>=0);
+    const sparse=bundleClassifier.logScoresActive(ids);
+    for (const [index,label] of ['present','absent'].entries()) assert.equal(sparse[index],bundleClassifier.logScore(tokens,label), 'Sparse scoring must preserve exact summation order');
+  }
+
+  const incrementalOracle=new natural.BayesClassifier(natural.PorterStemmer);
+  const incrementalBundle=new BundleBayes(BundleStemmer);
+  for(let round=0;round<4;round++){
+    for(let index=0;index<17;index++){
+      const tokens=Array.from({length:11},(_,j)=>`u:${JSON.stringify(`term${(index*7+j*3+round*13)%53}`)}`);tokens.push(tokens[0]);
+      const label=index%2?'present':'absent';incrementalOracle.addDocument(tokens,label);incrementalBundle.addDocument(tokens,label);
+    }
+    incrementalOracle.train();while(!incrementalBundle.trainStep(3)){}
+    for(const key of ['classFeatures','classTotals','totalExamples','smoothing'])assert.deepStrictEqual(incrementalBundle.classifier[key],incrementalOracle.classifier[key],`Incremental sparse fit ${key}`);
+    for(let index=0;index<53;index++)for(const label of ['present','absent']){
+      const tokens=[`u:"term${index}"`,'u:"unseen"'];
+      const expected=incrementalOracle.classifier.probabilityOfClass(incrementalOracle.textToFeatures(tokens),label);
+      assert.ok(Math.abs(incrementalBundle.logScore(tokens,label)-Math.log(expected))<1e-9);
+    }
+  }
+
+  log('  10. Testing frozen Train vocabulary and held-out isolation...');
+  new Function('globalThis',fs.readFileSync(path.join(REPO_ROOT,'crates/argos-osint-core/src/classifier/vocabulary.js'),'utf8'))(sandbox);
+  new Function('globalThis',fs.readFileSync(path.join(REPO_ROOT,'crates/argos-osint-core/src/classifier/bridge.js'),'utf8'))(sandbox);
+  let sequence=0;
+  const bridge=(operation,body)=>{
+    const reply=JSON.parse(sandbox.argosClassifier[operation](JSON.stringify({version:'1',request_id:`vocabulary-${sequence++}`,model_id:'frozen-vocabulary',...body})));
+    assert.ok(!reply.error,JSON.stringify(reply));
+    return reply;
+  };
+  const rows=[{row_id:'positive',feature_input_hash:'a'.repeat(64),title:'Ballot parliamentary vote',description:'Lawmakers ratify legislation',membership:Array(6).fill('Present')},{row_id:'negative',feature_input_hash:'b'.repeat(64),title:'Culinary recipe feast',description:'Bakers prepare pastry',membership:Array(6).fill('Absent')}];
+  assert.equal(bridge('trainBatch',{phase:'vocabulary',rows}).prepared,2);
+  assert.equal(bridge('trainBatch',{phase:'freeze_vocabulary',rows:[]}).vocabulary_frozen,true);
+  bridge('trainBatch',{rows});
+  while(!bridge('finishTraining',{max_documents_per_step:16}).done){}
+  const original=bridge('serializeModel',{});
+  assert.equal(original.feature_policy.training_documents,2);
+  assert.ok(original.feature_policy.terms.every(term=>term.document_frequency>=1 && Number.isFinite(term.idf)));
+  const heldout={items:[{id:'held-out',title:'quasar unseen vocabulary',description:'unknown astronomical discovery'}]};
+  const before=JSON.stringify(original.feature_policy);
+  const unseen=bridge('classifyBatch',heldout);
+  assert.ok(unseen.items[0].results.every(result=>result.known_feature_count===0));
+  assert.equal(JSON.stringify(bridge('serializeModel',{}).feature_policy),before,'Held-out inference cannot update frozen DF/IDF or vocabulary');
+  assert.throws(()=>sandbox.argosClassifierVocabulary.restore({}, {...original.feature_policy,terms:[{...original.feature_policy.terms[0],idf:123}]}),/invalid_vocabulary_term/);
+
+  let bindingReads=0;
+  class AuditedBayes extends BundleBayes {
+    constructor(...args){super(...args);this.featureIndex=new Proxy(this.featureIndex,{get(target,key,receiver){if(typeof key==='string' && /^\d+$/.test(key))bindingReads++;return Reflect.get(target,key,receiver);}});}
+  }
+  sandbox.argosNaturalBayes={...sandbox.argosNaturalBayes,BayesClassifier:AuditedBayes};
+  new Function('globalThis',fs.readFileSync(path.join(REPO_ROOT,'crates/argos-osint-core/src/classifier/bridge.js'),'utf8'))(sandbox);
+  const auditCall=(operation,body)=>{const value=JSON.parse(sandbox.argosClassifier[operation](JSON.stringify({version:'1',request_id:`audit-${sequence++}`,model_id:'batch-audit',...body})));assert.ok(!value.error,JSON.stringify(value));return value;};
+  const auditRows=rows.map(({feature_input_hash,...row})=>row);
+  auditCall('trainBatch',{rows:auditRows});while(!auditCall('finishTraining',{max_documents_per_step:16}).done){}
+  const audited=auditCall('serializeModel',{});const totalVocabulary=Object.values(audited.domains).reduce((sum,model)=>sum+model.feature_order.length,0);
+  bindingReads=0;
+  auditCall('trainBatch',{rows:Array.from({length:32},(_,index)=>({...auditRows[index%2],row_id:`batch-row-${index}`}))});
+  assert.ok(bindingReads<=3*totalVocabulary,`Binding audits must scale with vocabulary per batch, not per row: ${bindingReads}/${totalVocabulary}`);
 
   if (jsonMode) process.stdout.write(JSON.stringify({ tolerance: 1e-9, max_delta: maxDelta, training_corpus: trainingCorpus, fixtures }, null, 2) + '\n');
   log('All classifier bundle parity tests PASSED successfully.');

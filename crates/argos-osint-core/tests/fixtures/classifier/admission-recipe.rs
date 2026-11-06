@@ -24,6 +24,24 @@ pub async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
 }
 /// Uses the same real learner and gates with caller-owned fictional vocabulary.
 pub fn install_with_titles(titles: [&str; 3]) -> Installed {
+    install_with_disabled_domains(titles, &[])
+}
+
+/// Storage boundary fixture: actual fitted weights with alternate secondary
+/// gates explicitly disabled. This does not claim training-quality acceptance.
+#[allow(dead_code)] // Shared fixture module; used only by the single-domain contract target.
+pub fn install_primary_only() -> Installed {
+    install_with_disabled_domains(
+        [
+            "Ballot patrol common",
+            "Freight clinic common",
+            "River sensor common",
+        ],
+        &[1, 3, 5],
+    )
+}
+
+fn install_with_disabled_domains(titles: [&str; 3], disabled: &[usize]) -> Installed {
     let mut fixture = recipes::Fixture::new("admission-fixture");
     let pairs = [[0, 1], [2, 3], [4, 5]];
     let membership = |pair: usize| -> [LabelMembership; 6] {
@@ -64,7 +82,11 @@ pub fn install_with_titles(titles: [&str; 3]) -> Installed {
             }
         })
         .collect();
-    let fit = calibration::fit(&scored, &CalibrationPolicy).unwrap();
+    let mut fit = calibration::fit(&scored, &CalibrationPolicy).unwrap();
+    for index in disabled {
+        fit.gates.domains[*index].threshold = calibration::DISABLED_THRESHOLD;
+    }
+    fit.metrics = calibration::evaluate(&scored, &fit.gates).unwrap();
     let mut candidate = recipes::Candidate::from_fixture(fixture);
     candidate.report.gate_set = fit.gates;
     candidate.report.evaluation = fit.metrics.clone();

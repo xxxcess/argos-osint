@@ -108,7 +108,7 @@ fn create_valid_manifest(model_id_str: &str, payload_str: &str, report_str: &str
         "dataset_sha256": "a".repeat(64),
         "train_split_sha256": "b".repeat(64),
         "calibration_split_sha256": "c".repeat(64),
-        "test_split_sha256": "d".repeat(64),
+        "development_split_sha256":"7".repeat(64),"test_split_sha256": "d".repeat(64),
         "family_assignment_sha256": "e".repeat(64),
         "taxonomy_version": TAXONOMY_VERSION,
         "domains": DomainId::ALL.to_vec(),

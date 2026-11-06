@@ -121,10 +121,21 @@ fn unknown_memberships_do_not_update_the_masked_model() {
 fn repetition_is_binary_presence_not_token_weight() {
     let _serial = support::serial();
     let mut fixture = support::trained();
-    assert_eq!(
-        fixture.classify("ballot patrol common"),
-        fixture.classify("ballot ballot patrol patrol common")
-    );
+    let once = fixture.classify("ballot patrol common");
+    let repeated = fixture.classify("ballot ballot patrol patrol common");
+    for (once, repeated) in once
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(repeated.as_array().unwrap())
+    {
+        for field in ["present_log_score", "absent_log_score", "raw_log_odds"] {
+            assert_eq!(
+                once[field], repeated[field],
+                "binary feature repetition must not weight scores"
+            );
+        }
+    }
 }
 #[cfg(feature = "classifier")]
 #[test]
@@ -191,7 +202,7 @@ fn late_numeric_features_append_per_model_without_reindexing() {
         .as_array()
         .unwrap();
     assert_eq!(&new_order[..old_order.len()], old_order.as_slice());
-    assert!(new_order[old_order.len()..].contains(&serde_json::json!("0")));
+    assert!(new_order[old_order.len()..].contains(&serde_json::json!("u:\"0\"")));
     for domain in &DomainId::ALL[1..] {
         assert_eq!(
             before["domains"][domain.as_str()],
@@ -252,10 +263,22 @@ fn long_oov_and_kept_tokens_remain_finite_without_feature_leakage() {
         .as_array()
         .unwrap();
     for token in ["cannot", "never", "nato", "2026", "1", "2"] {
-        assert!(order.contains(&serde_json::json!(token)), "missing {token}");
+        assert!(
+            order.contains(&serde_json::json!(format!(
+                "u:{}",
+                serde_json::to_string(token).unwrap()
+            ))),
+            "missing {token}"
+        );
     }
     for token in ["p-governance", "present", "absent", "train", "fixture-m1"] {
-        assert!(!order.contains(&serde_json::json!(token)), "leaked {token}");
+        assert!(
+            !order.contains(&serde_json::json!(format!(
+                "u:{}",
+                serde_json::to_string(token).unwrap()
+            ))),
+            "leaked {token}"
+        );
     }
     let scores = fixture.classify(&"ballot patrol common zzqxjv ".repeat(128));
     for score in scores.as_array().unwrap() {
@@ -282,7 +305,7 @@ fn top_two_independent_gates_cover_admission_edges() {
             "weak-second",
             [0.95, 0.79, 0.1, 0.1, 0.1, 0.1],
             [0.8; 6],
-            false,
+            true,
         ),
         ("three", [0.95, 0.90, 0.85, 0.1, 0.1, 0.1], [0.8; 6], true),
         ("inclusive", [0.8, 0.8, 0.1, 0.1, 0.1, 0.1], [0.8; 6], true),
@@ -290,12 +313,13 @@ fn top_two_independent_gates_cover_admission_edges() {
             "no-skip",
             [0.95, 0.90, 0.85, 0.1, 0.1, 0.1],
             [0.99, 0.8, 0.8, 0.8, 0.8, 0.8],
-            false,
+            true,
         ),
     ] {
         let gates = GateSet {
             version: CALIBRATION_VERSION.into(),
             domains: core::array::from_fn(|idx| DomainCalibration {
+                sigmoid: None,
                 domain: DomainId::ALL[idx],
                 knots: vec![CalibrationKnot {
                     raw_upper: 1.0,
@@ -315,7 +339,7 @@ fn top_two_independent_gates_cover_admission_edges() {
         });
         let input = ClassifyInput::new(name, "Headline", "Description", Some("en".into()));
         let receipt = calibration::apply_gates(&input, &raw, &model, &gates).unwrap();
-        assert_eq!(receipt.selected_pair.is_some(), expected, "{name}");
+        assert_eq!(receipt.is_admitted(), expected, "{name}");
         receipt.validate().unwrap();
         if !expected {
             assert_eq!(
@@ -335,10 +359,15 @@ fn receipt_versions_diagnostics_and_occurrence_identity_survive_roundtrip() {
     let gates = GateSet {
         version: CALIBRATION_VERSION.into(),
         domains: DomainId::ALL.map(|domain| DomainCalibration {
+            sigmoid: None,
             domain,
             knots: vec![CalibrationKnot {
                 raw_upper: 1.0,
-                relevance: 0.9,
+                relevance: if matches!(domain, DomainId::Economic | DomainId::Environmental) {
+                    0.9
+                } else {
+                    0.1
+                },
             }],
             threshold: 0.8,
             min_informative_features: 1,
@@ -358,11 +387,11 @@ fn receipt_versions_diagnostics_and_occurrence_identity_survive_roundtrip() {
         let input = ClassifyInput::new(id, "Same headline", "Same description", Some("en".into()));
         let receipt = calibration::apply_gates(&input, &raw, &model, &gates).unwrap();
         assert_eq!(
-            receipt.selected_pair,
-            Some([DomainId::Economic, DomainId::Environmental])
+            receipt.selected_domains,
+            vec![DomainId::Economic, DomainId::Environmental]
         );
         assert_eq!(receipt.occurrence_id, id);
-        assert_eq!(receipt.receipt_schema_version, "classifier-receipt-v1");
+        assert_eq!(receipt.receipt_schema_version, "classifier-receipt-v2");
         assert!(
             receipt
                 .scores
@@ -561,6 +590,7 @@ fn calibrated_order_is_independent_of_raw_ranking_and_receipts_reject_corruption
     let gates = GateSet {
         version: CALIBRATION_VERSION.into(),
         domains: DomainId::ALL.map(|domain| DomainCalibration {
+            sigmoid: None,
             domain,
             knots: vec![CalibrationKnot {
                 raw_upper: 10.0,
@@ -584,8 +614,8 @@ fn calibrated_order_is_independent_of_raw_ranking_and_receipts_reject_corruption
     .unwrap();
     assert!(raw[0].raw_log_odds > raw[4].raw_log_odds);
     assert_eq!(
-        receipt.selected_pair,
-        Some([DomainId::Environmental, DomainId::Scientific])
+        receipt.selected_domains,
+        vec![DomainId::Environmental, DomainId::Scientific]
     );
     receipt.validate().unwrap();
     let mut corruptions = Vec::new();
@@ -605,13 +635,13 @@ fn calibrated_order_is_independent_of_raw_ranking_and_receipts_reject_corruption
     bad.scores[0].passes_gate = true;
     corruptions.push(bad);
     let mut bad = receipt.clone();
-    bad.selected_pair = Some([DomainId::Governance, DomainId::Security]);
+    bad.selected_domains = vec![DomainId::Governance, DomainId::Security];
     corruptions.push(bad);
     let mut bad = receipt.clone();
     bad.rejection_reason = Some(RejectionReason::InsufficientDomains);
     corruptions.push(bad);
     let mut bad = receipt.clone();
-    bad.selected_pair = None;
+    bad.selected_domains.clear();
     bad.rejection_reason = None;
     corruptions.push(bad);
     let mut bad = receipt.clone();
@@ -650,6 +680,7 @@ fn typed_rejection_priority_and_informative_gates_match_generated_diagnostics() 
     let gates = GateSet {
         version: CALIBRATION_VERSION.into(),
         domains: DomainId::ALL.map(|domain| DomainCalibration {
+            sigmoid: None,
             domain,
             knots: vec![CalibrationKnot {
                 raw_upper: 10.0,
@@ -678,10 +709,10 @@ fn typed_rejection_priority_and_informative_gates_match_generated_diagnostics() 
             RejectionReason::WhollyOov,
         ),
         (
-            "One informative gate fails",
+            "Qualifying gates lack discriminative support",
             "en",
-            [0, 1, 1, 1, 1, 1],
-            RejectionReason::InsufficientDomains,
+            [0, 0, 1, 1, 1, 1],
+            RejectionReason::OutOfScope,
         ),
     ] {
         let input = ClassifyInput::new("rejected", title, "", Some(language.into()));
@@ -695,7 +726,7 @@ fn typed_rejection_priority_and_informative_gates_match_generated_diagnostics() 
         });
         let receipt = calibration::apply_gates(&input, &raw, &model, &gates).unwrap();
         assert_eq!(receipt.rejection_reason, Some(expected));
-        assert!(receipt.selected_pair.is_none());
+        assert!(receipt.selected_domains.is_empty());
         receipt.validate().unwrap();
         let diagnostics = receipt.raw_diagnostics.as_ref().unwrap();
         for (index, score) in receipt.scores.iter().enumerate() {
@@ -730,14 +761,61 @@ fn typed_rejection_priority_and_informative_gates_match_generated_diagnostics() 
         domain.threshold = 2.0;
     }
     let receipt = calibration::apply_gates(&input, &raw, &model, &failed).unwrap();
-    assert_eq!(
-        receipt.rejection_reason,
-        Some(RejectionReason::InsufficientDomains)
-    );
+    assert_eq!(receipt.rejection_reason, Some(RejectionReason::OutOfScope));
     receipt.validate().unwrap();
     let serialized = serde_json::to_string(&RejectionReason::OutOfScope).unwrap();
     assert_eq!(
         serde_json::from_str::<RejectionReason>(&serialized).unwrap(),
         RejectionReason::OutOfScope
+    );
+}
+
+#[cfg(feature = "classifier")]
+#[test]
+fn stemmed_function_word_phrases_cannot_create_training_support() {
+    use argos_osint_core::classifier::BridgeOperation;
+    let _serial = support::serial();
+    let mut fixture = support::Fixture::new("neutral-phrase-regression");
+    let rows:Vec<_>=["This was the","are the","was in","the and of","those are the","it was in the"].iter().enumerate().map(|(index,title)|serde_json::json!({"row_id":format!("neutral-{index}"),"title":title,"description":"","membership":vec![if index%2==0 {"Present"}else{"Absent"};6]})).collect();
+    let result = fixture.call(
+        BridgeOperation::TrainBatch,
+        serde_json::json!({"rows":rows}),
+    );
+    assert_eq!(result["accepted"], 0);
+    assert_eq!(result["skipped"], 6);
+    assert_eq!(
+        result["vocabulary_sizes"],
+        serde_json::json!([0, 0, 0, 0, 0, 0])
+    );
+    assert_eq!(
+        result["fitted_memberships"],
+        serde_json::json!([0, 0, 0, 0, 0, 0])
+    );
+}
+
+#[cfg(feature = "classifier")]
+#[test]
+fn phrase_support_stops_at_hard_line_boundaries() {
+    use argos_osint_core::classifier::BridgeOperation;
+    let _serial = support::serial();
+    let mut fixture = support::Fixture::new("phrase-line-boundary");
+    fixture.fit(serde_json::json!([
+        {"row_id":"positive","title":"armed strike","description":"","membership":["Present","Present","Present","Present","Present","Present"]},
+        {"row_id":"negative","title":"culinary pastry","description":"","membership":["Absent","Absent","Absent","Absent","Absent","Absent"]}
+    ]));
+    let result = fixture.call(
+        BridgeOperation::ClassifyBatch,
+        serde_json::json!({"items":[
+            {"id":"space","title":"armed strike","description":"","explain":true},
+            {"id":"line","title":"armed\nstrike","description":"","explain":true}
+        ]}),
+    );
+    assert_eq!(
+        result["items"][0]["results"][0]["support"]["active_phrases"],
+        1
+    );
+    assert_eq!(
+        result["items"][1]["results"][0]["support"]["active_phrases"],
+        0
     );
 }

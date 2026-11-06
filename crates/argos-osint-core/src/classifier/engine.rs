@@ -22,12 +22,33 @@ use crate::atlas_taxonomy::DomainId;
 use crate::js_runtime_budget::{classifier_process_budget, ReservationError, RuntimeReservation};
 
 const BUNDLE_SRC: &str = include_str!("../../assets/classifier/natural-classifier.js");
+const FEATURES_SRC: &str = include_str!("features.js");
+const VOCABULARY_SRC: &str = include_str!("vocabulary.js");
 const BRIDGE_SRC: &str = include_str!("bridge.js");
 const ADAPT_SRC: &str = include_str!("../../assets/classifier/natural-bayes.adapt.js");
 const MANIFEST_SRC: &str = include_str!("../../assets/classifier/source-manifest.json");
 
 /// Total byte reservation required per QuickJS runtime (128 MiB heap + 1 MiB stack).
 pub const RUNTIME_RESERVATION_BYTES: usize = RUNTIME_MEMORY_LIMIT_BYTES + RUNTIME_STACK_LIMIT_BYTES;
+
+#[derive(serde::Deserialize)]
+struct VocabularyPrepared {
+    version: String,
+    request_id: String,
+    prepared: usize,
+    documents: usize,
+    terms: usize,
+    errors: Vec<String>,
+}
+#[derive(serde::Deserialize)]
+struct VocabularyFrozen {
+    version: String,
+    request_id: String,
+    vocabulary_frozen: bool,
+    documents: usize,
+    terms: usize,
+    errors: Vec<String>,
+}
 
 enum WorkerMessage {
     BridgeCall {
@@ -207,6 +228,8 @@ pub fn compiled_identity() -> Result<CompiledIdentity, ClassifierError> {
         ("/build/bundle_sha256", BUNDLE_SRC.as_bytes()),
         ("/adaptation/adapter_sha256", ADAPT_SRC.as_bytes()),
         ("/bridge/sha256", BRIDGE_SRC.as_bytes()),
+        ("/features/sha256", FEATURES_SRC.as_bytes()),
+        ("/vocabulary/sha256", VOCABULARY_SRC.as_bytes()),
     ] {
         let expected = manifest_json
             .pointer(pointer)
@@ -240,7 +263,7 @@ pub fn compiled_identity() -> Result<CompiledIdentity, ClassifierError> {
     })
 }
 
-fn javascript_error(
+pub(super) fn javascript_error(
     ctx: &rquickjs::Ctx<'_>,
     error: rquickjs::Error,
     operation: &str,
@@ -293,10 +316,10 @@ fn fixed_runtime_fixture(
         "fixture:tokenize-once" => {
             r#"
             (() => {
-                const stemmer=globalThis.argosNaturalBayes.PorterStemmer;
-                const original=stemmer.tokenizeAndStem;
+                const stemmer=globalThis.argosNaturalBayes.RegexpTokenizer.prototype;
+                const original=stemmer.tokenize;
                 let count=0;
-                stemmer.tokenizeAndStem=function(...args){ count++; return original.apply(this,args); };
+                stemmer.tokenize=function(...args){ count++; return original.apply(this,args); };
                 try {
                     const base={version:'1',model_id:'token-once'};
                     const rows=[{row_id:'row-a',description:'',title:'ballot patrol common',membership:Array(6).fill('Present')},{row_id:'row-b',description:'',title:'ballot policy common',membership:Array(6).fill('Absent')}];
@@ -304,10 +327,10 @@ fn fixed_runtime_fixture(
                     if(train.error || count!==2) throw new Error('train token count');
                     const fit=JSON.parse(argosClassifier.finishTraining(JSON.stringify({...base,request_id:'b',max_documents_per_step:16})));
                     if(fit.error || !fit.done || count!==2) throw new Error('fit retokenized');
-                    const result=JSON.parse(argosClassifier.classifyBatch(JSON.stringify({...base,request_id:'c',items:[{id:'query',title:'ballot common'}]})));
-                    if(result.error || count!==3 || result.items[0].results.length!==6) throw new Error('inference token count');
+                    const result=JSON.parse(argosClassifier.classifyBatch(JSON.stringify({...base,request_id:'c',items:[{id:'query',title:'ballot common',description:'policy patrol'}]})));
+                    if(result.error || count!==4 || result.items[0].results.length!==6) throw new Error('inference token count');
                     return 'done';
-                } finally { stemmer.tokenizeAndStem=original; }
+                } finally { stemmer.tokenize=original; }
             })()
         "#
         }
@@ -511,8 +534,7 @@ fn worker_loop(
             return;
         }
     };
-    runtime.set_memory_limit(RUNTIME_MEMORY_LIMIT_BYTES);
-    runtime.set_max_stack_size(RUNTIME_STACK_LIMIT_BYTES);
+    super::runtime_proof::configure(&runtime);
 
     let cancel_flag = Arc::new(Mutex::new(Arc::new(AtomicBool::new(false))));
     let deadline_cell = Arc::new(Mutex::new(Instant::now() + Duration::from_secs(3600)));
@@ -551,6 +573,10 @@ fn worker_loop(
             .map_err(|e| ClassifierError::InvalidArtifact(format!("console shim init: {e}")))?;
         ctx.eval::<(), _>(BUNDLE_SRC)
             .map_err(|e| ClassifierError::InvalidArtifact(format!("bundle init: {e}")))?;
+        ctx.eval::<(), _>(FEATURES_SRC)
+            .map_err(|e| ClassifierError::InvalidArtifact(format!("features init: {e}")))?;
+        ctx.eval::<(), _>(VOCABULARY_SRC)
+            .map_err(|e| ClassifierError::InvalidArtifact(format!("vocabulary init: {e}")))?;
         ctx.eval::<(), _>(BRIDGE_SRC)
             .map_err(|e| ClassifierError::InvalidArtifact(format!("bridge init: {e}")))?;
         if let Some((model, payload, control)) = startup {
@@ -770,8 +796,45 @@ fn worker_loop(
                 let res = res.and_then(|response| {
                     let valid = match operation {
                         BridgeOperation::TrainBatch => {
-                            serde_json::from_str::<super::training::TrainBatchResponse>(&response)
-                                .is_ok_and(|value| value.version == "1" && value.errors.is_empty())
+                            let request: serde_json::Value =
+                                serde_json::from_str(&request).unwrap_or_default();
+                            match request["phase"].as_str() {
+                                Some("vocabulary") => serde_json::from_str::<VocabularyPrepared>(
+                                    &response,
+                                )
+                                .is_ok_and(|value| {
+                                    value.version == "1"
+                                        && request["request_id"].as_str()
+                                            == Some(value.request_id.as_str())
+                                        && value.errors.is_empty()
+                                        && value.prepared
+                                            == request["rows"].as_array().map_or(0, Vec::len)
+                                        && value.documents <= 50_000
+                                        && value.terms <= 100_000
+                                }),
+                                Some("freeze_vocabulary") => {
+                                    serde_json::from_str::<VocabularyFrozen>(&response).is_ok_and(
+                                        |value| {
+                                            value.version == "1"
+                                                && request["request_id"].as_str()
+                                                    == Some(value.request_id.as_str())
+                                                && value.errors.is_empty()
+                                                && value.vocabulary_frozen
+                                                && (1..=50_000).contains(&value.documents)
+                                                && (1..=100_000).contains(&value.terms)
+                                        },
+                                    )
+                                }
+                                None => {
+                                    serde_json::from_str::<super::training::TrainBatchResponse>(
+                                        &response,
+                                    )
+                                    .is_ok_and(|value| {
+                                        value.version == "1" && value.errors.is_empty()
+                                    })
+                                }
+                                _ => false,
+                            }
                         }
                         BridgeOperation::FinishTraining => serde_json::from_str::<
                             super::training::FinishTrainingResponse,
@@ -780,9 +843,26 @@ fn worker_loop(
                         _ => true,
                     };
                     if !valid {
+                        let value: serde_json::Value =
+                            serde_json::from_str(&response).unwrap_or_default();
+                        let machine = value["error"].as_str().filter(|code| {
+                            matches!(
+                                *code,
+                                "no_discriminative_training_vocabulary"
+                                    | "vocabulary_document_bound"
+                                    | "vocabulary_byte_bound"
+                                    | "vocabulary_term_bound"
+                                    | "vocabulary_freeze_state"
+                                    | "vocabulary_policy_conflict"
+                                    | "tfidf_statistics_mismatch"
+                                    | "unprepared_training_row"
+                            )
+                        });
                         return Err(ClassifierError::BridgeProtocol {
                             operation: op_name.into(),
-                            code: "invalid mutation reply; candidate discarded".into(),
+                            code: machine
+                                .unwrap_or("invalid mutation reply; candidate discarded")
+                                .into(),
                         });
                     }
                     Ok(response)
@@ -908,6 +988,7 @@ impl QuickJsEngine {
                     "id": input.occurrence_id,
                     "title": input.title,
                     "description": input.description,
+                    "explain": input.explain,
                     "language": input.language,
                 })
             })
@@ -1079,6 +1160,25 @@ impl QuickJsEngine {
                     .collect();
                 receipts.push(receipt);
             }
+            if let Some(diagnostics) = receipts
+                .last_mut()
+                .and_then(|receipt| receipt.raw_diagnostics.as_mut())
+            {
+                diagnostics.support = results
+                    .iter()
+                    .map(|result| {
+                        let support: super::feature_policy::DomainSupport =
+                            serde_json::from_value(result["support"].clone()).map_err(|_| {
+                                ClassifierError::BridgeProtocol {
+                                    operation: "classifyBatch".into(),
+                                    code: "invalid_support_diagnostics".into(),
+                                }
+                            })?;
+                        support.validate()?;
+                        Ok(support)
+                    })
+                    .collect::<Result<Vec<_>, ClassifierError>>()?;
+            }
         }
 
         Ok(receipts)
@@ -1191,6 +1291,15 @@ pub struct CandidateWorkerHandle {
 }
 
 impl ClassifierWorker for CandidateWorkerHandle {
+    fn performance(&self) -> Result<ClassifierPerformance, ClassifierError> {
+        self.sender
+            .observations
+            .lock()
+            .map_err(|_| ClassifierError::Busy)?
+            .as_ref()
+            .map(WorkerObservations::snapshot)
+            .ok_or(ClassifierError::Unavailable)
+    }
     fn call(
         &mut self,
         operation: BridgeOperation,
@@ -1906,6 +2015,7 @@ mod replay_bound_tests {
         let maximum_row = 6 * (MAX_ROW_TEXT_BYTES + 256) + frame;
         let worst_row = TrainingRow {
             row_id: "\"\\".repeat(128),
+            feature_input_hash: "f".repeat(64),
             title: "\0".repeat(MAX_ROW_TEXT_BYTES),
             description: String::new(),
             membership: [LabelMembership::Present; 6],
@@ -1921,8 +2031,8 @@ mod replay_bound_tests {
         // Finishing every collection separately adds at most one rounded step
         // per batch beyond the total six-membership/16 bound.
         let finishes = (MAX_TRAINING_ROWS * 6).div_ceil(FIT_DOCUMENTS_PER_STEP) + collections;
-        let mutations = collections + finishes;
-        assert!(mutations < 23_000);
+        let mutations = 2 * collections + finishes + 1;
+        assert!(mutations < 26_000);
         assert!(mutations < MAX_REPLAY_IDENTITIES);
         let identity = serde_json::to_vec(&(
             ("m".repeat(64), "finishTraining", "\"\\".repeat(128)),

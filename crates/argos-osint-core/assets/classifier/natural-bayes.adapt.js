@@ -21,6 +21,12 @@
 function adaptSource(relPath, source) {
   const normalized = relPath.replace(/\\/g, '/');
 
+  if (normalized.endsWith('natural/lib/natural/tfidf/tfidf.js')) {
+    return source.replace("const fs = require('fs')\n", '')
+      .replace(/function isEncoding \(encoding\) \{[\s\S]*?\n\}\n/, '')
+      .replace(/  addFileSync \(path, encoding, key, restoreCache\) \{[\s\S]*?\n  \}\n/, '');
+  }
+
   if (normalized.endsWith('natural/lib/natural/classifiers/classifier.js')) {
     let code = source;
 
@@ -117,9 +123,19 @@ function adaptSource(relPath, source) {
     const limit = (typeof maxDocs === 'number' && maxDocs > 0)
       ? Math.min(totalDocs, this.lastAdded + maxDocs)
       : totalDocs
+    if (!this.trainingLookup || this.trainingLookup.size !== this.featureOrder.length) {
+      if (!Array.isArray(this.featureIndex) || this.featureIndex.length !== this.featureOrder.length) { throw new Error('feature_order_mismatch') }
+      this.trainingLookup = new Map(this.featureOrder.map((token, index) => {
+        const binding = this.featureIndex[index]
+        if (!binding || binding.token !== token || binding.index !== index) { throw new Error('feature_order_mismatch') }
+        return [token, index]
+      }))
+    }
     for (let i = this.lastAdded; i < limit; i++) {
-      const features = this.textToFeatures(this.docs[i].text)
-      this.classifier.addExample(features, this.docs[i].label)
+      const indices = Array.from(new Set(this.docs[i].text))
+        .filter(token => this.trainingLookup.has(token))
+        .map(token => this.trainingLookup.get(token)).sort((a, b) => a - b)
+      this.classifier.addExampleActive(indices, this.docs[i].label)
       this.emit('trainedWithDocument', { index: i, total: totalDocs, doc: this.docs[i] })
       this.lastAdded++
     }
@@ -259,6 +275,18 @@ function adaptSource(relPath, source) {
 
   logScore (observation, label) {
     return this.classifier.logScore(this.textToFeatures(observation), label)
+  }
+
+  logScoresActive (indices) {
+    const model = this.classifier
+    return ['present', 'absent'].map(label => {
+      let result = Math.log(model.classTotals[label] / model.totalExamples)
+      for (let i = indices.length - 1; i >= 0; i--) {
+        const count = model.classFeatures[label][indices[i]] || model.smoothing
+        result += Math.log(count / model.classTotals[label])
+      }
+      return result
+    })
   }`;
     code = code.replace(restoreEnd, logScoreAddition);
 
@@ -267,6 +295,29 @@ function adaptSource(relPath, source) {
 
   if (normalized.endsWith('apparatus/lib/apparatus/classifier/bayes_classifier.js')) {
     let code = source;
+
+    // Equivalent to upstream addExample's binary-array branch, visiting only
+    // present indices. Counts, prior pseudo-examples and smoothing are unchanged.
+    code = code.replace('function train() {', `function addExampleActive(indices, label) {
+    if (!this.classFeatures[label]) {
+        this.classFeatures[label] = {};
+        this.classTotals[label] = 1;
+    }
+    this.totalExamples++;
+    this.classTotals[label]++;
+    var i = indices.length;
+    while (i--) {
+        var index = indices[i];
+        if (this.classFeatures[label][index]) {
+            this.classFeatures[label][index]++;
+        } else {
+            this.classFeatures[label][index] = 1 + this.smoothing;
+        }
+    }
+}
+BayesClassifier.prototype.addExampleActive = addExampleActive;
+
+function train() {`);
 
     // 1. Add logScore implementation
     const probFunc = `function probabilityOfClass(observation, label) {`;

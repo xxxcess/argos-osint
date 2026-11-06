@@ -134,15 +134,60 @@ async fn exec(
     id: &str,
     binds: Vec<(&'static str, serde_json::Value)>,
 ) -> Result<()> {
-    let mut q = repo
-        .db()
-        .query(sql)
-        .bind(("b", rid("article_body", id)))
-        .bind(("now", now()));
-    for (k, v) in binds {
-        q = q.bind((k, v));
-    }
-    q.await?.check()?;
+    let id = id.to_owned();
+    super::tx::run_tx(repo.db(), super::tx::RetryPolicy::default(), move |tx| {
+        let (id, binds) = (id.clone(), binds.clone());
+        async move {
+            let mut head = tx
+                .query("SELECT VALUE article_id FROM ONLY $body;")
+                .bind(("body", rid("article_body", &id)))
+                .await?
+                .check()?;
+            let article: Option<String> = head.take(0)?;
+            if let Some(article) = &article {
+                super::pipeline_inputs::body_input_guard_in(&tx, std::slice::from_ref(article))
+                    .await?;
+            }
+            let mut query = tx
+                .query(sql)
+                .bind(("b", rid("article_body", &id)))
+                .bind(("now", now()));
+            for (key, value) in binds {
+                query = query.bind((key, value));
+            }
+            query.await?.check()?;
+            if let Some(article) = article {
+                #[derive(SurrealValue)]
+                struct Head {
+                    content_hash: String,
+                    body_version: i64,
+                    state: String,
+                }
+                let mut response = tx
+                    .query("SELECT content_hash,body_version,state FROM ONLY $body;")
+                    .bind(("body", rid("article_body", &id)))
+                    .await?
+                    .check()?;
+                if let Some(head) = response.take::<Option<Head>>(0)? {
+                    let revision = super::codec::encode(&[
+                        &id,
+                        &head.body_version.to_string(),
+                        &head.content_hash,
+                        &head.state,
+                    ]);
+                    super::atlas_derivative_invalidation::enqueue_in(
+                        &tx,
+                        Some(&article),
+                        &crate::classifier::artifact::sha256_hex(revision.as_bytes()),
+                        Utc::now(),
+                    )
+                    .await?;
+                }
+            }
+            Ok(())
+        }
+    })
+    .await?;
     Ok(())
 }
 

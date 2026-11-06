@@ -1,821 +1,426 @@
 {
-  "schema_version": "classifier-upstream-oracle-v1",
+  "schema_version": "classifier-upstream-oracle-v2",
   "natural_version": "8.2.6",
   "apparatus_version": "0.0.10",
   "tolerance": 1e-9,
   "recipe_sha256": "a5de8dd6db534e75ef3dd01d1cfbc07724369ffd8c8bc19d1e17005977bff262",
-  "source_manifest_sha256": "7650f092ccb9ab5f507471f24a0cec214747ff64cc0a63b91c2c11f31c1833c1",
-  "bundle_sha256": "7aae167cdb6a27473be18f89ba88e5ede39a27b2252f3a216026a770447a047a",
-  "adapter_sha256": "85e041294425eebd0f68eada161e4be184dac8ec7dab1905682ed67a0c6a5fc2",
-  "bridge_sha256": "d4a84acad0c34ab2a4e36e942c881b361a27ec9cb525d4f71f6af5be91933b52",
+  "source_manifest_sha256": "a22805bbbb7b9c8e962b1a95a0dacdfdc22f63d533c27df4a84c8d3eb23119b1",
+  "bundle_sha256": "db11da2ea61182ed36bfcd207b5b0fb6310b110430638ce47b0e37ecdb792646",
+  "adapter_sha256": "0a19c975be5ab2a62441cbaec8ebc0b1bac5c1a2a9bebe8217e5e8a4edb7d45d",
+  "bridge_sha256": "055678ab7d2f3b36105a0f8c4bad58acbd9d08ccf5ceb8ecb9800cb871a9b963",
+  "features_sha256": "35d5429f6ddec60a3524f81366faac0ac20a053dda719c7ad85d6b2630a27a09",
   "models": [
     {
       "domain": "governance",
       "feature_order": [
-        "ballot",
-        "common",
-        "cannot",
-        "nato",
-        "2026",
-        "never",
-        "2",
-        "patrol",
-        "freight",
-        "clinic",
-        "river",
-        "sensor",
-        "knit",
-        "1"
-      ],
-      "labels": [
-        "present",
-        "absent"
+        "u:\"ballot\"",
+        "b:[\"ballot\",\"common\"]",
+        "u:\"common\"",
+        "b:[\"common\",\"cannot\"]",
+        "u:\"cannot\"",
+        "b:[\"cannot\",\"nato\"]",
+        "u:\"nato\"",
+        "b:[\"nato\",\"2026\"]",
+        "u:\"2026\"",
+        "u:\"never\"",
+        "b:[\"never\",\"2\"]",
+        "u:\"2\"",
+        "u:\"patrol\"",
+        "b:[\"patrol\",\"common\"]",
+        "u:\"freight\"",
+        "b:[\"freight\",\"common\"]",
+        "u:\"clinic\"",
+        "b:[\"clinic\",\"common\"]",
+        "u:\"river\"",
+        "b:[\"river\",\"common\"]",
+        "u:\"sensor\"",
+        "b:[\"sensor\",\"common\"]",
+        "b:[\"common\",\"knit\"]",
+        "u:\"knit\"",
+        "b:[\"never\",\"1\"]",
+        "u:\"1\""
       ],
       "queries": [
         {
           "text": "ballot patrol common",
-          "tokens": [
-            "ballot",
-            "patrol",
-            "common"
-          ],
-          "binary_features": [
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
-          "present_log_score": -2.0794415416798357,
-          "absent_log_score": -3.3322045101752042,
-          "raw_log_odds": 1.2527629684953685
+          "present_log_score": -2.772588722239781,
+          "absent_log_score": -4.584967478670572,
+          "raw_log_odds": 1.8123787564307912
         },
         {
-          "text": "ballot ballot patrol patrol common",
-          "tokens": [
-            "ballot",
-            "ballot",
-            "patrol",
-            "patrol",
-            "common"
-          ],
-          "binary_features": [
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
+          "text": "cannot never NATO 2026",
+          "present_log_score": -1.3862943611198906,
+          "absent_log_score": -0.7501341119335561,
+          "raw_log_odds": -0.6361602491863345
+        },
+        {
+          "text": "freight hospital common",
           "present_log_score": -2.0794415416798357,
-          "absent_log_score": -3.3322045101752042,
-          "raw_log_odds": 1.2527629684953685
+          "absent_log_score": -1.3862943611198906,
+          "raw_log_odds": -0.6931471805599452
+        },
+        {
+          "text": "river laboratory common",
+          "present_log_score": -2.0794415416798357,
+          "absent_log_score": -1.3862943611198906,
+          "raw_log_odds": -0.6931471805599452
         },
         {
           "text": "zzqxjv",
-          "tokens": [
-            "zzqxjv"
-          ],
-          "binary_features": [
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
           "present_log_score": -1.3862943611198906,
           "absent_log_score": -0.13353139262452263,
           "raw_log_odds": -1.252762968495368
         },
         {
-          "text": "cannot NATO 2026 never 2",
-          "tokens": [
-            "cannot",
-            "nato",
-            "2026",
-            "never",
-            "2"
-          ],
-          "binary_features": [
-            0,
-            0,
-            1,
-            1,
-            1,
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
+          "text": "",
           "present_log_score": -1.3862943611198906,
-          "absent_log_score": -0.7501341119335561,
-          "raw_log_odds": -0.6361602491863345
+          "absent_log_score": -0.13353139262452263,
+          "raw_log_odds": -1.252762968495368
         }
       ]
     },
     {
       "domain": "security",
       "feature_order": [
-        "ballot",
-        "common",
-        "cannot",
-        "nato",
-        "2026",
-        "never",
-        "2",
-        "patrol",
-        "freight",
-        "clinic",
-        "river",
-        "sensor",
-        "knit",
-        "1"
-      ],
-      "labels": [
-        "present",
-        "absent"
+        "u:\"ballot\"",
+        "b:[\"ballot\",\"common\"]",
+        "u:\"common\"",
+        "b:[\"common\",\"cannot\"]",
+        "u:\"cannot\"",
+        "b:[\"cannot\",\"nato\"]",
+        "u:\"nato\"",
+        "b:[\"nato\",\"2026\"]",
+        "u:\"2026\"",
+        "u:\"never\"",
+        "b:[\"never\",\"2\"]",
+        "u:\"2\"",
+        "u:\"patrol\"",
+        "b:[\"patrol\",\"common\"]",
+        "u:\"freight\"",
+        "b:[\"freight\",\"common\"]",
+        "u:\"clinic\"",
+        "b:[\"clinic\",\"common\"]",
+        "u:\"river\"",
+        "b:[\"river\",\"common\"]",
+        "u:\"sensor\"",
+        "b:[\"sensor\",\"common\"]",
+        "b:[\"common\",\"knit\"]",
+        "u:\"knit\"",
+        "b:[\"never\",\"1\"]",
+        "u:\"1\""
       ],
       "queries": [
         {
           "text": "ballot patrol common",
-          "tokens": [
-            "ballot",
-            "patrol",
-            "common"
-          ],
-          "binary_features": [
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
           "present_log_score": -2.0794415416798357,
-          "absent_log_score": -3.3322045101752042,
-          "raw_log_odds": 1.2527629684953685
+          "absent_log_score": -5.278114659230518,
+          "raw_log_odds": 3.198673117550682
         },
         {
-          "text": "ballot ballot patrol patrol common",
-          "tokens": [
-            "ballot",
-            "ballot",
-            "patrol",
-            "patrol",
-            "common"
-          ],
-          "binary_features": [
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
+          "text": "cannot never NATO 2026",
+          "present_log_score": -1.3862943611198906,
+          "absent_log_score": -0.7501341119335561,
+          "raw_log_odds": -0.6361602491863345
+        },
+        {
+          "text": "freight hospital common",
           "present_log_score": -2.0794415416798357,
-          "absent_log_score": -3.3322045101752042,
-          "raw_log_odds": 1.2527629684953685
+          "absent_log_score": -1.3862943611198906,
+          "raw_log_odds": -0.6931471805599452
+        },
+        {
+          "text": "river laboratory common",
+          "present_log_score": -2.0794415416798357,
+          "absent_log_score": -1.3862943611198906,
+          "raw_log_odds": -0.6931471805599452
         },
         {
           "text": "zzqxjv",
-          "tokens": [
-            "zzqxjv"
-          ],
-          "binary_features": [
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
           "present_log_score": -1.3862943611198906,
           "absent_log_score": -0.13353139262452263,
           "raw_log_odds": -1.252762968495368
         },
         {
-          "text": "cannot NATO 2026 never 2",
-          "tokens": [
-            "cannot",
-            "nato",
-            "2026",
-            "never",
-            "2"
-          ],
-          "binary_features": [
-            0,
-            0,
-            1,
-            1,
-            1,
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
+          "text": "",
           "present_log_score": -1.3862943611198906,
-          "absent_log_score": -0.7501341119335561,
-          "raw_log_odds": -0.6361602491863345
+          "absent_log_score": -0.13353139262452263,
+          "raw_log_odds": -1.252762968495368
         }
       ]
     },
     {
       "domain": "economic",
       "feature_order": [
-        "ballot",
-        "common",
-        "cannot",
-        "nato",
-        "2026",
-        "never",
-        "2",
-        "patrol",
-        "freight",
-        "clinic",
-        "river",
-        "sensor",
-        "knit",
-        "1"
-      ],
-      "labels": [
-        "present",
-        "absent"
+        "u:\"ballot\"",
+        "b:[\"ballot\",\"common\"]",
+        "u:\"common\"",
+        "b:[\"common\",\"cannot\"]",
+        "u:\"cannot\"",
+        "b:[\"cannot\",\"nato\"]",
+        "u:\"nato\"",
+        "b:[\"nato\",\"2026\"]",
+        "u:\"2026\"",
+        "u:\"never\"",
+        "b:[\"never\",\"2\"]",
+        "u:\"2\"",
+        "u:\"patrol\"",
+        "b:[\"patrol\",\"common\"]",
+        "u:\"freight\"",
+        "b:[\"freight\",\"common\"]",
+        "u:\"clinic\"",
+        "b:[\"clinic\",\"common\"]",
+        "u:\"river\"",
+        "b:[\"river\",\"common\"]",
+        "u:\"sensor\"",
+        "b:[\"sensor\",\"common\"]",
+        "b:[\"common\",\"knit\"]",
+        "u:\"knit\"",
+        "b:[\"never\",\"1\"]",
+        "u:\"1\""
       ],
       "queries": [
         {
           "text": "ballot patrol common",
-          "tokens": [
-            "ballot",
-            "patrol",
-            "common"
-          ],
-          "binary_features": [
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
-          "present_log_score": -2.772588722239781,
-          "absent_log_score": -2.639057329615259,
-          "raw_log_odds": -0.1335313926245223
+          "present_log_score": -3.4657359027997265,
+          "absent_log_score": -3.891820298110627,
+          "raw_log_odds": 0.42608439531090037
         },
         {
-          "text": "ballot ballot patrol patrol common",
-          "tokens": [
-            "ballot",
-            "ballot",
-            "patrol",
-            "patrol",
-            "common"
-          ],
-          "binary_features": [
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
-          "present_log_score": -2.772588722239781,
-          "absent_log_score": -2.639057329615259,
-          "raw_log_odds": -0.1335313926245223
+          "text": "cannot never NATO 2026",
+          "present_log_score": -1.3862943611198906,
+          "absent_log_score": -0.7501341119335561,
+          "raw_log_odds": -0.6361602491863345
+        },
+        {
+          "text": "freight hospital common",
+          "present_log_score": -1.3862943611198906,
+          "absent_log_score": -2.0794415416798357,
+          "raw_log_odds": 0.6931471805599452
+        },
+        {
+          "text": "river laboratory common",
+          "present_log_score": -2.0794415416798357,
+          "absent_log_score": -1.3862943611198906,
+          "raw_log_odds": -0.6931471805599452
         },
         {
           "text": "zzqxjv",
-          "tokens": [
-            "zzqxjv"
-          ],
-          "binary_features": [
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
           "present_log_score": -1.3862943611198906,
           "absent_log_score": -0.13353139262452263,
           "raw_log_odds": -1.252762968495368
         },
         {
-          "text": "cannot NATO 2026 never 2",
-          "tokens": [
-            "cannot",
-            "nato",
-            "2026",
-            "never",
-            "2"
-          ],
-          "binary_features": [
-            0,
-            0,
-            1,
-            1,
-            1,
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
+          "text": "",
           "present_log_score": -1.3862943611198906,
-          "absent_log_score": -0.7501341119335561,
-          "raw_log_odds": -0.6361602491863345
+          "absent_log_score": -0.13353139262452263,
+          "raw_log_odds": -1.252762968495368
         }
       ]
     },
     {
       "domain": "human",
       "feature_order": [
-        "ballot",
-        "common",
-        "cannot",
-        "nato",
-        "2026",
-        "never",
-        "2",
-        "patrol",
-        "freight",
-        "clinic",
-        "river",
-        "sensor",
-        "knit",
-        "1"
-      ],
-      "labels": [
-        "present",
-        "absent"
+        "u:\"ballot\"",
+        "b:[\"ballot\",\"common\"]",
+        "u:\"common\"",
+        "b:[\"common\",\"cannot\"]",
+        "u:\"cannot\"",
+        "b:[\"cannot\",\"nato\"]",
+        "u:\"nato\"",
+        "b:[\"nato\",\"2026\"]",
+        "u:\"2026\"",
+        "u:\"never\"",
+        "b:[\"never\",\"2\"]",
+        "u:\"2\"",
+        "u:\"patrol\"",
+        "b:[\"patrol\",\"common\"]",
+        "u:\"freight\"",
+        "b:[\"freight\",\"common\"]",
+        "u:\"clinic\"",
+        "b:[\"clinic\",\"common\"]",
+        "u:\"river\"",
+        "b:[\"river\",\"common\"]",
+        "u:\"sensor\"",
+        "b:[\"sensor\",\"common\"]",
+        "b:[\"common\",\"knit\"]",
+        "u:\"knit\"",
+        "b:[\"never\",\"1\"]",
+        "u:\"1\""
       ],
       "queries": [
         {
           "text": "ballot patrol common",
-          "tokens": [
-            "ballot",
-            "patrol",
-            "common"
-          ],
-          "binary_features": [
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
-          "present_log_score": -2.772588722239781,
-          "absent_log_score": -2.639057329615259,
-          "raw_log_odds": -0.1335313926245223
+          "present_log_score": -3.4657359027997265,
+          "absent_log_score": -3.891820298110627,
+          "raw_log_odds": 0.42608439531090037
         },
         {
-          "text": "ballot ballot patrol patrol common",
-          "tokens": [
-            "ballot",
-            "ballot",
-            "patrol",
-            "patrol",
-            "common"
-          ],
-          "binary_features": [
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
-          "present_log_score": -2.772588722239781,
-          "absent_log_score": -2.639057329615259,
-          "raw_log_odds": -0.1335313926245223
+          "text": "cannot never NATO 2026",
+          "present_log_score": -1.3862943611198906,
+          "absent_log_score": -0.7501341119335561,
+          "raw_log_odds": -0.6361602491863345
+        },
+        {
+          "text": "freight hospital common",
+          "present_log_score": -2.0794415416798357,
+          "absent_log_score": -1.3862943611198906,
+          "raw_log_odds": -0.6931471805599452
+        },
+        {
+          "text": "river laboratory common",
+          "present_log_score": -2.0794415416798357,
+          "absent_log_score": -1.3862943611198906,
+          "raw_log_odds": -0.6931471805599452
         },
         {
           "text": "zzqxjv",
-          "tokens": [
-            "zzqxjv"
-          ],
-          "binary_features": [
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
           "present_log_score": -1.3862943611198906,
           "absent_log_score": -0.13353139262452263,
           "raw_log_odds": -1.252762968495368
         },
         {
-          "text": "cannot NATO 2026 never 2",
-          "tokens": [
-            "cannot",
-            "nato",
-            "2026",
-            "never",
-            "2"
-          ],
-          "binary_features": [
-            0,
-            0,
-            1,
-            1,
-            1,
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
+          "text": "",
           "present_log_score": -1.3862943611198906,
-          "absent_log_score": -0.7501341119335561,
-          "raw_log_odds": -0.6361602491863345
+          "absent_log_score": -0.13353139262452263,
+          "raw_log_odds": -1.252762968495368
         }
       ]
     },
     {
       "domain": "environmental",
       "feature_order": [
-        "ballot",
-        "common",
-        "cannot",
-        "nato",
-        "2026",
-        "never",
-        "2",
-        "patrol",
-        "freight",
-        "clinic",
-        "river",
-        "sensor",
-        "knit",
-        "1"
-      ],
-      "labels": [
-        "present",
-        "absent"
+        "u:\"ballot\"",
+        "b:[\"ballot\",\"common\"]",
+        "u:\"common\"",
+        "b:[\"common\",\"cannot\"]",
+        "u:\"cannot\"",
+        "b:[\"cannot\",\"nato\"]",
+        "u:\"nato\"",
+        "b:[\"nato\",\"2026\"]",
+        "u:\"2026\"",
+        "u:\"never\"",
+        "b:[\"never\",\"2\"]",
+        "u:\"2\"",
+        "u:\"patrol\"",
+        "b:[\"patrol\",\"common\"]",
+        "u:\"freight\"",
+        "b:[\"freight\",\"common\"]",
+        "u:\"clinic\"",
+        "b:[\"clinic\",\"common\"]",
+        "u:\"river\"",
+        "b:[\"river\",\"common\"]",
+        "u:\"sensor\"",
+        "b:[\"sensor\",\"common\"]",
+        "b:[\"common\",\"knit\"]",
+        "u:\"knit\"",
+        "b:[\"never\",\"1\"]",
+        "u:\"1\""
       ],
       "queries": [
         {
           "text": "ballot patrol common",
-          "tokens": [
-            "ballot",
-            "patrol",
-            "common"
-          ],
-          "binary_features": [
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
-          "present_log_score": -2.772588722239781,
-          "absent_log_score": -2.639057329615259,
-          "raw_log_odds": -0.1335313926245223
+          "present_log_score": -3.4657359027997265,
+          "absent_log_score": -3.891820298110627,
+          "raw_log_odds": 0.42608439531090037
         },
         {
-          "text": "ballot ballot patrol patrol common",
-          "tokens": [
-            "ballot",
-            "ballot",
-            "patrol",
-            "patrol",
-            "common"
-          ],
-          "binary_features": [
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
-          "present_log_score": -2.772588722239781,
-          "absent_log_score": -2.639057329615259,
-          "raw_log_odds": -0.1335313926245223
+          "text": "cannot never NATO 2026",
+          "present_log_score": -1.3862943611198906,
+          "absent_log_score": -0.7501341119335561,
+          "raw_log_odds": -0.6361602491863345
+        },
+        {
+          "text": "freight hospital common",
+          "present_log_score": -2.0794415416798357,
+          "absent_log_score": -1.3862943611198906,
+          "raw_log_odds": -0.6931471805599452
+        },
+        {
+          "text": "river laboratory common",
+          "present_log_score": -1.3862943611198906,
+          "absent_log_score": -2.0794415416798357,
+          "raw_log_odds": 0.6931471805599452
         },
         {
           "text": "zzqxjv",
-          "tokens": [
-            "zzqxjv"
-          ],
-          "binary_features": [
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
           "present_log_score": -1.3862943611198906,
           "absent_log_score": -0.13353139262452263,
           "raw_log_odds": -1.252762968495368
         },
         {
-          "text": "cannot NATO 2026 never 2",
-          "tokens": [
-            "cannot",
-            "nato",
-            "2026",
-            "never",
-            "2"
-          ],
-          "binary_features": [
-            0,
-            0,
-            1,
-            1,
-            1,
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
+          "text": "",
           "present_log_score": -1.3862943611198906,
-          "absent_log_score": -0.7501341119335561,
-          "raw_log_odds": -0.6361602491863345
+          "absent_log_score": -0.13353139262452263,
+          "raw_log_odds": -1.252762968495368
         }
       ]
     },
     {
       "domain": "scientific",
       "feature_order": [
-        "ballot",
-        "common",
-        "cannot",
-        "nato",
-        "2026",
-        "never",
-        "2",
-        "patrol",
-        "freight",
-        "clinic",
-        "river",
-        "sensor",
-        "knit",
-        "1"
-      ],
-      "labels": [
-        "present",
-        "absent"
+        "u:\"ballot\"",
+        "b:[\"ballot\",\"common\"]",
+        "u:\"common\"",
+        "b:[\"common\",\"cannot\"]",
+        "u:\"cannot\"",
+        "b:[\"cannot\",\"nato\"]",
+        "u:\"nato\"",
+        "b:[\"nato\",\"2026\"]",
+        "u:\"2026\"",
+        "u:\"never\"",
+        "b:[\"never\",\"2\"]",
+        "u:\"2\"",
+        "u:\"patrol\"",
+        "b:[\"patrol\",\"common\"]",
+        "u:\"freight\"",
+        "b:[\"freight\",\"common\"]",
+        "u:\"clinic\"",
+        "b:[\"clinic\",\"common\"]",
+        "u:\"river\"",
+        "b:[\"river\",\"common\"]",
+        "u:\"sensor\"",
+        "b:[\"sensor\",\"common\"]",
+        "b:[\"common\",\"knit\"]",
+        "u:\"knit\"",
+        "b:[\"never\",\"1\"]",
+        "u:\"1\""
       ],
       "queries": [
         {
           "text": "ballot patrol common",
-          "tokens": [
-            "ballot",
-            "patrol",
-            "common"
-          ],
-          "binary_features": [
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
-          "present_log_score": -2.772588722239781,
-          "absent_log_score": -2.639057329615259,
-          "raw_log_odds": -0.1335313926245223
+          "present_log_score": -3.4657359027997265,
+          "absent_log_score": -3.891820298110627,
+          "raw_log_odds": 0.42608439531090037
         },
         {
-          "text": "ballot ballot patrol patrol common",
-          "tokens": [
-            "ballot",
-            "ballot",
-            "patrol",
-            "patrol",
-            "common"
-          ],
-          "binary_features": [
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
-          "present_log_score": -2.772588722239781,
-          "absent_log_score": -2.639057329615259,
-          "raw_log_odds": -0.1335313926245223
+          "text": "cannot never NATO 2026",
+          "present_log_score": -1.3862943611198906,
+          "absent_log_score": -0.7501341119335561,
+          "raw_log_odds": -0.6361602491863345
+        },
+        {
+          "text": "freight hospital common",
+          "present_log_score": -2.0794415416798357,
+          "absent_log_score": -1.3862943611198906,
+          "raw_log_odds": -0.6931471805599452
+        },
+        {
+          "text": "river laboratory common",
+          "present_log_score": -2.0794415416798357,
+          "absent_log_score": -1.3862943611198906,
+          "raw_log_odds": -0.6931471805599452
         },
         {
           "text": "zzqxjv",
-          "tokens": [
-            "zzqxjv"
-          ],
-          "binary_features": [
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
           "present_log_score": -1.3862943611198906,
           "absent_log_score": -0.13353139262452263,
           "raw_log_odds": -1.252762968495368
         },
         {
-          "text": "cannot NATO 2026 never 2",
-          "tokens": [
-            "cannot",
-            "nato",
-            "2026",
-            "never",
-            "2"
-          ],
-          "binary_features": [
-            0,
-            0,
-            1,
-            1,
-            1,
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-          ],
+          "text": "",
           "present_log_score": -1.3862943611198906,
-          "absent_log_score": -0.7501341119335561,
-          "raw_log_odds": -0.6361602491863345
+          "absent_log_score": -0.13353139262452263,
+          "raw_log_odds": -1.252762968495368
         }
       ]
     }

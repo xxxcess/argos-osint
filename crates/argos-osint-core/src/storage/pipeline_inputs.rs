@@ -142,6 +142,15 @@ pub async fn register_in(
         .bind(("tr", transform.to_string())),
     )
     .await?;
+    if owner_kind == "article" {
+        super::atlas_derivative_invalidation::enqueue_in(
+            tx,
+            Some(owner_id),
+            &format!("source:{ref_key}"),
+            chrono::Utc::now(),
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -260,6 +269,19 @@ pub async fn put_article_body(repo: &Repository, b: &ArticleBodyRow) -> Result<(
         .bind(("st", b.state.clone()))
         .bind(("c", b.created_at.clone()))
         .bind(("u", b.updated_at.clone()))).await?;
+            let revision = super::codec::encode(&[
+                &b.id,
+                &b.body_version.to_string(),
+                &b.content_hash,
+                &b.state,
+            ]);
+            super::atlas_derivative_invalidation::enqueue_in(
+                &tx,
+                Some(&b.article_id),
+                &crate::classifier::artifact::sha256_hex(revision.as_bytes()),
+                chrono::Utc::now(),
+            )
+            .await?;
             Ok(())
         }
     })

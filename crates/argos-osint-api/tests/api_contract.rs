@@ -539,7 +539,7 @@ async fn article_search_serves_the_discovery_page_contract() {
         seen_at: published.into(),
         ..Default::default()
     };
-    current_admission::admit(
+    current_admission::admit_with_titles(
         &repo,
         &[
             source(
@@ -553,6 +553,7 @@ async fn article_search_serves_the_discovery_page_contract() {
                 "2026-01-03T00:00:00Z",
             ),
         ],
+        ["Ballot patrol", "Harbor Union merger", "River sensor"],
     )
     .await;
     // New-looking tags and an admission timestamp cannot forge current authority.

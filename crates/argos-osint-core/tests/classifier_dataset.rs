@@ -46,7 +46,7 @@ fn row(id: &str, family: &str, split: &str, domains: &[&str]) -> Vec<String> {
         "".into(),
         "synthetic".into(),
         difficulty.into(),
-        "synthetic-fixture-v1".into(),
+        "synthetic-development-v1".into(),
         "Ignored annotation".into(),
         split.into(),
         family.into(),
@@ -135,7 +135,7 @@ fn rfc_quotes_and_newlines_preserve_features_and_exact_hash() {
             LabelMembership::Absent
         ]
     );
-    assert_eq!(parsed.summary.split_rows, [1, 1, 1]);
+    assert_eq!(parsed.summary.split_rows, [1, 1, 0, 1]);
     assert_eq!(
         parsed.summary.dataset_sha256,
         format!("{:x}", Sha256::digest(&bytes))
@@ -498,9 +498,12 @@ fn delivered_version_requires_complete_independent_release_invariants() {
     assert_eq!(parsed.profile, CsvProfile::DeliveredSeedV1);
     assert_eq!(parsed.summary.rows, 1700);
     assert_eq!(parsed.summary.families, 220);
-    assert_eq!(parsed.summary.split_rows, [1130, 285, 285]);
-    assert_eq!(parsed.summary.split_families, [142, 39, 39]);
-    assert_eq!(parsed.summary.positive_rows, [[190; 6], [55; 6], [55; 6]]);
+    assert_eq!(parsed.summary.split_rows, [1130, 285, 0, 285]);
+    assert_eq!(parsed.summary.split_families, [142, 39, 0, 39]);
+    assert_eq!(
+        parsed.summary.positive_rows,
+        [[190; 6], [55; 6], [0; 6], [55; 6]]
+    );
     rows.pop();
     assert!(matches!(
         parse_bytes(&encode(&rows)),
@@ -516,5 +519,77 @@ fn release_family_cardinality_is_not_proven_by_aggregate_row_counts() {
     rows[0][12] = rows[10][12].clone();
     assert!(
         matches!(parse_bytes(&encode(&rows)), Err(DatasetError::ReleaseCounts { invariant, .. }) if invariant == "focused_family_variants")
+    );
+}
+
+#[test]
+fn delivered_distinct_corpus_keeps_four_partitions_and_complete_triads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut req = request(&root);
+    req.explicit_file = Some(root.join("datasets/argos_atlas_strategic_domains_v2.csv"));
+    let parsed = dataset::parse_csv(&dataset::resolve_dataset(&req).unwrap()).unwrap();
+    assert_eq!(parsed.profile, CsvProfile::DeliveredDistinctV2);
+    assert_eq!(parsed.summary.rows, 1020);
+    assert_eq!(parsed.summary.split_families, [440, 230, 165, 185]);
+    assert_eq!(
+        parsed.summary.positive_rows,
+        [[80; 6], [40; 6], [30; 6], [40; 6]]
+    );
+    assert_eq!(
+        parsed.corpus.development_split_sha256,
+        training::corpus_hashes(&parsed.corpus.rows)
+            .unwrap()
+            .development_split_sha256
+    );
+    assert_eq!(
+        parsed
+            .corpus
+            .rows
+            .iter()
+            .filter(|row| row
+                .membership
+                .iter()
+                .filter(|m| **m == LabelMembership::Present)
+                .count()
+                == 3)
+            .count(),
+        20
+    );
+}
+
+#[test]
+fn unknown_csv_policy_version_is_rejected_explicitly() {
+    let mut rows = development();
+    for row in &mut rows {
+        row[9] = "unknown-future-policy".into();
+    }
+    assert!(
+        matches!(parse_bytes(&encode(&rows)), Err(DatasetError::InvalidRow {code,..}) if code=="unsupported_dataset_version")
+    );
+}
+
+#[test]
+fn development_content_changes_its_hash_without_changing_training_identity() {
+    let mut rows = development();
+    for row in &mut rows {
+        row[9] = "synthetic-development-v2".into();
+    }
+    rows[1][16] = "admit".into();
+    rows[1][17] = "".into();
+    rows.push(row("dev", "dev-family", "development", &["human"]));
+    let dev = rows.last_mut().unwrap();
+    dev[9] = "synthetic-development-v2".into();
+    dev[16] = "admit".into();
+    dev[17] = "".into();
+    let first = parse_bytes(&encode(&rows)).unwrap();
+    rows.last_mut().unwrap()[2] = "Changed held-out development content".into();
+    let second = parse_bytes(&encode(&rows)).unwrap();
+    assert_eq!(
+        first.corpus.train_split_sha256,
+        second.corpus.train_split_sha256
+    );
+    assert_ne!(
+        first.corpus.development_split_sha256,
+        second.corpus.development_split_sha256
     );
 }

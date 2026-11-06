@@ -13,6 +13,24 @@ use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::store::AtlasArticleRow;
 
 pub async fn admit(repo: &Repository, model_home: &Path, articles: &[AtlasArticleRow]) {
+    publish(
+        repo,
+        model_home,
+        articles,
+        &admission::StageProvenance::default(),
+        "admitted",
+    )
+    .await;
+}
+
+/// Publishes a real local decision, including explicit provenance rejection.
+pub async fn publish(
+    repo: &Repository,
+    model_home: &Path,
+    articles: &[AtlasArticleRow],
+    provenance: &admission::StageProvenance,
+    expected_state: &str,
+) {
     assert!(!articles.is_empty() && articles.len() <= 64);
     let run_id = &articles[0].run_id;
     assert!(articles.iter().all(|article| &article.run_id == run_id));
@@ -57,11 +75,16 @@ pub async fn admit(repo: &Repository, model_home: &Path, articles: &[AtlasArticl
         .await
         .unwrap();
     for article in articles {
-        assert!(
-            admission::stage_article(&owner, &run, article, "fixture-source-v1", now)
-                .await
-                .unwrap()
-        );
+        assert!(admission::stage_article_with_provenance(
+            &owner,
+            &run,
+            article,
+            "fixture-source-v1",
+            provenance,
+            now,
+        )
+        .await
+        .unwrap());
     }
     let token = admission::begin_admission(&owner, &run, &context, false, now)
         .await
@@ -85,7 +108,11 @@ pub async fn admit(repo: &Repository, model_home: &Path, articles: &[AtlasArticl
         )
         .await
         .unwrap();
-        assert_eq!(view.admission_state, "admitted", "{}: {view:?}", article.id);
+        assert_eq!(
+            view.admission_state, expected_state,
+            "{}: {view:?}",
+            article.id
+        );
     }
     admission::stop_run(
         &owner,

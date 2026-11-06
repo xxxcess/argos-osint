@@ -527,6 +527,8 @@ struct MentionRow {
     origin_id: String,
     origin_revision: String,
     spans_json: String,
+    native_input_revision: String,
+    publication_batch: String,
 }
 
 /// MentionedIn edges of one actor, from `brain_actor_mention` (pinned to
@@ -542,6 +544,42 @@ pub async fn actor_mention_edges(
         .await?
         .check()?;
     let rows: Vec<MentionRow> = r.take(0)?;
+    let retained = rows;
+    let rows = super::tx::run_tx(db, super::tx::RetryPolicy::default(), move |tx| {
+        let rows = retained.clone();
+        async move {
+            let keys: Vec<_> = rows
+                .iter()
+                .filter(|row| row.origin_kind == "article" && !row.native_input_revision.is_empty())
+                .map(|row| {
+                    crate::atlas_classify::OccurrenceKey::new(&row.origin_scope, &row.origin_id)
+                })
+                .collect();
+            let mut visibility = super::native_visibility::NativeVisibility::new(tx);
+            visibility.prefetch(&keys).await?;
+            let mut visible = Vec::new();
+            for row in rows {
+                if row.origin_kind != "article"
+                    || row.native_input_revision.is_empty()
+                    || visibility
+                        .mention_current(
+                            &crate::atlas_classify::OccurrenceKey::new(
+                                &row.origin_scope,
+                                &row.origin_id,
+                            ),
+                            &row.native_input_revision,
+                            &row.publication_batch,
+                        )
+                        .await?
+                {
+                    visible.push(row);
+                }
+            }
+            Ok(visible)
+        }
+    })
+    .await?
+    .value;
     let mut out = Vec::new();
     for m in rows {
         let to = if m.origin_kind == "article" {
@@ -569,7 +607,11 @@ pub async fn actor_mention_edges(
                 "brain_actor_mentions:{actor_id}:{}:{}:{}@{}\n{}",
                 m.origin_kind, m.origin_scope, m.origin_id, m.origin_revision, m.spans_json
             ),
-            status: String::new(),
+            status: if m.origin_kind == "article" && m.native_input_revision.is_empty() {
+                "retained".into()
+            } else {
+                String::new()
+            },
         });
     }
     Ok(out)
@@ -577,7 +619,7 @@ pub async fn actor_mention_edges(
 
 /// One actor's mentions; pinned to `brain_actor_mention_actor`.
 pub const ACTOR_MENTIONS_SURQL: &str =
-    "SELECT origin_kind, origin_scope, origin_id, origin_revision, spans_json
+    "SELECT origin_kind, origin_scope, origin_id, origin_revision, spans_json,(native_input_revision ?? '') AS native_input_revision,(publication_batch ?? '') AS publication_batch
     FROM brain_actor_mention WHERE actor_id = $a
     ORDER BY origin_kind, origin_scope, origin_id, origin_revision";
 

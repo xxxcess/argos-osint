@@ -18,6 +18,8 @@ const routes = new Map([
   ["jobs/retry", "POST"],
   ["topology", "GET"],
   ["topology/resolve", "POST"],
+  ["topology/summary", "GET"],
+  ["topology/summary/generate", "POST"],
 ]);
 const headers = {
   "cache-control": "no-store",

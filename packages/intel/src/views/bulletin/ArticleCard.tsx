@@ -2,6 +2,7 @@
 import React, { useState } from "react";
 import { View, Text, Image, Pressable, StyleSheet } from "react-native";
 import type { Article } from "@argos/api-client";
+import { articleDomainLabel } from "../article-domain-label";
 import { intelColors as c, intelRadius } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
 import { TemperatureTag } from "../temperatureTag";
@@ -55,7 +56,7 @@ export function ArticleCard({
     >
       <View style={s.content}>
         <View style={s.meta}>
-          <Text style={s.category}>{a.category.toUpperCase()}</Text>
+          <Text style={s.category}>{articleDomainLabel(a)}</Text>
           <TemperatureTag value={a.temperature} />
           <Text style={s.date}>{a.published_at.slice(0, 10)}</Text>
         </View>

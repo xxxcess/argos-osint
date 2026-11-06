@@ -1,0 +1,81 @@
+{
+  "upstream": {
+    "natural": {
+      "version": "8.2.6",
+      "gitHead": "e5bb63d6af741209e71691ae8702e91664d61c29",
+      "tarball_sha256": "05094a3b7c6750e942b943758288ca193249a96cc1105f25c4eeb35c2df60040",
+      "integrity": "sha512-NEZgLOCFZVWpzEVaDz+ZyPhWGZQKHS2Gmxqzex5/WVgwkkzUDodZ2fFyqeOXpxIbxnYsvkRc+RuDkV+hAdzVRg=="
+    },
+    "apparatus": {
+      "version": "0.0.10",
+      "gitHead": "861cf4cbb0775e2fd12ffaf30d01b7d8f9497e12",
+      "tarball_sha256": "4bc0726d881db4dadab338f7cb2eb2dc1f2b9adc682263753d851daeb80c58ee",
+      "integrity": "sha512-KLy/ugo33KZA7nugtQ7O0E1c8kQ52N3IvD/XgIh4w/Nr28ypfkwDfA67F1ev4N1m5D+BOk1+b2dEJDfpj/VvZg=="
+    }
+  },
+  "build": {
+    "esbuild_version": "0.21.5",
+    "node_version": "v24.22.1",
+    "bundle_file": "natural-classifier.js",
+    "bundle_sha256": "7aae167cdb6a27473be18f89ba88e5ede39a27b2252f3a216026a770447a047a",
+    "bundle_bytes": 10378
+  },
+  "adaptation": {
+    "patch_file": "natural-bayes.patch",
+    "patch_sha256": "1fd8a55033b8dbe3037be2e78338634754ccf9f0d4ffb4453c59328842db7816",
+    "adapter_file": "natural-bayes.adapt.js",
+    "adapter_sha256": "85e041294425eebd0f68eada161e4be184dac8ec7dab1905682ed67a0c6a5fc2",
+    "transform_version": "v2-feature-index"
+  },
+  "bridge": {
+    "version": "argos-classifier-bridge-v1",
+    "sha256": "d4a84acad0c34ab2a4e36e942c881b361a27ec9cb525d4f71f6af5be91933b52"
+  },
+  "files": [
+    {
+      "path": "natural/lib/natural/classifiers/bayes_classifier.js",
+      "sha256": "8c8fdd2a1dec69cb8203482554350043c0a66808f9a96de66a1c7cd6e050bb58",
+      "bytes": 2294
+    },
+    {
+      "path": "natural/lib/natural/classifiers/classifier.js",
+      "sha256": "7bef6515dd23b8abac00ff44dfc4b117cbdac27d4bec94420431677a63c1beff",
+      "bytes": 5297
+    },
+    {
+      "path": "natural/lib/natural/stemmers/porter_stemmer.js",
+      "sha256": "6dc59339f71a5324b5c4739d78acb66efb76be32a2305782ba17ec5dd17807b6",
+      "bytes": 7577
+    },
+    {
+      "path": "natural/lib/natural/stemmers/stemmer.js",
+      "sha256": "0b31932623d9eb5d0ac1f2d78be7be740c98a9780299aabea719608a77871483",
+      "bytes": 2587
+    },
+    {
+      "path": "natural/lib/natural/tokenizers/aggressive_tokenizer.js",
+      "sha256": "167acc7e5d6b51d0b41bd26b457bf93654224e365847550f4ba06e09cd6d3527",
+      "bytes": 1623
+    },
+    {
+      "path": "natural/lib/natural/tokenizers/tokenizer.js",
+      "sha256": "30185f91d939778ec67e83533140d2edfd4391970ec9848a060c54447f09677d",
+      "bytes": 1270
+    },
+    {
+      "path": "natural/lib/natural/util/stopwords.js",
+      "sha256": "a4eeca8d529f2cd8ba2c5f3175c4beb741413a4d27a9c107cf76f281d8f576f0",
+      "bytes": 2529
+    },
+    {
+      "path": "apparatus/lib/apparatus/classifier/bayes_classifier.js",
+      "sha256": "efd88e526312a25aaca5e5836ee1a7708dda353ee84ee251f3f42e66a4c38251",
+      "bytes": 4222
+    },
+    {
+      "path": "apparatus/lib/apparatus/classifier/classifier.js",
+      "sha256": "45c12d169a2825b34f3fd75f3ec2f95e65b2494746a9fc37a720eb6df01e1e78",
+      "bytes": 1771
+    }
+  ]
+}

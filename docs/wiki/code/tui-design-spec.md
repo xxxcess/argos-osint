@@ -91,14 +91,13 @@ Retain session state and app identities (`Osint/Providers/System`). Completed tr
 
 ## Agent workflow and acceptance
 
-Follow [tui-verification.md](tui-verification.md) and `argos-tui-verify` for fresh capture and recorded image review. [Session evidence](../../archive/tui-verification-session-2026-10-10.md) demonstrates the procedure. Generated PNGs do not certify actions or metrics.
+Follow the canonical [agent workflow](agent-workflow.md), [TUI verification](tui-verification.md) and `argos-tui-verify` for early labelled previews, proportional capture scope, recorded image inspection and provenance-based reuse. [Session evidence](../../archive/tui-verification-session-2026-10-10.md) demonstrates the visual procedure. Generated PNGs do not certify actions or metrics.
 
-AGENTS.md and the supported existing OpenCode mechanisms (`argos-plan`, `argos-implement`, `ecc-edit`, `ecc-planner`, `ecc-reviewer`, `ecc-verify`) link these contracts. They preserve disjoint file ownership and concise child prompts. No new OpenCode config key, tool permission or model default is needed.
+Root AGENTS.md and the existing OpenCode skills (`argos-plan`, `argos-implement`, `argos-tui-verify`) and commands (`ecc-plan`, `ecc-review`, `ecc-verify`, `tui-verify`) link these contracts. Preserve disjoint ownership and the active host/profile's roles. No new tool permission, model default or delegation layer is required to gather focused evidence.
 
-Verify all 20 primary views, merged details, filters and System/Configs. Render terminal fixtures with `scripts/render_tui_cells.py` at 160×50, 120×40, 100×32, 80×24, 60×18 and too-small, empty, stale and loading states. Check geometry, no wrapping, Unicode, shared scales, denominators, missing/low-N samples, stable colors, owner actions, focus/scroll restoration and mouse parity. Compare actual Summary/Recon snapshots against approved references when available; concept images are not QA.
+Changes to shared Profile geometry or inventory verify all 20 primary views, merged details, filters and System/Configs. Local changes select affected views/states under the verification guide. Use `scripts/tui_review.py capture` for scoped fixtures and `scripts/render_tui_cells.py` for existing cells; choose relevant sizes from 160×50, 120×40, 100×32, 80×24, 60×18 and too-small viewports, plus affected empty, stale and loading states. Check geometry, no wrapping, Unicode, shared scales, denominators, missing/low-N samples, stable colors, owner actions, focus/scroll restoration and mouse parity. Compare actual Summary/Recon snapshots against approved references when available; concept images are not QA.
 
-Run repository fmt → clippy → test with ARGOS_EMBED unset. Agent builds use the isolated wrapper and embedded defaults per [contributor workflow](contributing.md); refresh affected wiki routes/tags/diagrams after code changes. Report actual results and unverified live behavior; acceptance instructions are not evidence that checks have run.
-
+Run authorized focused checks while the contract is runnable, then the required final native embedded gate under the [contributor workflow](contributing.md). Agent builds use the shared isolated wrapper with ARGOS_EMBED unset; local mutation/server/all-platform execution remains excluded. Refresh affected wiki routes/tags/diagrams and report actual results, carried-forward provenance and unverified live behavior. Acceptance instructions are not executed evidence.
 
 ## Shared navigation and portable configuration
 

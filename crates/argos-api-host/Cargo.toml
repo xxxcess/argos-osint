@@ -6,10 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["embedded", "nlp"]
+default = ["embedded", "nlp", "classifier"]
 embedded = ["argos-osint-core/embedded", "argos-osint-api/embedded"]
 server = ["argos-osint-core/server", "argos-osint-api/server"]
 nlp = ["argos-osint-core/nlp", "argos-osint-api/nlp"]
+classifier = ["argos-osint-core/classifier", "argos-osint-api/classifier"]
 
 [dependencies]
 anyhow.workspace = true

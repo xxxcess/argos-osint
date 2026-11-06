@@ -3,7 +3,9 @@ name: argos-implement
 description: Implement one assigned phase directly and return verification needs
 ---
 
-Follow the assigned `.opencode/agents/rust-coder.md` or `.opencode/agents/react-coder.md` and `docs/wiki/code/opencode-v2.md`. Rust work loads `argos-rust-style`. Investigate and implement assigned work directly; do not spawn children. Integrate/format one phase, then return documentation and verification needs to the parent for Scribe/tester dispatch. Include affected wiki/tags/diagrams; report completed checklist items promptly. Relay evidence to architect for corrections/acceptance. Honor user overrides/exclusions. Failed delegation is not permission to bypass roles.
+Use the canonical [agent workflow](../../../docs/wiki/code/agent-workflow.md) with the active host's roles and existing authorization. OpenCode-only restrictions apply when that profile is explicitly selected.
+
+When an OpenCode stack role is selected, follow its assigned `.opencode/agents/rust-coder.md` or `.opencode/agents/react-coder.md` and `docs/wiki/code/opencode-v2.md`. Rust work loads `argos-rust-style`. Investigate and implement the authorized unit directly. Delegate only when the active host/profile permits it and ownership is disjoint. Integrate/format one unit, smoke-test the real affected contract through the build owner, and return incremental evidence plus documentation and final verification needs to the task owner. Include affected wiki/tags/diagrams; report completed checklist items promptly. Request architecture input only for material unresolved contracts. Honor user overrides/exclusions. Failed delegation is not permission to bypass roles.
 
 ## Rust mutation execution restriction
 

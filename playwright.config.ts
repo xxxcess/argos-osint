@@ -18,7 +18,12 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    env: { ARGOS_WEB_TEST_DEV: development ? "1" : "0" },
+    // Local production fixtures can share the isolated build mapping; hosted
+    // production runs retain their normal output unless explicitly requested.
+    env: {
+      ARGOS_WEB_TEST_DEV:
+        development || process.env.ARGOS_WEB_TEST_DEV === "1" ? "1" : "0",
+    },
     command: development
       ? `pnpm --dir apps/web-desktop dev --port ${port}`
       : `node scripts/serve_web.mjs --port ${port}`,

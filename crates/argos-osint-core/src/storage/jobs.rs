@@ -98,9 +98,11 @@ pub const CLAIM_CANDIDATES_SURQL: &str = "SELECT record::id(id) AS id, priority,
      record::id(job) AS job_id, record::id(root) AS root_id, operation, pool, input_hash, \
      array::len(deps) AS dep_count, deps.state AS dep_states, \
      (job.cancel_requested OR array::any(job.ancestors.cancel_requested)) AS cancelled, \
-     job.created_at >= <datetime>$fresh_after AS fresh, \
+     (job.created_at >= <datetime>$fresh_after OR operation IN ['atlas_admission_reclassify','classifier_calibrate']) AS fresh, \
      record::exists(type::record('job_retirement', record::id(root))) AS retired \
      FROM task WHERE state = 'queued' AND pool = $pool AND next_eligible_at <= <datetime>$now \
+     AND (operation NOT IN ['atlas_admission_reclassify','classifier_calibrate'] OR \
+       (job.state IN ['queued','running','reconciling'] AND !job.stopped)) \
      ORDER BY priority, created_at LIMIT $k START $start";
 
 /// Order in which one worker tries a page of candidates: eligible rows only,
@@ -139,7 +141,9 @@ pub(crate) async fn run(
 ) -> Result<IndexedResults, TxError> {
     let _ = tx;
     super::tx::QUERY_ROUND_TRIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Ok(query.await?.check()?)
+    Ok(super::classifier_admission::measured_query(query)
+        .await?
+        .check()?)
 }
 
 pub(crate) fn take<T: SurrealValue>(res: &mut IndexedResults, i: usize) -> Result<T, TxError>
@@ -252,7 +256,7 @@ pub(crate) async fn rollup_in(tx: &Tx, job_id: &str) -> Result<(), TxError> {
 }
 
 /// Lifecycle logs commit with their job/task transition, including API-hosted work.
-async fn log_transition_in(
+pub(crate) async fn log_transition_in(
     tx: &Tx,
     job: &str,
     key: &str,
@@ -586,7 +590,7 @@ async fn claim(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn claim_in(
+pub(crate) async fn claim_in(
     tx: &Tx,
     pool: &str,
     task_id: Option<&str>,
@@ -757,28 +761,39 @@ pub async fn renew_lease(
     now: DateTime<Utc>,
 ) -> Result<Committed<bool>, TxError> {
     run_tx(db, RetryPolicy::default(), |tx| async move {
-        run(
-            &tx,
-            tx.query(
-                "UPDATE $t SET lease_until = <datetime>$until, heartbeat_at = <datetime>$now, \
-                 updated_at = <datetime>$now WHERE state = 'running' AND lease_owner = $owner \
-                 AND lease_epoch = $e RETURN NONE",
-            )
-            .bind(("t", rid("task", &claimed.id)))
-            .bind(("until", ts(now + ChronoDuration::seconds(lease_secs))))
-            .bind(("now", ts(now)))
-            .bind(("owner", claimed.lease_owner.clone()))
-            .bind(("e", claimed.lease_epoch)),
-        )
-        .await?;
-        let task = load_task(&tx, &claimed.id).await?;
-        Ok(task.is_some_and(|t| {
-            t.state == "running"
-                && t.lease_owner == claimed.lease_owner
-                && t.lease_epoch == claimed.lease_epoch
-        }))
+        renew_owned_in(&tx, claimed, lease_secs, now).await
     })
     .await
+}
+
+/// Existing renewal semantics inside the caller's owned transaction. Callers
+/// requiring live authority first check their publication/cleanup fence.
+pub(crate) async fn renew_owned_in(
+    tx: &Tx,
+    claimed: &ClaimedTask,
+    lease_secs: i64,
+    now: DateTime<Utc>,
+) -> Result<bool, TxError> {
+    run(
+        tx,
+        tx.query(
+            "UPDATE $t SET lease_until = <datetime>$until, heartbeat_at = <datetime>$now, \
+                 updated_at = <datetime>$now WHERE state = 'running' AND lease_owner = $owner \
+                 AND lease_epoch = $e RETURN NONE",
+        )
+        .bind(("t", rid("task", &claimed.id)))
+        .bind(("until", ts(now + ChronoDuration::seconds(lease_secs))))
+        .bind(("now", ts(now)))
+        .bind(("owner", claimed.lease_owner.clone()))
+        .bind(("e", claimed.lease_epoch)),
+    )
+    .await?;
+    let task = load_task(tx, &claimed.id).await?;
+    Ok(task.is_some_and(|t| {
+        t.state == "running"
+            && t.lease_owner == claimed.lease_owner
+            && t.lease_epoch == claimed.lease_epoch
+    }))
 }
 
 #[derive(Debug, SurrealValue)]
@@ -805,14 +820,33 @@ pub async fn interrupt_expired_leases(
 
 /// Reaper body inside an open transaction (exposed for interleaving tests).
 pub async fn interrupt_expired_leases_in(tx: &Tx, now: DateTime<Utc>) -> Result<usize, TxError> {
+    interrupt_expired_matching_in(tx, None, now).await
+}
+
+/// Recovers only this pool's expired work. Independent drainers must not rely
+/// on another pool or a process-wide recovery sweep being scheduled first.
+pub(crate) async fn interrupt_expired_pool_in(
+    tx: &Tx,
+    pool: &str,
+    now: DateTime<Utc>,
+) -> Result<usize, TxError> {
+    interrupt_expired_matching_in(tx, Some(pool), now).await
+}
+
+async fn interrupt_expired_matching_in(
+    tx: &Tx,
+    pool: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<usize, TxError> {
     let now_s = ts(now);
-    bump(tx, "lease_sweep_guard", "singleton").await?;
+    bump(tx, "lease_sweep_guard", pool.unwrap_or("singleton")).await?;
     let mut res = run(
         tx,
         tx.query(
             "SELECT record::id(id) AS id, record::id(root) AS root_id, lease_epoch, recoveries \
-             FROM task WHERE state = 'running' AND lease_until <= <datetime>$now LIMIT $n",
+             FROM task WHERE state = 'running' AND ($pool=NONE OR pool=$pool) AND lease_until <= <datetime>$now LIMIT $n",
         )
+        .bind(("pool", pool.map(str::to_owned)))
         .bind(("now", now_s.clone()))
         .bind(("n", SWEEP_BATCH)),
     )
@@ -1496,17 +1530,32 @@ pub async fn stop_job(
     max_batches: Option<usize>,
 ) -> Result<StopProgress, TxError> {
     let now_s = ts(now);
-    let root_id = run_tx(db, RetryPolicy::default(), |tx| {
+    let (root_id, maintenance) = run_tx(db, RetryPolicy::default(), |tx| {
         let now_s = now_s.clone();
         async move {
             let mut res = run(
                 &tx,
-                tx.query("SELECT VALUE record::id(root) FROM ONLY $j")
+                tx.query("SELECT record::id(root) AS root_id, (operation ?? '') AS operation FROM ONLY $j")
                     .bind(("j", rid("job", job_id))),
             )
             .await?;
-            let root: Option<String> = take(&mut res, 0)?;
-            let root = root.ok_or_else(|| TxError::Abort(format!("job {job_id} missing")))?;
+            #[derive(SurrealValue)]
+            struct StopTarget { root_id: String, operation: String }
+            let target: Option<StopTarget> = take(&mut res, 0)?;
+            let target = target.ok_or_else(|| TxError::Abort(format!("job {job_id} missing")))?;
+            if target.operation == crate::atlas_admission_maintenance::OPERATION {
+                let state = super::atlas_admission_maintenance::cancel_in(&tx, job_id, now).await?;
+                return Ok((target.root_id, Some(StopProgress {
+                    jobs_stopped: usize::from(state == crate::atlas_admission_maintenance::MaintenanceState::Cancelled),
+                    batches: 1,
+                    done: state.terminal(),
+                })));
+            }
+            if target.operation == super::classifier_calibration::OPERATION {
+                let done = super::classifier_calibration::cancel_in(&tx, job_id, now).await?;
+                return Ok((target.root_id, Some(StopProgress { jobs_stopped: usize::from(done), batches: 1, done })));
+            }
+            let root = target.root_id;
             bump(&tx, "job_guard", &root).await?;
             run(
                 &tx,
@@ -1518,11 +1567,14 @@ pub async fn stop_job(
                 .bind(("now", now_s)),
             )
             .await?;
-            Ok(root)
+            Ok((root, None))
         }
     })
     .await?
     .value;
+    if let Some(progress) = maintenance {
+        return Ok(progress);
+    }
     let mut progress = StopProgress::default();
     loop {
         if max_batches.is_some_and(|m| progress.batches >= m) {
@@ -1615,7 +1667,8 @@ async fn tree_busy(tx: &Tx, root: &str, protect_active_jobs: bool) -> Result<boo
         tx.query(
             "RETURN count(SELECT id FROM task WHERE root = $r AND state = 'running') \
              + count(SELECT id FROM job WHERE root = $r AND (kind = 'service' OR $protect_active_jobs) \
-               AND state IN ['running', 'queued', 'retry_scheduled', 'waiting', 'blocked'])",
+               AND state IN ['running', 'queued', 'retry_scheduled', 'waiting', 'blocked']) \
+             + count(SELECT id FROM job WHERE root=$r AND operation IN ['atlas_admission_reclassify','classifier_calibrate'] AND state NOT IN ['completed','failed','cancelled'])",
         )
         .bind(("r", rid("job", root)))
         .bind(("protect_active_jobs", protect_active_jobs)),
@@ -1668,6 +1721,7 @@ pub async fn cleanup_batch(
                 tx.query(
                     "SELECT VALUE record::id(id) FROM job WHERE parent = NONE \
                      AND kind != 'service' AND created_at < <datetime>$cutoff \
+                     AND !(operation IN ['atlas_admission_reclassify','classifier_calibrate'] AND state NOT IN ['completed','failed','cancelled']) \
                      ORDER BY created_at LIMIT $n",
                 )
                 .bind(("cutoff", cutoff))
@@ -1744,5 +1798,684 @@ pub async fn clear_jobs_by_status(
         if seen == 0 {
             return Ok(total);
         }
+    }
+}
+
+/// Cooperative continuation under the exact task/root lease. The caller writes
+/// its safe checkpoint in this same transaction before yielding. Ordinary
+/// pagination never consumes the infrastructure recovery budget.
+pub(crate) async fn yield_owned_in(
+    tx: &Tx,
+    claimed: &ClaimedTask,
+    continuation: &NewTask<'_>,
+    next_eligible_at: DateTime<Utc>,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<Publish, TxError> {
+    if continuation.job != claimed.job_id
+        || continuation.pool != claimed.pool
+        || continuation.operation != claimed.operation
+        || continuation.id == claimed.id
+        || continuation.input_hash.is_empty()
+        || continuation.deps != vec![claimed.id.as_str()]
+        || reason.is_empty()
+        || reason.len() > 64
+        || !reason
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(TxError::Abort("invalid_owned_continuation".into()));
+    }
+    bump(tx, "job_guard", &claimed.root_id).await?;
+    let output = format!("yielded:{}:{}", continuation.id, continuation.input_hash);
+    let mut reply = run(tx,tx.query("LET $next=(SELECT * FROM ONLY $requested);RETURN $next=NONE; RETURN $next!=NONE AND record::id($next.job)=$job AND record::id($next.root)=$root AND $next.pool=$pool AND $next.operation=$op AND $next.priority=$priority AND $next.deps=$deps AND $next.input_hash=$input AND $next.created_at=<datetime>$created;")
+        .bind(("requested",rid("task",continuation.id))).bind(("job",claimed.job_id.clone())).bind(("root",claimed.root_id.clone())).bind(("pool",claimed.pool.clone())).bind(("op",claimed.operation.clone())).bind(("priority",continuation.priority)).bind(("deps",vec![rid("task",&claimed.id)])).bind(("input",continuation.input_hash.to_string())).bind(("created",ts(continuation.created_at)))).await?;
+    let absent = take::<Option<bool>>(&mut reply, 1)? == Some(true);
+    let equivalent = take::<Option<bool>>(&mut reply, 2)? == Some(true);
+    if !absent && !equivalent {
+        return Err(TxError::Abort("continuation_identity_conflict".into()));
+    }
+    let stored = load_task(tx, &claimed.id)
+        .await?
+        .ok_or_else(|| TxError::Abort("continuation_task_missing".into()))?;
+    if stored.job_id != claimed.job_id
+        || stored.root_id != claimed.root_id
+        || stored.operation != claimed.operation
+        || stored.pool != claimed.pool
+        || stored.input_hash != claimed.input_hash
+    {
+        return Err(TxError::Abort("continuation_task_identity".into()));
+    }
+    let Some(actual) = fence(tx, claimed, &ts(now)).await? else {
+        return Ok(Publish::LeaseLost);
+    };
+    if actual.cancelled {
+        return Ok(Publish::Cancelled);
+    }
+    if actual.state == "completed"
+        && actual.lease_epoch == claimed.lease_epoch
+        && actual.output_hash == output
+        && equivalent
+    {
+        return Ok(Publish::Committed);
+    }
+    if !holds(&actual, claimed) {
+        return Ok(Publish::LeaseLost);
+    }
+    complete_in(tx, claimed, &output, &ts(now)).await?;
+    if absent {
+        create_task_in(tx, continuation).await?;
+    }
+    run(tx,tx.query("UPDATE $next SET next_eligible_at=<datetime>$eligible RETURN NONE; UPDATE attempt SET outcome='yielded' WHERE task=$old AND epoch=$epoch RETURN NONE;")
+        .bind(("next",rid("task",continuation.id))).bind(("eligible",ts(next_eligible_at))).bind(("old",rid("task",&claimed.id))).bind(("epoch",claimed.lease_epoch))).await?;
+    log_transition_in(
+        tx,
+        &claimed.job_id,
+        &format!("{}:{}:yielded", claimed.id, claimed.lease_epoch),
+        "task.yielded",
+        reason,
+        &ts(now),
+    )
+    .await?;
+    Ok(Publish::Committed)
+}
+
+#[cfg(all(test, feature = "embedded"))]
+mod cooperative_maintenance_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn owned_yield_keeps_resumable_jobs_after_72h_without_consuming_recovery_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::storage::repo::Repository::connect(
+            &crate::storage::open::Target::Embedded {
+                path: root.path().join("db"),
+            },
+            "argos",
+            "cooperative_yield",
+        )
+        .await
+        .unwrap();
+        let now: DateTime<Utc> = "2026-11-05T00:00:00Z".parse().unwrap();
+        let old = now - ChronoDuration::hours(80);
+        let initial = "a".repeat(64);
+        create_job(
+            repo.db(),
+            &NewJob {
+                id: "retained-job",
+                kind: "maintenance",
+                operation: "atlas_admission_reclassify",
+                parent: None,
+                created_at: old,
+            },
+            &[NewTask {
+                id: "retained-job:activate:0",
+                job: "retained-job",
+                pool: "atlas_admission_maintenance",
+                operation: "atlas_admission_reclassify",
+                priority: 20,
+                deps: Vec::new(),
+                input_hash: &initial,
+                created_at: old,
+            }],
+        )
+        .await
+        .unwrap();
+        create_job(
+            repo.db(),
+            &NewJob {
+                id: "ordinary-old-job",
+                kind: "task",
+                operation: "ordinary",
+                parent: None,
+                created_at: old,
+            },
+            &[NewTask {
+                id: "ordinary-old",
+                job: "ordinary-old-job",
+                pool: "ordinary",
+                operation: "ordinary",
+                priority: 20,
+                deps: Vec::new(),
+                input_hash: "ordinary",
+                created_at: old,
+            }],
+        )
+        .await
+        .unwrap();
+        assert!(
+            claim_next(repo.db(), "ordinary", "w", 30, now, "ordinary-stale-claim")
+                .await
+                .unwrap()
+                .value
+                .is_none()
+        );
+        for activation in 0..5 {
+            let at = now + ChronoDuration::seconds(activation);
+            let claimed = claim_next(
+                repo.db(),
+                "atlas_admission_maintenance",
+                "w",
+                30,
+                at,
+                &format!("maintenance-claim-{activation}"),
+            )
+            .await
+            .unwrap()
+            .value
+            .unwrap();
+            assert_eq!(claimed.id, format!("retained-job:activate:{activation}"));
+            let next = format!("retained-job:activate:{}", activation + 1);
+            let input = format!("{activation:064x}");
+            let old_task = claimed.clone();
+            let output = run_tx(repo.db(), RetryPolicy::default(), move |tx| {
+                let (claimed, next, input) = (old_task.clone(), next.clone(), input.clone());
+                async move {
+                    yield_owned_in(
+                        &tx,
+                        &claimed,
+                        &NewTask {
+                            id: &next,
+                            job: &claimed.job_id,
+                            pool: &claimed.pool,
+                            operation: &claimed.operation,
+                            priority: 20,
+                            deps: vec![&claimed.id],
+                            input_hash: &input,
+                            created_at: at,
+                        },
+                        at,
+                        "page_budget",
+                        at,
+                    )
+                    .await
+                }
+            })
+            .await
+            .unwrap()
+            .value;
+            assert_eq!(output, Publish::Committed);
+        }
+        let mut counts=repo.db().query("SELECT attempts,recoveries,state FROM task WHERE job=type::record('job','retained-job'); RETURN count(SELECT id FROM attempt WHERE outcome='yielded');").await.unwrap().check().unwrap();
+        let rows: Vec<serde_json::Value> = counts.take(0).unwrap();
+        assert_eq!(rows.len(), 6);
+        assert!(rows.iter().all(|row| row["recoveries"] == 0));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["state"] == "completed")
+                .count(),
+            5
+        );
+        assert_eq!(counts.take::<Option<i64>>(1).unwrap(), Some(5));
+        cleanup_batch(repo.db(), now + ChronoDuration::hours(1))
+            .await
+            .unwrap();
+        let mut retained=repo.db().query("RETURN record::exists(type::record('job','retained-job')); UPDATE type::record('job','retained-job') SET state='blocked' RETURN NONE;").await.unwrap().check().unwrap();
+        assert_eq!(retained.take::<Option<bool>>(0).unwrap(), Some(true));
+        let mut preserved=repo.db().query("RETURN record::exists(type::record('task','retained-job:activate:4')); RETURN count(SELECT id FROM attempt WHERE root=type::record('job','retained-job')); RETURN type::record('task','retained-job:activate:5').deps;").await.unwrap().check().unwrap();
+        assert_eq!(
+            preserved.take::<Option<bool>>(0).unwrap(),
+            Some(true),
+            "completed dependency remains available after72h cleanup"
+        );
+        assert_eq!(
+            preserved.take::<Option<i64>>(1).unwrap(),
+            Some(5),
+            "completed attempts/checkpoint lineage are retained"
+        );
+        assert_eq!(
+            preserved.take::<Vec<RecordId>>(2).unwrap(),
+            vec![rid("task", "retained-job:activate:4")]
+        );
+        assert!(claim_next(
+            repo.db(),
+            "atlas_admission_maintenance",
+            "w",
+            30,
+            now + ChronoDuration::seconds(9),
+            "blocked-no-claim"
+        )
+        .await
+        .unwrap()
+        .value
+        .is_none());
+        repo.db()
+            .query("UPDATE type::record('job','retained-job') SET state='paused' RETURN NONE")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(claim_next(
+            repo.db(),
+            "atlas_admission_maintenance",
+            "w",
+            30,
+            now + ChronoDuration::seconds(10),
+            "paused-no-claim"
+        )
+        .await
+        .unwrap()
+        .value
+        .is_none());
+        repo.db()
+            .query("UPDATE type::record('job','retained-job') SET state='running' RETURN NONE")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(claim_next(
+            repo.db(),
+            "atlas_admission_maintenance",
+            "w",
+            30,
+            now + ChronoDuration::seconds(11),
+            "explicit-resumed-claim"
+        )
+        .await
+        .unwrap()
+        .value
+        .is_some());
+    }
+
+    #[tokio::test]
+    async fn owned_yield_rejects_foreign_owner_and_conflicting_continuation_without_completing_current_task(
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::storage::repo::Repository::connect(
+            &crate::storage::open::Target::Embedded {
+                path: root.path().join("db"),
+            },
+            "argos",
+            "cooperative_fence",
+        )
+        .await
+        .unwrap();
+        let now: DateTime<Utc> = "2026-11-05T00:00:00Z".parse().unwrap();
+        create_job(
+            repo.db(),
+            &NewJob {
+                id: "job",
+                kind: "maintenance",
+                operation: "atlas_admission_reclassify",
+                parent: None,
+                created_at: now,
+            },
+            &[NewTask {
+                id: "job:activate:0",
+                job: "job",
+                pool: "atlas_admission_maintenance",
+                operation: "atlas_admission_reclassify",
+                priority: 20,
+                deps: Vec::new(),
+                input_hash: "first",
+                created_at: now,
+            }],
+        )
+        .await
+        .unwrap();
+        let claimed = claim_next(
+            repo.db(),
+            "atlas_admission_maintenance",
+            "owner",
+            30,
+            now,
+            "first-claim",
+        )
+        .await
+        .unwrap()
+        .value
+        .unwrap();
+        let mut foreign = claimed.clone();
+        foreign.lease_owner = "other-owner".into();
+        let denied = run_tx(repo.db(), RetryPolicy::default(), move |tx| {
+            let foreign = foreign.clone();
+            async move {
+                yield_owned_in(
+                    &tx,
+                    &foreign,
+                    &NewTask {
+                        id: "job:activate:1",
+                        job: "job",
+                        pool: "atlas_admission_maintenance",
+                        operation: "atlas_admission_reclassify",
+                        priority: 20,
+                        deps: vec!["job:activate:0"],
+                        input_hash: "next",
+                        created_at: now,
+                    },
+                    now,
+                    "page_budget",
+                    now,
+                )
+                .await
+            }
+        })
+        .await
+        .unwrap()
+        .value;
+        assert_eq!(denied, Publish::LeaseLost);
+        let mut state=repo.db().query("SELECT state,lease_owner FROM ONLY type::record('task','job:activate:0'); RETURN record::exists(type::record('task','job:activate:1'));").await.unwrap().check().unwrap();
+        let current: Option<serde_json::Value> = state.take(0).unwrap();
+        assert_eq!(current.as_ref().unwrap()["state"], "running");
+        assert_eq!(current.unwrap()["lease_owner"], "owner");
+        assert_eq!(state.take::<Option<bool>>(1).unwrap(), Some(false));
+        async fn yield_once(
+            repo: &crate::storage::repo::Repository,
+            claimed: ClaimedTask,
+            input: &str,
+            at: DateTime<Utc>,
+        ) -> Result<Publish, TxError> {
+            let input = input.to_owned();
+            run_tx(repo.db(), RetryPolicy::default(), move |tx| {
+                let (claimed, input) = (claimed.clone(), input.clone());
+                async move {
+                    yield_owned_in(
+                        &tx,
+                        &claimed,
+                        &NewTask {
+                            id: "job:activate:1",
+                            job: "job",
+                            pool: "atlas_admission_maintenance",
+                            operation: "atlas_admission_reclassify",
+                            priority: 20,
+                            deps: vec!["job:activate:0"],
+                            input_hash: &input,
+                            created_at: at,
+                        },
+                        at,
+                        "page_budget",
+                        at,
+                    )
+                    .await
+                }
+            })
+            .await
+            .map(|value| value.value)
+        }
+        let mut wrong_epoch = claimed.clone();
+        wrong_epoch.lease_epoch += 1;
+        assert_eq!(
+            yield_once(&repo, wrong_epoch, "next", now).await.unwrap(),
+            Publish::LeaseLost
+        );
+        run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+            create_task_in(
+                &tx,
+                &NewTask {
+                    id: "job:activate:1",
+                    job: "job",
+                    pool: "atlas_admission_maintenance",
+                    operation: "atlas_admission_reclassify",
+                    priority: 20,
+                    deps: vec!["job:activate:0"],
+                    input_hash: "different",
+                    created_at: now,
+                },
+            )
+            .await
+        })
+        .await
+        .unwrap();
+        assert!(yield_once(&repo, claimed.clone(), "next", now)
+            .await
+            .is_err());
+        let mut check=repo.db().query("RETURN type::record('task','job:activate:0').state; RETURN type::record('task','job:activate:1').input_hash;").await.unwrap().check().unwrap();
+        assert_eq!(
+            check.take::<Option<String>>(0).unwrap().as_deref(),
+            Some("running")
+        );
+        assert_eq!(
+            check.take::<Option<String>>(1).unwrap().as_deref(),
+            Some("different")
+        );
+        repo.db()
+            .query("DELETE type::record('task','job:activate:1') RETURN NONE")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            yield_once(&repo, claimed.clone(), "next", now)
+                .await
+                .unwrap(),
+            Publish::Committed
+        );
+        assert_eq!(
+            yield_once(&repo, claimed.clone(), "next", now)
+                .await
+                .unwrap(),
+            Publish::Committed,
+            "uncertain reply replays byte-equivalent continuation"
+        );
+        assert!(yield_once(&repo, claimed.clone(), "changed", now)
+            .await
+            .is_err());
+        let mut replay=repo.db().query("RETURN count(SELECT id FROM task WHERE job=type::record('job','job')); RETURN count(SELECT id FROM attempt WHERE task=type::record('task','job:activate:0')); RETURN type::record('task','job:activate:1').input_hash;").await.unwrap().check().unwrap();
+        assert_eq!(replay.take::<Option<i64>>(0).unwrap(), Some(2));
+        assert_eq!(replay.take::<Option<i64>>(1).unwrap(), Some(1));
+        assert_eq!(
+            replay.take::<Option<String>>(2).unwrap().as_deref(),
+            Some("next")
+        );
+    }
+    #[tokio::test]
+    async fn owned_yield_refuses_an_expired_lease_without_creating_a_continuation() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::storage::repo::Repository::connect(
+            &crate::storage::open::Target::Embedded {
+                path: root.path().join("db"),
+            },
+            "argos",
+            "cooperative_expiry",
+        )
+        .await
+        .unwrap();
+        let now: DateTime<Utc> = "2026-11-05T00:00:00Z".parse().unwrap();
+        create_job(
+            repo.db(),
+            &NewJob {
+                id: "job",
+                kind: "maintenance",
+                operation: "atlas_admission_reclassify",
+                parent: None,
+                created_at: now,
+            },
+            &[NewTask {
+                id: "job:activate:0",
+                job: "job",
+                pool: "atlas_admission_maintenance",
+                operation: "atlas_admission_reclassify",
+                priority: 20,
+                deps: Vec::new(),
+                input_hash: "first",
+                created_at: now,
+            }],
+        )
+        .await
+        .unwrap();
+        let claimed = claim_next(
+            repo.db(),
+            "atlas_admission_maintenance",
+            "owner",
+            30,
+            now,
+            "expiry-claim",
+        )
+        .await
+        .unwrap()
+        .value
+        .unwrap();
+        let expired = now + ChronoDuration::seconds(31);
+        let result = run_tx(repo.db(), RetryPolicy::default(), move |tx| {
+            let claimed = claimed.clone();
+            async move {
+                yield_owned_in(
+                    &tx,
+                    &claimed,
+                    &NewTask {
+                        id: "job:activate:1",
+                        job: "job",
+                        pool: "atlas_admission_maintenance",
+                        operation: "atlas_admission_reclassify",
+                        priority: 20,
+                        deps: vec!["job:activate:0"],
+                        input_hash: "next",
+                        created_at: expired,
+                    },
+                    expired,
+                    "page_budget",
+                    expired,
+                )
+                .await
+            }
+        })
+        .await
+        .unwrap()
+        .value;
+        assert_eq!(result, Publish::LeaseLost);
+        let mut state=repo.db().query("RETURN type::record('task','job:activate:0').state; RETURN record::exists(type::record('task','job:activate:1')); RETURN count(SELECT id FROM attempt WHERE outcome='yielded');").await.unwrap().check().unwrap();
+        assert_eq!(
+            state.take::<Option<String>>(0).unwrap().as_deref(),
+            Some("running")
+        );
+        assert_eq!(state.take::<Option<bool>>(1).unwrap(), Some(false));
+        assert_eq!(state.take::<Option<i64>>(2).unwrap(), Some(0));
+    }
+    #[tokio::test]
+    async fn owned_claim_checkpoint_and_yield_count_actual_query_issues_without_unscoped_leakage() {
+        use crate::storage::classifier_admission::{owned_tx, AdmissionOwner};
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::storage::repo::Repository::connect(
+            &crate::storage::open::Target::Embedded {
+                path: root.path().join("db"),
+            },
+            "argos",
+            "cooperative_metrics",
+        )
+        .await
+        .unwrap();
+        let owner = AdmissionOwner::new(repo.clone());
+        let metrics = owner.metrics();
+        let measured = owned_tx(&owner, RetryPolicy::default(), |tx| async move {
+            let mut result = run(&tx, tx.query("RETURN true")).await?;
+            take::<Option<bool>>(&mut result, 0)
+        })
+        .await
+        .unwrap()
+        .value;
+        assert_eq!(measured, Some(true));
+        assert_eq!(
+            (
+                metrics.begins(),
+                metrics.commits(),
+                metrics.rollbacks(),
+                metrics.round_trips()
+            ),
+            (1, 1, 0, 3),
+            "one actual query +actual BEGIN/COMMIT, never a second wrapper count"
+        );
+        let unscoped = run_tx(repo.db(), RetryPolicy::default(), |tx| async move {
+            let mut result = run(&tx, tx.query("RETURN true")).await?;
+            take::<Option<bool>>(&mut result, 0)
+        })
+        .await
+        .unwrap()
+        .value;
+        assert_eq!(unscoped, Some(true));
+        assert_eq!(
+            metrics.round_trips(),
+            3,
+            "unscoped work cannot leak into a prior operation-local owner"
+        );
+        let now: DateTime<Utc> = "2026-11-05T00:00:00Z".parse().unwrap();
+        create_job(
+            repo.db(),
+            &NewJob {
+                id: "job",
+                kind: "maintenance",
+                operation: "atlas_admission_reclassify",
+                parent: None,
+                created_at: now,
+            },
+            &[NewTask {
+                id: "job:activate:0",
+                job: "job",
+                pool: "atlas_admission_maintenance",
+                operation: "atlas_admission_reclassify",
+                priority: 20,
+                deps: Vec::new(),
+                input_hash: "initial",
+                created_at: now,
+            }],
+        )
+        .await
+        .unwrap();
+        let claimed = owned_tx(&owner, RetryPolicy::default(), move |tx| async move {
+            claim_in(
+                &tx,
+                "atlas_admission_maintenance",
+                None,
+                "worker",
+                30,
+                now,
+                "owned-metrics-claim",
+                None,
+            )
+            .await
+        })
+        .await
+        .unwrap()
+        .value
+        .unwrap();
+        let after_claim = metrics.round_trips();
+        assert!(
+            after_claim > metrics.begins() + metrics.commits(),
+            "actual claim query issues are attributed"
+        );
+        owned_tx(&owner, RetryPolicy::default(), move |tx| {
+            let claimed = claimed.clone();
+            async move {
+                run(
+                    &tx,
+                    tx.query("UPDATE type::record('job','job') SET progress_done=64 RETURN NONE"),
+                )
+                .await?;
+                yield_owned_in(
+                    &tx,
+                    &claimed,
+                    &NewTask {
+                        id: "job:activate:1",
+                        job: "job",
+                        pool: "atlas_admission_maintenance",
+                        operation: "atlas_admission_reclassify",
+                        priority: 20,
+                        deps: vec!["job:activate:0"],
+                        input_hash: "checkpoint-hash",
+                        created_at: now,
+                    },
+                    now,
+                    "page_budget",
+                    now,
+                )
+                .await
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            metrics.round_trips() > after_claim + 2,
+            "actual checkpoint/yield queries count in addition to transaction boundaries"
+        );
+        assert_eq!(
+            (metrics.begins(), metrics.commits(), metrics.rollbacks()),
+            (3, 3, 0)
+        );
+        let mut checkpoint=repo.db().query("RETURN type::record('job','job').progress_done; RETURN type::record('task','job:activate:1').state;").await.unwrap().check().unwrap();
+        assert_eq!(checkpoint.take::<Option<i64>>(0).unwrap(), Some(64));
+        assert_eq!(
+            checkpoint.take::<Option<String>>(1).unwrap().as_deref(),
+            Some("queued")
+        );
+        owner.shutdown().await.unwrap();
     }
 }

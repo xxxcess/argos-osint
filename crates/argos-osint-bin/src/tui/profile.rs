@@ -1405,7 +1405,7 @@ fn system_lines(app: &App, pane: usize, width: u16) -> Vec<Line<'static>> {
     let lines = if pane == 0 {
         super::ui::system_host_lines(&app.hardware)
     } else {
-        super::ui::system_path_lines()
+        super::ui::system_path_lines(&app.settings.data_paths)
     };
     components::measured_lines(lines.into_iter().map(Line::raw).collect(), width)
 }

@@ -237,6 +237,10 @@ pub async fn analyze(
         }
         let id = crate::store::new_id();
         let p = InferencePayload {
+            inference_kind: None,
+            domains: Vec::new(),
+            conditions: Vec::new(),
+            extraction_fidelity: None,
             premise_claims: inf.premise_claims.clone(),
             actors: inf
                 .actors
@@ -305,6 +309,7 @@ pub async fn analyze(
             .map(|a| (a, "endpoint"))
             .collect();
         let p = LinkPayload {
+            validation: None,
             source: link.source,
             target: link.target,
             relation: rel.to_string(),
@@ -318,7 +323,7 @@ pub async fn analyze(
                 id: id.clone(),
                 text: String::new(),
                 kind: MemoryKind::Link,
-                payload: Some(MemoryPayload::Link(p)),
+                payload: Some(MemoryPayload::Link(Box::new(p))),
                 lifecycle: "active".into(),
             },
             json!({}),

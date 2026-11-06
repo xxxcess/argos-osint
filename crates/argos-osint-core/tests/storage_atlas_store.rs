@@ -4,6 +4,8 @@
 //! Run through `python3 scripts/test_surreal.py --mode both`.
 #![cfg(feature = "surreal")]
 
+#[path = "support/current_admission.rs"]
+mod current_admission;
 mod support;
 
 use argos_osint_core::atlas_store::AtlasStore;
@@ -81,6 +83,31 @@ async fn script(store: &AtlasStore) -> serde_json::Value {
     let mut replaced = unit("run-1", "u1", 1);
     replaced.disposition = "failed".into();
     store.save_unit_manifest(&replaced).await.unwrap();
+    let repo = store.repository().unwrap();
+    let key = argos_osint_core::storage::codec::encode(&["run-1", "u1"]);
+    repo.db().query("UPDATE type::record('atlas_work_unit', $key) SET owner='native-owner', epoch=7, input_revision=3, source_revision='native-source'")
+        .bind(("key", key.clone())).await.unwrap().check().unwrap();
+    assert!(
+        store
+            .save_unit_manifest(&unit("run-1", "u1", 1))
+            .await
+            .is_err(),
+        "legacy writer cannot replace a leased native manifest"
+    );
+    let mut ownership = repo.db().query("SELECT epoch, input_revision, source_revision FROM ONLY type::record('atlas_work_unit', $key)")
+        .bind(("key", key.clone())).await.unwrap().check().unwrap();
+    let owned: Option<surrealdb::types::Value> = ownership.take(0).unwrap();
+    let owned = owned.unwrap().into_json_value();
+    assert_eq!(owned["epoch"], 7);
+    assert_eq!(owned["input_revision"], 3);
+    assert_eq!(owned["source_revision"], "native-source");
+    repo.db()
+        .query("UPDATE type::record('atlas_work_unit', $key) SET owner=''")
+        .bind(("key", key))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
     let stage1 = store.unit_manifests("run-1", 1).await.unwrap();
     let all = store.all_unit_manifests("run-1").await.unwrap();
 
@@ -112,11 +139,7 @@ async fn work_units_reject_empty_ids() {
         .is_empty());
 }
 
-fn related_article(
-    id: &str,
-    title: &str,
-    category: &str,
-) -> argos_osint_core::store::AtlasArticleRow {
+fn related_article(id: &str, title: &str) -> argos_osint_core::store::AtlasArticleRow {
     argos_osint_core::store::AtlasArticleRow {
         run_id: "run-r".into(),
         id: id.into(),
@@ -126,25 +149,28 @@ fn related_article(
         source_domain: "example.com".into(),
         published_at: "2026-10-12".into(),
         provider: "fixture".into(),
-        category: category.into(),
         ..Default::default()
     }
 }
 
-fn mention(
+fn mentions(
     title: &str,
-    name: &str,
-    kind: &str,
-) -> argos_osint_core::atlas_metadata::ArticleMention {
-    let start = title.find(name).unwrap();
-    argos_osint_core::atlas_metadata::ArticleMention {
-        type_hint: kind.into(),
-        comparison_key: argos_osint_core::atlas_metadata::comparison_key(name),
-        field: "title".into(),
-        start_byte: start,
-        end_byte: start + name.len(),
-        original_text: name.into(),
+    names: &[(&str, &str)],
+) -> Vec<argos_osint_core::atlas_metadata::ArticleMention> {
+    let mut mentions = Vec::new();
+    for &(name, kind) in names {
+        for (start, text) in title.match_indices(name) {
+            mentions.push(argos_osint_core::atlas_metadata::ArticleMention {
+                type_hint: kind.into(),
+                comparison_key: argos_osint_core::atlas_metadata::comparison_key(name),
+                field: "title".into(),
+                start_byte: start,
+                end_byte: start + text.len(),
+                original_text: text.into(),
+            });
+        }
     }
+    mentions
 }
 
 /// `related_articles::build_on`: the same pairs on both stores, a cached
@@ -176,23 +202,26 @@ async fn related_script(store: &AtlasStore) -> Vec<usize> {
     vec![first, cached, after_delete]
 }
 
-/// Three articles in one run with complete metadata on the source; returns
-/// the first build's pair count.
+/// Three current occurrences with complete local metadata. Repeated Ada
+/// mentions still count as one entity, so only source/two form a pair.
 async fn related_setup(store: &AtlasStore) -> usize {
     use argos_osint_core::atlas_metadata::{ArticleMetadata, MetadataState};
     store.insert_run("run-r", "{}", "{}").await.unwrap();
-    let source = related_article("source", "Ada and Ada meet Acme", "economic");
-    let one = related_article("one", "Ada mentions Ada", "unk");
-    let two = related_article("two", "Ada meets Acme", "unk");
-    for a in [&source, &one, &two] {
-        store.upsert_article(a).await.unwrap();
+    let mut source = related_article("source", "Ada and Ada meet Acme");
+    let mut one = related_article("one", "Ada mentions Ada");
+    let mut two = related_article("two", "Ada meets Acme");
+    for a in [&mut source, &mut one, &mut two] {
+        current_admission::admit(store.repository().unwrap(), a, "Ballot patrol common").await;
     }
-    let mut m = ArticleMetadata::pending(&source);
-    m.entity_state = MetadataState::Complete;
-    m.mentions.push(mention(&source.title, "Ada", "person"));
-    m.mentions
-        .push(mention(&source.title, "Acme", "organization"));
-    assert!(store.save_metadata(&m).await.unwrap());
+    for article in [&source, &one, &two] {
+        let mut metadata = ArticleMetadata::pending(article);
+        metadata.entity_state = MetadataState::Complete;
+        metadata.mentions = mentions(
+            &article.title,
+            &[("Ada", "person"), ("Acme", "organization")],
+        );
+        assert!(store.save_metadata(&metadata).await.unwrap());
+    }
     argos_osint_core::related_articles::build_on(store, "run-r")
         .await
         .unwrap()
@@ -237,4 +266,134 @@ async fn related_articles_global_rows() {
     let s = global_rows(&surreal).await;
     assert_eq!(s.len(), 2, "{s:?}");
     assert_eq!(s[0].0, "two");
+    assert!(s.iter().all(|row| row.2), "Related leads stay tentative");
+    let repo = surreal.repository().unwrap();
+    let source = atlas::article(repo.db(), "run-r", "source")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut legacy_source = related_article("legacy-source", "Ada meets Acme");
+    legacy_source.url = source.url.clone();
+    let mut legacy_target = related_article("legacy-target", "Ada meets Acme");
+    for article in [&mut legacy_source, &mut legacy_target] {
+        // Modern-looking tags and valid spans do not grant native admission.
+        article.category = source.category.clone();
+        article.categories = source.categories.clone();
+        surreal.upsert_article(article).await.unwrap();
+        let mut metadata = argos_osint_core::atlas_metadata::ArticleMetadata::pending(article);
+        metadata.entity_state = argos_osint_core::atlas_metadata::MetadataState::Complete;
+        metadata.mentions = mentions(
+            &article.title,
+            &[("Ada", "person"), ("Acme", "organization")],
+        );
+        assert!(surreal.save_metadata(&metadata).await.unwrap());
+    }
+    let pair = atlas_metadata::related_pairs(repo.db(), "run-r", "source")
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    // Simulate retained legacy pairs whose text/category hashes still match.
+    // Neither same-URL source aliases nor forged positive targets are current.
+    for left in [&source, &legacy_source] {
+        let legacy_revision = |article: &argos_osint_core::store::AtlasArticleRow| {
+            argos_osint_core::nlp::cache::hash(&format!(
+                "{}:{}",
+                argos_osint_core::atlas_metadata::input_hash(article),
+                serde_json::to_string(&article.categories).unwrap()
+            ))
+        };
+        repo.db().query("CREATE type::record('atlas_related_article', $key) CONTENT {run_id:$run,left_id:$left,right_id:$right,left_revision:$lr,right_revision:$rr,shared_json:$shared,match_version:$version,named_count:2,shared_count:2,rarity:1.0} RETURN NONE")
+            .bind(("key", argos_osint_core::storage::codec::encode(&["run-r", &left.id, &legacy_target.id])))
+            .bind(("run", "run-r")).bind(("left", left.id.clone())).bind(("right", legacy_target.id.clone()))
+            .bind(("lr", legacy_revision(left))).bind(("rr", legacy_revision(&legacy_target)))
+            .bind(("shared", pair.shared_json.clone())).bind(("version", argos_osint_core::related_articles::MATCH_VERSION))
+            .await.unwrap().check().unwrap();
+    }
+    use argos_osint_core::related_global::{related_articles_global_on, RelatedScope};
+    for scope in [RelatedScope::AllRetained, RelatedScope::ThisCycle] {
+        let page = related_articles_global_on(repo, "run-r", "source", scope, None, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.total, 1,
+            "legacy targets are excluded before pagination"
+        );
+        assert_eq!(page.rows[0].article.id, "two");
+        assert!(page.next_cursor.is_none());
+        let legacy = related_articles_global_on(repo, "run-r", &legacy_source.id, scope, None, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            legacy.total, 0,
+            "legacy seed cannot borrow a current URL alias"
+        );
+    }
+    assert!(
+        argos_osint_core::intel_service::article(repo, "run-r", &legacy_source.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "legacy detail remains readable"
+    );
+    let public = argos_osint_core::intel_service::related(repo, &source, None, 1)
+        .await
+        .unwrap();
+    assert_eq!(public["total"], 1);
+    assert_eq!(public["rows"][0]["article"]["id"], "two");
+    assert_eq!(public["rows"][0]["tentative"], true);
+    let seed = argos_osint_core::brain_topology::TopologySeed::Article {
+        run_id: source.run_id.clone(),
+        article_id: source.id.clone(),
+        revision: argos_osint_core::atlas_metadata::input_hash(&source),
+        originating_memory: None,
+    };
+    let topology =
+        argos_osint_core::storage::topology::topology_snapshot(repo, &seed, &Default::default())
+            .await
+            .unwrap();
+    assert_eq!(
+        topology
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == argos_osint_core::brain_topology::TopologyEdgeKind::Related)
+            .count(),
+        1,
+        "topology validates the native fingerprint stored alongside legacy text revisions"
+    );
+    // Retain the pair while changing its native annotation revision, as after
+    // interruption between metadata publication and derivative refresh.
+    let mut metadata = surreal.metadata("run-r", "source").await.unwrap().unwrap();
+    metadata.entity_version.push_str("-revised");
+    repo.db().query("UPDATE type::record('atlas_article_metadata', $key) SET metadata_json=$json RETURN NONE")
+        .bind(("key", argos_osint_core::storage::codec::encode(&["run-r", "source"])))
+        .bind(("json", serde_json::to_string(&metadata).unwrap()))
+        .await.unwrap().check().unwrap();
+    for scope in [RelatedScope::AllRetained, RelatedScope::ThisCycle] {
+        assert_eq!(
+            related_articles_global_on(repo, "run-r", "source", scope, None, 1)
+                .await
+                .unwrap()
+                .total,
+            0,
+            "stale native pair is not a current lead"
+        );
+    }
+    assert_eq!(
+        argos_osint_core::intel_service::related(repo, &source, None, 1)
+            .await
+            .unwrap()["total"],
+        0
+    );
+    let topology =
+        argos_osint_core::storage::topology::topology_snapshot(repo, &seed, &Default::default())
+            .await
+            .unwrap();
+    assert!(
+        !topology
+            .edges
+            .iter()
+            .any(|edge| edge.kind == argos_osint_core::brain_topology::TopologyEdgeKind::Related),
+        "stale native pair is hidden from topology too"
+    );
 }

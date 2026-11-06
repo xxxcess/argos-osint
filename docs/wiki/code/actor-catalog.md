@@ -12,7 +12,7 @@ Brain actors come from the local `datasets/argos_actors.csv` catalog after its f
 
 Venture probes `argos storage actor-seed-status` in a short-lived child before drawing its menu. It shows **Seed DB** when the completion receipt is missing/incomplete **or** the catalog actor table is empty. A failed/locked status query is reported as unavailable and never treated as an empty database. The parent owns no datastore between sessions.
 
-Selecting Seed DB runs `argos storage seed-actors` in a child process. New homes initialize embedded storage first; existing homes retain their configured storage mode. The dataset resolves from `--file`, `ARGOS_ACTORS_CSV`, the working directory's `datasets/argos_actors.csv`, the Argos home's dataset folder, then the source checkout. Installed binaries must have a local CSV or an explicit path; the 140 MB CSV is not embedded in the executable. No network or model is used for seeding.
+Selecting Seed DB prompts for the actor CSV path (`auto` uses configured/default selection), then runs `argos storage seed-actors` in a child process. New homes initialize embedded storage first; existing homes retain their configured storage mode. The dataset resolves from `--file`, `ARGOS_ACTORS_CSV`, saved `[data_paths].actor_csv`, the working directory's `datasets/argos_actors.csv`, the Argos home's dataset folder, then the source checkout. Installed binaries must have a local CSV or an explicit path; the 140 MB CSV is not embedded in the executable. No network or model is used for seeding.
 
 ```sh
 argos storage actor-seed-status
@@ -43,7 +43,9 @@ Supported `catalog_json.metadata` keys are `description`, `actor_type`, `country
 
 ## Article revision contract and repair
 
-The actor-index receipt uses the enrichment checksum (title/description/category/metadata) to detect work changes. Article mention rows and typed Article endpoints use `atlas_metadata::input_hash`, the source-content revision that topology validates. These are different contracts. Index contract `atlas-actor-index-v5-clean-body-nlp` invalidates the older receipt checksums; the normal elected Brain backfill drainer reindexes retained occurrences in bounded batches after the updated backend starts. It uses the bundled local NLP engine on retained cleaned text and existing catalog aliases, without remote model calls. No dossier/topology read repairs or writes data. A genuinely revised article remains fenced out until indexing catches up.
+The native actor-index receipt binds the current derivative input revision, including admission, metadata and retained cleaned-body inputs. Its checksum binds that revision, actor coverage and the current index/identity contracts. Article mention rows and typed Article endpoints use `atlas_metadata::input_hash`, the source-content revision that topology validates. Index contract `atlas-actor-index-v6-metadata-first` invalidates older checksums. A `Current` Actors derivative marker permits reuse only when the actual `atlas_article_index` receipt has the expected revision and a valid checksum. Claim and completion audits check this output under the same source fence, with at most 64 point reads; missing or stale output is reclaimed by the writer. See [actor indexing](../../../crates/argos-osint-core/src/atlas_actor_index.rs), [derivative storage](../../../crates/argos-osint-core/src/storage/classifier_admission.rs) and the [catalog repair contracts](../../../crates/argos-osint-core/tests/storage_actor_catalog.rs).
+
+The normal elected Brain backfill drainer reindexes retained occurrences in bounded batches. It uses the bundled local NLP engine on retained cleaned text and existing catalog aliases, without remote model calls. No dossier/topology read repairs or writes data. A genuinely revised article remains fenced out until indexing catches up.
 
 Dossiers expose direct recorded Claim and Inference associations separately. Inference `premise` roles identify inherited premise association, never independent corroboration. Mentioned articles are linked by exact run/article occurrence. The topology can walk through those article nodes to their retained insights without manufacturing a direct actor–claim edge from a shared article.
 
@@ -61,7 +63,7 @@ Full article commit refreshes mention indexes for the article’s retained run o
 
 Canonical pipeline inputs include catalog candidates in source-specific namespaces (`body:<id>:actor:<canonical-id>` for body spans). Only entities inside the insight’s cited source ranges bind references; equal byte offsets in metadata and body cannot bind each other. Inferences record direct cited mentions separately from inherited premise roles. Canonical publication version 5 includes the entity roster in the snapshot key. No actor is assigned to a claim merely because the article mentions it.
 
-If no actor is available while Full article cleanup is pending, the actor section shows its labeled skeleton and omits a verified-zero count. Existing actors remain visible with a compact “checking cleaned article” indicator. Completion appends matches or shows verified empty; failed cleanup shows incomplete detection instead of an indefinite loader.
+If no actor is available while Full article cleanup is pending, the actor section shows its labeled skeleton and omits a verified-zero count. Existing actors, including retained ready cleaned-body matches, remain visible with a compact “checking cleaned article” indicator. A queued or running Body stage keeps `actors_body_pending` true even when those retained matches are available. Completion appends matches or shows verified empty; failed cleanup shows incomplete detection instead of an indefinite loader.
 
 ## Metadata-first recovery
 

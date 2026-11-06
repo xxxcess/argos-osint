@@ -130,6 +130,55 @@ pub async fn prepare(
     ))
 }
 
+pub const CAPTURED_SOURCE_CHANGED: &str = "captured source changed before publication";
+
+/// Current publication uses the exact root occurrence/metadata snapshot rather
+/// than rebinding old faithful spans to a newer mutable article row.
+pub async fn prepare_captured(
+    repo: &Repository,
+    article_id: &str,
+    metadata: &Value,
+    body: &Value,
+    claims: &Value,
+    inferences: &Value,
+    operation: &str,
+) -> Result<std::result::Result<CanonicalBrief, String>> {
+    if !metadata.is_object() {
+        return prepare(repo, article_id, body, claims, inferences, operation).await;
+    }
+    let run_id = metadata["run_id"].as_str();
+    let article = match run_id {
+        Some(run) => super::atlas::article(repo.db(), run, article_id).await?,
+        None => super::atlas::latest_article_by_id(repo.db(), article_id).await?,
+    };
+    let Some(article) = article else {
+        return Ok(Err(CAPTURED_SOURCE_CHANGED.into()));
+    };
+    let current = crate::intel_recon::brief_stages::metadata_snapshot(&article);
+    for field in [
+        "title",
+        "description",
+        "published_at",
+        "url",
+        "source_name",
+        "source_domain",
+        "country",
+        "run_id",
+        "article_id",
+        "source_revision",
+    ] {
+        if metadata.get(field).is_some() && metadata[field] != current[field] {
+            return Ok(Err(CAPTURED_SOURCE_CHANGED.into()));
+        }
+    }
+    let generation = super::insight_owner::desired_generation(repo, "article", article_id).await?;
+    let input =
+        super::pipeline_inputs::article_input(repo, &article, generation, "intel brief").await?;
+    Ok(brief_canonical::prepare_for_stage(
+        input, &article, body, claims, inferences, operation,
+    ))
+}
+
 /// Publish one completed kind and return its index state. The caller binds
 /// the state as the stage receipt and the article's footer state.
 pub async fn publish_stage(
@@ -172,7 +221,7 @@ pub async fn publish_stage(
         Ok(brief) => brief.clone(),
     };
     let attempt = if operation == "intel_brief_links" {
-        publish_links(repo, article_id, job_id).await
+        publish_links(repo, article_id, job_id, brief).await
     } else {
         publish_kind(repo, article_id, operation, brief, snapshot_hash).await
     };
@@ -232,7 +281,7 @@ async fn publish_kind(
             for inference in &mut output.inferences {
                 inference.snapshot_key = input.snapshot.key.clone();
             }
-            let validate = super::live_evidence::step(input.snapshot.clone());
+            let validate = super::live_evidence::publication_step(input.snapshot.clone());
             let save = input.save_insights;
             let key = input.snapshot.key.clone();
             let snapshot = input.snapshot.clone();
@@ -286,6 +335,7 @@ async fn required_receipts(
     let rows: Vec<DerivationRow> = take(&mut r, 0)?;
     let mut ids: Vec<String> = rows.into_iter().filter_map(|d| d.memory_id).collect();
     ids.extend(lead_ids(tx, article_id).await?);
+    ids.extend(curated_ids(tx, article_id).await?);
     ids.sort();
     ids.dedup();
     let mut out = Vec::new();
@@ -334,7 +384,12 @@ struct LeadRow {
 /// the article's active snapshot; every lead's inference must be a live
 /// canonical memory. Each lead becomes a tentative Related memory; leads the
 /// article no longer has are retired.
-async fn publish_links(repo: &Repository, article_id: &str, job_id: &str) -> Result<Published> {
+async fn publish_links(
+    repo: &Repository,
+    article_id: &str,
+    job_id: &str,
+    prepared: CanonicalBrief,
+) -> Result<Published> {
     let inference = stage_receipt(repo, job_id, "intel_brief_inferences")
         .await?
         .filter(|s| s.state == "indexed");
@@ -343,6 +398,7 @@ async fn publish_links(repo: &Repository, article_id: &str, job_id: &str) -> Res
     };
     let (article, job) = (article_id.to_string(), job_id.to_string());
     let snapshot = inference.snapshot_id.clone();
+    let prepared = Arc::new(prepared);
     // Unique per publication, fixed across transaction retries: a later
     // Links publication of the same job must not reuse an op_key.
     let nonce = format!(
@@ -350,13 +406,21 @@ async fn publish_links(repo: &Repository, article_id: &str, job_id: &str) -> Res
         chrono::Utc::now().timestamp_micros()
     );
     let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
-        let (article, job, snapshot, nonce) = (
+        let (article, job, snapshot, nonce, prepared) = (
             article.clone(),
             job.clone(),
             snapshot.clone(),
             nonce.clone(),
+            prepared.clone(),
         );
         async move {
+            // Recheck the retained original source inside the same transaction
+            // as all tentative/confirmed writes and lifecycle/index changes.
+            super::live_evidence::publication_step(prepared.input.snapshot.clone())(
+                tx.clone(),
+                String::new(),
+            )
+            .await?;
             let now = chrono::Utc::now();
             let mut r = run(
                 &tx,
@@ -411,10 +475,16 @@ async fn publish_links(repo: &Repository, article_id: &str, job_id: &str) -> Res
                         "a Link endpoint lacks its current canonical inference",
                     ));
                 }
-                if super::atlas::article_in(&tx, &lead.candidate_run_id, &lead.candidate_article_id)
-                    .await?
-                    .is_none()
-                {
+                let Some(target) = super::atlas::article_in(
+                    &tx,
+                    &lead.candidate_run_id,
+                    &lead.candidate_article_id,
+                )
+                .await?
+                else {
+                    continue;
+                };
+                if crate::atlas_metadata::input_hash(&target) != lead.candidate_metadata_revision {
                     continue;
                 }
                 let payload = RelatedPayload {
@@ -456,6 +526,8 @@ async fn publish_links(repo: &Repository, article_id: &str, job_id: &str) -> Res
                 .await?;
                 current.push(id);
             }
+            let confirmed =
+                publish_curated_links_in(&tx, &article, &job, &derivations, &prepared).await?;
             let previous = lead_ids(&tx, &article).await?;
             let stale: Vec<String> = previous
                 .into_iter()
@@ -470,6 +542,7 @@ async fn publish_links(repo: &Repository, article_id: &str, job_id: &str) -> Res
             )
             .await?;
             let mut touched = current.clone();
+            touched.extend(confirmed);
             touched.extend(retired);
             enqueue_index(&tx, &touched, &nonce, now).await?;
             let required = required_receipts(&tx, &snapshot, &article).await?;
@@ -478,6 +551,397 @@ async fn publish_links(repo: &Repository, article_id: &str, job_id: &str) -> Res
     })
     .await?;
     Ok(committed.value)
+}
+
+fn curated_key(article: &str) -> String {
+    format!("intel-brief-curated-links:{article}")
+}
+async fn curated_ids(tx: &Tx, article: &str) -> Result<Vec<String>, TxError> {
+    let mut response = run(
+        tx,
+        tx.query("SELECT VALUE value FROM ONLY type::record('app_state', $key)")
+            .bind(("key", curated_key(article))),
+    )
+    .await?;
+    let raw: Option<String> = take(&mut response, 0)?;
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    if raw.len() > 64 * 1024 {
+        return Err(abort("curated Link owner receipt exceeds bound"));
+    }
+    let ids: Vec<String> = serde_json::from_str(&raw).map_err(abort)?;
+    if ids.len() > 200 {
+        return Err(abort("curated Link owner exceeds200 records"));
+    }
+    Ok(ids)
+}
+#[derive(SurrealValue)]
+struct CuratedMemory {
+    text: String,
+    payload_json: String,
+    memory_kind: String,
+    lifecycle: String,
+}
+async fn curated_memory(tx: &Tx, id: &str) -> Result<Option<CuratedMemory>, TxError> {
+    let mut result = run(
+        tx,
+        tx.query("SELECT text,payload_json,memory_kind,lifecycle FROM ONLY $memory")
+            .bind(("memory", rid("memory", id))),
+    )
+    .await?;
+    take(&mut result, 0)
+}
+fn endpoint_revision(memory: &CuratedMemory) -> Result<String, TxError> {
+    let payload: MemoryPayload = serde_json::from_str(&memory.payload_json).map_err(abort)?;
+    crate::memory_metadata::assertion_semantic_revision(&memory.text, &payload).map_err(abort)
+}
+
+async fn still_live_curated(
+    tx: &Tx,
+    payload: &crate::memory_metadata::LinkPayload,
+    current: &[DerivationRow],
+    prepared: &CanonicalBrief,
+) -> Result<bool, TxError> {
+    let Some(receipt) = &payload.validation else {
+        return Ok(false);
+    };
+    if receipt.validate_structure().is_err()
+        || payload.relation != receipt.kind.as_str()
+        || payload.source != receipt.source
+        || payload.target != receipt.target
+    {
+        return Ok(false);
+    }
+    let EndpointRef::Memory {
+        memory_id,
+        kind: MemoryKind::Inference,
+    } = &payload.source
+    else {
+        return Ok(false);
+    };
+    if !current
+        .iter()
+        .any(|row| row.memory_id.as_ref() == Some(memory_id))
+    {
+        return Ok(false);
+    }
+    let Some(source) = curated_memory(tx, memory_id).await? else {
+        return Ok(false);
+    };
+    if source.lifecycle != "active"
+        || source.memory_kind != "inference"
+        || endpoint_revision(&source)? != receipt.source_revision
+    {
+        return Ok(false);
+    }
+    let EndpointRef::Article {
+        run_id,
+        article_id,
+        revision,
+    } = &payload.target
+    else {
+        return Ok(false);
+    };
+    let Some(target) = super::atlas::article_in(tx, run_id, article_id).await? else {
+        return Ok(false);
+    };
+    if crate::atlas_metadata::input_hash(&target) != *revision
+        || receipt.target_revision != *revision
+    {
+        return Ok(false);
+    }
+    let published = chrono::DateTime::parse_from_rfc3339(&target.published_at)
+        .ok()
+        .map(|_| target.published_at.clone());
+    if receipt.target_time != published {
+        return Ok(false);
+    }
+    let target_source = format!("article:{run_id}/{article_id}");
+    let sources: Vec<_> = receipt
+        .evidence
+        .iter()
+        .filter(|reference| reference.source_id != target_source)
+        .collect();
+    if sources.is_empty()
+        || !sources.iter().all(|reference| {
+            prepared
+                .input
+                .evidence
+                .iter()
+                .any(|evidence| evidence.validate_ref(reference))
+        })
+    {
+        return Ok(false);
+    }
+    let mut result = run(
+        tx,
+        tx.query("SELECT VALUE value FROM ONLY $receipt")
+            .bind(("receipt", rid("brief_receipt", &receipt.decision_receipt))),
+    )
+    .await?;
+    Ok(take::<Option<String>>(&mut result, 0)?.as_deref() == Some("faithful"))
+}
+
+/// Every current typed Link write passes this live transaction gate. Failed
+/// proposals do not replace or retire unrelated still-valid confirmed records.
+async fn publish_curated_links_in(
+    tx: &Tx,
+    article: &str,
+    job: &str,
+    derivations: &[DerivationRow],
+    prepared: &CanonicalBrief,
+) -> Result<Vec<String>, TxError> {
+    use crate::intel_recon::brief_stages::{self as stages, CuratedLinkProof, StageContext};
+    use crate::intelligence_contracts::{LinkValidationReceipt, LINK_VALIDATION_VERSION};
+    use crate::investigation::insights::Inference;
+    use crate::memory_metadata::LinkPayload;
+    let mut response = run(tx, tx.query("SELECT VALUE output_json FROM ONLY $links; SELECT VALUE output_json FROM ONLY $body; SELECT VALUE output_json FROM ONLY $inferences; SELECT input_json,role_snapshot FROM ONLY $root;")
+        .bind(("links",rid("stage_output",&super::brief_stages::task_id(job,"intel_brief_links"))))
+        .bind(("body",rid("stage_output",&super::brief_stages::task_id(job,"intel_brief_body"))))
+        .bind(("inferences",rid("stage_output",&super::brief_stages::task_id(job,"intel_brief_inferences"))))
+        .bind(("root",rid("brief_stage_input",&super::brief_stages::task_id(job,"intel_brief_claims"))))).await?;
+    let links: Value = take::<Option<String>>(&mut response, 0)?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(abort)?
+        .unwrap_or(Value::Null);
+    let body: Value = take::<Option<String>>(&mut response, 1)?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(abort)?
+        .unwrap_or(Value::Null);
+    let raw_inferences: Value = take::<Option<String>>(&mut response, 2)?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(abort)?
+        .unwrap_or(Value::Null);
+    #[derive(SurrealValue)]
+    struct Root {
+        input_json: String,
+        role_snapshot: String,
+    }
+    let root: Option<Root> = take(&mut response, 3)?;
+    let context = root.map(|root| StageContext {
+        job_id: job.into(),
+        task_id: String::new(),
+        job_generation: 0,
+        lease_epoch: 0,
+        metadata_snapshot: serde_json::from_str::<Value>(&root.input_json)
+            .map(|value| value["metadata"].clone())
+            .unwrap_or(Value::Null),
+        route_snapshot: root.role_snapshot,
+        ledger: Arc::default(),
+    });
+    let context = context
+        .map(|context| stages::body_bound_context(&context, body["content_hash"].as_str()))
+        .transpose()
+        .map_err(abort)?;
+    let mut current = Vec::new();
+    let previous = curated_ids(tx, article).await?;
+    for id in &previous {
+        if let Some(memory) = curated_memory(tx, id).await? {
+            if let Ok(MemoryPayload::Link(payload)) = serde_json::from_str(&memory.payload_json) {
+                if memory.lifecycle == "active"
+                    && still_live_curated(tx, &payload, derivations, prepared).await?
+                {
+                    current.push(id.clone());
+                }
+            }
+        }
+    }
+    let proofs: Vec<CuratedLinkProof> = if links["curated_links"].is_null() {
+        Vec::new()
+    } else {
+        serde_json::from_value(links["curated_links"].clone()).map_err(abort)?
+    };
+    if proofs.len() > stages::MAX_LEADS {
+        return Err(abort("curated Link proposal bound exceeded"));
+    }
+    for proof in proofs {
+        if proof.schema_version != LINK_VALIDATION_VERSION || proof.source_article_id != article {
+            continue;
+        }
+        let Some(context) = &context else {
+            continue;
+        };
+        if stages::curation_revision(context).map_err(abort)? != proof.context_revision {
+            continue;
+        }
+        let Some(source_article) =
+            super::atlas::article_in(tx, &proof.source_run_id, &proof.source_article_id).await?
+        else {
+            continue;
+        };
+        let published = chrono::DateTime::parse_from_rfc3339(&source_article.published_at)
+            .ok()
+            .map(|_| source_article.published_at.clone());
+        if crate::atlas_metadata::input_hash(&source_article) != proof.source_metadata_revision
+            || published != proof.source_published_at
+        {
+            continue;
+        }
+        let Some(target) =
+            super::atlas::article_in(tx, &proof.candidate_run_id, &proof.candidate_article_id)
+                .await?
+        else {
+            continue;
+        };
+        let Some(raw_inference) = raw_inferences["inferences"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|inference| inference["id"] == proof.inference_id)
+        else {
+            continue;
+        };
+        let Some((memory_id, inference)) = derivations.iter().find_map(|row| {
+            let inference: Inference = serde_json::from_str(&row.item_json).ok()?;
+            if inference.id == proof.inference_id {
+                Some((row.memory_id.clone()?, inference))
+            } else {
+                None
+            }
+        }) else {
+            continue;
+        };
+        if inference.text != proof.source_assertion
+            || inference.evidence_refs.is_empty()
+            || !inference.evidence_refs.iter().all(|reference| {
+                prepared
+                    .input
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.validate_ref(reference))
+            })
+        {
+            continue;
+        }
+        let Ok(item) = stages::curated_semantic_item(&proof, raw_inference, &body, &target) else {
+            continue;
+        };
+        let route = context.route_key(
+            Some(crate::provider::OP_INFERENCES_ASSESS),
+            "atlas_evaluator",
+        );
+        if proof.decision_receipt != format!("intel-fidelity:{}:{route}", item.receipt_key()) {
+            continue;
+        }
+        let mut response = run(
+            tx,
+            tx.query("SELECT VALUE value FROM ONLY $receipt")
+                .bind(("receipt", rid("brief_receipt", &proof.decision_receipt))),
+        )
+        .await?;
+        if take::<Option<String>>(&mut response, 0)?.as_deref() != Some("faithful") {
+            continue;
+        }
+        let Some(source) = curated_memory(tx, &memory_id).await? else {
+            continue;
+        };
+        if source.lifecycle != "active" || source.memory_kind != "inference" {
+            continue;
+        }
+        let Ok((target_evidence, _)) = stages::curated_candidate_evidence(&proof, &target) else {
+            continue;
+        };
+        let source_endpoint = EndpointRef::Memory {
+            memory_id,
+            kind: MemoryKind::Inference,
+        };
+        let target_endpoint = EndpointRef::Article {
+            run_id: target.run_id.clone(),
+            article_id: target.id.clone(),
+            revision: proof.candidate_metadata_revision.clone(),
+        };
+        let roots: std::collections::BTreeSet<_> = inference
+            .evidence_refs
+            .iter()
+            .map(|reference| reference.origin_root.as_str())
+            .filter(|root| !root.is_empty())
+            .collect();
+        let source_lineage = if roots.len() == 1 {
+            roots.iter().next().copied().unwrap_or("").to_owned()
+        } else if roots.is_empty() {
+            String::new()
+        } else {
+            crate::nlp::cache::hash(&roots.into_iter().collect::<Vec<_>>().join("|"))
+        };
+        let mut evidence = inference.evidence_refs;
+        evidence.extend(target_evidence);
+        let receipt = LinkValidationReceipt {
+            schema_version: LINK_VALIDATION_VERSION.into(),
+            kind: proof.kind,
+            source: source_endpoint.clone(),
+            target: target_endpoint.clone(),
+            source_revision: endpoint_revision(&source)?,
+            target_revision: proof.candidate_metadata_revision,
+            evidence,
+            source_lineage,
+            target_lineage: String::new(),
+            chronology_basis: proof.chronology_basis,
+            source_time: proof.source_published_at,
+            target_time: proof.target_published_at,
+            conditions: proof.conditions,
+            limitations: proof.limitations,
+            decision_receipt: proof.decision_receipt,
+            context_revision: proof.context_revision,
+        };
+        if receipt.validate_structure().is_err() {
+            continue;
+        }
+        let id = crate::brain_actors::hid(
+            "link",
+            &[
+                proof.kind.as_str(),
+                &crate::brain_actors::endpoint_key(&source_endpoint),
+                &crate::brain_actors::endpoint_key(&target_endpoint),
+                &crate::nlp::cache::hash(&serde_json::to_string(&receipt).map_err(abort)?),
+            ],
+        );
+        let payload = MemoryPayload::Link(Box::new(LinkPayload {
+            validation: Some(receipt),
+            source: source_endpoint,
+            target: target_endpoint,
+            relation: proof.kind.as_str().into(),
+            rationale: proof.rationale,
+            receipts: Vec::new(),
+            promoted_from: None,
+        }));
+        super::memory::put_typed_in(
+            tx,
+            &super::memory::TypedMemory {
+                id: id.clone(),
+                text: crate::brain_actors::text_of(&payload),
+                kind: MemoryKind::Link,
+                payload: Some(payload),
+                lifecycle: "active".into(),
+            },
+        )
+        .await?;
+        if !current.contains(&id) {
+            current.push(id);
+        }
+    }
+    if current.len() > 200 {
+        return Err(abort(
+            "curated Link owner bound reached; prior confirmed records retained",
+        ));
+    }
+    let stale: Vec<_> = previous
+        .into_iter()
+        .filter(|id| !current.contains(id))
+        .collect();
+    let retired = super::memory::set_lifecycle_in(tx, &stale, "retired").await?;
+    run(
+        tx,
+        tx.query("UPSERT type::record('app_state',$key) SET value=$value RETURN NONE")
+            .bind(("key", curated_key(article)))
+            .bind(("value", serde_json::to_string(&current).map_err(abort)?)),
+    )
+    .await?;
+    current.extend(retired);
+    Ok(current)
 }
 
 async fn enqueue_index(

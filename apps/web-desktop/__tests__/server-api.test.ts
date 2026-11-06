@@ -9,6 +9,20 @@ const rust = "http://127.0.0.1:9188";
 afterEach(() => vi.unstubAllEnvs());
 
 describe("Next same-origin API → Rust transport", () => {
+  it("keeps classifier setup local to Venture", async () => {
+    for (const [method, endpoint] of [
+      ["GET", "classifier/status"],
+      ["POST", "classifier/train"],
+      ["GET", "classifier/jobs/detail"],
+      ["POST", "classifier/cancel"],
+    ]) {
+      const response = await proxyRust(
+        new Request(`${next}/api/v1/${endpoint}`, { method }),
+        endpoint.split("/"),
+      );
+      expect(response.status).toBe(404);
+    }
+  });
   it("uses only the server origin and forwards opaque queries/status without browser headers", async () => {
     vi.stubEnv("ARGOS_RUST_API_ORIGIN", rust);
     let target: URL | undefined;

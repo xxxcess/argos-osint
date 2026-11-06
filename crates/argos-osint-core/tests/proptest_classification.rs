@@ -1,64 +1,23 @@
-//! Offline batch classification contracts over varied category assignments.
-use argos_osint_core::atlas::{rank_question_id, CATEGORY_IDS, RANKED_PICKS};
-use argos_osint_core::atlas_classify::{batches, BatchAdapter, BATCH_SIZE};
-use argos_osint_core::recon::model_exec::DecisionsAdapter;
-use argos_osint_core::store::AtlasArticleRow;
+//! Independent raw scores always produce exactly the ranked, passing pair.
+use argos_osint_core::atlas_taxonomy::DomainId;
+use argos_osint_core::classifier::calibration::{
+    self, CalibrationKnot, DomainCalibration, GateSet, CALIBRATION_VERSION,
+};
+use argos_osint_core::classifier::{ClassifyInput, ModelId, RawDomainScore};
 use proptest::prelude::*;
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
     #[test]
-    fn classification_order_does_not_change_receipts(categories in prop::collection::vec(0usize..7, 1..=BATCH_SIZE)) {
-        // One documented batch: `parse_chat` consumes a single response whose
-        // ranked answers (BATCH_SIZE * RANKED_PICKS blocks) must stay under
-        // the parser's documented block bound; `batches` (asserted below)
-        // cuts larger inputs at BATCH_SIZE in production.
-        let articles: Vec<_> = categories.iter().enumerate().map(|(i, _)| AtlasArticleRow {
-            id: format!("fixture-{i}"), title: "Offline classification fixture".into(), ..Default::default()
-        }).collect();
-        // The first two picks are distinct fitting categories; later ranks stop.
-        let picks = |category: &usize| {
-            let first = CATEGORY_IDS[*category];
-            let second = CATEGORY_IDS[(*category + 1) % (CATEGORY_IDS.len() - 1)];
-            vec![first, second, "done"]
-        };
-        let blocks: Vec<String> = categories.iter().enumerate().map(|(i, category)| {
-            let mut text = String::new();
-            let picked = picks(category);
-            for rank in 1..=RANKED_PICKS {
-                let label = picked.get(rank - 1).copied().unwrap_or("done");
-                text.push_str(&format!(
-                    "## Decision\nQuestion: {}\nChoice: {label}\nEnd\n",
-                    rank_question_id(&format!("fixture-{i}"), rank)
-                ));
-            }
-            text
-        }).collect();
-        let raw = |reversed: bool| {
-            let mut text = String::from("argos-text-v1\n");
-            let ordered: Vec<&String> = if reversed {
-                blocks.iter().rev().collect()
-            } else {
-                blocks.iter().collect()
-            };
-            for block in ordered {
-                text.push_str(block);
-            }
-            text
-        };
-        let expected: std::collections::BTreeMap<_, _> = categories.iter().enumerate()
-            .map(|(i, category)| {
-                let picked = picks(category);
-                (format!("fixture-{i}"), format!("{},{}", picked[0], picked[1]))
-            })
-            .collect();
-        let first = BatchAdapter::new(articles.clone()).parse_chat(raw(false).as_str());
-        let second = BatchAdapter::new(articles.clone()).parse_chat(raw(true).as_str());
-        prop_assert_eq!(first.expect("valid classifications"), expected.clone());
-        prop_assert_eq!(second.expect("reordered classifications"), expected);
-        let batches = batches(&articles);
-        prop_assert!(batches.iter().all(|batch| !batch.is_empty() && batch.len() <= BATCH_SIZE));
-        let ids: Vec<_> = batches.iter().flatten().map(|article| &article.id).collect();
-        prop_assert_eq!(ids, articles.iter().map(|article| &article.id).collect::<Vec<_>>());
+    fn exact_pair_tracks_independent_scores_without_probability_normalization(values in prop::array::uniform6(0u8..=100)) {
+        let raw=core::array::from_fn(|index|RawDomainScore {domain:DomainId::ALL[index],present_log_score:f64::from(values[index]),absent_log_score:0.0,raw_log_odds:f64::from(values[index]),known_feature_count:4,oov_count:0});
+        let gates=GateSet {version:CALIBRATION_VERSION.into(),domains:DomainId::ALL.map(|domain|DomainCalibration {domain,knots:(0..=100).map(|score|CalibrationKnot {raw_upper:f64::from(score),relevance:f64::from(score)/100.0}).collect(),threshold:0.5,min_informative_features:1})};
+        let input=ClassifyInput::new("property/occurrence","Independent offline fixture","Ballot patrol freight river",Some("en".into()));
+        let receipt=calibration::apply_gates(&input,&raw,&ModelId::parse("property-model").unwrap(),&gates).unwrap();
+        let mut rank:Vec<_>=DomainId::ALL.into_iter().zip(values).collect();
+        rank.sort_by(|(left,ls),(right,rs)|rs.cmp(ls).then_with(||left.as_str().cmp(right.as_str())));
+        if rank[1].1>=50 {prop_assert_eq!(receipt.selected_pair,Some([rank[0].0,rank[1].0]));} else {prop_assert!(receipt.selected_pair.is_none());}
+        for (score,value) in receipt.scores.iter().zip(values) {prop_assert_eq!(score.calibrated_score,f64::from(value)/100.0);}
+        prop_assert_eq!(receipt.occurrence_id,input.occurrence_id);
     }
 }

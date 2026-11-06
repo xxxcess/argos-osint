@@ -19,8 +19,8 @@ use super::summary_flush;
 use super::tx::{run_tx, RetryPolicy};
 use crate::brain_neighborhood_brief::{NeighborhoodBrief, NeighborhoodInput};
 use crate::brain_neighborhood_brief_exec::{
-    build_request, delivered, fallback_result, generate, generated_result, Delivery, FailureKind,
-    GenerationFailure, Outcome,
+    build_request, delivered_for, fallback_result, generate, generated_result, Delivery,
+    FailureKind, GenerationFailure, Outcome,
 };
 use crate::recon::model_exec::RoleRuntime;
 use crate::summarization::SummaryRequest;
@@ -29,8 +29,8 @@ fn task_id(req: &SummaryRequest) -> String {
     format!("sum-task-{}", req.cache_key())
 }
 
-/// `exec::publish`: the generated result when one is cached, else cache the
-/// fallback, queue one upgrade and report its state.
+/// Read-only delivery lookup for navigation. Returns a cached generation or
+/// existing task state; never queues an upgrade or mutates a fallback.
 pub async fn publish(
     repo: &Repository,
     input: &NeighborhoodInput,
@@ -41,14 +41,52 @@ pub async fn publish(
     if !input.worth_generating() {
         return Ok((req, Delivery::Idle));
     }
-    if let Some(g) = summary_flush::cache_get(repo, &req)
+    if let Some(g) = measured_cache_get(repo, &req)
         .await?
         .as_ref()
-        .and_then(delivered)
+        .and_then(|result| delivered_for(&req, result))
     {
         return Ok((req, Delivery::Generated(Box::new(g))));
     }
+    let _ = fallback; // The caller already owns the deterministic snapshot.
+    let delivery = poll(repo, &req).await?;
+    Ok((req, delivery))
+}
+
+/// Explicit user action authorizing one durable generation for this exact
+/// frozen evidence/route identity. Ordinary read/publish never calls this.
+pub async fn request_generation(
+    repo: &Repository,
+    input: &NeighborhoodInput,
+    fallback: &NeighborhoodBrief,
+    fingerprint: &str,
+) -> Result<(SummaryRequest, Delivery)> {
+    let req = build_request(input, fingerprint);
+    if !input.worth_generating() {
+        return Ok((req, Delivery::Idle));
+    }
+    if let Some(cached) = measured_cache_get(repo, &req).await? {
+        if let Some(generated) = delivered_for(&req, &cached) {
+            return Ok((req, Delivery::Generated(Box::new(generated))));
+        }
+        if !cached.fallback {
+            // Only an explicit action may discard a rejected cached upgrade.
+            // Exact byte CAS preserves a concurrently published valid result.
+            repo.db()
+                .query("DELETE $row WHERE result_json=$invalid RETURN NONE")
+                .bind((
+                    "row",
+                    rid("derived_summary", &format!("sum-{}", req.cache_key())),
+                ))
+                .bind(("invalid", serde_json::to_string(&cached)?))
+                .await?
+                .check()?;
+        }
+    }
     summary_flush::publish(repo, &req, fallback_result(&req, fallback)).await?;
+    if matches!(poll(repo, &req).await?, Delivery::Failed(_)) {
+        retry(repo, &req).await?;
+    }
     let delivery = poll(repo, &req).await?;
     Ok((req, delivery))
 }
@@ -62,12 +100,16 @@ struct TaskRow {
 
 /// `exec::poll`: read-only; never runs a model.
 pub async fn poll(repo: &Repository, req: &SummaryRequest) -> Result<Delivery> {
-    if let Some(g) = summary_flush::cache_get(repo, req)
-        .await?
-        .as_ref()
-        .and_then(delivered)
-    {
-        return Ok(Delivery::Generated(Box::new(g)));
+    if let Some(cached) = measured_cache_get(repo, req).await? {
+        if let Some(generated) = delivered_for(req, &cached) {
+            return Ok(Delivery::Generated(Box::new(generated)));
+        }
+        if !cached.fallback {
+            return Ok(Delivery::Failed(GenerationFailure::new(
+                FailureKind::Rejected,
+                "cached summary does not match the current evidence; generate again",
+            )));
+        }
     }
     let mut r = repo
         .db()
@@ -116,7 +158,7 @@ pub async fn retry(repo: &Repository, req: &SummaryRequest) -> Result<bool> {
             let mut r = run(
                 &tx,
                 tx.query(
-                    "UPDATE $t SET state = 'queued', attempts = 0, output_hash = NONE,
+                    "UPDATE $t SET state = 'queued', attempts = 0, output_hash = '',
                        error_category = '', error_message = '', lease_owner = '',
                        process_owner = '', lease_until = NONE, finished_at = NONE,
                        next_eligible_at = <datetime>$now, updated_at = <datetime>$now
@@ -157,10 +199,10 @@ pub async fn run_claimed(
     runtime: Option<&RoleRuntime>,
     lease_secs: i64,
 ) -> Result<Outcome> {
-    if summary_flush::cache_get(repo, req)
+    if measured_cache_get(repo, req)
         .await?
         .as_ref()
-        .and_then(delivered)
+        .and_then(|result| delivered_for(req, result))
         .is_some()
     {
         return finish(repo, claimed, req, None, "already_upgraded".into(), true).await;
@@ -266,6 +308,7 @@ async fn finish(
     tag: String,
     generated: bool,
 ) -> Result<Outcome> {
+    let started = std::time::Instant::now();
     let now = jobs::ts(Utc::now());
     let json = cached.as_ref().map(serde_json::to_string).transpose()?;
     let key = format!("sum-{}", req.cache_key());
@@ -303,6 +346,10 @@ async fn finish(
         }
     })
     .await?;
+    crate::intel_recon::brief_timing::emit_observation(
+        "neighborhood_publication",
+        serde_json::json!({"elapsed_us":started.elapsed().as_micros() as u64,"committed":done.value,"generated":generated}),
+    );
     if !done.value {
         return Ok(lease_lost());
     }
@@ -311,4 +358,17 @@ async fn finish(
         generated,
         stale: false,
     })
+}
+
+async fn measured_cache_get(
+    repo: &Repository,
+    req: &SummaryRequest,
+) -> Result<Option<crate::summarization::SummaryResult>> {
+    let started = std::time::Instant::now();
+    let result = summary_flush::cache_get(repo, req).await;
+    crate::intel_recon::brief_timing::emit_observation(
+        "neighborhood_cache",
+        serde_json::json!({"elapsed_us":started.elapsed().as_micros() as u64,"cache_hit":result.as_ref().ok().and_then(|value|value.as_ref()).is_some(),"failed":result.is_err()}),
+    );
+    result
 }

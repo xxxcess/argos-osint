@@ -111,6 +111,22 @@ pub fn readiness(
     output: &PipelineOutput,
 ) -> Readiness {
     let mut out = Readiness::default();
+    if output.inferences.iter().any(|inference| {
+        inference.inference_kind.is_some_and(|kind| {
+            crate::intelligence_contracts::validate_inference_attributes(
+                kind,
+                &inference.domains,
+                &inference.support_state,
+                &inference.conditions,
+                &inference.limitations,
+            )
+            .is_err()
+        })
+    }) {
+        out.gaps
+            .push("inference kind/domain/support attributes are invalid".into());
+    }
+
     let body: Vec<_> = evidence
         .iter()
         .filter(|e| e.reference.source_id.starts_with("body:"))
@@ -255,6 +271,16 @@ pub fn prepare_for_stage(
             }
         }
         output.inferences.push(Inference {
+            inference_kind: serde_json::from_value(i["inference_kind"].clone())
+                .map_err(|_| "invalid inference kind")?,
+            domains: if i["domains"].is_null() {
+                Vec::new()
+            } else {
+                serde_json::from_value(i["domains"].clone())
+                    .map_err(|_| "invalid inference domains")?
+            },
+            support_state: i["support"].as_str().unwrap_or("").into(),
+            conditions: strings(&i["conditions"]),
             id: i["id"].as_str().unwrap_or("").into(),
             text: i["text"].as_str().unwrap_or("").into(),
             entity_refs: vec![],

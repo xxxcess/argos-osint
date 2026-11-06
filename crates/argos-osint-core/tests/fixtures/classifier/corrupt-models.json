@@ -1,0 +1,53 @@
+{
+  "schema_version": "classifier-mutations-v1",
+  "cases": [
+    {
+      "id": "missing-present",
+      "operation": "missing_present",
+      "domain": "governance",
+      "expected_variant": "InvalidArtifact"
+    },
+    {
+      "id": "third-label",
+      "operation": "third_label",
+      "domain": "governance",
+      "expected_variant": "InvalidArtifact"
+    },
+    {
+      "id": "zero-support",
+      "operation": "zero_present",
+      "domain": "governance",
+      "expected_variant": "InvalidArtifact"
+    },
+    {
+      "id": "duplicate-order",
+      "operation": "duplicate_feature",
+      "domain": "governance",
+      "expected_variant": "InvalidArtifact"
+    },
+    {
+      "id": "seventh-domain",
+      "operation": "extra_domain",
+      "domain": "governance",
+      "expected_variant": "InvalidArtifact"
+    },
+    {
+      "id": "missing-domain",
+      "operation": "missing_domain",
+      "domain": "governance",
+      "expected_variant": "InvalidArtifact"
+    },
+    {
+      "id": "pollution",
+      "operation": "forbidden_key",
+      "domain": "governance",
+      "expected_variant": "InvalidArtifact"
+    },
+    {
+      "id": "missing-order",
+      "operation": "missing_order",
+      "domain": "governance",
+      "expected_variant": "InvalidArtifact"
+    }
+  ]
+}

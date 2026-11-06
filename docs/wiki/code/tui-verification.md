@@ -1,6 +1,6 @@
 # TUI implementation and verification
 
-[Code route](index.md) · [Wiki](../../index.md)
+[Code route](index.md) · [Wiki](../../index.md) · [Canonical agent workflow](agent-workflow.md)
 
 This is the repo standard for agents changing terminal presentation or interaction. Read the [design contract](tui-design-spec.md) and affected [component APIs](tui-components.md) before editing. Keep the TUI simple. React Native component creativity belongs in the [Argos look and feel](react-ui.md#argos-look--feel-reference) and does not add terminal chrome. The [Profile implementation session](../../archive/tui-verification-session-2026-10-10.md) records how this procedure was established, including actual screenshots and defects found. The reusable skill is [argos-tui-verify](../../../.opencode/skills/argos-tui-verify/SKILL.md).
 
@@ -12,7 +12,7 @@ Identify components, layout preset, exact owned files, read-only references and 
 
 State the data contract: cohort, denominator, unit, filter scope, rollup coverage, live versus historical facts, missing values and sample threshold. Unknown is not zero. Never add store/network access to draw; render immutable snapshots. Extend shared components when behavior belongs to multiple screens, then update the catalog.
 
-For delegated work, assign disjoint file sets. Child prompts carry components/preset, owned files, read-only references, shared API contracts, exact viewport/data/interaction cases and the parent's validation responsibility. OpenCode editors format their Rust files only. Reviewers receive actual artifacts and completed results, not just acceptance instructions.
+For delegated work, assign disjoint file sets. Child prompts carry components/preset, owned files, read-only references, shared API contracts, exact viewport/data/interaction cases and the parent's validation responsibility. When the OpenCode profile is selected, preserve its editor/tester role boundaries; other hosts use their active roles and the shared build owner. Reviewers receive actual artifacts and incremental results, not just acceptance instructions.
 
 ## Build fixtures and assertions
 
@@ -30,7 +30,7 @@ Choose screenshot scope from the change and its consumers before capturing. Reco
 | Interaction/data-only with unchanged buffers | Focused action/metric tests; no new PNGs required when reviewed evidence still matches output |
 | Docs/tooling-only | Validate the workflow/tool; no application-wide screenshot sweep |
 
-Include directly affected overlays, empty/loading/stale/error and overflow states. Do not capture unrelated apps merely because a fixture emits them. Keep the full offline test gate for Rust changes; screenshot scope does not narrow test assertions. Broaden coverage when shared consumers or responsive behavior cannot be bounded.
+Include directly affected overlays, empty/loading/stale/error and overflow states. Do not capture unrelated apps merely because a fixture emits them. Keep the required final native embedded gate for Rust changes; early screenshot scope does not narrow its test assertions. Broaden coverage when shared consumers or responsive behavior cannot be bounded.
 
 Profile's available size matrix is:
 
@@ -56,21 +56,19 @@ Assertions complement image review:
 - Owner actions open the exact authoritative thread/article/quota scope.
 - Raw/rollup totals deduplicate, unavailable facts remain N/A, gaps remain gaps, low-N p95 is suppressed.
 
-## Run the check gate
+## Fast feedback and the final gate
 
-The parent runs these in order with `ARGOS_EMBED` unset:
+Follow the [canonical workflow](agent-workflow.md) and [contributor verification procedure](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration). Reuse existing test authorization. One build owner keeps the host/profile/feature graph and `target/agents` cache stable, selects concurrency from measured RAM/pressure, and serializes Cargo. Do not switch between package-only and workspace feature graphs by accident.
 
-```sh
-env -u ARGOS_EMBED cargo fmt --all --check
-env -u ARGOS_EMBED python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked -- -D warnings
-env -u ARGOS_EMBED ARGOS_HOME=/private/tmp/argos-tui-check python3 scripts/agent_cargo.py test --workspace --locked
-```
+Smoke the real affected fixture once its source/inputs are runnable, including its storage/setup prerequisites. Capture a small affected wide/compact selection immediately as a **preview** and inspect the PNGs; this is useful feedback before a full workspace gate. Label the preview in `--reason` and its review ledger. Preserve its actual test result and source/fixture/renderer provenance. A preview does not certify full integration acceptance.
 
-The wrapper and fixture capture reserve `target/agents` for agent artifacts; the user’s normal `cargo run` continues using `target/debug`. Capture manifests record `CARGO_TARGET_DIR` and the explicit Cargo target argument. Do not override the target directory or delete a lock file. See [agent Cargo isolation](contributing.md#build-and-test).
+Fix demonstrated failures at the owning layer. A fixture that now requires real classifier admission or actor setup must establish that contract instead of forging ready state or weakening assertions. If a check stalls or repeatedly fails, collect its original bounded error and choose a different diagnostic approach before another expensive run.
 
-Use a task-specific temporary state path (Linux may use `/tmp`) rather than `~/.argos`. OpenCode shell calls use `timeout: 600000`. `env -u` expresses the unset requirement on macOS/Linux; do not substitute `ARGOS_EMBED=0` when reporting the offline gate. If the sandbox blocks local mock sockets, request host-required escalation and rerun affected checks. A permission failure does not prove a code regression. Ignored MiniLM, server-mode and live-provider checks are separate results.
+Final Rust acceptance still requires `scripts/local_matrix.sh --storage embedded` in the stable integration tree with `ARGOS_EMBED` unset. Follow the contributor workflow for targeted checks and the gate's actual environment rather than duplicating a second manual command matrix here. Local mutation runs, server storage and all-platform matrices remain excluded. Report hosted, ignored MiniLM and live-provider evidence separately.
 
-Fix failures without weakening truthful assertions; rerun affected tests and the required gate. After a passing full gate, a final interaction-only edit may use focused follow-up plus fmt/Clippy if buffers are unchanged. Record the sequence instead of asserting an earlier suite ran on later source.
+The repository wrapper/capture tool reserves `target/agents`; the user's `target/debug`, servers and locks remain protected. Use temporary state through the capture tool rather than `~/.argos`. Host-specific permission requirements still apply; a permissions failure is not a code regression.
+
+Track passing source/contract checks and visual evidence independently. Rerun only checks invalidated by relevant source/configuration/fixture/renderer changes; never claim an earlier gate executed later code. Guidance-only edits or unchanged screenshot output do not by themselves require another Rust build. A new arbitrary attempt limit never waives an unmet final gate.
 
 ## Capture actual cells
 
@@ -82,12 +80,12 @@ uv pip install --python .agent-scratch/tui-review-env/bin/python Pillow
 .agent-scratch/tui-review-env/bin/python scripts/tui_review.py capture \
   --output .planning/<PLAN_ID>/tui/run-01 --test dump_overhaul_screens \
   --include 'tools-page-*' --size 160x50 --size 80x24 \
-  --reason "Tools compact page change; wide and compact layouts"
+  --reason "Preview: Tools compact page change; wide and compact layouts"
 ```
 
 Substitute the selected plan name for `<PLAN_ID>`. Dependency downloads may require host approval. DejaVu Sans Mono on Linux or Courier New on macOS is required; missing fonts are reported. No system Python mutation or Cargo dependency is needed.
 
-The capture tool runs the selected library test filter with workspace feature unification matching the gate, locked dependencies, the default embedded features, `ARGOS_EMBED` removed and temporary `ARGOS_HOME`. Other library tests are filtered out. It requires a new directory under `.planning/`, preventing stale dumps from appearing fresh. It validates dimensions/cell fields, renders PNGs and writes a gallery/manifest with command, result, source fingerprint, environment, renderer/font versions and artifact hashes. Review remains **pending**. It does not run the full workspace gate or certify actions/metrics. Incomplete runs remain visible; failed diagnostic logs stay in `.agent-scratch/`. Successful capture removes its log and temporary state.
+The capture tool runs the selected library test filter with workspace feature unification matching the gate, locked dependencies, the default embedded features, `ARGOS_EMBED` removed and temporary `ARGOS_HOME`. Other library tests are filtered out. It requires a new directory under `.planning/`, preventing stale dumps from appearing fresh. It validates dimensions/cell fields, renders PNGs and writes a gallery/manifest with command, result, source fingerprint, environment, renderer/font versions and artifact hashes. Review remains **pending**. It does not run the full workspace gate or certify actions/metrics. Before the final gate, label the run as a preview; after the gate, retain or refresh only the affected output evidence as described below. Incomplete runs remain visible; failed diagnostic logs stay in `.agent-scratch/`. Successful capture removes its log and temporary state.
 
 For another module, extend a deterministic test to emit the same cell format into `ARGOS_SCREEN_DIR`, then select it:
 
@@ -132,6 +130,9 @@ JSON is `{width, height, cells}`, exactly `height` rows of `width` cells. Each c
 
 ## Review, fix and recapture
 
+Keep an evidence record for each selected case: relevant source/module dependencies, exact fixture test/selectors and inputs, renderer/font identity, cell/PNG hashes, inspection result, and final gate command/source result. The capture manifest already records source and renderer hashes plus fixture selection; add the review observations without rewriting historical provenance. A whole-tree dirty hash is context, not proof that every unrelated documentation change invalidated the screen.
+
+
 Open PNGs with the host's image viewer. Use cell dumps and geometry assertions to resolve ambiguity. Review changed pages at wide/threshold sizes, then affected compact/minimum/too-small and data states. Inspect shell rows, gutters, borders, palette, selection, numeric clipping, legends/scales, overlap/wrapping, missing-glyph boxes, scroll affordances and control reachability.
 
 Compare supplied approved references and record exact files/differences. If absent, assess the written contract and say comparison was unavailable. Concept art and successful PNG generation are not QA. If the agent cannot view images, leave visual review pending for an image-capable agent or human. Do not silently grant browser/execute access or invent an OpenCode image tool.
@@ -147,7 +148,7 @@ Record findings in the run's `README.md` and planning progress:
 | Fix | Root cause, owner/file, regression and fresh run |
 | Limits | Missing references, viewing capability, live/feature checks |
 
-Update manifest review fields only after review, with a ledger link. Re-capture affected cases to a new run after output, fixture, geometry or renderer changes; preserve the recorded scope unless the fix expands its impact. Unaffected screenshots need no regeneration. Prior visual review may carry forward only when regenerated selected cell and PNG hashes match reviewed evidence and the viewport/state contract and renderer are unchanged; link the earlier ledger and record the comparison. Never describe carried evidence as a new image inspection. Label earlier evidence superseded only for changed cases. Do not overwrite reviewed baselines. Screenshots do not replace action or metric tests.
+Update manifest review fields only after review, with a ledger link. Re-capture affected cases to a new run after relevant output, fixture, geometry or renderer changes; preserve the recorded scope unless the fix expands its impact. Preview artifacts can support final review when their affected source/fixture/renderer and rendered output remain valid and the required final gate is separately recorded. Unaffected screenshots need no regeneration. Prior visual review may carry forward only when regenerated selected cell and PNG hashes match reviewed evidence and the viewport/state contract and renderer are unchanged; link the earlier ledger and record the comparison. Never describe carried evidence as a new image inspection. Label earlier evidence superseded only for changed cases. Do not overwrite reviewed baselines. Screenshots do not replace action or metric tests.
 
 ## Finish and retain evidence
 

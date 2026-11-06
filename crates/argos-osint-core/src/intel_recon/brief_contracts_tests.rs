@@ -59,7 +59,7 @@ fn schemas_are_strict_objects_with_offered_ids() {
     assert!(validate(&claims, &extra).is_err());
 
     let inf = inferences_schema(&["c1"], &["b1", "b2"]);
-    let ok = json!({"inferences":[{"id":"i1","text":"x","premise_claim_ids":["c1"],"body_evidence_ids":["b2"],"support":"conditional","why":"y","limitations":["z"],"counterevidence_ids":[]}],"empty_reason":""});
+    let ok = json!({"inferences":[{"id":"i1","text":"x","premise_claim_ids":["c1"],"body_evidence_ids":["b2"],"support":"conditional","inference_kind":"conditional_outlook","domains":[],"conditions":["If the recorded disruption continues"],"why":"y","limitations":["z"],"counterevidence_ids":[]}],"empty_reason":""});
     validate(&inf, &ok).unwrap();
     let leads = leads_schema(&["r1"], &["i1"], &["r1.t1"]);
     let ok = json!({"leads":[{"article_id":"r1","inference_id":"i1","metadata_evidence_ids":["r1.t1"],"why":"w","verification_needed":"v"}],"empty_reason":""});

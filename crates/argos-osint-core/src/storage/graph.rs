@@ -275,6 +275,10 @@ mod tests {
         assert_eq!(keys.len(), edges.len());
 
         let inference = MemoryPayload::Inference(InferencePayload {
+            inference_kind: None,
+            domains: Vec::new(),
+            conditions: Vec::new(),
+            extraction_fidelity: None,
             premise_claims: vec!["c1".into(), "c2".into(), "c1".into()],
             actors: vec![
                 actor("x", "relevant", IdentityState::Resolved),

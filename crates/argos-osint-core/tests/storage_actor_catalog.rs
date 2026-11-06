@@ -1,5 +1,7 @@
 //! Offline catalog seed/retry and article association contracts.
 #![cfg(feature = "surreal")]
+#[path = "support/current_admission.rs"]
+mod current_admission;
 mod support;
 
 use std::collections::BTreeMap;
@@ -145,7 +147,7 @@ async fn articles_match_catalog_aliases_without_nlp_and_never_create_unknown_ide
     )
     .await
     .expect("seed");
-    let article = AtlasArticleRow {
+    let mut article = AtlasArticleRow {
         id: "article".into(),
         run_id: "run".into(),
         title: "Harbor Alias 0 meets Unknown Person and Shared Alias".into(),
@@ -154,9 +156,7 @@ async fn articles_match_catalog_aliases_without_nlp_and_never_create_unknown_ide
     argos_osint_core::storage::atlas::insert_run(repo.db(), "run", "{}", "{}")
         .await
         .expect("run");
-    argos_osint_core::storage::atlas::upsert_article(repo.db(), &article)
-        .await
-        .expect("article");
+    current_admission::admit(&repo, &mut article, "Ballot patrol common").await;
     let matched = actor_catalog::article_actors(&repo, &article)
         .await
         .expect("catalog projection")
@@ -229,17 +229,14 @@ async fn articles_match_catalog_aliases_without_nlp_and_never_create_unknown_ide
     // Actual article changes still invalidate the recorded mention.
     let mut revised = article.clone();
     revised.title = "Revised title without the actor".into();
-    argos_osint_core::storage::atlas::upsert_article(repo.db(), &revised)
-        .await
-        .expect("revise");
+    // Native source replacement is published only after real local admission.
+    current_admission::admit(&repo, &mut revised, "Ballot patrol common").await;
     let stale = argos_osint_core::storage::actor_dossier::read(&repo, "fixture-actor-0")
         .await
         .expect("stale read")
         .expect("actor");
     assert_eq!(stale.loaded_briefs, 0);
-    argos_osint_core::storage::atlas::upsert_article(repo.db(), &article)
-        .await
-        .expect("restore fixture");
+    current_admission::admit(&repo, &mut article, "Ballot patrol common").await;
     let mut r = repo.db().query("SELECT VALUE actor_id FROM brain_actor_mention; RETURN count(SELECT id FROM brain_actor);").await.expect("mentions").check().expect("valid mentions");
     assert_eq!(
         r.take::<Vec<String>>(0).expect("actors"),
@@ -316,21 +313,18 @@ async fn retention_updates_actor_associations_and_preserves_other_occurrences() 
             .await
             .expect("run");
     }
-    repo.db().query("UPDATE atlas_run:old SET state = 'done', started_at = '2026-01-01T00:00:00Z'; UPDATE atlas_run:current SET state = 'done'").await.unwrap().check().unwrap();
     for (run, id) in [
         ("old", "expired"),
         ("old", "protected"),
         ("current", "retained"),
     ] {
-        let article = AtlasArticleRow {
+        let mut article = AtlasArticleRow {
             run_id: run.into(),
             id: id.into(),
             title: "Fixture Union 0 speaks".into(),
             ..Default::default()
         };
-        argos_osint_core::storage::atlas::upsert_article(repo.db(), &article)
-            .await
-            .expect("article");
+        current_admission::admit(&repo, &mut article, "Ballot patrol common").await;
         surreal::index_occurrence(
             &repo,
             &article,
@@ -341,6 +335,7 @@ async fn retention_updates_actor_associations_and_preserves_other_occurrences() 
         .await
         .expect("index");
     }
+    repo.db().query("UPDATE atlas_run:old SET state = 'done', started_at = '2026-01-01T00:00:00Z'; UPDATE atlas_run:current SET state = 'done'").await.unwrap().check().unwrap();
     argos_osint_core::storage::intel::ensure_investigation(
         repo.db(),
         "protected",
@@ -439,41 +434,55 @@ async fn cleaned_body_actors_append_bind_insights_and_fence_changed_acquisitions
     argos_osint_core::storage::atlas::insert_run(repo.db(), "run", "{}", "{}")
         .await
         .unwrap();
-    let article = AtlasArticleRow {
+    let mut article = AtlasArticleRow {
         id: "body-article".into(),
         run_id: "run".into(),
         title: "Fixture Union 0 speaks".into(),
         description: "Officials report a new agreement.".into(),
         ..Default::default()
     };
-    argos_osint_core::storage::atlas::upsert_article(repo.db(), &article)
-        .await
-        .unwrap();
+    current_admission::admit(&repo, &mut article, "Ballot patrol common").await;
     argos_osint_core::storage::atlas::insert_run(repo.db(), "other-run", "{}", "{}")
         .await
         .unwrap();
-    let other = AtlasArticleRow {
+    let mut other = AtlasArticleRow {
         run_id: "other-run".into(),
         ..article.clone()
     };
-    argos_osint_core::storage::atlas::upsert_article(repo.db(), &other)
+    current_admission::admit(&repo, &mut other, "Ballot patrol common").await;
+    assert_eq!(
+        argos_osint_core::atlas_metadata::input_hash(&article),
+        argos_osint_core::atlas_metadata::input_hash(&other),
+        "same-article occurrences share unchanged metadata and body acquisition"
+    );
+    let brief_settings = argos_osint_core::provider::SettingsFile::default();
+    let brief_auth = argos_osint_core::secrets::AuthFile::default();
+    let metadata_context_before =
+        argos_osint_core::storage::brief_stages::inputs_for_article_with_auth(
+            &repo,
+            &article,
+            &brief_settings,
+            &brief_auth,
+        )
         .await
         .unwrap();
+    let metadata_chain =
+        argos_osint_core::storage::brief_stages::ensure(&repo, &metadata_context_before)
+            .await
+            .unwrap();
     let initial = argos_osint_core::intel_service::brief(&repo, &article)
         .await
         .unwrap();
     assert_eq!(initial["actors"][0]["id"], "fixture-actor-0");
     assert_eq!(initial["actors_body_pending"], true);
-    let empty_article = AtlasArticleRow {
+    let mut empty_article = AtlasArticleRow {
         id: "empty-actors".into(),
         run_id: "run".into(),
         title: "An ordinary report".into(),
         description: "Officials meet.".into(),
         ..Default::default()
     };
-    argos_osint_core::storage::atlas::upsert_article(repo.db(), &empty_article)
-        .await
-        .unwrap();
+    current_admission::admit(&repo, &mut empty_article, "Ballot patrol common").await;
     let empty = argos_osint_core::intel_service::brief(&repo, &empty_article)
         .await
         .unwrap();
@@ -552,6 +561,39 @@ async fn cleaned_body_actors_append_bind_insights_and_fence_changed_acquisitions
         vec!["fixture-actor-0", "fixture-actor-1"],
         "bundled NLP resolves an organization alias; unknown people create no catalog actor"
     );
+    let metadata_context_after =
+        argos_osint_core::storage::brief_stages::inputs_for_article_with_auth(
+            &repo,
+            &article,
+            &brief_settings,
+            &brief_auth,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        metadata_context_before.input_revision, metadata_context_after.input_revision,
+        "body completion cannot invalidate its own metadata root generation"
+    );
+    assert_eq!(
+        argos_osint_core::storage::brief_stages::ensure(&repo, &metadata_context_after)
+            .await
+            .unwrap()
+            .job_id,
+        metadata_chain.job_id,
+        "a body cache head before Body task commit cannot supersede the pending chain"
+    );
+    assert_eq!(
+        metadata_context_before.metadata["domain_context"],
+        metadata_context_after.metadata["domain_context"]
+    );
+    assert_eq!(
+        metadata_context_after.metadata["actors"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "body-only actor never reaches metadata Claims roots"
+    );
     for actor in &matched {
         for mention in actor.mentions.iter().filter(|m| m.field == "body") {
             assert_eq!(
@@ -569,7 +611,10 @@ async fn cleaned_body_actors_append_bind_insights_and_fence_changed_acquisitions
         available["actors"][1]["topology_seed"],
         serde_json::json!({"Actor":"fixture-actor-1"})
     );
-    assert_eq!(available["actors_body_pending"], false);
+    assert_eq!(
+        available["actors_body_pending"], true,
+        "retained clean-body actors stay visible while the new Body stage is queued"
+    );
     let mut count = repo
         .db()
         .query("RETURN count(SELECT id FROM brain_actor)")
@@ -645,6 +690,10 @@ async fn cleaned_body_actors_append_bind_insights_and_fence_changed_acquisitions
         assessment: assessment.clone(),
     };
     let inference = Inference {
+        inference_kind: None,
+        domains: Vec::new(),
+        support_state: String::new(),
+        conditions: Vec::new(),
         id: "clean-inference".into(),
         text: "The agreement may advance talks.".into(),
         entity_refs: vec![entity.id],
@@ -853,7 +902,7 @@ async fn curated_title_alias_resolves_for_an_existing_seed_and_dossier_mentions(
     )
     .await
     .unwrap();
-    let article = AtlasArticleRow {
+    let mut article = AtlasArticleRow {
         id: "title".into(),
         run_id: "r".into(),
         title: "trump considering using nuclear weapons against iran - tucker carlson".into(),
@@ -862,9 +911,7 @@ async fn curated_title_alias_resolves_for_an_existing_seed_and_dossier_mentions(
     argos_osint_core::storage::atlas::insert_run(repo.db(), "r", "{}", "{}")
         .await
         .unwrap();
-    argos_osint_core::storage::atlas::upsert_article(repo.db(), &article)
-        .await
-        .unwrap();
+    current_admission::admit(&repo, &mut article, "Ballot patrol common").await;
     let brief = argos_osint_core::intel_service::brief(&repo, &article)
         .await
         .unwrap();

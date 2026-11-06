@@ -2,6 +2,7 @@
 mod actor_dossier;
 mod host_metrics;
 mod live;
+mod topology_summary;
 mod topology_web;
 
 use argos_osint_core::{
@@ -66,6 +67,11 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/jobs/retry", post(retry))
         .route("/api/v1/topology", get(topology_web::read).post(topology))
         .route("/api/v1/topology/resolve", post(topology_web::resolve))
+        .route("/api/v1/topology/summary", get(topology_summary::read))
+        .route(
+            "/api/v1/topology/summary/generate",
+            post(topology_summary::generate),
+        )
         .layer(axum::Extension(sampler))
         .layer(axum::Extension(feed))
         .layer(DefaultBodyLimit::max(16 * 1024))

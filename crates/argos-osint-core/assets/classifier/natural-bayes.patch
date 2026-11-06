@@ -1,0 +1,413 @@
+--- a/natural/lib/natural/classifiers/bayes_classifier.js
++++ b/natural/lib/natural/classifiers/bayes_classifier.js
+@@ -43,14 +43,8 @@
+     return classifier
+   }
+ 
+-  static load (filename, stemmer, callback) {
+-    Classifier.load(filename, stemmer, function (err, classifier) {
+-      if (err) {
+-        return callback(err)
+-      } else {
+-        callback(err, BayesClassifier.restore(classifier, stemmer))
+-      }
+-    })
++  logScore (observation, label) {
++    return this.classifier.logScore(this.textToFeatures(observation), label)
+   }
+ 
+   static async loadFrom (key, stemmer, storageBackend) {
+@@ -54,10 +48,6 @@
+   }
+ 
+   static async loadFrom (key, stemmer, storageBackend) {
+-    const classifier = await Classifier.loadFrom(key, storageBackend)
+-    return BayesClassifier.restore(classifier, stemmer)
+-  }
+-}
+ 
+ module.exports = BayesClassifier
+ 
+
+--- a/natural/lib/natural/classifiers/classifier.js
++++ b/natural/lib/natural/classifiers/classifier.js
+@@ -21,7 +21,6 @@
+ */
+ 
+ 'use strict'
+-const fs = require('fs')
+ 
+ const EventEmitter = require('events')
+ const PorterStemmer = require('../stemmers/porter_stemmer')
+@@ -25,7 +24,6 @@
+ 
+ const EventEmitter = require('events')
+ const PorterStemmer = require('../stemmers/porter_stemmer')
+-const parallelTrainer = require('./classifier_train_parallel')
+ 
+ class Classifier extends EventEmitter {
+   constructor (classifier, stemmer) {
+@@ -36,11 +34,8 @@
+     this.stemmer = stemmer || PorterStemmer
+     this.lastAdded = 0
+ 
+-    // Add methods for parallel training
+-    this.Threads = parallelTrainer.Threads
+-    this.trainParallel = parallelTrainer.trainParallel
+-    this.retrainParallel = parallelTrainer.retrainParallel
+-    this.trainParallelBatches = parallelTrainer.trainParallelBatches
++    this.featureOrder = []
++    this.featureIndex = []
+   }
+ 
+   addDocument (text, classification) {
+@@ -66,7 +61,14 @@
+ 
+     for (let i = 0; i < text.length; i++) {
+       const token = text[i]
+-      this.features[token] = (this.features[token] || 0) + 1
++      if (this.features[token] === undefined) {
++        this.features[token] = 1
++        const index = this.featureOrder.length
++        this.featureOrder.push(token)
++        this.featureIndex.push({ token, index })
++      } else {
++        this.features[token]++
++      }
+     }
+   }
+ 
+@@ -70,13 +72,23 @@
+     }
+   }
+ 
+-  removeDocument (text, classification) {
+-    const docs = this.docs
+-    let doc
+-    let pos
+-
+-    if (typeof text === 'string') {
+-      text = this.stemmer.tokenizeAndStem(text, this.keepStops)
++  textToFeatures (observation) {
++    const features = []
++
++    if (typeof observation === 'string') { observation = this.stemmer.tokenizeAndStem(observation, this.keepStops) }
++
++    if (!Array.isArray(this.featureOrder)) { throw new Error('feature_order_mismatch') }
++    const order = this.featureOrder
++    if (!Array.isArray(this.featureIndex) || this.featureIndex.length !== order.length) { throw new Error('feature_order_mismatch') }
++    for (let i = 0; i < order.length; i++) {
++      const feature = order[i]
++      const binding = this.featureIndex[i]
++      if (!binding || binding.index !== i || binding.token !== feature) { throw new Error('feature_order_mismatch') }
++      if (observation.indexOf(feature) > -1) {
++        features.push(1)
++      } else {
++        features.push(0)
++      }
+     }
+ 
+     for (let i = 0, ii = docs.length; i < ii; i++) {
+@@ -80,21 +92,6 @@
+     }
+ 
+     for (let i = 0, ii = docs.length; i < ii; i++) {
+-      doc = docs[i]
+-      if (doc.text.join(' ') === text.join(' ') &&
+-          doc.label === classification) {
+-        pos = i
+-      }
+-    }
+-
+-    // Remove if there's a match
+-    if (!isNaN(pos)) {
+-      this.docs.splice(pos, 1)
+-
+-      for (let i = 0, ii = text.length; i < ii; i++) {
+-        delete this.features[text[i]]
+-      }
+-    }
+   }
+ 
+   textToFeatures (observation) {
+@@ -98,24 +95,11 @@
+   }
+ 
+   textToFeatures (observation) {
+-    const features = []
+-
+-    if (typeof observation === 'string') { observation = this.stemmer.tokenizeAndStem(observation, this.keepStops) }
+-
+-    for (const feature in this.features) {
+-      if (observation.indexOf(feature) > -1) {
+-        features.push(1)
+-      } else {
+-        features.push(0)
+-      }
+-    }
+-
+-    return features
+-  }
+-
+-  train () {
+-    const totalDocs = this.docs.length
+-    for (let i = this.lastAdded; i < totalDocs; i++) {
++    const totalDocs = this.docs.length
++    const limit = (typeof maxDocs === 'number' && maxDocs > 0)
++      ? Math.min(totalDocs, this.lastAdded + maxDocs)
++      : totalDocs
++    for (let i = this.lastAdded; i < limit; i++) {
+       const features = this.textToFeatures(this.docs[i].text)
+       this.classifier.addExample(features, this.docs[i].label)
+       this.emit('trainedWithDocument', { index: i, total: totalDocs, doc: this.docs[i] })
+@@ -121,8 +105,12 @@
+       this.emit('trainedWithDocument', { index: i, total: totalDocs, doc: this.docs[i] })
+       this.lastAdded++
+     }
+-    this.classifier.train()
+-    this.emit('doneTraining', true)
++    if (this.lastAdded >= totalDocs) {
++      this.classifier.train()
++      this.emit('doneTraining', true)
++      return true
++    }
++    return false
+   }
+ 
+   retrain () {
+@@ -126,6 +114,10 @@
+   }
+ 
+   retrain () {
++    this.trainStep()
++  }
++
++  retrain () {
+     this.classifier = new (this.classifier.constructor)()
+     this.lastAdded = 0
+     this.train()
+@@ -141,6 +133,21 @@
+ 
+   static restore (classifier, stemmer) {
+     classifier.stemmer = stemmer || PorterStemmer
++    if (!Array.isArray(classifier.featureOrder) || classifier.featureOrder.length === 0 || new Set(classifier.featureOrder).size !== classifier.featureOrder.length) {
++      throw new Error('feature_order_mismatch')
++    }
++    if (!Array.isArray(classifier.featureIndex) || classifier.featureIndex.length !== classifier.featureOrder.length || classifier.featureIndex.some((binding, index) => !binding || binding.index !== index || binding.token !== classifier.featureOrder[index])) {
++      throw new Error('feature_order_mismatch')
++    }
++    if (classifier.features && (Object.keys(classifier.features).length !== classifier.featureOrder.length || classifier.featureOrder.some(token => !Object.prototype.hasOwnProperty.call(classifier.features, token)))) {
++      throw new Error('feature_order_mismatch')
++    }
++    if (!classifier.features && classifier.featureOrder) {
++      classifier.features = {}
++      for (let i = 0; i < classifier.featureOrder.length; i++) {
++        classifier.features[classifier.featureOrder[i]] = 1
++      }
++    }
+     return classifier
+   }
+ 
+@@ -144,13 +151,10 @@
+     return classifier
+   }
+ 
+-  save (filename, callback) {
+-    const data = JSON.stringify(this)
+-    const classifier = this
+-    fs.writeFile(filename, data, 'utf8', function (err) {
+-      if (callback) {
+-        callback(err, err ? null : classifier)
+-      }
+-    })
+-  }
++  setOptions (options) {
++    this.keepStops = !!(options.keepStops)
++  }
++}
++
++module.exports = Classifier
+ 
+@@ -154,34 +158,3 @@
+     })
+   }
+ 
+-  static load (filename, stemmer, callback) {
+-    if (!callback) {
+-      return
+-    }
+-    fs.readFile(filename, 'utf8', function (err, data) {
+-      if (err) {
+-        callback(err, null)
+-      } else {
+-        const classifier = JSON.parse(data)
+-        callback(err, Classifier.restore(classifier, stemmer))
+-      }
+-    })
+-  }
+-
+-  async saveTo (storageBackend) {
+-    return await storageBackend.store(this)
+-  }
+-
+-  static async loadFrom (key, storageBackend) {
+-    const obj = await storageBackend.retrieve(key)
+-    Object.setPrototypeOf(obj, Classifier.prototype)
+-    return obj
+-  }
+-
+-  setOptions (options) {
+-    this.keepStops = !!(options.keepStops)
+-  }
+-}
+-
+-module.exports = Classifier
+-
+
+--- a/apparatus/lib/apparatus/classifier/bayes_classifier.js
++++ b/apparatus/lib/apparatus/classifier/bayes_classifier.js
+@@ -73,16 +73,17 @@
+ 
+ }
+ 
+-function probabilityOfClass(observation, label) {
+-    var prob = 0;
+-
+-    if(observation instanceof Array){
+-        var i = observation.length;
+-
+-        while(i--) {
+-            if(observation[i]) {
+-                var count = this.classFeatures[label][i] || this.smoothing;
+-                // numbers are tiny, add logs rather than take product
++function logScore(observation, label) {
++    if (!this.classFeatures[label] || !this.classTotals[label] || this.totalExamples <= 0) {
++        return -Infinity;
++    }
++    var prob = Math.log(this.classTotals[label] / this.totalExamples);
++
++    if (observation instanceof Array) {
++        var i = observation.length;
++        while (i--) {
++            if (observation[i]) {
++                var count = this.classFeatures[label][i] || this.smoothing;
+                 prob += Math.log(count / this.classTotals[label]);
+             }
+         }
+@@ -87,10 +88,8 @@
+             }
+         }
+     } else {
+-        // sparse observation
+-        for(var key in observation){
+-            var count = this.classFeatures[label][observation[key]] || this.smoothing;
+-            // numbers are tiny, add logs rather than take product
++        for (var key in observation) {
++            var count = this.classFeatures[label][observation[key]] || this.smoothing;
+             prob += Math.log(count / this.classTotals[label]);
+         }
+     }
+@@ -94,10 +93,6 @@
+             prob += Math.log(count / this.classTotals[label]);
+         }
+     }
+-
+-    // p(C) * unlogging the above calculation P(X|C)
+-    prob = (this.classTotals[label] / this.totalExamples) * Math.exp(prob);
+-
+     return prob;
+ }
+ 
+@@ -101,32 +96,62 @@
+     return prob;
+ }
+ 
+-function getClassifications(observation) {
+-    var classifier = this;
+-    var labels = [];
+-
+-    for(var className in this.classFeatures) {
+-        labels.push({label: className,
+-        value: classifier.probabilityOfClass(observation, className)});
+-    }
+-
+-    return labels.sort(function(x, y) {
+-        return y.value - x.value;
+-    });
+-}
+-
+-function restore(classifier) {
+-     classifier = Classifier.restore(classifier);
+-     classifier.__proto__ = BayesClassifier.prototype;
+-
+-     return classifier;
+-}
+-
+-BayesClassifier.prototype.addExample = addExample;
+-BayesClassifier.prototype.train = train;
+-BayesClassifier.prototype.getClassifications = getClassifications;
+-BayesClassifier.prototype.probabilityOfClass = probabilityOfClass;
+-
+-BayesClassifier.restore = restore;
+-
+-module.exports = BayesClassifier;
++function probabilityOfClass(observation, label) {
++    var prob = 0;
++
++    if(observation instanceof Array){
++        var i = observation.length;
++
++        while(i--) {
++            if(observation[i]) {
++                var count = this.classFeatures[label][i] || this.smoothing;
++                // numbers are tiny, add logs rather than take product
++                prob += Math.log(count / this.classTotals[label]);
++            }
++        }
++    } else {
++        // sparse observation
++        for(var key in observation){
++            var count = this.classFeatures[label][observation[key]] || this.smoothing;
++            // numbers are tiny, add logs rather than take product
++            prob += Math.log(count / this.classTotals[label]);
++        }
++    }
++
++    // p(C) * unlogging the above calculation P(X|C)
++    prob = (this.classTotals[label] / this.totalExamples) * Math.exp(prob);
++
++    return prob;
++}
++
++function getClassifications(observation) {
++    var classifier = this;
++    var labels = [];
++
++    for(var className in this.classFeatures) {
++        labels.push({label: className,
++        value: classifier.probabilityOfClass(observation, className)});
++    }
++
++    return labels.sort(function(x, y) {
++        return y.value - x.value;
++    });
++}
++
++function restore(classifier) {
++     classifier = Classifier.restore(classifier);
++     Object.setPrototypeOf(classifier, BayesClassifier.prototype);
++
++     return classifier;
++}
++
++BayesClassifier.prototype.addExample = addExample;
++BayesClassifier.prototype.train = train;
++BayesClassifier.prototype.getClassifications = getClassifications;
++BayesClassifier.prototype.probabilityOfClass = probabilityOfClass;
++BayesClassifier.prototype.logScore = logScore;
++
++BayesClassifier.restore = restore;
++
++BayesClassifier.BayesClassifier = BayesClassifier;
++module.exports = BayesClassifier;
+

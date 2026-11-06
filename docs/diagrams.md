@@ -8,7 +8,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 
 | Aspect | Type | HTML | SVG |
 | --- | --- | --- | --- |
-| Local NLP | Data flow | [nlp-preprocessing.html](diagrams/nlp-preprocessing.html) | [nlp-preprocessing.svg](diagrams/nlp-preprocessing.svg) |
+| Local NLP | Data flow | — | [nlp-preprocessing.svg](diagrams/nlp-preprocessing.svg) |
 | Workspace | Architecture | [workspace.html](diagrams/workspace.html) | [workspace.svg](diagrams/workspace.svg) |
 | Local Intel web lifecycle | Process | [intel-web.html](diagrams/intel-web.html) | [intel-web.svg](diagrams/intel-web.svg) |
 | Intel Focus Brief column order | Layout | [intel-focus-layout.html](diagrams/intel-focus-layout.html) | [intel-focus-layout.svg](diagrams/intel-focus-layout.svg) |
@@ -19,6 +19,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Tool picker | Flowchart | [tool-picker.html](diagrams/tool-picker.html) | [tool-picker.svg](diagrams/tool-picker.svg) |
 | OSINT catalog | Nested | [osint-providers.html](diagrams/osint-providers.html) | [osint-providers.svg](diagrams/osint-providers.svg) |
 | Atlas classification-only cycle and Related leads | Process | [atlas-pipeline.html](diagrams/atlas-pipeline.html) | [atlas-pipeline.svg](diagrams/atlas-pipeline.svg) |
+| Classifier runtime and artifact | Data flow | [classifier-runtime.html](diagrams/classifier-runtime.html) | [classifier-runtime.svg](diagrams/classifier-runtime.svg) |
 | Brain browse projection | Data flow | [brain-browse.html](diagrams/brain-browse.html) | [brain-browse.svg](diagrams/brain-browse.svg) |
 | Brain source lifecycle | Data flow | [brain-source-lifecycle.html](diagrams/brain-source-lifecycle.html) | [brain-source-lifecycle.svg](diagrams/brain-source-lifecycle.svg) |
 | Actor identity maintenance | Process | [actor-identity.html](diagrams/actor-identity.html) | [actor-identity.svg](diagrams/actor-identity.svg) |
@@ -34,6 +35,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Investigation harness | Process | [investigation-harness.html](diagrams/investigation-harness.html) | [investigation-harness.svg](diagrams/investigation-harness.svg) |
 | Wiki navigation | Hierarchy | [wiki-navigation.html](diagrams/wiki-navigation.html) | [wiki-navigation.svg](diagrams/wiki-navigation.svg) |
 | Agent handoffs | Process | [agent-team.html](diagrams/agent-team.html) | [agent-team.svg](diagrams/agent-team.svg) |
+
 
 Only current contracts belong in this catalog. Retired Intel report and SQLite table figures have been removed; use the brief chain and SurrealDB persistence figures. Dated implementation evidence remains in [the archive](archive/index.md).
 

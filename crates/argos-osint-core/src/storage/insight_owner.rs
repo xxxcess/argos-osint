@@ -155,6 +155,8 @@ struct LinkRow {
     rationale: String,
     assessment_json: String,
     evidence_json: String,
+    item_json: String,
+    item_oversized: bool,
 }
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> Result<T> {
@@ -197,7 +199,9 @@ pub async fn active_output(
                      SELECT insight_kind, item_json, id FROM insight_derivation
                        WHERE snapshot_id = $s AND status != 'deleted' ORDER BY id;
                      SELECT record::id(id) AS key, left_kind, left_id, right_kind, right_id,
-                       relation, rationale, assessment_json, evidence_json, id
+                       relation, rationale, assessment_json, evidence_json, id,
+                       IF bytes::len(type::bytes(item_json ?? ''))<=65536 THEN item_json ?? '' ELSE '' END AS item_json,
+                       bytes::len(type::bytes(item_json ?? ''))>65536 AS item_oversized
                        FROM insight_derivation_link
                        WHERE snapshot_id = $s AND status = 'assessed' ORDER BY id;",
                 )
@@ -246,7 +250,41 @@ pub async fn active_output(
         }
     }
     for l in links {
+        if l.item_oversized {
+            return Err(anyhow!("stored Link item exceeds64KiB bound"));
+        }
+        if !l.item_json.is_empty() {
+            let link: AssessedLink = json(&l.item_json)?;
+            let [left, right] = link.typed_endpoints.as_slice() else {
+                return Err(anyhow!("stored Link item needs two endpoints"));
+            };
+            if format!("{}:{}", head.active_snapshot_id, link.id) != l.key
+                || link.snapshot_key != snapshot.input_key
+                || left.kind != l.left_kind
+                || left.id != l.left_id
+                || right.kind != l.right_kind
+                || right.id != l.right_id
+                || link.relation != l.relation
+                || link.rationale != l.rationale
+                || serde_json::to_value(&link.assessment)?
+                    != json::<serde_json::Value>(&l.assessment_json)?
+                || serde_json::to_value(&link.evidence_refs)?
+                    != json::<serde_json::Value>(&l.evidence_json)?
+            {
+                return Err(anyhow!(
+                    "stored Link item disagrees with indexed identity/provenance"
+                ));
+            }
+            output.links.push(link);
+            continue;
+        }
+        // Historical rows predate the typed item. Absence stays explicit;
+        // malformed nonempty current JSON never becomes a legacy fallback.
         output.links.push(AssessedLink {
+            chronology_basis: None,
+            conditions: Vec::new(),
+            limitations: Vec::new(),
+            curation: None,
             id: l.key,
             typed_endpoints: vec![
                 TypedEndpoint {

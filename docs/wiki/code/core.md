@@ -32,6 +32,8 @@ Turn-start and material-gap discovery now search BOTH actor and article indexes 
 
 [intel_recon/](../../../crates/argos-osint-core/src/intel_recon) owns article analysis; [brief_pipeline.rs](../../../crates/argos-osint-core/src/intel_recon/brief_pipeline.rs) coordinates brief work, with contract and pipeline tests nearby. Read [job concepts](../concepts/glossary.md#intel-brief-jobs-and-historical-reports) and the [brief chain](../../diagrams/intel-brief-chain.html). Follow persistence into [storage/brief.rs](../../../crates/argos-osint-core/src/storage/brief.rs) and [brief_publish.rs](../../../crates/argos-osint-core/src/storage/brief_publish.rs).
 
+[intelligence_contracts.rs](../../../crates/argos-osint-core/src/intelligence_contracts.rs) owns the feature-independent domain packet, inference kinds, six directed Link kinds and eight summary facets. Brief roots capture metadata actors and domain context once; body identity is joined only after completed Body output. Canonical inference payloads retain kind, relevant domains, true support and conditions separately from extraction fidelity. Link publication rechecks exact source/target evidence and the actual semantic decision in the same transaction; a changed publication locator alone is not a changed assertion.
+
 The UI-independent [Intel service](../../../crates/argos-osint-core/src/intel_service.rs) supplies the [local web API](intel-web.md); it reuses repository brief, Related and topology contracts without exporting terminal state.
 
 ## Atlas
@@ -40,7 +42,19 @@ The UI-independent [Intel service](../../../crates/argos-osint-core/src/intel_se
 
 [atlas.rs](../../../crates/argos-osint-core/src/atlas.rs) collects and classifies; [atlas_store.rs](../../../crates/argos-osint-core/src/atlas_store.rs) is the store-facing entry. Read the [classification and Related contract](../concepts/atlas-classification-and-related-articles.md) and [cycle figure](../../diagrams/atlas-pipeline.html). Keep tentative article leads distinct from published memory.
 
-Taxonomy v2 (`atlas-taxonomy-v2`): Information replaced by Science (scientific breakthroughs, space exploration, academic research, climate change, conservation, environmental policy) and Health (public health, medical discoveries, pharmaceutical regulations, mental health research, lifestyle wellness guides); geopolitical/economic/military/stability/technology retained; 7 categories + exclusive `unk`; retired `information` reads as `unk` until migration.
+Current local admission uses `strategic-domains-v1`, six independent domains and exactly two qualifying memberships. Native readers require current taxonomy/admission/publication authority before interpreting those labels. `atlas-taxonomy-v2` and its seven-topic strings remain explicit historical data; legacy `economic` does not establish the new Economic domain. Historical rejection preserves original tags and published evidence.
+
+## Classifier
+
+@tag:classifier · @tag:atlas-taxonomy
+
+[classifier/mod.rs](../../../crates/argos-osint-core/src/classifier/mod.rs) exposes the independent classifier feature and re-exports the taxonomy leaf. Engine/artifact/training, bounded dataset parsing and shared home management supply the local model lifecycle. CLI and Venture consume the shared readiness/manual-job DTOs; TUI Profile stores dataset and artifact paths. The feature is wired across all four workspace crates; disabled builds report unavailable. Atlas consumes the local adapter and pinned preflight; durable historical admission and provider monitoring run in separate pools. See the [classifier implementation](classifier.md) and its [acceptance evidence and limitations](../../../.planning/2026-11-05-atlas-performance-completion/acceptance.md).
+
+[atlas_taxonomy.rs](../../../crates/argos-osint-core/src/atlas_taxonomy.rs) — leaf owning the six domain IDs + official names + `strategic-domains-v1` + explicit legacy identifiers + membership/validation helpers; integration direction `atlas_taxonomy ← {classifier, atlas, related_articles, storage, intel_service, article_discovery}`; the leaf does not import the classifier engine, nlp, storage, or orchestration.
+
+Read the [taxonomy concept](../concepts/strategic-domains-taxonomy.md), [classifier code map](classifier.md) and public `tests/classifier_{contract,artifact,training_calibration,dataset,readiness}.rs` contracts together.
+
+Classifier status vocabulary: `missing / ready / training / invalid / incompatible / unavailable`; rejection reasons vs. model/queue/storage faults — faults are blocked or retryable, never `unk`.
 
 ## Brain
 
@@ -58,4 +72,16 @@ Actor sourcing and Venture seed behavior are defined by the [seeded catalog](act
 
 ## Local preprocessing
 
-[nlp/](../../../crates/argos-osint-core/src/nlp) contains local preprocessing. [NLP contract](../concepts/nlp-preprocessing.md) and its [flow figure](../../diagrams/nlp-preprocessing.html) describe evidence, selections and cache behavior.
+[nlp/](../../../crates/argos-osint-core/src/nlp) contains local preprocessing. [NLP contract](../concepts/nlp-preprocessing.md) and its [flow figure](../../diagrams/nlp-preprocessing.svg) describe evidence, selections and cache behavior.
+
+
+### Intel execution measurements
+
+`intel_recon/brief_timing.rs` supplies one task-local clock per real Surreal Brief stage; concurrent stage workers install their own clock inside the spawned execution. Scoped-thread adapters explicitly carry the captured clock. Local capture, model, fidelity and fenced persistence phases emit a numeric-only `intel_stage` telemetry event keyed by task and lease epoch. This event is separate from report publication totals, and telemetry write failures remain best effort. Summary fallback/packet construction, read-only cache lookups, provider generation, host validation and fenced summary publication emit structured `argos::intel_performance` traces. Timings never enter evidence or cache identities.
+
+Unobserved phases, queue admission, driver round trips and process RSS remain unavailable rather than zero. Existing model-operation/attempt telemetry remains authoritative for provider calls and retries. Stage wall durations can overlap nested/concurrent work and must not be summed as exclusive CPU time. The [acceptance record](../../../.planning/2026-11-05-atlas-performance-completion/acceptance.md) records executed workload comparisons, native embedded verification and their limits; the measurements do not establish an end-to-end speedup.
+
+
+New body-grounded Brief and Link publication uses `storage::live_evidence::validate_for_publication_in`: a shared per-article body-input epoch serializes body-row/source registration with a deduplicated verified current-head check in the publication transaction. The epoch is operational and never enters semantic assertion/cache identities. Historical confirmed Link liveness retains exact retained-evidence validation; a later acquisition alone does not retire an otherwise valid confirmed relationship.
+
+Historical admission uses [atlas_admission_maintenance.rs](../../../crates/argos-osint-core/src/atlas_admission_maintenance.rs) and its storage adapter, preserving retained source identity and completing scoped derivatives in bounded activations. [Provider capture](../../../crates/argos-osint-core/src/classifier/provider_capture.rs), [story families](../../../crates/argos-osint-core/src/atlas_calibration.rs) and [calibration storage](../../../crates/argos-osint-core/src/storage/classifier_calibration.rs) own the separate monitoring lane. See the [classifier contract](classifier.md#historical-admission-and-provider-monitoring).

@@ -26,6 +26,8 @@ Tags connect a documented concern to its implementation across directory boundar
 | `@tag:live-updates` | [Live update contract](code/intel-web.md#rest-snapshots-and-live-updates) | [Rust live.rs](../../crates/argos-osint-api/src/live.rs) / [Next relay](../../apps/web-desktop/live-relay.mjs) / [browser adapter](../../apps/web-desktop/app/live-transport.ts) |
 | `@tag:host-metrics` | [Intel web](code/intel-web.md#api-contract) | [host_metrics.rs](../../crates/argos-osint-api/src/host_metrics.rs) / [client](../../packages/api-client/src/index.tsx) |
 | `@tag:react-ui` | [React UI](code/react-ui.md) | [UI primitives](../../packages/ui/src/index.tsx) / [Intel screens](../../packages/intel/src/index.tsx) |
+| `@tag:classifier` | [Classifier](code/classifier.md) | [classifier/mod.rs](../../crates/argos-osint-core/src/classifier/mod.rs) |
+| `@tag:atlas-taxonomy` | [Atlas taxonomy](code/core.md#atlas) | [atlas_taxonomy.rs](../../crates/argos-osint-core/src/atlas_taxonomy.rs) |
 
 From the repo root:
 

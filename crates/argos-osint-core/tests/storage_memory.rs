@@ -484,14 +484,15 @@ mod graph_projection {
         m(
             id,
             MemoryKind::Link,
-            MemoryPayload::Link(LinkPayload {
+            MemoryPayload::Link(Box::new(LinkPayload {
+                validation: None,
                 source: ep(from, MemoryKind::Actor),
                 target: ep(to, MemoryKind::Actor),
                 relation: relation.into(),
                 rationale: String::new(),
                 receipts: vec![],
                 promoted_from: None,
-            }),
+            })),
         )
     }
 
@@ -553,6 +554,10 @@ mod graph_projection {
             "i",
             MemoryKind::Inference,
             MemoryPayload::Inference(InferencePayload {
+                inference_kind: None,
+                domains: Vec::new(),
+                conditions: Vec::new(),
+                extraction_fidelity: None,
                 premise_claims: vec!["c".into()],
                 actors: vec![actor_ref("x", "relevant")],
                 support_state: "supported".into(),
@@ -866,6 +871,10 @@ mod graph_edge_keys {
                 text: "inference".into(),
                 kind: MemoryKind::Inference,
                 payload: Some(MemoryPayload::Inference(InferencePayload {
+                    inference_kind: None,
+                    domains: Vec::new(),
+                    conditions: Vec::new(),
+                    extraction_fidelity: None,
                     premise_claims: vec!["c".into(), "c".into()],
                     actors: vec![actor("x", "relevant"), actor("x", "relevant")],
                     ..InferencePayload::default()

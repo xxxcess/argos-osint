@@ -1,6 +1,8 @@
 //! Article occurrence pagination through the Intel service and real storage.
 #![cfg(feature = "surreal")]
 
+#[path = "support/current_admission.rs"]
+mod current_admission;
 mod support;
 
 use argos_osint_core::intel_service::{articles, ArticleQuery};
@@ -20,7 +22,8 @@ fn query(category: &str) -> ArticleQuery {
 #[test]
 fn category_remains_required_and_validated() {
     assert!(query("all").validate().is_ok());
-    assert!(query("military").validate().is_ok());
+    assert!(query("security").validate().is_ok());
+    assert!(query("military").validate().is_err());
     assert!(query("").validate().is_err());
     assert!(query("unknown").validate().is_err());
     let mut invalid = query("all");
@@ -56,18 +59,18 @@ async fn all_pages_preserve_global_order_and_occurrence_identity() {
     }
     for (run, id, categories, published, seen) in [
         ("r1", "new", vec!["economic"], "2026-01-04", "2026-01-04"),
-        ("r1", "z", vec!["military"], "2026-01-03", "2026-01-04"),
+        ("r1", "z", vec!["security"], "2026-01-03", "2026-01-04"),
         (
             "r1",
             "a",
-            vec!["economic", "military"],
+            vec!["economic", "human"],
             "2026-01-03",
             "2026-01-03",
         ),
         // A newer occurrence of the same identity: All deduplicates to it.
         ("r2", "a", vec!["economic"], "2026-01-03", "2026-01-05"),
-        ("r1", "b", vec!["technology"], "2026-01-03", "2026-01-03"),
-        // A legacy row without v2 tags is pending migration: not admitted.
+        ("r1", "b", vec!["scientific"], "2026-01-03", "2026-01-03"),
+        // A legacy row without a current receipt is pending migration: not admitted.
         ("r1", "uncategorized", vec![], "2026-01-01", "2026-01-01"),
         (
             "old",
@@ -77,7 +80,7 @@ async fn all_pages_preserve_global_order_and_occurrence_identity() {
             "2026-01-05",
         ),
     ] {
-        let row = AtlasArticleRow {
+        let mut row = AtlasArticleRow {
             run_id: run.into(),
             id: id.into(),
             category: categories.first().copied().unwrap_or("unk").into(),
@@ -87,9 +90,18 @@ async fn all_pages_preserve_global_order_and_occurrence_identity() {
             title: format!("fixture {id}"),
             ..Default::default()
         };
-        atlas::upsert_article(repo.db(), &row)
-            .await
-            .expect("insert article");
+        if categories.is_empty() {
+            atlas::upsert_article(repo.db(), &row)
+                .await
+                .expect("legacy article");
+        } else {
+            let vocabulary = match categories[0] {
+                "economic" => "Freight clinic common",
+                "scientific" => "River sensor common",
+                _ => "Ballot patrol common",
+            };
+            current_admission::admit(&repo, &mut row, vocabulary).await;
+        }
     }
 
     let mut q = query("all");
@@ -152,22 +164,16 @@ async fn hottest_pages_order_the_entire_day_with_stable_temperature_ties() {
         ("tie-a", 0.5, "2026-01-03"),
         ("tie-b", 0.5, "2026-01-03"),
     ] {
-        atlas::upsert_article(
-            repo.db(),
-            &AtlasArticleRow {
-                run_id: "r".into(),
-                id: id.into(),
-                category: "military".into(),
-                categories: vec!["military".into()],
-                title: id.into(),
-                temperature: heat,
-                published_at: date.into(),
-                seen_at: date.into(),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+        let mut row = AtlasArticleRow {
+            run_id: "r".into(),
+            id: id.into(),
+            title: id.into(),
+            temperature: heat,
+            published_at: date.into(),
+            seen_at: date.into(),
+            ..Default::default()
+        };
+        current_admission::admit(&repo, &mut row, "Ballot patrol common").await;
     }
     let mut q = query("all");
     q.sort = "hottest".into();

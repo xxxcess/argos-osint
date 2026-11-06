@@ -16,7 +16,7 @@ const a: Article = {
   run_id: "run-1",
   title: "Server first",
   description: "First retained occurrence",
-  category: "geopolitical",
+  category: "governance",
   source_name: "Fixture Wire",
   source_domain: "example.test",
   url: "https://example.test/a",
@@ -142,8 +142,8 @@ beforeEach(() => {
     ),
     http.get(`${testBase}/api/v1/articles`, ({ request }) => {
       const read = record(request);
-      if (read.category !== "geopolitical")
-        return page([{ ...a, category: read.category || "geopolitical" }]);
+      if (read.category !== "governance")
+        return page([{ ...a, category: read.category || "governance" }]);
       if (read.cursor === cursor2) return page([d]);
       if (read.cursor === cursor1) return page([b, c], cursor2);
       return page([a, b], cursor1);
@@ -158,7 +158,7 @@ describe("server-backed global All", () => {
     mswServer.use(
       http.get(`${testBase}/api/v1/articles`, ({ request }) => {
         const read = record(request);
-        if (read.category !== "geopolitical") return page([a]);
+        if (read.category !== "governance") return page([a]);
         return fail
           ? HttpResponse.json(
               { error: "Global feed unavailable" },
@@ -195,9 +195,9 @@ describe("server-backed global All", () => {
     expect(cards()).toEqual(
       [a, b].map((row) => `Open Focus Brief: ${row.title}`),
     );
-    expect(
-      reads.filter((read) => read.category !== "geopolitical"),
-    ).toHaveLength(0);
+    expect(reads.filter((read) => read.category !== "governance")).toHaveLength(
+      0,
+    );
   });
   it("uses one server stream, preserves uneven page order, deduplicates occurrences and exhausts opaque cursors", async () => {
     const user = userEvent.setup();
@@ -211,12 +211,12 @@ describe("server-backed global All", () => {
     expect(cards()).toEqual(
       [a, b].map((row) => `Open Focus Brief: ${row.title}`),
     );
-    expect(reads.filter((read) => read.category === "geopolitical")).toEqual([
-      { category: "geopolitical", day: "2026-10-29", search: "", cursor: null },
+    expect(reads.filter((read) => read.category === "governance")).toEqual([
+      { category: "governance", day: "2026-10-29", search: "", cursor: null },
     ]);
-    expect(
-      reads.filter((read) => read.category !== "geopolitical"),
-    ).toHaveLength(0);
+    expect(reads.filter((read) => read.category !== "governance")).toHaveLength(
+      0,
+    );
     await loadMore(user);
     await waitFor(() =>
       expect(
@@ -237,7 +237,7 @@ describe("server-backed global All", () => {
     );
     expect(
       reads
-        .filter((read) => read.category === "geopolitical")
+        .filter((read) => read.category === "governance")
         .map((read) => read.cursor),
     ).toEqual([null, cursor1, cursor2]);
     expect(
@@ -254,7 +254,7 @@ describe("server-backed global All", () => {
     mswServer.use(
       http.get(`${testBase}/api/v1/articles`, ({ request }) => {
         const read = record(request);
-        if (read.category !== "geopolitical") return page([a]);
+        if (read.category !== "governance") return page([a]);
         if (!read.cursor) return page([a, b], cursor1);
         return fail
           ? HttpResponse.json(
@@ -297,7 +297,7 @@ describe("server-backed global All", () => {
     );
     expect(reads.slice(before)).toEqual([
       {
-        category: "geopolitical",
+        category: "governance",
         day: "2026-10-29",
         search: "",
         cursor: cursor1,
@@ -321,7 +321,7 @@ describe("server-backed global All", () => {
     mswServer.use(
       http.get(`${testBase}/api/v1/articles`, ({ request }) => {
         const read = record(request);
-        if (read.category !== "geopolitical") return page([a]);
+        if (read.category !== "governance") return page([a]);
         return read.cursor
           ? page(generation === 1 ? [c] : [d])
           : page(
@@ -362,7 +362,7 @@ describe("server-backed global All", () => {
     expect(
       reads
         .slice(before)
-        .filter((read) => read.category === "geopolitical")
+        .filter((read) => read.category === "governance")
         .map((read) => read.cursor),
     ).toEqual([null, freshCursor]);
     expect(
@@ -382,14 +382,14 @@ describe("server-backed global All", () => {
                   {
                     ...scoped,
                     category:
-                      read.category === "geopolitical"
+                      read.category === "governance"
                         ? scoped.category
-                        : read.category || "geopolitical",
+                        : read.category || "governance",
                   },
                 ]
               : [],
           );
-        if (read.category !== "geopolitical") return page([a]);
+        if (read.category !== "governance") return page([a]);
         return read.cursor ? page([c]) : page([a, b], cursor1);
       }),
     );
@@ -413,7 +413,7 @@ describe("server-backed global All", () => {
     );
     await screen.findByRole("heading", { name: "NO MATCHING INTELLIGENCE" });
     expect(reads.at(-1)).toEqual({
-      category: "geopolitical",
+      category: "governance",
       day: "2026-10-29",
       search: "ports",
       cursor: null,
@@ -424,7 +424,7 @@ describe("server-backed global All", () => {
       name: `Open Focus Brief: ${scoped.title}`,
     });
     expect(reads.at(-1)).toEqual({
-      category: "geopolitical",
+      category: "governance",
       day: "2026-10-28",
       search: "ports",
       cursor: null,
@@ -456,7 +456,7 @@ describe("server-backed global All", () => {
       );
       if (
         url.pathname.endsWith("/articles") &&
-        url.searchParams.get("category") === "geopolitical"
+        url.searchParams.get("category") === "governance"
       ) {
         const signal = init?.signal;
         if (!signal)
@@ -510,16 +510,15 @@ it("sort changes request the server order with an independent first-page cursor"
   render(<App />);
   await openAll(user);
   await waitFor(() => expect(cards()[0]).toContain(a.title));
-  await user.click(
-    screen.getByRole("button", { name: "Hottest" }),
-  );
+  await user.click(screen.getByRole("button", { name: "Hottest" }));
   await waitFor(() => expect(cards()[0]).toContain(b.title));
   expect(
     requests.filter((p) => p.get("sort") === "hottest")[0].get("cursor"),
   ).toBeNull();
   await user.click(screen.getByRole("button", { name: "Latest" }));
   await waitFor(() => expect(cards()[0]).toContain(a.title));
-  expect(
-    screen.getByRole("button", { name: "Latest" }),
-  ).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByRole("button", { name: "Latest" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 });

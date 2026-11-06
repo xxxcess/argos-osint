@@ -95,6 +95,8 @@ pub enum EventKind {
     IntelArticle,
     /// Terminal revision of one Intel report per mode.
     IntelReport,
+    /// One measured Intel stage execution; distinct from report publication.
+    IntelStage,
     /// Per-article Brief rating observation.
     IntelBriefRating,
     /// One accepted evidence item and its provenance.
@@ -119,13 +121,14 @@ impl EventKind {
             Self::AtlasStage => "atlas_stage",
             Self::IntelArticle => "intel_article",
             Self::IntelReport => "intel_report",
+            Self::IntelStage => "intel_stage",
             Self::IntelBriefRating => "intel_brief_rating",
             Self::EvidenceItem => "evidence_item",
         }
     }
 
     /// Every event kind, so retention and rollup cover the full vocabulary.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::ModelOperation,
         Self::ModelAttempt,
         Self::ToolInvocation,
@@ -141,6 +144,7 @@ impl EventKind {
         Self::AtlasStage,
         Self::IntelArticle,
         Self::IntelReport,
+        Self::IntelStage,
         Self::IntelBriefRating,
         Self::EvidenceItem,
     ];
@@ -560,6 +564,22 @@ pub fn tool_invocation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intel_stage_is_a_distinct_bounded_event_kind() {
+        let names: std::collections::BTreeSet<_> =
+            EventKind::ALL.iter().map(|kind| kind.as_str()).collect();
+        assert_eq!(names.len(), EventKind::ALL.len());
+        assert!(EventKind::ALL.contains(&EventKind::IntelStage));
+        assert_eq!(
+            TelemetryEvent::new(EventKind::IntelStage).event_type,
+            "intel_stage"
+        );
+        assert_ne!(
+            EventKind::IntelStage.as_str(),
+            EventKind::IntelReport.as_str()
+        );
+    }
 
     #[test]
     fn secret_shaped_keys_are_rejected_from_payloads() {

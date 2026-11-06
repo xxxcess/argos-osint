@@ -35,6 +35,7 @@ import type { CanvasHandle, GLink, GNode } from "./ForceCanvas";
 import { kindHue, kindIconSvg } from "./nodeGlyph";
 import { classifyNeighborhood } from "./neighborhood";
 import { intelColors, topologyColors } from "../shell/intel-theme";
+import { NeighborhoodSummary } from "./NeighborhoodSummary";
 
 // Canvas + d3 only load in the browser (server rendering must not evaluate them).
 const ForceCanvas = lazy(() => import("./ForceCanvas"));
@@ -110,6 +111,16 @@ export function Topology({
           focus={focus}
           onSeed={onSeed}
           displayScale={displayScale}
+          summaryPane={
+            graph.data.neighborhood_brief ? (
+              <NeighborhoodSummary
+                seed={graph.isPlaceholderData ? null : seed}
+                fallback={graph.data.neighborhood_brief}
+                nodes={graph.data.nodes}
+                onSeed={onSeed}
+              />
+            ) : null
+          }
         />
       ) : null}
       {graph.data?.findings.gaps.map((g, i) => (
@@ -130,7 +141,9 @@ function GraphExplorer({
   focus,
   onSeed,
   displayScale,
+  summaryPane,
 }: {
+  summaryPane?: React.ReactNode;
   data: TopoData;
   graphSeed: string | null;
   focus?: string;
@@ -515,6 +528,7 @@ function GraphExplorer({
       <View nativeID="intel-topology-layout" style={t.layout}>
         {graphArea}
       </View>
+      {summaryPane}
       <View nativeID="intel-topology-nodes" style={t.nodesSection}>
         {nodeList}
       </View>
@@ -829,7 +843,10 @@ function TopologySkeleton({
       <View style={t.layout}>
         <View style={t.graphCol}>
           <GraphSquare height={graphHeight} />
-          <View nativeID="intel-topology-controls-skeleton" style={t.sectionRect}>
+          <View
+            nativeID="intel-topology-controls-skeleton"
+            style={t.sectionRect}
+          >
             <Skeleton fill radius={12} />
           </View>
         </View>

@@ -75,7 +75,9 @@ fn welcome_setup_can_be_cancelled_without_initializing_storage() {
         );
         let output = String::from_utf8(result.stdout).unwrap();
         assert!(output.contains("Welcome to Argos Venture!"));
-        assert!(output.contains("2. API Server"));
+        assert!(output.contains("5. Train and save classifier"));
+        assert!(!output.contains("2. API Server"));
+        assert!(!output.contains("Storage mode"));
         assert!(!home.path().join("storage/config.json").exists());
         assert!(!home.path().join("stack.json").exists());
     }

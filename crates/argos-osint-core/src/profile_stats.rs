@@ -206,7 +206,7 @@ pub const fn applicable_filter_dimensions(kind: EventKind) -> &'static [&'static
     match kind {
         EventKind::IntelArticle => &["app", "category"],
         EventKind::IntelBriefRating => &["app", "mode", "category"],
-        EventKind::IntelReport => &["app", "mode"],
+        EventKind::IntelReport | EventKind::IntelStage => &["app", "mode"],
         EventKind::ReconRun | EventKind::RecallQuery | EventKind::DirectiveAssessed => {
             &["app", "mode"]
         }

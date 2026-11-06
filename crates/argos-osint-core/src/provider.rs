@@ -2515,6 +2515,9 @@ fn http() -> Result<reqwest::Client> {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SettingsFile {
+    /// Dataset inputs and the persistent article classifier artifact directory.
+    #[serde(default)]
+    pub data_paths: crate::data_paths::DataPaths,
     /// Total investigative recall candidates, clamped to 10–20; absent means 20.
     #[serde(default)]
     pub insight_recall_limit: Option<usize>,
@@ -2851,6 +2854,7 @@ impl SettingsFile {
                             | "currents_api_key_fallback"
                             | "whoxy_api_key_fallback"
                             | "recon_limits"
+                            | "data_paths"
                     )
                 })
             });

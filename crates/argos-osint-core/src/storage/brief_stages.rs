@@ -69,13 +69,14 @@ struct ExistingRun {
     job_id: String,
     generation: i64,
     state: String,
+    input_revision: String,
 }
 
 async fn latest_run(repo: &Repository, article_id: &str) -> Result<Option<ExistingRun>> {
     let mut response = repo
         .db()
         .query(
-            "SELECT record::id(job) AS job_id, generation, state FROM brief_run \
+            "SELECT record::id(job) AS job_id, generation, state, input_revision FROM brief_run \
              WHERE article_id = $a ORDER BY generation DESC LIMIT 1",
         )
         .bind(("a", article_id.to_string()))
@@ -89,15 +90,18 @@ async fn latest_run(repo: &Repository, article_id: &str) -> Result<Option<Existi
 /// article's chain for unchanged inputs, otherwise supersede it and admit
 /// the next generation with its captured stage inputs.
 pub async fn ensure(repo: &Repository, inputs: &BriefInputs) -> Result<jobs::Chain> {
-    // Opening a brief that already has a run must not admit another queued
-    // chain. Reload still carries a distinct `:reload:` revision.
+    // Reopen the same semantic inputs, including a previous explicit reload,
+    // without creating another generation. Changed inputs go through the
+    // authoritative transactional jobs::ensure_chain comparison below.
     if !inputs.input_revision.contains(":reload:") {
         if let Some(existing) = latest_run(repo, &inputs.article_id).await? {
-            return Ok(jobs::Chain {
-                job_id: existing.job_id,
-                generation: existing.generation,
-                created: false,
-            });
+            if same_semantic_revision(&existing.input_revision, &inputs.input_revision) {
+                return Ok(jobs::Chain {
+                    job_id: existing.job_id,
+                    generation: existing.generation,
+                    created: false,
+                });
+            }
         }
     }
     let specs: Vec<StageSpec<'_>> = brief_pipeline::STAGES
@@ -571,6 +575,28 @@ async fn publish_stage(repo: &Repository, job_id: &str, operation: &str, run: &R
     let links = output("intel_brief_links").await;
     let own = stages.stage_output(job_id, operation).await?;
     let snapshot_hash = crate::nlp::cache::hash(&json!([operation, own]).to_string());
+    let captured = input(repo, &task_id(job_id, "intel_brief_claims"))
+        .await?
+        .and_then(|input| serde_json::from_str::<Value>(&input.input_json).ok())
+        .map(|input| input["metadata"].clone())
+        .unwrap_or(Value::Null);
+    let prepared = super::brief_publish::prepare_captured(
+        repo,
+        &run.article_id,
+        &captured,
+        &body,
+        &claims,
+        &inferences,
+        operation,
+    )
+    .await?;
+    if prepared
+        .as_ref()
+        .err()
+        .is_some_and(|reason| reason == super::brief_publish::CAPTURED_SOURCE_CHANGED)
+    {
+        return Ok(());
+    }
     let written = super::brief::publish(
         repo,
         &super::brief::Publication {
@@ -606,8 +632,11 @@ async fn publish_stage(repo: &Repository, job_id: &str, operation: &str, run: &R
                 let candidate = lead["article_id"].as_str().unwrap_or("");
                 super::brief::Lead {
                     id: format!(
-                        "{}:{}:{inference}:{candidate}",
-                        run.article_id, run.generation
+                        "{}:{}:{inference}:{}:{candidate}:{}",
+                        run.article_id,
+                        run.generation,
+                        lead["article_run_id"].as_str().unwrap_or(""),
+                        lead["metadata_revision"].as_str().unwrap_or("")
                     ),
                     inference_id: inference.to_string(),
                     inference_text: texts.get(inference).copied().unwrap_or("").to_string(),
@@ -628,16 +657,6 @@ async fn publish_stage(repo: &Repository, job_id: &str, operation: &str, run: &R
             .collect();
         super::brief::replace_leads(repo, &run.article_id, job_id, run.generation, &leads).await?;
     }
-    let prepared = super::brief_publish::prepare(
-        repo,
-        &run.article_id,
-        &body,
-        &claims,
-        &inferences,
-        operation,
-    )
-    .await
-    .unwrap_or_else(|error| Err(format!("canonical inputs not prepared: {error}")));
     let state = super::brief_publish::publish_stage(
         repo,
         &run.article_id,
@@ -720,6 +739,8 @@ pub async fn run_claimed(
     config: &ExecConfig,
 ) -> Result<StageOutcome> {
     let operation = claimed.operation.clone();
+    let measured_at = std::time::Instant::now();
+    let clock = crate::intel_recon::brief_timing::StageClock::default();
     let cancel = Arc::new(AtomicBool::new(false));
     let lost = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
@@ -782,7 +803,7 @@ pub async fn run_claimed(
     let stages = SurrealStages::new(repo);
     let watch = cancel.clone();
     let result = tokio::select! {
-        r = execute(&stages, &claimed, backend, &cancel) => r,
+        r = crate::intel_recon::brief_timing::with_clock(clock.clone(), execute(&stages, &claimed, backend, &cancel)) => r,
         _ = async move {
             while !watch.load(Ordering::Acquire) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -790,6 +811,7 @@ pub async fn run_claimed(
         } => Err(anyhow!("cancelled")),
     };
     // Commit while the heartbeat still covers the lease, then stop it.
+    let persist_at = std::time::Instant::now();
     let outcome = match result {
         _ if lost.load(Ordering::Acquire) || cancel.load(Ordering::Acquire) => {
             StageOutcome::Stale { operation }
@@ -812,6 +834,40 @@ pub async fn run_claimed(
             }
         }
     };
+    crate::intel_recon::brief_timing::note_on(
+        &clock,
+        crate::intel_recon::brief_timing::Phase::Persistence,
+        persist_at.elapsed(),
+    );
+    let (disposition, rows) = match &outcome {
+        StageOutcome::Committed { items, .. } => ("committed", *items),
+        StageOutcome::Stale { .. } => ("stale_or_cancelled", 0),
+        StageOutcome::Failed { .. } => ("failed", 0),
+    };
+    let measurement = crate::intel_recon::brief_timing::observation(
+        &clock,
+        measured_at.elapsed(),
+        disposition,
+        rows,
+    );
+    crate::intel_recon::brief_timing::emit(
+        &clock,
+        measured_at.elapsed(),
+        disposition,
+        rows,
+        &claimed.operation,
+    );
+    let mut event = crate::telemetry::TelemetryEvent::new(crate::telemetry::EventKind::IntelStage);
+    event.id = format!("brief-timing:{}:e{}", claimed.id, claimed.epoch);
+    event.app = "intel".into();
+    event.mode = claimed.operation.clone();
+    event.job_id = claimed.job_id.clone();
+    event.outcome = disposition.into();
+    event.metric_ms = Some(measured_at.elapsed().as_millis().min(i64::MAX as u128) as i64);
+    event.payload_json = measurement.to_string();
+    if let Err(error) = super::telemetry::record(repo.db(), &event).await {
+        tracing::warn!(error = %error, "brief timing telemetry unavailable");
+    }
     done.store(true, Ordering::Release);
     if let Some(h) = heartbeat_guard.handle.take() {
         h.abort();
@@ -938,6 +994,145 @@ pub async fn related(repo: &Repository, article: &AtlasArticleRow) -> Result<Vec
     Ok(out)
 }
 
+/// Two independent indexed channels share one hard initial raw-row budget.
+/// Hydration follows the actor cap; text metadata queries have their own SQL caps.
+pub async fn discover_link_candidates(
+    repo: &Repository,
+    ctx: &StageContext,
+    article: &AtlasArticleRow,
+) -> Result<crate::intel_recon::brief_stages::LinkDiscovery> {
+    discover_link_candidates_after(repo, ctx, article, None).await
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct LinkDiscoveryCursor {
+    revision: String,
+    actor_after: Option<[String; 3]>,
+    actor_done: bool,
+    text_after: Option<String>,
+    text_done: bool,
+}
+
+/// Explicit continuation of bounded indexed discovery. Never queues model work.
+pub async fn discover_link_candidates_after(
+    repo: &Repository,
+    ctx: &StageContext,
+    article: &AtlasArticleRow,
+    cursor: Option<&str>,
+) -> Result<crate::intel_recon::brief_stages::LinkDiscovery> {
+    let mut actors: Vec<String> = ctx.metadata_snapshot["actors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|actor| actor["id"].as_str().map(str::to_owned))
+        .collect();
+    actors.sort();
+    actors.dedup();
+    actors.truncate(crate::intelligence_contracts::MAX_CONTEXT_ACTORS);
+    let revision = crate::summarization::sha_hex(
+        &json!([crate::atlas_metadata::input_hash(article), actors]).to_string(),
+    );
+    let cursor = match cursor {
+        Some(raw) => {
+            anyhow::ensure!(raw.len() <= 4096, "link discovery cursor exceeds bound");
+            let cursor: LinkDiscoveryCursor = serde_json::from_str(raw)?;
+            anyhow::ensure!(cursor.revision == revision, "stale link discovery cursor");
+            cursor
+        }
+        None => LinkDiscoveryCursor {
+            revision: revision.clone(),
+            ..Default::default()
+        },
+    };
+    let mentions = if actors.is_empty() || cursor.actor_done {
+        Vec::new()
+    } else {
+        super::atlas::current_actor_mentions(
+            repo,
+            &actors,
+            &crate::atlas_classify::OccurrenceKey::new(&article.run_id, &article.id),
+            50,
+            cursor.actor_after.as_ref(),
+        )
+        .await?
+    };
+    let actor_raw = mentions.len();
+    let actor_after = mentions.last().map(|mention| {
+        [
+            mention.origin_scope.clone(),
+            mention.origin_id.clone(),
+            mention.actor_id.clone(),
+        ]
+    });
+    let mut seen = std::collections::BTreeSet::new();
+    let keys: Vec<_> = mentions
+        .iter()
+        .filter(|mention| seen.insert((mention.origin_scope.clone(), mention.origin_id.clone())))
+        .map(|mention| {
+            crate::atlas_classify::OccurrenceKey::new(&mention.origin_scope, &mention.origin_id)
+        })
+        .collect();
+    let actor_unique = keys.len();
+    let mut rows: Vec<AtlasArticleRow> = super::atlas::current_articles_many(repo.db(), &keys)
+        .await?
+        .into_values()
+        .collect();
+    rows.sort_by(|a, b| (&a.run_id, &a.id).cmp(&(&b.run_id, &b.id)));
+    let excluded_or_missing = actor_unique.saturating_sub(rows.len());
+    // An excluded actor hit must not suppress a separately authorized text hit.
+    seen = rows
+        .iter()
+        .map(|row| (row.run_id.clone(), row.id.clone()))
+        .collect();
+    let text = if cursor.text_done {
+        super::article_discovery::BoundedRelatedCandidates::default()
+    } else {
+        super::article_discovery::related_from_seed_bounded_after(
+            repo,
+            article,
+            100 - actor_raw,
+            cursor.text_after.as_deref(),
+        )
+        .await?
+    };
+    for hit in &text.hits {
+        if !seen.insert((hit.run_id.clone(), hit.article_id.clone())) {
+            continue;
+        }
+        rows.push(AtlasArticleRow {
+            run_id: hit.run_id.clone(),
+            id: hit.article_id.clone(),
+            title: hit.title.clone(),
+            description: hit.description.clone(),
+            url: hit.url.clone(),
+            source_name: hit.source_name.clone(),
+            source_domain: hit.source_domain.clone(),
+            published_at: hit.published_at.clone(),
+            seen_at: hit.seen_at.clone(),
+            provider: hit.provider.clone(),
+            categories: hit.categories.clone(),
+            category: hit.categories.first().cloned().unwrap_or_default(),
+            ..Default::default()
+        });
+    }
+    let actor_done = cursor.actor_done || actor_raw < 50;
+    let text_done = cursor.text_done || !text.truncated;
+    let next_cursor = if actor_done && text_done {
+        None
+    } else {
+        Some(serde_json::to_string(&LinkDiscoveryCursor {
+            revision,
+            actor_after: actor_after.or(cursor.actor_after),
+            actor_done,
+            text_after: text.next_cursor.clone().or(cursor.text_after),
+            text_done,
+        })?)
+    };
+    let coverage = json!({"adapter":"indexed_all_retained","initial_limit":100,"actor_fetched":actor_raw,"text_fetched":text.fetched,"unique_candidates":rows.len(),"excluded_or_missing_actor_candidates":excluded_or_missing,"truncated":next_cursor.is_some(),"next_cursor":next_cursor,"text_revision":text.revision,"curator_limit":crate::intel_recon::brief_stages::MAX_CANDIDATES,"note":"Discovery overlap is tentative; current metadata and semantic publication gates decide confirmation."});
+    Ok(crate::intel_recon::brief_stages::LinkDiscovery { rows, coverage })
+}
+
 impl StageBackend for SurrealRuntimeBackend {
     fn prepare_body<'a>(
         &'a mut self,
@@ -981,11 +1176,28 @@ impl StageBackend for SurrealRuntimeBackend {
         // Sync boundary inside an async stage: run the read on a scoped
         // thread driven by the repository's runtime.
         let (repo, handle) = (self.repo.clone(), self.handle.clone());
+        let clock = crate::intel_recon::brief_timing::current_clock().unwrap_or_default();
         std::thread::scope(|s| {
-            s.spawn(|| handle.block_on(related(&repo, article)))
-                .join()
-                .map_err(|_| anyhow!("related read panicked"))?
+            s.spawn(|| {
+                handle.block_on(crate::intel_recon::brief_timing::with_clock(
+                    clock,
+                    crate::intel_recon::brief_timing::timed(
+                        crate::intel_recon::brief_timing::Phase::Local,
+                        related(&repo, article),
+                    ),
+                ))
+            })
+            .join()
+            .map_err(|_| anyhow!("related read panicked"))?
         })
+    }
+
+    fn related_discovery<'a>(
+        &'a mut self,
+        ctx: &'a StageContext,
+        article: &'a AtlasArticleRow,
+    ) -> BoxFut<'a, Result<crate::intel_recon::brief_stages::LinkDiscovery>> {
+        Box::pin(async move { discover_link_candidates(&self.repo, ctx, article).await })
     }
 
     fn focused_oversized(&self) -> bool {
@@ -1055,16 +1267,252 @@ pub async fn ensure_for_article(
     article: &AtlasArticleRow,
     settings: &crate::provider::SettingsFile,
 ) -> Result<String> {
-    use crate::intel_recon::brief_stages as bs;
-    let inputs = BriefInputs {
-        article_id: article.id.clone(),
-        input_revision: bs::input_revision(article, settings),
-        role_snapshot: serde_json::to_string(&settings.defaults).unwrap_or_default(),
-        title: article.title.clone(),
-        stage_revisions: bs::stage_revisions(article, settings),
-        metadata: bs::metadata_snapshot(article),
-    };
+    let inputs = inputs_for_article(repo, article, settings).await?;
     Ok(ensure(repo, &inputs).await?.job_id)
+}
+
+/// Captures the metadata/domain/actor/route context once before either root
+/// dispatches. Body text is never part of this metadata-only context.
+pub async fn inputs_for_article(
+    repo: &Repository,
+    article: &AtlasArticleRow,
+    settings: &crate::provider::SettingsFile,
+) -> Result<BriefInputs> {
+    let auth = tokio::task::spawn_blocking(crate::secrets::AuthFile::load).await??;
+    inputs_for_article_with_auth(repo, article, settings, &auth).await
+}
+
+/// Captures context using an already loaded runtime auth snapshot. Hosts and
+/// isolated offline fixtures can share their immutable route configuration.
+pub async fn inputs_for_article_with_auth(
+    repo: &Repository,
+    article: &AtlasArticleRow,
+    settings: &crate::provider::SettingsFile,
+    auth: &crate::secrets::AuthFile,
+) -> Result<BriefInputs> {
+    use crate::intel_recon::brief_stages as bs;
+    use crate::intelligence_contracts::{
+        DomainActor, DomainPacket, DomainSource, DomainVersions, MAX_CONTEXT_ACTORS,
+        MAX_CONTEXT_ALIASES,
+    };
+
+    let captured =
+        if let Some(actors) = super::actor_catalog::metadata_article_actors(repo, article).await? {
+            actors
+        } else {
+            super::atlas_metadata::metadata(repo.db(), &article.run_id, &article.id)
+                .await?
+                .map(|metadata| crate::atlas_metadata::article_actors(article, &metadata))
+                .unwrap_or_default()
+        };
+    let mut captured: Vec<ContextActor> = captured.iter().map(ContextActor::from).collect();
+    captured.sort_by(|left, right| left.id.cmp(&right.id));
+    captured.dedup_by(|left, right| left.id == right.id);
+    let mut actors_omitted = captured.len().saturating_sub(MAX_CONTEXT_ACTORS);
+    captured.truncate(MAX_CONTEXT_ACTORS);
+    let mut aliases_omitted = 0usize;
+    let mut actors = Vec::with_capacity(captured.len());
+    for actor in &mut captured {
+        actor.aliases.sort();
+        actor.aliases.dedup();
+        aliases_omitted += actor.aliases.len().saturating_sub(MAX_CONTEXT_ALIASES);
+        actor.aliases.truncate(MAX_CONTEXT_ALIASES);
+        actors.push(DomainActor::new(
+            actor.id.clone(),
+            actor.name.clone(),
+            actor.aliases.clone(),
+        )?);
+    }
+    let source_revision = crate::atlas_metadata::input_hash(article);
+    let mut source = DomainSource::new(
+        article.run_id.clone(),
+        article.id.clone(),
+        source_revision,
+        crate::intel_recon::sentence_index::INDEX_VERSION.into(),
+    )?;
+    source.publisher = article.source_name.clone();
+    source.url = article.url.clone();
+    source.published_at = chrono::DateTime::parse_from_rfc3339(&article.published_at)
+        .ok()
+        .map(|_| article.published_at.clone());
+    // Country is known source metadata. More precise geography is not inferred.
+    source.place = (!article.country.trim().is_empty()).then(|| article.country.clone());
+    #[cfg(feature = "classifier")]
+    let admission = {
+        use crate::atlas_classify::OccurrenceKey;
+        use crate::intelligence_contracts::DomainAdmission;
+        let key = OccurrenceKey::new(article.run_id.clone(), article.id.clone());
+        let view = super::classifier_admission::classification_view(repo, &key).await?;
+        let current_input = crate::classifier::ClassifyInput::new(
+            key.record_id(),
+            article.title.clone(),
+            article.description.clone(),
+            None,
+        );
+        if !view.legacy && view.admission_state == "admitted" {
+            let stored = view
+                .receipt
+                .ok_or_else(|| anyhow!("admitted domain context lacks its validated receipt"))?;
+            if stored.receipt.input_hash != current_input.input_hash {
+                return Err(anyhow!(
+                    "admitted domain context belongs to a different metadata revision"
+                ));
+            }
+            let pair = stored
+                .receipt
+                .selected_pair
+                .ok_or_else(|| anyhow!("admitted domain context lacks its domain pair"))?;
+            Some(DomainAdmission::new(
+                &view.taxonomy_version,
+                pair,
+                crate::summarization::sha_hex(&serde_json::to_string(&stored)?),
+            )?)
+        } else {
+            None
+        }
+    };
+    #[cfg(not(feature = "classifier"))]
+    let admission = None;
+    let mut routes = Vec::new();
+    for (role, operation) in [
+        ("atlas_analyst", Some(crate::provider::OP_CLAIMS_GENERATE)),
+        (
+            "atlas_analyst",
+            Some(crate::provider::OP_INFERENCES_GENERATE),
+        ),
+        ("atlas_analyst", Some(crate::provider::OP_LINKS_GENERATE)),
+        ("atlas_evaluator", None),
+        (
+            "atlas_evaluator",
+            Some(crate::provider::OP_INFERENCES_ASSESS),
+        ),
+        (
+            "atlas_evaluator",
+            Some(crate::provider::OP_INFERENCES_DEDUP),
+        ),
+    ] {
+        let (resolved, secrets) =
+            crate::recon::model_exec::resolve_operation_routes(auth, settings, role, operation);
+        let projection: Vec<_> = resolved
+            .iter()
+            .zip(&secrets)
+            .map(|(route, secret)| {
+                let host = url::Url::parse(&secret.base_url)
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_owned))
+                    .unwrap_or_default();
+                json!([
+                    route.provider,
+                    route.account,
+                    secret.model,
+                    host,
+                    route.skip_reason.is_some()
+                ])
+            })
+            .collect();
+        routes.push(json!([role, operation, projection]));
+    }
+    let route = crate::summarization::sha_hex(&serde_json::to_string(&routes)?);
+    let mut packet = DomainPacket::new(
+        source,
+        admission,
+        actors,
+        DomainVersions::new(
+            "intel-brief-domain-context-v1".into(),
+            crate::intel_recon::brief_contracts::BRIEF_CONTRACT_VERSION.into(),
+            route,
+        )?,
+    )?;
+    // Preserve exact known aliases, or explicitly omit whole alias/actor
+    // entries. Source text is never abbreviated into a different identity.
+    while serde_json::to_vec(&packet)?.len() > 8 * 1024 {
+        if let Some(actor) = packet
+            .actors
+            .iter_mut()
+            .rev()
+            .find(|actor| !actor.verified_aliases.is_empty())
+        {
+            actor.verified_aliases.pop();
+            aliases_omitted += 1;
+        } else if packet.actors.pop().is_some() {
+            actors_omitted += 1;
+        } else {
+            return Err(anyhow!("domain source context exceeds its bounded packet"));
+        }
+    }
+    let captured: Vec<ContextActor> = packet
+        .actors
+        .iter()
+        .map(|actor| ContextActor {
+            id: actor.id.clone(),
+            name: actor.name.clone(),
+            aliases: actor.verified_aliases.clone(),
+        })
+        .collect();
+    let packet_revision = packet.revision()?;
+    let coverage =
+        json!({"actors_omitted":actors_omitted,"verified_aliases_omitted":aliases_omitted});
+    let domain_revision =
+        crate::summarization::sha_hex(&json!([packet_revision, coverage]).to_string());
+    let stage_revisions: Vec<_> = bs::stage_revisions(article, settings)
+        .into_iter()
+        .map(|revision| {
+            crate::summarization::sha_hex(&json!([revision, domain_revision]).to_string())
+        })
+        .collect();
+    let mut metadata = bs::metadata_snapshot(article);
+    metadata["domain_context"] = serde_json::to_value(packet)?;
+    metadata["domain_context_coverage"] = coverage;
+    metadata["actors"] = serde_json::to_value(captured)?;
+    let base_revision = crate::nlp::cache::hash(&stage_revisions.join(":"));
+    let current_body = clean_artifact(repo, &article.id)
+        .await?
+        .map(|artifact| artifact.content_hash)
+        .filter(|hash| !hash.is_empty());
+    let latest = latest_run(repo, &article.id).await?;
+    let completed_body = if let Some(latest) = &latest {
+        SurrealStages::new(repo)
+            .stage_output(&latest.job_id, "intel_brief_body")
+            .await
+            .ok()
+            .and_then(|output| {
+                output["content_hash"]
+                    .as_str()
+                    .filter(|hash| !hash.is_empty())
+                    .map(str::to_owned)
+            })
+    } else {
+        None
+    };
+    let revision = observed_body_revision(
+        &base_revision,
+        latest
+            .as_ref()
+            .map(|run| (run.input_revision.as_str(), run.state == "active")),
+        current_body.as_deref(),
+        completed_body.as_deref(),
+    );
+    let mut stage_revisions = stage_revisions;
+    // Claims remain metadata-only. Body and its inference join must not reuse
+    // outputs from an observed external body refresh.
+    let body_basis = revision
+        .split_once(":body:")
+        .map(|(_, value)| value)
+        .unwrap_or("initial");
+    for index in [0, 2] {
+        if let Some(stage) = stage_revisions.get_mut(index) {
+            *stage = crate::summarization::sha_hex(&json!([stage, body_basis]).to_string());
+        }
+    }
+    metadata["body_observation"] = json!(current_body);
+    Ok(BriefInputs {
+        article_id: article.id.clone(),
+        input_revision: revision,
+        role_snapshot: serde_json::to_string(&settings.defaults)?,
+        title: article.title.clone(),
+        stage_revisions,
+        metadata,
+    })
 }
 
 /// `brief_pipeline::stage_views` for a repository chain.
@@ -1141,4 +1589,123 @@ pub async fn stage_outputs(
         .into_iter()
         .filter_map(|o| Some((o.stage, serde_json::from_str(&o.output_json).ok()?)))
         .collect())
+}
+
+/// Compare only against a committed Body output. A cache head may appear
+/// before that task commits; it must never supersede its own pending chain.
+fn observed_body_revision(
+    base: &str,
+    previous: Option<(&str, bool)>,
+    current: Option<&str>,
+    completed: Option<&str>,
+) -> String {
+    if let Some((previous, pending)) = previous {
+        let previous = previous
+            .split_once(":reload:")
+            .map_or(previous, |(base, _)| base);
+        let previous_base = previous
+            .split_once(":body:")
+            .map_or(previous, |(base, _)| base);
+        if previous_base == base && ((pending && completed.is_none()) || current == completed) {
+            return previous.to_owned();
+        }
+    }
+    let body_basis = if previous.is_some() && completed.is_some() {
+        format!(
+            "transition-{}",
+            crate::summarization::sha_hex(&json!([current, completed]).to_string())
+        )
+    } else {
+        current.unwrap_or("missing").to_owned()
+    };
+    format!("{base}:body:{body_basis}")
+}
+
+fn same_semantic_revision(saved: &str, requested: &str) -> bool {
+    !requested.is_empty()
+        && saved.split_once(":reload:").map_or(saved, |(base, _)| base) == requested
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::{observed_body_revision, same_semantic_revision};
+
+    #[test]
+    fn body_completion_preserves_its_own_chain_but_external_refresh_changes_it() {
+        let first = observed_body_revision("metadata-route", None, None, None);
+        assert_eq!(first, "metadata-route:body:missing");
+        assert_eq!(
+            observed_body_revision("metadata-route", Some((&first, true)), Some("body-1"), None),
+            first,
+            "pending Body race cannot supersede itself"
+        );
+        assert_eq!(
+            observed_body_revision(
+                "metadata-route",
+                Some((&first, false)),
+                Some("body-1"),
+                Some("body-1")
+            ),
+            first,
+            "completion is not its own invalidation source"
+        );
+        let refreshed = observed_body_revision(
+            "metadata-route",
+            Some((&first, false)),
+            Some("body-2"),
+            Some("body-1"),
+        );
+        assert!(refreshed.starts_with("metadata-route:body:transition-"));
+        assert_eq!(
+            observed_body_revision(
+                "metadata-route",
+                Some((&refreshed, false)),
+                Some("body-2"),
+                Some("body-2")
+            ),
+            refreshed,
+            "ordinary reopen reuses the new body generation"
+        );
+        let reload = "metadata-route:body:body-1:reload:explicit";
+        let rollback = observed_body_revision(
+            "metadata-route",
+            Some((reload, false)),
+            Some("body-1"),
+            Some("body-2"),
+        );
+        assert_ne!(
+            rollback, "metadata-route:body:body-1",
+            "reload A->B then external head A must not reuse the B output"
+        );
+        assert_ne!(
+            observed_body_revision(
+                "changed-source",
+                Some((&refreshed, true)),
+                Some("body-2"),
+                None
+            ),
+            refreshed
+        );
+    }
+
+    #[test]
+    fn ordinary_reopen_preserves_only_matching_semantic_inputs() {
+        assert!(same_semantic_revision(
+            "source-domain-prompt-route-v1",
+            "source-domain-prompt-route-v1"
+        ));
+        assert!(same_semantic_revision(
+            "source-domain-prompt-route-v1:reload:explicit-key",
+            "source-domain-prompt-route-v1"
+        ));
+        assert!(!same_semantic_revision(
+            "source-domain-prompt-route-v1:reload:explicit-key",
+            "source-domain-prompt-route-v2"
+        ));
+        assert!(!same_semantic_revision(
+            "legacy-domainless",
+            "source-domain-prompt-route-v1"
+        ));
+        assert!(!same_semantic_revision("", ""));
+    }
 }

@@ -176,27 +176,18 @@ pub enum IntelPage {
     Briefing,
 }
 
-/// Seven OSINT classification tabs shown in Intel (excludes `unk`).
-pub const INTEL_CATEGORIES: &[&str] = &[
-    "geopolitical",
-    "economic",
-    "military",
-    "science",
-    "health",
-    "stability",
-    "technology",
-];
+/// The shared six strategic domains shown in Intel.
+pub const INTEL_CATEGORIES: &[&str] = &argos_osint_core::atlas_taxonomy::DOMAIN_IDS;
 
 /// Short tab label for an Intel classification id.
 pub fn intel_category_short(id: &str) -> &'static str {
     match id {
-        "geopolitical" => "Geopolitical",
+        "governance" => "Governance",
+        "security" => "Security",
         "economic" => "Economic",
-        "military" => "Military",
-        "science" => "Science",
-        "health" => "Health",
-        "stability" => "Stability",
-        "technology" => "Tech",
+        "human" => "Human",
+        "environmental" => "Environment",
+        "scientific" => "Scientific",
         _ => "Unk",
     }
 }
@@ -388,6 +379,9 @@ pub enum FieldId {
     Composer,
     /// Profile > System > Configs: export destination path.
     ProfileExportPath,
+    ProfileActorCsv,
+    ProfileArticleCsv,
+    ProfileClassifierDir,
     /// Profile > System > Configs: import document editor.
     ProfileImportEditor,
 }
@@ -832,7 +826,14 @@ enum WorkEvent {
             argos_osint_core::brain_neighborhood_brief_exec::GenerationFailure,
         >,
     },
-    /// The background summary request exists (its identity, for Retry).
+    /// Read-only lookup found no user-authorized generation for this basis.
+    TopologySummaryIdle {
+        generation: u64,
+        seed: argos_osint_core::brain_topology::TopologySeed,
+        options: argos_osint_core::brain_topology::TopologyOptions,
+        basis_key: String,
+    },
+    /// An existing or explicitly authorized summary request is pending.
     TopologySummaryStarted {
         generation: u64,
         seed: argos_osint_core::brain_topology::TopologySeed,
@@ -978,7 +979,34 @@ enum WorkEvent {
     Atlas(atlas::AtlasEvent),
     AtlasDone {
         outcome: std::result::Result<atlas::Stop, String>,
+        preflight_block: Option<argos_osint_core::classifier::readiness::Diagnostic>,
     },
+}
+
+fn atlas_preflight_diagnostic(
+    error: &anyhow::Error,
+) -> Option<argos_osint_core::classifier::readiness::Diagnostic> {
+    use argos_osint_core::classifier::readiness::{CyclePreflightError, Diagnostic};
+    use argos_osint_core::classifier::ClassifierError;
+    let error = error.downcast_ref::<CyclePreflightError>()?;
+    let (code, retryable) = match error {
+        CyclePreflightError::Classifier { code, source, .. } => (
+            code.clone(),
+            matches!(
+                source,
+                ClassifierError::Busy
+                    | ClassifierError::Timeout
+                    | ClassifierError::WorkerStopped
+                    | ClassifierError::RuntimeBudgetExceeded { .. }
+                    | ClassifierError::Io(_)
+                    | ClassifierError::Storage(_)
+            ),
+        ),
+        CyclePreflightError::MissingPinnedRevision => ("missing_pinned_revision".into(), false),
+        CyclePreflightError::InvalidRunState { code } => (code.clone(), false),
+        _ => ("classifier_preflight_blocked".into(), false),
+    };
+    Some(Diagnostic::new(code, error.to_string(), retryable))
 }
 
 /// Synthesis text for a thread that is still streaming. Deltas for a thread that is not
@@ -1873,11 +1901,11 @@ impl App {
             brain_dirty: true,
             brain_prefer: None,
             hits: Vec::new(),
+            profile_config: super::profile_config::ConfigView::with_paths(&settings.data_paths),
             auth,
             settings,
             hardware: hardware::profile_cached(false),
             profile: super::profile::ProfileView::default(),
-            profile_config: super::profile_config::ConfigView::default(),
             auth_path: paths::auth_path(),
             settings_path: paths::config_path(),
             store,
@@ -3222,11 +3250,36 @@ impl App {
                 }
                 Err(error) => self.profile_config.import_error = Some(error.to_string()),
             },
+            3 => {
+                let paths = self.profile_config.data_paths();
+                let previous = self.settings.data_paths.clone();
+                let result = paths
+                    .validate()
+                    .map_err(anyhow::Error::from)
+                    .and_then(|()| {
+                        self.settings.data_paths = paths;
+                        self.save_settings()
+                    });
+                self.profile_config.paths_status = Some(match result {
+                    Ok(()) => {
+                        "Paths saved · Venture uses these locations on its next launch".into()
+                    }
+                    Err(error) => {
+                        self.settings.data_paths = previous;
+                        format!("Paths not saved: {error}")
+                    }
+                });
+            }
+            4 => self.profile_config.edit_paths = true,
+            5 => self.profile_config.edit_paths = false,
             _ => {}
         }
     }
 
     fn reload_configuration_fields(&mut self) {
+        self.profile_config.actor_csv = self.settings.data_paths.actor_csv.clone();
+        self.profile_config.article_csv = self.settings.data_paths.article_csv.clone();
+        self.profile_config.classifier_dir = self.settings.data_paths.classifier_dir.clone();
         if let Ok(secret) = provider::role_secret(&self.auth, &self.settings, "recon_agent") {
             self.recon_provider = provider::effective_kind(&secret);
             self.recon_model = secret.model;
@@ -3491,6 +3544,9 @@ impl App {
             FieldId::FallbackFilter => &self.fallback_popup_filter,
             FieldId::Composer => &self.input,
             FieldId::ProfileExportPath => &self.profile_config.export_path,
+            FieldId::ProfileActorCsv => &self.profile_config.actor_csv,
+            FieldId::ProfileArticleCsv => &self.profile_config.article_csv,
+            FieldId::ProfileClassifierDir => &self.profile_config.classifier_dir,
             FieldId::ProfileImportEditor => "",
         }
     }
@@ -3555,6 +3611,9 @@ impl App {
             FieldId::FallbackFilter => &mut self.fallback_popup_filter,
             FieldId::Composer => &mut self.input,
             FieldId::ProfileExportPath => &mut self.profile_config.export_path,
+            FieldId::ProfileActorCsv => &mut self.profile_config.actor_csv,
+            FieldId::ProfileArticleCsv => &mut self.profile_config.article_csv,
+            FieldId::ProfileClassifierDir => &mut self.profile_config.classifier_dir,
             // The import editor owns its own cursor and paste buffer; it is
             // reached through `profile_config` rather than a flat string field.
             FieldId::ProfileImportEditor => &mut self.profile_config.import.text,
@@ -5159,9 +5218,13 @@ impl App {
                     let _ = emit_tx.send(WorkEvent::Atlas(event));
                 },
             )
-            .await
-            .map_err(|err| err.to_string());
-            let _ = tx.send(WorkEvent::AtlasDone { outcome });
+            .await;
+            let preflight_block = outcome.as_ref().err().and_then(atlas_preflight_diagnostic);
+            let outcome = outcome.map_err(|err| err.to_string());
+            let _ = tx.send(WorkEvent::AtlasDone {
+                outcome,
+                preflight_block,
+            });
         });
         Ok(())
     }
@@ -5258,7 +5321,7 @@ impl App {
                 self.atlas_status = fault.summary.clone();
                 self.status = format!("Atlas: {}", fault.summary);
             }
-            atlas::AtlasEvent::Stats(stats) => self.atlas_stats = stats,
+            atlas::AtlasEvent::Stats(stats) => self.atlas_stats = *stats,
             atlas::AtlasEvent::Article(article) => {
                 let follow = self.atlas_feed_follow || self.atlas_feed.is_empty();
                 self.atlas_feed.push(article);
@@ -5518,14 +5581,33 @@ impl App {
                 options,
                 basis_key,
                 request,
-            } => self.on_topology_summary(
+            } => {
+                let accepted = self.on_topology_summary(
+                    generation,
+                    &seed,
+                    &options,
+                    &basis_key,
+                    None,
+                    Some(request),
+                );
+                if accepted {
+                    self.topology_state.summary.gen = super::topology::SummaryGen::Pending;
+                }
+                accepted
+            }
+            WorkEvent::TopologySummaryIdle {
                 generation,
-                &seed,
-                &options,
-                &basis_key,
-                None,
-                Some(request),
-            ),
+                seed,
+                options,
+                basis_key,
+            } => {
+                let accepted =
+                    self.on_topology_summary(generation, &seed, &options, &basis_key, None, None);
+                if accepted {
+                    self.topology_state.summary.gen = super::topology::SummaryGen::Idle;
+                }
+                accepted
+            }
             WorkEvent::ManualHistoryLoaded { outcome } => {
                 self.manual_reading = false;
                 if std::mem::take(&mut self.manual_pending) {
@@ -6224,9 +6306,23 @@ impl App {
                 self.on_atlas(event);
                 self.module == Some(ModuleId::Atlas)
             }
-            WorkEvent::AtlasDone { outcome } => {
+            WorkEvent::AtlasDone {
+                outcome,
+                preflight_block,
+            } => {
                 self.atlas_pause = None;
                 self.atlas_insight_progress = None;
+                if let Some(block) = preflight_block {
+                    self.push_log(
+                        "warn",
+                        format!("Atlas blocked ({}): {}", block.code, block.message),
+                    );
+                    self.atlas_state = "blocked".into();
+                    self.atlas_status = block.message;
+                    self.status = self.atlas_status.clone();
+                    self.atlas_auto_started = false;
+                    return true;
+                }
                 let finished = matches!(outcome, Ok(atlas::Stop::Finished));
                 let paused = matches!(outcome, Ok(atlas::Stop::Paused));
                 match outcome {
@@ -7443,10 +7539,9 @@ impl App {
         }
     }
 
-    /// Start (or resume) the background summary for the loaded snapshot.
-    /// Runs entirely off the draw path: the thread publishes the recorded
-    /// brief as the cache fallback, enqueues one deduplicated generation, then
-    /// polls the cache/task state (one read at a time, never a model request).
+    /// Read the summary cache for navigation, or explicitly authorize a
+    /// generation when `retry` comes from the Generate/Retry action. All work
+    /// runs off the draw path; a read never creates a task.
     pub(crate) fn begin_topology_summary(&mut self, retry: bool) {
         use super::topology::SummaryGen;
         let Some(seed) = self.topology_state.seed.clone() else {
@@ -7483,15 +7578,16 @@ impl App {
         if !same {
             summary.request = None;
         }
-        if !(same && matches!(summary.gen, SummaryGen::Generated(_))) || retry {
+        if retry {
             summary.gen = SummaryGen::Pending;
+        } else if !(same && matches!(summary.gen, SummaryGen::Generated(_))) {
+            summary.gen = SummaryGen::Idle;
         }
         summary.generation = summary.generation.wrapping_add(1);
         let generation = summary.generation;
         let stop = Arc::new(AtomicBool::new(false));
         summary.stop = Some(stop.clone());
         let basis_key = brief.basis_key.clone();
-        let request = summary.request.clone();
         let tx = self.work_tx.clone();
         let job = TopologySummaryJob {
             generation,
@@ -7500,7 +7596,6 @@ impl App {
             basis_key,
             brief,
             input,
-            request,
             retry,
             stop,
             limits: argos_osint_core::brain_neighborhood_brief_exec::WatchLimits::standard(),
@@ -7521,7 +7616,7 @@ impl App {
     pub(crate) fn retry_topology_summary(&mut self) {
         self.begin_topology_summary(true);
         self.layout.borrow_mut().view_stamp.clear();
-        self.status = "Retrying the neighborhood summary…".into();
+        self.status = "Requesting the neighborhood summary…".into();
     }
 
     /// Apply a started/settled summary event under the identity fences. It
@@ -11582,7 +11677,6 @@ struct TopologySummaryJob {
     basis_key: String,
     brief: argos_osint_core::brain_neighborhood_brief::NeighborhoodBrief,
     input: argos_osint_core::brain_neighborhood_brief::NeighborhoodInput,
-    request: Option<Box<argos_osint_core::summarization::SummaryRequest>>,
     retry: bool,
     stop: Arc<AtomicBool>,
     limits: argos_osint_core::brain_neighborhood_brief_exec::WatchLimits,
@@ -11632,13 +11726,9 @@ impl TopologySummaryJob {
         use argos_osint_core::storage::{neighborhood_brief as nb, runtime as storage};
         let fingerprint = exec::route_fingerprint(runtime);
         let (input, brief, retry) = (self.input.clone(), self.brief.clone(), self.retry);
-        let request = self.request.as_deref().cloned();
         let published = storage::blocking(move |repo| async move {
             if retry {
-                let req = request.unwrap_or_else(|| exec::build_request(&input, &fingerprint));
-                let _ = nb::retry(&repo, &req).await;
-                let delivery = nb::poll(&repo, &req).await?;
-                Ok((req, delivery))
+                nb::request_generation(&repo, &input, &brief, &fingerprint).await
             } else {
                 nb::publish(&repo, &input, &brief, &fingerprint).await
             }
@@ -11650,13 +11740,24 @@ impl TopologySummaryJob {
                 return;
             }
         };
-        send(WorkEvent::TopologySummaryStarted {
-            generation: self.generation,
-            seed: self.seed.clone(),
-            options: self.options.clone(),
-            basis_key: self.basis_key.clone(),
-            request: Box::new(req.clone()),
-        });
+        if matches!(delivery, exec::Delivery::Idle) {
+            send(WorkEvent::TopologySummaryIdle {
+                generation: self.generation,
+                seed: self.seed.clone(),
+                options: self.options.clone(),
+                basis_key: self.basis_key.clone(),
+            });
+            return;
+        }
+        if matches!(delivery, exec::Delivery::Pending) {
+            send(WorkEvent::TopologySummaryStarted {
+                generation: self.generation,
+                seed: self.seed.clone(),
+                options: self.options.clone(),
+                basis_key: self.basis_key.clone(),
+                request: Box::new(req.clone()),
+            });
+        }
         let begun = std::time::Instant::now();
         let mut errors = 0u32;
         while matches!(delivery, exec::Delivery::Pending) {
@@ -11694,11 +11795,14 @@ impl TopologySummaryJob {
         match delivery {
             exec::Delivery::Generated(g) => send(self.event(Ok(g))),
             exec::Delivery::Failed(f) => send(self.event(Err(f))),
-            exec::Delivery::Idle => self.fail(
-                exec::FailureKind::Storage,
-                "the summary request is no longer queued".into(),
-                send,
-            ),
+            exec::Delivery::Idle => {
+                send(WorkEvent::TopologySummaryIdle {
+                    generation: self.generation,
+                    seed: self.seed.clone(),
+                    options: self.options.clone(),
+                    basis_key: self.basis_key.clone(),
+                });
+            }
             exec::Delivery::Pending => {}
         }
     }
@@ -11946,41 +12050,86 @@ mod tests {
         assert!(app.intel_search.contains('3'));
     }
 
-    fn seed_intel_articles(app: &mut App) {
-        app.store.atlas_insert_run("run-intel", "{}", "{}").unwrap();
+    #[test]
+    fn intel_domains_follow_shared_taxonomy_and_keyboard_mouse() {
+        assert_eq!(
+            INTEL_CATEGORIES,
+            &argos_osint_core::atlas_taxonomy::DOMAIN_IDS
+        );
+        let dir = std::env::var("ARGOS_SCREEN_DIR").ok();
+        if let Some(dir) = &dir {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for (width, height) in [(160, 50), (120, 40), (80, 24), (40, 20)] {
+            let mut app = app();
+            app.screen = Rect::new(0, 0, width, height);
+            app.select(ModuleId::Intel.index());
+            for (index, domain) in INTEL_CATEGORIES.iter().enumerate() {
+                click(&mut app, Target::IntelTab(index));
+                assert_eq!(app.intel_category.as_str(), *domain);
+                if index == 0 || index == INTEL_CATEGORIES.len() - 1 {
+                    if let Some(dir) = &dir {
+                        dump_cells(
+                            &mut app,
+                            dir,
+                            &format!("intel-domains-{domain}-{width}x{height}"),
+                            width,
+                            height,
+                        );
+                    }
+                }
+            }
+            for index in (0..INTEL_CATEGORIES.len() - 1).rev() {
+                app.set_focus(Target::IntelTab(index + 1));
+                app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+                assert_eq!(app.focus, Target::IntelTab(index));
+                app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                assert_eq!(app.intel_category, INTEL_CATEGORIES[index]);
+            }
+            for (index, domain) in INTEL_CATEGORIES.iter().enumerate().skip(1) {
+                app.set_focus(Target::IntelTab(index - 1));
+                app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+                assert_eq!(app.focus, Target::IntelTab(index));
+                app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                assert_eq!(app.intel_category.as_str(), *domain);
+            }
+        }
+    }
+
+    fn seed_intel_articles() {
         let now = chrono::Utc::now().to_rfc3339();
-        for (id, title) in [
+        let articles = [
             ("a1", "Border talks stall"),
             ("a2", "Geneva summit delayed"),
-        ] {
-            app.store
-                .atlas_upsert_article(&AtlasArticleRow {
-                    run_id: "run-intel".into(),
-                    id: id.into(),
-                    title: title.into(),
-                    description: format!("{title} body"),
-                    url: format!("https://example.com/{id}"),
-                    country: "us".into(),
-                    source_name: "Wire".into(),
-                    source_domain: "example.com".into(),
-                    published_at: now.clone(),
-                    provider: "newsapi".into(),
-                    temperature: 0.88,
-                    category: "geopolitical".into(),
-                    categories: vec!["geopolitical".into()],
-                    admitted_at: String::new(),
-                    seen_at: now.clone(),
-                    author: String::new(),
-                    image_url: String::new(),
-                })
-                .unwrap();
-        }
+        ]
+        .into_iter()
+        .map(|(id, title)| AtlasArticleRow {
+            run_id: "run-intel".into(),
+            id: id.into(),
+            title: title.into(),
+            description: "ballot patrol common".into(),
+            url: format!("https://wire.example/{id}"),
+            country: "us".into(),
+            source_name: "Wire".into(),
+            source_domain: "wire.example".into(),
+            published_at: now.clone(),
+            provider: "newsapi".into(),
+            temperature: 0.88,
+            category: String::new(),
+            categories: Vec::new(),
+            admitted_at: String::new(),
+            seen_at: now.clone(),
+            author: String::new(),
+            image_url: String::new(),
+        })
+        .collect();
+        crate::test_storage::admit_current(articles);
     }
 
     #[test]
     fn intel_opens_bulletin_filters_and_opens_briefing() {
         let mut app = app();
-        seed_intel_articles(&mut app);
+        seed_intel_articles();
         click(&mut app, Target::App(ModuleId::Intel.index()));
         assert_eq!(app.module, Some(ModuleId::Intel));
         assert_eq!(app.intel_page, IntelPage::Bulletin);
@@ -13353,7 +13502,8 @@ mod tests {
             return;
         };
         std::fs::create_dir_all(&dir).unwrap();
-        for role in [DefaultsRole::ClaimAssessor] {
+        {
+            let role = DefaultsRole::ClaimAssessor;
             let mut app = app();
             app.screen = Rect::new(0, 0, 140, 40);
             app.google_key = "google-key".into();
@@ -15255,7 +15405,7 @@ mod tests {
             provider: "newsapi".into(),
             temperature: 1.0,
             seen_at: "2026-10-01T00:01:00Z".into(),
-            category: "stability".into(),
+            category: "governance".into(),
         });
         app.atlas_feed_sel = 0;
         app.set_focus(Target::AtlasFeed(0));
@@ -15263,7 +15413,7 @@ mod tests {
         assert_eq!(app.module, Some(ModuleId::Intel));
         assert_eq!(app.intel_page, IntelPage::Briefing);
         assert_eq!(app.intel_articles[app.intel_sel].id, "art-1");
-        assert_eq!(app.intel_category, "stability");
+        assert_eq!(app.intel_category, "governance");
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.intel_page, IntelPage::Bulletin);
         app.select(ModuleId::Atlas.index());
@@ -15325,7 +15475,7 @@ mod tests {
                 published_at: "2026-10-01T00:00:00Z".into(),
                 provider: "newsapi".into(),
                 temperature: 1.0,
-                category: "stability".into(),
+                category: "governance".into(),
                 seen_at: "2026-10-01T00:01:00Z".into(),
                 categories: Vec::new(),
                 admitted_at: String::new(),
@@ -15350,14 +15500,14 @@ mod tests {
         assert!(painted.contains("Cabinet reshuffle"), "{painted}");
         assert!(painted.contains("Reuters"), "{painted}");
         assert!(painted.contains("DE"), "{painted}");
-        assert!(painted.contains("stability"), "{painted}");
+        assert!(painted.contains("governance"), "{painted}");
         assert!(painted.contains("news:"), "{painted}");
         assert!(painted.contains("articles"), "{painted}");
         click(&mut app, Target::AtlasArticle(0));
         assert_eq!(app.module, Some(ModuleId::Intel));
         assert_eq!(app.intel_page, IntelPage::Briefing);
         assert_eq!(app.intel_articles[app.intel_sel].id, "art-1");
-        assert_eq!(app.intel_category, "stability");
+        assert_eq!(app.intel_category, "governance");
         assert!(matches!(app.overlay, Overlay::None));
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.intel_page, IntelPage::Bulletin);
@@ -16380,6 +16530,7 @@ mod tests {
         };
         app.atlas_auto_started = true;
         app.on_work_event(WorkEvent::AtlasDone {
+            preflight_block: None,
             outcome: Ok(atlas::Stop::Finished),
         });
         assert_eq!(app.atlas_run_sel, 0);
@@ -16394,6 +16545,7 @@ mod tests {
         app.atlas_run_sel = 1;
         app.atlas_auto_started = false;
         app.on_work_event(WorkEvent::AtlasDone {
+            preflight_block: None,
             outcome: Ok(atlas::Stop::Finished),
         });
         assert_eq!(app.atlas_run_sel, 1);
@@ -16402,9 +16554,48 @@ mod tests {
         app.atlas_run_sel = 1;
         app.atlas_auto_started = true;
         app.on_work_event(WorkEvent::AtlasDone {
+            preflight_block: None,
             outcome: Ok(atlas::Stop::Finished),
         });
         assert_eq!(app.atlas_run_sel, 1);
+    }
+
+    #[test]
+    fn typed_classifier_preflight_block_preserves_atlas_history_and_clears_owner() {
+        use argos_osint_core::classifier::readiness::CyclePreflightError;
+        let error: anyhow::Error = CyclePreflightError::MissingPinnedRevision.into();
+        let diagnostic = atlas_preflight_diagnostic(&error).expect("typed preflight diagnostic");
+        assert_eq!(diagnostic.code, "missing_pinned_revision");
+        assert!(atlas_preflight_diagnostic(&anyhow::anyhow!("unrelated failure")).is_none());
+        let mut app = app();
+        let history = |runs: &[argos_osint_core::store::AtlasRunRow]| {
+            runs.iter()
+                .map(|run| {
+                    (
+                        run.id.clone(),
+                        run.state.clone(),
+                        run.phase,
+                        run.cursor_json.clone(),
+                        run.stats_json.clone(),
+                        run.note.clone(),
+                        run.started_at.clone(),
+                        run.finished_at.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = history(&app.atlas_runs);
+        app.atlas_auto_started = true;
+        app.atlas_pause = Some(Arc::new(AtomicBool::new(false)));
+        app.on_work_event(WorkEvent::AtlasDone {
+            outcome: Err(error.to_string()),
+            preflight_block: Some(diagnostic),
+        });
+        assert_eq!(app.atlas_state, "blocked");
+        assert!(app.atlas_pause.is_none());
+        assert!(!app.atlas_auto_started);
+        assert_eq!(history(&app.atlas_runs), before);
+        assert!(app.atlas_status.contains("saved model revision"));
     }
 
     #[test]
@@ -17305,6 +17496,115 @@ mod tests {
     }
 
     /// The Configs popup covers about 85% of the viewport and is bounded by it.
+    #[test]
+    fn profile_dataset_paths_save_and_reload_through_keyboard_and_mouse() {
+        let mut app = app();
+        let home = tempfile::tempdir().unwrap();
+        app.settings_path = home.path().join("config.toml");
+        app.select(ModuleId::System.index());
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        render(&mut app, 120, 40);
+        click(&mut app, Target::ConfigAction(4));
+        let text = buffer_text(&render(&mut app, 120, 40));
+        assert!(
+            text.contains("type path") && text.contains("Save paths"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("JSON newline") && !text.contains("Verify → Save"),
+            "{text}"
+        );
+        let narrow = buffer_text(&render(&mut app, 40, 20));
+        assert!(
+            narrow.contains("Resize terminal to edit dataset") && narrow.contains("paths."),
+            "{narrow}"
+        );
+        assert!(!hit(&app, Target::Field(FieldId::ProfileActorCsv)));
+        assert!(!hit(&app, Target::ConfigAction(3)));
+        render(&mut app, 120, 40);
+        click(&mut app, Target::Field(FieldId::ProfileActorCsv));
+        app.edit_paste("datasets/actors.csv");
+        app.set_focus(Target::Field(FieldId::ProfileArticleCsv));
+        app.edit_paste("/data/reviewed article data.csv");
+        app.set_focus(Target::Field(FieldId::ProfileClassifierDir));
+        app.edit_paste("models/article classifier");
+        app.set_focus(Target::ConfigAction(3));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let saved = SettingsFile::load_from(&app.settings_path).unwrap();
+        assert_eq!(saved.data_paths.actor_csv, "datasets/actors.csv");
+        assert_eq!(
+            saved.data_paths.article_csv,
+            "/data/reviewed article data.csv"
+        );
+        assert_eq!(saved.data_paths.classifier_dir, "models/article classifier");
+        assert!(app
+            .profile_config
+            .paths_status
+            .as_deref()
+            .unwrap()
+            .contains("Paths saved"));
+        app.profile_config.classifier_dir = "invalid\npath".into();
+        render(&mut app, 120, 40);
+        click(&mut app, Target::ConfigAction(3));
+        assert_eq!(
+            SettingsFile::load_from(&app.settings_path)
+                .unwrap()
+                .data_paths,
+            saved.data_paths
+        );
+        assert!(app
+            .profile_config
+            .paths_status
+            .as_deref()
+            .unwrap()
+            .contains("not saved"));
+    }
+
+    #[test]
+    fn dump_profile_dataset_path_screens() {
+        let Some(dir) = std::env::var_os("ARGOS_SCREEN_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (width, height) in [(160, 50), (100, 32), (80, 24), (60, 18), (40, 20)] {
+            let mut app = app();
+            app.select(ModuleId::System.index());
+            app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            app.config_action(4);
+            app.profile_config.actor_csv = "/datasets/actors.csv".into();
+            app.profile_config.article_csv = "/datasets/reviewed articles.csv".into();
+            app.profile_config.classifier_dir = "models/article classifier".into();
+            app.settings.data_paths = app.profile_config.data_paths();
+            app.set_focus(Target::Field(FieldId::ProfileArticleCsv));
+            dump_cells(
+                &mut app,
+                dir.to_str().unwrap(),
+                &format!("profile-paths-{width}x{height}"),
+                width,
+                height,
+            );
+            app.profile.tab = crate::tui::profile::SystemTab::System;
+            app.compact_pages[ModuleId::System.index()] = 1;
+            dump_cells(
+                &mut app,
+                dir.to_str().unwrap(),
+                &format!("profile-saved-paths-{width}x{height}"),
+                width,
+                height,
+            );
+            app.profile.tab = crate::tui::profile::SystemTab::Configs;
+            app.config_action(5);
+            dump_cells(
+                &mut app,
+                dir.to_str().unwrap(),
+                &format!("profile-transfer-{width}x{height}"),
+                width,
+                height,
+            );
+        }
+    }
+
     #[test]
     fn profile_configs_page_uses_the_body_and_has_visible_actions() {
         let mut app = app();
@@ -18917,6 +19217,14 @@ mod tests {
         if let Some(item) = brief.overview.as_mut() {
             item.text = text.into();
         }
+        let current = brief
+            .facets
+            .iter_mut()
+            .find(|block| {
+                block.facet == argos_osint_core::intelligence_contracts::BriefFacet::CurrentState
+            })
+            .expect("current state fixture");
+        current.items[0].text = text.into();
         Box::new(argos_osint_core::brain_neighborhood_brief_exec::Generated {
             brief,
             route: "mock/summary-model".into(),
@@ -18956,7 +19264,7 @@ mod tests {
             );
             // It sits above the brief text, so it is on screen without scrolling.
             let note = text.find("Ignored unknown reference").unwrap();
-            let overview = text.find("Overview").unwrap();
+            let overview = text.find("Current State").unwrap();
             assert!(note < overview, "{width}x{height}");
             // Several keys collapse into one line.
             let g = host_noted(
@@ -19031,7 +19339,7 @@ mod tests {
         let text = buffer_text(&render(&mut app, 120, 40));
         assert!(text.contains("[Summary] [Record]"));
         assert!(text.contains("Summary · recorded brief"));
-        assert!(text.contains("Overview"));
+        assert!(text.contains("Current State"));
         app.activate_target(Target::TopologyContentTab(1));
         assert_eq!(app.topology_state.content_tab, ContentTab::Record);
         let text = buffer_text(&render(&mut app, 120, 40));
@@ -19211,14 +19519,37 @@ mod tests {
                 "{label}: {text}"
             );
             // The recorded brief is still there.
-            assert!(text.contains("Overview"), "{label}: content kept");
+            assert!(text.contains("Current State"), "{label}: content kept");
             assert!(text.contains("Retry"), "{label}: retry offered");
         }
+        // Real reads attach both the deterministic brief and its input packet.
+        let snapshot = app.topology_state.snapshot.as_ref().unwrap();
+        let input = argos_osint_core::brain_neighborhood_brief::BriefInput {
+            snapshot,
+            seed: app.topology_state.seed.as_ref().unwrap(),
+            depth: app.topology_state.depth,
+            cycle: &app.topology_state.cycle_scope,
+            payloads: Default::default(),
+            payload_reads_skipped: 0,
+        };
+        let packet = argos_osint_core::brain_neighborhood_brief::build_input(
+            &input,
+            &app.topology_state.summary.basis_key,
+        );
+        app.topology_state
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .neighborhood_input = Some(packet);
         // Retry flips back to generating while the brief stays visible.
         app.retry_topology_summary();
+        assert!(matches!(
+            app.topology_state.summary.gen,
+            super::super::topology::SummaryGen::Pending
+        ));
         let text = buffer_text(&render(&mut app, 120, 40));
-        assert!(text.contains("Overview"));
-        assert!(text.contains("Retrying"));
+        assert!(text.contains("Current State"));
+        assert!(text.contains("generating"), "{text}");
     }
 
     #[test]
@@ -19243,7 +19574,7 @@ mod tests {
             text.contains("stale · refresh") && text.contains("failed · recorded brief"),
             "{text}"
         );
-        assert!(text.contains("Overview"));
+        assert!(text.contains("Current State"));
         // No seed.
         let mut app = brief_fixture();
         app.topology_state.snapshot = None;
@@ -19357,17 +19688,12 @@ mod tests {
     fn topology_summary_rows_are_cached_per_key_and_keep_markup_characters() {
         use super::super::topology::{summary_rows, SummaryGen, SummaryRow};
         let mut app = brief_fixture();
+        let generated = generated_from(&app, "Entity `x*y*` and *Star* Corp");
         app.topology_state
             .snapshot
             .as_mut()
             .unwrap()
-            .neighborhood_brief
-            .as_mut()
-            .unwrap()
-            .overview
-            .as_mut()
-            .unwrap()
-            .text = "Entity `x*y*` and *Star* Corp".into();
+            .neighborhood_brief = Some(generated.brief);
         let st = &app.topology_state;
         let a = summary_rows(st, false, None, 40);
         let b = summary_rows(st, false, None, 40);
@@ -19427,7 +19753,7 @@ mod tests {
     }
 
     #[test]
-    fn topology_summary_begin_publishes_the_fallback_and_goes_pending() {
+    fn topology_summary_navigation_reads_cache_and_retains_idle_fallback() {
         use super::super::topology::SummaryGen;
         use argos_osint_core::brain_neighborhood_brief as brief;
         let mut app = brief_fixture();
@@ -19452,17 +19778,10 @@ mod tests {
         app.begin_topology_summary(false);
         let state = &app.topology_state.summary;
         assert_eq!(state.generation, 1);
-        assert!(
-            matches!(
-                state.gen,
-                SummaryGen::Pending | SummaryGen::Failed(_) | SummaryGen::Generated(_)
-            ),
-            "{:?}",
-            state.gen
-        );
+        assert!(matches!(state.gen, SummaryGen::Idle), "{:?}", state.gen);
         // The deterministic brief is on screen whatever the outcome.
         let text = buffer_text(&render(&mut app, 120, 40));
-        assert!(text.contains("Overview"));
+        assert!(text.contains("Current State"));
     }
 
     #[test]

@@ -27,6 +27,14 @@ pub enum Phase {
     Fidelity,
     /// Dispatch → first meaningful answer/reasoning delta (first one only).
     FirstOutput,
+    /// Cache lookup wall time.
+    Cache,
+    /// Frozen packet construction.
+    Packet,
+    /// Host validation after generation.
+    Validation,
+    /// Fenced storage publication.
+    Persistence,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +75,12 @@ pub type StageClock = Arc<Mutex<HashMap<Phase, Duration>>>;
 
 tokio::task_local! {
     static CLOCK: StageClock;
+}
+
+/// Capture the current stage clock before crossing a thread/task boundary.
+/// A spawned future must use `with_clock`; Tokio does not inherit task locals.
+pub fn current_clock() -> Option<StageClock> {
+    CLOCK.try_with(Arc::clone).ok()
 }
 
 /// Run `fut` with `clock` as the current stage clock.
@@ -242,3 +256,70 @@ pub fn activity_sink(
 #[cfg(test)]
 #[path = "brief_timing_tests.rs"]
 mod tests;
+
+/// Counts-only observation. Missing phases stay null, never a fabricated zero.
+/// This payload is operational telemetry and must never enter evidence/cache keys.
+pub fn observation(
+    clock: &StageClock,
+    total: Duration,
+    outcome: &str,
+    rows: usize,
+) -> serde_json::Value {
+    let value = |phase| {
+        clock.lock().ok().and_then(|map| {
+            map.get(&phase)
+                .map(|d| d.as_micros().min(u64::MAX as u128) as u64)
+        })
+    };
+    serde_json::json!({"schema":"intel-stage-timing-v1","outcome":outcome,"total_us":total.as_micros().min(u64::MAX as u128) as u64,
+        "local_us":value(Phase::Local),"model_us":value(Phase::Model),"fidelity_us":value(Phase::Fidelity),"first_output_us":value(Phase::FirstOutput),
+        "cache_us":value(Phase::Cache),"packet_us":value(Phase::Packet),"validation_us":value(Phase::Validation),"persistence_us":value(Phase::Persistence),"rows":rows,
+        "queue_us":null,"db_round_trips":null,"rss_bytes":null,"unavailable_reason":"queue admission, driver round trips and process RSS are not measured by this stage clock; provider attempts remain in model-operation telemetry"})
+}
+
+/// Bounded optional observation sink for isolated benchmarks and host diagnostics.
+/// It carries operational measurements only, outside all evidence/cache identities.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ObservationLog {
+    pub events: Vec<serde_json::Value>,
+    pub omitted: usize,
+}
+
+pub type ObservationSink = Arc<Mutex<ObservationLog>>;
+
+tokio::task_local! {
+    static OBSERVATIONS: ObservationSink;
+}
+
+/// Capture the scope's emitted measurements without a global subscriber.
+/// Spawned tasks must explicitly carry a captured sink, like the stage clock.
+pub fn with_observations<F: std::future::Future>(
+    sink: ObservationSink,
+    fut: F,
+) -> impl std::future::Future<Output = F::Output> {
+    // Keep the measured operation out of the task-local wrapper's inline state.
+    // Deep embedded queries otherwise share its large poll frame with every
+    // caller, even when the operation's later model branch is not executing.
+    OBSERVATIONS.scope(sink, Box::pin(fut))
+}
+
+/// Emit bounded numeric/count metadata through the existing tracing subscriber.
+/// The optional scope receives at most 64 events; omitted counts stay explicit.
+pub fn emit_observation(operation: &str, measurement: serde_json::Value) {
+    let observation = serde_json::json!({"operation":operation,"measurement":measurement});
+    tracing::info!(target: "argos::intel_performance", observation = %observation, "Intel stage measured");
+    let _ = OBSERVATIONS.try_with(|sink| {
+        if let Ok(mut log) = sink.lock() {
+            if log.events.len() < 64 && observation.to_string().len() <= 4096 {
+                log.events.push(observation);
+            } else {
+                log.omitted = log.omitted.saturating_add(1);
+            }
+        }
+    });
+}
+
+/// Emit a structured operational event without writing during read navigation.
+pub fn emit(clock: &StageClock, total: Duration, outcome: &str, rows: usize, operation: &str) {
+    emit_observation(operation, observation(clock, total, outcome, rows));
+}

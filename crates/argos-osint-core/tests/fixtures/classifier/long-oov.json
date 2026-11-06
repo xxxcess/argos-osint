@@ -1,0 +1,6 @@
+{
+  "schema_version": "classifier-long-inputs-v1",
+  "known_text": "ballot patrol common cannot NATO 2026 never 2",
+  "repeat_count": 128,
+  "oov_token": "zzqxjv"
+}

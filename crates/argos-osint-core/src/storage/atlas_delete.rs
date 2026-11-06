@@ -540,6 +540,7 @@ pub async fn delete_article(
             let mut remaining = run(&tx, tx.query("RETURN count(SELECT id FROM atlas_article WHERE article_id = $article LIMIT 1)").bind(("article", article_id.clone()))).await?;
             if take::<Option<usize>>(&mut remaining, 0)?.unwrap_or(0) == 0 {
                 // Bodies/artifacts are article-owned, shared by run occurrences.
+                super::pipeline_inputs::body_input_guard_in(&tx,std::slice::from_ref(&article_id)).await?;
                 super::insight::remove_nlp_owner_in(&tx, "article", &article_id).await?;
             }
             Ok((ids, ()))

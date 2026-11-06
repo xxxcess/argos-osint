@@ -1,0 +1,103 @@
+{
+  "schema_version": "classifier-test-recipe-v1",
+  "model_id": "fixture-m1",
+  "rows": [
+    {
+      "row_id": "p-governance",
+      "title": "ballot common cannot NATO 2026",
+      "description": "never 2",
+      "membership": [
+        "Present",
+        "Absent",
+        "Absent",
+        "Absent",
+        "Absent",
+        "Absent"
+      ]
+    },
+    {
+      "row_id": "p-security",
+      "title": "patrol common cannot NATO 2026",
+      "description": "never 2",
+      "membership": [
+        "Absent",
+        "Present",
+        "Absent",
+        "Absent",
+        "Absent",
+        "Absent"
+      ]
+    },
+    {
+      "row_id": "p-economic",
+      "title": "freight common cannot NATO 2026",
+      "description": "never 2",
+      "membership": [
+        "Absent",
+        "Absent",
+        "Present",
+        "Absent",
+        "Absent",
+        "Absent"
+      ]
+    },
+    {
+      "row_id": "p-human",
+      "title": "clinic common cannot NATO 2026",
+      "description": "never 2",
+      "membership": [
+        "Absent",
+        "Absent",
+        "Absent",
+        "Present",
+        "Absent",
+        "Absent"
+      ]
+    },
+    {
+      "row_id": "p-environmental",
+      "title": "river common cannot NATO 2026",
+      "description": "never 2",
+      "membership": [
+        "Absent",
+        "Absent",
+        "Absent",
+        "Absent",
+        "Present",
+        "Absent"
+      ]
+    },
+    {
+      "row_id": "p-scientific",
+      "title": "sensor common cannot NATO 2026",
+      "description": "never 2",
+      "membership": [
+        "Absent",
+        "Absent",
+        "Absent",
+        "Absent",
+        "Absent",
+        "Present"
+      ]
+    },
+    {
+      "row_id": "negative",
+      "title": "common knitting",
+      "description": "never 1",
+      "membership": [
+        "Absent",
+        "Absent",
+        "Absent",
+        "Absent",
+        "Absent",
+        "Absent"
+      ]
+    }
+  ],
+  "queries": [
+    "ballot patrol common",
+    "ballot ballot patrol patrol common",
+    "zzqxjv",
+    "cannot NATO 2026 never 2"
+  ]
+}

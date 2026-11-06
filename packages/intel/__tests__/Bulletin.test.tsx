@@ -14,7 +14,7 @@ const row: Article = {
   run_id: "run-one",
   title: "Harbor access report",
   description: "Retained source description.",
-  category: "geopolitical",
+  category: "governance",
   source_name: "Fixture Wire",
   source_domain: "example.test",
   url: "https://example.test/report",
@@ -156,7 +156,7 @@ describe("Nexus Desk Bulletin", () => {
     });
     expect(search).toHaveValue("");
     expect(
-      screen.getByRole("button", { name: /^Geopolitical$/ }),
+      screen.getByRole("button", { name: /^Governance$/ }),
     ).toHaveAttribute("aria-pressed", "true");
   });
 
@@ -167,14 +167,14 @@ describe("Nexus Desk Bulletin", () => {
     await screen.findByRole("button", {
       name: `Open Focus Brief: ${row.title}`,
     });
-    await user.click(screen.getByRole("button", { name: /^Geopolitical$/ }));
+    await user.click(screen.getByRole("button", { name: /^Governance$/ }));
     await user.keyboard("{ArrowDown}");
-    expect(screen.getByRole("button", { name: /^Economic$/ })).toHaveFocus();
+    expect(screen.getByRole("button", { name: /^Security$/ })).toHaveFocus();
     expect(
-      screen.getByRole("button", { name: /^Geopolitical$/ }),
+      screen.getByRole("button", { name: /^Governance$/ }),
     ).toHaveAttribute("aria-pressed", "true");
     await user.keyboard("{Enter}");
-    expect(screen.getByRole("button", { name: /^Economic$/ })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: /^Security$/ })).toHaveAttribute(
       "aria-pressed",
       "true",
     );
@@ -183,7 +183,7 @@ describe("Nexus Desk Bulletin", () => {
     ).not.toBeInTheDocument();
     expect(screen.queryByText(row.id)).not.toBeInTheDocument();
     expect(screen.getByText(/Fixture Wire/)).toBeVisible();
-    await waitFor(() => expect(requests.at(-1)?.category).toBe("economic"));
+    await waitFor(() => expect(requests.at(-1)?.category).toBe("security"));
     const card = await screen.findByRole("button", {
       name: `Open Focus Brief: ${row.title}`,
     });
@@ -197,7 +197,7 @@ describe("Nexus Desk Bulletin", () => {
     mswServer.use(
       http.get(`${testBase}/api/v1/articles`, ({ request }) => {
         const cursor = new URL(request.url).searchParams.get("cursor");
-        requests.push({ category: "geopolitical", search: "", cursor });
+        requests.push({ category: "governance", search: "", cursor });
         return HttpResponse.json({
           rows: cursor ? [row, { ...row, run_id: "run-two" }] : [row],
           next_cursor: cursor ? null : "opaque+/cursor=",

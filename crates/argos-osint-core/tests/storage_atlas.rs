@@ -3,6 +3,8 @@
 //! Run through `python3 scripts/test_surreal.py --mode both`.
 #![cfg(feature = "surreal")]
 
+#[path = "support/current_admission.rs"]
+mod current_admission;
 mod support;
 
 use argos_osint_core::storage::atlas;
@@ -324,20 +326,20 @@ async fn article_views_filter_by_category_membership_and_dedup_identity() {
     let Some(server) = Server::start() else {
         return;
     };
-    let db = fresh(&server, "atlas_membership").await;
-    atlas::insert_run(&db, "r1", "{}", "{}").await.unwrap();
+    let repo = server.repo("argos", "atlas_membership").await;
+    let db = repo.db();
+    atlas::insert_run(db, "r1", "{}", "{}").await.unwrap();
     let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let mut science = article("r1", "a", "2026-01-02");
-    science.categories = vec!["science".into(), "health".into()];
-    atlas::upsert_article(&db, &science).await.unwrap();
-    let mut military = article("r1", "b", "2026-01-02");
-    military.categories = vec!["military".into()];
-    atlas::upsert_article(&db, &military).await.unwrap();
-    // A legacy row without v2 tags is pending migration: excluded from All.
-    let legacy = article("r1", "c", "2026-01-02");
-    atlas::upsert_article(&db, &legacy).await.unwrap();
+    current_admission::admit(&repo, &mut science, "River sensor common").await;
+    let mut security = article("r1", "b", "2026-01-02");
+    current_admission::admit(&repo, &mut security, "Ballot patrol common").await;
+    // Current-looking tags on an unclassified legacy row are not authority.
+    let mut legacy = article("r1", "c", "2026-01-02");
+    legacy.categories = science.categories.clone();
+    atlas::upsert_article(db, &legacy).await.unwrap();
 
-    let science_view = atlas::articles_for_intel(&db, "science", &day, "")
+    let science_view = atlas::articles_for_intel(db, "scientific", &day, "")
         .await
         .unwrap();
     assert_eq!(
@@ -347,13 +349,19 @@ async fn article_views_filter_by_category_membership_and_dedup_identity() {
             .collect::<Vec<_>>(),
         ["a"]
     );
-    let all = atlas::articles_for_intel(&db, "all", &day, "")
+    assert!(
+        atlas::articles_for_intel(db, "science", &day, "")
+            .await
+            .is_err(),
+        "obsolete filters are rejected"
+    );
+    let all = atlas::articles_for_intel(db, "all", &day, "")
         .await
         .unwrap();
     assert_eq!(
         all.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
         ["a", "b"],
-        "All is the admitted corpus with tags; legacy rows wait for migration"
+        "only real current admissions are listed"
     );
 }
 
@@ -398,7 +406,7 @@ async fn category_membership_filters_use_the_categories_index() {
     let db = fresh(&server, "atlas_membership_plans").await;
     let mut r = db
         .query(format!("{MEMBERSHIP_SURQL} EXPLAIN FULL"))
-        .bind(("category", "science".to_string()))
+        .bind(("category", "scientific".to_string()))
         .await
         .unwrap()
         .check()
@@ -412,4 +420,58 @@ async fn category_membership_filters_use_the_categories_index() {
         !p.contains("TableScan"),
         "membership must not fall back to a table scan: {p}"
     );
+}
+
+#[tokio::test]
+async fn admission_existence_is_run_scoped_and_includes_all_retained_states() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let db = fresh(&server, "admission_preflight").await;
+    assert!(!atlas::admission_pending_exists(&db, "requested")
+        .await
+        .unwrap());
+    atlas::stage_article(
+        &db,
+        &article("other", "a", "2026-01-01"),
+        "revision-1",
+        "fixture-taxonomy",
+    )
+    .await
+    .unwrap();
+    assert!(!atlas::admission_pending_exists(&db, "requested")
+        .await
+        .unwrap());
+    assert!(atlas::admission_pending_exists(&db, "other").await.unwrap());
+    atlas::stage_article(
+        &db,
+        &article("requested", "b", "2026-01-01"),
+        "revision-1",
+        "fixture-taxonomy",
+    )
+    .await
+    .unwrap();
+    for state in ["pending", "evaluating", "failed", "future_live_state"] {
+        db.query("UPDATE atlas_admission SET state = $state WHERE run_id = 'requested'")
+            .bind(("state", state.to_string()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(
+            atlas::admission_pending_exists(&db, "requested")
+                .await
+                .unwrap(),
+            "{state}"
+        );
+    }
+    db.query("DELETE atlas_admission WHERE run_id = 'requested'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(!atlas::admission_pending_exists(&db, "requested")
+        .await
+        .unwrap());
+    assert!(atlas::admission_pending_exists(&db, "other").await.unwrap());
 }

@@ -8,10 +8,10 @@
 //! coverage counters. It never parses labels, details or id strings for
 //! meaning, never writes, and never calls a model or provider.
 //!
-//! Format (120–180 words, fewer for sparse neighborhoods; inapplicable blocks
-//! are omitted, with no placeholders): Overview, Connections (at most two),
-//! Interpretation (at most one), Limits (one line). Items carry typed basis
-//! references (node and edge ids) that the UI opens in Record.
+//! Current summaries expose eight evidence facets within a bounded word budget;
+//! unsupported facets carry an explicit absence reason. Historical Overview,
+//! Connections, Interpretation and Limits fields remain compatibility projections.
+//! Items carry typed basis references that the UI opens in Record.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,10 +21,11 @@ use crate::brain_topology::{
     CycleScope, TopologyEdge, TopologyEdgeKind, TopologyNode, TopologyNodeKind, TopologySeed,
     TopologySnapshot,
 };
+use crate::intelligence_contracts::{BriefFacet, FacetBlock, MAX_SUMMARY_EDGES, MAX_SUMMARY_NODES};
 use crate::memory_metadata::MemoryPayload;
 
 /// Bump when the rendering or selection rules change (part of `basis_key`).
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 3;
 /// Upper bound on payload reads while hydrating one brief.
 pub const MAX_PAYLOAD_READS: usize = 160;
 const WORDS_MAX: usize = 180;
@@ -118,6 +119,9 @@ pub struct NeighborhoodBrief {
     pub limits: Vec<BriefItem>,
     pub references: Vec<BasisRef>,
     pub coverage: BriefCoverage,
+    /// Additive evidence facets. Historical cache records default to no facets.
+    #[serde(default)]
+    pub facets: Vec<FacetBlock<BriefItem>>,
 }
 
 impl NeighborhoodBrief {
@@ -137,6 +141,16 @@ impl NeighborhoodBrief {
             cycle,
             self.coverage.status.label()
         )
+    }
+
+    /// Supported facet sections in stable order; the old block fields remain
+    /// readable for cached records and compatibility consumers.
+    pub fn facet_blocks(&self) -> Vec<(&'static str, Vec<&BriefItem>)> {
+        self.facets
+            .iter()
+            .filter(|facet| !facet.items.is_empty())
+            .map(|facet| (facet.facet.display_name(), facet.items.iter().collect()))
+            .collect()
     }
 
     /// Items in reading order with their block name.
@@ -355,9 +369,90 @@ fn dedup(mut v: Vec<String>) -> Vec<String> {
     v
 }
 
+/// Select the bounded summary neighborhood without changing the larger graph
+/// exploration result. Existing stricter source limits and explanatory paths
+/// remain authoritative; discovery totals disclose every omitted record.
+pub fn summary_projection(source: &TopologySnapshot) -> TopologySnapshot {
+    let mut projected = source.clone();
+    projected.nodes.clear();
+    projected.edges.clear();
+    projected.neighborhood_brief = None;
+    projected.neighborhood_input = None;
+    let options = crate::brain_topology::TopologyOptions {
+        max_nodes: MAX_SUMMARY_NODES.min(source.nodes.len()),
+        max_edges: MAX_SUMMARY_EDGES.min(source.edges.len()),
+        ..Default::default()
+    };
+    crate::brain_topology::admit(
+        &mut projected,
+        source
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.clone()))
+            .collect(),
+        source
+            .edges
+            .iter()
+            .map(|edge| (edge.id.clone(), edge.clone()))
+            .collect(),
+        &options,
+        source.exploration_exhausted,
+        source.findings.gaps.iter().cloned().collect(),
+    );
+    projected.discovered_nodes = source
+        .discovered_nodes
+        .max(source.nodes.len().saturating_add(source.omitted_nodes));
+    projected.discovered_edges = source
+        .discovered_edges
+        .max(source.edges.len().saturating_add(source.omitted_edges));
+    projected
+        .unresolved_endpoints
+        .extend(source.unresolved_endpoints.iter().cloned());
+    projected.unresolved_endpoints.sort();
+    projected.unresolved_endpoints.dedup();
+    projected.omitted_nodes = projected
+        .discovered_nodes
+        .saturating_sub(projected.nodes.len());
+    projected.omitted_edges = projected
+        .discovered_edges
+        .saturating_sub(projected.edges.len());
+    projected.total_nodes = source.total_nodes.max(projected.discovered_nodes);
+    projected.total_edges = source.total_edges.max(projected.discovered_edges);
+    projected.has_continuation = projected.omitted_nodes > 0 || projected.omitted_edges > 0;
+    projected
+}
+fn projected_payloads(
+    input: &BriefInput,
+    projection: &TopologySnapshot,
+) -> BTreeMap<String, MemoryPayload> {
+    let ids: BTreeSet<&str> = projection
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .chain(projection.edges.iter().map(|edge| edge.id.as_str()))
+        .collect();
+    input
+        .payloads
+        .iter()
+        .filter(|(id, _)| ids.contains(id.as_str()))
+        .map(|(id, payload)| (id.clone(), payload.clone()))
+        .collect()
+}
+
 /// Build the brief for an accepted snapshot. Pure and deterministic: equal
 /// inputs give equal text and `basis_key`; no clock, position or selection.
 pub fn build(input: &BriefInput) -> NeighborhoodBrief {
+    let started = std::time::Instant::now();
+    let projection = summary_projection(input.snapshot);
+    let bounded = BriefInput {
+        snapshot: &projection,
+        seed: input.seed,
+        depth: input.depth,
+        cycle: input.cycle,
+        payloads: projected_payloads(input, &projection),
+        payload_reads_skipped: input.payload_reads_skipped,
+    };
+    let input = &bounded;
     let mut brief = build_at(input, LEVELS[0]);
     for level in &LEVELS[1..] {
         if brief.word_count() <= WORDS_MAX {
@@ -365,6 +460,10 @@ pub fn build(input: &BriefInput) -> NeighborhoodBrief {
         }
         brief = build_at(input, *level);
     }
+    crate::intel_recon::brief_timing::emit_observation(
+        "neighborhood_fallback",
+        serde_json::json!({"elapsed_us":started.elapsed().as_micros() as u64,"nodes":projection.nodes.len(),"edges":projection.edges.len()}),
+    );
     brief
 }
 
@@ -742,19 +841,50 @@ fn build_at(input: &BriefInput, t: Tight) -> NeighborhoodBrief {
             _ => None,
         };
         let state = p
-            .map(|p| p.support_state.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| i.status.clone());
+            .and_then(|payload| payload.support())
+            .unwrap_or("not recorded");
         let mut text = format!(
             "Stored inference {} (support state: {state}; a stored interpretation, not a verified conclusion).",
             q(&i.id)
         );
         if let Some(p) = p {
-            let r = clip_words(&p.reasoning, t.reasoning);
+            let conditional = p.support() == Some("conditional");
+            let conditions = p.conditions.join("; ");
+            let qualifiers_fit = !p.conditions.is_empty()
+                && conditions.split_whitespace().count() + p.limitations.split_whitespace().count()
+                    <= 50;
+            if conditional && !qualifiers_fit {
+                text = "A stored conditional inference is present, but its complete conditions and limitations do not fit this summary; open its retained record.".into();
+            }
+            if let Some(fidelity) = p.extraction_fidelity.as_deref().or_else(|| {
+                matches!(p.support_state.as_str(), "faithful" | "unfaithful")
+                    .then_some(p.support_state.as_str())
+            }) {
+                text.push_str(&format!(
+                    " Extraction fidelity: {}.",
+                    clip_words(fidelity, 3)
+                ));
+            }
+            if conditional && qualifiers_fit {
+                text.push_str(&format!(" Conditions: {conditions}."));
+            }
+            let r = if conditional && !qualifiers_fit {
+                String::new()
+            } else {
+                clip_words(&p.reasoning, t.reasoning)
+            };
             if !r.is_empty() {
                 text.push_str(&format!(" Reasoning: {}.", r.trim_end_matches('.')));
             }
-            let l = clip_words(&p.limitations, t.limitation);
+            let l = if conditional {
+                if qualifiers_fit {
+                    p.limitations.clone()
+                } else {
+                    String::new()
+                }
+            } else {
+                clip_words(&p.limitations, t.limitation)
+            };
             if !l.is_empty() {
                 text.push_str(&format!(" Limitation: {}.", l.trim_end_matches('.')));
             }
@@ -1064,10 +1194,207 @@ fn build_at(input: &BriefInput, t: Tight) -> NeighborhoodBrief {
         limits,
         references: Vec::new(),
         coverage,
+        facets: Vec::new(),
     };
     number_references(&mut brief, &nodes, &snap.edges, &q_label(t));
     brief.basis_key = basis_key(input);
+    brief.facets = fallback_facets(&brief, input);
     brief
+}
+
+fn fallback_facets(brief: &NeighborhoodBrief, input: &BriefInput) -> Vec<FacetBlock<BriefItem>> {
+    let actors: BTreeSet<&str> = input
+        .snapshot
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.kind,
+                TopologyNodeKind::Entity | TopologyNodeKind::ActorGroup
+            )
+        })
+        .map(|node| node.id.as_str())
+        .collect();
+    let conditional: BTreeSet<&str> = input
+        .payloads
+        .iter()
+        .filter_map(|(id, payload)| match payload {
+            MemoryPayload::Inference(payload)
+                if payload.support() == Some("conditional")
+                    && !payload.conditions.is_empty()
+                    && !payload.limitations.trim().is_empty()
+                    && brief.interpretation.iter().any(|item| {
+                        item.node_ids.contains(id)
+                            && payload
+                                .conditions
+                                .iter()
+                                .all(|condition| item.text.contains(condition))
+                            && item.text.contains(&payload.limitations)
+                    }) =>
+            {
+                Some(id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let cross_domain = input
+        .payloads
+        .iter()
+        .filter_map(|(id, payload)| match payload {
+            MemoryPayload::Inference(payload)
+                if payload.inference_kind
+                    == Some(crate::intelligence_contracts::InferenceKind::CrossDomainImpact)
+                    && payload.domains.len() >= 2
+                    && payload.validate_attributes().is_ok() =>
+            {
+                Some(id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    project_facets(brief, &actors, &conditional, &cross_domain)
+}
+fn facets_from_packet(
+    brief: &NeighborhoodBrief,
+    input: &NeighborhoodInput,
+) -> Vec<FacetBlock<BriefItem>> {
+    let actors: BTreeSet<&str> = input
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.node.kind,
+                TopologyNodeKind::Entity | TopologyNodeKind::ActorGroup
+            )
+        })
+        .map(|node| node.node.id.as_str())
+        .collect();
+    let conditional: BTreeSet<&str> = input
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.payload.as_ref().is_some_and(|payload| {
+                payload
+                    .pointer("/payload/support_state")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("conditional")
+                    && payload
+                        .pointer("/payload/limitations")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+            })
+        })
+        .map(|node| node.node.id.as_str())
+        .collect();
+    let cross_domain = input
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.payload.as_ref().is_some_and(|payload| {
+                payload
+                    .pointer("/payload/inference_kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("cross_domain_impact")
+                    && payload
+                        .pointer("/payload/domains")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|domains| domains.len() >= 2)
+            })
+        })
+        .map(|node| node.node.id.as_str())
+        .collect();
+    project_facets(brief, &actors, &conditional, &cross_domain)
+}
+fn project_facets(
+    brief: &NeighborhoodBrief,
+    actors: &BTreeSet<&str>,
+    conditional: &BTreeSet<&str>,
+    cross_domain: &BTreeSet<&str>,
+) -> Vec<FacetBlock<BriefItem>> {
+    let limits_words: usize = brief
+        .limits
+        .iter()
+        .map(|item| item.text.split_whitespace().count())
+        .sum();
+    let mut used = limits_words;
+    BriefFacet::ALL
+        .into_iter()
+        .map(|facet| {
+            let mut items: Vec<BriefItem> = match facet {
+                BriefFacet::CurrentState => brief.overview.iter().cloned().collect(),
+                BriefFacet::ActorRelationships => brief
+                    .connections
+                    .iter()
+                    .filter(|item| {
+                        item.node_ids.iter().any(|id| actors.contains(id.as_str()))
+                            || !item.member_ids.is_empty()
+                    })
+                    .cloned()
+                    .collect(),
+                BriefFacet::CrossDomainImplications => brief
+                    .interpretation
+                    .iter()
+                    .filter(|item| {
+                        item.node_ids
+                            .iter()
+                            .any(|id| cross_domain.contains(id.as_str()))
+                    })
+                    .cloned()
+                    .collect(),
+                BriefFacet::ConditionalOutlook => brief
+                    .interpretation
+                    .iter()
+                    .filter(|item| {
+                        item.node_ids
+                            .iter()
+                            .any(|id| conditional.contains(id.as_str()))
+                    })
+                    .cloned()
+                    .collect(),
+                BriefFacet::Evidence if !brief.references.is_empty() => vec![BriefItem {
+                    text: "Evidence is limited to the retained records referenced below.".into(),
+                    epistemic: Epistemic::Recorded,
+                    node_ids: brief
+                        .references
+                        .iter()
+                        .filter_map(|reference| match &reference.target {
+                            BasisTarget::Node(id) => Some(id.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    edge_ids: brief
+                        .references
+                        .iter()
+                        .filter_map(|reference| match &reference.target {
+                            BasisTarget::Edge(id) => Some(id.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    member_ids: Vec::new(),
+                    receipts: Vec::new(),
+                    basis: brief
+                        .references
+                        .iter()
+                        .map(|reference| reference.n)
+                        .collect(),
+                }],
+                BriefFacet::Limitations => brief.limits.clone(),
+                _ => Vec::new(),
+            };
+            if facet != BriefFacet::Limitations {
+                items.retain(|item| {
+                    let words = item.text.split_whitespace().count();
+                    if used + words <= WORDS_MAX {
+                        used += words;
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+            FacetBlock::new(facet, items)
+        })
+        .collect()
 }
 
 fn q_label(t: Tight) -> usize {
@@ -1223,7 +1550,7 @@ pub(crate) mod tests;
 // ------------------------------------------------------- model input packet
 
 /// Version of the packet shape and the model output contract.
-pub const PACKET_VERSION: u32 = 2;
+pub const PACKET_VERSION: u32 = 3;
 /// Upper bound on the serialized packet sent to a model.
 pub const PACKET_BYTES_MAX: usize = 36_000;
 const FIELD_CHARS_MAX: usize = 600;
@@ -1436,15 +1763,45 @@ fn trim_value(v: &mut serde_json::Value, shortened: &mut usize) {
     }
 }
 
+fn packet_field(value: &str, shortened: &mut usize) -> String {
+    if value.chars().count() > FIELD_CHARS_MAX {
+        *shortened += 1;
+        format!(
+            "{}…",
+            value.chars().take(FIELD_CHARS_MAX).collect::<String>()
+        )
+    } else {
+        value.to_string()
+    }
+}
+
 /// Assemble the packet. Deterministic: nodes are ordered (seed, hops, id) and
 /// edges by id; references follow that order.
 pub fn build_input(input: &BriefInput, basis_key: &str) -> NeighborhoodInput {
+    let started = std::time::Instant::now();
+    let projection = summary_projection(input.snapshot);
+    let bounded = BriefInput {
+        snapshot: &projection,
+        seed: input.seed,
+        depth: input.depth,
+        cycle: input.cycle,
+        payloads: projected_payloads(input, &projection),
+        payload_reads_skipped: input.payload_reads_skipped,
+    };
+    let input = &bounded;
     let snap = input.snapshot;
     let mut shortened = 0usize;
     let mut nodes: Vec<&TopologyNode> = snap.nodes.iter().collect();
     nodes.sort_by(|a, b| (!a.is_root, a.min_hops, &a.id).cmp(&(!b.is_root, b.min_hops, &b.id)));
-    let mut edges: Vec<&TopologyEdge> = snap.edges.iter().collect();
+    nodes.truncate(MAX_SUMMARY_NODES);
+    let kept: BTreeSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
+    let mut edges: Vec<&TopologyEdge> = snap
+        .edges
+        .iter()
+        .filter(|edge| kept.contains(edge.from.as_str()) && kept.contains(edge.to.as_str()))
+        .collect();
     edges.sort_by(|a, b| a.id.cmp(&b.id));
+    edges.truncate(MAX_SUMMARY_EDGES);
     let mut aliases = IdAliases::default();
     for p in input.payloads.values() {
         if let Ok(v) = serde_json::to_value(p) {
@@ -1485,7 +1842,9 @@ pub fn build_input(input: &BriefInput, basis_key: &str) -> NeighborhoodInput {
         .enumerate()
         .map(|(i, n)| {
             let mut lite = (*n).clone();
-            lite.label = aliases.scrub_text(&lite.label);
+            lite.label = packet_field(&aliases.scrub_text(&lite.label), &mut shortened);
+            lite.status = packet_field(&lite.status, &mut shortened);
+            lite.subtype = packet_field(&lite.subtype, &mut shortened);
             lite.detail = String::new();
             lite.passages.clear();
             PacketNode {
@@ -1500,8 +1859,9 @@ pub fn build_input(input: &BriefInput, basis_key: &str) -> NeighborhoodInput {
         .enumerate()
         .map(|(i, e)| {
             let mut lite = (*e).clone();
-            lite.label = aliases.scrub_text(&lite.label);
-            lite.rationale = aliases.scrub_text(&lite.rationale);
+            lite.label = packet_field(&aliases.scrub_text(&lite.label), &mut shortened);
+            lite.status = packet_field(&lite.status, &mut shortened);
+            lite.rationale = packet_field(&aliases.scrub_text(&lite.rationale), &mut shortened);
             lite.receipts.truncate(RECEIPTS_MAX);
             PacketEdge {
                 reference: format!("E{}", i + 1),
@@ -1514,7 +1874,7 @@ pub fn build_input(input: &BriefInput, basis_key: &str) -> NeighborhoodInput {
         packet_version: PACKET_VERSION,
         basis_key: basis_key.to_string(),
         seed: input.seed.clone(),
-        seed_label: aliases.scrub_text(&snap.root_label),
+        seed_label: packet_field(&aliases.scrub_text(&snap.root_label), &mut shortened),
         depth: input.depth,
         cycle: input.cycle.clone(),
         coverage: coverage_of(input),
@@ -1528,10 +1888,11 @@ pub fn build_input(input: &BriefInput, basis_key: &str) -> NeighborhoodInput {
     }
     // Drop record details from the farthest records first until the packet fits.
     let mut dropped = 0usize;
+    let mut payloads_omitted = 0usize;
     loop {
         out.nodes = pnodes.clone();
         out.edges = pedges.clone();
-        if prompt_json(&out).len() <= PACKET_BYTES_MAX {
+        if prompt_json(&out).len() <= PACKET_BYTES_MAX.saturating_sub(1024) {
             break;
         }
         let far_node = pnodes
@@ -1542,15 +1903,27 @@ pub fn build_input(input: &BriefInput, basis_key: &str) -> NeighborhoodInput {
             .map(|(i, _)| i);
         if let Some(i) = far_node {
             pnodes[i].payload = None;
+            payloads_omitted += 1;
             dropped += 1;
             continue;
         }
         if let Some(i) = pedges.iter().rposition(|e| e.payload.is_some()) {
             pedges[i].payload = None;
+            payloads_omitted += 1;
             dropped += 1;
             continue;
         }
         let Some(i) = pnodes.iter().rposition(|n| !n.node.is_root) else {
+            if let Some(root) = pnodes.iter_mut().find(|node| node.payload.is_some()) {
+                root.payload = None;
+                payloads_omitted += 1;
+                dropped += 1;
+                continue;
+            }
+            if pedges.pop().is_some() {
+                dropped += 1;
+                continue;
+            }
             break;
         };
         pnodes.remove(i);
@@ -1563,7 +1936,31 @@ pub fn build_input(input: &BriefInput, basis_key: &str) -> NeighborhoodInput {
             "{dropped} record details or records were left out to fit the request budget"
         ));
     }
+    if payloads_omitted > 0 {
+        omissions.push(format!(
+            "{payloads_omitted} retained payloads omitted from this model packet"
+        ));
+    }
+    out.coverage.discovered_nodes = out.coverage.discovered_nodes.max(snap.nodes.len());
+    out.coverage.discovered_edges = out.coverage.discovered_edges.max(snap.edges.len());
+    out.coverage.admitted_nodes = out.nodes.len();
+    out.coverage.admitted_edges = out.edges.len();
+    out.coverage.omitted_nodes = out
+        .coverage
+        .discovered_nodes
+        .saturating_sub(out.nodes.len());
+    out.coverage.omitted_edges = out
+        .coverage
+        .discovered_edges
+        .saturating_sub(out.edges.len());
+    if out.coverage.omitted_nodes > 0 || out.coverage.omitted_edges > 0 || payloads_omitted > 0 {
+        out.coverage.status = CoverageStatus::Limited;
+    }
     out.omissions = omissions;
+    crate::intel_recon::brief_timing::emit_observation(
+        "neighborhood_packet",
+        serde_json::json!({"elapsed_us":started.elapsed().as_micros() as u64,"nodes":out.nodes.len(),"edges":out.edges.len(),"packet_bytes":prompt_json(&out).len()}),
+    );
     out
 }
 
@@ -1701,6 +2098,22 @@ struct RawBrief {
     interpretation: Vec<RawItem>,
     #[serde(default)]
     limits: Vec<RawItem>,
+    #[serde(default)]
+    current_state: Vec<RawItem>,
+    #[serde(default)]
+    significant_developments: Vec<RawItem>,
+    #[serde(default)]
+    actor_relationships: Vec<RawItem>,
+    #[serde(default)]
+    cross_domain_implications: Vec<RawItem>,
+    #[serde(default)]
+    emerging_signals: Vec<RawItem>,
+    #[serde(default)]
+    conditional_outlook: Vec<RawItem>,
+    #[serde(default)]
+    evidence: Vec<RawItem>,
+    #[serde(default)]
+    limitations: Vec<RawItem>,
 }
 
 /// A validated generated brief and the host adjustments applied to it.
@@ -1801,6 +2214,48 @@ pub fn validate_generated(
     {
         return Err("too many items in a block".into());
     }
+    let faceted = [
+        &parsed.current_state,
+        &parsed.significant_developments,
+        &parsed.actor_relationships,
+        &parsed.cross_domain_implications,
+        &parsed.emerging_signals,
+        &parsed.conditional_outlook,
+        &parsed.evidence,
+        &parsed.limitations,
+    ]
+    .iter()
+    .any(|items| !items.is_empty());
+    if parsed.current_state.len() > 1 {
+        return Err("current state permits one bounded item".into());
+    }
+    if faceted
+        && [
+            &parsed.overview,
+            &parsed.connections,
+            &parsed.interpretation,
+            &parsed.limits,
+        ]
+        .iter()
+        .any(|items| !items.is_empty())
+    {
+        return Err("mixed legacy and current facet protocol".into());
+    }
+    if [
+        &parsed.current_state,
+        &parsed.significant_developments,
+        &parsed.actor_relationships,
+        &parsed.cross_domain_implications,
+        &parsed.emerging_signals,
+        &parsed.conditional_outlook,
+        &parsed.evidence,
+        &parsed.limitations,
+    ]
+    .iter()
+    .any(|items| items.len() > 2)
+    {
+        return Err("too many items in a facet".into());
+    }
     let corpus = input.prompt_json().to_lowercase();
     let mut allowed_numbers: BTreeSet<String> = corpus
         .split(|c: char| !c.is_ascii_digit())
@@ -1817,7 +2272,7 @@ pub fn validate_generated(
     let convert = |block: &str,
                    raw_items: &[RawItem],
                    total_words: &mut usize,
-                   host_notes: &mut Vec<String>|
+                   _host_notes: &mut Vec<String>|
      -> Result<Vec<BriefItem>, String> {
         let mut out = Vec::new();
         for r in raw_items {
@@ -1849,21 +2304,9 @@ pub fn validate_generated(
             }
             let cited_nothing = nodes_cited.is_empty() && edges_cited.is_empty();
             if !unknown.is_empty() {
-                if block != "limits" && cited_nothing {
-                    return Err(format!(
-                        "{block}: unknown reference {} (cite only packet references such as N1 or E2); no valid basis remains",
-                        unknown
-                            .iter()
-                            .map(|k| format!("{k:?}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-                for k in &unknown {
-                    host_notes.push(format!("{block}: ignored unknown basis reference {k:?}"));
-                }
+                return Err(format!("{block}: unknown reference {:?} (cite only packet references such as N1 or E2); {}", unknown[0], if cited_nothing { "no valid basis remains" } else { "whole upgrade rejected" }));
             }
-            if block != "limits" && cited_nothing {
+            if !matches!(block, "limits" | "limitations") && cited_nothing {
                 return Err(format!("{block}: item without a basis reference"));
             }
             let lower = text.to_lowercase();
@@ -1893,6 +2336,131 @@ pub fn validate_generated(
                 && !matches!(epistemic, Epistemic::StoredInference | Epistemic::Tentative)
             {
                 return Err("interpretation: no stored inference or tentative lead cited".into());
+            }
+            // A numeric event probability is never inferred from counts or
+            // unrelated percentages elsewhere in the packet.
+            let has_number = text.chars().any(|character| character.is_ascii_digit());
+            let probability = words.iter().any(|word| {
+                matches!(
+                    word.as_str(),
+                    "probability" | "chance" | "likelihood" | "odds"
+                )
+            });
+            if has_number && probability {
+                return Err(format!(
+                    "{block}: event probability is not a supported summary assertion"
+                ));
+            }
+            let inference_kind = |kind: &str| {
+                nodes_cited.iter().any(|node| {
+                    node.node.kind == TopologyNodeKind::Inference
+                        && node.payload.as_ref().is_some_and(|payload| {
+                            payload
+                                .pointer("/payload/inference_kind")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(kind)
+                        })
+                })
+            };
+            if block == "cross_domain_implications"
+                && (!inference_kind("cross_domain_impact")
+                    || !nodes_cited.iter().any(|node| {
+                        node.payload.as_ref().is_some_and(|payload| {
+                            payload
+                                .pointer("/payload/domains")
+                                .and_then(serde_json::Value::as_array)
+                                .is_some_and(|domains| domains.len() >= 2)
+                        })
+                    }))
+            {
+                return Err("cross-domain facet lacks a stored cross-domain inference".into());
+            }
+            if block == "emerging_signals"
+                && !matches!(epistemic, Epistemic::StoredInference | Epistemic::Tentative)
+            {
+                return Err("emerging signals require a stored inference or tentative lead".into());
+            }
+            if block == "actor_relationships"
+                && !nodes_cited.iter().any(|node| {
+                    matches!(
+                        node.node.kind,
+                        TopologyNodeKind::Entity | TopologyNodeKind::ActorGroup
+                    )
+                })
+                && !edges_cited.iter().any(|edge| {
+                    input.nodes.iter().any(|node| {
+                        matches!(
+                            node.node.kind,
+                            TopologyNodeKind::Entity | TopologyNodeKind::ActorGroup
+                        ) && (node.node.id == edge.edge.from || node.node.id == edge.edge.to)
+                    })
+                })
+            {
+                return Err("actor relationships lack a retained actor basis".into());
+            }
+            if block == "conditional_outlook" {
+                let conditional = nodes_cited.iter().any(|node| {
+                    node.payload.as_ref().is_some_and(|payload| {
+                        let known_kind = payload
+                            .pointer("/payload/inference_kind")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("conditional_outlook");
+                        let known_state = payload
+                            .pointer("/payload/support_state")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("conditional");
+                        let limitations = payload
+                            .pointer("/payload/limitations")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|value| !value.trim().is_empty());
+                        (known_kind || known_state) && limitations
+                    })
+                });
+                if !conditional
+                    || !words.iter().any(|word| {
+                        matches!(word.as_str(), "if" | "unless" | "provided" | "conditional")
+                    })
+                {
+                    return Err(
+                        "conditional outlook lacks its recorded condition and limitations".into(),
+                    );
+                }
+            }
+            // Every use of a stored conditional conclusion preserves all of
+            // its retained qualifiers, whichever presentation facet cites it.
+            for node in &nodes_cited {
+                if let Some(payload) = &node.payload {
+                    if payload
+                        .pointer("/payload/support_state")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("conditional")
+                    {
+                        let conditions = payload
+                            .pointer("/payload/conditions")
+                            .and_then(serde_json::Value::as_array)
+                            .ok_or_else(|| {
+                                "conditional inference lacks captured conditions".to_string()
+                            })?;
+                        let limitation = payload
+                            .pointer("/payload/limitations")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("");
+                        if conditions.is_empty()
+                            || !conditions.iter().all(|condition| {
+                                condition.as_str().is_some_and(|condition| {
+                                    !condition.is_empty()
+                                        && lower.contains(&condition.to_lowercase())
+                                })
+                            })
+                            || limitation.is_empty()
+                            || !lower.contains(&limitation.to_lowercase())
+                        {
+                            return Err(
+                                "conditional inference qualifiers were omitted or changed".into()
+                            );
+                        }
+                    }
+                }
             }
             // Unsupported assertions.
             for (i, w) in words.iter().enumerate() {
@@ -1962,30 +2530,91 @@ pub fn validate_generated(
         Ok(out)
     };
 
-    let mut overview = convert(
-        "overview",
-        &parsed.overview,
-        &mut total_words,
-        &mut host_notes,
-    )?;
-    let mut connections = convert(
-        "connections",
-        &parsed.connections,
-        &mut total_words,
-        &mut host_notes,
-    )?;
-    let interpretation = convert(
-        "interpretation",
-        &parsed.interpretation,
-        &mut total_words,
-        &mut host_notes,
-    )?;
-    let mut limits = convert("limits", &parsed.limits, &mut total_words, &mut host_notes)?;
+    let mut generated_facets = Vec::new();
+    if faceted {
+        for (facet, items) in [
+            (BriefFacet::CurrentState, &parsed.current_state),
+            (
+                BriefFacet::SignificantDevelopments,
+                &parsed.significant_developments,
+            ),
+            (BriefFacet::ActorRelationships, &parsed.actor_relationships),
+            (
+                BriefFacet::CrossDomainImplications,
+                &parsed.cross_domain_implications,
+            ),
+            (BriefFacet::EmergingSignals, &parsed.emerging_signals),
+            (BriefFacet::ConditionalOutlook, &parsed.conditional_outlook),
+            (BriefFacet::Evidence, &parsed.evidence),
+            (BriefFacet::Limitations, &parsed.limitations),
+        ] {
+            generated_facets.push(FacetBlock::new(
+                facet,
+                convert(facet.as_str(), items, &mut total_words, &mut host_notes)?,
+            ));
+        }
+    }
+    let facet_items = |facet: BriefFacet| {
+        generated_facets
+            .iter()
+            .find(|block| block.facet == facet)
+            .map(|block| block.items.clone())
+            .unwrap_or_default()
+    };
+    let mut overview = if faceted {
+        facet_items(BriefFacet::CurrentState)
+    } else {
+        convert(
+            "overview",
+            &parsed.overview,
+            &mut total_words,
+            &mut host_notes,
+        )?
+    };
+    let mut connections = if faceted {
+        [
+            BriefFacet::SignificantDevelopments,
+            BriefFacet::ActorRelationships,
+            BriefFacet::Evidence,
+        ]
+        .into_iter()
+        .flat_map(facet_items)
+        .collect()
+    } else {
+        convert(
+            "connections",
+            &parsed.connections,
+            &mut total_words,
+            &mut host_notes,
+        )?
+    };
+    let interpretation = if faceted {
+        [
+            BriefFacet::CrossDomainImplications,
+            BriefFacet::EmergingSignals,
+            BriefFacet::ConditionalOutlook,
+        ]
+        .into_iter()
+        .flat_map(facet_items)
+        .collect()
+    } else {
+        convert(
+            "interpretation",
+            &parsed.interpretation,
+            &mut total_words,
+            &mut host_notes,
+        )?
+    };
+    let mut limits = if faceted {
+        facet_items(BriefFacet::Limitations)
+    } else {
+        convert("limits", &parsed.limits, &mut total_words, &mut host_notes)?
+    };
     model_items += overview.len() + connections.len() + interpretation.len() + limits.len();
-    if model_items == 0 || (connections.is_empty() && interpretation.is_empty()) {
+    if model_items == 0 || (!faceted && connections.is_empty() && interpretation.is_empty()) {
         return Err("no meaningful content".into());
     }
-    if total_words > WORDS_TOTAL_MAX {
+    if total_words > if faceted { WORDS_MAX } else { WORDS_TOTAL_MAX } {
         return Err(format!("too long: {total_words} words"));
     }
 
@@ -2076,7 +2705,8 @@ pub fn validate_generated(
         interpretation,
         limits,
         references: Vec::new(),
-        coverage: fallback.coverage.clone(),
+        coverage: input.coverage.clone(),
+        facets: Vec::new(),
     };
     let nodes: BTreeMap<&str, &TopologyNode> = input
         .nodes
@@ -2085,6 +2715,54 @@ pub fn validate_generated(
         .collect();
     let edges: Vec<TopologyEdge> = input.edges.iter().map(|e| e.edge.clone()).collect();
     number_references(&mut brief, &nodes, &edges, &4);
+    brief.facets = if faceted {
+        for block in &mut generated_facets {
+            if block.facet == BriefFacet::CurrentState {
+                block.items = brief.overview.iter().cloned().collect();
+            }
+            if block.facet == BriefFacet::Limitations {
+                block.items = brief.limits.clone();
+            }
+            // Mandatory host contradictions remain visible as evidence.
+            if block.facet == BriefFacet::Evidence {
+                for pinned in &brief.connections {
+                    if input.edges.iter().any(|edge| {
+                        pinned.edge_ids.contains(&edge.edge.id)
+                            && packet_relation(edge).as_deref() == Some("contradicts")
+                    }) && !block
+                        .items
+                        .iter()
+                        .any(|item| item.edge_ids == pinned.edge_ids)
+                    {
+                        block.items.push(pinned.clone());
+                    }
+                }
+            }
+            for item in &mut block.items {
+                item.basis = brief
+                    .references
+                    .iter()
+                    .filter(|reference| match &reference.target {
+                        BasisTarget::Node(id) => item.node_ids.contains(id),
+                        BasisTarget::Edge(id) => item.edge_ids.contains(id),
+                    })
+                    .map(|reference| reference.n)
+                    .collect();
+            }
+            *block = FacetBlock::new(block.facet, std::mem::take(&mut block.items));
+        }
+        let total: usize = generated_facets
+            .iter()
+            .flat_map(|block| &block.items)
+            .map(|item| item.text.split_whitespace().count())
+            .sum();
+        if total > WORDS_MAX {
+            return Err("generated facets exceed the bounded visible word budget after required host caveats".into());
+        }
+        generated_facets
+    } else {
+        facets_from_packet(&brief, input)
+    };
     Ok(Validated { brief, host_notes })
 }
 
@@ -2103,7 +2781,7 @@ fn quoted(text: &str) -> Vec<String> {
 }
 
 /// The task given to the model; the packet follows as the user message.
-pub const MODEL_TASK: &str = "Explain what stands out around this seed and why its supplied neighborhood matters. Use only the packet. Return Overview, Connections, Interpretation, and Limits as structured brief items. Cite records only by their packet references (N1…, E1…) in basis; never write record ids or other identifiers, in basis or in text. Preserve attribution, uncertainty, existing inference limitations, tentative leads, and material contradictions. Target 120–180 words. Do not create facts, sources, relationships, or new investigative conclusions.";
+pub const MODEL_TASK: &str = "Explain what stands out around this seed and why its supplied neighborhood matters. Use only the packet. Return the eight ordered sections Current State, Significant Developments, Actor Relationships, Cross-Domain Implications, Emerging Signals, Conditional Outlook, Evidence, and Limitations as structured brief items. Omit unsupported sections instead of filling them with speculation. Cross-domain implications and conditional outlooks require their stored inference basis; conditions and limitations must remain explicit. Never invent event probabilities. Cite records only by their packet references (N1…, E1…) in basis; never write record ids or other identifiers, in basis or in text. Preserve attribution, uncertainty, existing inference limitations, tentative leads, and material contradictions. Target 120–180 words. Do not create facts, sources, relationships, or new investigative conclusions.";
 
 fn seed_kind(seed: &TopologySeed) -> String {
     format!("{seed:?}")

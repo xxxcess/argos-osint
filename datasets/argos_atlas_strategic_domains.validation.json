@@ -1,0 +1,35 @@
+{
+  "validation_scope": "Dataset integrity only; model training and evaluation are separate evidence",
+  "dataset": "argos_atlas_strategic_domains.csv",
+  "sha256": "d81c2ebacbc72dff1a281e506eb105b9321001180d78126b31c42339a5176209",
+  "rows": 1700,
+  "splits": {
+    "train": 1130,
+    "calibration": 285,
+    "test": 285
+  },
+  "scenario_families": 220,
+  "unique_titles": 1700,
+  "unique_ids": 1700,
+  "pair_counts": {
+    "economic|environmental": 20,
+    "economic|governance": 20,
+    "economic|human": 20,
+    "economic|scientific": 20,
+    "economic|security": 20,
+    "environmental|governance": 20,
+    "environmental|human": 20,
+    "environmental|scientific": 20,
+    "environmental|security": 20,
+    "governance|human": 20,
+    "governance|scientific": 20,
+    "governance|security": 20,
+    "human|scientific": 20,
+    "human|security": 20,
+    "scientific|security": 20
+  },
+  "csv_roundtrip": true,
+  "family_partition_leakage": false,
+  "model_trained": false,
+  "quality_or_speed_measured": false
+}

@@ -273,6 +273,15 @@ pub struct ClaimPayload {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InferencePayload {
     #[serde(default)]
+    pub inference_kind: Option<crate::intelligence_contracts::InferenceKind>,
+    #[serde(default)]
+    pub domains: Vec<crate::atlas_taxonomy::DomainId>,
+    #[serde(default)]
+    pub conditions: Vec<String>,
+    /// Textual fidelity is independent of whether the inference is supported.
+    #[serde(default)]
+    pub extraction_fidelity: Option<String>,
+    #[serde(default)]
     pub premise_claims: Vec<String>,
     #[serde(default)]
     pub actors: Vec<ActorRef>,
@@ -286,8 +295,40 @@ pub struct InferencePayload {
     pub coverage_receipt: String,
 }
 
+impl InferencePayload {
+    /// Validates only current typed attributes; historical payloads stay readable.
+    pub fn validate_attributes(&self) -> Result<(), crate::intelligence_contracts::ContractError> {
+        if let Some(kind) = self.inference_kind {
+            crate::intelligence_contracts::validate_inference_attributes(
+                kind,
+                &self.domains,
+                &self.support_state,
+                &self.conditions,
+                &if self.limitations.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    vec![self.limitations.clone()]
+                },
+            )?;
+        }
+        Ok(())
+    }
+    /// Legacy `faithful` was extraction fidelity, never an inference-support label.
+    pub fn support(&self) -> Option<&str> {
+        matches!(
+            self.support_state.as_str(),
+            "supported" | "conditional" | "partially_supported"
+        )
+        .then_some(self.support_state.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkPayload {
+    /// Present only for current curated links with semantic and live-evidence gates.
+    /// Absent on historical/observed relations; absence never implies validation.
+    #[serde(default)]
+    pub validation: Option<crate::intelligence_contracts::LinkValidationReceipt>,
     pub source: EndpointRef,
     pub target: EndpointRef,
     /// e.g. `mentioned_in`, `supports`, `contradicts`, `derived_from`.
@@ -325,7 +366,7 @@ pub enum MemoryPayload {
     Actor(ActorPayload),
     Claim(ClaimPayload),
     Inference(InferencePayload),
-    Link(LinkPayload),
+    Link(Box<LinkPayload>),
     Related(RelatedPayload),
 }
 
@@ -339,6 +380,32 @@ impl MemoryPayload {
             MemoryPayload::Related(_) => MemoryKind::Related,
         }
     }
+}
+
+/// Revision of a canonical assertion's text and material typed attributes.
+///
+/// The inference coverage receipt locates its publication snapshot; merely
+/// republishing unchanged evidence must not change the assertion's meaning.
+/// Evidence revisions remain in Link receipts and require independent live
+/// source validation at every publication. No body/evidence identity is erased.
+pub fn assertion_semantic_revision(
+    text: &str,
+    payload: &MemoryPayload,
+) -> Result<String, crate::intelligence_contracts::ContractError> {
+    let mut semantic = payload.clone();
+    match &mut semantic {
+        MemoryPayload::Inference(inference) => inference.coverage_receipt.clear(),
+        MemoryPayload::Claim(_) => {}
+        _ => {
+            return Err(crate::intelligence_contracts::ContractError::InvalidField(
+                "assertion.kind",
+            ))
+        }
+    }
+    Ok(format!(
+        "assertion-semantic-v1:{}",
+        crate::nlp::cache::key(&serde_json::json!([text, semantic]))
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

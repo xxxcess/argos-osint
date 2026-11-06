@@ -20,7 +20,7 @@ pub const EMPTY_REASON_WORDS: usize = 25;
 pub const LEAD_WHY_WORDS: usize = 40;
 
 /// Contract schema version (part of stage revisions once wired).
-pub const BRIEF_CONTRACT_VERSION: &str = "brief-contracts-v2-text";
+pub const BRIEF_CONTRACT_VERSION: &str = "brief-contracts-v3-domain-inference";
 
 pub const MODALITIES: [&str; 4] = ["asserted", "alleged", "denied", "uncertain"];
 pub const POLARITIES: [&str; 2] = ["positive", "negative"];
@@ -80,6 +80,9 @@ pub fn inferences_schema<S: AsRef<str>, T: AsRef<str>>(claim_ids: &[S], body_ids
         "premise_claim_ids": id_array(claim_ids, 1),
         "body_evidence_ids": id_array(body_ids, 1),
         "support": {"type": "string", "enum": SUPPORT},
+        "inference_kind": {"type":"string","enum":["implication","mechanism","conditional_outlook","cross_domain_impact"]},
+        "domains": {"type":"array","items":{"type":"string","enum":crate::atlas_taxonomy::DomainId::ALL.map(|domain| domain.as_str())}},
+        "conditions": {"type":"array","items":{"type":"string"}},
         "why": {"type": "string"},
         "limitations": {"type": "array", "items": {"type": "string"}},
         "counterevidence_ids": id_array(body_ids, 0),

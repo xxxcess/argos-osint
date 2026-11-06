@@ -21,9 +21,17 @@ use crate::store::{AtlasArticleRow, AtlasRunRow};
 pub use crate::recon::backend::surreal_selected;
 
 /// The Atlas store a caller uses for one unit of work.
+#[derive(Clone)]
 pub enum AtlasStore {
     #[cfg(feature = "surreal")]
     Surreal(crate::storage::repo::Repository),
+    #[cfg(feature = "surreal")]
+    Claimed {
+        repo: crate::storage::repo::Repository,
+        db_owner: crate::storage::classifier_admission::AdmissionOwner,
+        claim: crate::storage::classifier_admission::RunClaim,
+        stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    },
 }
 
 /// Error for an operation that is still legacy-store-only.
@@ -40,7 +48,7 @@ macro_rules! dispatch {
     ($self:ident, $r:ident => $surreal:expr) => {
         match $self {
             #[cfg(feature = "surreal")]
-            AtlasStore::Surreal($r) => $surreal,
+            AtlasStore::Surreal($r) | AtlasStore::Claimed { repo: $r, .. } => $surreal,
         }
     };
 }
@@ -61,7 +69,42 @@ impl AtlasStore {
     #[cfg(feature = "surreal")]
     pub fn repository(&self) -> Option<&crate::storage::repo::Repository> {
         match self {
-            Self::Surreal(r) => Some(r),
+            Self::Surreal(r) | Self::Claimed { repo: r, .. } => Some(r),
+        }
+    }
+
+    pub(crate) fn with_claim(
+        self,
+        db_owner: crate::storage::classifier_admission::AdmissionOwner,
+        claim: crate::storage::classifier_admission::RunClaim,
+    ) -> Self {
+        match self {
+            Self::Surreal(repo) | Self::Claimed { repo, .. } => Self::Claimed {
+                repo,
+                db_owner,
+                claim,
+                stopping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        }
+    }
+    pub(crate) fn run_claim(&self) -> Option<&crate::storage::classifier_admission::RunClaim> {
+        match self {
+            Self::Claimed { claim, .. } => Some(claim),
+            Self::Surreal(_) => None,
+        }
+    }
+    pub(crate) fn admission_owner(
+        &self,
+    ) -> Option<&crate::storage::classifier_admission::AdmissionOwner> {
+        match self {
+            Self::Claimed { db_owner, .. } => Some(db_owner),
+            Self::Surreal(_) => None,
+        }
+    }
+    pub(crate) fn stopping(&self) -> bool {
+        match self {
+            Self::Claimed { stopping, .. } => stopping.load(std::sync::atomic::Ordering::Acquire),
+            Self::Surreal(_) => false,
         }
     }
 
@@ -74,7 +117,7 @@ impl AtlasStore {
     ) -> Result<Option<crate::store::PublicationReceipt>> {
         match self {
             #[cfg(feature = "surreal")]
-            Self::Surreal(r) => {
+            Self::Surreal(r) | Self::Claimed { repo: r, .. } => {
                 crate::storage::atlas_memory::publication_receipt(r.db(), run_id).await
             }
         }
@@ -87,7 +130,7 @@ impl AtlasStore {
     ) -> Result<crate::store::PublicationVerification> {
         match self {
             #[cfg(feature = "surreal")]
-            Self::Surreal(r) => {
+            Self::Surreal(r) | Self::Claimed { repo: r, .. } => {
                 crate::storage::atlas_memory::verify_publication(r.db(), receipt).await
             }
         }
@@ -108,6 +151,21 @@ impl AtlasStore {
                 .map_err(tx("atlas insert run")))
     }
     pub async fn save(&self, id: &str, cursor_json: &str, stats_json: &str) -> Result<()> {
+        if let Self::Claimed {
+            db_owner, claim, ..
+        } = self
+        {
+            anyhow::ensure!(claim.run_id == id, "cycle checkpoint run mismatch");
+            return crate::storage::classifier_admission::save_run(
+                db_owner,
+                claim,
+                cursor_json,
+                stats_json,
+                chrono::Utc::now(),
+            )
+            .await
+            .map_err(Into::into);
+        }
         dispatch!(self,
             r => crate::storage::atlas::save(r.db(), id, cursor_json, stats_json)
                 .await
@@ -122,6 +180,23 @@ impl AtlasStore {
         cursor_json: &str,
         stats_json: &str,
     ) -> Result<()> {
+        if let Self::Claimed {
+            db_owner, claim, ..
+        } = self
+        {
+            anyhow::ensure!(claim.run_id == id, "cycle receipt run mismatch");
+            return crate::storage::classifier_admission::save_run_with_receipt(
+                db_owner,
+                claim,
+                cursor_json,
+                stats_json,
+                receipt_key,
+                receipt_json,
+                chrono::Utc::now(),
+            )
+            .await
+            .map_err(Into::into);
+        }
         dispatch!(self, r => crate::storage::atlas::save_with_receipt(
                 r.db(), id, receipt_key, receipt_json, cursor_json, stats_json,
             )
@@ -129,6 +204,42 @@ impl AtlasStore {
             .map_err(tx("atlas receipt")))
     }
     pub async fn set_state(&self, id: &str, state: &str, note: &str, finished: bool) -> Result<()> {
+        if let Self::Claimed {
+            repo,
+            db_owner,
+            claim,
+            stopping,
+        } = self
+        {
+            anyhow::ensure!(claim.run_id == id, "cycle state run mismatch");
+            use crate::storage::classifier_admission::{self, RunStop};
+            let stop = match state {
+                "paused" => RunStop::Paused,
+                "waiting" => RunStop::Waiting,
+                "blocked" => RunStop::Blocked,
+                "completed" => RunStop::Completed,
+                "partial" => RunStop::Partial,
+                "failed" => RunStop::Failed,
+                "cancelled" => RunStop::Cancelled,
+                _ => anyhow::bail!("invalid owned Atlas terminal state"),
+            };
+            let checkpoint = crate::storage::atlas::run_by_id(repo.db(), id)
+                .await?
+                .ok_or_else(|| anyhow!("owned Atlas run disappeared"))?;
+            stopping.store(true, std::sync::atomic::Ordering::Release);
+            classifier_admission::stop_run_with_hook(
+                db_owner,
+                claim,
+                stop,
+                &checkpoint.cursor_json,
+                &checkpoint.stats_json,
+                note,
+                chrono::Utc::now(),
+                Some(crate::storage::classifier_calibration::terminal_hook()),
+            )
+            .await?;
+            return Ok(());
+        }
         dispatch!(self,
             r => crate::storage::atlas::set_state(r.db(), id, state, note, finished)
                 .await
@@ -142,6 +253,9 @@ impl AtlasStore {
             r => crate::storage::atlas::list_articles(r.db(), run_id)
                 .await
                 .map_err(tx("atlas articles")))
+    }
+    pub(crate) async fn current_articles(&self, run_id: &str) -> Result<Vec<AtlasArticleRow>> {
+        dispatch!(self,r=>crate::storage::atlas::current_articles(r.db(),run_id).await.map_err(tx("atlas current articles")))
     }
     pub async fn recent_articles(&self) -> Result<Vec<AtlasArticleRow>> {
         dispatch!(self,

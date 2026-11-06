@@ -3,6 +3,8 @@ name: argos-rust-style
 description: Apply Google's Rust Style Guide when writing, reviewing, or refactoring any Rust in this repo. Use for API design, naming, imports, error handling, documentation, and implementation patterns.
 ---
 
+Use the canonical [agent workflow](../../../docs/wiki/code/agent-workflow.md) with the active host's roles and existing authorization. OpenCode-only restrictions apply when that profile is explicitly selected.
+
 # Rust style — Google Rust Style Guide
 
 Load this for every Rust edit or review under `crates/`. Follow the public [Rust Style Guide](https://doc.rust-lang.org/nightly/style-guide/) and [API Guidelines](https://rust-lang.github.io/api-guidelines/) unless this skill conflicts. `cargo fmt` handles formatting.
@@ -12,6 +14,7 @@ Load this for every Rust edit or review under `crates/`. Follow the public [Rust
 These win when the guide below disagrees:
 
 - Tokio async is required. [Async runtime and process safety](../../../docs/wiki/code/conventions.md#async-runtime-and-process-safety) overrides the Chromium ban on `async`/`await`.
+- Follow that guide's allocation-boundary rule for large task-local callbacks. Verify a stack-overflow repair through the actual public path on the normal stack; do not hide it with larger test stacks.
 - Keep the existing workspace. Do not flatten crates, ban module subdirectories, or adopt Chromium `rust_static_library` layout.
 - `argos-osint-core` and `argos-osint-api` are library code. `argos-osint-bin` and `argos-api-host` are application code.
 - Fuchsia sync primitives do not apply.

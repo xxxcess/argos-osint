@@ -9,15 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-pub const CATEGORIES: [&str; 7] = [
-    "geopolitical",
-    "economic",
-    "military",
-    "science",
-    "health",
-    "stability",
-    "technology",
-];
+pub const CATEGORIES: [&str; 6] = crate::atlas_taxonomy::DOMAIN_IDS;
 
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 512 && !id.chars().any(|c| c.is_control())
@@ -36,7 +28,9 @@ pub struct ArticleQuery {
 }
 impl ArticleQuery {
     pub fn validate(&self) -> Result<()> {
-        if self.category != "all" && !CATEGORIES.contains(&self.category.as_str()) {
+        if self.category != "all"
+            && crate::atlas_taxonomy::DomainId::parse(&self.category).is_none()
+        {
             bail!("invalid category");
         }
         if chrono::NaiveDate::parse_from_str(&self.day, "%Y-%m-%d").is_err() || self.day.len() != 10
@@ -65,9 +59,35 @@ impl ArticleQuery {
 
 #[derive(Debug, Serialize)]
 pub struct ArticlePage {
+    #[serde(serialize_with = "serialize_current_articles")]
     pub rows: Vec<AtlasArticleRow>,
     pub next_cursor: Option<String>,
     pub revision: String,
+    pub coverage: crate::storage::classifier_admission::TaxonomyCoverage,
+}
+
+/// Adds indexed classification identity without expanding the retained row DTO.
+fn serialize_current_articles<S: serde::Serializer>(
+    rows: &[AtlasArticleRow],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct CurrentArticle<'a> {
+        #[serde(flatten)]
+        article: &'a AtlasArticleRow,
+        taxonomy_version: &'static str,
+        admission_state: &'static str,
+        publication_version: &'static str,
+    }
+    rows.iter()
+        .map(|article| CurrentArticle {
+            article,
+            taxonomy_version: crate::atlas_taxonomy::TAXONOMY_VERSION,
+            admission_state: "admitted",
+            publication_version: crate::storage::classifier_admission::PUBLICATION_VERSION,
+        })
+        .collect::<Vec<_>>()
+        .serialize(serializer)
 }
 
 /// Deduplicate article occurrences by identity, newest occurrence first
@@ -127,30 +147,29 @@ pub async fn articles(repo: &Repository, q: &ArticleQuery) -> Result<ArticlePage
         )
     };
     let n = q.limit.unwrap_or(30);
-    // Category membership over the ordered tags; All means admitted (the
-    // canonical corpus carries at least one tag) and deduplicates identity.
-    let member = |a: &AtlasArticleRow| {
-        if q.category == "all" {
-            !a.categories.is_empty()
-        } else {
-            a.categories.iter().any(|tag| tag == &q.category)
-        }
+    let scope = crate::storage::classifier_admission::CoverageFilter {
+        run_day: Some(q.day.clone()),
+        text: Some(q.search.trim().to_lowercase()),
+        ..Default::default()
     };
-    let sql = "SELECT * FROM atlas_article WHERE
-          run_id IN (SELECT VALUE record::id(id) FROM atlas_run WHERE started_at >= $start AND started_at < $end)
-          AND ($search = '' OR string::contains(string::lowercase(string::concat(title, ' ', description, ' ', source_name, ' ', source_domain, ' ', url)), $search))
-          ORDER BY published_at DESC, seen_at DESC, article_id, run_id";
+    let coverage = crate::storage::classifier_admission::coverage_filtered(repo, &scope).await?;
+    let sql=format!("SELECT * FROM atlas_article WHERE ({}) AND ({}) AND ($category='all' OR category=$category OR categories CONTAINS $category) ORDER BY published_at DESC,seen_at DESC,article_id,run_id", scope.predicate(),atlas::CURRENT_ADMISSION_FILTER);
     let mut response = repo
         .db()
         .query(sql)
-        .bind(("start", q.day.clone()))
-        .bind(("end", format!("{}~", q.day)))
-        .bind(("search", q.search.trim().to_lowercase()))
+        .bind(("scope_started", q.day.clone()))
+        .bind(("scope_started_end", format!("{}~", q.day)))
+        .bind(("scope_text", q.search.trim().to_lowercase()))
+        .bind(("category", q.category.clone()))
+        .bind(("taxonomy", crate::atlas_taxonomy::TAXONOMY_VERSION))
+        .bind((
+            "publication",
+            crate::storage::classifier_admission::PUBLICATION_VERSION,
+        ))
         .await?
         .check()?;
     let raw: Vec<crate::storage::atlas::ArticleRow> = response.take(0)?;
     let mut rows: Vec<AtlasArticleRow> = dedup_newest(raw.into_iter().map(Into::into).collect());
-    rows.retain(member);
     if hottest {
         // The fetch orders newest-first; the hot ordering re-sorts the
         // deduplicated page set by temperature first, ties deterministic.
@@ -226,11 +245,12 @@ pub async fn articles(repo: &Repository, q: &ArticleQuery) -> Result<ArticlePage
     } else {
         None
     };
-    let revision = crate::nlp::cache::hash(&serde_json::to_string(&page)?);
+    let revision = crate::nlp::cache::hash(&serde_json::to_string(&(&page, &coverage))?);
     Ok(ArticlePage {
         rows: page,
         next_cursor,
         revision,
+        coverage,
     })
 }
 
@@ -248,9 +268,10 @@ pub async fn category_counts(
     let mut response = repo
         .db()
         .query(
-            "SELECT * FROM atlas_article WHERE
-              run_id IN (SELECT VALUE record::id(id) FROM atlas_run WHERE started_at >= $start AND started_at < $end)",
+            format!("SELECT * FROM atlas_article WHERE run_id IN (SELECT VALUE record::id(id) FROM atlas_run WHERE started_at >= $start AND started_at < $end) AND ({})",atlas::CURRENT_ADMISSION_FILTER),
         )
+        .bind(("taxonomy", crate::atlas_taxonomy::TAXONOMY_VERSION))
+        .bind(("publication", crate::storage::classifier_admission::PUBLICATION_VERSION))
         .bind(("start", day.to_string()))
         .bind(("end", format!("{day}~")))
         .await?
@@ -483,6 +504,16 @@ pub async fn brief(repo: &Repository, article: &AtlasArticleRow) -> Result<Value
     if catalog_enabled {
         crate::intel_topology::decorate_catalog_actors(repo, &mut value).await?;
     }
+    value["classification"] = serde_json::to_value(
+        crate::storage::classifier_admission::classification_view(
+            repo,
+            &crate::atlas_classify::OccurrenceKey::new(&article.run_id, &article.id),
+        )
+        .await?,
+    )?;
+    value["coverage"] = serde_json::to_value(
+        crate::storage::classifier_admission::coverage(repo, Some(&article.run_id), None).await?,
+    )?;
     let revision = crate::nlp::cache::hash(&serde_json::to_string(&value)?);
     value["revision"] = json!(revision);
     Ok(value)
@@ -540,15 +571,11 @@ pub async fn reload_brief(
         return Ok(job);
     }
     let settings = crate::provider::SettingsFile::load()?;
-    let bs = &crate::intel_recon::brief_stages::input_revision(article, &settings);
-    let inputs = crate::intel_recon::brief_pipeline::BriefInputs {
-        article_id: article.id.clone(),
-        input_revision: format!("{bs}:reload:{key}"),
-        role_snapshot: serde_json::to_string(&settings.defaults)?,
-        title: article.title.clone(),
-        stage_revisions: Vec::new(),
-        metadata: crate::intel_recon::brief_stages::metadata_snapshot(article),
-    };
+    let mut inputs = brief_stages::inputs_for_article(repo, article, &settings).await?;
+    inputs.input_revision = format!("{}:reload:{key}", inputs.input_revision);
+    // An explicit reload reruns nodes, while retaining the captured immutable
+    // domain/source packet produced by the shared builder.
+    inputs.stage_revisions.clear();
     Ok(brief_stages::ensure(repo, &inputs).await?.job_id)
 }
 

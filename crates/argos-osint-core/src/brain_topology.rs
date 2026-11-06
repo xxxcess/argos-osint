@@ -9,8 +9,9 @@ use crate::brain_browse::Associations;
 
 #[path = "brain_topology_query.rs"]
 mod query;
+pub(crate) use query::admit;
 #[cfg(feature = "surreal")]
-pub(crate) use query::{admit, edge, edge_priority, node, record_edge, source_node, topic_node};
+pub(crate) use query::{edge, edge_priority, node, record_edge, source_node, topic_node};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TopologySeed {

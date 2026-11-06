@@ -112,20 +112,27 @@ policy or schema.
 
 ## Neighborhood summary
 
-Each seed shows a deterministic **neighborhood brief** at once, generates a
-better explanation in the background with the Summarization role from a frozen
-typed packet, and replaces the fallback only after the complete answer
-validates. Failure keeps the fallback. Only summary cache, task and log rows are
-written; there is no migration and no canonical write.
+Each seed shows a deterministic **neighborhood brief** at once. Ordinary
+navigation, GET and polling read the fallback/cache without authorizing model
+work. The explicit **Generate summary** action alone queues an upgrade from its
+frozen typed packet. Only a complete validated answer replaces the fallback;
+failure keeps it. Eight additive facets cover current state, developments,
+actor relationships, cross-domain implications, emerging signals, conditional
+outlook, evidence and limitations. Sparse facets stay explicitly limited or
+empty. Compatible Overview/Connections/Interpretation/Limits prose remains
+readable. Generation writes summary cache/task/log rows, never canonical facts.
 
 ### Flow
 
 1. **Fallback and frozen input.** During the topology background load
    (`brain_neighborhood_brief.rs`) bounded typed payloads (at most 160 reads)
    yield an immutable `NeighborhoodBrief` and `NeighborhoodInput` packet, owned
-   by the snapshot. Nothing is parsed from labels or IDs.
-2. **Queued generation.** `brain_neighborhood_brief_exec.rs` publishes the
-   fallback and enqueues one deduplicated `topology_neighborhood` request
+   by the snapshot. A summary packet admits at most 100 nodes/200 edges, or a
+   stricter caller limit. Count/byte reduction retains closed edge endpoints
+   and recalculates loaded/omitted coverage. Nothing is parsed from labels or IDs.
+2. **Explicit generation.** Only the existing Generate/Retry mutation calls
+   `brain_neighborhood_brief_exec.rs` to enqueue one deduplicated
+   `topology_neighborhood` request
    (`POOL_SUMMARY`). `storage/summary_flush.rs` stores results in `derived_summary` and queued request envelopes in `summary_flush_request`. Request identity is the
    `basis_key` (seed, options, hydrated content and revisions, coverage, format
    version; node labels are part of it, so a rename produces a new request), the
@@ -136,7 +143,8 @@ written; there is no migration and no canonical write.
    known typed references, kind/epistemic compatibility, relation direction,
    preserved qualifications and unsupported assertions. Only a valid result is
    cached and delivered by `TopologySummaryLoaded`, fenced by summary generation,
-   seed, options and `basis_key`; it is assigned in one step and never moves
+   seed, options and `basis_key`; a changed basis requires a new explicit
+   action rather than navigation-triggered regeneration. It is assigned in one step and never moves
    focus. Every other outcome completes the task with a typed `topology_failed`
    tag.
 4. **Bounded watching.** A background watcher polls every 750 ms (one read in

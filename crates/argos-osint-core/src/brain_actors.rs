@@ -173,12 +173,26 @@ pub(crate) fn text_of(payload: &MemoryPayload) -> String {
         MemoryPayload::Actor(a) => {
             format!("Actor: {} ({})", a.display_name, subtype_str(a.subtype))
         }
-        MemoryPayload::Link(l) => format!(
-            "Link: {} {} {}",
-            l.source.index_key().1,
-            l.relation.replace('_', " "),
-            l.target.index_key().1
-        ),
+        MemoryPayload::Link(l) => {
+            let mut text = format!(
+                "Link: {} {} {}",
+                l.source.index_key().1,
+                l.relation.replace('_', " "),
+                l.target.index_key().1
+            );
+            if let Some(receipt) = &l.validation {
+                if !receipt.conditions.is_empty() {
+                    text.push_str(&format!(". Conditions: {}", receipt.conditions.join("; ")));
+                }
+                if !receipt.limitations.is_empty() {
+                    text.push_str(&format!(
+                        ". Limitations: {}",
+                        receipt.limitations.join("; ")
+                    ));
+                }
+            }
+            text
+        }
         MemoryPayload::Related(r) => format!(
             "Related (tentative): {} ↔ {} — {}",
             r.source.index_key().1,

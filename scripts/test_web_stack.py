@@ -6,6 +6,7 @@ adoption tests) through scripts/agent_cargo.py first. Build the
 web export with pnpm build. All state lives in a temporary ARGOS_HOME.
 """
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -17,10 +18,233 @@ import signal
 import subprocess
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class TerminalScreen:
+    """Minimal VT cell view for the fixed-size PTY, with byte-offset freshness.
+
+    Ratatui emits cell differences: a repaint may retain characters between
+    cursor movements. Reconstruct the current screen instead of concatenating
+    historical writes, and only accept matches touched since the input mark.
+    """
+
+    CSI = re.compile(rb"\x1b\[([0-?]*)([ -/]*)([@-~])")
+
+    def __init__(self, data, width=160, height=50):
+        self.width, self.height = width, height
+        self.cells = [[" "] * width for _ in range(height)]
+        self.written = [[-1] * width for _ in range(height)]
+        self.row = self.column = 0
+        self.saved = (0, 0)
+        self.primary = None
+        self._read(bytes(data))
+
+    def _clear(self, row, first, last, offset):
+        for column in range(first, last):
+            self.cells[row][column] = " "
+            self.written[row][column] = offset
+
+    def _newline(self, offset):
+        self.row += 1
+        if self.row == self.height:
+            self.cells.pop(0)
+            self.written.pop(0)
+            self.cells.append([" "] * self.width)
+            self.written.append([offset] * self.width)
+            self.row -= 1
+
+    def _control(self, parameters, command, offset):
+        private = parameters.startswith(b"?")
+        values = [int(value) if value else 0 for value in parameters.lstrip(b"?").split(b";")]
+        amount = values[0] or 1
+        if command in (b"H", b"f"):
+            self.row = min((values[0] or 1) - 1, self.height - 1)
+            self.column = min((values[1] or 1) - 1 if len(values) > 1 else 0, self.width - 1)
+        elif command in (b"A", b"B", b"E", b"F"):
+            self.row = max(0, min(self.height - 1, self.row + (amount if command in (b"B", b"E") else -amount)))
+            if command in (b"E", b"F"):
+                self.column = 0
+        elif command in (b"C", b"D"):
+            self.column = max(0, min(self.width - 1, self.column + (amount if command == b"C" else -amount)))
+        elif command in (b"G", b"`"):
+            self.column = min(amount - 1, self.width - 1)
+        elif command == b"d":
+            self.row = min(amount - 1, self.height - 1)
+        elif command == b"K":
+            mode = values[0]
+            self._clear(self.row, 0 if mode in (1, 2) else min(self.column, self.width),
+                        self.width if mode in (0, 2) else min(self.column + 1, self.width), offset)
+        elif command == b"J":
+            for row in range(self.height):
+                if values[0] == 2 or (values[0] == 0 and row > self.row) or (values[0] == 1 and row < self.row):
+                    self._clear(row, 0, self.width, offset)
+                elif row == self.row and values[0] in (0, 1):
+                    self._clear(row, 0 if values[0] == 1 else min(self.column, self.width),
+                                min(self.column + 1, self.width) if values[0] == 1 else self.width, offset)
+        elif command == b"s":
+            self.saved = self.row, self.column
+        elif command == b"u":
+            self.row, self.column = self.saved
+        elif private and command in (b"h", b"l") and 1049 in values:
+            if command == b"h" and self.primary is None:
+                self.primary = self.cells, self.written, self.row, self.column
+                self.cells = [[" "] * self.width for _ in range(self.height)]
+                self.written = [[offset] * self.width for _ in range(self.height)]
+                self.row = self.column = 0
+            elif command == b"l" and self.primary is not None:
+                self.cells, self.written, self.row, self.column = self.primary
+                self.primary = None
+        else:
+            assert command in (b"m", b"h", b"l", b"q"), f"unsupported PTY control: {parameters!r}{command!r}"
+
+    def _read(self, data):
+        offset = 0
+        while offset < len(data):
+            value = data[offset]
+            if value == 27:
+                if data[offset:offset + 2] == b"\x1b[":
+                    match = self.CSI.match(data, offset)
+                    if match is None:  # Snapshot ended in a partially received control.
+                        break
+                    self._control(match[1], match[3], offset)
+                    offset = match.end()
+                    continue
+                if data[offset:offset + 2] == b"\x1b]":
+                    ends = [position for position in (data.find(b"\x07", offset + 2), data.find(b"\x1b\\", offset + 2)) if position >= 0]
+                    if not ends:
+                        break
+                    end = min(ends)
+                    offset = end + (1 if data[end] == 7 else 2)
+                    continue
+                if offset + 1 == len(data):
+                    break
+                command = data[offset + 1:offset + 2]
+                if command == b"7":
+                    self.saved = self.row, self.column
+                elif command == b"8":
+                    self.row, self.column = self.saved
+                else:
+                    raise AssertionError(f"unsupported PTY escape: {command!r}")
+                offset += 2
+                continue
+            if value < 32 or value == 127:
+                if value == 13:
+                    self.column = 0
+                elif value == 10:
+                    self._newline(offset)
+                elif value == 8:
+                    self.column = max(0, self.column - 1)
+                elif value == 9:
+                    self.column = min((self.column // 8 + 1) * 8, self.width - 1)
+                offset += 1
+                continue
+            size = 1 if value < 128 else 2 if value < 224 else 3 if value < 240 else 4
+            if offset + size > len(data):
+                break
+            character = data[offset:offset + size].decode("utf-8")
+            width = 0 if unicodedata.combining(character) else 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
+            if width == 0:
+                if self.column:
+                    self.cells[self.row][min(self.column - 1, self.width - 1)] += character
+            else:
+                if self.column + width > self.width:
+                    self.column = 0
+                    self._newline(offset)
+                self.cells[self.row][self.column] = character
+                self.written[self.row][self.column] = offset
+                if width == 2:
+                    self.cells[self.row][self.column + 1] = ""
+                    self.written[self.row][self.column + 1] = offset
+                self.column += width
+            offset += size
+
+    def _lines(self):
+        for cells, written in zip(self.cells, self.written):
+            yield "".join(cells), [stamp for cell, stamp in zip(cells, written) for _ in cell]
+
+    def text(self, start=0):
+        return "\n".join(line.rstrip() for line, stamps in self._lines() if any(stamp >= start for stamp in stamps)).encode("utf-8")
+
+    def contains(self, label, start=0):
+        label = label.decode("utf-8")
+        for line, stamps in self._lines():
+            position = line.find(label)
+            while position >= 0:
+                if any(stamp >= start for stamp in stamps[position:position + len(label)]):
+                    return True
+                position = line.find(label, position + 1)
+        return False
+
+
+def verify_terminal_screen(capture):
+    prompt = b"Classifier CSV path (auto for configured/default)"
+    initial = b"\x1b[2J\x1b[2;3HClassifier CSV path (auto for configured/default)"
+    repaint = b"\x1b[2;3HClassifier CSV pat\x1b[2;22H (auto\x1b[2;29Hfo\x1b[2;32H configured/default)"
+    assert TerminalScreen(initial + repaint).contains(prompt, len(initial)), "retained cells must complete the exact prompt"
+    next_prompt = initial + repaint + b"\x1b[2;3HAPI port\x1b[K"
+    assert not TerminalScreen(next_prompt).contains(prompt), "replaced prompts must not match historical output"
+    unchanged = next_prompt + b"\x1b[4;1Hstatus"
+    assert not TerminalScreen(unchanged).contains(b"API port", len(next_prompt)), "unrelated fresh cells cannot freshen an old match"
+    raw = capture.read_bytes()
+    mark = raw.rfind(b"Classifier CSV pat")
+    end = raw.find(b"\x1b[?25h", mark)
+    frame = raw[:end + len(b"\x1b[?25h")] if end >= 0 else raw
+    assert mark >= 0 and TerminalScreen(frame).contains(prompt, mark), "captured cursor diff must reconstruct the exact CSV prompt"
+    assert prompt not in TerminalScreen.CSI.sub(b"", frame), "captured regression must exercise retained cells"
+    if b"Intel" in raw and b"Recon" in raw:
+        leave = raw.rfind(b"\x1b[?1049l")
+        enter = raw.rfind(b"\x1b[?1049h", 0, leave)
+        returned = TerminalScreen(raw[:leave])
+        assert enter >= 0 and returned.contains(b"Choose a service", enter)
+        assert returned.contains(b"2  API Server", enter), "captured TUI exit must return to a fresh, ready Venture menu"
+    print("PASS: retained-cell repaint, replaced/stale prompt guards and captured CSV prompt reconstruction")
+
+
+def service_row_position(screen, title):
+    """Locate a live service title in the rendered table, excluding details/history."""
+    matches = []
+    for row, cells in enumerate(screen.cells):
+        borders = [column for column, value in enumerate(cells) if value == "│"]
+        if len(borders) < 2:
+            continue
+        table = cells[borders[0] + 1:borders[1]]
+        text = "".join(table)
+        position = text.find(title)
+        if position < 0 or not re.search(r"\bservice\b", text[:position]):
+            continue
+        columns = [column for column in range(borders[0] + 1, borders[1]) for _ in cells[column]]
+        matches.append((columns[position] + 1, row + 1))  # SGR uses 1-based actual cells.
+    assert len(matches) <= 1, f"multiple live service rows match {title!r}"
+    return matches[0] if matches else None
+
+
+def classifier_fixture(path):
+    """Independent synthetic CSV for first-run setup; never production evidence."""
+    fields = ["sample_id", "title", "description", "domain_labels", "primary_domain",
+              "secondary_domain", "subcategories", "source_kind", "difficulty",
+              "dataset_version", "annotation_notes", "split", "scenario_group",
+              "language", "synthetic", "labels_complete", "expected_admission",
+              "rejection_reason"]
+    with path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fields)
+        writer.writeheader()
+        for split in ("train", "calibration", "test"):
+            for domain in ("governance", "security", "economic", "human", "environmental", "scientific"):
+                writer.writerow(dict.fromkeys(fields, "") | {
+                    "sample_id": f"{split}-{domain}", "title": f"Fictional {domain} bulletin {split}",
+                    "description": f"Synthetic {domain} development example.",
+                    "domain_labels": domain, "primary_domain": domain,
+                    "source_kind": "synthetic", "difficulty": "single_domain_boundary",
+                    "dataset_version": "synthetic-launcher-smoke-v1", "split": split,
+                    "scenario_group": f"family-{split}-{domain}", "language": "en",
+                    "synthetic": "true", "labels_complete": "true",
+                    "expected_admission": "reject", "rejection_reason": "insufficient_domains",
+                })
 
 
 def free_port():
@@ -31,6 +255,7 @@ def free_port():
 
 def get(url):
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=1) as response:
+        assert response.status == 200, (url, response.status)
         return response.read()
 
 
@@ -87,14 +312,10 @@ def composer_smoke(binary):
         done = threading.Event()
 
         def terminal_text(start=0):
-            return re.sub(
-                rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\\\))",
-                b"",
-                bytes(capture[start:]),
-            )
+            return TerminalScreen(capture).text(start)
 
         def sees(label, start=0):
-            return label in terminal_text(start)
+            return TerminalScreen(capture).contains(label, start)
 
         def read_terminal():
             while not done.is_set():
@@ -186,9 +407,16 @@ def main():
     parser.add_argument("--argos", type=Path, default=ROOT / "target/agents/debug/argos")
     parser.add_argument("--terminal-captures", type=Path, help="retain PTY lifecycle output for review")
     parser.add_argument("--tui-only", action="store_true", help="run just embedded API/Web terminal-display checks")
+    parser.add_argument("--tui-case", choices=("all", "tui", "api", "web", "web-quit"), help="run one isolated terminal case; api/web cases train through the real classifier CLI")
     parser.add_argument("--tui-web-profile", choices=("dev", "installed"), default="dev", help="Web profile for terminal-display checks; installed avoids another dev server's workspace lock")
     parser.add_argument("--composer-smoke", action="store_true", help="regression: a TUI composer launch must not abort the Tokio worker runtime")
+    parser.add_argument("--verify-terminal-screen", type=Path, help="check retained-cell and fresh-prompt matching against a failed PTY capture without launching services")
     args = parser.parse_args()
+    if args.verify_terminal_screen:
+        verify_terminal_screen(args.verify_terminal_screen)
+        return
+    if args.tui_case is not None:
+        args.tui_only = True
     binary = args.argos.resolve()
     if args.composer_smoke:
         composer_smoke(binary)
@@ -197,6 +425,8 @@ def main():
     assert binary.is_file() and host.is_file(), "build argos and argos-api-host first"
     with tempfile.TemporaryDirectory(prefix="argos-web-stack-") as tmp:
         env = {**os.environ, "ARGOS_HOME": tmp}
+        training_csv = Path(tmp) / "article training fixture.csv"
+        classifier_fixture(training_csv)
         env.pop("ARGOS_EMBED", None)
         env.pop("ARGOS_STORAGE_MODE", None)
         # Stub the OS URL handler: verify browser dispatch without opening tabs
@@ -246,22 +476,11 @@ def main():
             before = termios.tcgetattr(slave)
             capture = bytearray()
             done = threading.Event()
-
-            def terminal_text(start=0):
-                """Return visible terminal bytes without redraw controls.
-
-                Ratatui's incremental ANSI updates can place a cursor/style
-                sequence inside a label. Match the rendered text rather than
-                assuming each label arrives as one contiguous byte sequence.
-                """
-                return re.sub(
-                    rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\\\))",
-                    b"",
-                    bytes(capture[start:]),
-                )
+            passed = False
+            capture_name = target.removeprefix("--") + ("-quit" if quit_from_tui else "")
 
             def sees(label, start=0):
-                return label in terminal_text(start)
+                return TerminalScreen(capture).contains(label, start)
 
             def read_terminal():
                 while not done.is_set():
@@ -296,6 +515,22 @@ def main():
             try:
                 if wizard:
                     eventually(lambda: sees(b"Choose a service"), process)
+                    if not (Path(tmp) / "classifier/active.json").is_file():
+                        assert sees(b"Train and save classifier"), "missing model must expose initial setup"
+                        mark = len(capture)
+                        os.write(master, b"5\r")
+                        eventually(lambda: sees(b"Classifier CSV path", mark), process)
+                        os.write(master, b"\x15" + str(training_csv).encode() + b"\r")
+                        def trained_service_menu():
+                            # Match the fresh service option itself; training
+                            # notices/history can also mention API Server.
+                            return ((Path(tmp) / "classifier/active.json").is_file()
+                                    and sees(b"Choose a service", mark)
+                                    and sees(b"2  API Server", mark))
+
+                        eventually(trained_service_menu, process, seconds=60)
+                        assert (Path(tmp) / "classifier/active.json").is_file(), "setup must save before enabling services"
+                        training_csv.unlink()  # Later sessions restore the saved model without its CSV.
                     if target == "--tui":
                         os.write(master, b"3\r")
                         eventually(lambda: sees(b"Web port"), process)
@@ -314,9 +549,7 @@ def main():
                         os.write(master, b"\x15" + str(api_port).encode() + b"\r")
                     eventually(lambda: sees(b"Storage mode"), process)
                     os.write(master, b"\r")
-                    # Match the selected option label, not the question
-                    # title: an incremental cursor repaint can overwrite
-                    # part of the title in the raw PTY byte stream.
+                    # Wait for the actual terminal choices before confirming.
                     terminal_choice = b"Jobs / Logs available" if target == "--tui" else b"Server logs"
                     eventually(lambda: sees(terminal_choice), process)
                     os.write(master, b"\r" if target == "--tui" else b"\x1b[A\r")
@@ -325,12 +558,11 @@ def main():
                     if sees(b"Open last app view session"):
                         os.write(master, b"n")
                     mark = len(capture)
-                    for _ in range(8):
-                        os.write(master, b"\x11\x11")
-                        time.sleep(0.25)
-                        if sees(b"Choose a service", mark):
-                            break
-                    eventually(lambda: sees(b"Choose a service", mark), process)
+                    # One pair arms/confirms TUI quit. Retrying while storage
+                    # drains can queue Ctrl-Q for Venture and quit its menu.
+                    os.write(master, b"\x11\x11")
+                    eventually(lambda: sees(b"Choose a service", mark)
+                               and sees(b"2  API Server", mark), process)
                     assert not state_file.exists(), "direct TUI created a managed service stack"
                     # Launch a different session in the same Venture parent:
                     # the previous TUI must have released embedded storage.
@@ -353,6 +585,7 @@ def main():
                     assert (termios.tcgetattr(slave)[3] & (termios.ICANON | termios.ECHO)) == (before[3] & (termios.ICANON | termios.ECHO))
                     os.write(master, b"\n")
                     assert process.wait(timeout=10) == 0
+                    passed = True
                     return
                 managed = eventually(state, process, seconds=60)
                 assert managed["terminal"] == "Tui"
@@ -372,22 +605,42 @@ def main():
                 if target == "--web":
                     get(f"http://127.0.0.1:{managed['web_port']}/?token=fixture-private-query")
                 rows = json.loads(get(f"http://127.0.0.1:{api_port}/api/v1/jobs"))["rows"]
-                operation = "web_server" if target == "--web" else "api_server"
-                selected = next((index, row) for index, row in enumerate(rows) if row["operation"] == operation and row["state"] == "running")
-                assert selected[1]["kind"] == "service" and not selected[1]["cancellable"]
-                assert any(row["operation"] == "api_server" and row["state"] == "running" for row in rows)
-                os.write(master, b"\x1b")
-                time.sleep(0.2)
-                os.write(master, b"5")
-                eventually(lambda: selected[1]["title"].encode() in capture, process)
-                # Jobs initially focuses its search field. Focus the measured
-                # 160×50 table row before using the existing row shortcut.
-                row = 10 + selected[0] * 2  # SGR mouse coordinates are 1-based.
-                os.write(master, f"\x1b[<0;25;{row}M\x1b[<0;25;{row}m".encode())
-                time.sleep(0.2)
-                os.write(master, b"l")  # Existing Jobs → View logs shortcut.
-                expected = b"GET /" if target == "--web" else b"GET /api/v1/days"
-                eventually(lambda: expected in capture, process)
+
+                def service(operation):
+                    matches = [row for row in rows if row["operation"] == operation and row["state"] == "running"]
+                    assert len(matches) == 1, (operation, matches)
+                    job = matches[0]
+                    assert job["kind"] == "service" and not job["cancellable"]
+                    return job
+
+                api_job = service("api_server")
+
+                def open_service_logs(job):
+                    if sees(b"[Home] > Logs"):
+                        os.write(master, b"\x1b")  # Logs returns to its selected job.
+                    elif not sees(b"[Home] > Jobs"):
+                        os.write(master, b"\x1b")
+                        time.sleep(0.2)  # Finish Escape before the next key; ESC+5 means Alt+5.
+                        os.write(master, b"5")
+                    eventually(lambda: sees(b"[Home] > Jobs"), process)
+                    column, row = eventually(
+                        lambda: service_row_position(TerminalScreen(capture), job["title"]), process)
+                    os.write(master, f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m".encode())
+                    eventually(lambda: sees(job["id"].encode())
+                               and sees(("Operation: " + job["operation"]).encode()), process)
+                    os.write(master, b"l")
+                    eventually(lambda: sees(b"[Home] > Logs")
+                               and sees(job["id"][-8:].encode()), process)
+
+                if target == "--web":
+                    open_service_logs(service("web_server"))
+                    eventually(lambda: sees(b"Argos Next server ready at"), process)
+                    # Development Next emits access lines; the installed runtime
+                    # emits server output, while owned API traffic has its own job.
+                    if args.tui_web_profile == "dev":
+                        eventually(lambda: sees(b"GET /"), process)
+                open_service_logs(api_job)
+                eventually(lambda: sees(b"GET /api/v1/days"), process)
                 assert b"fixture-private-query" not in capture, "traffic included a query string"
                 assert b"Unexpected text node" not in capture, "React Native rendered a raw text child inside View"
                 if target == "--web":
@@ -405,7 +658,7 @@ def main():
                     assert ready(api_port)
                     run("stack", "down", target)
                 if wizard:
-                    eventually(lambda: b"Choose a service" in capture[return_mark:], process, seconds=25)
+                    eventually(lambda: sees(b"Choose a service", return_mark), process, seconds=25)
                     os.write(master, b"\x1b")
                 eventually(lambda: b"ARGOS_EXIT=0" in capture, process, seconds=25)
                 assert not state_file.exists()
@@ -418,6 +671,7 @@ def main():
                     pass
                 else:
                     raise AssertionError("in-process API survived TUI stack shutdown")
+                passed = True
             finally:
                 if process.poll() is None:
                     try:
@@ -428,20 +682,31 @@ def main():
                 reader.join(timeout=2)
                 if args.terminal_captures:
                     args.terminal_captures.mkdir(parents=True, exist_ok=True)
-                    (args.terminal_captures / (target.removeprefix("--") + ".ansi")).write_bytes(capture)
+                    (args.terminal_captures / (capture_name + ".ansi")).write_bytes(capture)
                     service_log = Path(tmp) / "stack-services.log"
                     if service_log.exists() and target != "--tui":
-                        (args.terminal_captures / (target.removeprefix("--") + "-services.log")).write_bytes(service_log.read_bytes()[-65536:])
+                        (args.terminal_captures / (capture_name + "-services.log")).write_bytes(service_log.read_bytes()[-65536:])
                 os.close(master)
                 os.close(slave)
+                if passed:
+                    print(f"PASS: terminal case {capture_name}{' with Venture wizard' if wizard else ''}; service logs, shutdown and terminal restoration")
 
         try:
             if args.tui_only:
                 run("storage", "init", "--mode", "embedded")
-                exercise_tui("--tui", wizard=True)
-                exercise_tui("--server", wizard=True)
-                exercise_tui("--web", quit_from_tui=True)
-                print("PASS: Venture wizard, shared embedded API/Web TUI, service Jobs/traffic Logs, clean startup, quit/down and raw-mode restoration")
+                if args.tui_case in ("api", "web", "web-quit"):
+                    run("classifier", "train", "--file", str(training_csv), "--activate-synthetic-baseline")
+                    training_csv.unlink()  # Selected cases must restore the saved artifact.
+                    exercise_tui("--server" if args.tui_case == "api" else "--web",
+                                 quit_from_tui=args.tui_case == "web-quit")
+                elif args.tui_case == "tui":
+                    exercise_tui("--tui", wizard=True)
+                else:
+                    exercise_tui("--tui", wizard=True)
+                    exercise_tui("--server", wizard=True)
+                    exercise_tui("--web", quit_from_tui=True)
+                if args.tui_case in (None, "all"):
+                    print("PASS: Venture wizard, shared embedded API/Web TUI, service Jobs/traffic Logs, clean startup, quit/down and raw-mode restoration")
                 return
             run("stack", "up", "--server", success=False)
             assert not state_file.exists()

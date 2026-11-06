@@ -50,16 +50,17 @@ fn named(kind: &str) -> bool {
     matches!(kind, "person" | "organization" | "place")
 }
 fn recognized(category: &str) -> bool {
-    matches!(
-        category,
-        "geopolitical"
-            | "economic"
-            | "military"
-            | "science"
-            | "health"
-            | "stability"
-            | "technology"
-    )
+    crate::atlas_taxonomy::DOMAIN_IDS.contains(&category)
+        || matches!(
+            category,
+            "geopolitical"
+                | "economic"
+                | "military"
+                | "science"
+                | "health"
+                | "stability"
+                | "technology"
+        )
 }
 
 fn word(c: char) -> bool {
@@ -317,23 +318,12 @@ pub struct PlannedPair {
 }
 
 /// Inverted token and entity postings avoid comparing all article pairs.
-pub fn build(store: &Store, run_id: &str) -> Result<usize> {
-    let articles = store.atlas_list_articles(run_id)?;
-    let mut metadata = Vec::new();
-    for a in &articles {
-        metadata.push(store.atlas_metadata(run_id, &a.id)?);
-    }
-    let (build_key, input_revision) = build_input(run_id, &articles, &metadata)?;
-    if let Some(marker) = store.app_state_get(&build_key)? {
-        let count = crate::storage::store_bridge::related_count(run_id)?;
-        if build_is_current(Some(&marker), &input_revision, count) {
-            return Ok(count);
-        }
-    }
-    let planned = plan(&articles, &metadata)?;
-    let count = crate::storage::store_bridge::replace_related(run_id, &articles, &planned)?;
-    store.app_state_set(&build_key, &build_marker(&input_revision, count)?)?;
-    Ok(count)
+pub fn build(_store: &Store, run_id: &str) -> Result<usize> {
+    let run_id = run_id.to_owned();
+    crate::storage::runtime::blocking(move |repo| async move {
+        let store = crate::atlas_store::AtlasStore::from_repository(repo.clone());
+        build_surreal(&store, &repo, &run_id).await
+    })
 }
 
 /// [`build`] on the SurrealDB repository: same plan, same input marker
@@ -347,33 +337,68 @@ pub async fn build_on(store: &crate::atlas_store::AtlasStore, run_id: &str) -> R
 
 #[cfg(feature = "surreal")]
 async fn build_surreal(
-    store: &crate::atlas_store::AtlasStore,
+    _store: &crate::atlas_store::AtlasStore,
     repo: &crate::storage::repo::Repository,
     run_id: &str,
 ) -> Result<usize> {
-    let articles = store.list_articles(run_id).await?;
-    let mut metadata = Vec::new();
-    for a in &articles {
-        metadata.push(store.metadata(run_id, &a.id).await?);
-    }
-    let (build_key, input_revision) = build_input(run_id, &articles, &metadata)?;
-    if let Some(marker) = store.app_state_get(&build_key).await? {
-        let count = crate::storage::atlas_metadata::related_count(repo.db(), run_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("atlas related count: {e}"))?;
-        if build_is_current(Some(&marker), &input_revision, count) {
-            return Ok(count);
+    use crate::storage::classifier_admission::{self, DerivativeStage};
+    let owner = classifier_admission::AdmissionOwner::new(repo.clone());
+    let result = async {
+        let mut after = None;
+        let mut processed = 0usize;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        loop {
+            let keys = crate::storage::atlas::current_occurrence_keys_page(
+                repo,
+                Some(run_id),
+                None,
+                after.as_ref(),
+            )
+            .await?;
+            if keys.is_empty() {
+                break;
+            }
+            after = keys.last().cloned();
+            processed += keys.len();
+            let report = classifier_admission::process_native_refresh_stage(
+                &owner,
+                &keys,
+                DerivativeStage::Related,
+                &cancel,
+            )
+            .await?;
+            if report.states.iter().any(|work| {
+                !work
+                    .stages
+                    .iter()
+                    .find(|stage| stage.stage == DerivativeStage::Related)
+                    .and_then(|stage| stage.disposition.as_ref())
+                    .is_some_and(classifier_admission::DerivativeDisposition::terminal)
+            }) {
+                anyhow::bail!("Related native inputs remain unavailable or changed");
+            }
         }
-    }
-    let planned = plan(&articles, &metadata)?;
-    let count =
-        crate::storage::atlas_metadata::replace_related(repo.db(), run_id, &articles, &planned)
+        let mut response = repo
+            .db()
+            .query("RETURN count(SELECT id FROM atlas_article WHERE run_id=$run);")
+            .bind(("run", run_id.to_owned()))
+            .await?
+            .check()?;
+        let retained = response
+            .take::<Option<i64>>(0)?
+            .ok_or_else(|| anyhow::anyhow!("missing retained Related count"))?;
+        if usize::try_from(retained).ok() != Some(processed) {
+            anyhow::bail!("Related refresh ineligible for legacy, rejected or pending occurrences");
+        }
+        crate::storage::atlas_metadata::related_count(repo.db(), run_id)
             .await
-            .map_err(|e| anyhow::anyhow!("atlas related articles: {e}"))?;
-    store
-        .app_state_set(&build_key, &build_marker(&input_revision, count)?)
-        .await?;
-    Ok(count)
+            .map_err(anyhow::Error::from)
+    }
+    .await;
+    let cleanup = owner.shutdown().await;
+    let result = result?;
+    cleanup?;
+    Ok(result)
 }
 
 /// `Store::related_articles` on the selected Atlas store: under SurrealDB
@@ -402,7 +427,7 @@ async fn related_surreal(
     limit: usize,
 ) -> Result<RelatedArticlePage> {
     let limit = limit.clamp(1, 100);
-    let articles = store.list_articles(run_id).await?;
+    let articles = store.current_articles(run_id).await?;
     let lookup: HashMap<_, _> = articles.iter().map(|a| (a.id.as_str(), a)).collect();
     let mut pairs = crate::storage::atlas_metadata::related_pairs(repo.db(), run_id, article_id)
         .await
@@ -735,7 +760,7 @@ pub(crate) fn revision(a: &AtlasArticleRow) -> String {
     crate::nlp::cache::hash(&format!(
         "{}:{}",
         atlas_metadata::input_hash(a),
-        a.projected_category()
+        serde_json::to_string(&a.categories).expect("domain strings serialize")
     ))
 }
 pub(crate) fn canonical_url(raw: &str) -> String {
@@ -747,40 +772,159 @@ pub(crate) fn canonical_url(raw: &str) -> String {
         .unwrap_or_else(|_| raw.into())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn article(id: &str, title: &str, category: &str) -> AtlasArticleRow {
-        AtlasArticleRow {
-            run_id: "r".into(),
-            id: id.into(),
-            title: title.into(),
-            description: "Nairobi".into(),
-            url: format!("https://example.com/{id}"),
-            country: String::new(),
-            source_name: "Publisher".into(),
-            source_domain: "example.com".into(),
-            published_at: "2026-10-12".into(),
-            provider: "fixture".into(),
-            temperature: 0.0,
-            category: category.into(),
-            seen_at: String::new(),
-            author: String::new(),
-            image_url: String::new(),
-            categories: Vec::new(),
-            admitted_at: String::new(),
-        }
+/// Rebuilds only pairs touching one captured occurrence. Candidate retrieval
+/// is indexed and bounded to 100 raw hits; a continuation remains durable.
+pub(crate) async fn process_derivative(
+    owner: &crate::storage::classifier_admission::AdmissionOwner,
+    fence: &crate::storage::classifier_admission::DerivativeFence,
+    claim: &crate::storage::classifier_admission::DerivativeClaim,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<crate::storage::classifier_admission::DerivativeDisposition> {
+    use crate::storage::classifier_admission::{self, DerivativeDisposition, DerivativeStage};
+    use crate::storage::tx::{RetryPolicy, TxError};
+    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(DerivativeDisposition::Retryable {
+            code: "cancelled".into(),
+        });
     }
-    fn inventory(store: &Store, a: &AtlasArticleRow, key: &str, kind: &str) {
-        store.atlas_upsert_article(a).unwrap();
-        let mut m = atlas_metadata::ArticleMetadata::pending(a);
-        m.entity_state = MetadataState::Complete;
-        m.reliability_state = MetadataState::Complete;
-        if let Some(mention) = find_exact(&a.title, &key.to_lowercase(), kind, "title") {
-            m.mentions.push(mention);
-        }
-        m.mentions
-            .push(find_exact(&a.description, "nairobi", "place", "description").unwrap());
-        assert!(store.atlas_save_metadata(&m).unwrap());
+    let Some(metadata) = claim.metadata.as_ref() else {
+        return Ok(classifier_admission::release_derivative(
+            owner,
+            fence,
+            claim,
+            DerivativeDisposition::Retryable {
+                code: "related_metadata_missing".into(),
+            },
+        )
+        .await?);
+    };
+    if metadata.entity_state == MetadataState::Skipped {
+        let fence = fence.clone();
+        let claim = claim.clone();
+        return Ok(
+            classifier_admission::owned_tx(owner, RetryPolicy::default(), move |tx| {
+                let fence = fence.clone();
+                let claim = claim.clone();
+                async move {
+                    let now = chrono::Utc::now();
+                    if !classifier_admission::check_derivative_in(&tx, &fence, &claim, now).await? {
+                        return Ok(DerivativeDisposition::StaleInput);
+                    }
+                    let disposition = DerivativeDisposition::Disabled {
+                        reason: "local_entities_disabled".into(),
+                    };
+                    if !classifier_admission::complete_derivative_in(
+                        &tx,
+                        &fence,
+                        &claim,
+                        &disposition,
+                        "",
+                        now,
+                    )
+                    .await?
+                    {
+                        return Err(TxError::Abort("related_disabled_lease_lost".into()));
+                    }
+                    Ok(disposition)
+                }
+            })
+            .await?
+            .value,
+        );
     }
+    if metadata.entity_state != MetadataState::Complete
+        && metadata.entity_state != MetadataState::Unsupported
+    {
+        return Ok(classifier_admission::release_derivative(
+            owner,
+            fence,
+            claim,
+            DerivativeDisposition::Retryable {
+                code: "related_entities_unavailable".into(),
+            },
+        )
+        .await?);
+    }
+    let cursor = if claim.checkpoint_json.is_empty() {
+        None
+    } else {
+        Some(claim.checkpoint_json.as_str())
+    };
+    let candidates = crate::storage::article_discovery::related_from_seed_bounded_after(
+        owner.repository(),
+        &claim.article,
+        100,
+        cursor,
+    )
+    .await?;
+    let keys: Vec<_> = candidates
+        .hits
+        .iter()
+        .filter(|hit| hit.run_id == claim.article.run_id && hit.article_id != claim.article.id)
+        .map(|hit| crate::atlas_classify::OccurrenceKey::new(&hit.run_id, &hit.article_id))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let first = claim.checkpoint_json.is_empty();
+    let next = candidates.next_cursor.clone();
+    let truncated = candidates.truncated;
+    let captured = classifier_admission::owned_tx(owner, RetryPolicy::default(), move |tx| {
+        let keys = keys.clone();
+        async move {
+            let mut rows = BTreeMap::new();
+            for keys in keys.chunks(64) {
+                rows.extend(
+                    classifier_admission::derivative_snapshots_in(
+                        &tx,
+                        keys,
+                        DerivativeStage::Related,
+                    )
+                    .await?,
+                );
+            }
+            Ok(rows)
+        }
+    })
+    .await?
+    .value;
+    let mut articles = vec![claim.article.clone()];
+    let mut metadata = vec![claim.metadata.clone()];
+    let mut captures = vec![claim.snapshot.clone()];
+    for (snapshot, article, native) in captured.values() {
+        if snapshot.admission_state != "admitted" {
+            continue;
+        }
+        articles.push(article.clone());
+        metadata.push(native.clone());
+        captures.push(snapshot.clone());
+    }
+    let planned = plan(&articles, &metadata)?;
+    let planned: Vec<_> = planned
+        .into_iter()
+        .filter(|pair| pair.left == 0 || pair.right == 0)
+        .collect();
+    let fence = fence.clone();
+    let claim = claim.clone();
+    let committed=classifier_admission::owned_tx(owner,RetryPolicy::default(),move|tx|{let fence=fence.clone();let claim=claim.clone();let articles=articles.clone();let planned=planned.clone();let captures=captures.clone();let next=next.clone();async move {
+        let now=chrono::Utc::now();if !classifier_admission::check_derivative_in(&tx,&fence,&claim,now).await?{return Ok(DerivativeDisposition::StaleInput);}
+        let keys:Vec<_>=articles.iter().skip(1).map(|article|crate::atlas_classify::OccurrenceKey::new(&article.run_id,&article.id)).collect();
+        let mut current=BTreeMap::new();for keys in keys.chunks(64){current.extend(classifier_admission::derivative_snapshots_in(&tx,keys,DerivativeStage::Related).await?);}
+        if first {
+            crate::storage::jobs::run(&tx,tx.query("DELETE atlas_related_article WHERE run_id=$run AND left_id=$article RETURN NONE;DELETE atlas_related_article WHERE run_id=$run AND right_id=$article RETURN NONE;").bind(("run",claim.article.run_id.clone())).bind(("article",claim.article.id.clone()))).await?;
+        }
+        let mut conflicted=false;
+        for pair in &planned {
+            let(left,right)=(&articles[pair.left],&articles[pair.right]);let other=if pair.left==0{pair.right}else{pair.left};
+            let key=crate::atlas_classify::OccurrenceKey::new(&articles[other].run_id,&articles[other].id);
+            if current.get(&key).map(|(snapshot,_,_)|snapshot.revision(DerivativeStage::Related)).transpose()?.as_deref()!=Some(captures[other].revision(DerivativeStage::Related)?.as_str()){conflicted=true;continue;}
+            crate::storage::jobs::run(&tx,tx.query("UPSERT type::record('atlas_related_article',$key) CONTENT {run_id:$run,left_id:$left,right_id:$right,left_revision:$lr,right_revision:$rr,left_native_revision:$ln,right_native_revision:$rn,shared_json:$shared,match_version:$version,named_count:$named,shared_count:$count,rarity:$rarity} RETURN NONE;")
+                .bind(("key",crate::storage::codec::encode(&[&left.run_id,&left.id,&right.id]))).bind(("run",left.run_id.clone())).bind(("left",left.id.clone())).bind(("right",right.id.clone())).bind(("lr",revision(left))).bind(("rr",revision(right))).bind(("ln",captures[pair.left].revision(DerivativeStage::Related)?)).bind(("rn",captures[pair.right].revision(DerivativeStage::Related)?)).bind(("shared",pair.shared_json.clone())).bind(("version",MATCH_VERSION)).bind(("named",pair.named_count)).bind(("count",pair.shared_count)).bind(("rarity",pair.rarity))).await?;
+        }
+        let(disposition,checkpoint)=if conflicted {(DerivativeDisposition::Retryable {code:"related_candidate_changed".into()},String::new())}
+            else if let Some(next)=next {(DerivativeDisposition::Retryable {code:"related_continuation".into()},next)}
+            else if truncated {(DerivativeDisposition::Retryable {code:"related_discovery_cap".into()},String::new())}
+            else {(DerivativeDisposition::Current,String::new())};
+        if !classifier_admission::complete_derivative_in(&tx,&fence,&claim,&disposition,&checkpoint,now).await?{return Err(TxError::Abort("related_completion_lease_lost".into()));}Ok(disposition)
+    }}).await?;
+    Ok(committed.value)
 }

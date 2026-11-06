@@ -125,6 +125,10 @@ async fn derivations_write_memories_evidence_and_retire_on_refresh() {
     let rejected = claim("c2", "nothing", false);
     let fp = claim_fingerprint(&kept);
     let inference = Inference {
+        inference_kind: None,
+        domains: Vec::new(),
+        support_state: String::new(),
+        conditions: Vec::new(),
         id: "i1".into(),
         text: "Acme is expanding.".into(),
         entity_refs: vec!["e:acme".into()],
@@ -407,6 +411,10 @@ async fn claims_bind_actors_and_kind_refresh_carries_the_other_kind() {
         },
     ];
     let inference = Inference {
+        inference_kind: None,
+        domains: Vec::new(),
+        support_state: String::new(),
+        conditions: Vec::new(),
         id: "i1".into(),
         text: "Acme is expanding.".into(),
         entity_refs: vec!["e:acme".into()],
@@ -564,4 +572,89 @@ async fn claims_bind_actors_and_kind_refresh_carries_the_other_kind() {
         scalar::<i64>(&db, "RETURN count(SELECT id FROM brain_actor)").await,
         actors
     );
+}
+
+#[tokio::test]
+async fn typed_inference_attributes_survive_canonical_memory_projection_and_retirement() {
+    use argos_osint_core::atlas_taxonomy::DomainId;
+    use argos_osint_core::intelligence_contracts::InferenceKind;
+    use argos_osint_core::investigation::insights::inference_fingerprint;
+    use argos_osint_core::memory_metadata::MemoryPayload;
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "typed_inference").await;
+    let db = repo.db().clone();
+    let premise = claim("c1", "office", true);
+    let inference = Inference {
+        inference_kind: Some(InferenceKind::ConditionalOutlook),
+        domains: vec![DomainId::Security, DomainId::Economic],
+        support_state: "conditional".into(),
+        conditions: vec!["If the closure persists".into()],
+        id: "i1".into(),
+        text: "If the closure persists, traffic may move to another port.".into(),
+        entity_refs: vec!["e:acme".into()],
+        premise_claim_ids: vec!["c1".into()],
+        evidence_refs: vec![reference("body:a1")],
+        rationale: "The retained passage describes a closure.".into(),
+        limitations: vec!["No subsequent traffic measurements".into()],
+        assessment: Assessment {
+            fidelity: "faithful".into(),
+            threshold_passed: true,
+            ..Default::default()
+        },
+        snapshot_key: String::new(),
+    };
+    let fingerprint = inference_fingerprint(&inference);
+    let memory = format!("mem:{fingerprint}");
+    publish(
+        &db,
+        "a1",
+        PipelineOutput {
+            claims: vec![premise.clone()],
+            inferences: vec![inference],
+            ..Default::default()
+        },
+        saving(),
+    )
+    .await;
+    let raw: String = scalar(
+        &db,
+        &format!("SELECT VALUE payload_json FROM ONLY type::record('memory', '{memory}')"),
+    )
+    .await;
+    let MemoryPayload::Inference(payload) = serde_json::from_str(&raw).unwrap() else {
+        panic!("canonical typed inference");
+    };
+    assert_eq!(
+        payload.inference_kind,
+        Some(InferenceKind::ConditionalOutlook)
+    );
+    assert_eq!(payload.domains, [DomainId::Security, DomainId::Economic]);
+    assert_eq!(payload.support(), Some("conditional"));
+    assert_eq!(payload.conditions, ["If the closure persists"]);
+    assert_eq!(payload.extraction_fidelity.as_deref(), Some("faithful"));
+    assert!(
+        !payload.premise_claims.is_empty(),
+        "premises bind to canonical memories"
+    );
+    assert_eq!(
+        scalar::<String>(
+            &db,
+            &format!("SELECT VALUE lifecycle FROM ONLY type::record('memory', '{memory}')")
+        )
+        .await,
+        "active"
+    );
+    publish(
+        &db,
+        "a1",
+        PipelineOutput {
+            claims: vec![premise],
+            ..Default::default()
+        },
+        saving(),
+    )
+    .await;
+    assert_eq!(scalar::<i64>(&db, &format!("RETURN count(SELECT id FROM memory WHERE id = type::record('memory', '{memory}') AND lifecycle = 'active')")).await, 0, "superseded inference is not a live endpoint");
 }

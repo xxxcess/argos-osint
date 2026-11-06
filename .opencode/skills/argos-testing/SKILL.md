@@ -2,6 +2,8 @@
 
 > Applies to every agent that writes, changes, reviews, or executes tests in this repository. These rules extend (they do not replace) the root `AGENTS.md`, `docs/wiki/code/contributing.md`, and `.opencode/AGENTS.md`.
 
+[Shared agent execution policy](../../../docs/wiki/code/agent-workflow.md) owns coordination, resource budgets, evidence reuse, estimates and workflow improvements. This skill supplies test design and execution contracts.
+
 ## 1. Mission and non-negotiable principles
 
 Tests are executable product contracts. Write them to catch realistic regressions and prove externally observable behavior, not to make a coverage number look good.
@@ -29,17 +31,19 @@ Before running tests, read:
 Current verified repository facts (re-check files if the branch has changed):
 
 - Rust toolchain is pinned to **1.95.0** in `rust-toolchain.toml`.
-- Cargo workspace members are `crates/argos-osint-core` and `crates/argos-osint-bin`.
-- Core and binary default features are `embedded,nlp`. Embedded storage uses SurrealDB/RocksDB; server mode is opt-in through `server,nlp`.
+- Cargo workspace members are `crates/argos-osint-core`, `crates/argos-osint-bin`, `crates/argos-osint-api` and `crates/argos-api-host`.
+- Supported default features are `embedded,nlp,classifier`. Embedded storage uses SurrealDB/RocksDB; server mode is opt-in through `server,nlp,classifier`.
 - SurrealDB is the active storage system. SQLite/LanceDB are removed; CI explicitly rejects `rusqlite` and `lancedb` in the dependency graph.
 - All agent Cargo commands must use `python3 scripts/agent_cargo.py … --locked`. Do not run Cargo directly for builds/tests/clippy. `cargo fmt` is the documented exception and runs directly.
 - The agent local gate is `bash scripts/local_matrix.sh --storage embedded`. This includes format check, clippy with warnings denied, workspace tests, storage CLI smoke test, and embedded storage contracts.
 - Agents run the **embedded** matrix locally. The server storage matrix is CI-only.
 - Storage contract tests use `crates/argos-osint-core/tests/support` and `scripts/test_surreal.py`. Their environment controls matter; an unconfigured test may skip.
-- Serialize Cargo commands that share `target/agents`. Do not delete lock files, kill unrelated Cargo jobs, or launch competing builds to speed up verification.
+- Follow the [shared build-graph policy](../../../docs/wiki/code/agent-workflow.md#keep-one-reusable-build-graph). Workspace binary tests enable core `fixtures`; preserve activating targets when reusing that graph. Finish assigned production edits before build handoff and report later edits to compiled inputs; never start competing builds or bypass Cargo locks.
 - Worktrees are edit-only. Run formatting there; run tests in the designated combined integration tree.
 
-The repository currently contains a Rust workspace and OpenCode agent/test infrastructure. Do not assume a React app, package manager, Vitest, Testing Library, MSW, or Playwright is present. First inspect the current tree, lockfiles, package manifests, scripts, and CI. Apply the React guidance below only to an actual React surface and its existing toolchain. Do not scaffold a frontend test stack as part of unrelated Rust work.
+The repository also contains React Native Web packages and repository browser tooling. Inspect current manifests, lockfiles, scripts and CI before choosing frontend checks; apply frontend guidance only to the affected surface and existing toolchain. Do not scaffold another test stack as part of unrelated Rust work.
+
+Confirm proposed verification tests and scope once unless the session already explicitly authorizes them. Authorization persists across targeted retries and required follow-up within that scope; do not repeatedly ask for it. When the user will verify, leave runtime tests to the user and report them as not run. Choose concurrency under the shared resource policy and record it with test evidence.
 
 ## 3. Test design workflow (all languages)
 
@@ -56,6 +60,15 @@ For every behavior change:
 9. **Report evidence.** Include exact commands, exit codes, commit/revision or diff identity, environment/mode, pass/fail/skip counts, and any limitations.
 
 Use Arrange–Act–Assert (or Given–When–Then) where it clarifies the behavior. Test names should describe a condition and expected result, e.g. `expired_lease_is_not_reclaimed_by_a_different_owner`, not `test_works`.
+
+### 3.1 Native fixture prerequisites and diagnostic output
+
+Follow the shared [early-smoke](../../../docs/wiki/code/agent-workflow.md#establish-the-critical-path) and [failure-diagnosis](../../../docs/wiki/code/agent-workflow.md#diagnose-before-repeating) policy. Test-specific requirements:
+
+- Use real shared prerequisites: local classifier admission/publication, seeded catalog identities when required, current metadata, validated retained-body registration and complete native NLP receipts. Modern-looking tags, completion markers or hand-written checksums cannot grant current authority. Adversarial legacy/forged rows are valid when the test explicitly proves their exclusion.
+- Keep meaningful behavior assertions during smoke and fixture corrections. An ignored benchmark compiling does not prove that its runtime setup works.
+- Failure diagnostics must be bounded and omit credentials/article/body prose. Capture existing publisher warnings across background tasks when necessary; a generic retry wrapper is not the original transaction error. Do not hide production stack problems with larger test stacks.
+- Preserve independent tester ownership and mandatory gates when suggesting or applying [authorized workflow improvements](../../../docs/wiki/code/agent-workflow.md#communicate-and-improve-the-workflow).
 
 ## 4. Rust testing standards
 
@@ -190,7 +203,7 @@ For OSINT specifically, use synthetic, clearly non-real identities/domains/IPs a
 - Prioritize high-risk paths: persistence, retries, idempotency, state transitions, provider quota accounting, cancellation, fallback, parsing of untrusted data and user-visible failures.
 - When a bug is fixed, add a regression test that failed before the fix and passes after it.
 - Ask: "Would this test fail if the bug returned?" and "Could the test pass while the user-visible behavior is still broken?"
-- Use mutation testing selectively for high-risk pure logic or policy modules when the tooling is already available or the setup cost is justified. Do not introduce a mutation-testing dependency for a trivial change.
+- Use hosted mutation results selectively for high-risk pure logic or policy modules. Local Rust mutation tests and baselines remain prohibited; do not introduce a mutation-testing dependency for a trivial change.
 - Do not inflate test count with multiple tests that assert the same outcome without adding distinct boundary or failure coverage.
 
 ## 9. Running checks and interpreting results
@@ -200,22 +213,30 @@ For OSINT specifically, use synthetic, clearly non-real identities/domains/IPs a
 From the designated combined integration tree:
 
 ```bash
-bash scripts/local_matrix.sh --storage embedded
+env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURREAL_REQUIRED \
+  bash scripts/local_matrix.sh --storage embedded
 ```
 
-This is the authoritative local agent gate. It runs format checking, Clippy with `-D warnings`, all workspace tests, a CLI smoke test, and embedded SurrealDB contracts. The script invokes the Cargo wrapper according to repository policy.
+This is the authoritative local agent gate. It runs format checking, Clippy with `-D warnings`, all workspace tests, a CLI smoke test, and embedded SurrealDB contracts. The script invokes the Cargo wrapper according to repository policy. Parent storage mode is deliberately unset: the plain workspace phase skips mode-selected storage tests, then the dedicated harness runs required embedded contracts once. Targeted storage tests instead set their required mode explicitly. An intentional workspace skip is not a storage pass.
 
 For a targeted diagnosis, use the required wrapper, preserve `--locked`, and keep the command scoped to the affected crate/test. Examples (adjust package/test names after inspecting the workspace):
 
 ```bash
-python3 scripts/agent_cargo.py test -p argos-osint-core --test storage_bootstrap --locked
-python3 scripts/agent_cargo.py test -p argos-osint-core <test_filter> --locked
+# Match the workspace graph, retaining activating bin/API test targets.
+ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
+  python3 scripts/agent_cargo.py test --workspace --locked \
+  --test storage_bootstrap --test stack_cli --test api_contract <test_filter>
+
+# These package-only alternatives intentionally select a smaller feature graph.
+ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
+  python3 scripts/agent_cargo.py test -p argos-osint-core --test storage_bootstrap --locked
+python3 scripts/agent_cargo.py test -p argos-osint-core --lib <test_filter> --locked
 python3 scripts/agent_cargo.py clippy -p argos-osint-core --all-targets --locked -- -D warnings
 ```
 
 Do not copy/paste a targeted command blindly if the target is feature-gated or requires the SurrealDB harness. Use `scripts/test_surreal.py --help` and repository docs to select the supported mode. Do not run the server matrix locally as an agent.
 
-The documented repeat budget for the full gate is 1–2 runs, maximum 3. On failure, diagnose with a focused check, fix the cause, then run one final full gate. Do not loop retries without new evidence.
+Plan one final full gate after focused closure. If it fails, reproduce and fix the affected contract before another full run, recording why changed inputs justify it. Do not loop unchanged retries; a numerical repeat count cannot substitute for the required passing gate.
 
 ### Frontend checks
 
@@ -236,7 +257,7 @@ For every run, capture command, working directory, tested revision/diff, exit co
 The tester agent is an independent verifier, not a fixer.
 
 1. Read the active plan/acceptance criteria, contributor workflow, and changed-file list.
-2. Wait for editors to finish. Record the exact combined-tree revision and dirty diff identity before testing.
+2. Coordinate the input boundary with editors: focused checks may run after the relevant files settle; the final gate follows integration closure. Record the combined-tree revision and relevant dirty paths without repeatedly hashing unrelated files.
 3. Verify that tests cover each acceptance criterion and important failure mode. Identify missing tests even when CI is green.
 4. Do not edit source or tests to make verification pass. Report a minimal reproducer and evidence to the architect.
 5. Run targeted tests, then the applicable required gate in the integration root. Follow the serialization and retry limits.

@@ -1,6 +1,6 @@
 # CI workflows
 
-[Code route](index.md) · [Wiki](../../index.md)
+[Code route](index.md) · [Shared agent execution policy](agent-workflow.md) · [Wiki](../../index.md)
 
 Six workflows live in `.github/workflows/` (owned by Code Architect; CI changes are scoped separately from product edits).
 
@@ -19,14 +19,27 @@ Runs on pushes to `main` and when a PR is opened, reopened or marked ready for r
 
 Every leg calls the same entry point you run locally, `scripts/local_matrix.sh`:
 
-- **Embedded** (default features `embedded,nlp`): installs libclang on Linux, then `local_matrix.sh --storage embedded` = `cargo fmt --check` → clippy `-D warnings` → `cargo test --workspace --locked` → `test_surreal.py --mode embedded` (all `storage_*` tests on in-process RocksDB).
-- **Server** (`--no-default-features --features server,nlp`): checks the pinned SurrealDB hashes in `scripts/test_surreal.py` match `.planning/2026-10-22-surrealdb/design.md`, fetches the SHA-256-verified SurrealDB 3.3.4 binary (cached), then `local_matrix.sh --storage server --surreal-bin <bin>` = clippy on core+bin → `test_surreal.py --mode server`. Unit tests are not rerun here.
+- **Embedded** (default features `embedded,nlp,classifier`): installs libclang on Linux, then `local_matrix.sh --storage embedded` = `cargo fmt --check` → clippy `-D warnings` → `cargo test --workspace --locked` → `test_surreal.py --mode embedded` (all `storage_*` tests on in-process RocksDB).
+- **Server** (`--no-default-features --features server,nlp,classifier`): checks the pinned SurrealDB hashes in `scripts/test_surreal.py` match `.planning/2026-10-22-surrealdb/design.md`, fetches the SHA-256-verified SurrealDB 3.3.4 binary (cached), then `local_matrix.sh --storage server --surreal-bin <bin>` = clippy on core+bin → `test_surreal.py --mode server`. Unit tests are not rerun here.
 
 Storage tests are selected by `ARGOS_SURREAL_MODE`; with no mode and no `ARGOS_SURREAL_BIN` they skip, so the plain `cargo test` in the embedded leg doesn't duplicate them. `test_surreal.py` sets `ARGOS_SURREAL_REQUIRED=1`, so a missing server fails instead of skipping.
 
 Cache: `Swatinem/rust-cache` keyed per OS × storage, covering `target/agents` (where `scripts/agent_cargo.py` builds).
 
-**Local vs. hosted rule:** never run the all-platform or `server` storage stack from `.github/workflows/ci.yml` locally. Agents must **stabilize the local host machine build and embedded storage tests first** (`uname -ms`, `rustc -vV | grep '^host:'`), preferring targeted crate/test commands (`python3 scripts/agent_cargo.py check|clippy|test --locked -p <crate> [--lib | --test <name>]`, or `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 python3 scripts/agent_cargo.py test --locked -p argos-osint-core --test storage_<name>`) during iteration before running `scripts/local_matrix.sh --storage embedded` ([contributor workflow](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration)). Once local builds are stable and changes are pushed, monitor GitHub Actions checks/runs for issues on other platforms and `server` storage mode when CLI access is available (`gh pr checks`, `gh run list --branch "$(git branch --show-current)"`, `gh run view <run-id> --log-failed`).
+**Local vs. hosted rule:** never run the all-platform or `server` storage stack from `.github/workflows/ci.yml` locally. Agents must **stabilize the local host machine build and embedded storage tests first** (`uname -ms`, `rustc -vV | grep '^host:'`), using [workspace-compatible targeted commands or intentional package-only alternatives](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration) during iteration before running `scripts/local_matrix.sh --storage embedded`. Once local builds are stable and changes are pushed, monitor GitHub Actions checks/runs for issues on other platforms and `server` storage mode when CLI access is available (`gh pr checks`, `gh run list --branch "$(git branch --show-current)"`, `gh run view <run-id> --log-failed`).
+
+## Efficient local verification before CI
+
+Follow the [shared agent execution policy](agent-workflow.md) for build ownership, stable Cargo features, resource budgets, early smoke, failure diagnosis and evidence reuse. The [contributor recipes](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration) illustrate workspace-compatible selectors and intentional package-only alternatives. Finish assigned production edits before build handoff; later edits to compiled inputs must be reported to the owner.
+
+Start the normal gate with parent storage selection unset:
+
+```sh
+env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURREAL_REQUIRED \
+  scripts/local_matrix.sh --storage embedded
+```
+
+The workspace phase then skips mode-selected storage contracts, and `test_surreal.py` runs them once in required embedded mode. For targeted storage tests, explicitly set `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1`. Those intentional workspace skips are not a storage pass. The shared policy preserves mandatory native verification and local mutation/server/all-platform restrictions; `.github` edits remain Code Architect-owned. See the [testing guidelines](../../../.opencode/skills/argos-testing/SKILL.md) for contract-specific evidence rules.
 
 ## `datasets.yml` — LFS dataset integrity
 
@@ -56,6 +69,8 @@ The web workflow runs on matching web/config/build-check changes on `main` and p
 | `pnpm test:live` | Offline raw-relay, production runtime/restart and isolated development/HMR lifecycle contracts; runs after the Next build and browser installation |
 | Offline Playwright | The same Chromium fixtures run against the production Next server and the Next development server; both exercise RN Web UI, compilation, hydration, connection/actions and responsive layout. Production nonce CSP and same-origin API assertions apply to the production server. |
 | Retained evidence | Export/dev test results and screenshots use separate directories under `test-results/`; HTML reports use `playwright-report/export` and `playwright-report/dev`. Uploaded with `always()` and seven-day retention. |
+
+Local agents can isolate the production build/check pair with `ARGOS_WEB_TEST_DEV=1 pnpm build` followed by `ARGOS_WEB_TEST_DEV=1 pnpm check:web-build`. Both use the existing `.agent-scratch/next-web-tests` mapping and preserve launcher `.next`; omitting the setting keeps default build behavior. This pair verifies compiled output. Follow with `ARGOS_WEB_TEST_DEV=1 pnpm test:e2e` for the default production browser profile using that same isolated build; development remains `ARGOS_WEB_PROFILE=dev pnpm test:e2e`. Browser results and the full frontend gate remain separate evidence. Follow the [contributor isolation rules](contributing.md#build-and-test) and keep the user’s frontend running.
 
 New PR web runs cancel stale runs for the same PR; main runs are not cancelled. The web job has a 25-minute limit for the build, live lifecycle tests and both browser profiles.
 
@@ -90,7 +105,7 @@ Live-transport changes also run `pnpm test:live` after the Next build. Its offli
 
 ## Scoped mutation diagnostics
 
-[mutation.yml](../../../.github/workflows/mutation.yml) is a Linux embedded diagnostic gate triggered on pushes to `main`, separate from the platform/storage matrix. Its current trigger is defined in the workflow; there is no manual-dispatch trigger. It pins cargo-mutants 27.1.0 and uses [.cargo/mutants.toml](../../../.cargo/mutants.toml) to restrict mutation sites to NLP selection, provider attempt/request policy and Atlas classification, with the core library and property integration tests as the oracle. Default features remain embedded/nlp; no live providers or server storage are used.
+[mutation.yml](../../../.github/workflows/mutation.yml) is a Linux embedded diagnostic gate triggered on pushes to `main`, separate from the platform/storage matrix. Its current trigger is defined in the workflow; there is no manual-dispatch trigger. It pins cargo-mutants 27.1.0 and uses [.cargo/mutants.toml](../../../.cargo/mutants.toml) to restrict mutation sites to NLP selection, provider attempt/request policy and Atlas classification, with the core library and property integration tests as the oracle. Supported default features are `embedded,nlp,classifier`; the workflow remains authoritative for any explicit mutation feature selection. No live providers or server storage are used.
 
 The runner keeps the unmutated baseline check, fails on missed or timed-out mutations and retains outcome/log artifacts for seven days, including failure evidence. The 120-minute workflow limit bounds this expensive diagnostic; a timeout is incomplete evidence, not a passing baseline. Configuration and local smoke results do not establish a hosted mutation result. Review survivors before changing tests; equivalent mutants require a documented rationale rather than silently weakening the gate.
 

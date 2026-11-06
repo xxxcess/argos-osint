@@ -424,6 +424,10 @@ mod tests {
             ..Default::default()
         };
         output.inferences.push(Inference {
+            inference_kind: None,
+            domains: Vec::new(),
+            support_state: String::new(),
+            conditions: Vec::new(),
             id: "inference".into(),
             text: "Qualified conclusion".into(),
             entity_refs: vec!["actor".into()],

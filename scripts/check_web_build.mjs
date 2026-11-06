@@ -8,8 +8,15 @@ import { fileURLToPath } from "node:url";
 const app = process.argv[2]
   ? resolve(process.argv[2])
   : fileURLToPath(new URL("../apps/web-desktop/", import.meta.url));
+// Match Next's verification output without reading the launcher's .next.
+const dist = resolve(
+  app,
+  process.env.ARGOS_WEB_TEST_DEV === "1"
+    ? "../../.agent-scratch/next-web-tests"
+    : ".next",
+);
 const { config } = JSON.parse(
-  await readFile(resolve(app, ".next/required-server-files.json"), "utf8"),
+  await readFile(resolve(dist, "required-server-files.json"), "utf8"),
 );
 assert.notEqual(
   config.output,
@@ -38,10 +45,10 @@ for (const name of [
     `Missing shared transpilation: ${name}`,
   );
 
-await readFile(resolve(app, ".next/server/app/api/v1/[...path]/route.js"));
+await readFile(resolve(dist, "server/app/api/v1/[...path]/route.js"));
 await readFile(resolve(app, "server.mjs"));
 await readFile(resolve(app, "live-relay.mjs"));
-const chunks = resolve(app, ".next/static/chunks/app");
+const chunks = resolve(dist, "static/chunks/app");
 const pages = (await readdir(chunks)).filter((name) =>
   /^(page|layout)-.*\.js$/.test(name),
 );

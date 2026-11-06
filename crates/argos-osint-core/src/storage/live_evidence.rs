@@ -181,6 +181,68 @@ pub async fn validate_in(tx: &Tx, snapshot: &EvidenceSnapshot) -> Result<(), TxE
     Ok(())
 }
 
+/// Validate a NEW body-grounded publication against the exact current ready
+/// acquisition. Existing historical support continues to use `validate_in`.
+/// The shared epoch serializes a concurrent new body row/source registration;
+/// rereading a latest-head query alone cannot fence that phantom.
+pub async fn validate_for_publication_in(
+    tx: &Tx,
+    snapshot: &EvidenceSnapshot,
+) -> Result<(), TxError> {
+    let bodies: Vec<String> = snapshot
+        .source_refs
+        .iter()
+        .filter_map(|reference| reference.source_id.strip_prefix("body:").map(str::to_owned))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if !bodies.is_empty() {
+        ensure(
+            bodies.len() <= 64,
+            "publication body source budget exceeded",
+        )?;
+        let owners = super::actor_catalog::body_article_ids_many_in(tx, &bodies).await?;
+        ensure(
+            owners.len() == bodies.len(),
+            "publication body owner unavailable",
+        )?;
+        let articles: Vec<_> = owners
+            .values()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        super::pipeline_inputs::body_input_guard_in(tx, &articles).await?;
+        let heads = super::actor_catalog::clean_body_heads_many_in(tx, &articles).await?;
+        for reference in &snapshot.source_refs {
+            let Some(body) = reference.source_id.strip_prefix("body:") else {
+                continue;
+            };
+            let owner = owners
+                .get(body)
+                .ok_or_else(|| refuse("publication body owner unavailable"))?;
+            ensure(
+                heads.get(owner).is_some_and(|head| {
+                    head.source_id == reference.source_id
+                        && head.revision == reference.revision
+                        && head.artifact_hash == reference.artifact_hash
+                }),
+                "current body acquisition changed before publication",
+            )?;
+        }
+    }
+    validate_in(tx, snapshot).await
+}
+
+/// Current-input validation for a new canonical publication.
+pub fn publication_step(snapshot: EvidenceSnapshot) -> SnapshotStep {
+    let snapshot = Arc::new(snapshot);
+    Arc::new(move |tx, _| {
+        let snapshot = snapshot.clone();
+        Box::pin(async move { validate_for_publication_in(&tx, &snapshot).await })
+    })
+}
+
 /// [`validate_in`] as a publication step over a captured snapshot.
 pub fn step(snapshot: EvidenceSnapshot) -> SnapshotStep {
     let snapshot = Arc::new(snapshot);

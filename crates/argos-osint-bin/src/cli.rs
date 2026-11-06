@@ -23,6 +23,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect, train, evaluate or roll back the local article classifier.
+    Classifier {
+        #[command(subcommand)]
+        command: ClassifierCommand,
+    },
     /// Start and manage a local application stack.
     Stack {
         #[command(subcommand)]
@@ -95,6 +100,57 @@ enum Command {
         #[command(subcommand)]
         command: StorageCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum ClassifierCommand {
+    /// Show truthful local readiness without opening storage.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Train a synthetic candidate; activation requires separate explicit consent.
+    Train {
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        request_id: Option<String>,
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        activate_synthetic_baseline: bool,
+    },
+    /// Evaluate test families without training or changing the active model.
+    Evaluate {
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+    },
+    /// Restore a named model that was previously activated.
+    Rollback {
+        #[arg(long)]
+        model: String,
+    },
+    /// Queue a separate, resumable reclassification of retained occurrences.
+    Reclassify {
+        #[arg(long)]
+        request_id: String,
+        /// Omit to cover all retained runs.
+        #[arg(long)]
+        run_id: Option<String>,
+    },
+    /// Inspect or control an accepted historical reclassification job.
+    HistoryJob {
+        #[arg(long)]
+        job_id: String,
+        #[arg(long, value_enum, default_value_t = HistoryAction::Status)]
+        action: HistoryAction,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum HistoryAction {
+    Status,
+    Pause,
+    Resume,
+    Cancel,
 }
 
 #[cfg(feature = "surreal")]
@@ -333,18 +389,54 @@ pub async fn dispatch() -> Result<()> {
     }
     // Venture owns the session; child TUI/stack guards restore the terminal
     // and stop owned services before the next menu is presented.
+    let classifier_request =
+        argos_osint_core::classifier::dataset::DatasetRequest::from_runtime(None)?;
+    let classifier_home = argos_osint_core::classifier::readiness::ClassifierHome::new(
+        classifier_request.home.clone(),
+    );
     let mut notice = None;
     loop {
+        // Profile may have changed dataset/save paths in the previous child
+        // session. Capture them again before drawing or launching a service.
+        let classifier_request =
+            argos_osint_core::classifier::dataset::DatasetRequest::from_runtime(None)?;
+        let classifier = match classifier_home.refresh_integrity(&classifier_request).await {
+            Ok(status) => Some(status),
+            Err(error) => {
+                notice = Some(format!("Classifier status unavailable: {error}"));
+                None
+            }
+        };
         let current_notice = notice.clone();
         let Some(selection) = tokio::task::spawn_blocking(move || {
-            crate::welcome::run_with_notice(current_notice.as_deref())
+            crate::welcome::run_with_notice(current_notice.as_deref(), classifier.as_ref())
         })
         .await??
         else {
+            classifier_home.shutdown().await?;
             return Ok(());
         };
         notice = None;
         Cli::try_parse_from(&selection.args)?;
+        // Refresh readiness again before starting storage or service children.
+        // A removed/corrupt model between the menu probe and selection cannot
+        // bypass Venture's initial classifier setup.
+        if selection
+            .args
+            .get(1)
+            .is_some_and(|argument| argument == "stack")
+        {
+            match classifier_home.refresh_integrity(&classifier_request).await {
+                Ok(status) if status.can_infer => {}
+                _ => {
+                    notice = Some(
+                        "Train the initial classifier before launching TUI, API Server or Web."
+                            .into(),
+                    );
+                    continue;
+                }
+            }
+        }
         if let Some(args) = selection.storage_init {
             let status = tokio::process::Command::new(std::env::current_exe()?)
                 .args(args)
@@ -359,9 +451,18 @@ pub async fn dispatch() -> Result<()> {
         // Each session owns its repository and background workers. Waiting for
         // process exit releases embedded storage before Venture can launch again.
         let started = std::time::Instant::now();
+        use std::io::IsTerminal as _;
+        let classifier_tty = selection.args.get(1).is_some_and(|v| v == "classifier")
+            && selection.args.get(2).is_some_and(|v| v == "train")
+            && io::stdin().is_terminal()
+            && io::stderr().is_terminal();
         let mut child = tokio::process::Command::new(std::env::current_exe()?)
             .args(selection.args.iter().skip(1))
-            .stderr(std::process::Stdio::piped())
+            .stderr(if classifier_tty {
+                std::process::Stdio::inherit()
+            } else {
+                std::process::Stdio::piped()
+            })
             .kill_on_drop(true)
             .spawn()?;
         let last_err: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
@@ -475,6 +576,7 @@ async fn dispatch_command(command: Option<Command>) -> Result<()> {
             let app = tokio::task::spawn_blocking(App::boot).await??;
             tui::run(app).await
         }
+        Some(Command::Classifier { command }) => classifier_command(command).await,
         Some(Command::Stack { command }) => crate::stack::dispatch(command).await,
         Some(Command::Remember {
             app,
@@ -554,6 +656,132 @@ async fn dispatch_command(command: Option<Command>) -> Result<()> {
         #[cfg(feature = "surreal")]
         Some(Command::Storage { command }) => storage_command(command).await,
     }
+}
+
+async fn classifier_command(command: ClassifierCommand) -> Result<()> {
+    use argos_osint_core::classifier::artifact::ModelId;
+    use argos_osint_core::classifier::dataset::DatasetRequest;
+    use argos_osint_core::classifier::readiness::{
+        ClassifierHome, EvaluateRequest, ManualTrainRequest,
+    };
+    use argos_osint_core::classifier::training::SyntheticActivation;
+    let explicit = match &command {
+        ClassifierCommand::Train { file, .. } | ClassifierCommand::Evaluate { file } => {
+            file.clone()
+        }
+        _ => None,
+    };
+    // Parse rollback IDs before any model path access.
+    let rollback = match &command {
+        ClassifierCommand::Rollback { model } => {
+            Some(ModelId::parse(model).ok_or_else(|| anyhow!("invalid classifier model ID"))?)
+        }
+        _ => None,
+    };
+    let request = DatasetRequest::from_runtime(explicit)?;
+    if let ClassifierCommand::Train {
+        request_id,
+        activate_synthetic_baseline,
+        ..
+    } = command
+    {
+        static NEXT_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = match request_id {
+            Some(id) => id,
+            None => format!(
+                "cli-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos(),
+                NEXT_REQUEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ),
+        };
+        let consent = if activate_synthetic_baseline {
+            SyntheticActivation::ExplicitOptIn
+        } else {
+            SyntheticActivation::RetainPrior
+        };
+        let outcome =
+            crate::welcome::classifier::run(ManualTrainRequest::new(request, id, consent)).await?;
+        return print_json(&outcome);
+    }
+    let home = ClassifierHome::new(request.home.clone());
+    let result = async {
+        match command {
+            ClassifierCommand::Status { json } => {
+                let status = home.refresh_integrity(&request).await?;
+                if json {
+                    print_json(&status)
+                } else {
+                    println!("Classifier: {}", status.state.as_str());
+                    if let Some(model) = &status.active_model {
+                        println!("Model: {} · {}", model.model_id, model.provenance.label);
+                    }
+                    if let Some(path) = &status.dataset.path {
+                        println!("Dataset: {path} · {}", status.dataset.change);
+                    }
+                    if let Some(diagnostic) = &status.diagnostic {
+                        println!("{}: {}", diagnostic.code, diagnostic.message);
+                    }
+                    if let Some(diagnostic) = &status.dataset.diagnostic {
+                        println!("{}: {}", diagnostic.code, diagnostic.message);
+                    }
+                    Ok(())
+                }
+            }
+            ClassifierCommand::Evaluate { .. } => {
+                print_json(&home.evaluate_file(EvaluateRequest::new(request)).await?)
+            }
+            ClassifierCommand::Rollback { .. } => print_json(
+                &home
+                    .rollback_to(
+                        rollback
+                            .as_ref()
+                            .ok_or_else(|| anyhow!("missing rollback model"))?,
+                    )
+                    .await?,
+            ),
+            ClassifierCommand::Reclassify { request_id, run_id } => {
+                use argos_osint_core::atlas_admission_maintenance::{
+                    self as maintenance, MaintenanceScope, ReclassificationRequest,
+                };
+                let layout = argos_osint_core::storage::home::Layout::new(request.home.clone());
+                let repo = argos_osint_core::storage::repo::Repository::open_home(&layout).await?;
+                let scope = match run_id {
+                    Some(run_id) => MaintenanceScope::Run { run_id },
+                    None => MaintenanceScope::AllRetained,
+                };
+                let job_id = maintenance::start(
+                    &repo,
+                    &home,
+                    ReclassificationRequest::new(request_id, scope),
+                )
+                .await?;
+                print_json(&maintenance::result(&repo, &job_id).await?)
+            }
+            ClassifierCommand::HistoryJob { job_id, action } => {
+                use argos_osint_core::atlas_admission_maintenance as maintenance;
+                let layout = argos_osint_core::storage::home::Layout::new(request.home.clone());
+                let repo = argos_osint_core::storage::repo::Repository::open_home(&layout).await?;
+                match action {
+                    HistoryAction::Pause => maintenance::pause(&repo, &job_id).await?,
+                    HistoryAction::Resume => maintenance::resume(&repo, &job_id).await?,
+                    HistoryAction::Cancel => maintenance::cancel(&repo, &job_id).await?,
+                    HistoryAction::Status => {}
+                }
+                print_json(&maintenance::result(&repo, &job_id).await?)
+            }
+            ClassifierCommand::Train { .. } => {
+                anyhow::bail!("unexpected classifier training dispatch")
+            }
+        }
+    }
+    .await;
+    let shutdown = home.shutdown().await;
+    result?;
+    shutdown?;
+    Ok(())
 }
 
 #[cfg(feature = "surreal")]
@@ -1406,6 +1634,69 @@ fn write_turn_event(event: &recon::TurnEvent, out: &mut impl std::io::Write) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifier_command_grammar_requires_explicit_activation_and_named_rollback() {
+        let parsed =
+            Cli::try_parse_from(["argos", "classifier", "train"]).expect("candidate grammar");
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Classifier {
+                command: ClassifierCommand::Train {
+                    activate_synthetic_baseline: false,
+                    ..
+                }
+            })
+        ));
+        let parsed = Cli::try_parse_from([
+            "argos",
+            "classifier",
+            "train",
+            "--activate-synthetic-baseline",
+        ])
+        .expect("explicit grammar");
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Classifier {
+                command: ClassifierCommand::Train {
+                    activate_synthetic_baseline: true,
+                    ..
+                }
+            })
+        ));
+        for arguments in [
+            vec![
+                "argos",
+                "classifier",
+                "train",
+                "--activate-synthetic-baseline=true",
+            ],
+            vec![
+                "argos",
+                "classifier",
+                "train",
+                "--activate-synthetic-baseline=false",
+            ],
+            vec!["argos", "classifier", "rollback"],
+            vec![
+                "argos",
+                "classifier",
+                "evaluate",
+                "--activate-synthetic-baseline",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
+        assert!(Cli::try_parse_from(["argos", "classifier", "status", "--json"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "argos",
+            "classifier",
+            "rollback",
+            "--model",
+            "previous-good"
+        ])
+        .is_ok());
+    }
 
     #[test]
     fn atlas_memory_maintenance_accepts_historical_and_rejects_collection_contracts() {

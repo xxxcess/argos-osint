@@ -1,4 +1,10 @@
 #![cfg(feature = "embedded")]
+#[cfg(feature = "classifier")]
+#[path = "../../argos-osint-core/tests/fixtures/classifier/admission-recipe.rs"]
+mod classifier_fixture;
+#[cfg(feature = "classifier")]
+#[path = "support/current_admission.rs"]
+mod current_admission;
 use argos_osint_api::{loopback_url, router, ApiState};
 use argos_osint_core::{
     storage::{atlas, open::Target, repo::Repository},
@@ -65,6 +71,7 @@ fn rejects_remote_and_credentialed_endpoints() {
     assert!(loopback_url("http://127.0.0.1:8080").is_ok());
 }
 #[tokio::test]
+#[cfg(feature = "classifier")]
 async fn storage_api_contracts() {
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("ARGOS_HOME", dir.path().join("home"));
@@ -77,42 +84,28 @@ async fn storage_api_contracts() {
     )
     .await
     .unwrap();
-    atlas::insert_run(repo.db(), "r1", "{}", "{}")
-        .await
-        .unwrap();
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    for i in 0..5 {
-        atlas::upsert_article(
-            repo.db(),
-            &AtlasArticleRow {
-                run_id: "r1".into(),
-                id: format!("a{i}"),
-                title: format!("Harbor signal {i}"),
-                description: "Shipping news".into(),
-                category: "geopolitical".into(),
-                published_at: format!("{today}T12:00:00Z"),
-                seen_at: format!("{today}T13:00:00Z"),
-                // Admitted v2 rows: the current query contract filters by
-                // ordered-tag membership, so the fixture carries the tags
-                // and the admission stamp. Legacy scalar-only rows are
-                // pending migration (an evaluator-model path) and stay out
-                // of this offline contract.
-                categories: ["geopolitical", "economic"]
-                    .iter()
-                    .map(|tag| tag.to_string())
-                    .collect(),
-                admitted_at: chrono::Utc::now().to_rfc3339(),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    }
+    let articles = (0..5)
+        .map(|i| AtlasArticleRow {
+            run_id: "r1".into(),
+            id: format!("a{i}"),
+            title: format!("Harbor signal {i}"),
+            description: "Shipping news".into(),
+            url: format!("https://example.test/a{i}"),
+            source_name: "Fixture Wire".into(),
+            source_domain: "example.test".into(),
+            provider: "newsapi".into(),
+            published_at: format!("{today}T12:00:00Z"),
+            seen_at: format!("{today}T13:00:00Z"),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    current_admission::admit(&repo, &articles).await;
     let body = argos_osint_core::storage::article_body::ensure(
         &repo,
         "a0",
         "r1",
-        "https://example.test",
+        "https://example.test/a0",
         "example.test",
         "Fixture Wire",
     )
@@ -125,7 +118,7 @@ async fn storage_api_contracts() {
         "fixture-hash",
         "complete",
         "Offline fixture",
-        "https://example.test",
+        "https://example.test/a0",
         "fixture",
         false,
     )
@@ -302,12 +295,25 @@ async fn storage_api_contracts() {
         response.headers()["access-control-allow-origin"],
         "http://localhost:3000"
     );
-    let query = format!("/api/v1/articles?category=geopolitical&day={today}&search=harbor&limit=2");
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            &format!("/api/v1/articles?category=geopolitical&day={today}"),
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST,
+        "legacy topic identifiers are not current domain filters"
+    );
+    let query = format!("/api/v1/articles?category=governance&day={today}&search=harbor&limit=2");
     for order in ["latest", "hottest"] {
         let (status, _) = call(
             &app,
             "GET",
-            &format!("/api/v1/articles?category=geopolitical&day={today}&sort={order}"),
+            &format!("/api/v1/articles?category=governance&day={today}&sort={order}"),
             None,
             Value::Null,
         )
@@ -321,7 +327,7 @@ async fn storage_api_contracts() {
     let (status, _) = call(
         &app,
         "GET",
-        &format!("/api/v1/articles?category=geopolitical&day={today}&sort=unknown"),
+        &format!("/api/v1/articles?category=governance&day={today}&sort=unknown"),
         None,
         Value::Null,
     )
@@ -516,12 +522,10 @@ async fn capabilities_advertise_only_supported_features() {
 /// shape (matched_field/rank/excerpt/categories/revision/next_cursor) and the
 /// paired capabilities feature.
 #[tokio::test]
+#[cfg(feature = "classifier")]
 async fn article_search_serves_the_discovery_page_contract() {
     let (_dir, repo, app) = isolated_api().await;
-    atlas::insert_run(repo.db(), "r1", "{}", "{}")
-        .await
-        .unwrap();
-    let admitted = |id: &str, title: &str, published: &str| AtlasArticleRow {
+    let source = |id: &str, title: &str, published: &str| AtlasArticleRow {
         run_id: "r1".into(),
         id: id.into(),
         title: title.into(),
@@ -532,31 +536,35 @@ async fn article_search_serves_the_discovery_page_contract() {
         published_at: published.into(),
         provider: "newsapi".into(),
         temperature: 1.0,
-        category: "economic".into(),
         seen_at: published.into(),
-        categories: ["economic", "military"]
-            .iter()
-            .map(|t| t.to_string())
-            .collect(),
-        admitted_at: chrono::Utc::now().to_rfc3339(),
         ..Default::default()
     };
-    for (id, title, published) in [
-        (
-            "lead-a",
-            "Harbor Union approves the merger",
-            "2026-01-04T00:00:00Z",
-        ),
-        (
-            "lead-b",
-            "Harbor Union rejects the merger",
-            "2026-01-03T00:00:00Z",
-        ),
-    ] {
-        atlas::upsert_article(repo.db(), &admitted(id, title, published))
-            .await
-            .unwrap();
-    }
+    current_admission::admit(
+        &repo,
+        &[
+            source(
+                "lead-a",
+                "Harbor Union approves the merger",
+                "2026-01-04T00:00:00Z",
+            ),
+            source(
+                "lead-b",
+                "Harbor Union rejects the merger",
+                "2026-01-03T00:00:00Z",
+            ),
+        ],
+    )
+    .await;
+    // New-looking tags and an admission timestamp cannot forge current authority.
+    let mut legacy = source(
+        "lead-legacy",
+        "Harbor Union legacy merger",
+        "2026-01-05T00:00:00Z",
+    );
+    legacy.category = "economic".into();
+    legacy.categories = vec!["economic".into(), "human".into()];
+    legacy.admitted_at = chrono::Utc::now().to_rfc3339();
+    atlas::upsert_article(repo.db(), &legacy).await.unwrap();
     let query = format!(
         "/api/v1/articles/search?query={}&limit=1",
         url::form_urlencoded::byte_serialize("harbor union".as_bytes()).collect::<String>()
@@ -565,6 +573,19 @@ async fn article_search_serves_the_discovery_page_contract() {
     assert_eq!(status, StatusCode::OK, "{page}");
     let hits = page["hits"].as_array().expect("hits array");
     assert_eq!(hits.len(), 1, "{page}");
+    assert_eq!(page["coverage"]["current_admitted"], 2);
+    assert_eq!(page["coverage"]["legacy_unmigrated"], 1);
+    let (legacy_status, legacy_detail) = call(
+        &app,
+        "GET",
+        "/api/v1/articles/detail?run=r1&id=lead-legacy",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(legacy_status, StatusCode::OK);
+    assert_eq!(legacy_detail["classification"]["legacy"], true);
+
     for field in ["matched_field", "rank", "excerpt", "categories", "revision"] {
         assert!(
             hits[0].get(field).is_some(),
@@ -579,7 +600,7 @@ async fn article_search_serves_the_discovery_page_contract() {
         .unwrap_or_default()
         .to_lowercase()
         .contains("harbor"));
-    assert_eq!(hits[0]["categories"], json!(["economic", "military"]));
+    assert_eq!(hits[0]["categories"], json!(["economic", "human"]));
     assert_eq!(hits[0]["article_id"], "lead-a", "newest published first");
     assert!(!page["revision"].as_str().unwrap_or_default().is_empty());
     assert_eq!(page["diagnostic"], "");

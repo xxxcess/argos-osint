@@ -34,8 +34,10 @@ scraper.workspace = true
 
 [features]
 # A local build runs Argos on embedded SurrealDB (RocksDB on disk, no network).
-default = ["embedded", "nlp"]
+default = ["embedded", "nlp", "classifier"]
 nlp = ["dep:rquickjs"]
+# Local six-domain classifier (QuickJS + Natural engine). Independent of `nlp`.
+classifier = ["dep:rquickjs"]
 # SurrealDB storage API without an engine; pick `embedded` and/or `server`.
 surreal = ["dep:surrealdb"]
 # Embedded RocksDB engine in-process (single owner per Argos home). Default.

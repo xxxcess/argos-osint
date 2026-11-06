@@ -171,6 +171,7 @@ pub fn record_thread_actor(thread: &str, name: &str, kind: &str) -> Result<()> {
         let write: MemoryWrite = Arc::new(move |tx| {
             let (thread, name, kind, tid) =
                 (thread.clone(), name.clone(), kind.clone(), t.id.clone());
+            let support_batch = super::lifecycle::SupportBatch::new(&tx);
             Box::pin(async move {
                 let now = chrono::Utc::now().to_rfc3339();
                 let scope = format!("recon-thread:{tid}");
@@ -188,7 +189,7 @@ pub fn record_thread_actor(thread: &str, name: &str, kind: &str) -> Result<()> {
                 )
                 .await?;
                 changed.extend(
-                    super::lifecycle::record_mention_in(
+                    super::lifecycle::record_mention_in_batch(
                         &tx,
                         &bound.actor_id,
                         "thread",
@@ -197,6 +198,7 @@ pub fn record_thread_actor(thread: &str, name: &str, kind: &str) -> Result<()> {
                         "thread-associations-v1",
                         "[]",
                         &now,
+                        &support_batch,
                     )
                     .await?,
                 );

@@ -12,8 +12,9 @@ name = "argos"
 path = "src/main.rs"
 
 [features]
-default = ["embedded", "nlp"]
+default = ["embedded", "nlp", "classifier"]
 nlp = ["argos-osint-core/nlp", "argos-osint-api/nlp"]
+classifier = ["argos-osint-core/classifier", "argos-osint-api/classifier"]
 surreal = ["argos-osint-core/surreal"]
 embedded = ["surreal", "argos-osint-core/embedded", "argos-osint-api/embedded"]
 server = ["surreal", "argos-osint-core/server", "argos-osint-api/server"]

@@ -92,3 +92,25 @@ pub(crate) fn drain() {
     .expect("drain thread")
     .expect("drain storage writes");
 }
+
+#[path = "../../argos-osint-core/tests/fixtures/classifier/admission-support.rs"]
+mod classifier_fixture;
+#[path = "../../argos-osint-core/tests/fixtures/classifier/admission-publication.rs"]
+mod publication;
+
+/// Publish fixture articles through the real classifier and admission fences.
+pub(crate) fn admit_current(articles: Vec<argos_osint_core::store::AtlasArticleRow>) {
+    ensure();
+    std::thread::spawn(move || {
+        runtime::blocking(|repo| async move {
+            let _serial = classifier_fixture::serial().await;
+            let installed = tokio::task::spawn_blocking(classifier_fixture::install).await?;
+            publication::admit(&repo, installed.directory.path(), &articles).await;
+            installed.home.shutdown().await?;
+            Ok(())
+        })
+    })
+    .join()
+    .expect("admission fixture thread")
+    .expect("admission fixture");
+}

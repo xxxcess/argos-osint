@@ -1,30 +1,52 @@
 //! Venture's offline actor seeding service, with immutable progress snapshots.
-use std::io::{self, IsTerminal};
+use std::io;
+#[cfg(feature = "surreal")]
+use std::io::IsTerminal;
+#[cfg(feature = "surreal")]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(feature = "surreal")]
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "surreal")]
 use anyhow::{Context, Result};
+#[cfg(feature = "surreal")]
 use argos_osint_core::storage::actor_catalog::{self, Progress};
+#[cfg(feature = "surreal")]
 use argos_osint_core::storage::home::Layout as Home;
+#[cfg(feature = "surreal")]
 use argos_osint_core::storage::repo::Repository;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+#[cfg(feature = "surreal")]
 use ratatui::backend::CrosstermBackend;
+#[cfg(feature = "surreal")]
 use ratatui::layout::{Constraint, Layout, Rect};
+#[cfg(feature = "surreal")]
 use ratatui::text::Line;
+#[cfg(feature = "surreal")]
 use ratatui::widgets::Paragraph;
+#[cfg(feature = "surreal")]
 use ratatui::{Frame, Terminal};
 
+#[cfg(feature = "surreal")]
 use crate::tui::{profile_components, theme};
 
+#[cfg(feature = "surreal")]
 fn dataset_path(file: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(file) = file.or_else(|| std::env::var_os("ARGOS_ACTORS_CSV").map(PathBuf::from)) {
         return Ok(file);
+    }
+    let home = argos_osint_core::paths::home_dir();
+    let configured = argos_osint_core::data_paths::DataPaths::load_from_home(&home)?;
+    if let Some(path) =
+        argos_osint_core::data_paths::DataPaths::resolve(&home, &configured.actor_csv)
+    {
+        return Ok(path);
     }
     let paths = [
         std::env::current_dir()?.join("datasets/argos_actors.csv"),
@@ -37,6 +59,7 @@ fn dataset_path(file: Option<PathBuf>) -> Result<PathBuf> {
         .context("actor dataset not found; provide --file or ARGOS_ACTORS_CSV")
 }
 
+#[cfg(feature = "surreal")]
 pub(crate) async fn run(file: Option<PathBuf>) -> Result<()> {
     let path = dataset_path(file)?;
     let repo = Repository::open_home(&Home::new(argos_osint_core::paths::ensure_home()?)).await?;
@@ -59,14 +82,67 @@ pub(crate) async fn run(file: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-struct Restore;
-impl Drop for Restore {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+/// Restores exactly the stream/modes acquired by a progress presentation.
+pub(super) struct ProgressTerminal {
+    stderr: bool,
+}
+impl ProgressTerminal {
+    pub(super) fn enter(stderr: bool) -> anyhow::Result<Self> {
+        enable_raw_mode()?;
+        let guard = Self { stderr };
+        if stderr {
+            execute!(
+                io::stderr(),
+                EnterAlternateScreen,
+                event::EnableMouseCapture,
+                event::EnableBracketedPaste
+            )?;
+        } else {
+            execute!(
+                io::stdout(),
+                EnterAlternateScreen,
+                event::EnableMouseCapture,
+                event::EnableBracketedPaste
+            )?;
+        }
+        Ok(guard)
     }
 }
+impl Drop for ProgressTerminal {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        if self.stderr {
+            let _ = execute!(
+                io::stderr(),
+                event::DisableMouseCapture,
+                event::DisableBracketedPaste,
+                LeaveAlternateScreen,
+                crossterm::cursor::Show
+            );
+        } else {
+            let _ = execute!(
+                io::stdout(),
+                event::DisableMouseCapture,
+                event::DisableBracketedPaste,
+                LeaveAlternateScreen,
+                crossterm::cursor::Show
+            );
+        }
+    }
+}
+/// UI teardown requests cancellation before its owner joins the worker.
+pub(super) struct CancelOnDrop(pub(super) Arc<AtomicBool>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+/// The same pressed-key contract is used by actor and classifier progress.
+pub(super) fn progress_cancel_requested(event: &Event) -> bool {
+    matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press && (key.code == KeyCode::Esc || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))))
+}
 
+#[cfg(feature = "surreal")]
 fn show_progress(
     receive: std::sync::mpsc::Receiver<Progress>,
     cancel: Arc<AtomicBool>,
@@ -83,9 +159,8 @@ fn show_progress(
         }
         return Ok(());
     }
-    enable_raw_mode()?;
-    let _restore = Restore;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    let _restore = ProgressTerminal::enter(false)?;
+    let _cancel_on_drop = CancelOnDrop(cancel.clone());
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let started = Instant::now();
     let mut progress = Progress::default();
@@ -105,20 +180,14 @@ fn show_progress(
         if disconnected {
             break;
         }
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Esc
-                    || (key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL))
-                {
-                    cancel.store(true, Ordering::Release);
-                }
-            }
+        if event::poll(Duration::from_millis(100))? && progress_cancel_requested(&event::read()?) {
+            cancel.store(true, Ordering::Release);
         }
     }
     Ok(())
 }
 
+#[cfg(feature = "surreal")]
 fn draw(frame: &mut Frame, progress: &Progress, elapsed: Duration) {
     let area = frame.area();
     frame.render_widget(Paragraph::new("").style(theme::text()), area);
@@ -191,7 +260,7 @@ fn draw(frame: &mut Frame, progress: &Progress, elapsed: Duration) {
     );
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "surreal"))]
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;

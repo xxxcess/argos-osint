@@ -5,6 +5,8 @@
 //! indexes with point reads only.
 #![cfg(feature = "surreal")]
 
+#[path = "support/current_admission.rs"]
+mod current_admission;
 mod support;
 
 use std::collections::BTreeMap;
@@ -15,8 +17,7 @@ use argos_osint_core::storage::article_discovery::{self, ArticleSearchQuery, Mat
 use argos_osint_core::storage::{actor_catalog, atlas, atlas_delete, repo::Repository};
 use argos_osint_core::store::AtlasArticleRow;
 
-/// Admit one article through the real admission commit (categories, scalar
-/// projection and `admitted_at` are all stamped by `admission_admit`).
+/// Admit through real local scoring; fixture metadata selects a fitted pair.
 #[allow(clippy::too_many_arguments)]
 async fn admit(
     repo: &Repository,
@@ -28,7 +29,7 @@ async fn admit(
     published: &str,
     seen: &str,
 ) {
-    let row = AtlasArticleRow {
+    let mut row = AtlasArticleRow {
         run_id: run.into(),
         id: id.into(),
         title: title.into(),
@@ -44,9 +45,16 @@ async fn admit(
         categories: categories.iter().map(|tag| tag.to_string()).collect(),
         ..Default::default()
     };
-    atlas::admission_admit(repo.db(), &row, "hash", "atlas-taxonomy-v2")
-        .await
-        .expect("admit article");
+    let vocabulary = if categories.contains(&"environmental") {
+        "River sensor common"
+    } else {
+        "Freight clinic common"
+    };
+    current_admission::admit(repo, &mut row, vocabulary).await;
+    assert_eq!(
+        row.categories, categories,
+        "actual learner must select the fixture pair"
+    );
 }
 
 async fn search(repo: &Repository, query: &str) -> article_discovery::ArticleSearchPage {
@@ -74,7 +82,7 @@ async fn titles_rank_above_description_only_matches_with_field_attribution() {
         "title-hit",
         "Harbor Union approves the merger",
         "Unrelated description text",
-        &["economic", "military"],
+        &["economic", "human"],
         "2026-01-03T00:00:00+00:00",
         "2026-01-03T00:00:00+00:00",
     )
@@ -85,7 +93,7 @@ async fn titles_rank_above_description_only_matches_with_field_attribution() {
         "description-hit",
         "Completely different headline",
         "The harbor union met behind closed doors",
-        &["economic", "technology"],
+        &["economic", "human"],
         "2026-01-03T00:00:00+00:00",
         "2026-01-03T00:00:00+00:00",
     )
@@ -124,7 +132,7 @@ async fn occurrences_deduplicate_to_the_newest_and_legacy_rows_stay_excluded() {
         "dup",
         "Harbor Union merger approved",
         "First occurrence",
-        &["economic", "military"],
+        &["economic", "human"],
         "2026-01-03T00:00:00+00:00",
         "2026-01-03T00:00:00+00:00",
     )
@@ -135,12 +143,12 @@ async fn occurrences_deduplicate_to_the_newest_and_legacy_rows_stay_excluded() {
         "dup",
         "Harbor Union merger approved",
         "Newer occurrence",
-        &["economic", "military"],
+        &["economic", "human"],
         "2026-01-03T00:00:00+00:00",
         "2026-01-05T00:00:00+00:00",
     )
     .await;
-    // A legacy row (never admitted under v2) is pending migration, never a hit.
+    // A legacy row (never admitted under the current contract) is pending migration, never a hit.
     atlas::upsert_article(
         repo.db(),
         &AtlasArticleRow {
@@ -170,26 +178,13 @@ async fn filters_narrow_by_category_day_source_and_run() {
         return;
     };
     let repo = server.repo("discovery", "filters").await;
-    for (run, day) in [("r1", "2026-01-02"), ("r2", "2026-01-03")] {
-        atlas::insert_run(repo.db(), run, "{}", "{}")
-            .await
-            .expect("insert run");
-        repo.db()
-            .query("UPDATE type::record('atlas_run', $run) SET started_at = $day")
-            .bind(("run", run.to_string()))
-            .bind(("day", day.to_string()))
-            .await
-            .expect("set run day")
-            .check()
-            .expect("set run day");
-    }
     admit(
         &repo,
         "r1",
         "in-day",
         "Harbor Union meeting",
         "Scoped description",
-        &["economic", "military"],
+        &["economic", "human"],
         "2026-01-03T00:00:00+00:00",
         "2026-01-03T00:00:00+00:00",
     )
@@ -200,7 +195,7 @@ async fn filters_narrow_by_category_day_source_and_run() {
         "out-of-day",
         "Harbor Union meeting",
         "Scoped description",
-        &["technology", "science"],
+        &["environmental", "scientific"],
         "2026-01-05T00:00:00+00:00",
         "2026-01-05T00:00:00+00:00",
     )
@@ -211,21 +206,27 @@ async fn filters_narrow_by_category_day_source_and_run() {
         "other-source",
         "Harbor Union meeting",
         "Scoped description",
-        &["economic", "military"],
+        &["economic", "human"],
         "2026-01-05T00:00:00+00:00",
         "2026-01-05T00:00:00+00:00",
     )
     .await;
-    repo.db()
-        .query("UPDATE type::record('atlas_article', $key) SET source_domain = 'other.example'")
-        .bind((
-            "key",
-            argos_osint_core::storage::codec::encode(&["r2", "other-source"]),
-        ))
+    let mut other = atlas::article(repo.db(), "r2", "other-source")
         .await
-        .expect("set source")
-        .check()
-        .expect("set source");
+        .unwrap()
+        .unwrap();
+    other.source_domain = "other.example".into();
+    current_admission::admit(&repo, &mut other, "Freight clinic common").await;
+    for (run, day) in [("r1", "2026-01-02"), ("r2", "2026-01-03")] {
+        repo.db()
+            .query("UPDATE type::record('atlas_run', $run) SET started_at = $day")
+            .bind(("run", run.to_string()))
+            .bind(("day", day.to_string()))
+            .await
+            .expect("set run day")
+            .check()
+            .expect("set run day");
+    }
     let day = ArticleSearchQuery {
         query: "harbor union".into(),
         day: "2026-01-03".into(),
@@ -243,7 +244,7 @@ async fn filters_narrow_by_category_day_source_and_run() {
     );
     let category = ArticleSearchQuery {
         query: "harbor union".into(),
-        category: "technology".into(),
+        category: "environmental".into(),
         ..Default::default()
     };
     let page = article_discovery::search_articles(&repo, &category)
@@ -292,7 +293,7 @@ async fn pagination_is_bounded_and_deterministic() {
             &format!("a{i}"),
             &format!("Harbor Union item {i}"),
             "Shared description body",
-            &["economic", "military"],
+            &["economic", "human"],
             "2026-01-03T00:00:00+00:00",
             "2026-01-03T00:00:00+00:00",
         )
@@ -346,7 +347,7 @@ async fn deleted_articles_leave_the_discovery_index() {
         "gone",
         "Harbor Union secret meeting",
         "Sensitive description",
-        &["economic", "military"],
+        &["economic", "human"],
         "2026-01-03T00:00:00+00:00",
         "2026-01-03T00:00:00+00:00",
     )
@@ -376,7 +377,7 @@ async fn re_admission_updates_the_index_and_moves_the_revision() {
         "story",
         "Harbor Union vote scheduled",
         "Original description",
-        &["economic", "military"],
+        &["economic", "human"],
         "2026-01-03T00:00:00+00:00",
         "2026-01-03T00:00:00+00:00",
     )
@@ -389,7 +390,7 @@ async fn re_admission_updates_the_index_and_moves_the_revision() {
         "story",
         "Harbor Union vote cancelled",
         "Revised description",
-        &["economic", "stability"],
+        &["economic", "human"],
         "2026-01-03T00:00:00+00:00",
         "2026-01-04T00:00:00+00:00",
     )
@@ -418,7 +419,7 @@ async fn related_candidates_exclude_the_seed() {
         "seed",
         "Harbor Union merger confirmed by regulators",
         "The harbor union merger cleared review",
-        &["economic", "military"],
+        &["economic", "human"],
         "2026-01-03T00:00:00+00:00",
         "2026-01-03T00:00:00+00:00",
     )
@@ -429,7 +430,7 @@ async fn related_candidates_exclude_the_seed() {
         "lead",
         "Harbor Union merger faces a second review",
         "A later development",
-        &["economic", "technology"],
+        &["economic", "human"],
         "2026-01-04T00:00:00+00:00",
         "2026-01-04T00:00:00+00:00",
     )
@@ -463,7 +464,7 @@ async fn unicode_titles_match_folded_and_unfolded_queries() {
         "unicode",
         "München Übereinkunft 東京合意 signed",
         "Folded and unfolded queries must agree",
-        &["economic", "military"],
+        &["economic", "human"],
         "2026-01-03T00:00:00+00:00",
         "2026-01-03T00:00:00+00:00",
     )

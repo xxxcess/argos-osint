@@ -119,15 +119,49 @@ fn contract(kind: &str) -> Option<(&'static [&'static str], &'static [&'static s
                 "conditions",
                 "counterevidence",
             ],
-            &["rationale", "support", "entities"],
+            &[
+                "rationale",
+                "support",
+                "entities",
+                "kind",
+                "domains",
+                "limitations",
+            ],
         )),
         "related lead" => Some((
             &["article", "findings", "rationale"],
-            &["evidence", "verification needed"],
+            &[
+                "evidence",
+                "verification needed",
+                "relation",
+                "chronology",
+                "conditions",
+                "limitations",
+            ],
         )),
-        "overview" | "connections" | "interpretation" | "limits" => Some((&["text", "basis"], &[])),
+        "overview"
+        | "connections"
+        | "interpretation"
+        | "limits"
+        | "current state"
+        | "significant developments"
+        | "actor relationships"
+        | "cross-domain implications"
+        | "emerging signals"
+        | "conditional outlook"
+        | "evidence"
+        | "limitations"
+        | "current_state"
+        | "significant_developments"
+        | "actor_relationships"
+        | "cross_domain_implications"
+        | "emerging_signals"
+        | "conditional_outlook" => Some((&["text", "basis"], &[])),
         "decision" => Some((&["question", "choice"], &[])),
-        "link" => Some((&["endpoints", "relation", "evidence", "rationale"], &[])),
+        "link" => Some((
+            &["endpoints", "relation", "evidence", "rationale"],
+            &["chronology", "conditions", "limitations"],
+        )),
         "strategy" => Some((&["choice", "rationale"], &[])),
         "queries" => Some((&["identity", "investigative"], &[])),
         "selection" => Some((&["choices", "rationale"], &[])),
@@ -325,10 +359,15 @@ pub fn brief_value(raw: &str, kind: &str) -> anyhow::Result<Value> {
         "inference" => json!({"id":block.durable_id("inference"),"text":block.field("conclusion"),
             "premise_claim_ids":block.list("premises"),"body_evidence_ids":block.list("evidence"),
             "support":block.field("support"),"why":block.field("rationale"),
-            "limitations":block.list("conditions"),"counterevidence_ids":block.list("counterevidence")}),
+            "limitations":if block.field("limitations").is_empty() {block.list("conditions")} else {block.list("limitations")},
+            "conditions":block.list("conditions"),
+            "inference_kind":if block.field("kind").is_empty() {Value::Null} else {json!(block.field("kind"))},
+            "domains":block.list("domains"),"counterevidence_ids":block.list("counterevidence")}),
         "related lead" => json!({"article_id":block.field("article"),"inference_id":block.field("findings"),
             "metadata_evidence_ids":block.list("evidence"),"why":block.field("rationale"),
-            "verification_needed":block.field("verification needed")}),
+            "verification_needed":block.field("verification needed"),
+            "proposed_relation":block.field("relation"),"chronology_basis":block.field("chronology"),
+            "conditions":block.list("conditions"),"limitations":block.list("limitations")}),
         _ => Value::Null,
     }).collect();
     Ok(match kind {
@@ -346,10 +385,28 @@ pub fn summary_value(raw: &str) -> anyhow::Result<Value> {
         document.empty_reason.is_none(),
         "a summary requires cited sections"
     );
-    let mut value = json!({"overview":[],"connections":[],"interpretation":[],"limits":[]});
+    let facet_for = |kind: &str| {
+        crate::intelligence_contracts::BriefFacet::ALL
+            .into_iter()
+            .find(|facet| {
+                facet.as_str() == kind || facet.display_name().to_ascii_lowercase() == kind
+            })
+    };
+    let faceted = document
+        .blocks
+        .iter()
+        .any(|block| facet_for(&block.kind).is_some());
+    let mut value = if faceted {
+        json!({"current_state":[],"significant_developments":[],"actor_relationships":[],"cross_domain_implications":[],"emerging_signals":[],"conditional_outlook":[],"evidence":[],"limitations":[]})
+    } else {
+        json!({"overview":[],"connections":[],"interpretation":[],"limits":[]})
+    };
     for block in document.blocks {
+        let kind = facet_for(&block.kind)
+            .map(|facet| facet.as_str())
+            .unwrap_or(&block.kind);
         let array = value
-            .get_mut(&block.kind)
+            .get_mut(kind)
             .and_then(Value::as_array_mut)
             .ok_or_else(|| anyhow::anyhow!("unexpected summary section"))?;
         array.push(json!({"text":block.field("text"),"basis":block.list("basis")}));

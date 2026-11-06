@@ -7,6 +7,7 @@ use std::sync::{
 };
 
 use anyhow::{ensure, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::decisions::{
@@ -17,8 +18,9 @@ use crate::recon::model_exec::{DecisionsAdapter, ModelOperationError, OperationS
 
 pub(super) const BATCH_LIMIT: usize = 8;
 
-#[derive(Clone)]
-pub(super) struct Item {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Item {
     pub id: String,
     pub kind: String,
     pub text: String,
@@ -222,8 +224,147 @@ pub(super) fn operation_scope<'a>(
     scope
 }
 
-/// Serial bounded batches share provider admission; optional model unavailability settles
-/// items as withheld, while local/stale/persistence/cancellation errors remain terminal.
+const CHECKPOINT_VERSION: &str = "insight-assessment-proof-v1";
+const CHECKPOINT_BYTES: usize = 128 * 1024;
+
+/// Only a hash of the configured model route/variants is retained; account names,
+/// credentials, headers and complete settings never enter the receipt.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RouteIdentity {
+    role: String,
+    route_policy_sha256: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssessmentCheckpoint {
+    schema_version: String,
+    items: Vec<Item>,
+    route: RouteIdentity,
+    assessments: BTreeMap<String, Assessment>,
+}
+
+fn checkpoint_key(input: &PipelineInput, items: &[Item], route: &RouteIdentity) -> Result<String> {
+    let (contract, state, policy) = compile(input, items)?;
+    Ok(crate::nlp::cache::key(&json!([
+        input.snapshot.owner_kind,
+        input.snapshot.owner_id,
+        CHECKPOINT_VERSION,
+        contract,
+        state,
+        policy,
+        route
+    ])))
+}
+
+/// Exact proof envelope shared by actual evaluator persistence and offline
+/// decision fixtures. A key alone never establishes a passed relationship.
+pub(super) fn checkpoint_proof(
+    input: &PipelineInput,
+    items: &[Item],
+    settings: &crate::provider::SettingsFile,
+    assessments: &BTreeMap<String, Assessment>,
+) -> Result<(String, String)> {
+    ensure!(
+        !items.is_empty() && items.len() <= BATCH_LIMIT,
+        "assessment proof batch exceeds bound"
+    );
+    let role = role_for_kind(&input.snapshot.owner_kind, &items[0].kind);
+    let route = RouteIdentity {
+        role: role.into(),
+        route_policy_sha256: crate::nlp::cache::key(&json!([
+            settings.defaults.resolve_role(role).0,
+            settings.defaults.model_variants
+        ])),
+    };
+    let key = checkpoint_key(input, items, &route)?;
+    let checkpoint = AssessmentCheckpoint {
+        schema_version: CHECKPOINT_VERSION.into(),
+        items: items.to_vec(),
+        route,
+        assessments: assessments.clone(),
+    };
+    let raw = serde_json::to_string(&checkpoint)?;
+    ensure!(
+        raw.len() <= CHECKPOINT_BYTES,
+        "assessment proof exceeds bounded envelope"
+    );
+    Ok((key, raw))
+}
+
+/// Reconstructs a complete current batch before accepting its persisted result.
+/// This is used again by the publishing transaction, never a supplied hash alone.
+pub(crate) fn receipt_assessment(
+    input: &PipelineInput,
+    key: &str,
+    raw: &str,
+    expected: &Item,
+) -> Result<Assessment> {
+    ensure!(
+        raw.len() <= CHECKPOINT_BYTES,
+        "assessment proof exceeds bounded envelope"
+    );
+    let checkpoint: AssessmentCheckpoint = serde_json::from_str(raw)?;
+    ensure!(
+        checkpoint.schema_version == CHECKPOINT_VERSION
+            && !checkpoint.items.is_empty()
+            && checkpoint.items.len() <= BATCH_LIMIT,
+        "invalid assessment proof version/count"
+    );
+    ensure!(
+        checkpoint.route.route_policy_sha256.len() == 64
+            && checkpoint
+                .route
+                .route_policy_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit()),
+        "invalid route identity"
+    );
+    ensure!(
+        checkpoint
+            .items
+            .iter()
+            .all(|item| role_for_kind(&input.snapshot.owner_kind, &item.kind)
+                == checkpoint.route.role),
+        "assessment role changed"
+    );
+    let (contract, state, _) = compile(input, &checkpoint.items)?;
+    ensure!(
+        fits(&contract, &state),
+        "complete assessment proof exceeds request ceiling"
+    );
+    ensure!(
+        checkpoint_key(input, &checkpoint.items, &checkpoint.route)? == key,
+        "assessment proof key mismatch"
+    );
+    ensure!(
+        checkpoint
+            .items
+            .iter()
+            .any(|item| serde_json::to_value(item).ok() == serde_json::to_value(expected).ok()),
+        "assessment proof belongs to another proposition"
+    );
+    ensure!(
+        checkpoint.assessments.len() == checkpoint.items.len()
+            && checkpoint
+                .items
+                .iter()
+                .all(|item| checkpoint.assessments.contains_key(&item.id)),
+        "incomplete assessment proof"
+    );
+    checkpoint
+        .assessments
+        .get(&expected.id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("assessment item absent"))
+}
+
+pub(super) struct AssessedItems {
+    pub assessments: BTreeMap<String, Assessment>,
+    pub receipts: BTreeMap<String, String>,
+}
+
+/// Existing callers receive assessments; new curated links also retain proof keys.
 pub(super) async fn assess(
     input: &PipelineInput,
     items: &[Item],
@@ -232,7 +373,25 @@ pub(super) async fn assess(
     cancel: &Arc<AtomicBool>,
     db_path: &Path,
 ) -> Result<BTreeMap<String, Assessment>> {
+    Ok(
+        assess_with_receipts(input, items, auth, settings, cancel, db_path)
+            .await?
+            .assessments,
+    )
+}
+
+/// Serial bounded batches share provider admission; optional model unavailability settles
+/// items as withheld, while local/stale/persistence/cancellation errors remain terminal.
+pub(super) async fn assess_with_receipts(
+    input: &PipelineInput,
+    items: &[Item],
+    auth: &crate::secrets::AuthFile,
+    settings: &crate::provider::SettingsFile,
+    cancel: &Arc<AtomicBool>,
+    db_path: &Path,
+) -> Result<AssessedItems> {
     let mut output = BTreeMap::new();
+    let mut receipts = BTreeMap::new();
     let mut offset = 0;
     while offset < items.len() {
         ensure!(!cancel.load(Ordering::Acquire), "cancelled");
@@ -250,6 +409,12 @@ pub(super) async fn assess(
             }
             end -= 1;
         };
+        if !fits(&contract, &state) && items[offset].kind == "curated_link" {
+            let item = &items[offset];
+            output.insert(item.id.clone(),Assessment {gaps:vec!["Complete two-sided relationship context exceeds bounded request; relation withheld".into()],..Default::default()});
+            offset = end;
+            continue;
+        }
         if !fits(&contract, &state) {
             let item = &items[offset];
             let parts = partition_item(input, item)?;
@@ -278,22 +443,25 @@ pub(super) async fn assess(
             offset = end;
             continue;
         }
-        let key = crate::nlp::cache::key(&json!([
-            input.snapshot.owner_kind,
-            input.snapshot.owner_id,
-            "assessment-batch",
-            contract,
-            state,
-            policy,
-            settings.defaults.resolve_role(role).0
-        ]));
+        let route_identity = RouteIdentity {
+            role: role.into(),
+            route_policy_sha256: crate::nlp::cache::key(&json!([
+                settings.defaults.resolve_role(role).0,
+                settings.defaults.model_variants
+            ])),
+        };
+        let key = checkpoint_key(input, &items[offset..end], &route_identity)?;
         let store = super::exec_store::ExecStore::open(db_path).await?;
         store.validate_dispatch(input).await?;
         let saved = store.checkpoint(&key).await?;
         if let Some((status, json, error)) = saved {
             if status == "completed" {
                 store.record_reuse(&key, input).await?;
-                output.extend(serde_json::from_str::<BTreeMap<String, Assessment>>(&json)?);
+                for item in &items[offset..end] {
+                    let assessment = receipt_assessment(input, &key, &json, item)?;
+                    output.insert(item.id.clone(), assessment);
+                    receipts.insert(item.id.clone(), key.clone());
+                }
                 offset = end;
                 continue;
             }
@@ -341,6 +509,7 @@ pub(super) async fn assess(
                         "corroboration" => "claim_relation",
                         "identity" => "entity_binding",
                         "memory_relevance" => "evidence_relevance",
+                        "curated_link" => "curated_link",
                         _ => "publication",
                     };
                     let qid = format!("q{index}:{question}");
@@ -372,7 +541,11 @@ pub(super) async fn assess(
                     if !passed
                         || matches!(
                             answer.label.as_str(),
-                            "overstated" | "contradictory" | "different_entity" | "irrelevant"
+                            "overstated"
+                                | "unfaithful"
+                                | "contradictory"
+                                | "different_entity"
+                                | "irrelevant"
                         )
                     {
                         assessment.gaps.push(format!(
@@ -412,11 +585,17 @@ pub(super) async fn assess(
         };
         let store = super::exec_store::ExecStore::open(db_path).await?;
         store.validate_dispatch(input).await?;
+        let (saved_key, checkpoint_json) =
+            checkpoint_proof(input, &items[offset..end], settings, &assessments)?;
+        ensure!(
+            saved_key == key,
+            "resolved assessment route changed before persistence"
+        );
         store
             .finish(
                 &key,
                 status,
-                Some(serde_json::to_string(&assessments)?),
+                Some(checkpoint_json),
                 Some(route.to_string()),
                 &error,
             )
@@ -437,11 +616,17 @@ pub(super) async fn assess(
             },
             json!({"operation":execution_id,"items":end-offset,"compiled_bytes":crate::nlp::message_bytes(&ContractAdapter {contract:&contract,state:&state}.compile_chat(),&Value::Null)}),
         )?;
+        for item in &items[offset..end] {
+            receipts.insert(item.id.clone(), key.clone());
+        }
         output.extend(assessments);
         offset = end;
         tokio::task::yield_now().await;
     }
-    Ok(output)
+    Ok(AssessedItems {
+        assessments: output,
+        receipts,
+    })
 }
 
 #[cfg(test)]

@@ -49,18 +49,23 @@ fn mem(id: &str) -> EndpointRef {
 }
 
 fn link(source: &str, target: &str, relation: &str, rationale: &str) -> MemoryPayload {
-    MemoryPayload::Link(LinkPayload {
+    MemoryPayload::Link(Box::new(LinkPayload {
+        validation: None,
         source: mem(source),
         target: mem(target),
         relation: relation.into(),
         rationale: rationale.into(),
         receipts: vec![],
         promoted_from: None,
-    })
+    }))
 }
 
 fn inference(state: &str) -> MemoryPayload {
     MemoryPayload::Inference(InferencePayload {
+        inference_kind: None,
+        domains: Vec::new(),
+        conditions: Vec::new(),
+        extraction_fidelity: None,
         premise_claims: vec!["c1".into(), "c2".into(), "c9".into()],
         actors: vec![],
         reasoning: "Both claims name the same harbor operator".into(),
@@ -384,6 +389,10 @@ fn no_inference_means_structural_connections_not_conclusions() {
         .edges
         .retain(|e| e.kind != TopologyEdgeKind::Premise);
     f.payloads.clear();
+    f.snapshot.discovered_nodes = f.snapshot.nodes.len();
+    f.snapshot.discovered_edges = f.snapshot.edges.len();
+    f.snapshot.total_nodes = f.snapshot.nodes.len();
+    f.snapshot.total_edges = f.snapshot.edges.len();
     let b = brief_of(&f);
     assert!(b.interpretation.is_empty());
     assert!(
@@ -464,6 +473,10 @@ fn bounded_coverage_is_a_limit_and_never_a_claim_of_absence() {
     f.snapshot.omitted_nodes = 4;
     f.snapshot.omitted_edges = 1;
     f.snapshot.unresolved_endpoints = vec!["x".into(), "y".into()];
+    f.snapshot.discovered_nodes = f.snapshot.nodes.len() + f.snapshot.omitted_nodes;
+    f.snapshot.discovered_edges = f.snapshot.edges.len() + f.snapshot.omitted_edges;
+    f.snapshot.total_nodes = f.snapshot.discovered_nodes;
+    f.snapshot.total_edges = f.snapshot.discovered_edges;
     let b = brief_of(&f);
     assert_eq!(b.coverage.status, CoverageStatus::Limited);
     let l = &b.limits[0];
@@ -609,6 +622,10 @@ fn long_text_is_shortened_to_the_word_target_and_references_survive() {
     f.payloads.insert(
         "i1".into(),
         MemoryPayload::Inference(InferencePayload {
+            inference_kind: None,
+            domains: Vec::new(),
+            conditions: Vec::new(),
+            extraction_fidelity: None,
             premise_claims: vec!["c1".into(), "c2".into()],
             reasoning: long.clone(),
             limitations: long,
@@ -904,6 +921,7 @@ pub(crate) fn with_raw_ids(depth: usize) -> Fixture {
     f.payloads.insert(
         "i1".into(),
         MemoryPayload::Inference(InferencePayload {
+ inference_kind: None, domains: Vec::new(), conditions: Vec::new(), extraction_fidelity: None,
             premise_claims: vec!["c1".into(), "c2".into(), "b23".into()],
             actors: vec![],
             reasoning: "Reasoning: b23 shows insurers paused cover, and c1 and c2 name the same harbor operator".into(),
@@ -944,7 +962,7 @@ fn brief_at(f: &Fixture, depth: usize) -> NeighborhoodBrief {
 }
 
 #[test]
-fn a_model_that_copies_a_raw_record_id_into_basis_does_not_sink_the_answer() {
+fn a_model_that_copies_a_raw_record_id_into_basis_rejects_the_whole_upgrade() {
     let f = with_raw_ids(2);
     let input = input_at(&f, 2);
     // The id reaches the model today, so a faithful model copies it.
@@ -959,17 +977,17 @@ fn a_model_that_copies_a_raw_record_id_into_basis_does_not_sink_the_answer() {
         &["b23", "N4"],
     );
     let ok = validate_generated(&input, &brief_at(&f, 2), &raw);
-    assert!(ok.is_ok(), "{ok:?}");
+    assert!(ok.unwrap_err().contains("unknown reference"));
 }
 
 #[test]
-fn a_raw_id_in_basis_is_reported_by_key_and_sinks_only_that_key() {
+fn an_unknown_key_rejects_an_upgrade_even_beside_a_valid_reference() {
     let f = with_raw_ids(2);
     let input = input_at(&f, 2);
     let text = "A stored inference with support state supported reads the claims together; it is a stored interpretation, not a verified conclusion.";
     let both = with("interpretation", text, &["b23", "N4"]);
     let ok = validate_generated(&input, &brief_at(&f, 2), &both);
-    assert!(ok.is_ok(), "{ok:?}");
+    assert!(ok.unwrap_err().contains("whole upgrade rejected"));
     let alone = with("interpretation", text, &["b23"]);
     let err = validate_generated(&input, &brief_at(&f, 2), &alone).unwrap_err();
     assert!(err.contains("b23"), "{err}");
@@ -983,17 +1001,12 @@ fn model_task_forbids_citing_record_ids() {
 const INTERP: &str = "A stored inference with support state supported reads the claims together; it is a stored interpretation, not a verified conclusion.";
 
 #[test]
-fn a_cited_record_id_is_dropped_with_a_host_note_when_a_real_reference_remains() {
+fn a_valid_reference_does_not_rescue_an_unknown_record_id() {
     let f = with_raw_ids(2);
-    let input = input_at(&f, 2);
     let raw = with("interpretation", INTERP, &["b23", "N4"]);
-    let ok = validate_generated(&input, &brief_at(&f, 2), &raw).unwrap();
-    assert!(
-        ok.host_notes.iter().any(|n| n.contains("\"b23\"")),
-        "{:?}",
-        ok.host_notes
-    );
-    assert_eq!(ok.brief.interpretation[0].node_ids, vec!["i1".to_string()]);
+    assert!(validate_generated(&input_at(&f, 2), &brief_at(&f, 2), &raw)
+        .unwrap_err()
+        .contains("unknown reference"));
 }
 
 #[test]
@@ -1031,13 +1044,13 @@ fn reference_keys_are_normalized_before_lookup() {
 }
 
 #[test]
-fn unsupported_claims_are_still_rejected_next_to_a_dropped_key() {
+fn unsupported_claims_are_rejected_with_valid_references() {
     let f = with_raw_ids(2);
     let input = input_at(&f, 2);
     let raw = with(
         "interpretation",
         "A stored inference proves the harbor operator coordinated both claims, a stored interpretation only.",
-        &["b23", "N4"],
+        &["N4"],
     );
     assert!(validate_generated(&input, &brief_at(&f, 2), &raw)
         .unwrap_err()
@@ -1055,7 +1068,7 @@ fn depth_one_two_and_three_fixtures_all_validate_without_ids_in_the_prompt() {
         ] {
             assert!(!prompt.contains(id), "depth {depth}: {id} leaked: {prompt}");
         }
-        let raw = with("interpretation", INTERP, &["b23", "N4"]);
+        let raw = with("interpretation", INTERP, &["N4"]);
         let ok = validate_generated(&input, &brief_at(&f, depth), &raw);
         assert!(ok.is_ok(), "depth {depth}: {ok:?}");
     }
@@ -1132,15 +1145,275 @@ fn the_packet_size_cap_keeps_references_stable_and_id_free() {
 }
 
 #[test]
-fn a_non_inference_ref_plus_an_unknown_key_still_fails_interpretation() {
+fn a_valid_non_inference_reference_cannot_carry_interpretation() {
     let f = with_raw_ids(2);
     let input = input_at(&f, 2);
-    // N1 is a Claim (not an Inference); b23 is dropped, leaving one valid
-    // non-Inference ref, which cannot carry an interpretation.
-    let raw = with("interpretation", INTERP, &["N1", "b23"]);
+    // A valid Claim reference cannot carry an attributed stored inference.
+    let raw = with("interpretation", INTERP, &["N1"]);
     let err = validate_generated(&input, &brief_at(&f, 2), &raw).unwrap_err();
     assert!(
         err.contains("no stored inference or tentative lead cited"),
         "{err}"
     );
+}
+
+#[test]
+fn bounded_summary_packet_retains_endpoint_closure_and_truthful_coverage() {
+    let mut f = rich();
+    for index in 0..130 {
+        f.snapshot.nodes.push(node(
+            &format!("extra-{index:03}"),
+            TopologyNodeKind::Claim,
+            &"long evidence statement ".repeat(180),
+            1,
+        ));
+        f.snapshot.edges.push(edge(
+            &format!("extra-edge-{index:03}"),
+            "c1",
+            &format!("extra-{index:03}"),
+            TopologyEdgeKind::Premise,
+        ));
+    }
+    f.snapshot.discovered_nodes = f.snapshot.nodes.len() + 11;
+    f.snapshot.discovered_edges = f.snapshot.edges.len() + 7;
+    let original_nodes = f.snapshot.nodes.len();
+    let projection = summary_projection(&f.snapshot);
+    assert!(projection.nodes.len() <= 100);
+    assert!(projection.edges.len() <= 200);
+    assert_eq!(
+        f.snapshot.nodes.len(),
+        original_nodes,
+        "explorer remains unchanged"
+    );
+    let packet = input_of(&f);
+    assert!(packet.nodes.len() <= 100 && packet.edges.len() <= 200);
+    let kept: BTreeSet<_> = packet
+        .nodes
+        .iter()
+        .map(|node| node.node.id.as_str())
+        .collect();
+    assert!(
+        packet
+            .edges
+            .iter()
+            .all(|edge| kept.contains(edge.edge.from.as_str())
+                && kept.contains(edge.edge.to.as_str()))
+    );
+    assert!(packet.prompt_json().len() <= PACKET_BYTES_MAX);
+    assert_eq!(packet.coverage.admitted_nodes, packet.nodes.len());
+    assert_eq!(packet.coverage.admitted_edges, packet.edges.len());
+    assert_eq!(
+        packet.coverage.discovered_nodes,
+        f.snapshot.discovered_nodes
+    );
+    assert_eq!(
+        packet.coverage.omitted_nodes,
+        f.snapshot.discovered_nodes - packet.nodes.len()
+    );
+    assert_eq!(
+        packet.coverage.omitted_edges,
+        f.snapshot.discovered_edges - packet.edges.len()
+    );
+    assert_eq!(packet.coverage.status, CoverageStatus::Limited);
+}
+
+#[test]
+fn eight_facets_disclose_unsupported_meaning_without_invented_fill() {
+    let b = brief_of(&rich());
+    assert_eq!(
+        b.facets.iter().map(|block| block.facet).collect::<Vec<_>>(),
+        BriefFacet::ALL
+    );
+    for facet in [
+        BriefFacet::SignificantDevelopments,
+        BriefFacet::CrossDomainImplications,
+        BriefFacet::EmergingSignals,
+        BriefFacet::ConditionalOutlook,
+    ] {
+        let block = b
+            .facets
+            .iter()
+            .find(|block| block.facet == facet)
+            .expect("all facets present");
+        assert!(
+            block.items.is_empty(),
+            "unsupported facet must not borrow unrelated prose"
+        );
+        assert!(block
+            .empty_reason
+            .as_ref()
+            .is_some_and(|reason| !reason.is_empty()));
+    }
+    assert!(b
+        .facets
+        .iter()
+        .find(|block| block.facet == BriefFacet::CurrentState)
+        .is_some_and(|block| !block.items.is_empty()));
+    assert!(b
+        .facets
+        .iter()
+        .find(|block| block.facet == BriefFacet::Evidence)
+        .is_some_and(|block| !block.items.is_empty()));
+    assert!(
+        b.facets
+            .iter()
+            .flat_map(|block| &block.items)
+            .map(|item| item.text.split_whitespace().count())
+            .sum::<usize>()
+            <= WORDS_MAX
+    );
+}
+
+#[test]
+fn eight_generated_facets_use_offered_refs_and_keep_host_caveats() {
+    let fixture = rich();
+    let input = input_of(&fixture);
+    let claim = input
+        .nodes
+        .iter()
+        .find(|node| node.node.id == "c1")
+        .unwrap();
+    let raw = serde_json::json!({
+        "current_state":[{"text":"The retained claim reports the port closure.","basis":[claim.reference]}],
+        "evidence":[{"text":"This account is limited to the retained claim record.","basis":[claim.reference]}],
+    });
+    let validated = validate_generated(&input, &brief_of(&fixture), &raw.to_string()).unwrap();
+    assert_eq!(
+        validated
+            .brief
+            .facets
+            .iter()
+            .map(|block| block.facet)
+            .collect::<Vec<_>>(),
+        BriefFacet::ALL
+    );
+    assert!(validated
+        .brief
+        .facets
+        .iter()
+        .find(|block| block.facet == BriefFacet::ConditionalOutlook)
+        .unwrap()
+        .items
+        .is_empty());
+    assert!(
+        !validated.brief.limits.is_empty(),
+        "required missing-premise caveat is retained"
+    );
+    assert!(
+        validated
+            .brief
+            .facets
+            .iter()
+            .find(|block| block.facet == BriefFacet::Evidence)
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.edge_ids.contains(&"l1".to_owned())),
+        "host contradiction remains visible"
+    );
+    assert!(validated.brief.verify(&fixture.snapshot).is_empty());
+    let mut invalid = raw.clone();
+    invalid["current_state"][0]["basis"] = serde_json::json!([claim.reference, "N999"]);
+    assert!(
+        validate_generated(&input, &brief_of(&fixture), &invalid.to_string())
+            .unwrap_err()
+            .contains("unknown reference")
+    );
+}
+
+#[test]
+fn specialized_facets_require_their_stored_basis_and_never_invent_probability() {
+    let fixture = rich();
+    let input = input_of(&fixture);
+    let claim = input
+        .nodes
+        .iter()
+        .find(|node| node.node.id == "c1")
+        .unwrap();
+    for (facet, text) in [
+        (
+            "cross_domain_implications",
+            "This claim changes security and economic conditions.",
+        ),
+        (
+            "conditional_outlook",
+            "If the port reopens the route may resume.",
+        ),
+        (
+            "emerging_signals",
+            "This may be an emerging signal around the port.",
+        ),
+        (
+            "current_state",
+            "There is a 2 percent chance the port reopens.",
+        ),
+    ] {
+        let mut raw = serde_json::json!({});
+        raw[facet] = serde_json::json!([{"text":text,"basis":[claim.reference]}]);
+        assert!(
+            validate_generated(&input, &brief_of(&fixture), &raw.to_string()).is_err(),
+            "{facet} requires actual supporting record semantics"
+        );
+    }
+}
+
+#[test]
+fn readable_eight_facet_protocol_converts_into_the_same_strict_wire() {
+    let raw = "argos-text-v1\n## Current State\nText: The retained claim reports the port closure.\nBasis: N1\nEnd\n\n## Evidence\nText: This account uses the retained claim record.\nBasis: N1\nEnd";
+    let value = crate::provider::structured_text::summary_value(raw).unwrap();
+    assert_eq!(
+        value["current_state"][0]["basis"],
+        serde_json::json!(["N1"])
+    );
+    assert_eq!(
+        value["evidence"][0]["text"],
+        "This account uses the retained claim record."
+    );
+    assert_eq!(value["conditional_outlook"], serde_json::json!([]));
+    assert!(crate::provider::structured_text::summary_value("argos-text-v1\n## Current State\nText: Retained claim.\nBasis: N1\nEnd\n## Overview\nText: Mixed protocol.\nBasis: N1\nEnd").is_err());
+}
+
+#[test]
+fn typed_cross_domain_and_conditional_facets_preserve_recorded_qualifiers() {
+    use crate::atlas_taxonomy::DomainId;
+    use crate::intelligence_contracts::InferenceKind;
+    let mut fixture = rich();
+    let Some(MemoryPayload::Inference(payload)) = fixture.payloads.get_mut("i1") else {
+        panic!("inference fixture");
+    };
+    payload.inference_kind = Some(InferenceKind::CrossDomainImpact);
+    payload.domains = vec![DomainId::Security, DomainId::Economic];
+    payload.extraction_fidelity = Some("faithful".into());
+    let brief = brief_of(&fixture);
+    assert!(!brief
+        .facets
+        .iter()
+        .find(|block| block.facet == BriefFacet::CrossDomainImplications)
+        .unwrap()
+        .items
+        .is_empty());
+    let Some(MemoryPayload::Inference(payload)) = fixture.payloads.get_mut("i1") else {
+        unreachable!();
+    };
+    payload.inference_kind = Some(InferenceKind::ConditionalOutlook);
+    payload.support_state = "conditional".into();
+    payload.conditions = vec!["If the observed closure persists".into()];
+    payload.limitations = "No later traffic measurements are retained".into();
+    let brief = brief_of(&fixture);
+    let facet = brief
+        .facets
+        .iter()
+        .find(|block| block.facet == BriefFacet::ConditionalOutlook)
+        .unwrap();
+    assert_eq!(facet.items.len(), 1);
+    assert!(facet.items[0]
+        .text
+        .contains("If the observed closure persists"));
+    assert!(facet.items[0]
+        .text
+        .contains("No later traffic measurements are retained"));
+    assert!(facet.items[0].text.contains("support state: conditional"));
+    assert!(facet.items[0]
+        .text
+        .contains("Extraction fidelity: faithful"));
 }

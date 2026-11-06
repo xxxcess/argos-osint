@@ -42,6 +42,12 @@ export interface Article {
   source_domain: string;
   published_at: string;
   category: string;
+  /** Ordered memberships; scalar category remains the primary legacy-compatible value. */
+  categories?: string[];
+  taxonomy_version?: string;
+  /** Current publication authority; historical categories alone do not identify domains. */
+  admission_state?: string;
+  publication_version?: string;
   image_url: string;
   url: string;
   author: string;
@@ -95,8 +101,81 @@ export interface Brief {
 export interface Seed {
   [key: string]: unknown;
 }
+export const BRIEF_FACETS = [
+  { id: "current_state", name: "Current State" },
+  { id: "significant_developments", name: "Significant Developments" },
+  { id: "actor_relationships", name: "Actor Relationships" },
+  { id: "cross_domain_implications", name: "Cross-Domain Implications" },
+  { id: "emerging_signals", name: "Emerging Signals" },
+  { id: "conditional_outlook", name: "Conditional Outlook" },
+  { id: "evidence", name: "Evidence" },
+  { id: "limitations", name: "Limitations" },
+] as const;
+export type BriefFacetId = (typeof BRIEF_FACETS)[number]["id"];
+export interface NeighborhoodBriefItem {
+  text: string;
+  epistemic: "recorded" | "stored_inference" | "tentative" | "coverage";
+  node_ids: string[];
+  edge_ids: string[];
+  member_ids: string[];
+  receipts: string[];
+  basis: number[];
+}
+/** Presentation adapter from Rust NeighborhoodBrief; counts remain host owned. */
+export interface NeighborhoodBrief {
+  format_version: number;
+  basis_key: string;
+  seed: Seed;
+  seed_label: string;
+  overview: NeighborhoodBriefItem | null;
+  connections: NeighborhoodBriefItem[];
+  interpretation: NeighborhoodBriefItem[];
+  limits: NeighborhoodBriefItem[];
+  references: {
+    n: number;
+    target: { Node: string } | { Edge: string };
+    label: string;
+  }[];
+  coverage: {
+    status: "ready" | "limited" | "isolated" | "missing";
+    depth: number;
+    cycle_scope: "AllRetained" | { ThisCycle: string };
+    admitted_nodes: number;
+    admitted_edges: number;
+    discovered_nodes: number;
+    discovered_edges: number;
+    omitted_nodes: number;
+    omitted_edges: number;
+    unresolved_endpoints: number;
+    exploration_exhausted: boolean;
+    payload_reads_skipped: number;
+  };
+  facets?: {
+    facet: BriefFacetId;
+    items: NeighborhoodBriefItem[];
+    empty_reason: string | null;
+  }[];
+}
+export type TopologySummaryView =
+  | { kind: "recorded" | "pending"; brief: NeighborhoodBrief }
+  | {
+      kind: "generated";
+      brief: NeighborhoodBrief;
+      route: string;
+      host_notes: string[];
+    }
+  | {
+      kind: "failed";
+      brief: NeighborhoodBrief;
+      diagnostic: { kind: string; message: string };
+    };
+export interface TopologySummaryKey {
+  seed: string;
+  basis: string;
+}
 export interface Topology {
   root_label: string;
+  neighborhood_brief?: NeighborhoodBrief | null;
   nodes: {
     id: string;
     label: string;
@@ -512,13 +591,22 @@ export function useAction<T>(path: string, signal?: AbortSignal) {
 }
 /** Specific categories supported by v1; "all" selects the server's global feed. */
 export const INTEL_CATEGORIES = [
-  "geopolitical",
+  "governance",
+  "security",
   "economic",
-  "military",
-  "information",
-  "stability",
-  "technology",
+  "human",
+  "environmental",
+  "scientific",
 ] as const;
+export type StrategicDomain = (typeof INTEL_CATEGORIES)[number];
+export const INTEL_DOMAIN_NAMES: Record<StrategicDomain, string> = {
+  governance: "Governance & Political Stability",
+  security: "Security & Threat Environment",
+  economic: "Economic & Supply Chain Resilience",
+  human: "Human Security & Public Welfare",
+  environmental: "Environmental & Resource Security",
+  scientific: "Scientific & Technological Capability",
+};
 // Native "all" uses this same stream: the server owns order and opaque cursors.
 export function useArticles(
   category: string,
@@ -575,6 +663,46 @@ export function useTopology(seed: string | null) {
         `topology?seed=${encodeURIComponent(seed || "")}`,
         undefined,
         signal,
+      ),
+  });
+}
+
+/** A delivery read never creates a task; only an already pending identity polls. */
+export function useTopologySummary(seed: string | null, basis: string | null) {
+  const b = useBackend();
+  return useQuery({
+    queryKey: [b.base, b.instance, "topology/summary", seed, basis],
+    enabled: b.connected && !!seed && !!basis,
+    queryFn: ({ signal }) =>
+      request<TopologySummaryView>(
+        b.base,
+        `topology/summary?${new URLSearchParams({ seed: seed || "", basis: basis || "" })}`,
+        undefined,
+        signal,
+      ),
+    staleTime: 30_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) =>
+      !query.state.error &&
+      query.state.data?.kind === "pending" &&
+      query.state.dataUpdateCount < 60
+        ? 1000
+        : false,
+  });
+}
+/** An explicit button action is the sole client generation authorization. */
+export function useGenerateTopologySummary() {
+  const b = useBackend();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (key: TopologySummaryKey) =>
+      request<TopologySummaryView>(b.base, "topology/summary/generate", key),
+    retry: false,
+    onSuccess: (view, key) =>
+      client.setQueryData(
+        [b.base, b.instance, "topology/summary", key.seed, key.basis],
+        view,
       ),
   });
 }

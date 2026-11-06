@@ -243,6 +243,26 @@ pub struct TypedMemory {
 /// write). Use inside a [`MemoryWrite`] so index work joins the same
 /// publication.
 pub async fn put_typed_in(tx: &Tx, m: &TypedMemory) -> Result<(), TxError> {
+    if let Some(crate::memory_metadata::MemoryPayload::Inference(payload)) = &m.payload {
+        payload
+            .validate_attributes()
+            .map_err(|error| TxError::Abort(error.to_string()))?;
+    }
+    if let Some(crate::memory_metadata::MemoryPayload::Link(payload)) = &m.payload {
+        if let Some(receipt) = &payload.validation {
+            receipt
+                .validate_structure()
+                .map_err(|error| TxError::Abort(error.to_string()))?;
+            if receipt.source != payload.source
+                || receipt.target != payload.target
+                || receipt.kind.as_str() != payload.relation
+            {
+                return Err(TxError::Abort(
+                    "curated Link payload does not match its validation receipt".into(),
+                ));
+            }
+        }
+    }
     let payload_json = match &m.payload {
         Some(p) => serde_json::to_string(p)
             .map_err(|e| TxError::Abort(format!("memory {} payload: {e}", m.id)))?,

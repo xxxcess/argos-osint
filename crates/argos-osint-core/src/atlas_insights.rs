@@ -2418,7 +2418,7 @@ mod tests {
     fn significance_keeps_every_tier_and_ignores_domain_and_provider() {
         let origins = vec![origin("us", 1, 1.0), origin("de", 3, 0.4)];
         let articles = vec![
-            article("hot", "military", "us", "One", "", 1.0),
+            article("hot", "security", "us", "One", "", 1.0),
             article("cold", "economic", "de", "Two", "", 0.2),
             article("wire", "unk", "us", "Three", "", 1.0),
         ];
@@ -2444,7 +2444,7 @@ mod tests {
             .map(|index| {
                 article(
                     &format!("a{index:02}"),
-                    "military",
+                    "security",
                     "us",
                     "Title",
                     "",

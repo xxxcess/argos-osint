@@ -408,215 +408,70 @@ pub async fn process_run(
     db_path: &std::path::Path,
     run_id: &str,
     cancel: Arc<AtomicBool>,
-    user_agent: &str,
+    _user_agent: &str,
 ) -> Result<Coverage> {
-    let mut coverage = Coverage::default();
-    if cancel.load(std::sync::atomic::Ordering::Acquire) {
-        return Ok(coverage);
-    }
+    use crate::storage::classifier_admission::{self, DerivativeStage};
     let store = AtlasStore::open(db_path).await?;
-    let legacy_db = crate::recon::backend::legacy_side_store_path(db_path);
-    let publishers_enabled = store.tool_enabled(rsp::TOOL_ID).await?;
-    let articles = store.list_articles(run_id).await?;
-    if articles.is_empty() {
-        return Ok(coverage);
-    }
-    let entity_job = metadata_job(
-        db_path,
-        run_id,
-        "atlas_entities",
-        "Local entity inventory",
-        cancel.clone(),
-    );
-    let publisher_job = metadata_job(
-        db_path,
-        run_id,
-        "atlas_publishers",
-        "Publisher initial confidence",
-        cancel.clone(),
-    );
-    let total = articles.len() as i64;
-    let stored = store.app_state_get(rsp::APP_STATE_KEY).await?;
-    #[cfg(test)]
-    let index = stored
-        .as_deref()
-        .and_then(|j| rsp::index_from_json(j).ok())
-        .or_else(rsp::last_good_index);
-    #[cfg(not(test))]
-    let failed_in_inventory = {
-        let key = format!("atlas-publisher-failure:{run_id}");
-        let failed = store.app_state_get(&key).await?.as_deref() == Some("1");
-        store.app_state_delete(&key).await?;
-        failed
-    };
-    #[cfg(not(test))]
-    let index = if !publishers_enabled || failed_in_inventory {
-        None
-    } else {
-        let lookup = tokio::select! {
-            result=rsp::warm_with_store_json_for_db(stored.as_deref(),user_agent,legacy_db.map(std::path::Path::to_path_buf))=>Some(result),
-            _=wait_cancelled(cancel.clone())=>None,
-        };
-        match lookup {
-            None => None,
-            Some(result) => match result {
-                Ok((index, changed)) => {
-                    if changed {
-                        store
-                            .app_state_set(rsp::APP_STATE_KEY, &rsp::index_to_json(&index)?)
-                            .await?;
-                    }
-                    Some(index)
-                }
-                Err(e) => {
+    let repo = store
+        .repository()
+        .ok_or_else(|| anyhow::anyhow!("native metadata repository missing"))?;
+    let owner = classifier_admission::AdmissionOwner::new(repo.clone());
+    let result = async {
+        let mut after = None;
+        let mut coverage = Coverage::default();
+        loop {
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            let keys = crate::storage::atlas::current_occurrence_keys_page(
+                repo,
+                Some(run_id),
+                None,
+                after.as_ref(),
+            )
+            .await?;
+            if keys.is_empty() {
+                break;
+            }
+            after = keys.last().cloned();
+            let report = classifier_admission::process_native_refresh_stage(
+                &owner,
+                &keys,
+                DerivativeStage::Metadata,
+                &cancel,
+            )
+            .await?;
+            for state in report.states {
+                if !state
+                    .stages
+                    .iter()
+                    .find(|stage| stage.stage == DerivativeStage::Metadata)
+                    .and_then(|stage| stage.disposition.as_ref())
+                    .is_some_and(classifier_admission::DerivativeDisposition::terminal)
+                {
                     coverage
                         .warnings
-                        .push(format!("Publisher lookup unavailable: {e}"));
-                    None
+                        .push("Native metadata remains unavailable or changed".into());
                 }
-            },
-        }
-    };
-    #[cfg(test)]
-    let _ = user_agent;
-    for (index_in_run, article) in articles.into_iter().enumerate() {
-        if cancel.load(std::sync::atomic::Ordering::Acquire) {
-            break;
-        }
-        let existing = store.metadata(run_id, &article.id).await?;
-        let mut metadata = if let Some(existing) = existing.filter(|m| {
-            let mode = nlp::configured_mode();
-            let entity_reusable = m.entity_version == ENTITY_VERSION
-                && match mode {
-                    nlp::Mode::Off => m.entity_state == MetadataState::Skipped,
-                    _ if !cfg!(feature = "nlp") => m.entity_state == MetadataState::Unavailable,
-                    _ => m.entity_state == MetadataState::Complete,
-                };
-            let publisher_reusable = if !publishers_enabled {
-                m.reliability_state == MetadataState::Skipped
-            } else {
-                m.prior_version == PRIOR_VERSION
-                    && m.reliability_state == MetadataState::Complete
-                    && index.as_ref().is_some_and(|i| {
-                        m.publisher_prior.as_ref().is_some_and(|p| {
-                            p.fetched_at == i.fetched_at
-                                && p.version == PRIOR_VERSION
-                                && p.stale != rsp::index_is_fresh(i)
-                        })
-                    })
-            };
-            m.input_hash == input_hash(&article) && entity_reusable && publisher_reusable
-        }) {
-            existing
-        } else {
-            collect_inner(
-                &article,
-                if publishers_enabled {
-                    index.as_ref()
-                } else {
-                    None
-                },
-                cancel.clone(),
-                legacy_db.as_deref(),
-            )
-            .await
-        };
-        if !publishers_enabled {
-            metadata.reliability_state = MetadataState::Skipped;
-            metadata.publisher_prior = None;
-            metadata
-                .diagnostics
-                .retain(|d| !d.starts_with("Publisher reliability"));
-        }
-        // Classification may finish while native work is in flight. Merge the durable receipt.
-        if let Some(latest) = store.metadata(run_id, &article.id).await? {
-            if latest.input_hash == metadata.input_hash {
-                metadata.classification_status = latest.classification_status;
-                metadata.classification_receipt = latest.classification_receipt;
             }
-        } else if article.category != "unk" {
-            metadata.classification_status = "classified".into();
         }
-        if metadata.entity_state == MetadataState::Complete {
-            coverage.entities_complete += 1;
-        } else if metadata.entity_state != MetadataState::Skipped {
-            coverage.entities_unavailable += 1;
-        }
-        if metadata
-            .publisher_prior
-            .as_ref()
-            .and_then(|p| p.score)
-            .is_some()
-        {
-            coverage.publishers_available += 1;
-        }
-        coverage
-            .warnings
-            .extend(metadata.diagnostics.iter().cloned());
-        store.save_metadata(&metadata).await?;
-        record_unit(
-            db_path,
-            &store,
-            &metadata,
-            crate::atlas_work::STAGE_ENTITIES,
-            &metadata.entity_state,
-            metadata.entity_ms,
-        )
-        .await?;
-        record_unit(
-            db_path,
-            &store,
-            &metadata,
-            crate::atlas_work::STAGE_PUBLISHERS,
-            &metadata.reliability_state,
-            metadata.publisher_ms,
-        )
-        .await?;
-        if let Some(job) = &entity_job {
-            job.phase("Entities", Some(index_in_run as i64 + 1), Some(total));
-        }
-        if let Some(job) = &publisher_job {
-            job.phase(
-                "Publisher priors",
-                Some(index_in_run as i64 + 1),
-                Some(total),
+        let summary = classifier_admission::native_run_summary(repo, run_id).await?;
+        let retained = classifier_admission::run_summary(repo, run_id).await?;
+        if retained.legacy > 0 || retained.staged > 0 {
+            coverage.warnings.push(
+                "Legacy or pending occurrences remain ineligible for new native metadata".into(),
             );
         }
+        coverage.entities_complete = u32::try_from(summary.entities).unwrap_or(u32::MAX);
+        coverage.publishers_available = u32::try_from(summary.publishers).unwrap_or(u32::MAX);
+        coverage.entities_unavailable = coverage.warnings.len() as u32;
+        Ok::<_, anyhow::Error>(coverage)
     }
-
-    let cancelled = cancel.load(std::sync::atomic::Ordering::Acquire);
-    if let Some(job) = entity_job {
-        job.finish(if cancelled {
-            crate::job_registry::Finish::Paused {
-                summary: "Native metadata paused".into(),
-            }
-        } else if coverage.entities_unavailable > 0 {
-            crate::job_registry::Finish::Partial {
-                summary: format!(
-                    "{} article entity inventories unavailable",
-                    coverage.entities_unavailable
-                ),
-            }
-        } else {
-            crate::job_registry::Finish::completed()
-        });
-    }
-    if let Some(job) = publisher_job {
-        job.finish(if cancelled {
-            crate::job_registry::Finish::Paused {
-                summary: "Native publisher lookups paused".into(),
-            }
-        } else {
-            crate::job_registry::Finish::completed()
-        });
-    }
-    Ok(coverage)
-}
-#[cfg(not(test))]
-async fn wait_cancelled(cancel: Arc<AtomicBool>) {
-    while !cancel.load(std::sync::atomic::Ordering::Acquire) {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    .await;
+    let cleanup = owner.shutdown().await;
+    let result = result?;
+    cleanup?;
+    Ok(result)
 }
 
 async fn record_unit(
@@ -1102,4 +957,113 @@ fn metadata_job(
 ) -> Option<crate::job_registry::JobHandle> {
     // Job tracking lived in the legacy store; under SurrealDB Atlas runs untracked.
     None
+}
+
+/// Enrichs one bounded captured occurrence using local NLP and the retained
+/// publisher index. Maintenance never refreshes the index over the network.
+pub(crate) async fn process_derivative(
+    owner: &crate::storage::classifier_admission::AdmissionOwner,
+    fence: &crate::storage::classifier_admission::DerivativeFence,
+    claim: &crate::storage::classifier_admission::DerivativeClaim,
+    cancel: &AtomicBool,
+) -> Result<crate::storage::classifier_admission::DerivativeDisposition> {
+    use crate::storage::classifier_admission::{self, DerivativeDisposition};
+    use crate::storage::tx::{RetryPolicy, TxError};
+    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(DerivativeDisposition::Retryable {
+            code: "cancelled".into(),
+        });
+    }
+    let repo = owner.repository();
+    let enabled = crate::storage::recon_threads::tool_enabled(repo, rsp::TOOL_ID).await?;
+    let raw = crate::storage::pipeline_inputs::app_state_get(repo, rsp::APP_STATE_KEY).await?;
+    let index = if enabled {
+        raw.as_deref()
+            .and_then(|json| rsp::index_from_json(json).ok())
+    } else {
+        None
+    };
+    let signal = Arc::new(AtomicBool::new(false));
+    struct CancelNative(Arc<AtomicBool>);
+    impl Drop for CancelNative {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let _stop = CancelNative(signal.clone());
+    let mut work = Box::pin(collect_inner(
+        &claim.article,
+        index.as_ref(),
+        signal.clone(),
+        None,
+    ));
+    let mut metadata = tokio::select! {
+        metadata=&mut work=>metadata,
+        _=async {while !cancel.load(std::sync::atomic::Ordering::Acquire){tokio::time::sleep(std::time::Duration::from_millis(50)).await;}}=> {signal.store(true,std::sync::atomic::Ordering::Release);work.await},
+    };
+    if !enabled {
+        metadata.reliability_state = MetadataState::Skipped;
+        metadata.publisher_prior = None;
+        metadata
+            .diagnostics
+            .retain(|line| !line.starts_with("Publisher reliability"));
+    }
+    let entities_ready = matches!(
+        metadata.entity_state,
+        MetadataState::Complete | MetadataState::Skipped | MetadataState::Unsupported
+    );
+    let publisher_ready = matches!(
+        metadata.reliability_state,
+        MetadataState::Complete | MetadataState::Skipped
+    );
+    let disposition = if cancel.load(std::sync::atomic::Ordering::Acquire) {
+        DerivativeDisposition::Retryable {
+            code: "cancelled".into(),
+        }
+    } else if entities_ready && publisher_ready {
+        if metadata.entity_state == MetadataState::Skipped && !enabled {
+            DerivativeDisposition::Disabled {
+                reason: "native_tools_disabled".into(),
+            }
+        } else {
+            DerivativeDisposition::Current
+        }
+    } else {
+        DerivativeDisposition::Retryable {
+            code: "native_metadata_unavailable".into(),
+        }
+    };
+    let fence = fence.clone();
+    let claim = claim.clone();
+    let result = disposition.clone();
+    let committed = classifier_admission::owned_tx(owner, RetryPolicy::default(), move |tx| {
+        let fence = fence.clone();
+        let claim = claim.clone();
+        let metadata = metadata.clone();
+        let disposition = result.clone();
+        async move {
+            let now = chrono::Utc::now();
+            if !classifier_admission::check_derivative_in(&tx, &fence, &claim, now).await? {
+                return Ok(DerivativeDisposition::StaleInput);
+            }
+            if !crate::storage::atlas_metadata::save_metadata_in(&tx, &metadata).await? {
+                return Err(TxError::Abort("native_metadata_source_changed".into()));
+            }
+            if !classifier_admission::complete_derivative_in(
+                &tx,
+                &fence,
+                &claim,
+                &disposition,
+                "",
+                now,
+            )
+            .await?
+            {
+                return Err(TxError::Abort("native_metadata_lease_lost".into()));
+            }
+            Ok(disposition)
+        }
+    })
+    .await?;
+    Ok(committed.value)
 }

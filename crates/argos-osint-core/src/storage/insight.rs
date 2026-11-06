@@ -142,6 +142,7 @@ DEFINE FIELD IF NOT EXISTS relation ON insight_derivation_link TYPE string;
 DEFINE FIELD IF NOT EXISTS rationale ON insight_derivation_link TYPE string;
 DEFINE FIELD IF NOT EXISTS assessment_json ON insight_derivation_link TYPE string;
 DEFINE FIELD IF NOT EXISTS evidence_json ON insight_derivation_link TYPE string;
+DEFINE FIELD IF NOT EXISTS item_json ON insight_derivation_link TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS status ON insight_derivation_link TYPE string;
 DEFINE FIELD IF NOT EXISTS revision ON insight_derivation_link TYPE string;
 DEFINE INDEX IF NOT EXISTS insight_links_snapshot ON insight_derivation_link FIELDS snapshot_id;

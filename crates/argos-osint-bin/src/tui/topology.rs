@@ -1096,15 +1096,37 @@ fn brief_lines(brief: &NeighborhoodBrief, width: u16) -> Vec<Line<'static>> {
         width,
     ));
     out.push(Line::from(""));
-    for (name, items) in brief.blocks() {
+    let blocks = if brief.facets.is_empty() {
+        brief.blocks()
+    } else {
+        brief
+            .facets
+            .iter()
+            .map(|block| (block.facet.display_name(), block.items.iter().collect()))
+            .collect()
+    };
+    for (name, items) in blocks {
         out.push(Line::styled(
             name.to_string(),
             Style::default().add_modifier(Modifier::BOLD),
         ));
+        if items.is_empty() {
+            if let Some(reason) = brief
+                .facets
+                .iter()
+                .find(|block| block.facet.display_name() == name)
+                .and_then(|block| block.empty_reason.as_deref())
+            {
+                out.extend(components::measured_lines(
+                    vec![Line::styled(reason.to_owned(), theme::muted())],
+                    width,
+                ));
+            }
+        }
         for item in items {
             let refs = argos_osint_core::brain_neighborhood_brief::refs_text(&item.basis);
             let text = format!("{}{refs}", item.text);
-            if name == "Connections" && width > 3 {
+            if matches!(name, "Connections" | "Actor Relationships") && width > 3 {
                 let wrapped = components::measured_lines(vec![Line::from(text)], width - 2);
                 for (i, line) in wrapped.into_iter().enumerate() {
                     let mut spans = vec![Span::raw(if i == 0 { "• " } else { "  " })];
@@ -1504,7 +1526,13 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
         _ => None,
     };
     let rows = summary_rows(state, app.topology_loading, error, width);
-    let button_rows = u16::from(failure.is_some() && area.height >= 4);
+    let can_generate = matches!(state.summary.gen, SummaryGen::Idle)
+        && state
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.neighborhood_input.as_ref())
+            .is_some_and(|input| input.worth_generating());
+    let button_rows = u16::from((failure.is_some() || can_generate) && area.height >= 4);
     let available = area.height - label_rows - button_rows;
     let overflow = rows.len() > available as usize && available > 1;
     let content_height = if overflow { available - 1 } else { available };
@@ -1551,13 +1579,21 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
             Rect::new(x, content.bottom(), width, 1),
         );
     }
-    if let (Some(failure), true) = (failure, button_rows == 1) {
-        let mut labels = vec!["Retry summary", "View logs"];
-        let mut buttons = vec![
-            ButtonId::TopologySummaryRetry,
-            ButtonId::TopologySummaryLogs,
-        ];
-        if failure.kind.needs_models() {
+    if button_rows == 1 {
+        let mut labels = vec![if can_generate {
+            "Generate summary"
+        } else {
+            "Retry summary"
+        }];
+        let mut buttons = vec![ButtonId::TopologySummaryRetry];
+        if failure.is_some() {
+            labels.push("View logs");
+            buttons.push(ButtonId::TopologySummaryLogs);
+        }
+        if failure
+            .as_ref()
+            .is_some_and(|failure| failure.kind.needs_models())
+        {
             labels.push("Models");
             buttons.push(ButtonId::TopologySummaryModels);
         }

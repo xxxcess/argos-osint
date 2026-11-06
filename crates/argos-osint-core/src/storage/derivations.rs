@@ -212,14 +212,21 @@ pub async fn write_derivations_in(
                     link.id
                 )));
             };
+            let item_json = serde_json::to_string(link).map_err(json_err)?;
+            if item_json.len() > 65536 {
+                return Err(TxError::Abort(
+                    "curated Link item exceeds64KiB bound".into(),
+                ));
+            }
             run(
                 tx,
                 tx.query(
                     "CREATE type::record('insight_derivation_link', $id) SET snapshot_id = $s,
                        left_kind = $lk, left_id = $li, right_kind = $rk, right_id = $ri,
                        relation = $rel, rationale = $why, assessment_json = $a,
-                       evidence_json = $e, status = 'assessed', revision = $rev RETURN NONE;",
+                       evidence_json = $e, item_json=$item, status = 'assessed', revision = $rev RETURN NONE;",
                 )
+                .bind(("item",item_json))
                 .bind(("id", format!("{snapshot_id}:{}", link.id)))
                 .bind(("s", snapshot_id.to_string()))
                 .bind(("lk", left.kind.clone()))
@@ -244,7 +251,312 @@ pub async fn write_derivations_in(
             .await?;
         }
     }
+    if save && kind.is_none() {
+        touched.extend(publish_full_story_links_in(tx, snapshot_id, input, output).await?);
+    }
     Ok(touched)
+}
+
+#[derive(SurrealValue)]
+struct LinkMemory {
+    text: String,
+    payload_json: String,
+    memory_kind: String,
+    lifecycle: String,
+}
+
+async fn link_memory_in(tx: &Tx, id: &str) -> Result<Option<LinkMemory>, TxError> {
+    let mut result = run(
+        tx,
+        tx.query("SELECT text,payload_json,memory_kind,lifecycle FROM ONLY $memory")
+            .bind(("memory", rid("memory", id))),
+    )
+    .await?;
+    take(&mut result, 0)
+}
+
+fn link_endpoint_revision(memory: &LinkMemory) -> Result<String, TxError> {
+    let payload: crate::memory_metadata::MemoryPayload =
+        serde_json::from_str(&memory.payload_json).map_err(json_err)?;
+    crate::memory_metadata::assertion_semantic_revision(&memory.text, &payload)
+        .map_err(|error| TxError::Abort(error.to_string()))
+}
+
+async fn link_endpoint_in(
+    tx: &Tx,
+    snapshot: &str,
+    assertion: &crate::investigation::insights::LinkAssertionProof,
+) -> Result<Option<(crate::memory_metadata::EndpointRef, String)>, TxError> {
+    use crate::memory_metadata::{EndpointRef, MemoryKind};
+    let endpoint = &assertion.endpoint;
+    let kind = match endpoint.kind.as_str() {
+        "claim" => MemoryKind::Claim,
+        "inference" => MemoryKind::Inference,
+        _ => return Ok(None),
+    };
+    let mut result=run(tx,tx.query("SELECT VALUE memory_id FROM ONLY $derivation WHERE snapshot_id=$snapshot AND insight_kind=$kind AND status='assessed'")
+        .bind(("derivation",rid("insight_derivation",&format!("{snapshot}:{}",endpoint.id))))
+        .bind(("snapshot",snapshot.to_string())).bind(("kind",endpoint.kind.clone()))).await?;
+    let Some(id) = take::<Option<String>>(&mut result, 0)? else {
+        return Ok(None);
+    };
+    let Some(memory) = link_memory_in(tx, &id).await? else {
+        return Ok(None);
+    };
+    if memory.lifecycle != "active"
+        || memory.memory_kind != endpoint.kind
+        || memory.text != assertion.text
+    {
+        return Ok(None);
+    }
+    let revision = link_endpoint_revision(&memory)?;
+    Ok(Some((
+        EndpointRef::Memory {
+            memory_id: id,
+            kind,
+        },
+        revision,
+    )))
+}
+
+async fn full_story_link_still_live(
+    tx: &Tx,
+    input: &PipelineInput,
+    payload: &crate::memory_metadata::LinkPayload,
+) -> Result<bool, TxError> {
+    use crate::memory_metadata::EndpointRef;
+    let Some(receipt) = &payload.validation else {
+        return Ok(false);
+    };
+    if receipt.validate_structure().is_err()
+        || receipt.source != payload.source
+        || receipt.target != payload.target
+        || receipt.kind.as_str() != payload.relation
+    {
+        return Ok(false);
+    }
+    for (endpoint, revision) in [
+        (&receipt.source, &receipt.source_revision),
+        (&receipt.target, &receipt.target_revision),
+    ] {
+        let EndpointRef::Memory { memory_id, .. } = endpoint else {
+            return Ok(false);
+        };
+        let Some(memory) = link_memory_in(tx, memory_id).await? else {
+            return Ok(false);
+        };
+        if memory.lifecycle != "active" || link_endpoint_revision(&memory)? != *revision {
+            return Ok(false);
+        }
+    }
+    let mut evidence_snapshot = input.snapshot.clone();
+    evidence_snapshot.source_refs = receipt.evidence.clone();
+    evidence_snapshot.memory_refs.clear();
+    match super::live_evidence::validate_in(tx, &evidence_snapshot).await {
+        Ok(()) => {}
+        Err(TxError::Abort(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    let mut result = run(
+        tx,
+        tx.query("SELECT VALUE state FROM ONLY $checkpoint").bind((
+            "checkpoint",
+            rid("insight_stage_checkpoint", &receipt.decision_receipt),
+        )),
+    )
+    .await?;
+    Ok(take::<Option<String>>(&mut result, 0)?.as_deref() == Some("completed"))
+}
+
+/// Adds current six-kind canonical Links beside historical derivation metadata.
+/// Every decision, source and endpoint is rechecked in this publication's transaction.
+async fn publish_full_story_links_in(
+    tx: &Tx,
+    snapshot: &str,
+    input: &PipelineInput,
+    output: &PipelineOutput,
+) -> Result<Vec<String>, TxError> {
+    use crate::intelligence_contracts::{LinkValidationReceipt, LINK_VALIDATION_VERSION};
+    use crate::investigation::insights::{full_story_receipt_assessment, prepare_full_story_link};
+    use crate::memory_metadata::{LinkPayload, MemoryKind, MemoryPayload};
+    let owner_key = format!(
+        "full-story-curated-links:{}",
+        crate::nlp::cache::key(&serde_json::json!([
+            input.snapshot.owner_kind,
+            input.snapshot.owner_id
+        ]))
+    );
+    let mut result=run(tx,tx.query("SELECT VALUE IF bytes::len(type::bytes(value))<=65536 THEN value ELSE 'oversized' END FROM ONLY $owner").bind(("owner",rid("app_state",&owner_key)))).await?;
+    let raw = take::<Option<String>>(&mut result, 0)?;
+    let previous: Vec<String> = if let Some(raw) = raw {
+        if raw.len() > 65536 {
+            return Err(TxError::Abort("curated owner receipt exceeds bound".into()));
+        }
+        serde_json::from_str(&raw).map_err(json_err)?
+    } else {
+        Vec::new()
+    };
+    if previous.len() > 200 {
+        return Err(TxError::Abort("curated owner exceeds200relations".into()));
+    }
+    let mut current = Vec::new();
+    for id in &previous {
+        if let Some(memory) = link_memory_in(tx, id).await? {
+            if let Ok(MemoryPayload::Link(payload)) = serde_json::from_str(&memory.payload_json) {
+                if memory.lifecycle == "active"
+                    && full_story_link_still_live(tx, input, &payload).await?
+                {
+                    current.push(id.clone());
+                }
+            }
+        }
+    }
+    for link in &output.links {
+        let Some(proof) = &link.curation else {
+            continue;
+        };
+        if !link.assessment.faithful() {
+            continue;
+        }
+        let Ok(mut expected) =
+            prepare_full_story_link(input, &output.claims, &output.inferences, link)
+        else {
+            continue;
+        };
+        expected.decision_receipt = proof.decision_receipt.clone();
+        if serde_json::to_value(&expected).map_err(json_err)?
+            != serde_json::to_value(proof).map_err(json_err)?
+        {
+            continue;
+        }
+
+        #[derive(SurrealValue)]
+        struct Checkpoint {
+            state: String,
+            output_json: String,
+            owner_kind: String,
+            owner_id: String,
+        }
+        let mut result=run(tx,tx.query("SELECT state, IF bytes::len(type::bytes(output_json))<=131072 THEN output_json ELSE '' END AS output_json, owner_kind,owner_id FROM ONLY $checkpoint")
+            .bind(("checkpoint",rid("insight_stage_checkpoint",&proof.decision_receipt)))).await?;
+        let Some(checkpoint) = take::<Option<Checkpoint>>(&mut result, 0)? else {
+            continue;
+        };
+        if checkpoint.state != "completed"
+            || checkpoint.owner_kind != input.snapshot.owner_kind
+            || checkpoint.owner_id != input.snapshot.owner_id
+        {
+            continue;
+        }
+        let Ok(assessment) = full_story_receipt_assessment(
+            input,
+            &proof.decision_receipt,
+            &checkpoint.output_json,
+            link,
+            &expected,
+        ) else {
+            continue;
+        };
+        if !assessment.faithful()
+            || serde_json::to_value(&assessment).map_err(json_err)?
+                != serde_json::to_value(&link.assessment).map_err(json_err)?
+        {
+            continue;
+        }
+        // Even a consumer that supplied another SnapshotStep cannot bypass
+        // evidence liveness for a new confirmed relationship.
+        super::live_evidence::validate_for_publication_in(tx, &input.snapshot).await?;
+        let Some((source, source_revision)) = link_endpoint_in(tx, snapshot, &proof.source).await?
+        else {
+            continue;
+        };
+        let Some((target, target_revision)) = link_endpoint_in(tx, snapshot, &proof.target).await?
+        else {
+            continue;
+        };
+        let mut evidence = proof.source.evidence.clone();
+        for reference in &proof.target.evidence {
+            if !evidence.contains(reference) {
+                evidence.push(reference.clone());
+            }
+        }
+        let receipt = LinkValidationReceipt {
+            schema_version: LINK_VALIDATION_VERSION.into(),
+            kind: proof.kind,
+            source: source.clone(),
+            target: target.clone(),
+            source_revision,
+            target_revision,
+            evidence,
+            source_lineage: proof.source.lineage.clone(),
+            target_lineage: proof.target.lineage.clone(),
+            chronology_basis: proof.chronology_basis,
+            source_time: proof.source.published_at.clone(),
+            target_time: proof.target.published_at.clone(),
+            conditions: proof.conditions.clone(),
+            limitations: proof.limitations.clone(),
+            decision_receipt: proof.decision_receipt.clone(),
+            context_revision: proof.context_revision.clone(),
+        };
+        if receipt.validate_structure().is_err() {
+            continue;
+        }
+        let id = crate::brain_actors::hid(
+            "link",
+            &[
+                proof.kind.as_str(),
+                &crate::brain_actors::endpoint_key(&source),
+                &crate::brain_actors::endpoint_key(&target),
+                &crate::nlp::cache::key(&serde_json::json!(receipt)),
+            ],
+        );
+        let payload = MemoryPayload::Link(Box::new(LinkPayload {
+            validation: Some(receipt),
+            source,
+            target,
+            relation: proof.kind.as_str().into(),
+            rationale: link.rationale.clone(),
+            receipts: Vec::new(),
+            promoted_from: None,
+        }));
+        super::memory::put_typed_in(
+            tx,
+            &super::memory::TypedMemory {
+                id: id.clone(),
+                text: crate::brain_actors::text_of(&payload),
+                kind: MemoryKind::Link,
+                payload: Some(payload),
+                lifecycle: "active".into(),
+            },
+        )
+        .await?;
+        if !current.contains(&id) {
+            current.push(id);
+        }
+    }
+    if current.len() > 200 {
+        return Err(TxError::Abort(
+            "curated owner bound reached; prior relations preserved".into(),
+        ));
+    }
+    let stale: Vec<_> = previous
+        .into_iter()
+        .filter(|id| !current.contains(id))
+        .collect();
+    let retired = super::memory::set_lifecycle_in(tx, &stale, "retired").await?;
+    let raw = serde_json::to_string(&current).map_err(json_err)?;
+    if raw.len() > 65536 {
+        return Err(TxError::Abort("curated owner receipt exceeds bound".into()));
+    }
+    run(
+        tx,
+        tx.query("UPSERT $owner SET value=$value RETURN NONE")
+            .bind(("owner", rid("app_state", &owner_key)))
+            .bind(("value", raw)),
+    )
+    .await?;
+    current.extend(retired);
+    Ok(current)
 }
 
 /// A deletion tombstone owned by this owner (or unscoped) suppresses the
@@ -908,11 +1220,15 @@ async fn bind_item_in(
         actors.sort_by(|l, r| (&l.actor_id, &l.role).cmp(&(&r.actor_id, &r.role)));
         actors.dedup_by(|l, r| l.actor_id == r.actor_id && l.role == r.role);
         let payload = MemoryPayload::Inference(InferencePayload {
+            inference_kind: inference.inference_kind,
+            domains: inference.domains.clone(),
+            conditions: inference.conditions.clone(),
+            extraction_fidelity: Some(inference.assessment.fidelity.clone()),
             premise_claims: premises,
             actors: actors.clone(),
             reasoning: inference.rationale.clone(),
             limitations: inference.limitations.join("; "),
-            support_state: inference.assessment.fidelity.clone(),
+            support_state: inference.support_state.clone(),
             coverage_receipt: snapshot_id.into(),
         });
         let mut r = run(

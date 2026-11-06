@@ -6,9 +6,9 @@
 # embedded (the default build): default-features clippy, the whole
 #   workspace test suite (unit + storage contract tests on the embedded
 #   engine), then `test_surreal.py --mode embedded`.
-# server (opt-in): `--no-default-features --features server,nlp` clippy for
-#   core and bin, then the storage contract tests against a local SurrealDB
-#   3.3.4 server (`test_surreal.py --mode server`, using --surreal-bin or
+# server (opt-in): `--no-default-features --features server,nlp,classifier`
+#   clippy for core and bin, then the storage contract tests against a local
+#   SurrealDB 3.3.4 server (`test_surreal.py --mode server`, using --surreal-bin or
 #   `surreal` on PATH). Non-storage tests run only in the embedded leg.
 #
 # Any failure exits nonzero. Builds go through scripts/agent_cargo.py.
@@ -51,8 +51,8 @@ case "$storage" in
     fi
     [ -n "$surreal_bin" ] || { echo "local_matrix: no surreal binary (pass --surreal-bin or put surreal on PATH)" >&2; exit 2; }
     step "${cargo[@]}" clippy -p argos-osint-core -p argos-osint-bin --all-targets --locked \
-      --no-default-features --features server,nlp -- -D warnings
-    step "${cargo[@]}" run -q -p argos-osint-bin --locked --no-default-features --features server,nlp \
+      --no-default-features --features server,nlp,classifier -- -D warnings
+    step "${cargo[@]}" run -q -p argos-osint-bin --locked --no-default-features --features server,nlp,classifier \
       -- storage init --help
     step python3 scripts/test_surreal.py --mode server --bin "$surreal_bin" --no-fail-fast
     ;;

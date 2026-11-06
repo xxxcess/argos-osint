@@ -2,6 +2,8 @@ import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { articleDomainLabel } from "../src/views/article-domain-label";
+import type { Article } from "@argos/api-client";
 import { ArticleCard } from "../src/views/ArticleCard";
 
 // @tag:testing — real card metadata; no synthetic REF, trend or TLP fields.
@@ -28,7 +30,7 @@ describe("Bulletin article metadata", () => {
       />,
     );
     expect(screen.queryByText("article-raw-id")).not.toBeInTheDocument();
-    expect(screen.getByText("GEOPOLITICAL")).toBeVisible();
+    expect(screen.getByText("Legacy category · GEOPOLITICAL")).toBeVisible();
     expect(screen.getByText("2026-10-25")).toBeVisible();
     expect(screen.queryByText(/VIEW_DETAILS/)).not.toBeInTheDocument();
     expect(screen.getByText("Fixture Wire · Fixture reporter")).toBeVisible();
@@ -88,5 +90,44 @@ describe("Bulletin article metadata", () => {
     expect(rule(sizeClass)).toContain("background-size: contain");
     expect(rule(widthClass)).toContain("width: 120px");
     expect(rule(heightClass)).toContain("height: 120px");
+  });
+});
+
+describe("authoritative domain labels", () => {
+  const article: Article = {
+    id: "a",
+    run_id: "r",
+    title: "Source",
+    description: "",
+    source_name: "",
+    source_domain: "",
+    published_at: "",
+    category: "economic",
+    categories: ["economic", "human"],
+    taxonomy_version: "strategic-domains-v1",
+    admission_state: "admitted",
+    publication_version: "atlas-admission-publication-v3",
+    image_url: "",
+    url: "",
+    author: "",
+  };
+  it("uses official names only for a current admitted exact pair", () => {
+    expect(articleDomainLabel(article)).toBe(
+      "Economic & Supply Chain Resilience",
+    );
+    for (const changes of [
+      { taxonomy_version: undefined },
+      { admission_state: "rejected" },
+      { admission_state: "pending" },
+      { publication_version: undefined },
+      { categories: ["economic"] },
+      { categories: ["economic", "economic"] },
+      { categories: ["economic", "military"] },
+      { categories: ["human", "economic"] },
+    ]) {
+      expect(articleDomainLabel({ ...article, ...changes })).toBe(
+        "Legacy category · ECONOMIC",
+      );
+    }
   });
 });

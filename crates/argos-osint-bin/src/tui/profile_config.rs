@@ -59,6 +59,11 @@ pub struct ImportBuffer {
 #[derive(Clone, Debug)]
 pub struct ConfigView {
     pub open: bool,
+    pub edit_paths: bool,
+    pub actor_csv: String,
+    pub article_csv: String,
+    pub classifier_dir: String,
+    pub paths_status: Option<String>,
     /// Export destination, before `~` expansion.
     pub export_path: String,
     /// Where the expanded path points.
@@ -84,6 +89,11 @@ impl Default for ConfigView {
     fn default() -> Self {
         Self {
             open: false,
+            edit_paths: false,
+            actor_csv: String::new(),
+            article_csv: String::new(),
+            classifier_dir: String::new(),
+            paths_status: None,
             export_path: "~/argos-config.json".to_string(),
             export_resolved: None,
             export_status: None,
@@ -198,6 +208,23 @@ impl ImportBuffer {
 }
 
 impl ConfigView {
+    pub fn with_paths(paths: &argos_osint_core::data_paths::DataPaths) -> Self {
+        Self {
+            actor_csv: paths.actor_csv.clone(),
+            article_csv: paths.article_csv.clone(),
+            classifier_dir: paths.classifier_dir.clone(),
+            ..Self::default()
+        }
+    }
+
+    pub fn data_paths(&self) -> argos_osint_core::data_paths::DataPaths {
+        argos_osint_core::data_paths::DataPaths {
+            actor_csv: self.actor_csv.trim().into(),
+            article_csv: self.article_csv.trim().into(),
+            classifier_dir: self.classifier_dir.trim().into(),
+        }
+    }
+
     pub fn open(&mut self) {
         self.open = true;
         self.export_status = None;
@@ -496,6 +523,34 @@ pub fn draw(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let block = theme::card(" Configs ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let mut left = inner.x;
+    for (action, label, width, selected) in [
+        (4, "Dataset paths", 17, config.edit_paths),
+        (5, "Export / import", 19, !config.edit_paths),
+    ] {
+        let rect = Rect::new(
+            left,
+            inner.y,
+            width.min(inner.right().saturating_sub(left)),
+            1.min(inner.height),
+        );
+        app.layout
+            .borrow_mut()
+            .register(Target::ConfigAction(action), rect);
+        components::tab_button(
+            frame,
+            rect,
+            label,
+            selected,
+            app.focus == Target::ConfigAction(action),
+        );
+        left = rect.right();
+    }
+    let inner = strip(inner, 2, inner.height.saturating_sub(2));
+    if config.edit_paths {
+        draw_paths(frame, app, inner);
+        return;
+    }
     if inner.height < 10 {
         frame.render_widget(
             Paragraph::new("Configs needs more height · resize to edit").style(theme::warn()),
@@ -642,6 +697,65 @@ pub fn draw(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Paragraph::new("Tab focus · Enter newline in JSON · Verify → Save and apply · Esc discard")
             .style(theme::dim()),
         strip(inner, inner.height - 1, 1),
+    );
+}
+
+fn draw_paths(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    use super::app::{FieldId, Target};
+    if area.height < 8 || area.width < 40 {
+        frame.render_widget(
+            Paragraph::new("Resize terminal to edit dataset paths.")
+                .style(theme::warn())
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    let field_height = if area.height >= 12 { 3 } else { 2 };
+    for (index, field, label) in [
+        (0, FieldId::ProfileActorCsv, "Actor CSV"),
+        (1, FieldId::ProfileArticleCsv, "Article training CSV"),
+        (
+            2,
+            FieldId::ProfileClassifierDir,
+            "Classifier save directory",
+        ),
+    ] {
+        super::ui::draw_field(
+            frame,
+            app,
+            field,
+            label,
+            strip(area, index * field_height, field_height),
+        );
+    }
+    let action_top = field_height * 3;
+    let mut save = strip(area, action_top, 1);
+    save.width = save.width.min(16);
+    app.layout
+        .borrow_mut()
+        .register(Target::ConfigAction(3), save);
+    super::components::tab_button(
+        frame,
+        save,
+        "Save paths",
+        false,
+        app.focus == Target::ConfigAction(3),
+    );
+    let message = app
+        .config()
+        .paths_status
+        .as_deref()
+        .unwrap_or("Blank = automatic · relative paths use ARGOS_HOME · ~/ uses your home");
+    frame.render_widget(
+        Paragraph::new(message)
+            .style(theme::muted())
+            .wrap(Wrap { trim: false }),
+        strip(
+            area,
+            action_top + 1,
+            area.height.saturating_sub(action_top + 1),
+        ),
     );
 }
 

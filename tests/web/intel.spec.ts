@@ -1,3 +1,4 @@
+import type { Article } from "@argos/api-client";
 import { installLiveFixture } from "./live-fixture";
 import { test, expect, type Page } from "@playwright/test";
 async function gotoBulletin(page: Page, url = "/") {
@@ -62,7 +63,7 @@ function deferred() {
   });
   return { promise, resolve };
 }
-const a = {
+const a: Article = {
   id: "a1",
   run_id: "r1",
   title: "Harbor negotiations enter a new phase",
@@ -1999,7 +2000,7 @@ test("brief source image fits its full aspect ratio and bulletin has no details 
   await expect(page.getByText(/VIEW_DETAILS/)).toHaveCount(0);
   const card = page.getByTestId("article-card-a1");
   const category = await card
-    .getByText("GEOPOLITICAL", { exact: true })
+    .getByText("Legacy category · GEOPOLITICAL", { exact: true })
     .boundingBox();
   const date = await card
     .getByText("2026-10-25", { exact: true })
@@ -2799,3 +2800,233 @@ test("HTTP article images are allowed by the image CSP and render", async ({
     .poll(() => img.evaluate((el) => (el as HTMLImageElement).naturalWidth))
     .toBe(80);
 });
+
+for (const width of [1440, 320]) {
+  test(`topology summary requires explicit generation and keeps eight evidence facets at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await fixtures(page);
+    const facets = [
+      ["current_state", "Current State"],
+      ["significant_developments", "Significant Developments"],
+      ["actor_relationships", "Actor Relationships"],
+      ["cross_domain_implications", "Cross-Domain Implications"],
+      ["emerging_signals", "Emerging Signals"],
+      ["conditional_outlook", "Conditional Outlook"],
+      ["evidence", "Evidence"],
+      ["limitations", "Limitations"],
+    ];
+    const item = {
+      text: "The retained claim reports the port closure.",
+      epistemic: "recorded",
+      node_ids: ["claim1"],
+      edge_ids: [],
+      member_ids: [],
+      receipts: [],
+      basis: [1],
+    };
+    const brief = {
+      format_version: 2,
+      basis_key: "captured-evidence-route-v1",
+      seed: { Claim: "claim1" },
+      seed_label: "Port closure",
+      overview: item,
+      connections: [],
+      interpretation: [],
+      limits: [],
+      references: [
+        {
+          n: 1,
+          target: { Node: "claim1" },
+          label: "Retained claim from Fixture Wire",
+        },
+      ],
+      coverage: {
+        status: "limited",
+        depth: 1,
+        cycle_scope: "AllRetained",
+        admitted_nodes: 2,
+        admitted_edges: 1,
+        discovered_nodes: 3,
+        discovered_edges: 2,
+        omitted_nodes: 1,
+        omitted_edges: 1,
+        unresolved_endpoints: 0,
+        exploration_exhausted: true,
+        payload_reads_skipped: 0,
+      },
+      facets: facets.map(([facet]) => ({
+        facet,
+        items: facet === "current_state" ? [item] : [],
+        empty_reason:
+          facet === "current_state"
+            ? null
+            : "No supported retained evidence for this facet.",
+      })),
+    };
+    let state = "recorded";
+    const actions: unknown[] = [];
+    await page.route("**/api/v1/topology?**", (route) =>
+      route.fulfill({
+        json: {
+          root_label: "Port closure",
+          nodes: [
+            {
+              id: "claim1",
+              label: "Port closure",
+              kind: "Claim",
+              detail: "Retained evidence",
+              topology_seed: { Claim: "claim1" },
+              is_root: true,
+            },
+            {
+              id: "actor1",
+              label: "Harbor Authority",
+              kind: "Entity",
+              detail: "Recorded source actor",
+              topology_seed: { Actor: "actor1" },
+            },
+          ],
+          edges: [
+            { id: "edge1", from: "actor1", to: "claim1", label: "concerns" },
+          ],
+          findings: { gaps: [] },
+          has_continuation: false,
+          neighborhood_brief: brief,
+        },
+      }),
+    );
+    const delivery = () =>
+      state === "failed"
+        ? {
+            kind: "failed",
+            brief,
+            diagnostic: {
+              kind: "rejected",
+              message:
+                "The generated interpretation cited an unknown record. Recorded evidence was retained.",
+            },
+          }
+        : state === "generated"
+          ? {
+              kind: "generated",
+              brief,
+              route: "fixture/summarization",
+              host_notes: [],
+            }
+          : { kind: state, brief };
+    await page.route("**/api/v1/topology/summary?**", (route) =>
+      route.fulfill({ json: delivery() }),
+    );
+    await page.route("**/api/v1/topology/summary/generate", async (route) => {
+      actions.push(route.request().postDataJSON());
+      state = actions.length === 1 ? "pending" : "generated";
+      await route.fulfill({ json: delivery() });
+    });
+    await page.goto("/topology?seed=claim1");
+    const title = page.getByRole("heading", {
+      name: "Neighborhood summary",
+      exact: true,
+    });
+    await expect(title).toBeVisible();
+    for (const [, name] of facets)
+      await expect(
+        page.getByRole("heading", { name, exact: true }),
+      ).toBeVisible();
+    expect(actions).toEqual([]);
+    await title.scrollIntoViewIfNeeded();
+    await page.screenshot({
+      path: `${captureDir}/topology-summary-recorded-${width}.png`,
+      fullPage: true,
+    });
+    await page
+      .getByRole("button", { name: "Generate summary", exact: true })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Generation pending", exact: true }),
+    ).toBeDisabled();
+    expect(actions).toEqual([{ seed: "claim1", basis: brief.basis_key }]);
+    await page.screenshot({
+      path: `${captureDir}/topology-summary-pending-${width}.png`,
+      fullPage: true,
+    });
+    state = "failed";
+    await page
+      .getByRole("button", { name: "Refresh summary status", exact: true })
+      .click();
+    await expect(page.getByText(/Generation unavailable:/)).toBeVisible();
+    await expect(
+      page.getByText(/retained claim reports the port closure/),
+    ).toBeVisible();
+    expect(actions).toHaveLength(1);
+    await page.screenshot({
+      path: `${captureDir}/topology-summary-failed-${width}.png`,
+      fullPage: true,
+    });
+    await page
+      .getByRole("button", { name: "Retry summary", exact: true })
+      .click();
+    await expect(
+      page.getByText("Generated with fixture/summarization", { exact: true }),
+    ).toBeVisible();
+    expect(actions).toHaveLength(2);
+    await page.screenshot({
+      path: `${captureDir}/topology-summary-generated-${width}.png`,
+      fullPage: true,
+    });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  });
+}
+
+for (const width of [320, 1440]) {
+  test(`article domain authority keeps historical Economic explicit at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await fixtures(page, true, "", {
+      category: "economic",
+      categories: ["economic", "human"],
+      taxonomy_version: "strategic-domains-v1",
+      admission_state: "rejected",
+      publication_version: "atlas-admission-publication-v3",
+    });
+    await gotoBulletin(page);
+    await expect(
+      page
+        .getByTestId("article-card-a1")
+        .getByText("Legacy category · ECONOMIC", { exact: true }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: `${captureDir}/article-domain-legacy-${width}.png`,
+      fullPage: true,
+    });
+    await fixtures(page, true, "", {
+      category: "economic",
+      categories: ["economic", "human"],
+      taxonomy_version: "strategic-domains-v1",
+      admission_state: "admitted",
+      publication_version: "atlas-admission-publication-v3",
+    });
+    await page.reload();
+    await expect(
+      page.getByRole("heading", { name: "Intelligence bulletin", exact: true }),
+    ).toBeVisible();
+    const card = page.getByTestId("article-card-a1");
+    await expect(
+      card.getByText("Economic & Supply Chain Resilience", { exact: true }),
+    ).toBeVisible();
+    const overflow = await card.evaluate(
+      (el) => el.scrollWidth > el.clientWidth + 1,
+    );
+    expect(overflow).toBe(false);
+    await page.screenshot({
+      path: `${captureDir}/article-domain-current-${width}.png`,
+      fullPage: true,
+    });
+  });
+}

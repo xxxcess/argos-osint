@@ -65,6 +65,8 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
         "derived_summary",
         "summary_flush_request",
         "brain_scope_request",
+        "atlas_reclassification_job",
+        "classifier_calibration_job",
         "storage_meta",
     ] {
         assert!(info.contains(&format!("\"{table}\"")), "missing {table}");
@@ -72,7 +74,7 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
     // Idempotent re-run.
     let again = ensure_schema(&db).await.unwrap();
     assert_eq!(again.previous, SCHEMA_VERSION);
-    assert_eq!(bootstrap::schemas().len(), 37);
+    assert_eq!(bootstrap::schemas().len(), 40);
 
     // A newer database is refused and left untouched.
     db.query("UPDATE storage_meta:schema SET version = 99")
@@ -209,7 +211,10 @@ async fn ensure_schema_upgrades_a_pre_v2_store_with_existing_atlas_rows() {
 
     // Re-running the upgrade is a no-op that keeps the data usable.
     let again = ensure_schema(&db).await.expect("re-run must stay a no-op");
-    assert_eq!((again.previous, again.version), (2, SCHEMA_VERSION));
+    assert_eq!(
+        (again.previous, again.version),
+        (SCHEMA_VERSION, SCHEMA_VERSION)
+    );
     let mut r = db
         .query("SELECT VALUE article_id FROM atlas_article WHERE title @1@ 'helicopter'")
         .await

@@ -25,7 +25,7 @@ The maps link stable module paths rather than line numbers. Search symbols in th
 
 | Topic | Canonical reference |
 | --- | --- |
-| Local Intel web/API and stack launcher | [Intel web](intel-web.md) |
+| Local six-domain classifier | [Classifier](classifier.md) |
 | Pipeline boundaries and data flow | [Architecture](architecture.md) |
 | Investigation execution and tool decisions | [Harness](investigation-harness.md), [decision gates](jev-decision-gates.md) |
 | Rust style | [argos-rust-style](../../../.opencode/skills/argos-rust-style/SKILL.md), [conventions](conventions.md#rust-style) |
@@ -39,6 +39,7 @@ The maps link stable module paths rather than line numbers. Search symbols in th
 | Task | Canonical procedure |
 | --- | --- |
 | Build and contribute | [Contributor workflow](contributing.md), [code conventions](conventions.md) |
+| Coordinate agents and avoid repeated work | [Efficient agent execution](agent-workflow.md) |
 | Verify TUI behavior | [TUI verification](tui-verification.md) |
 | Plan and track implementation | [Planning format and retention](planning-artifacts.md) |
 | Use OpenCode roles and handoffs | [OpenCode](opencode-v2.md) |

@@ -3,7 +3,9 @@ name: argos-commit
 description: Prepare or create an authorized Argos commit with Conventional Commits, release impact and scoped staging.
 ---
 
-Apply existing commit authorization; this skill grants no push/merge/release permission. Architect proposes only; coordinator commits, editors do not.
+Use the canonical [agent workflow](../../../docs/wiki/code/agent-workflow.md) with the active host's roles and existing authorization. OpenCode-only restrictions apply when that profile is explicitly selected.
+
+Apply existing commit authorization; this skill grants no push/merge/release permission. When an OpenCode role is explicitly selected, preserve its configured commit/edit boundaries and use the assigned committer. Other hosts follow their active role and existing user authorization.
 
 Follow `docs/wiki/code/versioning.md`: inspect status/staged diff, preserve unrelated work, stage exact paths, and review the full staged diff. Use Conventional Commits with appropriate release impact and breaking/migration notes. Never hand-bump versions, invent Release-As or rewrite commits without authorization.
 

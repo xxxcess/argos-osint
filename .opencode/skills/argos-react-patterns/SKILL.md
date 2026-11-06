@@ -3,6 +3,8 @@ name: argos-react-patterns
 description: Implement or refactor compiler-compatible Argos React Native components, hooks, Query state and rendering in apps/web-desktop and packages/{ui,intel,api-client}. Use for component architecture or frontend performance work; excludes Rust and native-only apps.
 ---
 
+Use the canonical [agent workflow](../../../docs/wiki/code/agent-workflow.md) with the active host's roles and existing authorization. OpenCode-only restrictions apply when that profile is explicitly selected.
+
 # Argos React patterns
 
 Use `docs/wiki/code/react-ui.md` for ownership/design, including the Argos look and feel. Component structure may be original inside that theme. Use `docs/wiki/code/intel-web.md` for client contracts. Read installed Next docs via `apps/web-desktop/AGENTS.md` before changing app APIs. Paths are relative to the repository root.

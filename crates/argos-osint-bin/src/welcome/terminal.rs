@@ -34,6 +34,7 @@ pub(super) fn run(
     existing: Option<&str>,
     notice: Option<&str>,
     needs_seed: bool,
+    needs_classifier: bool,
 ) -> anyhow::Result<Option<Selection>> {
     enable_raw_mode()?;
     let _restore = Restore;
@@ -60,7 +61,7 @@ pub(super) fn run(
         if prompts.notice.is_empty() {
             prompts.notice = initial_notice.clone();
         }
-        let selection = configure_seed(&mut prompts, existing, needs_seed)?;
+        let selection = configure_seed(&mut prompts, existing, needs_seed, needs_classifier)?;
         if !prompts.navigation.back_requested {
             return Ok(selection);
         }
@@ -171,6 +172,7 @@ struct Question {
     value: String,
     cursor: usize,
     choices: Vec<(String, String)>,
+    stable_service_keys: bool,
     selected: usize,
     error: String,
     rows: Vec<Rect>,
@@ -188,6 +190,7 @@ impl Question {
                 ("2", "API Server"),
                 ("3", "Web"),
                 ("4", "Seed DB"),
+                ("5", "Train and save classifier"),
             ]
         } else if label.starts_with("Web profile") {
             vec![("dev", "Development"), ("installed", "Built static app")]
@@ -225,6 +228,7 @@ impl Question {
             value: default.into(),
             cursor: default.len(),
             choices,
+            stable_service_keys: label.starts_with("Choose a service"),
             selected,
             error: String::new(),
             rows: Vec::new(),
@@ -249,6 +253,28 @@ impl Question {
 
     fn title(&self) -> &str {
         self.label.split('[').next().unwrap_or(&self.label).trim()
+    }
+
+    fn visible_title(&self, width: usize) -> String {
+        let title = self.title();
+        if title.width() <= width {
+            return title.to_owned();
+        }
+        if width == 0 {
+            return String::new();
+        }
+        let mut shown = String::new();
+        let mut used = 0;
+        for character in title.chars() {
+            let cells = character.width().unwrap_or(0);
+            if used + cells >= width {
+                break;
+            }
+            shown.push(character);
+            used += cells;
+        }
+        shown.push('…');
+        shown
     }
 
     fn draw(&mut self, frame: &mut Frame, history: &[String], notice: &str) {
@@ -322,8 +348,9 @@ impl Question {
             card_width,
             parts[1].height,
         );
+        let title = self.visible_title(usize::from(card.width.saturating_sub(4)));
         frame.render_widget(
-            theme::panel(self.title())
+            theme::panel(&title)
                 .border_style(theme::accent())
                 .title_alignment(ratatui::layout::Alignment::Center),
             card,
@@ -363,7 +390,7 @@ impl Question {
                 Rect::new(inner.x, inner.y + 2, inner.width, 1),
             );
         } else {
-            for (index, (_, name)) in self.choices.iter().enumerate() {
+            for (index, (key, name)) in self.choices.iter().enumerate() {
                 let row = Rect::new(
                     inner.x,
                     inner.y + index as u16 * item_height,
@@ -381,7 +408,11 @@ impl Question {
                     Paragraph::new(format!(
                         "{} {}  {name}",
                         if index == self.selected { "›" } else { " " },
-                        index + 1
+                        if self.stable_service_keys {
+                            key.clone()
+                        } else {
+                            (index + 1).to_string()
+                        }
                     ))
                     .style(style)
                     .centered(),
@@ -478,12 +509,18 @@ impl Question {
                     self.selected = (self.selected + 1) % self.choices.len()
                 }
                 KeyCode::Char(c) if !self.choices.is_empty() => {
-                    if let Some(index) = c
-                        .to_digit(10)
-                        .and_then(|n| n.checked_sub(1))
-                        .filter(|n| (*n as usize) < self.choices.len())
-                    {
-                        self.selected = index as usize;
+                    let index = if self.stable_service_keys {
+                        self.choices
+                            .iter()
+                            .position(|(key, _)| key == &c.to_string())
+                    } else {
+                        c.to_digit(10)
+                            .and_then(|n| n.checked_sub(1))
+                            .map(|n| n as usize)
+                            .filter(|n| *n < self.choices.len())
+                    };
+                    if let Some(index) = index {
+                        self.selected = index;
                     }
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -579,6 +616,48 @@ mod tests {
     }
 
     #[test]
+    fn hidden_seed_does_not_renumber_classifier_service_five() {
+        let valid = |value: &str| matches!(value, "1" | "2" | "3" | "5");
+        let mut question = Question::new("Choose a service", "1", &valid);
+        assert_eq!(
+            question
+                .choices
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1", "2", "3", "5"]
+        );
+        question.event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('4'),
+                KeyModifiers::NONE,
+            )),
+            &valid,
+        );
+        assert_eq!(question.raw_value(), "1");
+        question.event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('5'),
+                KeyModifiers::NONE,
+            )),
+            &valid,
+        );
+        assert_eq!(question.raw_value(), "5");
+        assert_eq!(
+            question.event(
+                Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE
+                )),
+                &valid
+            ),
+            Some(Some("5".into()))
+        );
+        let dataset = Question::new("Classifier CSV path", "auto", &|_| true);
+        assert!(!dataset.stable_service_keys);
+    }
+
+    #[test]
     fn venture_back_retains_values_and_revalidates_changed_branches() {
         let mut navigation = Navigation::default();
         navigation.remember(0, "Service", "web");
@@ -659,6 +738,24 @@ mod tests {
                     (|v: &str| matches!(v, "1" | "2" | "3" | "4")) as fn(&str) -> bool,
                 ),
                 (
+                    "service-setup",
+                    "Choose a service",
+                    "5",
+                    (|v: &str| matches!(v, "4" | "5")) as fn(&str) -> bool,
+                ),
+                (
+                    "dataset",
+                    "Classifier CSV path (auto for configured/default)",
+                    "/data/article training.csv",
+                    (|v: &str| super::super::dataset_path(v).is_some()) as fn(&str) -> bool,
+                ),
+                (
+                    "actor-dataset",
+                    "Actor CSV path (auto for configured/default)",
+                    "/data/actor seed.csv",
+                    (|v: &str| super::super::dataset_path(v).is_some()) as fn(&str) -> bool,
+                ),
+                (
                     "terminal",
                     "Terminal display",
                     "logs",
@@ -702,6 +799,26 @@ mod tests {
                 terminal
                     .draw(|frame| question.draw(frame, &history, ""))
                     .unwrap();
+                if width >= 40 && matches!(name, "dataset" | "actor-dataset") {
+                    let buffer = terminal.backend().buffer();
+                    let text = (0..height)
+                        .map(|y| {
+                            (0..width)
+                                .map(|x| buffer[(x, y)].symbol())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let label = if name == "dataset" {
+                        "Classifier CSV path"
+                    } else {
+                        "Actor CSV path"
+                    };
+                    assert!(
+                        text.contains(label),
+                        "CSV purpose must remain visible: {text}"
+                    );
+                }
                 for row in &question.rows {
                     assert!(row.right() <= width && row.bottom() <= height);
                     assert!(

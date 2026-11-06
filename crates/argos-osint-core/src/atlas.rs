@@ -25,9 +25,11 @@ use url::Url;
 use crate::atlas_insights::{self, InsightStats};
 use crate::atlas_memory;
 use crate::atlas_store::AtlasStore;
+use crate::classifier::readiness::{
+    self, ClassifierHome, CyclePermit, CyclePreflightError, CycleRequirement,
+};
 use crate::osint::atlas_news::{self, Hit};
 use crate::osint::ProviderKeys;
-use crate::provider::DecisionsResponse;
 use crate::secrets::ProviderSecret;
 use crate::store::{AtlasArticleRow, AtlasRunRow};
 use crate::telemetry::{self, EventKind, TelemetryEvent, Trigger};
@@ -37,362 +39,24 @@ const PHASE1_TARGET: u32 = 50;
 /// Pages per source. Ten articles a page, so five pages cover the target.
 const PHASE1_MAX_PAGES: usize = 5;
 
-const CLUSTERS: &[(&str, &[&str])] = &[
-    (
-        "geopolitical",
-        &[
-            "joint statement",
-            "strategic partnership",
-            "memorandum of understanding",
-            "bilateral agreement",
-            "multilateral pact",
-            "diplomatic alignment",
-            "voting bloc",
-            "treaty ratification",
-            "security guarantee",
-            "envoy recalled",
-            "diplomat expelled",
-            "consulate closed",
-            "sanctions package",
-            "diplomatic retaliation",
-            "sovereignty dispute",
-            "demarche",
-            "official protest",
-            "border dispute",
-        ],
-    ),
-    (
-        "economic",
-        &[
-            "critical minerals",
-            "semiconductor supply",
-            "rare earth elements",
-            "lithium production",
-            "cobalt sourcing",
-            "export restriction",
-            "export embargo",
-            "export quota",
-            "chokepoint vulnerability",
-            "de-dollarization",
-            "local currency settlement",
-            "bilateral swap line",
-            "currency decoupling",
-            "financial sanctions",
-            "SWIFT alternative",
-            "asset freeze",
-            "central bank reserves",
-            "energy security",
-            "LNG terminal",
-            "pipeline disruption",
-            "trade asymmetry",
-            "strategic tariff",
-            "protectionism",
-            "maritime chokepoint",
-            "freight route disruption",
-        ],
-    ),
-    (
-        "military",
-        &[
-            "joint military exercise",
-            "live-fire drill",
-            "troop deployment",
-            "combat readiness",
-            "troop mobilization",
-            "border buildup",
-            "naval transit",
-            "airspace intrusion",
-            "freedom of navigation",
-            "defense budget",
-            "arms sale",
-            "military procurement",
-            "hypersonic missile",
-            "deep-water port",
-            "naval base expansion",
-            "air defense system",
-            "dual-use infrastructure",
-            "satellite reconnaissance",
-        ],
-    ),
-    (
-        "science",
-        &[
-            "scientific breakthrough",
-            "research breakthrough",
-            "space exploration",
-            "space mission",
-            "satellite launch",
-            "academic research",
-            "university study",
-            "research paper",
-            "climate change",
-            "global warming",
-            "extreme weather study",
-            "conservation effort",
-            "endangered species",
-            "wildlife protection",
-            "environmental policy",
-            "emissions regulation",
-            "pollution control",
-        ],
-    ),
-    (
-        "health",
-        &[
-            "public health",
-            "disease outbreak",
-            "epidemiological update",
-            "medical discovery",
-            "clinical trial",
-            "drug approval",
-            "pharmaceutical regulation",
-            "drug pricing",
-            "mental health research",
-            "psychiatric care study",
-            "wellness guide",
-            "preventive care guidance",
-        ],
-    ),
-    (
-        "stability",
-        &[
-            "civil unrest",
-            "mass protest",
-            "general strike",
-            "curfew declared",
-            "anti-government demonstration",
-            "food rationing",
-            "hyperinflation",
-            "energy blackouts",
-            "labor shortage",
-            "succession plan",
-            "political factionalism",
-            "cabinet reshuffle",
-            "anti-corruption purge",
-            "regime fragility",
-            "martial law",
-            "snap election",
-            "constitutional amendment",
-        ],
-    ),
-    (
-        "technology",
-        &[
-            "6G standards",
-            "AI governance",
-            "biotech protocol",
-            "quantum computing regulation",
-            "technology decoupling",
-            "intellectual property theft",
-            "tech controls",
-            "cyber reconnaissance",
-            "industrial control system",
-            "power grid vulnerability",
-            "undersea cable",
-            "ransomware attack",
-            "critical infrastructure breach",
-            "firmware exploit",
-        ],
-    ),
-];
-
-pub const CATEGORY_IDS: &[&str] = &[
-    "geopolitical",
-    "economic",
-    "military",
-    "science",
-    "health",
-    "stability",
-    "technology",
-    "unk",
-];
-
-/// Version of the admission taxonomy. A rejection receipt is reconsidered
-/// when the input hash or this version changes.
-pub const TAXONOMY_VERSION: &str = "atlas-taxonomy-v2";
-/// Admitted articles carry at least this many distinct categories, ranked
-/// most likely first.
+/// Current classifier facets. Historical labels never establish membership.
+pub const CATEGORY_IDS: &[&str] = &crate::atlas_taxonomy::DOMAIN_IDS;
+pub use crate::atlas_taxonomy::TAXONOMY_VERSION;
 pub const MIN_ADMISSION_TAGS: usize = 2;
-/// Hard ceiling on stored categories; never padded with weak tags.
-pub const MAX_ADMISSION_TAGS: usize = 7;
-/// Ranked category picks requested per article — one question per rank, so
-/// the evaluator can justify up to [`MAX_ADMISSION_TAGS`] tags. Ranks beyond
-/// the first are answered `done` when no further category fits, so tags are
-/// never padded.
-pub const RANKED_PICKS: usize = MAX_ADMISSION_TAGS;
-
-/// Short tag stored on the article and shown in the news list. Retired
-/// labels (for example the former `information`) read as `unk` until the
-/// resumable migration reclassifies the row by subject.
+pub const MAX_ADMISSION_TAGS: usize = 2;
 pub fn category_tag(id: &str) -> &'static str {
-    match id {
-        "geopolitical" => "geopolitical",
-        "economic" => "economic",
-        "military" => "military",
-        "science" => "science",
-        "health" => "health",
-        "stability" => "stability",
-        "technology" => "technology",
-        "ambiguous" => "ambiguous",
-        "out_of_scope" => "out_of_scope",
-        "failed" => "failed",
-        _ => "unk",
-    }
+    crate::atlas_taxonomy::DomainId::parse(id)
+        .map(crate::atlas_taxonomy::DomainId::as_str)
+        .unwrap_or("unk")
 }
-
-/// Full OSINT category name for the article card.
 pub fn category_name(id: &str) -> &'static str {
-    match id {
-        "geopolitical" => "Geopolitical & Diplomatic",
-        "economic" => "Economic & Resource",
-        "military" => "Military Posture",
-        "science" => "Science & Environment",
-        "health" => "Health & Medicine",
-        "stability" => "Domestic Stability",
-        "technology" => "Technological Vectors",
-        _ => "unk",
-    }
+    crate::atlas_taxonomy::DomainId::parse(id)
+        .map(crate::atlas_taxonomy::DomainId::display_name)
+        .unwrap_or("unk")
 }
-
-/// Compact per-category glosses for the second and later ranked picks; the
-/// model has the article in state and the rank-1 criteria carry the full
-/// signal lists.
-fn additional_criteria() -> serde_json::Value {
-    let mut criteria = serde_json::Map::new();
-    for id in CATEGORY_IDS {
-        if *id == "unk" {
-            continue;
-        }
-        criteria.insert(
-            (*id).to_string(),
-            serde_json::json!(format!("{} also fits this article.", category_name(id))),
-        );
-    }
-    criteria.insert(
-        "done".into(),
-        serde_json::json!("No further category fits this article."),
-    );
-    serde_json::Value::Object(criteria)
-}
-
-/// One ranked Decisions choice set. Rank 1 carries the category criteria and
-/// `unk` as the miss; ranks 2..=[`RANKED_PICKS`] ask for the next fitting
-/// category and stop with `done`, so tags are never padded.
-pub fn classification_request(article: &FeedArticle) -> (serde_json::Value, serde_json::Value) {
-    let mut primary = serde_json::Map::new();
-    for (id, phrases) in CLUSTERS {
-        primary.insert(
-            (*id).to_string(),
-            serde_json::json!(format!(
-                "{} Signals include: {}.",
-                category_name(id),
-                phrases.join(", ")
-            )),
-        );
-    }
-    primary.insert(
-        "unk".into(),
-        serde_json::json!("The article does not fit any of the other categories."),
-    );
-    let rank1 = serde_json::json!({
-        "type": "choice",
-        "instructions": "Choose the single OSINT category this article fits best from its title and description. Choose unk when no category fits.",
-        "criteria": primary,
-    });
-    let mut questions = serde_json::Map::new();
-    questions.insert("category".into(), rank1);
-    let additional = serde_json::json!({
-        "type": "choice",
-        "instructions": "Choose the category that fits this article next best, different from the categories already chosen. Choose done when no further category fits.",
-        "criteria": additional_criteria(),
-    });
-    for rank in 2..=RANKED_PICKS {
-        questions.insert(format!("category_{rank}"), additional.clone());
-    }
-    let questions = serde_json::Value::Object(questions);
-    let state = serde_json::json!({
-        "title": article.title,
-        "description": article.description,
-        "source": article.source_name,
-        "country": article.country,
-    });
-    (state, questions)
-}
-
-/// Question id of one ranked pick for an article in a batch.
-pub fn rank_question_id(article_id: &str, rank: usize) -> String {
-    format!("{article_id}#category_{rank}")
-}
-
-/// The categories a ranked response admits, or `None` when the evaluator
-/// reported fewer than [`MIN_ADMISSION_TAGS`] fitting categories.
-pub fn categories_from_decisions(
-    response: &DecisionsResponse,
-    article_id: &str,
-) -> Result<Option<Vec<String>>, String> {
-    let rank = |n: usize| -> Result<String, String> {
-        response
-            .answers
-            .get(&rank_question_id(article_id, n))
-            .and_then(|answer| answer.choice.clone())
-            .ok_or_else(|| format!("missing ranked choice for `{article_id}` rank {n}"))
-    };
-    let first = rank(1)?;
-    if first == "unk" {
-        // Mixed tags plus unk is a retryable validation error, not unknown.
-        for n in 2..=RANKED_PICKS {
-            let label = rank(n)?;
-            if label != "done" {
-                return Err(format!("`{article_id}` mixes unk with category `{label}`"));
-            }
-        }
-        return Ok(None);
-    }
-    let mut tags = vec![normalize_category(&first)];
-    if tags[0] == "unk" {
-        return Err(format!("`{article_id}` picked invalid category `{first}`"));
-    }
-    let mut done = false;
-    for n in 2..=RANKED_PICKS {
-        let raw = rank(n)?;
-        if raw == "done" {
-            done = true;
-            continue;
-        }
-        if done {
-            return Err(format!(
-                "`{article_id}` picked `{raw}` after done at rank {n}"
-            ));
-        }
-        let category = normalize_category(&raw);
-        if category == "unk" {
-            return Err(format!("`{article_id}` picked invalid category `{raw}`"));
-        }
-        if tags.contains(&category) {
-            return Err(format!("`{article_id}` picked duplicate category `{raw}`"));
-        }
-        tags.push(category);
-    }
-    if tags.len() > MAX_ADMISSION_TAGS {
-        return Err(format!(
-            "`{article_id}` picked {} categories, over the {MAX_ADMISSION_TAGS} cap",
-            tags.len()
-        ));
-    }
-    if tags.len() < MIN_ADMISSION_TAGS {
-        return Ok(None);
-    }
-    Ok(Some(tags))
-}
-
 pub fn normalize_category(raw: &str) -> String {
-    let id = raw.trim().to_ascii_lowercase();
-    let id = id.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
-    if CATEGORY_IDS.contains(&id) {
-        id.to_string()
-    } else {
-        "unk".into()
-    }
+    let value = raw.trim().to_ascii_lowercase();
+    category_tag(&value).into()
 }
 
 const DOMAIN_RANK: &[(&str, i32)] = &[
@@ -603,6 +267,14 @@ struct CycleTelemetry {
     /// [`CycleTelemetry::open`] and advanced locally (records are written
     /// asynchronously, so re-counting per stage would race them).
     stage_seqs: Option<std::collections::HashMap<String, i64>>,
+    provider_counts: ProviderCallCounts,
+    classifier_metrics: serde_json::Value,
+    classifier_queue_micros: Option<u64>,
+    repo: Option<crate::storage::repo::Repository>,
+    classifier_db_start: Option<ClassifierDbSample>,
+    classifier_read: u64,
+    classifier_claimed: u64,
+    classifier_dispositions: std::collections::BTreeMap<String, u64>,
 }
 
 impl CycleTelemetry {
@@ -621,18 +293,33 @@ impl CycleTelemetry {
             candidates,
             stage: None,
             stage_seqs: None,
+            provider_counts: ProviderCallCounts::default(),
+            classifier_metrics: serde_json::Value::Null,
+            classifier_queue_micros: Some(0),
+            repo: None,
+            classifier_db_start: None,
+            classifier_read: 0,
+            classifier_claimed: 0,
+            classifier_dispositions: std::collections::BTreeMap::new(),
         }
     }
 
     /// [`CycleTelemetry::new`] on the selected store: under SurrealDB the
     /// candidate and stage numbering continue from the repository, so a
     /// resumed cycle appends instead of overwriting earlier ids.
-    async fn open(db: &Path, run_id: &str, mode: &str, started_at: String) -> Self {
+    async fn open(
+        store: &AtlasStore,
+        db: &Path,
+        run_id: &str,
+        mode: &str,
+        started_at: String,
+    ) -> Self {
         let mut tel = Self::new(db, run_id, mode, started_at);
+        tel.repo = store.repository().cloned();
         #[cfg(feature = "surreal")]
         if crate::recon::backend::legacy_side_store_path(db).is_none() && !run_id.is_empty() {
             let mut seqs = std::collections::HashMap::new();
-            if let Ok(repo) = crate::storage::runtime::repository().await {
+            if let Some(repo) = tel.repo.as_ref() {
                 tel.candidates = crate::storage::telemetry::count_ids_with_prefix(
                     repo.db(),
                     &format!("atlas-cand-{run_id}-"),
@@ -655,6 +342,18 @@ impl CycleTelemetry {
             tel.stage_seqs = Some(seqs);
         }
         tel
+    }
+
+    fn record_event(&self, event: &TelemetryEvent) {
+        if let Some(repo) = &self.repo {
+            let repo = repo.clone();
+            let event = event.clone();
+            crate::storage::runtime::spawn(async move {
+                let _ = crate::storage::telemetry::record(repo.db(), &event).await;
+            });
+        } else {
+            let _ = telemetry::record(&self.db, event);
+        }
     }
 
     /// Opens a stage, closing the previous interval with the counts known now.
@@ -710,12 +409,14 @@ impl CycleTelemetry {
                 "ended_at": ended_at,
                 "error_category": if state == "interrupted" { "interrupted" } else { "none" },
                 "counts": stage_counts(stats),
+                "metrics":self.classifier_metrics,
+                "provider_counts":self.provider_counts,
             }));
         let event = event.with_id(format!(
             "atlas-stage-{}-{}-{}",
             self.run_id, open.name, open.seq
         ));
-        let _ = telemetry::record(&self.db, &event);
+        self.record_event(&event);
     }
 
     /// One candidate article occurrence, with exactly one mutually exclusive
@@ -757,7 +458,7 @@ impl CycleTelemetry {
             "atlas-cand-{}-{}-{}",
             self.run_id, article.id, self.candidates
         ));
-        let _ = telemetry::record(&self.db, &event);
+        self.record_event(&event);
     }
 
     /// One origin observation in the cycle snapshot, never one per repaint.
@@ -784,7 +485,7 @@ impl CycleTelemetry {
                     "snapshot_at": snapshot_at,
                 }));
             let event = event.with_id(format!("atlas-origin-{}-{}", self.run_id, row.country));
-            let _ = telemetry::record(&self.db, &event);
+            self.record_event(&event);
         }
     }
 
@@ -835,9 +536,12 @@ impl CycleTelemetry {
                 "scoring_version": ORIGIN_SCORING_VERSION,
                 "contract_version": stats.contract_version,
                 "coverage": stats.coverage,
+                "classifier_snapshot":stats.classifier_snapshot,
+                "metrics":self.classifier_metrics,
+                "provider_counts":self.provider_counts,
             }));
         let event = event.with_id(format!("atlas-cycle-{}", self.run_id));
-        let _ = telemetry::record(&self.db, &event);
+        self.record_event(&event);
     }
 }
 
@@ -849,6 +553,7 @@ fn stage_counts(stats: &RunStats) -> serde_json::Value {
         "articles": stats.article_total(),
         "origins": stats.origins.len(),
         "classified": stats.coverage.classified,
+        "oversized_inputs": stats.coverage.oversized_inputs,
         "entities_available": stats.coverage.entities_available,
         "publishers_available": stats.coverage.publishers_available,
         "related_pairs": stats.coverage.related_pairs,
@@ -953,6 +658,9 @@ pub struct CoverageStats {
     /// evaluation this run (the fetched-and-deduplicated set).
     #[serde(default)]
     pub staged: u32,
+    /// Provider items excluded before staging because metadata exceeds bounds.
+    #[serde(default)]
+    pub oversized_inputs: u32,
     /// Admitted articles (canonical, ordered categories, indexed denominator).
     #[serde(default)]
     pub admitted: u32,
@@ -976,6 +684,9 @@ pub struct RunStats {
     pub coverage: CoverageStats,
     #[serde(default)]
     pub acquisition_retry: Option<Cursor>,
+    /// Immutable local model selected before this run may acquire or admit articles.
+    #[serde(default)]
+    pub classifier_snapshot: Option<crate::classifier::ModelSnapshot>,
     /// One line per acquisition failure (provider and cause), capped, so the
     /// status text can name what failed.
     #[serde(default)]
@@ -1075,7 +786,8 @@ pub struct HttpReply {
     pub location: Option<String>,
 }
 
-/// A provider rejection. `summary` is the log line. `body` is the full response.
+/// A provider rejection. Both fields contain bounded code/status diagnostics;
+/// untrusted response text and credential-bearing URLs are never reflected.
 #[derive(Clone, Debug)]
 pub struct ProviderFault {
     pub summary: String,
@@ -1090,7 +802,7 @@ pub enum AtlasEvent {
         done: u32,
         total: u32,
     },
-    Stats(RunStats),
+    Stats(Box<RunStats>),
     Article(FeedArticle),
     Replaced {
         id: String,
@@ -1572,6 +1284,7 @@ struct SpareFetch {
     body: Option<serde_json::Value>,
     fault: Option<ProviderFault>,
     bucket: String,
+    metrics: ProviderCallCounts,
 }
 
 /// One provider call. A rate or quota fault retries once with `spare` when it differs.
@@ -1589,26 +1302,29 @@ where
 {
     let mut active = key.to_string();
     let mut tried_spare = false;
+    let mut metrics = ProviderCallCounts::default();
     loop {
         let spec = match spec_for(&active) {
             Ok(spec) => spec,
-            Err(err) => {
+            Err(_) => {
                 return SpareFetch {
                     body: None,
                     fault: Some(ProviderFault {
-                        summary: one_line(&err.to_string()),
+                        summary: format!("{provider} request configuration invalid"),
                         body: String::new(),
                     }),
                     bucket: quota_bucket(provider, &active, primary),
+                    metrics,
                 };
             }
         };
-        match dispatch(fetch, spec, user_agent).await {
+        match dispatch_counted(fetch, spec, user_agent, &mut metrics).await {
             Ok(body) => {
                 return SpareFetch {
                     body: Some(body),
                     fault: None,
                     bucket: quota_bucket(provider, &active, primary),
+                    metrics,
                 };
             }
             Err(fault)
@@ -1617,6 +1333,7 @@ where
                 crate::osint::note_key_exhausted(&active);
                 active = spare.to_string();
                 tried_spare = true;
+                metrics.fallbacks += 1;
                 continue;
             }
             Err(fault) => {
@@ -1624,14 +1341,135 @@ where
                     body: None,
                     fault: Some(fault),
                     bucket: quota_bucket(provider, &active, primary),
+                    metrics,
                 };
             }
         }
     }
 }
 
+/// Capture provider labels before country/window/admission filtering. Storage
+/// failures are diagnostic: calibration cannot change the collection outcome.
+async fn capture_provider_observations(
+    store: &AtlasStore,
+    run_id: &str,
+    provider: &str,
+    fetch_key: &str,
+    body: &serde_json::Value,
+    emit: &mut impl FnMut(AtlasEvent),
+) -> HashMap<String, Vec<String>> {
+    use crate::classifier::provider_labels::ProviderFormat;
+    let (format, endpoint, array) = match provider {
+        "newsdata" => (
+            ProviderFormat::NewsDataV1,
+            "https://newsdata.io/api/1/latest",
+            "results",
+        ),
+        "currents" => (
+            ProviderFormat::CurrentsV1,
+            "https://api.currentsapi.services/v1/latest-news",
+            "news",
+        ),
+        _ => return HashMap::new(),
+    };
+    let Some(owner) = store.admission_owner() else {
+        return HashMap::new();
+    };
+    let context = crate::classifier::provider_capture::CaptureContext {
+        cycle_id: run_id.into(),
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+        fetch_receipt_key: fetch_key.into(),
+        request_input_hash: crate::classifier::artifact::sha256_hex(fetch_key.as_bytes()),
+    };
+    let count = body
+        .get(array)
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let mut references: HashMap<String, Vec<String>> = HashMap::new();
+    for offset in (0..count.max(1)).step_by(crate::classifier::INFERENCE_BATCH_SIZE) {
+        let page = crate::classifier::provider_capture::capture_categories_page(
+            format.clone(),
+            endpoint,
+            body,
+            &context,
+            offset,
+        );
+        let rejected = page.rejections.len();
+        if crate::storage::classifier_calibration::capture_owned(
+            owner,
+            &context,
+            &page.observations,
+        )
+        .await
+        .is_err()
+        {
+            emit(AtlasEvent::Note(
+                "Provider calibration capture unavailable; collection continues".into(),
+            ));
+            continue;
+        }
+        for observation in page.observations {
+            references
+                .entry(observation.url)
+                .or_default()
+                .push(observation.observation_id);
+        }
+        if rejected > 0 {
+            emit(AtlasEvent::Note(format!(
+                "Provider calibration capture: {rejected} metadata exclusions"
+            )));
+        }
+    }
+    for ids in references.values_mut() {
+        ids.sort();
+        ids.dedup();
+    }
+    references
+}
+
+fn oversized_hit(hit: &Hit) -> bool {
+    hit.title
+        .len()
+        .checked_add(hit.description.len())
+        .is_none_or(|bytes| bytes > crate::classifier::MAX_INPUT_TEXT_BYTES)
+        || hit.url.len() > 4096
+        || hit.image_url.len() > 4096
+        || hit.published_at.len() > 256
+        || hit.language.as_ref().is_some_and(|language| {
+            language.is_empty() || language.len() > 128 || language.chars().any(char::is_control)
+        })
+}
+
+async fn stage_hit(
+    store: &AtlasStore,
+    row: &AtlasArticleRow,
+    revision: &str,
+    hit: &Hit,
+    observations: &HashMap<String, Vec<String>>,
+) -> Result<bool> {
+    use crate::storage::classifier_admission;
+    let provenance = classifier_admission::StageProvenance::new(
+        hit.language.clone(),
+        observations.get(&hit.url).cloned().unwrap_or_default(),
+    )?;
+    Ok(classifier_admission::stage_article_with_provenance(
+        store
+            .admission_owner()
+            .ok_or_else(|| anyhow!("Atlas run owner is missing"))?,
+        store
+            .run_claim()
+            .ok_or_else(|| anyhow!("Atlas run claim is missing"))?,
+        row,
+        revision,
+        &provenance,
+        chrono::Utc::now(),
+    )
+    .await?)
+}
+
 async fn apply_hits(
     hits: &[Hit],
+    observations: &HashMap<String, Vec<String>>,
     provider: &str,
     stats: &mut RunStats,
     seen: &mut Vec<Seen>,
@@ -1659,22 +1497,17 @@ async fn apply_hits(
         }
         return Ok(());
     }
-    // Already-staged and already-admitted rows for this run, with the
-    // ingestion time first seen, so a repeated headline is reported as
-    // retained-existing instead of new volume.
-    let mut retained: HashMap<String, String> = store
-        .list_articles(run_id)
-        .await?
-        .into_iter()
-        .map(|row| (row.id, row.seen_at))
-        .collect();
-    for staged in admission_rows_of(store, run_id).await? {
-        let seen_at = staged.article().ok().map(|a| a.seen_at).unwrap_or_default();
-        retained.entry(staged.article_id).or_insert(seen_at);
-    }
     let repo = store
         .repository()
         .ok_or_else(|| anyhow!("SurrealDB storage is not configured"))?;
+    let mut retained = HashMap::new();
+    let ids: Vec<_> = hits
+        .iter()
+        .map(|hit| format!("art-{}", url_hash(&hit.url)))
+        .collect();
+    for ids in ids.chunks(64) {
+        retained.extend(crate::storage::atlas::retained_identities(repo.db(), run_id, ids).await?);
+    }
     for hit in hits {
         let temperature = stats
             .origins
@@ -1683,6 +1516,15 @@ async fn apply_hits(
             .map(|row| row.temperature)
             .unwrap_or(0.0);
         let article = article_from(hit, provider, temperature);
+        if oversized_hit(hit) {
+            stats.coverage.oversized_inputs = stats.coverage.oversized_inputs.saturating_add(1);
+            tel.candidate(&article, provider, "metadata_too_large", None, None);
+            emit(AtlasEvent::Note(
+                "Provider item excluded: metadata exceeds the local input bound".into(),
+            ));
+            continue;
+        }
+
         match judge(&article, seen) {
             Verdict::Drop => {
                 // A headline with no usable title or URL is a rejected candidate;
@@ -1714,14 +1556,7 @@ async fn apply_hits(
                 // Fetch/dedup ends in bounded private staging; the canonical
                 // row is written at admission with its evaluated categories.
                 let revision = crate::atlas_metadata::input_hash(&row);
-                if crate::storage::atlas::stage_article(
-                    repo.db(),
-                    &row,
-                    &revision,
-                    crate::atlas::TAXONOMY_VERSION,
-                )
-                .await?
-                {
+                if stage_hit(store, &row, &revision, hit, observations).await? {
                     stats.coverage.staged += 1;
                 }
                 retained.insert(article.id.clone(), article.seen_at.clone());
@@ -1760,14 +1595,7 @@ async fn apply_hits(
                 remember(seen, &article, Some(&id));
                 let row = article_row(run_id, &article);
                 let revision = crate::atlas_metadata::input_hash(&row);
-                if crate::storage::atlas::stage_article(
-                    repo.db(),
-                    &row,
-                    &revision,
-                    crate::atlas::TAXONOMY_VERSION,
-                )
-                .await?
-                {
+                if stage_hit(store, &row, &revision, hit, observations).await? {
                     stats.coverage.staged += 1;
                 }
                 retained.remove(&id);
@@ -1862,7 +1690,7 @@ pub struct RunInput<'a> {
     pub resume: bool,
     pub feed: &'a [FeedArticle],
     /// Classifier account. Empty means every saved article stays `unk`.
-    /// A Jev decisions model tags categories through the decisions endpoint.
+    /// Legacy host configuration field. Local admission uses the pinned classifier.
     pub classifier: Option<ProviderSecret>,
     /// Synthesis account. Extracts claims. A decisions model is not used here.
     pub synthesizer: Option<ProviderSecret>,
@@ -2217,17 +2045,6 @@ where
         .ok()
         .map(|job| job.run_id.clone())
         .filter(|id| !id.is_empty());
-    if let (Err(error), Some(run_id)) = (&result, tracked_run.as_deref()) {
-        if let Ok(store) = AtlasStore::open(&db_path).await {
-            let message = error.to_string();
-            let state = if message.starts_with("Enter the ") {
-                "blocked"
-            } else {
-                "failed"
-            };
-            let _ = store.set_state(run_id, state, &message, true).await;
-        }
-    }
     let state_now = match tracked_run.as_deref() {
         Some(run_id) => match AtlasStore::open(&db_path).await {
             Ok(store) => store
@@ -2265,7 +2082,9 @@ where
             None => Finish::completed(),
         },
         Err(err) => {
-            if run_state().is_some_and(|(state, _)| state == "blocked") {
+            if err.downcast_ref::<CyclePreflightError>().is_some()
+                || run_state().is_some_and(|(state, _)| state == "blocked")
+            {
                 Finish::Blocked {
                     summary: format!("{err:#}"),
                 }
@@ -2313,90 +2132,143 @@ fn cycle_state(coverage: &CoverageStats, actor_index_incomplete: bool) -> &'stat
     }
 }
 
-/// One migration outcome for a canonical row without v2 categories.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MigrationStep {
-    /// The row already carries the ordered tags.
-    SkipMigrated,
-    /// A rejection receipt covers this input at the current taxonomy: the
-    /// occurrence is confirmed-unknown and loses its canonical row.
-    DiscardConfirmedUnknown,
-    /// Published evidence keeps its historical scalar identity.
-    SkipPublished,
-    /// Stage the row for reclassification (resumable while unpublished).
-    Reclassify,
-}
-
-/// The pure decision behind [`migrate_legacy_categories`].
-fn migration_step(row: &AtlasArticleRow, rejected: bool, published: bool) -> MigrationStep {
-    if !row.categories.is_empty() || !row.admitted_at.is_empty() {
-        MigrationStep::SkipMigrated
-    } else if rejected {
-        MigrationStep::DiscardConfirmedUnknown
-    } else if published {
-        MigrationStep::SkipPublished
-    } else {
-        MigrationStep::Reclassify
+pub(crate) fn validate_resume_state(
+    cursor: &Cursor,
+    stats: &RunStats,
+) -> std::result::Result<(), CyclePreflightError> {
+    let invalid = |code: &str| CyclePreflightError::InvalidRunState { code: code.into() };
+    if !(1..=6).contains(&cursor.phase)
+        || cursor.leg.len() > 128
+        || cursor.leg.chars().any(char::is_control)
+        || (!stats.contract_version.is_empty()
+            && !crate::atlas_work::is_collection_contract(&stats.contract_version))
+    {
+        return Err(invalid("unsupported_cursor_or_collection_contract"));
     }
-}
-
-/// Resumable legacy migration, driven by admission state (spec §3): every
-/// retained canonical row without v2 categories is reclassified by subject
-/// while it is unpublished. Published rows keep their historical scalar
-/// identity; a confirmed-unknown input (a rejection receipt at the current
-/// hash and taxonomy) loses its occurrence through lifecycle cleanup, and a
-/// reclassification failure stays privately staged for retry. Idempotent:
-/// migrated rows carry categories and are skipped.
-async fn migrate_legacy_categories(
-    store: &AtlasStore,
-    stats: &mut RunStats,
-    emit: &mut impl FnMut(AtlasEvent),
-) -> Result<()> {
-    let Some(repo) = store.repository() else {
-        anyhow::bail!("SurrealDB storage is not configured");
-    };
-    for row in store.recent_articles().await? {
-        let hash = crate::atlas_metadata::input_hash(&row);
-        let rejected = crate::storage::atlas::rejection_exists(
-            repo.db(),
-            &row.id,
-            &hash,
-            crate::atlas::TAXONOMY_VERSION,
-        )
-        .await?;
-        let published = crate::storage::brief::published_brief(repo, &row.id)
-            .await?
-            .is_some();
-        match migration_step(&row, rejected, published) {
-            MigrationStep::SkipMigrated => continue,
-            MigrationStep::SkipPublished => continue,
-            MigrationStep::DiscardConfirmedUnknown => {
-                store.delete_article(&row.run_id, &row.id).await?;
-                stats.coverage.discarded += 1;
-            }
-            MigrationStep::Reclassify => {
-                crate::storage::atlas::stage_article(
-                    repo.db(),
-                    &row,
-                    &hash,
-                    crate::atlas::TAXONOMY_VERSION,
-                )
-                .await?;
-                emit(AtlasEvent::Note(format!(
-                    "Reclassifying retained article {} under the current taxonomy",
-                    row.id
-                )));
+    for position in std::iter::once(cursor).chain(stats.acquisition_retry.iter()) {
+        if position.phase <= 2 {
+            let valid = match position.phase {
+                1 => {
+                    matches!(position.leg.as_str(), "gnews" | "newsdata")
+                        && position.chunk <= PHASE1_MAX_PAGES
+                        && position.kept <= PHASE1_TARGET
+                        && position.country == 0
+                        && position.page_token.len() <= 64 * 1024
+                }
+                2 => {
+                    matches!(position.leg.as_str(), "newsapi" | "currents")
+                        && position.country <= stats.origins.len()
+                        && position.chunk == 0
+                        && position.page_token.is_empty()
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(invalid("invalid_acquisition_cursor"));
             }
         }
+    }
+    if stats
+        .acquisition_retry
+        .as_ref()
+        .is_some_and(|retry| !(1..=2).contains(&retry.phase))
+    {
+        return Err(invalid("invalid_acquisition_retry_phase"));
     }
     Ok(())
 }
 
+fn decode_resume_state(
+    run: &AtlasRunRow,
+) -> std::result::Result<(Cursor, RunStats), CyclePreflightError> {
+    let cursor = serde_json::from_str(&run.cursor_json).map_err(|_| {
+        CyclePreflightError::InvalidRunState {
+            code: "invalid_cursor_json".into(),
+        }
+    })?;
+    let stats = serde_json::from_str(&run.stats_json).map_err(|_| {
+        CyclePreflightError::InvalidRunState {
+            code: "invalid_stats_json".into(),
+        }
+    })?;
+    validate_resume_state(&cursor, &stats)?;
+    Ok((cursor, stats))
+}
+
+fn cycle_requirement(
+    run_id: Option<&str>,
+    cursor: &Cursor,
+    stats: &RunStats,
+    live_staging: bool,
+) -> CycleRequirement {
+    if run_id.is_none() {
+        CycleRequirement::FreshAcquisition
+    } else if cursor.phase <= 2 || stats.acquisition_retry.is_some() {
+        CycleRequirement::AcquisitionAndAdmission
+    } else if cursor.phase == 3 || live_staging {
+        CycleRequirement::AdmissionOnly
+    } else {
+        CycleRequirement::PostAdmissionOnly
+    }
+}
+
+/// @tag:classifier @tag:atlas-collection
+/// Before-transition preflight: U6 must preserve this boundary and consume its
+/// returned pin rather than resolving active models independently per batch.
+async fn classifier_cycle_preflight(
+    store: &AtlasStore,
+    home: &ClassifierHome,
+    run_id: Option<&str>,
+    cursor: &Cursor,
+    stats: &RunStats,
+) -> std::result::Result<CyclePermit, CyclePreflightError> {
+    let live_staging = if let Some(run_id) = run_id {
+        let repo = store
+            .repository()
+            .ok_or_else(|| CyclePreflightError::Classifier {
+                status: crate::classifier::ClassifierStatus::Unavailable,
+                code: "storage_unavailable".into(),
+                source: crate::classifier::ClassifierError::Storage(
+                    "Atlas repository unavailable".into(),
+                ),
+            })?;
+        crate::storage::atlas::admission_pending_exists(repo.db(), run_id)
+            .await
+            .map_err(|error| CyclePreflightError::Classifier {
+                status: crate::classifier::ClassifierStatus::Unavailable,
+                code: "admission_probe_failed".into(),
+                source: crate::classifier::ClassifierError::Storage(error.to_string()),
+            })?
+    } else {
+        false
+    };
+    readiness::preflight_cycle(
+        home,
+        cycle_requirement(run_id, cursor, stats, live_staging),
+        stats.classifier_snapshot.as_ref(),
+    )
+    .await
+}
+
 async fn run_atlas_inner<F>(
+    input: RunInput<'_>,
+    emit: impl FnMut(AtlasEvent) + Send,
+    fetch: F,
+    tracker: &std::sync::Mutex<AtlasJob>,
+) -> Result<Stop>
+where
+    F: FnMut(HttpCall) -> FetchFut + Send,
+{
+    let store = AtlasStore::open(input.db_path).await?;
+    run_atlas_on_store(input, emit, fetch, tracker, store).await
+}
+
+async fn run_atlas_on_store<F>(
     input: RunInput<'_>,
     mut emit: impl FnMut(AtlasEvent) + Send,
     mut fetch: F,
     tracker: &std::sync::Mutex<AtlasJob>,
+    store: AtlasStore,
 ) -> Result<Stop>
 where
     F: FnMut(HttpCall) -> FetchFut + Send,
@@ -2414,13 +2286,12 @@ where
         pace,
         resume,
         feed,
-        classifier,
+        classifier: _,
         synthesizer: _,
         synthesizer_fallbacks: _,
         run_id: resume_id,
     } = input;
-    let store = AtlasStore::open(db_path).await?;
-    let (run_id, mut cursor, mut stats) = if resume {
+    let (run_id, mut cursor, mut stats, _resume_note) = if resume {
         let run = match resume_id {
             Some(id) => store
                 .list_runs()
@@ -2432,33 +2303,137 @@ where
         let Some(run) = run else {
             return Ok(Stop::Failed("No Atlas run to resume".into()));
         };
+        let (cursor, stats) = decode_resume_state(&run)?;
         if !resumable(&run) {
             return Ok(Stop::Failed("The latest Atlas run is not paused".into()));
         }
-        store
-            .set_state(&run.id, "running", &run.note, false)
-            .await?;
-        (
-            run.id,
-            parse_cursor(&run.cursor_json),
-            parse_stats(&run.stats_json),
-        )
+        (run.id, cursor, stats, Some(run.note))
     } else {
-        let id = new_run_id();
-        let from = lookback_from();
         let cursor = Cursor {
-            from: from.clone(),
+            from: lookback_from(),
             ..Cursor::default()
         };
-        store
-            .insert_run(
-                &id,
-                &serde_json::to_string(&cursor)?,
-                &serde_json::to_string(&RunStats::default())?,
+        (new_run_id(), cursor, RunStats::default(), None)
+    };
+    let home_path = std::path::absolute(db_path)?
+        .parent()
+        .ok_or_else(|| CyclePreflightError::InvalidRunState {
+            code: "database_home_missing".into(),
+        })?
+        .to_path_buf();
+    let classifier_home = ClassifierHome::new(home_path);
+    let repo = store
+        .repository()
+        .ok_or_else(|| anyhow!("SurrealDB storage is not configured"))?;
+    let owner_id = format!("atlas-owner-{}", crate::store::new_id());
+    let db_owner = crate::storage::classifier_admission::AdmissionOwner::new(repo.clone());
+    let intent = crate::storage::classifier_admission::announce_foreground_intent(
+        &db_owner,
+        &owner_id,
+        chrono::Utc::now(),
+    )
+    .await?;
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(
+            crate::storage::classifier_admission::FOREGROUND_HANDOFF_SECS,
+        );
+    let startup: Result<(CyclePermit, crate::storage::classifier_admission::RunClaim)> = async {
+        for attempt in 0..3 {
+            let revision =
+                crate::storage::classifier_admission::run_revision(repo, &run_id).await?;
+            let permit = foreground_classifier_preflight(
+                &store,
+                &classifier_home,
+                resume.then_some(run_id.as_str()),
+                &cursor,
+                &stats,
+                &db_owner,
+                &intent,
+                deadline,
             )
             .await?;
-        (id, cursor, RunStats::default())
+            if let Some(pinned) = permit.pinned() {
+                stats.classifier_snapshot = Some(pinned.snapshot.clone());
+            }
+            let cursor_json = serde_json::to_string(&cursor)?;
+            let stats_json = serde_json::to_string(&stats)?;
+            let request = crate::storage::classifier_admission::StartRunRequest::fresh(
+                &run_id,
+                &owner_id,
+                &cursor_json,
+                &stats_json,
+                chrono::Utc::now(),
+            );
+            let request = if resume {
+                request.resume(revision.revision, revision.work_generation)
+            } else {
+                request
+            };
+            match crate::storage::classifier_admission::start_run(&db_owner, &permit, &request)
+                .await
+            {
+                Ok(claim) => return Ok((permit, claim)),
+                Err(crate::storage::classifier_admission::AdmissionError::InvalidRunState {
+                    code,
+                }) if code == "preflight_stale" && resume && attempt < 2 => {
+                    // Re-read and re-preflight the selected run. A stale permit
+                    // is never reused against a changed checkpoint/cohort.
+                    let selected = crate::storage::atlas::run_by_id(repo.db(), &run_id)
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow!("selected Atlas run disappeared during preflight")
+                        })?;
+                    if !resumable(&selected) {
+                        return Err(CyclePreflightError::InvalidRunState {
+                            code: "selected_run_no_longer_resumable".into(),
+                        }
+                        .into());
+                    }
+                    (cursor, stats) = decode_resume_state(&selected)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(
+            crate::storage::classifier_admission::AdmissionError::InvalidRunState {
+                code: "preflight_stale".into(),
+            }
+            .into(),
+        )
+    }
+    .await;
+    let clear =
+        crate::storage::classifier_admission::clear_foreground_intent(&db_owner, &intent).await;
+    let (permit, claim) = match (startup, clear) {
+        (Ok(pair), Ok(())) => pair,
+        (result, cleared) => {
+            if let Ok((_, claim)) = &result {
+                let failed = store.clone().with_claim(db_owner.clone(), claim.clone());
+                let _ = failed
+                    .set_state(&run_id, "failed", "Foreground handoff cleanup failed", true)
+                    .await;
+            }
+            let error = match cleared {
+                Err(error) => anyhow!(error),
+                Ok(()) => result
+                    .err()
+                    .ok_or_else(|| anyhow!("missing startup error"))?,
+            };
+            emit(AtlasEvent::Note(error.to_string()));
+            let owner_cleanup = db_owner.shutdown().await;
+            let home_cleanup = classifier_home.shutdown().await;
+            if let Err(cleanup) = owner_cleanup {
+                return Err(cleanup.into());
+            }
+            if let Err(cleanup) = home_cleanup {
+                return Err(cleanup.into());
+            }
+            return Err(error);
+        }
     };
+    let store = store.with_claim(db_owner.clone(), claim.clone());
+    let mut work=Box::pin(db_owner.scope(async {
+    let repo=store.repository().ok_or_else(||anyhow!("SurrealDB storage is not configured"))?;
     if resume && cursor.phase <= 2 {
         stats.coverage.acquisition_failures = 0;
         stats.coverage.quota_skipped = 0;
@@ -2483,25 +2458,26 @@ where
         .map(|run| run.started_at)
         .unwrap_or_default();
     let cycle_mode = if resume { "resumed" } else { "fresh" };
-    let mut tel = CycleTelemetry::open(db_path, &run_id, cycle_mode, cycle_started_at).await;
+    let mut tel = CycleTelemetry::open(&store,db_path, &run_id, cycle_mode, cycle_started_at).await;
     if cursor.phase <= 1 {
         require_either(&keys.gnews, &keys.gnews_fallback, "GNews API key")?;
         require_either(&keys.newsdata, &keys.newsdata_fallback, "NewsData API key")?;
     }
     let mut seen: Vec<Seen> = feed.iter().map(seen_of).collect();
-    // Seed from every retained article (36h prune window), then this run's rows.
-    // URL/title matches against that history are dropped so cycles stay efficient.
-    for row in store.recent_articles().await? {
-        let article = article_from_row(&row);
-        if seen.iter().all(|item| item.id != article.id) {
-            seen.push(seen_of(&article));
+    // Seed thin history keys newest-first. Full descriptions, metadata and
+    // staged payloads never enter the historical dedup read.
+    let mut after:Option<(String,String,String)>=None;
+    loop {
+        let page=crate::storage::atlas::dedup_keys_page(repo.db(),after.as_ref().map(|(seen,id,run)|(seen.as_str(),id.as_str(),run.as_str()))).await?;
+        if page.is_empty() {break;}
+        for key in &page {
+            if seen.iter().all(|item|item.id!=key.article_id) {
+                seen.push(Seen {url_hash:url_hash(&key.url),title_norm:normalize_title(&key.title),domain:key.source_domain.clone(),rank:domain_rank(&key.source_domain),published_at:key.published_at.clone(),id:key.article_id.clone()});
+            }
         }
-    }
-    for row in store.list_articles(&run_id).await? {
-        let article = article_from_row(&row);
-        if seen.iter().all(|item| item.id != article.id) {
-            seen.push(seen_of(&article));
-        }
+        let last=page.last().ok_or_else(||anyhow!("dedup page missing final key"))?;
+        after=Some((last.seen_at.clone(),last.article_id.clone(),last.run_id.clone()));
+        if page.len()<64 {break;}
     }
     let mut last_gnews: Option<std::time::Instant> = None;
     let user_agent = if user_agent.trim().is_empty() {
@@ -2510,7 +2486,6 @@ where
         user_agent.to_string()
     };
 
-    let inventory = crate::atlas_metadata::NativeInventory::start(db_path, &run_id, &user_agent);
 
     if cursor.phase <= 1 {
         track(1);
@@ -2587,12 +2562,14 @@ where
                     |active| phase1_call(provider, page, &token, active),
                 )
                 .await;
+                tel.provider_calls(&fetched.metrics);
                 let bucket = fetched.bucket;
                 match fetched.body {
                     Some(body) => {
                         if provider == "gnews" {
                             last_gnews = Some(std::time::Instant::now());
                         }
+                        let observations = capture_provider_observations(&store, &run_id, provider, &receipt_key, &body, &mut emit).await;
                         let more = atlas_news::next_page(provider, &body);
                         match atlas_news::discovery_hits(provider, &body) {
                             Ok(mut hits) => {
@@ -2604,7 +2581,7 @@ where
                                 hits.truncate(room);
                                 kept += hits.len() as u32;
                                 apply_hits(
-                                    &hits, provider, &mut stats, &mut seen, &mut emit, &store,
+                                    &hits, &observations, provider, &mut stats, &mut seen, &mut emit, &store,
                                     &run_id, &mut tel,
                                 )
                                 .await?;
@@ -2617,9 +2594,9 @@ where
                                     stop_provider = true;
                                 }
                             }
-                            Err(err) => {
+                            Err(_) => {
                                 let fault = ProviderFault {
-                                    summary: format!("{provider} unreadable response: {err}"),
+                                    summary: format!("{provider} response schema invalid"),
                                     body: String::new(),
                                 };
                                 if record_fault(&mut stats, provider, &fault)
@@ -2656,7 +2633,7 @@ where
                 }
                 let _ = store.quota_bump(&bucket, &utc_day()).await?;
                 page += 1;
-                emit(AtlasEvent::Stats(stats.clone()));
+                emit(AtlasEvent::Stats(Box::new(stats.clone())));
                 if stop_provider || kept >= PHASE1_TARGET || page >= PHASE1_MAX_PAGES {
                     break;
                 }
@@ -2700,7 +2677,7 @@ where
             kept: 0,
         };
         save(&store, &run_id, &cursor, &stats).await?;
-        emit(AtlasEvent::Stats(stats.clone()));
+        emit(AtlasEvent::Stats(Box::new(stats.clone())));
         // One origin snapshot per cycle, taken here where the bands are computed,
         // never once per repaint.
         let snapshot_at = chrono::Utc::now().to_rfc3339();
@@ -2821,12 +2798,16 @@ where
                 |active| phase2_call(job.provider, country, active),
             )
             .await;
+            tel.provider_calls(&fetched.metrics);
             let bucket = fetched.bucket;
             match fetched.body {
-                Some(body) => match atlas_news::headline_hits(job.provider, country, &body) {
+                Some(body) => {
+                    let observations = capture_provider_observations(&store, &run_id, job.provider, &receipt_key, &body, &mut emit).await;
+                    match atlas_news::headline_hits(job.provider, country, &body) {
                     Ok(hits) => {
                         apply_hits(
                             &hits,
+                            &observations,
                             job.provider,
                             &mut stats,
                             &mut seen,
@@ -2846,9 +2827,9 @@ where
                         )
                         .await?;
                     }
-                    Err(err) => {
+                    Err(_) => {
                         let fault = ProviderFault {
-                            summary: format!("{} unreadable response: {err}", job.provider),
+                            summary: format!("{} response schema invalid", job.provider),
                             body: String::new(),
                         };
                         if record_fault(&mut stats, job.provider, &fault)
@@ -2858,7 +2839,7 @@ where
                         }
                         emit(parse_fault(job.provider, fault.summary, &body));
                     }
-                },
+                }},
                 None => {
                     if let Some(fault) = fetched.fault {
                         if record_fault(&mut stats, job.provider, &fault)
@@ -2873,7 +2854,7 @@ where
             let _ = store.quota_bump(&bucket, &utc_day()).await?;
             let next = next_after_phase2(job, countries.len());
             save(&store, &run_id, &cursor_at(&next, &cursor.from), &stats).await?;
-            emit(AtlasEvent::Stats(stats.clone()));
+            emit(AtlasEvent::Stats(Box::new(stats.clone())));
         }
         if !newsapi_skipped.is_empty() {
             let names = newsapi_skipped
@@ -2908,7 +2889,7 @@ where
             kept: 0,
         };
         save(&store, &run_id, &cursor, &stats).await?;
-        emit(AtlasEvent::Stats(stats.clone()));
+        emit(AtlasEvent::Stats(Box::new(stats.clone())));
     }
 
     // Local actor/metadata processing runs after admission admits the
@@ -2923,314 +2904,63 @@ where
     let native_cancel = NativeCancel(Arc::new(AtomicBool::new(false)));
     if cursor.phase == 3 {
         track(3);
-        tel.enter_stage(
-            crate::atlas_work::stage_label(crate::atlas_work::STAGE_CLASSIFICATION),
-            "article",
-            &stats,
-        );
-        let repo = store
-            .repository()
-            .ok_or_else(|| anyhow!("SurrealDB storage is not configured"))?;
-        // An interrupted cycle leaves `evaluating` rows behind; they retry.
-        crate::storage::atlas::admission_reset_stale(repo.db()).await?;
-        migrate_legacy_categories(&store, &mut stats, &mut emit).await?;
-        let staged = crate::storage::atlas::admission_work(repo.db()).await?;
-        let mut staging: Vec<(crate::storage::atlas::AdmissionRow, AtlasArticleRow)> =
-            Vec::with_capacity(staged.len());
-        for row in staged {
-            match row.article() {
-                Ok(article) => staging.push((row, article)),
-                Err(error) => {
-                    // An unparsable payload is a retryable failure; the input
-                    // stays privately retained until it is re-staged.
-                    crate::storage::atlas::admission_failed(
-                        repo.db(),
-                        &row.run_id,
-                        &row.article_id,
-                        &row.input_hash,
-                        &format!("staged payload: {error}"),
-                    )
-                    .await?;
-                    stats.coverage.admission_failed += 1;
-                }
-            }
+        tel.enter_stage(crate::atlas_work::stage_label(crate::atlas_work::STAGE_CLASSIFICATION),"article",&stats);
+        let pinned=permit.pinned().cloned().ok_or_else(||anyhow!("admission requires its preflighted classifier"))?;
+        let path=classifier_home.home().to_path_buf();
+        let context=tokio::task::spawn_blocking(move ||crate::atlas_classify::AdmissionContext::load(&path,pinned)).await??;
+        if run_local_admission(LocalAdmission {store:&store,context:&context,resumed:resume,tracker,pause},&mut stats,&mut emit,&mut tel).await? {
+            return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;
         }
-        stats.coverage.admission_pending = staging
-            .iter()
-            .filter(|(row, _)| row.state == "pending")
-            .count() as u32;
-        stats.coverage.admission_failed = staging
-            .iter()
-            .filter(|(row, _)| row.state == "failed")
-            .count() as u32;
-        if let Some(secret) = classifier.as_ref() {
-            // Borrowed pause flags are mirrored for the shared cancellable executor.
-            let cancel = Arc::new(AtomicBool::new(cycle_paused(tracker, pause)));
-            let articles: Vec<_> = staging.iter().map(|(_, a)| a.clone()).collect();
-            for (batch_index, batch) in
-                crate::atlas_classify::batches_for_model(&articles, &secret.model)
-                    .into_iter()
-                    .enumerate()
-            {
-                if cycle_paused(tracker, pause) {
-                    return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel).await;
-                }
-                emit(AtlasEvent::Status(format!(
-                    "Admission batch {} · {} articles",
-                    batch_index + 1,
-                    batch.len()
-                )));
-                for article in &batch {
-                    let Some((row, _)) = staging
-                        .iter()
-                        .find(|(_, a)| a.id == article.id && a.run_id == article.run_id)
-                    else {
-                        continue;
-                    };
-                    crate::storage::atlas::admission_begin(
-                        repo.db(),
-                        &row.run_id,
-                        &row.article_id,
-                        &row.input_hash,
-                    )
-                    .await?;
-                }
-                let work = crate::atlas_classify::execute(
-                    db_path,
-                    &run_id,
-                    secret,
-                    batch.clone(),
-                    &cancel,
-                );
-                tokio::pin!(work);
-                let (receipt, error) = loop {
-                    tokio::select! {
-                        result = &mut work => break result,
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
-                            if cycle_paused(tracker, pause) {
-                                crate::recon::cancel_with_notify(&cancel);
-                            }
-                        }
-                    }
-                };
-                if let Some(error) = &error {
-                    emit(AtlasEvent::Note(format!(
-                        "Admission batch incomplete: {error}"
-                    )));
-                }
-                for article in &batch {
-                    let Some((staged, _)) = staging
-                        .iter()
-                        .find(|(_, a)| a.id == article.id && a.run_id == article.run_id)
-                    else {
-                        continue;
-                    };
-                    let outcome = receipt
-                        .get(&article.id)
-                        .and_then(|raw| crate::atlas_classify::Outcome::decode(raw));
-                    let cancelled = cancel.load(Ordering::Relaxed);
-                    match outcome {
-                        Some(crate::atlas_classify::Outcome::Admitted(tags)) => {
-                            let mut admitted = article.clone();
-                            admitted.categories = tags;
-                            crate::storage::atlas::admission_admit(
-                                repo.db(),
-                                &admitted,
-                                &staged.input_hash,
-                                &staged.taxonomy_version,
-                            )
-                            .await?;
-                            stats.coverage.admitted += 1;
-                            let first = admitted.categories.first().cloned().unwrap_or_default();
-                            let receipt_json = serde_json::to_string(&serde_json::json!({
-                                "categories": admitted.categories,
-                                "prompt_version": crate::atlas_classify::PROMPT_VERSION,
-                                "diagnostic": error,
-                            }))?;
-                            store
-                                .set_classification(
-                                    &admitted.run_id,
-                                    &admitted.id,
-                                    &staged.input_hash,
-                                    "classified",
-                                    &receipt_json,
-                                    Some(&first),
-                                )
-                                .await?;
-                            emit(AtlasEvent::Classified {
-                                id: article.id.clone(),
-                                category: first,
-                            });
-                            // Local entity/publisher metadata overlaps the
-                            // remaining admission batches in the worker task.
-                            inventory.queue(&admitted).await?;
-                        }
-                        Some(crate::atlas_classify::Outcome::Unknown(reason)) => {
-                            let was_canonical = store
-                                .article(&staged.run_id, &staged.article_id)
-                                .await?
-                                .is_some();
-                            crate::storage::atlas::admission_discard(
-                                repo.db(),
-                                &staged.run_id,
-                                &staged.article_id,
-                                &staged.input_hash,
-                                &staged.source_revision,
-                                &staged.taxonomy_version,
-                                &reason,
-                            )
-                            .await?;
-                            if was_canonical {
-                                // A legacy occurrence reclassified as
-                                // confirmed-unknown loses its canonical row
-                                // and article-owned derivatives.
-                                store
-                                    .delete_article(&staged.run_id, &staged.article_id)
-                                    .await?;
-                            }
-                            stats.coverage.discarded += 1;
-                        }
-                        None if cancelled => {
-                            // Pause: the row stays staged and retries on resume.
-                        }
-                        None => {
-                            let detail = error
-                                .clone()
-                                .unwrap_or_else(|| "admission did not resolve this article".into());
-                            let blocked = detail.starts_with("all routes blocked");
-                            crate::storage::atlas::admission_failed(
-                                repo.db(),
-                                &staged.run_id,
-                                &staged.article_id,
-                                &staged.input_hash,
-                                &detail,
-                            )
-                            .await?;
-                            stats.coverage.admission_failed += 1;
-                            if blocked {
-                                stats.coverage.classification_blocked += 1;
-                            }
-                        }
-                    }
-                }
-                save(&store, &run_id, &cursor, &stats).await?;
-                if cycle_paused(tracker, pause) {
-                    return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel).await;
-                }
-            }
-        } else if !staging.is_empty() {
-            emit(AtlasEvent::Note(
-                "Classifier is not configured; required classification is blocked.".into(),
-            ));
-            stats.coverage.classification_blocked = staging.len() as u32;
-        }
-        cursor.phase = 4;
-        cursor.leg = "metadata".into();
-        save(&store, &run_id, &cursor, &stats).await?;
+        cursor.phase=4;cursor.leg="metadata".into();
+        save(&store,&run_id,&cursor,&stats).await?;
     }
-    // Metadata collection joined the admitted canonical rows: the spawned
-    // inventory worker processed them during the admission batches; this
-    // joins it and sweeps anything its per-article saves missed.
-    let native_work = async {
-        inventory.finish().await?;
-        crate::atlas_metadata::process_run(db_path, &run_id, native_cancel.0.clone(), &user_agent)
-            .await
-    };
-    tokio::pin!(native_work);
-    let mut native_result = None;
-    // Stage-specific admission: a phase-6 resume never replays 4/5.
-    if (4..6).contains(&cursor.phase) {
-        track(4);
-        tel.enter_stage("metadata", "article", &stats);
-        if cycle_paused(tracker, pause) {
-            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel).await;
+    // Native stages consume only bounded receipt work from this run. Their
+    // output and derivative checkpoint commit under the same publication fence.
+    use crate::storage::classifier_admission::{self as native,DerivativeFence,DerivativeStage};
+    let native_fence=DerivativeFence::Cycle(store.run_claim().cloned().ok_or_else(||anyhow!("native stages require the cycle lease"))?);
+    for (phase,stage,label,unit) in [(4,DerivativeStage::Metadata,"metadata","article"),(5,DerivativeStage::Related,"related","pair"),(6,DerivativeStage::Actors,"actors","article"),(6,DerivativeStage::Reconcile,"reconcile","identity")] {
+        if cursor.phase>phase {continue;}
+        track(phase);tel.enter_stage(label,unit,&stats);
+        emit(AtlasEvent::Status(format!("Processing {label}")));
+        loop {
+            if cycle_paused(tracker,pause){native_cancel.0.store(true,Ordering::Release);return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;}
+            let batch=native::cycle_derivative_work(&db_owner,&claim,stage).await?;
+            if batch.is_empty(){break;}
+            let mut pending =
+                native::process_derivative_stage(&db_owner, &native_fence, &batch, stage, &native_cancel.0);
+            let report=loop {tokio::select! {
+                result=&mut pending=>break result?,
+                _=tokio::time::sleep(std::time::Duration::from_millis(25))=>{if cycle_paused(tracker,pause){native_cancel.0.store(true,Ordering::Release);}},
+            }};
+            if native_cancel.0.load(Ordering::Acquire){return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;}
+            if report.items.is_empty(){break;}
         }
-        emit(AtlasEvent::Status(
-            "Local entities and publisher priors".into(),
-        ));
-        let coverage = if let Some(coverage) = native_result.take() {
-            coverage
-        } else {
-            loop {
-                tokio::select! {
-                    result = &mut native_work => break result?,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
-                        if cycle_paused(tracker,pause) {
-                            native_cancel.0.store(true,Ordering::Relaxed);
-                            return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;
-                        }
-                    }
-                }
-            }
-        };
-        stats.coverage.entities_available = coverage.entities_complete;
-        stats.coverage.entities_unavailable = coverage.entities_unavailable;
-        stats.coverage.publishers_available = coverage.publishers_available;
-
-        stats.coverage.warnings = coverage.warnings.len() as u32;
-        for warning in coverage.warnings {
-            emit(AtlasEvent::Note(warning));
-        }
-        if cycle_paused(tracker, pause) {
-            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel).await;
-        }
-        cursor.phase = 5;
-        cursor.leg = "related".into();
-        track(5);
-        tel.enter_stage("related", "pair", &stats);
-        emit(AtlasEvent::Status(
-            "Building shared headline/description leads".into(),
-        ));
-        stats.coverage.related_pairs =
-            crate::related_articles::build_on(&store, &run_id).await? as u32;
-        cursor.phase = 6;
-        cursor.leg = "actor_articles".into();
-        save(&store, &run_id, &cursor, &stats).await?;
+        cursor.phase=phase;cursor.leg=label.into();save(&store,&run_id,&cursor,&stats).await?;
     }
-    let mut actor_index_incomplete = false;
-    if cursor.phase >= 6 {
-        track(6);
-        tel.enter_stage(
-            crate::atlas_work::stage_label(crate::atlas_work::STAGE_ACTOR_ARTICLES),
-            crate::atlas_work::stage_unit(crate::atlas_work::STAGE_ACTOR_ARTICLES),
-            &stats,
-        );
-        emit(AtlasEvent::Status("Index actors and articles".into()));
-        let report = crate::atlas_actor_index::index_run_store(&store, &run_id, &|| {
-            cycle_paused(tracker, pause)
-        })
-        .await?;
-        stats.coverage.actor_indexed = report.reused + report.indexed;
-        stats.coverage.actor_zero = report.zero_actor;
-        stats.coverage.actor_index_failed = report.failed;
-        for error in report.errors.iter().take(5) {
-            emit(AtlasEvent::Note(format!("Actor index failed: {error}")));
-        }
-        if report.stopped {
-            return park(&store, &run_id, &cursor, &stats, &mut emit, &mut tel).await;
-        }
-        actor_index_incomplete = !report.complete();
-        cursor.leg = "actor_articles_done".into();
-        save(&store, &run_id, &cursor, &stats).await?;
-    }
+    let native_summary=native::native_run_summary(store.repository().ok_or_else(||anyhow!("native repository missing"))?,&run_id).await?;
+    stats.coverage.entities_available=u32::try_from(native_summary.entities).unwrap_or(u32::MAX);
+    stats.coverage.publishers_available=u32::try_from(native_summary.publishers).unwrap_or(u32::MAX);
+    stats.coverage.actor_indexed=u32::try_from(native_summary.actors).unwrap_or(u32::MAX);
+    stats.coverage.related_pairs=u32::try_from(native_summary.related).unwrap_or(u32::MAX);
+    let actor_index_incomplete=native_summary.pending>0;
+    if let Some(baseline)=tel.classifier_db_start {tel.classifier_metrics["atlas.db"]=ClassifierDbSample::read(&db_owner.metrics()).delta(baseline);}
     // Completion depends on admission, never on Brain indexing. Staged work
     // counts as the fetched set; canonical rows are the admitted set.
-    let articles = store.list_articles(&run_id).await?;
-    let live_staging = admission_rows_of(&store, &run_id).await?.len() as u32;
-    stats.coverage.articles = articles.len() as u32 + live_staging;
-    stats.coverage.classified = articles.iter().filter(|a| !a.categories.is_empty()).count() as u32;
-    stats.coverage.admitted = stats.coverage.classified;
-    // Legacy unknowns no longer persist: the migration reclassifies or
-    // discards them, so only unpublished legacy rows can remain here.
-    stats.coverage.legacy_unknown = articles
-        .iter()
-        .filter(|a| a.categories.is_empty() && a.category == "unk")
-        .count() as u32;
+    let repo=store.repository().ok_or_else(||anyhow!("SurrealDB storage is not configured"))?;
+    let summary=crate::storage::classifier_admission::run_summary(repo,&run_id).await?;
+    let bounded_count=|count:u64|u32::try_from(count).unwrap_or(u32::MAX);
+    stats.coverage.articles=bounded_count(summary.retained);
+    stats.coverage.classified=bounded_count(summary.admitted);
+    stats.coverage.admitted=bounded_count(summary.admitted);
+    stats.coverage.discarded=bounded_count(summary.rejected);
+    stats.coverage.admission_pending=bounded_count(summary.staged.saturating_sub(summary.failed));
+    stats.coverage.admission_failed=bounded_count(summary.failed);
+    stats.coverage.legacy_unknown=bounded_count(summary.legacy);
     stats.coverage.publishers_unavailable = stats
         .coverage
         .articles
         .saturating_sub(stats.coverage.publishers_available);
-    let state = cycle_state(&stats.coverage, actor_index_incomplete);
+    let state = if summary.staged>0 {"waiting"} else {cycle_state(&stats.coverage, actor_index_incomplete)};
     let note = format!(
         "Admitted {}/{} · discarded {} · pending {} · failed {} · legacy unk {} · entities {} · publisher priors {} · Related {} · actors indexed {}/{} (zero-actor {}, failed {}) · acquisition failures {}{}{}{}",
         stats.coverage.admitted,
@@ -3272,9 +3002,8 @@ where
             && stats.coverage.admission_failed == 0
             && actor_index_incomplete
         {
-            // Only phase 6 is unfinished: resume retries missing receipts only.
-            cursor.phase = 6;
-            cursor.leg = "actor_articles".into();
+            cursor.phase = native_summary.earliest_phase.unwrap_or(6);
+            cursor.leg = match cursor.phase {4=>"metadata",5=>"related",_=>"actor_articles"}.into();
         } else {
             cursor.phase = 3;
             cursor.leg = "classify".into();
@@ -3282,7 +3011,7 @@ where
     }
     save(&store, &run_id, &cursor, &stats).await?;
     store.set_state(&run_id, state, &note, true).await?;
-    emit(AtlasEvent::Stats(stats.clone()));
+    emit(AtlasEvent::Stats(Box::new(stats.clone())));
     emit(AtlasEvent::Status(note.clone()));
     tel.close_stage(state, &stats);
     tel.cycle(state, &stats);
@@ -3291,6 +3020,336 @@ where
     } else {
         Stop::Finished
     })
+    }));
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(
+        crate::storage::classifier_admission::HEARTBEAT_SECS,
+    ));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut outcome = loop {
+        tokio::select! {
+            result=&mut work=>break result,
+            _=heartbeat.tick(),if !store.stopping()=>{
+                match crate::storage::classifier_admission::heartbeat_run(&db_owner,&claim,chrono::Utc::now()).await {
+                    Ok(true)=>{},
+                    Ok(false)=>break Err(crate::storage::classifier_admission::AdmissionError::LeaseLost.into()),
+                    Err(error)=>break Err(error.into()),
+                }
+            }
+        }
+    };
+    // Drop the awaiting work before joining its owned transaction workers.
+    // This requests cancellation of in-flight JS and closes DB receivers; an
+    // owned BEGIN/body then rolls back, while issued COMMIT resolves safely.
+    drop(work);
+    if let Err(error) = db_owner.join().await {
+        outcome = Err(error.into());
+    }
+    if let Err(error) = &outcome {
+        if !matches!(
+            error.downcast_ref::<crate::storage::classifier_admission::AdmissionError>(),
+            Some(
+                crate::storage::classifier_admission::AdmissionError::LeaseLost
+                    | crate::storage::classifier_admission::AdmissionError::CleanupUncertain { .. }
+            )
+        ) {
+            let message = error.to_string();
+            let state = if message.starts_with("Enter the ") {
+                "blocked"
+            } else {
+                "failed"
+            };
+            if let Err(failure) = store.set_state(&run_id, state, &message, true).await {
+                outcome = Err(failure);
+            }
+        }
+    }
+    if let Err(error) = db_owner.shutdown().await {
+        outcome = Err(error.into());
+    }
+    if let Err(error) = classifier_home.shutdown().await {
+        outcome = Err(error.into());
+    }
+    outcome
+}
+
+/// Performs one activation over bounded run-local cohorts. Durable failed work
+/// is retried by a later explicit resume, never by an endless in-cycle loop.
+struct LocalAdmission<'a> {
+    store: &'a AtlasStore,
+    context: &'a crate::atlas_classify::AdmissionContext,
+    resumed: bool,
+    tracker: &'a std::sync::Mutex<AtlasJob>,
+    pause: &'a AtomicBool,
+}
+async fn run_local_admission(
+    input: LocalAdmission<'_>,
+    stats: &mut RunStats,
+    emit: &mut impl FnMut(AtlasEvent),
+    telemetry: &mut CycleTelemetry,
+) -> Result<bool> {
+    let LocalAdmission {
+        store,
+        context,
+        resumed,
+        tracker,
+        pause,
+    } = input;
+    use crate::storage::classifier_admission as admission;
+    let repo = store
+        .repository()
+        .ok_or_else(|| anyhow!("SurrealDB storage is not configured"))?;
+    let owner = store
+        .admission_owner()
+        .ok_or_else(|| anyhow!("Atlas admission database owner is missing"))?;
+    let run = store
+        .run_claim()
+        .ok_or_else(|| anyhow!("Atlas admission owner is missing"))?;
+    loop {
+        if cycle_paused(tracker, pause) {
+            return Ok(true);
+        }
+        if admission::upgrade_legacy_page(owner, run, chrono::Utc::now()).await? == 0 {
+            break;
+        }
+    }
+    let mut token =
+        admission::begin_admission(owner, run, context, resumed, chrono::Utc::now()).await?;
+    let mut cache = crate::atlas_classify::ComputationCache::default();
+    let started = std::time::Instant::now();
+    loop {
+        if cycle_paused(tracker, pause) {
+            return Ok(true);
+        }
+        let before_page = ClassifierDbSample::read(&owner.metrics());
+        let page = admission::claim_header_page(owner, run, &token, chrono::Utc::now()).await?;
+        let groups = admission::hydration_groups(owner, &page.claims).await?;
+        let mut first = true;
+        for group in groups {
+            if cycle_paused(tracker, pause) {
+                return Ok(true);
+            }
+            let (claims, unavailable) = match group {
+                admission::HydrationGroup::Ready(claims) => (claims, false),
+                admission::HydrationGroup::Unavailable(claims) => (claims, true),
+            };
+            let before = if first {
+                before_page
+            } else {
+                ClassifierDbSample::read(&owner.metrics())
+            };
+            first = false;
+            if process_admission_chunk(
+                LocalAdmissionChunk {
+                    store,
+                    context,
+                    tracker,
+                    pause,
+                    claims,
+                    unavailable,
+                    db_before: before,
+                },
+                &mut cache,
+                stats,
+                emit,
+                telemetry,
+            )
+            .await?
+            {
+                return Ok(true);
+            }
+        }
+        if let Some(next) = page.next {
+            token = next;
+            continue;
+        }
+        let revision = admission::run_revision(repo, &run.run_id).await?;
+        if revision.work_generation > token.through_seq {
+            if started.elapsed() >= std::time::Duration::from_secs(30) {
+                break;
+            }
+            token =
+                admission::begin_admission(owner, run, context, false, chrono::Utc::now()).await?;
+            continue;
+        }
+        break;
+    }
+    Ok(false)
+}
+struct LocalAdmissionChunk<'a> {
+    store: &'a AtlasStore,
+    context: &'a crate::atlas_classify::AdmissionContext,
+    tracker: &'a std::sync::Mutex<AtlasJob>,
+    pause: &'a AtomicBool,
+    claims: Vec<crate::storage::classifier_admission::AdmissionClaim>,
+    unavailable: bool,
+    db_before: ClassifierDbSample,
+}
+async fn process_admission_chunk(
+    input: LocalAdmissionChunk<'_>,
+    cache: &mut crate::atlas_classify::ComputationCache,
+    stats: &mut RunStats,
+    emit: &mut impl FnMut(AtlasEvent),
+    telemetry: &mut CycleTelemetry,
+) -> Result<bool> {
+    use crate::atlas_classify::{self, ItemClassification};
+    use crate::storage::classifier_admission::{self as admission, ItemCommit};
+    let LocalAdmissionChunk {
+        store,
+        context,
+        tracker,
+        pause,
+        claims,
+        unavailable,
+        db_before,
+    } = input;
+    let repo = store
+        .repository()
+        .ok_or_else(|| anyhow!("SurrealDB storage is not configured"))?;
+    let owner = store
+        .admission_owner()
+        .ok_or_else(|| anyhow!("Atlas admission database owner is missing"))?;
+    let run = store
+        .run_claim()
+        .ok_or_else(|| anyhow!("Atlas admission owner is missing"))?;
+    let started = std::time::Instant::now();
+    let worker_before = classifier_worker_observation(context).await.ok();
+    let cache_before = cache.metrics();
+    emit(AtlasEvent::Status(format!(
+        "Local admission · {} articles",
+        claims.len()
+    )));
+    let mut rows_read = 0usize;
+    let mut page_metrics = None;
+    let inputs = if unavailable {
+        Err(admission::AdmissionError::PayloadTooLarge {
+            kind: "native_metadata".into(),
+            limit: admission::MAX_RESPONSE_BYTES,
+        })
+    } else {
+        admission::bulk_inputs_current(owner, &claims).await
+    };
+    let mut outcomes = match inputs {
+        Ok(inputs) => {
+            rows_read = inputs.len();
+            let present: std::collections::BTreeSet<_> = inputs
+                .iter()
+                .map(|input| input.claim.occurrence.clone())
+                .collect();
+            let control = crate::classifier::WorkControl::new();
+            let work = atlas_classify::classify_page(context, inputs, cache, &control);
+            tokio::pin!(work);
+            let result = loop {
+                tokio::select! {
+                    result=&mut work=>break result,
+                    _=tokio::time::sleep(std::time::Duration::from_millis(25))=>{if cycle_paused(tracker,pause) {control.cancel.store(true,Ordering::Release);}}
+                }
+            };
+            let mut values = match result {
+                Ok(scored) => {
+                    page_metrics = Some(scored.metrics);
+                    scored.outcomes
+                }
+                Err(error) => {
+                    if cycle_paused(tracker, pause) {
+                        admission::release_owned(owner, run, &claims, chrono::Utc::now()).await?;
+                        return Ok(true);
+                    }
+                    let error = match error {
+                        admission::AdmissionError::Classifier(error) => error,
+                        _ => crate::classifier::ClassifierError::InvalidArtifact(
+                            "invalid_local_admission_response".into(),
+                        ),
+                    };
+                    claims
+                        .iter()
+                        .filter(|claim| present.contains(&claim.occurrence))
+                        .map(|claim| ItemClassification::Retryable {
+                            claim: claim.clone(),
+                            error: error.clone(),
+                        })
+                        .collect()
+                }
+            };
+            for claim in claims
+                .iter()
+                .filter(|claim| !present.contains(&claim.occurrence))
+            {
+                values.push(ItemClassification::Retryable {
+                    claim: claim.clone(),
+                    error: crate::classifier::ClassifierError::Storage(
+                        "claimed_source_changed".into(),
+                    ),
+                });
+            }
+            values
+        }
+        Err(_) => claims
+            .iter()
+            .map(|claim| ItemClassification::Retryable {
+                claim: claim.clone(),
+                error: if unavailable {
+                    crate::classifier::ClassifierError::CorpusTooLarge
+                } else {
+                    crate::classifier::ClassifierError::Storage("claimed_input_unavailable".into())
+                },
+            })
+            .collect(),
+    };
+    outcomes.sort_by_key(|outcome| match outcome {
+        ItemClassification::Evaluated { claim, .. }
+        | ItemClassification::Retryable { claim, .. } => claim.work_seq,
+    });
+    let committed = admission::commit_outcomes(owner, run, &outcomes, chrono::Utc::now()).await?;
+    for (outcome, result) in outcomes.iter().zip(&committed.items) {
+        match result {
+            ItemCommit::Committed { .. } => {
+                if let ItemClassification::Evaluated { claim, receipt } = outcome {
+                    if let Some(pair) = receipt.receipt.selected_pair {
+                        stats.coverage.admitted = stats.coverage.admitted.saturating_add(1);
+                        emit(AtlasEvent::Classified {
+                            id: claim.occurrence.article_id.clone(),
+                            category: pair[0].as_str().into(),
+                        });
+                    } else {
+                        stats.coverage.discarded = stats.coverage.discarded.saturating_add(1);
+                    }
+                }
+            }
+            ItemCommit::AlreadyCommitted { .. } => {}
+            ItemCommit::StaleInput { .. } => emit(AtlasEvent::Note(
+                "A changed headline remains queued under its new source revision".into(),
+            )),
+            ItemCommit::LeaseLost { .. }
+            | ItemCommit::Retryable { .. }
+            | ItemCommit::InvalidReceipt { .. } => {
+                stats.coverage.admission_failed = stats.coverage.admission_failed.saturating_add(1)
+            }
+            ItemCommit::Cancelled { .. } => {}
+        }
+    }
+    let observation = ClassifierChunkObservation {
+        db_before,
+        db_after: ClassifierDbSample::read(&owner.metrics()),
+        cache_before,
+        cache: cache.metrics(),
+        worker_before: worker_before.as_ref(),
+        page: page_metrics.as_ref(),
+        results: &committed.items,
+        rows_read,
+        wall_micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+    };
+    // Metrics are diagnostic: a storage failure here does not change the
+    // durable classifier outcomes or spend another inference attempt.
+    if telemetry
+        .classifier_chunk(repo, context, &claims, observation)
+        .await
+        .is_err()
+    {
+        emit(AtlasEvent::Note(
+            "Classifier telemetry write unavailable".into(),
+        ));
+    }
+    Ok(cycle_paused(tracker, pause))
 }
 
 /// The completion receipt and statistics commit together, preventing a crash
@@ -3377,7 +3436,7 @@ async fn park(
     // The open stage interval is closed as interrupted, so the age of work a
     // pause stopped mid-flight is derivable from its start timestamp.
     tel.close_stage("interrupted", stats);
-    emit(AtlasEvent::Stats(stats.clone()));
+    emit(AtlasEvent::Stats(Box::new(stats.clone())));
     emit(AtlasEvent::Status("Paused".into()));
     Ok(Stop::Paused)
 }
@@ -3405,61 +3464,32 @@ fn record_fault(stats: &mut RunStats, provider: &str, fault: &ProviderFault) -> 
     true
 }
 
-fn parse_fault(_provider: &str, summary: String, body: &serde_json::Value) -> AtlasEvent {
-    AtlasEvent::Fault(ProviderFault {
-        summary: one_line(&summary),
-        body: serde_json::to_string_pretty(body).unwrap_or_else(|_| body.to_string()),
-    })
+fn parse_fault(provider: &str, _summary: String, body: &serde_json::Value) -> AtlasEvent {
+    AtlasEvent::Fault(ProviderFault {summary:format!("{provider} response schema invalid"),body:serde_json::json!({"provider":provider,"code":"invalid_response_schema","top_level_fields":body.as_object().map(|object|object.len())}).to_string()})
 }
-
 fn one_line(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    flat.chars().take(180).collect()
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(180)
+        .collect()
 }
-
-fn pretty_body(raw: &str) -> String {
-    let raw = raw.trim();
-    let text = serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .and_then(|value| serde_json::to_string_pretty(&value).ok())
-        .unwrap_or_else(|| raw.to_string());
-    const MAX: usize = 16_000;
-    if text.chars().count() <= MAX {
-        text
-    } else {
-        let mut cut: String = text.chars().take(MAX).collect();
-        cut.push_str("\n…");
-        cut
-    }
-}
-
-fn json_message(raw: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let message = value
-        .pointer("/results/message")
-        .or_else(|| value.get("message"))
-        .or_else(|| value.get("errors"))?;
-    let text = message
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| message.to_string());
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
-}
-
 fn provider_fault(provider: &str, status: u16, raw: &str) -> ProviderFault {
-    let named = atlas_news::http_error(provider, status, raw);
-    let summary = match named {
-        Some(text) if !text.contains('{') => text,
-        _ => match json_message(raw) {
-            Some(message) => format!("{provider} HTTP {status}: {}", one_line(&message)),
-            None => format!("{provider} HTTP {status}"),
-        },
+    // Provider messages are untrusted. Inspect their class for retry policy,
+    // while reporting only bounded status/code diagnostics.
+    let quota = status == 429
+        || atlas_news::http_error(provider, status, raw)
+            .as_deref()
+            .is_some_and(|summary| crate::osint::quota_limited("failed", Some(summary)));
+    let code = if quota {
+        "quota limit exceeded"
+    } else if matches!(status, 401 | 403) {
+        "authentication or access denied"
+    } else {
+        "request failed"
     };
-    ProviderFault {
-        summary: one_line(&summary),
-        body: pretty_body(raw),
-    }
+    ProviderFault {summary:format!("{provider} HTTP {status}: {code}"),body:serde_json::json!({"provider":provider,"status":status,"code":if quota{"quota_limited"}else{"http_error"}}).to_string()}
 }
 
 /// Whether a failed call is worth one more try: transport errors, timeouts,
@@ -3480,10 +3510,23 @@ fn same_host_redirect(from: &str, location: &str) -> Option<String> {
 const DISPATCH_ATTEMPTS: u32 = 2;
 const DISPATCH_REDIRECTS: u32 = 3;
 
+#[cfg(test)]
 async fn dispatch<F>(
     fetch: &mut F,
     spec: CallSpec,
     user_agent: &str,
+) -> Result<serde_json::Value, ProviderFault>
+where
+    F: FnMut(HttpCall) -> FetchFut,
+{
+    dispatch_counted(fetch, spec, user_agent, &mut ProviderCallCounts::default()).await
+}
+
+async fn dispatch_counted<F>(
+    fetch: &mut F,
+    spec: CallSpec,
+    user_agent: &str,
+    metrics: &mut ProviderCallCounts,
 ) -> Result<serde_json::Value, ProviderFault>
 where
     F: FnMut(HttpCall) -> FetchFut,
@@ -3497,6 +3540,7 @@ where
     let mut redirects = 0;
     let reply = loop {
         attempt += 1;
+        metrics.calls += 1;
         let sent = fetch(HttpCall {
             provider: provider.into(),
             url: url.clone(),
@@ -3512,16 +3556,20 @@ where
                 {
                     Some(next) => {
                         redirects += 1;
+                        metrics.redirects += 1;
                         url = next;
                         continue;
                     }
                     None => break reply,
                 }
             }
-            Ok(reply) if transient_status(reply.status) && attempt < DISPATCH_ATTEMPTS => {}
+            Ok(reply) if transient_status(reply.status) && attempt < DISPATCH_ATTEMPTS => {
+                metrics.transport_retries += 1;
+            }
             Ok(reply) => break reply,
             Err(err) if attempt < DISPATCH_ATTEMPTS => {
                 let _ = err;
+                metrics.transport_retries += 1;
             }
             Err(err) => {
                 let kind = if err
@@ -3533,9 +3581,7 @@ where
                     "request failed"
                 };
                 return Err(ProviderFault {
-                    summary: one_line(&format!(
-                        "{provider} {kind} after {attempt} attempts: {err}"
-                    )),
+                    summary: one_line(&format!("{provider} {kind} after {attempt} attempts")),
                     body: String::new(),
                 });
             }
@@ -3555,10 +3601,7 @@ where
     if !(200..300).contains(&reply.status) {
         return Err(provider_fault(provider, reply.status, &reply.body));
     }
-    serde_json::from_str(&reply.body).map_err(|err| ProviderFault {
-        summary: format!("{provider} malformed JSON: {err}"),
-        body: pretty_body(&reply.body),
-    })
+    serde_json::from_str(&reply.body).map_err(|_|ProviderFault {summary:format!("{provider} malformed JSON"),body:serde_json::json!({"provider":provider,"code":"malformed_json","bytes":reply.body.len()}).to_string()})
 }
 
 /// Which run [`run_live`] works on.
@@ -3688,86 +3731,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migration_steps_are_resume_safe_and_preserve_publication() {
-        let migrated = AtlasArticleRow {
-            categories: vec!["science".into(), "health".into()],
-            admitted_at: "at".into(),
-            ..Default::default()
-        };
+    fn current_domains_are_exactly_six_and_historical_labels_do_not_alias() {
         assert_eq!(
-            migration_step(&migrated, false, false),
-            MigrationStep::SkipMigrated
+            CATEGORY_IDS,
+            crate::atlas_taxonomy::DomainId::ALL.map(crate::atlas_taxonomy::DomainId::as_str)
         );
-        let legacy = AtlasArticleRow {
-            category: "information".into(),
-            ..Default::default()
-        };
-        // A confirmed-unknown input loses its occurrence.
+        assert_eq!((MIN_ADMISSION_TAGS, MAX_ADMISSION_TAGS), (2, 2));
+        assert_eq!(normalize_category(" Governance "), "governance");
+        assert_eq!(normalize_category("science"), "unk");
+        assert_eq!(normalize_category("military"), "unk");
         assert_eq!(
-            migration_step(&legacy, true, false),
-            MigrationStep::DiscardConfirmedUnknown
+            category_name("scientific"),
+            "Scientific & Technological Capability"
         );
-        // Published evidence keeps its identity across the migration.
-        assert_eq!(
-            migration_step(&legacy, false, true),
-            MigrationStep::SkipPublished
-        );
-        // Unpublished legacy rows reclassify, and re-running is idempotent.
-        assert_eq!(
-            migration_step(&legacy, false, false),
-            MigrationStep::Reclassify
-        );
-    }
-
-    #[test]
-    fn the_taxonomy_registers_the_new_scopes_and_ranked_picks() {
-        // Science and Health replaced Information; retired labels miss.
-        assert_eq!(normalize_category("  Science "), "science");
-        assert_eq!(normalize_category("HEALTH"), "health");
-        assert_eq!(normalize_category("information"), "unk");
-        assert_eq!(normalize_category("sports"), "unk");
-        assert_eq!(category_name("science"), "Science & Environment");
-        assert_eq!(category_name("health"), "Health & Medicine");
-        assert_eq!(category_tag("information"), "unk");
-        let article = FeedArticle {
-            id: "art".into(),
-            title: "Joint military exercise begins".into(),
-            description: "A live-fire drill followed the troop deployment.".into(),
-            url: "https://example.com/drill".into(),
-            country: "us".into(),
-            source_name: "Wire".into(),
-            source_domain: "example.com".into(),
-            author: String::new(),
-            image_url: String::new(),
-            published_at: String::new(),
-            provider: "newsapi".into(),
-            temperature: 1.0,
-            seen_at: String::new(),
-            category: "unk".into(),
-        };
-        let (state, questions) = classification_request(&article);
-        assert_eq!(state["title"], "Joint military exercise begins");
-        // Rank 1 carries the full category criteria with unk as the miss;
-        // later ranks offer `done` so tags are never padded.
-        assert_eq!(questions["category"]["type"], "choice");
-        assert!(questions["category"]["criteria"]["military"]
-            .as_str()
-            .unwrap()
-            .contains("live-fire drill"));
-        assert!(questions["category"]["criteria"]["science"]
-            .as_str()
-            .unwrap()
-            .contains("space exploration"));
-        assert!(questions["category"]["criteria"]["health"]
-            .as_str()
-            .unwrap()
-            .contains("public health"));
-        assert!(questions["category"]["criteria"]["unk"].is_string());
-        assert!(questions["category"]["criteria"]
-            .get("information")
-            .is_none());
-        assert!(questions["category_2"]["criteria"]["done"].is_string());
-        assert!(questions["category_3"]["criteria"]["done"].is_string());
     }
 
     #[test]
@@ -3944,7 +3920,9 @@ mod tests {
         assert!(card.contains("Title: Opinion: International flavour"));
         assert!(card.contains("Publisher: winnipegfreepress.com"));
         assert!(card.contains("Author: Joel Schlesinger; Laurie"));
-        assert!(card.contains("Category: Economic & Resource"));
+        assert!(card
+            .lines()
+            .any(|line| line == "Category: Economic & Supply Chain Resilience"));
         assert!(card.contains(&format!(
             "Published: {}",
             friendly_date("2026-10-03 07:01:24 +0000")
@@ -4215,3 +4193,608 @@ mod acquisition_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod classifier_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn phase_alone_does_not_authorize_post_admission_resume() {
+        let mut cursor = Cursor {
+            phase: 4,
+            ..Cursor::default()
+        };
+        let mut stats = RunStats::default();
+        assert_eq!(
+            cycle_requirement(None, &cursor, &stats, false),
+            CycleRequirement::FreshAcquisition
+        );
+        assert_eq!(
+            cycle_requirement(Some("r"), &cursor, &stats, false),
+            CycleRequirement::PostAdmissionOnly
+        );
+        assert_eq!(
+            cycle_requirement(Some("r"), &cursor, &stats, true),
+            CycleRequirement::AdmissionOnly
+        );
+        stats.acquisition_retry = Some(Cursor::default());
+        assert_eq!(
+            cycle_requirement(Some("r"), &cursor, &stats, false),
+            CycleRequirement::AcquisitionAndAdmission
+        );
+        stats.acquisition_retry = None;
+        cursor.phase = 6;
+        assert_eq!(
+            cycle_requirement(Some("r"), &cursor, &stats, false),
+            CycleRequirement::PostAdmissionOnly
+        );
+        cursor.phase = 3;
+        assert_eq!(
+            cycle_requirement(Some("r"), &cursor, &stats, false),
+            CycleRequirement::AdmissionOnly
+        );
+    }
+
+    #[test]
+    fn malformed_or_unsupported_saved_state_cannot_default_to_an_exemption() {
+        let mut cursor = Cursor::default();
+        let mut stats = RunStats::default();
+        for phase in [0, 7, 255] {
+            cursor.phase = phase;
+            assert!(validate_resume_state(&cursor, &stats).is_err());
+        }
+        cursor = Cursor::default();
+        cursor.chunk = PHASE1_MAX_PAGES + 1;
+        assert!(validate_resume_state(&cursor, &stats).is_err());
+        cursor = Cursor::default();
+        stats.acquisition_retry = Some(Cursor {
+            phase: 4,
+            ..Cursor::default()
+        });
+        assert!(validate_resume_state(&cursor, &stats).is_err());
+        stats.acquisition_retry = None;
+        stats.contract_version = "unknown-future".into();
+        assert!(validate_resume_state(&cursor, &stats).is_err());
+    }
+
+    #[cfg(feature = "embedded")]
+    #[tokio::test]
+    async fn denied_preflight_spends_no_quota_or_fetches_and_preserves_resume_state() {
+        use crate::storage::open::Target;
+        use crate::storage::repo::Repository;
+        use surrealdb::types::SurrealValue;
+        #[derive(Debug, PartialEq, SurrealValue)]
+        struct QuotaState {
+            key: String,
+            used: i64,
+        }
+        async fn quota_snapshot(repo: &Repository) -> Vec<QuotaState> {
+            let mut response = repo
+                .db()
+                .query("SELECT record::id(id) AS key,used FROM atlas_quota")
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+            let mut rows: Vec<QuotaState> = response.take(0).unwrap();
+            rows.sort_by(|left, right| left.key.cmp(&right.key));
+            rows
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("argos.db");
+        let repo = Repository::connect(
+            &Target::Embedded {
+                path: temp.path().join("storage"),
+            },
+            "argos",
+            "preflight_denied",
+        )
+        .await
+        .unwrap();
+        crate::storage::atlas::apply_schema(repo.db())
+            .await
+            .unwrap();
+        // Existing quota state must also survive a denied invocation.
+        crate::storage::atlas::quota_bump(repo.db(), "fixture-provider", "2026-01-01")
+            .await
+            .unwrap();
+        assert_eq!(quota_snapshot(&repo).await[0].used, 1);
+        let pause = AtomicBool::new(false);
+        let keys = ProviderKeys::default();
+        for resume in [false, true] {
+            if resume {
+                crate::storage::atlas::insert_run(
+                    repo.db(),
+                    "paused",
+                    &serde_json::to_string(&Cursor::default()).unwrap(),
+                    &serde_json::to_string(&RunStats::default()).unwrap(),
+                )
+                .await
+                .unwrap();
+                crate::storage::atlas::set_state(
+                    repo.db(),
+                    "paused",
+                    "paused",
+                    "saved unchanged",
+                    false,
+                )
+                .await
+                .unwrap();
+            }
+            let before = crate::storage::atlas::list_runs(repo.db()).await.unwrap();
+            let before_quotas = quota_snapshot(&repo).await;
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = calls.clone();
+            let tracker = std::sync::Mutex::new(AtlasJob::new(&db_path));
+            let result = run_atlas_on_store(
+                RunInput {
+                    db_path: &db_path,
+                    pause: &pause,
+                    keys: &keys,
+                    user_agent: "offline-fixture",
+                    pace: false,
+                    resume,
+                    feed: &[],
+                    classifier: None,
+                    synthesizer: None,
+                    synthesizer_fallbacks: &[],
+                    run_id: resume.then_some("paused"),
+                },
+                |_| {},
+                move |_| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async {
+                        anyhow::bail!("fetch must not run before denied classifier preflight")
+                    })
+                },
+                &tracker,
+                AtlasStore::from_repository(repo.clone()),
+            )
+            .await;
+            assert!(result
+                .unwrap_err()
+                .downcast_ref::<CyclePreflightError>()
+                .is_some());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(tracker.lock().unwrap().run_id.is_empty());
+            let after = crate::storage::atlas::list_runs(repo.db()).await.unwrap();
+            assert_eq!(
+                before
+                    .iter()
+                    .map(|run| (
+                        &run.id,
+                        &run.state,
+                        run.phase,
+                        &run.cursor_json,
+                        &run.stats_json,
+                        &run.note,
+                        &run.started_at,
+                        &run.finished_at
+                    ))
+                    .collect::<Vec<_>>(),
+                after
+                    .iter()
+                    .map(|run| (
+                        &run.id,
+                        &run.state,
+                        run.phase,
+                        &run.cursor_json,
+                        &run.stats_json,
+                        &run.note,
+                        &run.started_at,
+                        &run.finished_at
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(quota_snapshot(&repo).await, before_quotas);
+            assert!(!temp.path().join("classifier").exists());
+        }
+        let store = AtlasStore::from_repository(repo.clone());
+        let home = ClassifierHome::new(temp.path().to_path_buf());
+        let cursor = Cursor {
+            phase: 6,
+            ..Cursor::default()
+        };
+        let stats = RunStats::default();
+        let other = AtlasArticleRow {
+            run_id: "other-run".into(),
+            id: "a".into(),
+            ..AtlasArticleRow::default()
+        };
+        crate::storage::atlas::stage_article(repo.db(), &other, "revision", "fixture")
+            .await
+            .unwrap();
+        let permit = classifier_cycle_preflight(&store, &home, Some("paused"), &cursor, &stats)
+            .await
+            .unwrap();
+        assert_eq!(permit.requirement(), CycleRequirement::PostAdmissionOnly);
+        assert!(permit.pinned().is_none());
+        let pending = AtlasArticleRow {
+            run_id: "paused".into(),
+            id: "b".into(),
+            ..AtlasArticleRow::default()
+        };
+        crate::storage::atlas::stage_article(repo.db(), &pending, "revision", "fixture")
+            .await
+            .unwrap();
+        assert!(matches!(
+            classifier_cycle_preflight(&store, &home, Some("paused"), &cursor, &stats).await,
+            Err(CyclePreflightError::MissingPinnedRevision)
+        ));
+        home.shutdown().await.unwrap();
+    }
+}
+
+/// Runtime handoff is signalled before pin allocation. Only transient admission
+/// errors retry, under one absolute deadline; existing model pins are never
+/// evicted to make a fourth runtime fit.
+async fn foreground_classifier_preflight(
+    store: &AtlasStore,
+    home: &ClassifierHome,
+    run_id: Option<&str>,
+    cursor: &Cursor,
+    stats: &RunStats,
+    owner: &crate::storage::classifier_admission::AdmissionOwner,
+    intent: &crate::storage::classifier_admission::ForegroundIntent,
+    deadline: tokio::time::Instant,
+) -> Result<CyclePermit> {
+    use crate::classifier::{ClassifierError, ClassifierStatus};
+    let pending = || CyclePreflightError::Classifier {
+        status: ClassifierStatus::Unavailable,
+        code: "foreground_handoff_pending".into(),
+        source: ClassifierError::Busy,
+    };
+    let mut renewal = tokio::time::interval(std::time::Duration::from_secs(1));
+    renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    renewal.tick().await;
+    loop {
+        let attempt = classifier_cycle_preflight(store, home, run_id, cursor, stats);
+        tokio::pin!(attempt);
+        let result = loop {
+            tokio::select! {
+                result=&mut attempt=>break result,
+                _=tokio::time::sleep_until(deadline)=>return Err(pending().into()),
+                _=renewal.tick()=> {
+                    if !crate::storage::classifier_admission::renew_foreground_intent(owner,intent,chrono::Utc::now()).await? {return Err(pending().into());}
+                }
+            }
+        };
+        match result {
+            Ok(permit) => return Ok(permit),
+            Err(error) if matches!(&error,CyclePreflightError::Classifier {source,..} if matches!(source,ClassifierError::Busy | ClassifierError::RuntimeBudgetExceeded {..})) =>
+                {}
+            Err(error) => return Err(error.into()),
+        }
+        tokio::select! {
+            _=tokio::time::sleep_until(deadline)=>return Err(pending().into()),
+            _=tokio::time::sleep(std::time::Duration::from_millis(100))=>{},
+            _=renewal.tick()=> {
+                if !crate::storage::classifier_admission::renew_foreground_intent(owner,intent,chrono::Utc::now()).await? {return Err(pending().into());}
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ClassifierDbSample {
+    round_trips: u64,
+    conflicts: u64,
+    begins: u64,
+    commits: u64,
+    rollbacks: u64,
+}
+impl ClassifierDbSample {
+    fn read(metrics: &crate::storage::classifier_admission::DbMetrics) -> Self {
+        Self {
+            round_trips: metrics.round_trips(),
+            conflicts: metrics.conflict_retries(),
+            begins: metrics.begins(),
+            commits: metrics.commits(),
+            rollbacks: metrics.rollbacks(),
+        }
+    }
+    fn delta(self, before: Self) -> serde_json::Value {
+        serde_json::json!({"round_trips":self.round_trips.checked_sub(before.round_trips),"conflict_retries":self.conflicts.checked_sub(before.conflicts),"begins":self.begins.checked_sub(before.begins),"commits":self.commits.checked_sub(before.commits),"rollbacks":self.rollbacks.checked_sub(before.rollbacks)})
+    }
+}
+#[derive(Clone, Debug, Default, serde::Serialize)]
+struct ProviderCallCounts {
+    calls: u64,
+    transport_retries: u64,
+    redirects: u64,
+    fallbacks: u64,
+}
+pub(crate) async fn classifier_worker_observation(
+    context: &crate::atlas_classify::AdmissionContext,
+) -> Result<crate::classifier::ClassifierPerformance, &'static str> {
+    let service = context.pin.service.clone();
+    match tokio::task::spawn_blocking(move || service.performance()).await {
+        Ok(Ok(performance))
+            if performance.batch_execution_micros.len() == performance.batch_sizes.len()
+                && performance.batch_sizes.len() <= 4096
+                && performance
+                    .batch_sizes
+                    .iter()
+                    .all(|size| (1..=64).contains(size)) =>
+        {
+            Ok(performance)
+        }
+        Ok(Ok(_)) => Err("invalid_worker_snapshot"),
+        _ => Err("worker_performance_unavailable"),
+    }
+}
+fn nearest_rank(samples: &[u64], percentile: usize) -> Option<u64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut values = samples.to_vec();
+    values.sort_unstable();
+    let rank = (values.len() * percentile).div_ceil(100).max(1);
+    values.get(rank - 1).copied()
+}
+pub(crate) fn classifier_worker_metrics(
+    before: Option<&crate::classifier::ClassifierPerformance>,
+    after: Result<&crate::classifier::ClassifierPerformance, &str>,
+) -> serde_json::Value {
+    match after {
+        Ok(after) => {
+            let queue = before
+                .and_then(|before| after.queue_micros.checked_sub(before.queue_micros))
+                .map(|micros| micros as f64 / 1000.0);
+            let mut sizes = [0u64; 64];
+            for size in &after.batch_sizes {
+                sizes[*size - 1] += 1;
+            }
+            serde_json::json!({
+                "atlas.classifier.queue_ms":queue,"atlas.classifier.queue_reason":if queue.is_some(){None}else{Some("baseline_unavailable_or_counter_discontinuity")},
+                "atlas.classifier.p50_ms":nearest_rank(&after.batch_execution_micros,50).map(|micros|micros as f64/1000.0),
+                "atlas.classifier.p95_ms":nearest_rank(&after.batch_execution_micros,95).map(|micros|micros as f64/1000.0),
+                "atlas.classifier.samples":after.batch_execution_micros.len(),"atlas.classifier.latency_unit":"batch",
+                "atlas.classifier.latency_reason":if after.batch_execution_micros.is_empty(){Some("no_execution_samples")}else{None},
+                "atlas.classifier.batch_sizes":sizes.as_slice(),"atlas.classifier.batch_sizes_encoding":"histogram_index_plus_one",
+                "atlas.classifier.js_heap_current_bytes":after.js_heap_current_bytes,"atlas.classifier.js_heap_peak_bytes":after.js_heap_peak_bytes,
+                "atlas.classifier.runtime_reserved_bytes":after.runtime_reserved_bytes,"atlas.classifier.stack_limit_bytes":after.stack_limit_bytes,
+            })
+        }
+        Err(reason) => {
+            serde_json::json!({"atlas.classifier.queue_ms":null,"atlas.classifier.p50_ms":null,"atlas.classifier.p95_ms":null,"atlas.classifier.samples":null,"atlas.classifier.batch_sizes":null,"atlas.classifier.js_heap_current_bytes":null,"atlas.classifier.js_heap_peak_bytes":null,"atlas.classifier.runtime_reserved_bytes":null,"atlas.classifier.stack_limit_bytes":null,"atlas.classifier.unavailable_reason":reason})
+        }
+    }
+}
+impl CycleTelemetry {
+    fn provider_calls(&mut self, counts: &ProviderCallCounts) {
+        self.provider_counts.calls += counts.calls;
+        self.provider_counts.transport_retries += counts.transport_retries;
+        self.provider_counts.redirects += counts.redirects;
+        self.provider_counts.fallbacks += counts.fallbacks;
+    }
+    /// One bounded aggregate per examined subgroup. No text, URLs, row labels or
+    /// provenance enter this payload. Source/worker timings remain distinct.
+    async fn classifier_chunk(
+        &mut self,
+        repo: &crate::storage::repo::Repository,
+        context: &crate::atlas_classify::AdmissionContext,
+        claims: &[crate::storage::classifier_admission::AdmissionClaim],
+        observed: ClassifierChunkObservation<'_>,
+    ) -> Result<()> {
+        use crate::storage::classifier_admission::ItemCommit;
+        let mut dispositions = std::collections::BTreeMap::<&str, u64>::new();
+        for outcome in observed.results {
+            let kind = match outcome {
+                ItemCommit::Committed { .. } => "committed",
+                ItemCommit::AlreadyCommitted { .. } => "already_committed",
+                ItemCommit::StaleInput { .. } => "stale",
+                ItemCommit::LeaseLost { .. } => "lease_lost",
+                ItemCommit::Retryable { .. } => "retryable",
+                ItemCommit::Cancelled { .. } => "cancelled",
+                ItemCommit::InvalidReceipt { .. } => "invalid_receipt",
+            };
+            *dispositions.entry(kind).or_default() += 1;
+        }
+        let after = classifier_worker_observation(context).await;
+        let mut metrics = classifier_worker_metrics(
+            observed.worker_before,
+            after.as_ref().map_err(|reason| *reason),
+        );
+        let object = metrics
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("classifier metric shape"))?;
+        let current = observed.cache;
+        for (name, value) in [
+            (
+                "atlas.stage.wall_ms",
+                serde_json::json!(observed.wall_micros as f64 / 1000.0),
+            ),
+            ("atlas.stage.queue_ms", serde_json::Value::Null),
+            (
+                "atlas.stage.queue_reason",
+                serde_json::json!("registry_admission_timestamp_unavailable"),
+            ),
+            ("atlas.db", observed.db_after.delta(observed.db_before)),
+            (
+                "atlas.db.scope",
+                serde_json::json!("classifier_owned_queries_and_transaction_boundaries"),
+            ),
+            ("atlas.rows.read", serde_json::json!(observed.rows_read)),
+            ("atlas.rows.claimed", serde_json::json!(claims.len())),
+            ("atlas.rows.dispositions", serde_json::json!(dispositions)),
+            (
+                "atlas.classifier.cache_hits",
+                serde_json::json!(current.hits.checked_sub(observed.cache_before.hits)),
+            ),
+            (
+                "atlas.classifier.cache_misses",
+                serde_json::json!(current.misses.checked_sub(observed.cache_before.misses)),
+            ),
+            (
+                "atlas.classifier.cache_evictions",
+                serde_json::json!(current
+                    .evictions
+                    .checked_sub(observed.cache_before.evictions)),
+            ),
+            (
+                "atlas.classifier.cache_bytes",
+                serde_json::json!(current.bytes),
+            ),
+            (
+                "atlas.classifier.model_id",
+                serde_json::json!(context.pin.snapshot.model_id),
+            ),
+            (
+                "atlas.classifier.artifact_sha256",
+                serde_json::json!(context.pin.snapshot.artifact_sha256),
+            ),
+            (
+                "atlas.classifier.manifest_sha256",
+                serde_json::json!(context.manifest_sha256),
+            ),
+            (
+                "atlas.classifier.taxonomy_version",
+                serde_json::json!(context.pin.snapshot.taxonomy_version),
+            ),
+            (
+                "atlas.classifier.policy_version",
+                serde_json::json!(context.pin.snapshot.policy_version),
+            ),
+            (
+                "atlas.classifier.computations",
+                serde_json::json!(observed.page.map(|page| page.computations)),
+            ),
+            (
+                "atlas.classifier.rejections",
+                serde_json::json!(observed.page.map(|page| &page.rejections)),
+            ),
+            (
+                "atlas.classifier.errors",
+                serde_json::json!(observed.page.map(|page| &page.operational_errors)),
+            ),
+            (
+                "atlas.classifier.outcome_metrics_reason",
+                serde_json::json!(if observed.page.is_some() {
+                    None
+                } else {
+                    Some("operation_did_not_return_page_metrics")
+                }),
+            ),
+            (
+                "atlas.host.buffer_peak_bytes",
+                serde_json::json!(observed.page.map(|page| page.owned_text_buffer_peak_bytes)),
+            ),
+            (
+                "atlas.host.buffer_reason",
+                serde_json::json!(if observed.page.is_some() {
+                    None
+                } else {
+                    Some("classification_not_completed")
+                }),
+            ),
+            (
+                "atlas.host.buffer_scope",
+                serde_json::json!("adapter_title_description_string_capacities_only"),
+            ),
+            ("atlas.host.total_buffer_bytes", serde_json::Value::Null),
+            (
+                "atlas.host.total_buffer_reason",
+                serde_json::json!("allocator_not_sampled"),
+            ),
+            ("atlas.process.rss_bytes", serde_json::Value::Null),
+            (
+                "atlas.process.rss_reason",
+                serde_json::json!("process_rss_not_sampled"),
+            ),
+            (
+                "atlas.provider.calls",
+                serde_json::json!(self.provider_counts.calls),
+            ),
+            (
+                "atlas.provider.transport_retries",
+                serde_json::json!(self.provider_counts.transport_retries),
+            ),
+            (
+                "atlas.provider.fallbacks",
+                serde_json::json!(self.provider_counts.fallbacks),
+            ),
+        ] {
+            object.insert(name.into(), value);
+        }
+        self.classifier_read += u64::try_from(observed.rows_read).unwrap_or(u64::MAX);
+        self.classifier_claimed += u64::try_from(claims.len()).unwrap_or(u64::MAX);
+        for (kind, count) in &dispositions {
+            *self
+                .classifier_dispositions
+                .entry((*kind).into())
+                .or_default() += count;
+        }
+        let baseline = *self.classifier_db_start.get_or_insert(observed.db_before);
+        let queue_delta = observed
+            .worker_before
+            .zip(after.as_ref().ok())
+            .and_then(|(before, after)| after.queue_micros.checked_sub(before.queue_micros));
+        self.classifier_queue_micros = self
+            .classifier_queue_micros
+            .zip(queue_delta)
+            .and_then(|(total, delta)| total.checked_add(delta));
+        self.classifier_metrics = metrics.clone();
+        self.classifier_metrics["atlas.classifier.queue_ms"] = serde_json::json!(self
+            .classifier_queue_micros
+            .map(|micros| micros as f64 / 1000.0));
+        self.classifier_metrics["atlas.classifier.queue_reason"] =
+            serde_json::json!(if self.classifier_queue_micros.is_some() {
+                None
+            } else {
+                Some("one_or_more_queue_intervals_unavailable")
+            });
+        self.classifier_metrics["atlas.db"] = observed.db_after.delta(baseline);
+        self.classifier_metrics["atlas.rows.read"] = serde_json::json!(self.classifier_read);
+        self.classifier_metrics["atlas.rows.claimed"] = serde_json::json!(self.classifier_claimed);
+        self.classifier_metrics["atlas.rows.dispositions"] =
+            serde_json::json!(self.classifier_dispositions);
+        self.classifier_metrics["atlas.classifier.cache_hits"] = serde_json::json!(current.hits);
+        self.classifier_metrics["atlas.classifier.cache_misses"] =
+            serde_json::json!(current.misses);
+        self.classifier_metrics["atlas.classifier.cache_evictions"] =
+            serde_json::json!(current.evictions);
+        let first = claims.first().map(|claim| claim.work_seq).unwrap_or(0);
+        let last = claims.last().map(|claim| claim.work_seq).unwrap_or(0);
+        let payload = serde_json::json!({"stage":"classification","unit":"chunk","first_work_seq":first,"last_work_seq":last,"metrics":metrics});
+        let payload = if serde_json::to_string(&payload)?.chars().count()
+            <= telemetry::MAX_PAYLOAD_CHARS
+        {
+            payload
+        } else {
+            serde_json::json!({"stage":"classification","metrics":null,"unavailable_reason":"telemetry_payload_bound","rows":claims.len()})
+        };
+        let event = TelemetryEvent::new(EventKind::AtlasStage)
+            .trigger(Trigger::AtlasCycle)
+            .app("atlas")
+            .run(&self.run_id)
+            .tool("local_classifier")
+            .category("batch")
+            .model(&context.pin.snapshot.model_id)
+            .outcome("examined")
+            .duration_ms(i64::try_from(observed.wall_micros / 1000).ok())
+            .count(1)
+            .with_id(format!(
+                "atlas-classifier-{}-{}-{first}-{last}",
+                self.run_id, context.pin.snapshot.model_id
+            ))
+            .payload(payload);
+        crate::storage::telemetry::record(repo.db(), &event).await?;
+        Ok(())
+    }
+}
+struct ClassifierChunkObservation<'a> {
+    db_before: ClassifierDbSample,
+    db_after: ClassifierDbSample,
+    cache_before: crate::atlas_classify::CacheMetrics,
+    cache: crate::atlas_classify::CacheMetrics,
+    worker_before: Option<&'a crate::classifier::ClassifierPerformance>,
+    page: Option<&'a crate::atlas_classify::PageMetrics>,
+    results: &'a [crate::storage::classifier_admission::ItemCommit],
+    rows_read: usize,
+    wall_micros: u64,
+}
+
+#[cfg(test)]
+#[path = "atlas_performance_tests.rs"]
+mod classifier_performance_tests;

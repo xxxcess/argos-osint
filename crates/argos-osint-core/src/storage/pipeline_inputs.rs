@@ -63,7 +63,8 @@ DEFINE FIELD IF NOT EXISTS transform_version ON nlp_source_ref TYPE string;
 DEFINE FIELD IF NOT EXISTS registered_at ON nlp_source_ref TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS nlp_ref_owner ON nlp_source_ref FIELDS owner_kind, owner_id;
 DEFINE TABLE IF NOT EXISTS app_state SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS value ON app_state TYPE string;";
+DEFINE FIELD IF NOT EXISTS value ON app_state TYPE string;
+DEFINE TABLE IF NOT EXISTS atlas_body_input_guard SCHEMALESS;";
 
 /// Retain `text` in the artifact store (idempotent); returns its hash.
 pub async fn artifact_in(tx: &Tx, text: &str) -> Result<String, TxError> {
@@ -96,6 +97,9 @@ pub async fn register_in(
 ) -> Result<(), TxError> {
     if hash(&source.prose) != source.prose_hash {
         return Err(TxError::Abort("prose hash mismatch".into()));
+    }
+    if owner_kind == "article" {
+        body_input_guard_in(tx, &[owner_id.to_owned()]).await?;
     }
     let raw_hash = match raw {
         Some(raw) => Some(artifact_in(tx, raw).await?),
@@ -225,8 +229,13 @@ struct BodyRow {
 }
 
 pub async fn put_article_body(repo: &Repository, b: &ArticleBodyRow) -> Result<()> {
-    repo.db()
-        .query(
+    let owner = super::classifier_admission::AdmissionOwner::new(repo.clone());
+    let body = b.clone();
+    let result = super::classifier_admission::owned_tx(&owner, RetryPolicy::default(), move |tx| {
+        let b = body.clone();
+        async move {
+            body_input_guard_in(&tx, &[b.article_id.clone()]).await?;
+            run(&tx,tx.query(
             "UPSERT $b SET article_id = $a, run_id = $run, original_url = $ou, resolved_url = $ru,
                source_domain = $sd, source_name = $sn, body_markdown = $md, content_hash = $ch,
                quality = $q, quality_rationale = $qr, body_version = $v, fetch_tool = $ft,
@@ -250,9 +259,14 @@ pub async fn put_article_body(repo: &Repository, b: &ArticleBodyRow) -> Result<(
         .bind(("ra", b.retry_after.clone()))
         .bind(("st", b.state.clone()))
         .bind(("c", b.created_at.clone()))
-        .bind(("u", b.updated_at.clone()))
-        .await?
-        .check()?;
+        .bind(("u", b.updated_at.clone()))).await?;
+            Ok(())
+        }
+    })
+    .await;
+    let cleanup = owner.shutdown().await;
+    result?;
+    cleanup?;
     Ok(())
 }
 
@@ -640,4 +654,33 @@ impl crate::investigation::insights::EvidenceLookup for Prefetched {
     fn retain_artifact(&mut self, text: &str) -> Result<String> {
         Ok(hash(text))
     }
+}
+
+/// Serializes article body versions and source registrations with publishers
+/// that promise an exact current clean-body head. Acquire before reading heads,
+/// then compare captured versions in the same publication transaction.
+pub async fn body_input_guard_in(tx: &Tx, article_ids: &[String]) -> Result<(), TxError> {
+    if article_ids.len() > 64
+        || article_ids
+            .iter()
+            .any(|id| !crate::intel_service::valid_id(id))
+    {
+        return Err(TxError::Abort("body_input_guard_bounds".into()));
+    }
+    let records: Vec<_> = article_ids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|id| rid("atlas_body_input_guard", id))
+        .collect();
+    if records.is_empty() {
+        return Ok(());
+    }
+    run(
+        tx,
+        tx.query("FOR $guard IN $guards {UPSERT $guard SET rev=(rev ?? 0)+1 RETURN NONE;};")
+            .bind(("guards", records)),
+    )
+    .await?;
+    Ok(())
 }

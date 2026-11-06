@@ -1,5 +1,5 @@
 //! Service setup before any application opens storage.
-#[cfg(feature = "surreal")]
+pub(crate) mod classifier;
 pub(crate) mod seed;
 mod terminal;
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -40,10 +40,13 @@ impl<R: BufRead, W: Write> Prompts for Lines<'_, R, W> {
 
 #[allow(dead_code)]
 pub(crate) fn run() -> anyhow::Result<Option<Selection>> {
-    run_with_notice(None)
+    run_with_notice(None, None)
 }
 
-pub(crate) fn run_with_notice(notice: Option<&str>) -> anyhow::Result<Option<Selection>> {
+pub(crate) fn run_with_notice(
+    notice: Option<&str>,
+    classifier: Option<&argos_osint_core::classifier::readiness::Readiness>,
+) -> anyhow::Result<Option<Selection>> {
     let mut existing = None;
     #[cfg(feature = "surreal")]
     {
@@ -84,8 +87,34 @@ pub(crate) fn run_with_notice(notice: Option<&str>) -> anyhow::Result<Option<Sel
             eprintln!("{msg}");
         }
     }
+    let needs_classifier = classifier.is_none_or(|status| !status.can_infer);
+    let classifier_notice = classifier.map(|status| {
+        let model = status
+            .active_model
+            .as_ref()
+            .map(|m| format!(" · {} · {}", m.model_id, m.provenance.label))
+            .unwrap_or_default();
+        format!(
+            "Classifier: {}{model}{}",
+            status.state.as_str(),
+            status
+                .diagnostic
+                .as_ref()
+                .map(|d| format!(" · {}", d.message))
+                .unwrap_or_default()
+        )
+    });
+    let notice = match (notice, classifier_notice.as_deref()) {
+        (Some(notice), Some(classifier)) => Some(format!("{notice}\n{classifier}")),
+        (Some(notice), None) => Some(notice.to_string()),
+        (None, Some(classifier)) => Some(classifier.to_string()),
+        _ => None,
+    };
     if io::stdin().is_terminal() && io::stdout().is_terminal() {
-        return terminal::run(existing, notice, needs_seed);
+        return terminal::run(existing, notice.as_deref(), needs_seed, needs_classifier);
+    }
+    if let Some(notice) = notice {
+        eprintln!("{notice}");
     }
     Ok(configure_seed(
         &mut Lines {
@@ -94,6 +123,7 @@ pub(crate) fn run_with_notice(notice: Option<&str>) -> anyhow::Result<Option<Sel
         },
         existing,
         needs_seed,
+        needs_classifier,
     )?)
 }
 
@@ -150,13 +180,33 @@ fn select(
 
 #[cfg(test)]
 fn configure(ui: &mut impl Prompts, existing: Option<&str>) -> io::Result<Option<Selection>> {
-    configure_seed(ui, existing, false)
+    configure_seed(ui, existing, false, false)
+}
+
+fn dataset_path(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let value = if (value.starts_with('"') && value.ends_with('"'))
+        || (value.starts_with('\'') && value.ends_with('\''))
+    {
+        value.get(1..value.len().saturating_sub(1)).unwrap_or("")
+    } else {
+        value
+    };
+    (!value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control))
+        .then_some(value)
+}
+
+fn append_dataset_file(args: &mut Vec<String>, selection: &str) {
+    if let Some(path) = dataset_path(selection).filter(|path| *path != "auto") {
+        args.extend(["--file".into(), path.into()]);
+    }
 }
 
 fn configure_seed(
     ui: &mut impl Prompts,
     existing: Option<&str>,
     needs_seed: bool,
+    needs_classifier: bool,
 ) -> io::Result<Option<Selection>> {
     macro_rules! prompt {
         ($label:expr, $default:expr, $valid:expr) => {
@@ -179,24 +229,64 @@ fn configure_seed(
     ui.message(&format!(
         "{banner}\nWelcome to Argos Venture! Which service would you like to run?\n"
     ))?;
-    ui.message(if needs_seed {
-        "  1. TUI\n  2. API Server\n  3. Web\n  4. Seed DB\n  q. Quit\n"
+    let mut choices = String::new();
+    if needs_classifier {
+        ui.message("Train the initial classifier to enable TUI, API Server and Web. The supplied seed creates a synthetic baseline; it is development evidence, not reviewed real reporting.")?;
     } else {
-        "  1. TUI\n  2. API Server\n  3. Web\n  q. Quit\n"
-    })?;
+        choices.push_str("  1. TUI\n  2. API Server\n  3. Web\n");
+    }
+    if needs_seed {
+        choices.push_str("  4. Seed DB\n");
+    }
+    if needs_classifier {
+        choices.push_str("  5. Train and save classifier\n");
+    }
+    choices.push_str("  q. Quit\n");
+    ui.message(&choices)?;
     let service = prompt!("Choose a service", "", |value: &str| {
         let value = value.to_ascii_lowercase();
-        matches!(
-            value.as_str(),
-            "1" | "tui" | "2" | "api" | "api server" | "server" | "3" | "web"
-        ) || (needs_seed && matches!(value.as_str(), "4" | "seed" | "seed db"))
+        (!needs_classifier
+            && matches!(
+                value.as_str(),
+                "1" | "tui" | "2" | "api" | "api server" | "server" | "3" | "web"
+            ))
+            || (needs_classifier && matches!(value.as_str(), "5" | "train" | "train classifier"))
+            || (needs_seed && matches!(value.as_str(), "4" | "seed" | "seed db"))
     });
+    if matches!(
+        service.to_ascii_lowercase().as_str(),
+        "5" | "train" | "train classifier"
+    ) {
+        let file = prompt!(
+            "Classifier CSV path (auto for configured/default)",
+            "auto",
+            |value: &str| dataset_path(value).is_some()
+        );
+        let mut args = vec![
+            "argos".into(),
+            "classifier".into(),
+            "train".into(),
+            "--activate-synthetic-baseline".into(),
+        ];
+        append_dataset_file(&mut args, &file);
+        return Ok(Some(Selection {
+            args,
+            storage_init: None,
+        }));
+    }
     if matches!(
         service.to_ascii_lowercase().as_str(),
         "4" | "seed" | "seed db"
     ) {
+        let file = prompt!(
+            "Actor CSV path (auto for configured/default)",
+            "auto",
+            |value: &str| dataset_path(value).is_some()
+        );
+        let mut args = vec!["argos".into(), "storage".into(), "seed-actors".into()];
+        append_dataset_file(&mut args, &file);
         return Ok(Some(Selection {
-            args: vec!["argos".into(), "storage".into(), "seed-actors".into()],
+            args,
             storage_init: existing.is_none().then(|| {
                 vec![
                     "storage".into(),
@@ -324,8 +414,102 @@ mod tests {
             .unwrap()
     }
     #[test]
+    fn initial_classifier_setup_is_conditional_and_precedes_service_selection() {
+        for needs_seed in [false, true] {
+            let mut input = std::io::Cursor::new(b"1\n5\n\n");
+            let mut output = Vec::new();
+            let selection = configure_seed(
+                &mut Lines {
+                    input: &mut input,
+                    output: &mut output,
+                },
+                None,
+                needs_seed,
+                true,
+            )
+            .expect("wizard")
+            .expect("initial training");
+            assert_eq!(
+                selection.args,
+                [
+                    "argos",
+                    "classifier",
+                    "train",
+                    "--activate-synthetic-baseline"
+                ]
+            );
+            assert!(
+                selection.storage_init.is_none(),
+                "training precedes database/service setup"
+            );
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("5. Train and save classifier"));
+            assert!(output.contains("synthetic baseline"));
+            assert!(!output.contains("1. TUI"));
+            assert!(!output.contains("Web port"));
+            assert!(!output.contains("Storage mode"));
+        }
+        let mut input = std::io::Cursor::new(b"5\nq\n");
+        let mut output = Vec::new();
+        assert!(configure_seed(
+            &mut Lines {
+                input: &mut input,
+                output: &mut output
+            },
+            Some("embedded"),
+            false,
+            false
+        )
+        .unwrap()
+        .is_none());
+        assert!(!String::from_utf8(output)
+            .unwrap()
+            .contains("5. Train and save classifier"));
+    }
+
+    #[test]
+    fn selected_csv_paths_are_passed_as_literal_arguments_to_each_ingestion_service() {
+        for (input, classifier) in [
+            ("5\n/fixture data/資料/domains.csv\n", true),
+            ("4\n\"/fixture data/actors.csv\"\n", false),
+        ] {
+            let mut input = std::io::Cursor::new(input.as_bytes());
+            let mut output = Vec::new();
+            let selected = configure_seed(
+                &mut Lines {
+                    input: &mut input,
+                    output: &mut output,
+                },
+                Some("embedded"),
+                true,
+                classifier,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(selected.storage_init.is_none());
+            let file = selected
+                .args
+                .windows(2)
+                .find(|arguments| arguments[0] == "--file")
+                .expect("explicit CSV argument");
+            assert_eq!(
+                file[1],
+                if classifier {
+                    "/fixture data/資料/domains.csv"
+                } else {
+                    "/fixture data/actors.csv"
+                }
+            );
+            assert_eq!(
+                selected.args[1],
+                if classifier { "classifier" } else { "storage" }
+            );
+        }
+    }
+
+    #[test]
     fn seed_service_is_conditional_and_dispatches_without_stack_startup() {
-        let mut input = std::io::Cursor::new(b"4\n");
+        let mut input = std::io::Cursor::new(b"4\n\n");
         let mut output = Vec::new();
         let selected = configure_seed(
             &mut Lines {
@@ -334,6 +518,7 @@ mod tests {
             },
             Some("embedded"),
             true,
+            false,
         )
         .expect("prompt")
         .expect("selection");
@@ -350,6 +535,7 @@ mod tests {
                 output: &mut output
             },
             Some("embedded"),
+            false,
             false
         )
         .expect("prompt")

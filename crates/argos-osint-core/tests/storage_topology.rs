@@ -88,7 +88,8 @@ async fn seed(repo: &Repository) -> (String, String) {
     )
     .await
     .unwrap();
-    let link = serde_json::to_string(&MemoryPayload::Link(LinkPayload {
+    let link = serde_json::to_string(&MemoryPayload::Link(Box::new(LinkPayload {
+        validation: None,
         source: EndpointRef::Memory {
             memory_id: "act1".into(),
             kind: MemoryKind::Actor,
@@ -102,7 +103,7 @@ async fn seed(repo: &Repository) -> (String, String) {
         rationale: "because".into(),
         receipts: vec![],
         promoted_from: None,
-    }))
+    })))
     .unwrap();
     db.query(
         "CREATE memory:act1 SET text = 'Acme Corp', memory_kind = 'actor';
@@ -321,6 +322,10 @@ async fn actor_group_topology_scopes_depth_and_seeds() {
 /// Adds inference i1 with c1 as its payload premise.
 async fn seed_inference(repo: &Repository, c1: &str) -> String {
     let payload = serde_json::to_string(&MemoryPayload::Inference(InferencePayload {
+        inference_kind: None,
+        domains: Vec::new(),
+        conditions: Vec::new(),
+        extraction_fidelity: None,
         premise_claims: vec![c1.into()],
         reasoning: "follows".into(),
         ..Default::default()

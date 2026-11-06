@@ -2,6 +2,7 @@
 import React, { useState } from "react";
 import { View, Text, Pressable } from "react-native";
 import type { Article } from "@argos/api-client";
+import { articleDomainLabel } from "../article-domain-label";
 import { intelColors as c } from "../../shell/intel-theme";
 import { briefStyles as s } from "./briefStyles";
 export function RelatedBriefCard({
@@ -28,7 +29,7 @@ export function RelatedBriefCard({
       style={[s.related, hovered && { borderColor: c.borderStrong }]}
     >
       <View style={s.meta}>
-        <Text style={s.micro}>{article.category.toUpperCase()}</Text>
+        <Text style={s.micro}>{articleDomainLabel(article)}</Text>
         <Text style={s.micro}>
           {article.published_at.slice(0, 10) || "Date unavailable"}
         </Text>

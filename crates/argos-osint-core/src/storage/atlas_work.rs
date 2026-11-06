@@ -11,6 +11,7 @@ use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
 
 use super::codec::encode;
+use super::tx::{run_tx, RetryPolicy};
 use crate::atlas_work::UnitManifest;
 
 /// Work-unit schema (idempotent). Register in bootstrap as
@@ -20,6 +21,11 @@ DEFINE FIELD IF NOT EXISTS run_id ON atlas_work_unit TYPE string;
 DEFINE FIELD IF NOT EXISTS unit_id ON atlas_work_unit TYPE string;
 DEFINE FIELD IF NOT EXISTS stage ON atlas_work_unit TYPE int;
 DEFINE FIELD IF NOT EXISTS manifest_json ON atlas_work_unit TYPE string;
+DEFINE FIELD IF NOT EXISTS owner ON atlas_work_unit TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS epoch ON atlas_work_unit TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS lease_until ON atlas_work_unit TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS input_revision ON atlas_work_unit TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS source_revision ON atlas_work_unit TYPE string DEFAULT '';
 DEFINE INDEX IF NOT EXISTS atlas_work_unit_run_stage ON atlas_work_unit FIELDS run_id, stage;";
 
 pub async fn apply_schema(db: &Surreal<Any>) -> Result<()> {
@@ -27,23 +33,41 @@ pub async fn apply_schema(db: &Surreal<Any>) -> Result<()> {
     Ok(())
 }
 
-/// `Store::atlas_save_unit_manifest` (replace).
+/// Save legacy bookkeeping without replacing native ownership or revisions.
 pub async fn save_unit_manifest(db: &Surreal<Any>, m: &UnitManifest) -> Result<()> {
     if m.run_id.is_empty() || m.unit_id.is_empty() {
         bail!("atlas_work_unit: empty id");
     }
-    db.query(
-        "UPSERT type::record('atlas_work_unit', $key) CONTENT {
-           run_id: $run, unit_id: $unit, stage: $stage, manifest_json: $json
-         } RETURN NONE",
-    )
-    .bind(("key", encode(&[&m.run_id, &m.unit_id])))
-    .bind(("run", m.run_id.clone()))
-    .bind(("unit", m.unit_id.clone()))
-    .bind(("stage", i64::from(m.stage)))
-    .bind(("json", serde_json::to_string(m)?))
-    .await?
-    .check()?;
+    let key = encode(&[&m.run_id, &m.unit_id]);
+    let fields = (
+        m.run_id.clone(),
+        m.unit_id.clone(),
+        i64::from(m.stage),
+        serde_json::to_string(m)?,
+    );
+    run_tx(db, RetryPolicy::default(), move |tx| {
+        let key = key.clone();
+        let (run, unit, stage, json) = fields.clone();
+        async move {
+            tx.query(
+                "LET $old = (SELECT * FROM ONLY type::record('atlas_work_unit', $key));
+                IF ($old.owner ?? '') != '' { THROW 'owned_work_unit_requires_fenced_writer'; };
+                UPSERT type::record('atlas_work_unit', $key) SET
+                    run_id=$run, unit_id=$unit, stage=$stage, manifest_json=$json,
+                    owner=owner ?? '', epoch=epoch ?? 0, input_revision=input_revision ?? 0,
+                    source_revision=source_revision ?? '' RETURN NONE;",
+            )
+            .bind(("key", key))
+            .bind(("run", run))
+            .bind(("unit", unit))
+            .bind(("stage", stage))
+            .bind(("json", json))
+            .await?
+            .check()?;
+            Ok(())
+        }
+    })
+    .await?;
     Ok(())
 }
 

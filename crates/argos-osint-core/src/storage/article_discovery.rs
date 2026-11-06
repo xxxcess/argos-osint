@@ -73,7 +73,7 @@ impl ArticleSearchQuery {
         }
         if !self.category.is_empty()
             && self.category != "all"
-            && !crate::intel_service::CATEGORIES.contains(&self.category.as_str())
+            && crate::atlas_taxonomy::DomainId::parse(&self.category).is_none()
         {
             anyhow::bail!("invalid category");
         }
@@ -149,6 +149,9 @@ pub struct ArticleSearchHit {
     /// The matched field's BM25 score. Relevance is not confidence.
     pub rank: f64,
     pub categories: Vec<String>,
+    pub taxonomy_version: String,
+    pub admission_state: String,
+    pub publication_version: String,
     pub source_name: String,
     pub source_domain: String,
     pub published_at: String,
@@ -166,6 +169,7 @@ pub struct ArticleSearchPage {
     pub revision: String,
     /// `""` — the canonical corpus is always searchable once bootstrapped.
     pub diagnostic: String,
+    pub coverage: super::classifier_admission::TaxonomyCoverage,
 }
 
 #[derive(SurrealValue)]
@@ -223,6 +227,9 @@ impl SearchRow {
             matched_field: field,
             rank: self.score,
             categories: self.categories.clone(),
+            taxonomy_version: crate::atlas_taxonomy::TAXONOMY_VERSION.into(),
+            admission_state: "admitted".into(),
+            publication_version: super::classifier_admission::PUBLICATION_VERSION.into(),
             source_name: self.source_name.clone(),
             source_domain: self.source_domain.clone(),
             published_at: self.published_at.clone(),
@@ -295,13 +302,19 @@ pub fn excerpt_for(text: &str, terms: &[String]) -> String {
 /// WHERE fragment for the caller's filters, and its bindings, shared by both
 /// field queries.
 fn filters(q: &ArticleSearchQuery) -> (String, Vec<(&'static str, String)>) {
-    let mut sql = String::from("admitted_at != ''");
-    let mut binds: Vec<(&'static str, String)> = Vec::new();
+    let mut sql = format!("({})", super::atlas::CURRENT_ADMISSION_FILTER);
+    let mut binds: Vec<(&'static str, String)> = vec![
+        ("taxonomy", crate::atlas_taxonomy::TAXONOMY_VERSION.into()),
+        (
+            "publication",
+            super::classifier_admission::PUBLICATION_VERSION.into(),
+        ),
+    ];
     if q.category.is_empty() || q.category == "all" {
         // All admitted articles carry at least one tag.
         sql.push_str(" AND categories != []");
     } else {
-        sql.push_str(" AND categories CONTAINS $category");
+        sql.push_str(" AND (category=$category OR categories CONTAINS $category)");
         binds.push(("category", q.category.clone()));
     }
     if !q.day.is_empty() {
@@ -396,6 +409,14 @@ pub async fn search_articles(
     q: &ArticleSearchQuery,
 ) -> Result<ArticleSearchPage> {
     q.validate()?;
+    let scope = super::classifier_admission::CoverageFilter {
+        run: (!q.run.is_empty()).then(|| q.run.clone()),
+        seen_day: (!q.day.is_empty()).then(|| q.day.clone()),
+        source: (!q.source.is_empty()).then(|| q.source.clone()),
+        indexed_text: Some(q.query.trim().to_string()),
+        ..Default::default()
+    };
+    let coverage = super::classifier_admission::coverage_filtered(repo, &scope).await?;
     let (filter_sql, binds) = filters(q);
     let titles = field_hits(repo.db(), "title", q, &filter_sql, &binds, QUERY_MATCH).await?;
     let mut hits: Vec<ArticleSearchHit> = Vec::new();
@@ -431,12 +452,13 @@ pub async fn search_articles(
     let more = page.len() > q.limit();
     let hits: Vec<ArticleSearchHit> = page.into_iter().take(q.limit()).collect();
     let next_cursor = more.then(|| (offset + q.limit()).to_string());
-    let revision = crate::nlp::cache::hash(&serde_json::to_string(&hits)?);
+    let revision = crate::nlp::cache::hash(&serde_json::to_string(&(&hits, &coverage))?);
     Ok(ArticleSearchPage {
         hits,
         next_cursor,
         revision,
         diagnostic: String::new(),
+        coverage,
     })
 }
 
@@ -497,6 +519,180 @@ pub async fn related_from_seed(
         .collect())
 }
 
+/// A bounded initial discovery window. `fetched` counts raw field hits before
+/// deduplication; callers can share one 100-row budget across independent channels.
+#[derive(Clone, Debug, Default)]
+pub struct BoundedRelatedCandidates {
+    pub hits: Vec<ArticleSearchHit>,
+    pub fetched: usize,
+    pub truncated: bool,
+    pub next_cursor: Option<String>,
+    pub revision: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelatedWindowCursor {
+    seed_revision: String,
+    title_offset: usize,
+    description_offset: usize,
+}
+
+/// Indexed all-retained metadata candidates, preserving exact occurrences.
+/// The SQL limits apply before metadata leaves storage, never after a 256-row fetch.
+pub async fn related_from_seed_bounded(
+    repo: &Repository,
+    seed: &AtlasArticleRow,
+    initial_budget: usize,
+) -> Result<BoundedRelatedCandidates> {
+    related_from_seed_bounded_after(repo, seed, initial_budget, None).await
+}
+
+/// Explicit bounded continuation of the same frozen seed metadata revision.
+/// No automatic pagination or model request is performed by this reader.
+pub async fn related_from_seed_bounded_after(
+    repo: &Repository,
+    seed: &AtlasArticleRow,
+    initial_budget: usize,
+    cursor: Option<&str>,
+) -> Result<BoundedRelatedCandidates> {
+    anyhow::ensure!(initial_budget <= 100, "related initial budget exceeds 100");
+    let seed_revision = crate::atlas_metadata::input_hash(seed);
+    let offsets = match cursor {
+        Some(raw) => {
+            anyhow::ensure!(raw.len() <= 1024, "related cursor exceeds bound");
+            let cursor: RelatedWindowCursor = serde_json::from_str(raw)?;
+            anyhow::ensure!(
+                cursor.seed_revision == seed_revision
+                    && cursor.title_offset <= MAX_OFFSET
+                    && cursor.description_offset <= MAX_OFFSET,
+                "stale or invalid related cursor"
+            );
+            cursor
+        }
+        None => RelatedWindowCursor {
+            seed_revision: seed_revision.clone(),
+            title_offset: 0,
+            description_offset: 0,
+        },
+    };
+    if initial_budget == 0 {
+        return Ok(BoundedRelatedCandidates {
+            revision: seed_revision,
+            ..Default::default()
+        });
+    }
+    let source_text = if seed.title.trim().is_empty() {
+        &seed.description
+    } else {
+        &seed.title
+    };
+    let query = search_terms(source_text).join(" ");
+    let query: String = query.chars().take(MAX_QUERY_CHARS).collect();
+    if query.trim().is_empty() {
+        return Ok(BoundedRelatedCandidates {
+            revision: seed_revision,
+            ..Default::default()
+        });
+    }
+    let terms = search_terms(&query);
+    let title_limit = initial_budget.div_ceil(2);
+    let description_limit = initial_budget / 2;
+    let titles = bounded_related_field(
+        repo,
+        seed,
+        "title",
+        &query,
+        title_limit,
+        offsets.title_offset,
+    )
+    .await?;
+    let descriptions = bounded_related_field(
+        repo,
+        seed,
+        "description",
+        &query,
+        description_limit,
+        offsets.description_offset,
+    )
+    .await?;
+    let fetched = titles.len() + descriptions.len();
+    let truncated = (title_limit > 0 && titles.len() == title_limit)
+        || (description_limit > 0 && descriptions.len() == description_limit);
+    let next_cursor = if truncated
+        && offsets.title_offset + titles.len() <= MAX_OFFSET
+        && offsets.description_offset + descriptions.len() <= MAX_OFFSET
+    {
+        Some(serde_json::to_string(&RelatedWindowCursor {
+            seed_revision,
+            title_offset: offsets.title_offset + titles.len(),
+            description_offset: offsets.description_offset + descriptions.len(),
+        })?)
+    } else {
+        None
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let hits: Vec<_> = titles
+        .iter()
+        .map(|row| row.hit(MatchedField::Title, excerpt_for(&row.title, &terms)))
+        .chain(descriptions.iter().map(|row| {
+            row.hit(
+                MatchedField::Description,
+                excerpt_for(&row.description, &terms),
+            )
+        }))
+        .filter(|hit| {
+            seen.insert((
+                hit.run_id.clone(),
+                hit.article_id.clone(),
+                hit.revision.clone(),
+            ))
+        })
+        .collect();
+    let revision = crate::nlp::cache::hash(&serde_json::to_string(&hits)?);
+    Ok(BoundedRelatedCandidates {
+        hits,
+        fetched,
+        truncated,
+        next_cursor,
+        revision,
+    })
+}
+
+async fn bounded_related_field(
+    repo: &Repository,
+    seed: &AtlasArticleRow,
+    field: &'static str,
+    query: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<SearchRow>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    anyhow::ensure!(
+        matches!(field, "title" | "description"),
+        "invalid related field"
+    );
+    let sql = format!("SELECT run_id, article_id, title, description, url, source_name, source_domain, published_at, seen_at, provider, categories, admitted_at, search::score(1) AS score FROM atlas_article WHERE {field} {RELATED_MATCH} $q AND ({}) AND !(run_id = $seed_run AND article_id = $seed_id) ORDER BY score DESC, published_at DESC, seen_at DESC, article_id ASC, run_id ASC LIMIT $limit START $offset",super::atlas::CURRENT_ADMISSION_FILTER);
+    let mut result = repo
+        .db()
+        .query(sql)
+        .bind(("taxonomy", crate::atlas_taxonomy::TAXONOMY_VERSION))
+        .bind((
+            "publication",
+            super::classifier_admission::PUBLICATION_VERSION,
+        ))
+        .bind(("q", query.to_owned()))
+        .bind(("seed_run", seed.run_id.clone()))
+        .bind(("seed_id", seed.id.clone()))
+        .bind(("limit", limit as i64))
+        .bind(("offset", offset as i64))
+        .await?
+        .check()?;
+    Ok(result.take(0)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,7 +713,10 @@ mod tests {
             excerpt: String::new(),
             matched_field: field,
             rank,
-            categories: vec!["science".into()],
+            categories: vec!["scientific".into()],
+            taxonomy_version: crate::atlas_taxonomy::TAXONOMY_VERSION.into(),
+            admission_state: "admitted".into(),
+            publication_version: crate::storage::classifier_admission::PUBLICATION_VERSION.into(),
             source_name: "Wire".into(),
             source_domain: "example.com".into(),
             published_at: published.into(),

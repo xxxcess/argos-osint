@@ -37,8 +37,9 @@ pub(crate) fn seed(store: &Store, run: &str, id: &str, title: &str, names: &[&st
 fn collection_contracts_are_recognised_centrally() {
     use crate::atlas_work::*;
     assert!(is_collection_contract(COLLECTION_CONTRACT_V1));
+    assert!(is_collection_contract(COLLECTION_CONTRACT_V2));
     assert!(is_collection_contract(COLLECTION_CONTRACT));
-    assert_eq!(COLLECTION_CONTRACT, "atlas-collection-v2");
+    assert_eq!(COLLECTION_CONTRACT, "atlas-collection-v3");
     assert!(!is_collection_contract(""));
     assert!(!is_collection_contract("atlas-memory-v3"));
     assert_eq!(stage_label(STAGE_ACTOR_ARTICLES), "actor_articles");

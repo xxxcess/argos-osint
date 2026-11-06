@@ -1044,7 +1044,7 @@ pub(crate) async fn clean_body_in(tx: &Tx, article_id: &str) -> Result<Option<Cl
     )
     .await?;
     Ok(take::<Option<String>>(&mut rows, 0)?
-        .filter(|text| !text.trim().is_empty())
+        .filter(|text| !text.trim().is_empty() && crate::nlp::cache::hash(text) == artifact_hash)
         .map(|text| CleanBody {
             source_id: format!("body:{}", body.id),
             revision,
@@ -1159,4 +1159,411 @@ mod discovery_tests {
         assert!(merged[0].owners.is_empty());
         assert!(!merged[0].ambiguous, "no live owner is not an ambiguity");
     }
+}
+
+// Appended to storage/actor_catalog.rs in the next repository checkpoint.
+/// Verified latest clean-body identities only; never acquires body text.
+/// All candidates use the same baseline/transform chain as clean_body_in.
+pub(crate) async fn clean_body_heads_many_in(
+    tx: &Tx,
+    article_ids: &[String],
+) -> Result<
+    std::collections::BTreeMap<String, crate::storage::classifier_admission::BodyRevision>,
+    TxError,
+> {
+    use crate::storage::classifier_admission::BodyRevision;
+    if article_ids.len() > 64 {
+        return Err(TxError::Abort("body_head_key_limit".into()));
+    }
+    let article_ids: Vec<_> = article_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if article_ids.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let mut sql = String::new();
+    for index in 0..article_ids.len() {
+        sql.push_str(&format!("SELECT record::id(id) AS id,body_version,state,updated_at FROM article_body WHERE article_id=$a{index} ORDER BY body_version DESC,updated_at DESC LIMIT 1;"));
+    }
+    let mut query = tx.query(sql);
+    for (index, article) in article_ids.iter().enumerate() {
+        query = query.bind((format!("a{index}"), article.clone()));
+    }
+    let mut response = super::classifier_admission::measured_query(query)
+        .await?
+        .check()?;
+    let mut bodies = Vec::new();
+    for (index, article) in article_ids.into_iter().enumerate() {
+        if let Some(head) = take::<Vec<BodyHead>>(&mut response, index)?
+            .into_iter()
+            .next()
+            .filter(|head| head.state == "ready")
+        {
+            bodies.push((article, head));
+        }
+    }
+    if bodies.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let mut sql = String::new();
+    for index in 0..bodies.len() {
+        sql.push_str(&format!("SELECT attempt_id,raw_hash,registered_at FROM nlp_source_ref WHERE owner_kind='article' AND owner_id=$a{index} AND source_id=$source{index} AND revision=$revision{index} AND transform_version='validated-baseline-v1' AND raw_hash!=NONE ORDER BY registered_at DESC LIMIT 1;"));
+    }
+    let mut query = tx.query(sql);
+    for (index, (article, head)) in bodies.iter().enumerate() {
+        query = query
+            .bind((format!("a{index}"), article.clone()))
+            .bind((format!("source{index}"), head.id.clone()))
+            .bind((format!("revision{index}"), head.body_version.to_string()));
+    }
+    let mut response = super::classifier_admission::measured_query(query)
+        .await?
+        .check()?;
+    let mut baselines = Vec::new();
+    for (index, (article, head)) in bodies.into_iter().enumerate() {
+        if let Some(baseline) = take::<Vec<BodyAcquisition>>(&mut response, index)?
+            .into_iter()
+            .next()
+        {
+            baselines.push((article, head, baseline));
+        }
+    }
+    if baselines.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let mut sql = String::new();
+    for index in 0..baselines.len() {
+        sql.push_str(&format!("SELECT VALUE prose_hash FROM nlp_source_ref WHERE owner_kind='article' AND owner_id=$a{index} AND source_id=$source{index} AND revision=$revision{index} AND transform_version=$transform AND attempt_id=$attempt{index} AND raw_hash=$raw{index} ORDER BY registered_at DESC LIMIT 1;"));
+    }
+    let mut query = tx.query(sql).bind((
+        "transform",
+        crate::intel_recon::clean_body::TRANSFORM.to_owned(),
+    ));
+    for (index, (article, head, baseline)) in baselines.iter().enumerate() {
+        query = query
+            .bind((format!("a{index}"), article.clone()))
+            .bind((format!("source{index}"), head.id.clone()))
+            .bind((format!("revision{index}"), head.body_version.to_string()))
+            .bind((format!("attempt{index}"), baseline.attempt_id.clone()))
+            .bind((format!("raw{index}"), baseline.raw_hash.clone()));
+    }
+    let mut response = super::classifier_admission::measured_query(query)
+        .await?
+        .check()?;
+    let mut result = std::collections::BTreeMap::new();
+    for (index, (article, head, _)) in baselines.into_iter().enumerate() {
+        if let Some(hash) = take::<Vec<String>>(&mut response, index)?
+            .into_iter()
+            .next()
+        {
+            if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(TxError::Abort(
+                    "invalid_clean_body_artifact_identity".into(),
+                ));
+            }
+            result.insert(
+                article,
+                BodyRevision {
+                    source_id: format!("body:{}", head.id),
+                    revision: head.body_version.to_string(),
+                    artifact_hash: hash,
+                    candidates_revision: None,
+                },
+            );
+        }
+    }
+    verify_body_heads_in(tx, result).await
+}
+
+#[derive(SurrealValue)]
+struct ArtifactIdentity {
+    actual_hash: String,
+    nonempty: bool,
+}
+#[derive(SurrealValue)]
+struct CandidateIdentity {
+    prose_hash: String,
+    revision: String,
+}
+async fn verify_body_heads_in(
+    tx: &Tx,
+    heads: std::collections::BTreeMap<String, crate::storage::classifier_admission::BodyRevision>,
+) -> Result<
+    std::collections::BTreeMap<String, crate::storage::classifier_admission::BodyRevision>,
+    TxError,
+> {
+    if heads.is_empty() {
+        return Ok(heads);
+    }
+    let rows: Vec<_> = heads.into_iter().collect();
+    let mut sql = String::new();
+    let mut feature_keys = Vec::new();
+    for (index, (_, head)) in rows.iter().enumerate() {
+        let mut source = crate::nlp::Source::derived(&head.source_id, &head.revision, "");
+        source.prose_hash = head.artifact_hash.clone();
+        let feature = crate::nlp::cache::feature_key(&source, &source.context());
+        feature_keys.push(feature);
+        sql.push_str(&format!("SELECT crypto::sha256(text) AS actual_hash,string::trim(text)!='' AS nonempty FROM ONLY $artifact{index};"));
+        if crate::nlp::configured_mode() == crate::nlp::Mode::Off {
+            sql.push_str("RETURN NONE;");
+        } else {
+            sql.push_str(&format!("SELECT prose_hash,crypto::sha256(annotations_json) AS revision FROM ONLY $feature{index};"));
+        }
+    }
+    let mut query = super::classifier_admission::tx_query(tx, sql);
+    for (index, (_, head)) in rows.iter().enumerate() {
+        query = query
+            .bind((
+                format!("artifact{index}"),
+                rid("nlp_artifact", &head.artifact_hash),
+            ))
+            .bind((
+                format!("feature{index}"),
+                rid("nlp_feature", &feature_keys[index]),
+            ));
+    }
+    let mut response = query.await?.check()?;
+    let mut out = std::collections::BTreeMap::new();
+    for (index, (article, mut head)) in rows.into_iter().enumerate() {
+        let artifact: Option<ArtifactIdentity> = take(&mut response, index * 2)?;
+        let candidate: Option<CandidateIdentity> = take(&mut response, index * 2 + 1)?;
+        if !artifact
+            .is_some_and(|artifact| artifact.nonempty && artifact.actual_hash == head.artifact_hash)
+        {
+            continue;
+        }
+        head.candidates_revision = candidate
+            .filter(|candidate| candidate.prose_hash == head.artifact_hash)
+            .map(|candidate| format!("{}:{}", feature_keys[index], candidate.revision));
+        out.insert(article, head);
+    }
+    Ok(out)
+}
+/// Correlates retained body record IDs to article owners in a bounded group.
+/// Callers strip only the documented `body:` evidence prefix before this read.
+pub(crate) async fn body_article_ids_many_in(
+    tx: &Tx,
+    body_ids: &[String],
+) -> Result<std::collections::BTreeMap<String, String>, TxError> {
+    if body_ids.len() > 64
+        || body_ids
+            .iter()
+            .any(|id| !crate::intel_service::valid_id(id))
+    {
+        return Err(TxError::Abort("body_owner_key_bounds".into()));
+    }
+    #[derive(SurrealValue)]
+    struct Owner {
+        id: String,
+        article: Option<String>,
+    }
+    let mut response=super::classifier_admission::tx_query(tx,"SELECT record::id(id) AS id,IF bytes::len(type::bytes(article_id))<=512 {article_id} ELSE {NONE} AS article FROM $records").bind(("records",body_ids.iter().map(|id|rid("article_body",id)).collect::<Vec<_>>())).await?.check()?;
+    let rows: Vec<Owner> = take(&mut response, 0)?;
+    let mut out = std::collections::BTreeMap::new();
+    for row in rows {
+        let article = row
+            .article
+            .ok_or_else(|| TxError::Abort("body_owner_id_bounds".into()))?;
+        if out.insert(row.id, article).is_some() {
+            return Err(TxError::Abort("duplicate_body_owner".into()));
+        }
+    }
+    Ok(out)
+}
+/// A used annotation row must not change between captured matching and commit.
+/// The guard is a storage field, not an annotation feature or model change.
+pub(crate) async fn fence_body_candidates_in(
+    tx: &Tx,
+    heads: &[crate::storage::classifier_admission::BodyRevision],
+) -> Result<bool, TxError> {
+    if heads.len() > 64 {
+        return Err(TxError::Abort("body_candidate_fence_limit".into()));
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    for head in heads {
+        if let Some(revision) = &head.candidates_revision {
+            let (feature, hash) = revision
+                .split_once(':')
+                .ok_or_else(|| TxError::Abort("invalid_body_candidate_revision".into()))?;
+            if [feature, hash].iter().any(|value| {
+                value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) {
+                return Err(TxError::Abort("invalid_body_candidate_revision".into()));
+            }
+            identities.insert((
+                feature.to_owned(),
+                hash.to_owned(),
+                head.artifact_hash.clone(),
+            ));
+        }
+    }
+    if identities.is_empty() {
+        return Ok(true);
+    }
+    let mut sql = String::new();
+    for index in 0..identities.len() {
+        sql.push_str(&format!("RETURN count(UPDATE $feature{index} SET atlas_publication_guard=(atlas_publication_guard ?? 0)+1 WHERE prose_hash=$prose{index} AND crypto::sha256(annotations_json)=$hash{index} RETURN VALUE id)=1;"));
+    }
+    let mut query = super::classifier_admission::tx_query(tx, sql);
+    for (index, (feature, hash, prose)) in identities.into_iter().enumerate() {
+        query = query
+            .bind((format!("feature{index}"), rid("nlp_feature", &feature)))
+            .bind((format!("hash{index}"), hash))
+            .bind((format!("prose{index}"), prose));
+    }
+    let mut response = query.await?.check()?;
+    for index in 0..response.num_statements() {
+        if take::<Option<bool>>(&mut response, index)? != Some(true) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Exact bounded body material, grouped by encoded size before transfer.
+/// Missing or invalid candidate material remains unavailable in NLP-on mode.
+pub(crate) async fn clean_body_materials_many_in(
+    tx: &Tx,
+    heads: &std::collections::BTreeMap<String, crate::storage::classifier_admission::BodyRevision>,
+) -> Result<
+    (
+        std::collections::BTreeMap<String, (CleanBody, Vec<crate::nlp::EntityCandidate>)>,
+        std::collections::BTreeSet<String>,
+    ),
+    TxError,
+> {
+    if heads.len() > 64 {
+        return Err(TxError::Abort("body_material_key_bound".into()));
+    }
+    let entries: Vec<_> = heads.iter().collect();
+    if entries.is_empty() {
+        return Ok((
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeSet::new(),
+        ));
+    }
+    let mut sql = String::new();
+    for index in 0..entries.len() {
+        sql.push_str(&format!(
+            "RETURN bytes::len(type::bytes((SELECT VALUE text FROM ONLY $artifact{index})??''));"
+        ));
+    }
+    let mut query = super::classifier_admission::tx_query(tx, sql);
+    for (index, (_, head)) in entries.iter().enumerate() {
+        query = query.bind((
+            format!("artifact{index}"),
+            rid("nlp_artifact", &head.artifact_hash),
+        ));
+    }
+    let mut response = query.await?.check()?;
+    let mut oversized = std::collections::BTreeSet::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut group = Vec::new();
+    let mut group_bytes = 0usize;
+    for (index, entry) in entries.iter().enumerate() {
+        let bytes = take::<Option<i64>>(&mut response, index)?
+            .ok_or_else(|| TxError::Abort("missing_body_size".into()))?;
+        let bytes =
+            usize::try_from(bytes).map_err(|_| TxError::Abort("negative_body_size".into()))?;
+        let wire = bytes
+            .checked_add(2)
+            .and_then(|bytes| bytes.checked_div(3))
+            .and_then(|bytes| bytes.checked_mul(4))
+            .and_then(|bytes| bytes.checked_add(256 * 1024))
+            .ok_or_else(|| TxError::Abort("body_material_size_overflow".into()))?;
+        if wire > super::classifier_admission::MAX_RESPONSE_BYTES {
+            oversized.insert(entry.0.clone());
+            continue;
+        }
+        if !group.is_empty() && group_bytes + wire > super::classifier_admission::MAX_RESPONSE_BYTES
+        {
+            groups.push(std::mem::take(&mut group));
+            group_bytes = 0;
+        }
+        group.push(index);
+        group_bytes += wire;
+    }
+    if !group.is_empty() {
+        groups.push(group);
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for group in groups {
+        let mut sql = String::new();
+        for index in &group {
+            sql.push_str(&format!("SELECT VALUE encoding::base64::encode(type::bytes(text),true) FROM ONLY $artifact{index};"));
+            if entries[*index].1.candidates_revision.is_some() {
+                sql.push_str(&format!("SELECT VALUE IF bytes::len(type::bytes(annotations_json))<=131072 {{encoding::base64::encode(type::bytes(annotations_json),true)}} ELSE {{NONE}} FROM ONLY $feature{index};"));
+            } else {
+                sql.push_str("RETURN NONE;");
+            }
+        }
+        let mut query = super::classifier_admission::tx_query(tx, sql);
+        for index in &group {
+            let head = entries[*index].1;
+            query = query.bind((
+                format!("artifact{index}"),
+                rid("nlp_artifact", &head.artifact_hash),
+            ));
+            if let Some(revision) = &head.candidates_revision {
+                let (feature, _) = revision
+                    .split_once(':')
+                    .ok_or_else(|| TxError::Abort("body_candidate_identity".into()))?;
+                query = query.bind((format!("feature{index}"), rid("nlp_feature", feature)));
+            }
+        }
+        let mut response = query.await?.check()?;
+        for (offset, index) in group.into_iter().enumerate() {
+            let (article, head) = entries[index];
+            let Some(encoded) = take::<Option<String>>(&mut response, offset * 2)? else {
+                continue;
+            };
+            let bytes = super::classifier_admission::decode_wire_json(
+                &encoded,
+                super::classifier_admission::MAX_RESPONSE_BYTES,
+            )
+            .map_err(|_| TxError::Abort("body_material_base64".into()))?;
+            let text = String::from_utf8(bytes)
+                .map_err(|_| TxError::Abort("body_material_utf8".into()))?;
+            if text.trim().is_empty() || crate::nlp::cache::hash(&text) != head.artifact_hash {
+                continue;
+            }
+            let encoded: Option<String> = take(&mut response, offset * 2 + 1)?;
+            let candidates = if crate::nlp::configured_mode() == crate::nlp::Mode::Off {
+                Vec::new()
+            } else {
+                let Some(encoded) = encoded else {
+                    continue;
+                };
+                let bytes = super::classifier_admission::decode_wire_json(&encoded, 131072)
+                    .map_err(|_| TxError::Abort("body_candidates_base64".into()))?;
+                let annotation: crate::nlp::Annotation = serde_json::from_slice(&bytes)
+                    .map_err(|_| TxError::Abort("body_candidates_json".into()))?;
+                let source = crate::nlp::Source::derived(&head.source_id, &head.revision, &text);
+                if annotation.status != crate::nlp::Status::Complete
+                    || !annotation.validate(&source)
+                    || annotation.feature_key
+                        != crate::nlp::cache::feature_key(&source, &source.context())
+                {
+                    continue;
+                }
+                crate::nlp::entity_candidates(&source, &annotation)
+            };
+            out.insert(
+                article.clone(),
+                (
+                    CleanBody {
+                        source_id: head.source_id.clone(),
+                        revision: head.revision.clone(),
+                        artifact_hash: head.artifact_hash.clone(),
+                        text,
+                    },
+                    candidates,
+                ),
+            );
+        }
+    }
+    Ok((out, oversized))
 }

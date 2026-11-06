@@ -7,6 +7,8 @@
 
 #[path = "support/actor_catalog.rs"]
 mod actor_catalog_fixture;
+#[path = "support/current_admission.rs"]
+mod current_admission;
 mod support;
 
 use argos_osint_core::atlas_actor_index::{index_run_store, surreal};
@@ -17,7 +19,7 @@ use argos_osint_core::store::AtlasArticleRow;
 use support::*;
 
 async fn seed(repo: &Repository, run: &str, id: &str, title: &str, names: &[&str]) {
-    let a = AtlasArticleRow {
+    let mut a = AtlasArticleRow {
         run_id: run.into(),
         id: id.into(),
         title: title.into(),
@@ -29,9 +31,7 @@ async fn seed(repo: &Repository, run: &str, id: &str, title: &str, names: &[&str
         category: "unk".into(),
         ..Default::default()
     };
-    argos_osint_core::storage::atlas::upsert_article(repo.db(), &a)
-        .await
-        .unwrap();
+    current_admission::admit(repo, &mut a, "Ballot patrol common").await;
     let mut m = ArticleMetadata::pending(&a);
     m.entity_state = MetadataState::Complete;
     for n in names {
@@ -112,7 +112,7 @@ async fn phase6_receipts_every_occurrence_and_reuses_them() {
     assert_eq!(
         count(
             &repo,
-            "RETURN count(SELECT 1 FROM brain_backfill_receipt WHERE source = 'atlas_articles')"
+            r#"RETURN count(SELECT 1 FROM atlas_classification_derivative WHERE run_id = 'r' AND stage = 'actors' AND state = 'complete' AND disposition_json = '{"kind":"current"}')"#
         )
         .await,
         6

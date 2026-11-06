@@ -255,6 +255,118 @@ pub struct WorkerPool {
 }
 
 impl WorkerPool {
+    /// Historical admission has an independent owner, stop signal and retained
+    /// thread handle. It never resets another pool's tasks or worker leases.
+    #[cfg(feature = "surreal")]
+    pub fn spawn_admission_maintenance_drainer(
+        db_path: std::path::PathBuf,
+        owner: String,
+        home: Arc<crate::classifier::readiness::ClassifierHome>,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let handle = std::thread::Builder::new()
+            .name("argos-admission-maintenance".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let mut initial_checked = false;
+                while !flag.load(Ordering::Acquire) {
+                    let (owner, home, cancel) = (owner.clone(), home.clone(), flag.clone());
+                    let should_initialize = !initial_checked;
+                    let diagnostic_path = db_path.clone();
+                    let drained = crate::storage::runtime::blocking(move |repo| async move {
+                        if !surreal_elected(&repo, &owner).await? {
+                            return Ok((false, false));
+                        }
+                        if cancel.load(Ordering::Acquire) {
+                            return Ok((false, false));
+                        }
+                        let initialized = if should_initialize {
+                            match crate::atlas_admission_maintenance::ensure_initial(&repo, &home)
+                                .await
+                            {
+                                Ok(_) => true,
+                                Err(error) => {
+                                    report_drainer::<()>(
+                                        &diagnostic_path,
+                                        "admission-maintenance-startup",
+                                        Err(anyhow::anyhow!("blocked_initial_classifier: {error}")),
+                                    );
+                                    false
+                                }
+                            }
+                        } else {
+                            true
+                        };
+                        let worked = crate::atlas_admission_maintenance::drain_one(
+                            &repo, &home, &owner, cancel,
+                        )
+                        .await?;
+                        Ok((worked.is_some(), initialized))
+                    });
+                    let busy = matches!(drained, Ok((true, _)));
+                    if matches!(drained, Ok((_, true))) {
+                        initial_checked = true;
+                    }
+                    report_drainer(
+                        &db_path,
+                        "admission-maintenance",
+                        drained.map(|(worked, _)| usize::from(worked)),
+                    );
+                    if !busy {
+                        for _ in 0..4 {
+                            if flag.load(Ordering::Acquire) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
+                    }
+                }
+            })
+            .ok();
+        Self { stop, handle }
+    }
+
+    /// Calibration has its own bounded pool and never runs on the cycle task.
+    #[cfg(feature = "surreal")]
+    pub fn spawn_classifier_calibration_drainer(
+        db_path: std::path::PathBuf,
+        owner: String,
+        home: Arc<crate::classifier::readiness::ClassifierHome>,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let handle = std::thread::Builder::new()
+            .name("argos-classifier-calibration".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                while !flag.load(Ordering::Acquire) {
+                    let (owner, home, cancel) = (owner.clone(), home.clone(), flag.clone());
+                    let result = crate::storage::runtime::blocking(move |repo| async move {
+                        if !surreal_elected(&repo, &owner).await? {
+                            return Ok(0);
+                        }
+                        Ok(crate::storage::classifier_calibration::drain_one(
+                            &repo, &home, &owner, cancel,
+                        )
+                        .await?)
+                    });
+                    let busy = matches!(result, Ok(count) if count > 0);
+                    report_drainer(&db_path, "classifier-calibration", result);
+                    if !busy {
+                        for _ in 0..4 {
+                            if flag.load(Ordering::Acquire) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
+                    }
+                }
+            })
+            .ok();
+        Self { stop, handle }
+    }
+
     pub fn spawn_index_drainer(db_path: std::path::PathBuf, owner: String) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
@@ -322,6 +434,12 @@ impl WorkerPool {
     /// Spawn the default local pools (index + summary) for one state root.
     pub fn spawn_default(db_path: std::path::PathBuf) -> Vec<WorkerPool> {
         let owner = process_owner();
+        let home = Arc::new(crate::classifier::readiness::ClassifierHome::new(
+            db_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .to_path_buf(),
+        ));
         // Under a storage config nothing may open the legacy store: each pool below
         // has a repository drainer.
         #[cfg(feature = "surreal")]
@@ -332,6 +450,8 @@ impl WorkerPool {
             Self::spawn_brain_backfill_drainer(db_path.clone(), owner.clone()),
             Self::spawn_actor_dedup_drainer(db_path.clone(), owner.clone()),
             Self::spawn_intel_brief_drainer(db_path.clone(), owner.clone()),
+            Self::spawn_admission_maintenance_drainer(db_path.clone(), owner.clone(), home.clone()),
+            Self::spawn_classifier_calibration_drainer(db_path.clone(), owner.clone(), home),
             Self::spawn_brain_scope_drainer(db_path, owner),
         ];
         #[cfg(not(feature = "surreal"))]

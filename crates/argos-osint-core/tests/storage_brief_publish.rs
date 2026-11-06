@@ -165,7 +165,7 @@ fn lead(id: &str, candidate: &str) -> brief::Lead {
         inference_text: "The strike will disrupt shipping.".into(),
         candidate_article_id: candidate.into(),
         candidate_run_id: "run1".into(),
-        candidate_metadata_revision: format!("rev-{candidate}"),
+        candidate_metadata_revision: argos_osint_core::atlas_metadata::input_hash(&article()),
         interpretation: "Same strike, another port.".into(),
         verification_needed: "Confirm the second port joined.".into(),
         citations_json: "[]".into(),
@@ -283,9 +283,19 @@ async fn inferences_then_links_publish_related_leads_and_retire_stale_ones() {
     .await
     .unwrap();
 
-    // Claims, then Inferences, each bound as the caller does.
-    let body = json!({ "markdown": prose });
-    let inferences = json!({"inferences": [{
+    register(
+        &repo,
+        "article",
+        "a1",
+        &source,
+        Some(&raw),
+        argos_osint_core::intel_recon::clean_body::TRANSFORM,
+    )
+    .await
+    .unwrap();
+    // Both payloads bind the current retained clean-body acquisition.
+    let body = json!({ "markdown": prose, "content_hash": hash(&prose) });
+    let inferences = json!({"body_hash": hash(&prose), "inferences": [{
         "id": "i1", "fidelity": "faithful",
         "text": "The strike will disrupt shipping.",
         "premise_claim_ids": ["t1"], "why": "Ports are closed.",

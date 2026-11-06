@@ -301,6 +301,7 @@ pub(super) fn newsapi_country_headlines(country: &str) -> Result<Request> {
 pub struct Hit {
     pub title: String,
     pub description: String,
+    pub language: Option<String>,
     pub url: String,
     pub country: String,
     pub source_name: String,
@@ -461,8 +462,12 @@ pub fn discovery_hits(provider: &str, value: &Value) -> Result<Vec<Hit>> {
             continue;
         };
         hits.push(Hit {
-            title: clip(text(row, &["title"])),
-            description: clip(text(row, &["description", "content"])),
+            language: row
+                .get("language")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            title: text(row, &["title"]).to_owned(),
+            description: text(row, &["description"]).to_owned(),
             url,
             country,
             source_name: clip(source_name),
@@ -499,8 +504,12 @@ pub fn headline_hits(provider: &str, country: &str, value: &Value) -> Result<Vec
             _ => text(row, &["source_name", "source_id"]).to_string(),
         };
         hits.push(Hit {
-            title: clip(text(row, &["title"])),
-            description: clip(text(row, &["description"])),
+            language: row
+                .get("language")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            title: text(row, &["title"]).to_owned(),
+            description: text(row, &["description"]).to_owned(),
             url,
             country: country.clone(),
             source_name: clip(source_name.trim()),
@@ -623,6 +632,23 @@ pub fn http_error(id: &str, status: u16, body: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn headlines_preserve_metadata_past_500_characters_and_never_substitute_a_body() {
+        let title = "A".repeat(700);
+        let description = format!(
+            "{} The cabinet denied the reported closure.",
+            "Context ".repeat(100)
+        );
+        let payload = json!({"news":[
+            {"url":"https://fictional.invalid/metadata","title":title,"description":description},
+            {"url":"https://fictional.invalid/body-only","title":"Body unavailable as metadata","content":"A full body must not become a description"}
+        ]});
+        let hits = headline_hits("currents", "us", &payload).unwrap();
+        assert_eq!(hits[0].title, title);
+        assert_eq!(hits[0].description, description);
+        assert!(hits[1].description.is_empty());
+    }
 
     #[test]
     fn latest_omits_timeframe_unless_the_caller_sets_one() {

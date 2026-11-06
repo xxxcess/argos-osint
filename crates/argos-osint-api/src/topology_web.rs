@@ -19,7 +19,10 @@ pub(crate) struct MemoryQuery {
     seed: String,
 }
 
-async fn memory_seed(state: &ApiState, id: &str) -> Result<TopologySeed, crate::ApiError> {
+pub(super) async fn memory_seed(
+    state: &ApiState,
+    id: &str,
+) -> Result<TopologySeed, crate::ApiError> {
     if id.trim().is_empty() || id.len() > 256 {
         return Err(crate::bad());
     }

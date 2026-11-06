@@ -276,32 +276,42 @@ pub async fn related_articles_global_on(
     cursor: Option<&str>,
     limit: usize,
 ) -> Result<GlobalRelatedPage> {
-    use crate::storage::{atlas, atlas_metadata};
+    use crate::atlas_classify::OccurrenceKey;
+    use crate::storage::atlas;
+    use crate::storage::classifier_admission::{self, DerivativeStage};
+    use crate::storage::tx::{run_tx, RetryPolicy, TxError};
     use surrealdb::types::SurrealValue;
-    #[derive(SurrealValue)]
+    #[derive(Clone, SurrealValue)]
     struct Pair {
         left_id: String,
         right_id: String,
-        left_revision: String,
-        right_revision: String,
+        left_native_revision: Option<String>,
+        right_native_revision: Option<String>,
         shared_json: String,
     }
     let db = repo.db();
-    let Some(source) = atlas::article(db, source_run, source_article).await? else {
+    let seed = OccurrenceKey::new(source_run, source_article);
+    let Some(source) = atlas::current_articles_many(db, std::slice::from_ref(&seed))
+        .await?
+        .remove(&seed)
+    else {
         return Ok(GlobalRelatedPage {
             scope,
             ..GlobalRelatedPage::default()
         });
     };
     let key = url_key(&source);
+    let source_revision = crate::atlas_metadata::input_hash(&source);
     let sources = if scope == RelatedScope::AllRetained && !key.starts_with("occurrence:") {
         let host = url_host(&key).unwrap_or_default();
         let mut r = db
             .query(
-                "SELECT VALUE [run_id, article_id, url] FROM atlas_article \
-                 WHERE url != '' AND ($host = '' OR string::lowercase(url) CONTAINS $host)",
+                format!("SELECT VALUE [run_id, article_id, url] FROM atlas_article \
+                 WHERE url != '' AND ($host = '' OR string::lowercase(url) CONTAINS $host) AND ({})", atlas::CURRENT_ADMISSION_FILTER),
             )
             .bind(("host", host))
+            .bind(("taxonomy", crate::atlas_taxonomy::TAXONOMY_VERSION))
+            .bind(("publication", classifier_admission::PUBLICATION_VERSION))
             .await?
             .check()?;
         let hits: Vec<Vec<String>> = r.take(0usize)?;
@@ -318,14 +328,14 @@ pub async fn related_articles_global_on(
     } else {
         vec![source.clone()]
     };
-    let exclude = BTreeSet::from([key]);
+    let exclude = BTreeSet::from([key.clone()]);
     let mut grouped = BTreeMap::new();
     for s in &sources {
         let mut r = db
             .query(
-                "SELECT left_id, right_id, left_revision, right_revision, shared_json
+                "SELECT left_id, right_id, left_native_revision, right_native_revision, shared_json
                    FROM atlas_related_article WHERE run_id = $r AND left_id = $a;
-                 SELECT left_id, right_id, left_revision, right_revision, shared_json
+                 SELECT left_id, right_id, left_native_revision, right_native_revision, shared_json
                    FROM atlas_related_article WHERE run_id = $r AND right_id = $a;",
             )
             .bind(("r", s.run_id.clone()))
@@ -334,43 +344,100 @@ pub async fn related_articles_global_on(
             .check()?;
         let mut pairs: Vec<Pair> = r.take(0usize)?;
         pairs.extend(r.take::<Vec<Pair>>(1usize)?);
-        for p in pairs {
-            let (Some(a), Some(b)) = (
-                atlas::article(db, &s.run_id, &p.left_id).await?,
-                atlas::article(db, &s.run_id, &p.right_id).await?,
-            ) else {
-                continue;
-            };
-            if crate::related_articles::revision(&a) != p.left_revision
-                || crate::related_articles::revision(&b) != p.right_revision
-            {
-                continue;
-            }
-            let am = atlas_metadata::metadata(db, &a.run_id, &a.id).await?;
-            let bm = atlas_metadata::metadata(db, &b.run_id, &b.id).await?;
-            if crate::related_articles::shared_entity_mentions_with(
-                &a,
-                am.as_ref(),
-                &b,
-                bm.as_ref(),
-            )
-            .len()
-                < crate::related_articles::MIN_SHARED_ENTITIES
-            {
-                continue;
-            }
-            let shared: Vec<crate::related_articles::SharedMention> =
-                serde_json::from_str(&p.shared_json)?;
-            let basis = format!(
-                "Shared mentions: {}",
-                shared
-                    .into_iter()
-                    .map(|m| m.original_text)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+        // Each transaction captures at most 62 endpoints plus the requested
+        // seed. Admission, native metadata and stored pair revisions are read
+        // together; retained legacy/rejected rows cannot become positive leads.
+        for pairs in pairs.chunks(31) {
+            let captured = (
+                s.run_id.clone(),
+                s.id.clone(),
+                seed.clone(),
+                key.clone(),
+                source_revision.clone(),
+                pairs.to_vec(),
             );
-            let target = if p.left_id == s.id { b } else { a };
-            insert(&exclude, &mut grouped, target, basis, false);
+            let current = run_tx(db, RetryPolicy::default(), move |tx| {
+                let (run, source_id, seed, url, source_revision, pairs) = captured.clone();
+                async move {
+                    let keys: Vec<_> = pairs
+                        .iter()
+                        .flat_map(|pair| {
+                            [
+                                OccurrenceKey::new(&run, &pair.left_id),
+                                OccurrenceKey::new(&run, &pair.right_id),
+                            ]
+                        })
+                        .chain(std::iter::once(seed.clone()))
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    let snapshots = classifier_admission::derivative_snapshots_in(
+                        &tx,
+                        &keys,
+                        DerivativeStage::Related,
+                    )
+                    .await?;
+                    let mut current = Vec::new();
+                    if !snapshots.get(&seed).is_some_and(|(snapshot, article, _)| {
+                        snapshot.admission_state == "admitted"
+                            && url_key(article) == url
+                            && crate::atlas_metadata::input_hash(article) == source_revision
+                    }) || !snapshots
+                        .get(&OccurrenceKey::new(&run, &source_id))
+                        .is_some_and(|(snapshot, article, _)| {
+                            snapshot.admission_state == "admitted" && url_key(article) == url
+                        })
+                    {
+                        return Ok(current);
+                    }
+                    for pair in pairs {
+                        let left = OccurrenceKey::new(&run, &pair.left_id);
+                        let right = OccurrenceKey::new(&run, &pair.right_id);
+                        let (Some((left_snapshot, a, am)), Some((right_snapshot, b, bm))) =
+                            (snapshots.get(&left), snapshots.get(&right))
+                        else {
+                            continue;
+                        };
+                        if left_snapshot.admission_state != "admitted"
+                            || right_snapshot.admission_state != "admitted"
+                            || pair.left_native_revision.as_deref()
+                                != Some(left_snapshot.revision(DerivativeStage::Related)?.as_str())
+                            || pair.right_native_revision.as_deref()
+                                != Some(right_snapshot.revision(DerivativeStage::Related)?.as_str())
+                            || crate::related_articles::shared_entity_mentions_with(
+                                a,
+                                am.as_ref(),
+                                b,
+                                bm.as_ref(),
+                            )
+                            .len()
+                                < crate::related_articles::MIN_SHARED_ENTITIES
+                        {
+                            continue;
+                        }
+                        let shared: Vec<crate::related_articles::SharedMention> =
+                            serde_json::from_str(&pair.shared_json).map_err(|_| {
+                                TxError::Abort("related_shared_mentions_invalid".into())
+                            })?;
+                        let basis = format!(
+                            "Shared mentions: {}",
+                            shared
+                                .into_iter()
+                                .map(|mention| mention.original_text)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        let target = if pair.left_id == source_id { b } else { a };
+                        current.push((target.clone(), basis));
+                    }
+                    Ok(current)
+                }
+            })
+            .await?
+            .value;
+            for (target, basis) in current {
+                insert(&exclude, &mut grouped, target, basis, false);
+            }
         }
     }
     Ok(finish(grouped, cursor, limit, scope))

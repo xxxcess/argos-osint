@@ -16,7 +16,7 @@ use surrealdb::Surreal;
 use super::codec::encode;
 use super::counters;
 use super::jobs::{run, take};
-use super::tx::{run_tx, RetryPolicy, TxError};
+use super::tx::{run_tx, RetryPolicy, Tx, TxError};
 use crate::store::{AtlasArticleRow, AtlasRunRow};
 
 /// Atlas schema (idempotent). The v2 additions are additive `IF NOT EXISTS`
@@ -49,11 +49,19 @@ DEFINE FIELD IF NOT EXISTS category ON atlas_article TYPE string DEFAULT 'unk';
 DEFINE FIELD IF NOT EXISTS categories ON atlas_article TYPE array DEFAULT [];
 DEFINE FIELD IF NOT EXISTS categories.* ON atlas_article TYPE string;
 DEFINE FIELD IF NOT EXISTS admitted_at ON atlas_article TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS taxonomy_version ON atlas_article TYPE string DEFAULT 'atlas-taxonomy-v2';
+DEFINE FIELD IF NOT EXISTS admission_state ON atlas_article TYPE string DEFAULT 'legacy';
+DEFINE FIELD IF NOT EXISTS classification_receipt_key ON atlas_article TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS publication_version ON atlas_article TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS input_revision ON atlas_article TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS source_revision ON atlas_article TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS seen_at ON atlas_article TYPE string;
 DEFINE FIELD IF NOT EXISTS author ON atlas_article TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS image_url ON atlas_article TYPE string DEFAULT '';
 DEFINE INDEX IF NOT EXISTS atlas_article_run ON atlas_article FIELDS run_id;
 DEFINE INDEX IF NOT EXISTS atlas_article_id ON atlas_article FIELDS article_id;
+DEFINE INDEX IF NOT EXISTS atlas_article_occurrence ON atlas_article FIELDS run_id, article_id;
+DEFINE INDEX IF NOT EXISTS atlas_article_dedup_page ON atlas_article FIELDS seen_at, article_id, run_id;
 DEFINE INDEX IF NOT EXISTS atlas_article_bulletin ON atlas_article FIELDS category, published_at, seen_at, article_id, run_id;
 DEFINE INDEX IF NOT EXISTS atlas_article_bulletin_all ON atlas_article FIELDS published_at, seen_at, article_id, run_id;
 DEFINE INDEX IF NOT EXISTS atlas_article_categories ON atlas_article FIELDS categories.*;
@@ -63,17 +71,31 @@ DEFINE TABLE IF NOT EXISTS atlas_admission SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS run_id ON atlas_admission TYPE string;
 DEFINE FIELD IF NOT EXISTS article_id ON atlas_admission TYPE string;
 DEFINE FIELD IF NOT EXISTS payload_json ON atlas_admission TYPE string;
+DEFINE FIELD IF NOT EXISTS provenance_json ON atlas_admission TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS input_hash ON atlas_admission TYPE string;
 DEFINE FIELD IF NOT EXISTS source_revision ON atlas_admission TYPE string;
 DEFINE FIELD IF NOT EXISTS state ON atlas_admission TYPE string;
 DEFINE FIELD IF NOT EXISTS attempts ON atlas_admission TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS last_error ON atlas_admission TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS taxonomy_version ON atlas_admission TYPE string;
+DEFINE FIELD IF NOT EXISTS seen_at ON atlas_admission TYPE string DEFAULT '';
 DEFINE FIELD IF NOT EXISTS created_at ON atlas_admission TYPE string;
 DEFINE FIELD IF NOT EXISTS updated_at ON atlas_admission TYPE string;
+DEFINE FIELD IF NOT EXISTS classifier_input_hash ON atlas_admission TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS input_revision ON atlas_admission TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS work_seq ON atlas_admission TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS owner ON atlas_admission TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS epoch ON atlas_admission TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS lease_until ON atlas_admission TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS next_eligible_at ON atlas_admission TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_activation ON atlas_admission TYPE string DEFAULT '';
 DEFINE INDEX IF NOT EXISTS atlas_admission_state ON atlas_admission FIELDS state, updated_at;
 DEFINE INDEX IF NOT EXISTS atlas_admission_article ON atlas_admission FIELDS article_id;
 DEFINE INDEX IF NOT EXISTS atlas_admission_hash ON atlas_admission FIELDS input_hash;
+DEFINE INDEX IF NOT EXISTS atlas_admission_run ON atlas_admission FIELDS run_id;
+DEFINE INDEX IF NOT EXISTS atlas_admission_run_work ON atlas_admission FIELDS run_id, work_seq, article_id;
+DEFINE INDEX IF NOT EXISTS atlas_admission_eligible ON atlas_admission FIELDS run_id, state, next_eligible_at, work_seq;
+DEFINE INDEX IF NOT EXISTS atlas_article_current_domain ON atlas_article FIELDS taxonomy_version, admission_state, category, published_at, seen_at, article_id, run_id;
 DEFINE TABLE IF NOT EXISTS atlas_rejection SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS article_id ON atlas_rejection TYPE string;
 DEFINE FIELD IF NOT EXISTS input_hash ON atlas_rejection TYPE string;
@@ -347,6 +369,12 @@ pub async fn latest_run(db: &Surreal<Any>) -> Result<Option<AtlasRunRow>, TxErro
     Ok(rows.into_iter().next().map(Into::into))
 }
 
+/// One exact durable checkpoint without loading run history.
+pub(crate) async fn run_by_id(db: &Surreal<Any>, id: &str) -> Result<Option<AtlasRunRow>, TxError> {
+    let mut response=db.query("SELECT record::id(id) AS id,state,phase,cursor_json,stats_json,note,started_at,finished_at FROM ONLY type::record('atlas_run',$id)").bind(("id",id.to_owned())).await?.check()?;
+    Ok(response.take::<Option<RunRow>>(0)?.map(Into::into))
+}
+
 /// `atlas_run_days`: distinct `YYYY-MM-DD` run days, newest first.
 pub async fn run_days(db: &Surreal<Any>) -> Result<Vec<String>, TxError> {
     let mut r = db
@@ -363,38 +391,44 @@ pub async fn run_days(db: &Surreal<Any>) -> Result<Vec<String>, TxError> {
     Ok(days)
 }
 
-/// `atlas_upsert_article`: insert or replace every column. `category` is
-/// stored as the projection of `categories` (first tag), so legacy bulletin
-/// readers keep their semantics.
+#[derive(SurrealValue)]
+struct UpsertDecision {
+    restage: bool,
+    category: String,
+    categories: Vec<String>,
+    admitted_at: String,
+}
+/// Legacy article insert/metadata update. Native classification columns remain
+/// authoritative: unchanged source preserves them; changed native source is
+/// privately restaged, with historical canonical text/tags retained until its
+/// local reevaluation. The public API cannot manufacture a current receipt.
 pub async fn upsert_article(db: &Surreal<Any>, row: &AtlasArticleRow) -> Result<(), TxError> {
-    exec(
-        db,
-        db.query("UPSERT type::record('atlas_article', $key) CONTENT $row RETURN NONE")
-            .bind(("key", encode(&[&row.run_id, &row.id])))
-            .bind((
-                "row",
-                ArticleRow {
-                    run_id: row.run_id.clone(),
-                    article_id: row.id.clone(),
-                    title: row.title.clone(),
-                    description: row.description.clone(),
-                    url: row.url.clone(),
-                    country: row.country.clone(),
-                    source_name: row.source_name.clone(),
-                    source_domain: row.source_domain.clone(),
-                    published_at: row.published_at.clone(),
-                    provider: row.provider.clone(),
-                    temperature: row.temperature,
-                    category: row.projected_category().to_string(),
-                    categories: Some(row.categories.clone()),
-                    admitted_at: Some(row.admitted_at.clone()),
-                    seen_at: row.seen_at.clone(),
-                    author: row.author.clone(),
-                    image_url: row.image_url.clone(),
-                },
-            )),
-    )
-    .await
+    let row = row.clone();
+    run_tx(db,RetryPolicy::default(),move |tx| {let row=row.clone();async move {
+        let key=encode(&[&row.run_id,&row.id]);
+        let bound=ArticleRow {run_id:row.run_id.clone(),article_id:row.id.clone(),title:row.title.clone(),description:row.description.clone(),url:row.url.clone(),country:row.country.clone(),source_name:row.source_name.clone(),source_domain:row.source_domain.clone(),published_at:row.published_at.clone(),provider:row.provider.clone(),temperature:row.temperature,category:row.projected_category().to_owned(),categories:Some(row.categories.clone()),admitted_at:Some(row.admitted_at.clone()),seen_at:row.seen_at.clone(),author:row.author.clone(),image_url:row.image_url.clone()};
+        let mut response=super::classifier_admission::tx_query(&tx,"{
+            UPSERT type::record('atlas_classifier_guard',$run_guard) SET updated_at=<datetime>$now RETURN NONE;
+            UPSERT type::record('atlas_classifier_guard',$source_guard) SET updated_at=<datetime>$now RETURN NONE;
+            LET $old=(SELECT * FROM ONLY type::record('atlas_article',$key));
+            LET $projection=(SELECT input_revision FROM ONLY type::record('atlas_classification_projection',$key));
+            LET $native=($old.input_revision ?? 0)>0 OR ($old.publication_version ?? '')=$publication OR ($projection.input_revision ?? 0)>0;
+            LET $same=$old!=NONE AND $old.title=$row.title AND $old.description=$row.description AND $old.url=$row.url AND $old.source_name=$row.source_name AND $old.source_domain=$row.source_domain AND $old.published_at=$row.published_at AND $old.provider=$row.provider AND $old.seen_at=$row.seen_at;
+            IF $native AND !$same {RETURN {restage:true,category:($old.category ?? 'unk'),categories:($old.categories ?? []),admitted_at:($old.admitted_at ?? '')};};
+            LET $protected={taxonomy_version:($old.taxonomy_version ?? 'atlas-taxonomy-v2'),admission_state:($old.admission_state ?? 'legacy'),classification_receipt_key:($old.classification_receipt_key ?? ''),publication_version:($old.publication_version ?? ''),input_revision:($old.input_revision ?? 0),source_revision:($old.source_revision ?? '')};
+            LET $base=object::extend($row,$protected);
+            LET $value=IF $native {object::extend($base,{category:$old.category,categories:$old.categories,admitted_at:$old.admitted_at})} ELSE {$base};
+            UPSERT type::record('atlas_article',$key) MERGE $value RETURN NONE;
+            RETURN {restage:false,category:'unk',categories:[],admitted_at:''};
+        }").bind(("run_guard",encode(&["run",&row.run_id]))).bind(("source_guard",encode(&["source",&row.run_id,&row.id]))).bind(("key",key)).bind(("row",bound)).bind(("publication",super::classifier_admission::PUBLICATION_VERSION)).bind(("now",chrono::Utc::now().to_rfc3339())).await?.check()?;
+        let decision=response.take::<Option<UpsertDecision>>(0)?.ok_or_else(||TxError::Abort("missing_article_upsert_decision".into()))?;
+        if decision.restage {
+            let mut correction=row;correction.category=decision.category;correction.categories=decision.categories;correction.admitted_at=decision.admitted_at;
+            super::classifier_admission::restage_correction_in(&tx,&correction,chrono::Utc::now()).await?;
+        }
+        Ok(())
+    }}).await?;
+    Ok(())
 }
 
 /// `atlas_set_category` (legacy scalar setter; the scalar projects the first
@@ -412,6 +446,120 @@ pub async fn set_category(
             .bind(("c", category.to_string())),
     )
     .await
+}
+
+/// Shared SQL eligibility. Raw historical reads deliberately remain separate.
+pub const CURRENT_ADMISSION_FILTER:&str="taxonomy_version=$taxonomy AND admission_state='admitted' AND publication_version=$publication AND admitted_at!='' AND classification_receipt_key!='' AND record::exists(type::record('atlas_classification_receipt',classification_receipt_key)) AND (SELECT VALUE receipt_key FROM ONLY type::record('atlas_classification_projection',record::id($parent.id)) WHERE admission_state='admitted' AND taxonomy_version=$taxonomy AND publication_version=$publication)=classification_receipt_key";
+
+/// The fields needed for URL/title history deduplication. Descriptions and
+/// article annotations never enter this paged history read.
+#[derive(Debug, Clone, SurrealValue)]
+pub struct DedupKey {
+    pub run_id: String,
+    pub article_id: String,
+    pub title: String,
+    pub url: String,
+    pub source_domain: String,
+    pub published_at: String,
+    pub seen_at: String,
+}
+
+/// Reads at most 64 thin keys in stable occurrence order. The SQL byte guard
+/// runs before any text reaches the driver; oversized legacy keys are errors,
+/// rather than silently incomplete deduplication.
+pub async fn dedup_keys_page(
+    db: &Surreal<Any>,
+    after: Option<(&str, &str, &str)>,
+) -> Result<Vec<DedupKey>, TxError> {
+    #[derive(SurrealValue)]
+    struct Wire {
+        run_id: Option<String>,
+        article_id: Option<String>,
+        title: Option<String>,
+        url: Option<String>,
+        source_domain: Option<String>,
+        published_at: Option<String>,
+        seen_at: Option<String>,
+    }
+    // At most 32KiB of strings per row. Even worst-case JSON escapes for all
+    // 64 rows plus bounded occurrence IDs fit below the 16MiB driver budget.
+    let valid = "bytes::len(type::bytes(string::concat(title,url,source_domain,published_at,seen_at)))<=32768 AND bytes::len(type::bytes(run_id))<=512 AND bytes::len(type::bytes(article_id))<=512";
+    let sql = format!("SELECT IF {valid} {{run_id}} ELSE {{NONE}} AS run_id,IF {valid} {{article_id}} ELSE {{NONE}} AS article_id,IF {valid} {{title}} ELSE {{NONE}} AS title,IF {valid} {{url}} ELSE {{NONE}} AS url,IF {valid} {{source_domain}} ELSE {{NONE}} AS source_domain,IF {valid} {{published_at}} ELSE {{NONE}} AS published_at,IF {valid} {{seen_at}} ELSE {{NONE}} AS seen_at FROM atlas_article WHERE $first OR seen_at<$after_seen OR (seen_at=$after_seen AND article_id>$after_article) OR (seen_at=$after_seen AND article_id=$after_article AND run_id>$after_run) ORDER BY seen_at DESC,article_id,run_id LIMIT 64");
+    let (seen, article, run) = after.unwrap_or(("", "", ""));
+    let mut response = super::classifier_admission::db_query(db, sql)
+        .bind(("first", after.is_none()))
+        .bind(("after_seen", seen.to_owned()))
+        .bind(("after_run", run.to_owned()))
+        .bind(("after_article", article.to_owned()))
+        .await?
+        .check()?;
+    let rows: Vec<Wire> = response.take(0)?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(DedupKey {
+                run_id: row
+                    .run_id
+                    .ok_or_else(|| TxError::Abort("dedup_key_exceeds_byte_bound".into()))?,
+                article_id: row
+                    .article_id
+                    .ok_or_else(|| TxError::Abort("dedup_key_exceeds_byte_bound".into()))?,
+                title: row
+                    .title
+                    .ok_or_else(|| TxError::Abort("dedup_key_exceeds_byte_bound".into()))?,
+                url: row
+                    .url
+                    .ok_or_else(|| TxError::Abort("dedup_key_exceeds_byte_bound".into()))?,
+                source_domain: row
+                    .source_domain
+                    .ok_or_else(|| TxError::Abort("dedup_key_exceeds_byte_bound".into()))?,
+                published_at: row
+                    .published_at
+                    .ok_or_else(|| TxError::Abort("dedup_key_exceeds_byte_bound".into()))?,
+                seen_at: row
+                    .seen_at
+                    .ok_or_else(|| TxError::Abort("dedup_key_exceeds_byte_bound".into()))?,
+            })
+        })
+        .collect()
+}
+
+/// Bulk identity lookup for one provider page. Staging keeps a small indexed
+/// ingestion timestamp so this lookup never decodes full staged payloads.
+pub async fn retained_identities(
+    db: &Surreal<Any>,
+    run: &str,
+    ids: &[String],
+) -> Result<std::collections::HashMap<String, String>, TxError> {
+    if ids.len() > 64 || ids.iter().any(|id| id.is_empty() || id.len() > 512) {
+        return Err(TxError::Abort("retained_identity_batch_limit".into()));
+    }
+    #[derive(SurrealValue)]
+    struct Row {
+        article_id: String,
+        seen_at: Option<String>,
+    }
+    let mut response = super::classifier_admission::db_query(db,
+        "SELECT article_id,IF bytes::len(type::bytes(seen_at))<=128 {seen_at} ELSE {NONE} AS seen_at FROM atlas_article WHERE run_id=$run AND article_id INSIDE $ids; SELECT article_id,IF bytes::len(type::bytes(seen_at ?? ''))<=128 {seen_at ?? ''} ELSE {NONE} AS seen_at FROM atlas_admission WHERE run_id=$run AND article_id INSIDE $ids;")
+        .bind(("run",run.to_owned())).bind(("ids",ids.to_vec())).await?.check()?;
+    let canonical: Vec<Row> = response.take(0)?;
+    let staging: Vec<Row> = response.take(1)?;
+    let mut out = std::collections::HashMap::new();
+    for row in canonical.into_iter().chain(staging) {
+        out.entry(row.article_id).or_insert(
+            row.seen_at
+                .ok_or_else(|| TxError::Abort("retained_seen_at_exceeds_byte_bound".into()))?,
+        );
+    }
+    Ok(out)
+}
+/// Construction input for native derivatives; legacy/rejected rows stay directly readable.
+pub(crate) async fn current_articles(
+    db: &Surreal<Any>,
+    run_id: &str,
+) -> Result<Vec<AtlasArticleRow>, TxError> {
+    let mut response=super::classifier_admission::db_query(db,format!("SELECT * FROM atlas_article WHERE run_id=$run AND ({CURRENT_ADMISSION_FILTER}) ORDER BY seen_at,article_id")).bind(("run",run_id.to_owned())).bind(("taxonomy",crate::atlas_taxonomy::TAXONOMY_VERSION)).bind(("publication",super::classifier_admission::PUBLICATION_VERSION)).await?.check()?;
+    let rows: Vec<ArticleRow> = response.take(0)?;
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 /// `atlas_list_articles`: one run's articles by `seen_at, article_id`.
@@ -607,34 +755,24 @@ pub async fn articles_for_intel(
     day: &str,
     query: &str,
 ) -> Result<Vec<AtlasArticleRow>, TxError> {
-    let q = query.trim().to_ascii_lowercase();
-    let all = category == "all";
-    let mut rows = Vec::new();
-    for run in list_runs(db).await? {
-        if run.started_at.get(..10) != Some(day) {
-            continue;
-        }
-        for a in list_articles(db, &run.id).await? {
-            let member = if all {
-                !a.categories.is_empty()
-            } else {
-                a.categories.iter().any(|tag| tag == category)
-            };
-            let hit = q.is_empty()
-                || [
-                    &a.title,
-                    &a.description,
-                    &a.source_name,
-                    &a.source_domain,
-                    &a.url,
-                ]
-                .iter()
-                .any(|f| f.to_ascii_lowercase().contains(&q));
-            if member && hit {
-                rows.push(a);
-            }
-        }
+    if category != "all" && crate::atlas_taxonomy::DomainId::parse(category).is_none() {
+        return Err(TxError::Abort("invalid_article_domain".into()));
     }
+    let sql=format!("SELECT * FROM atlas_article WHERE run_id IN (SELECT VALUE record::id(id) FROM atlas_run WHERE started_at >= $start AND started_at < $end) AND ({CURRENT_ADMISSION_FILTER}) AND ($category='all' OR category=$category OR categories CONTAINS $category) AND ($query='' OR string::contains(string::lowercase(string::concat(title,' ',description,' ',source_name,' ',source_domain,' ',url)), $query)) ORDER BY published_at DESC,seen_at DESC,article_id,run_id");
+    let mut response = super::classifier_admission::db_query(db, sql)
+        .bind(("taxonomy", crate::atlas_taxonomy::TAXONOMY_VERSION))
+        .bind((
+            "publication",
+            super::classifier_admission::PUBLICATION_VERSION,
+        ))
+        .bind(("category", category.to_owned()))
+        .bind(("start", day.to_owned()))
+        .bind(("end", format!("{day}~")))
+        .bind(("query", query.trim().to_lowercase()))
+        .await?
+        .check()?;
+    let raw: Vec<ArticleRow> = response.take(0)?;
+    let mut rows: Vec<AtlasArticleRow> = raw.into_iter().map(Into::into).collect();
     rows.sort_by(|a, b| {
         b.published_at
             .cmp(&a.published_at)
@@ -721,6 +859,18 @@ pub async fn stage_article(
         .await?
         .check()?;
     Ok(r.take::<Option<bool>>(2)?.unwrap_or(false))
+}
+
+/// Whether this exact run retains any live admission work, including failed,
+/// evaluating or future states. Terminal staging is deleted by the outcome commit.
+pub async fn admission_pending_exists(db: &Surreal<Any>, run_id: &str) -> Result<bool, TxError> {
+    let mut response = db
+        .query("SELECT VALUE article_id FROM atlas_admission WHERE run_id = $run LIMIT 1")
+        .bind(("run", run_id.to_string()))
+        .await?
+        .check()?;
+    let rows: Vec<String> = response.take(0)?;
+    Ok(!rows.is_empty())
 }
 
 /// Live staging rows of one run, oldest update first.
@@ -953,4 +1103,268 @@ pub async fn rejection_exists(
         .await?
         .check()?;
     Ok(r.take::<Option<bool>>(0)? == Some(true))
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum OriginalArticle {
+    Present(Box<AtlasArticleRow>),
+    Oversized,
+}
+#[derive(SurrealValue)]
+struct OriginalArticleWire {
+    key: String,
+    article: Option<ArticleRow>,
+}
+enum ArticleSnapshotReader<'a> {
+    Db(&'a Surreal<Any>),
+    Tx(&'a Tx),
+}
+impl ArticleSnapshotReader<'_> {
+    fn query(&self, sql: String) -> super::classifier_admission::MeasuredQuery<'_> {
+        match self {
+            Self::Db(db) => super::classifier_admission::db_query(db, sql),
+            Self::Tx(tx) => super::classifier_admission::tx_query(tx, sql),
+        }
+    }
+}
+fn article_snapshot_sql(current: bool) -> String {
+    let strings="string::concat(run_id,article_id,title,description,url,country,source_name,source_domain,published_at,provider,category,seen_at,author ?? '',image_url ?? '',admitted_at ?? '',taxonomy_version ?? '',classification_receipt_key ?? '',publication_version ?? '',source_revision ?? '')";
+    let projection="{run_id:run_id,article_id:article_id,title:title,description:description,url:url,country:country,source_name:source_name,source_domain:source_domain,published_at:published_at,provider:provider,temperature:temperature,category:category,categories:categories,admitted_at:admitted_at,seen_at:seen_at,author:author ?? '',image_url:image_url ?? ''}";
+    let eligibility = if current {
+        format!(" WHERE ({CURRENT_ADMISSION_FILTER})")
+    } else {
+        String::new()
+    };
+    format!("SELECT record::id(id) AS key,IF bytes::len(type::bytes({strings}))<=65536 AND array::len(categories ?? [])<=64 AND bytes::len(type::bytes(string::join('',categories ?? [])))<=4096 {{ {projection} }} ELSE {{NONE}} AS article FROM $keys{eligibility}")
+}
+async fn article_originals_many_read(
+    reader: ArticleSnapshotReader<'_>,
+    keys: &[crate::atlas_classify::OccurrenceKey],
+    current: bool,
+) -> Result<
+    std::collections::BTreeMap<crate::atlas_classify::OccurrenceKey, OriginalArticle>,
+    TxError,
+> {
+    if keys.len() > 100
+        || keys.iter().any(|key| {
+            !crate::intel_service::valid_id(&key.run_id)
+                || !crate::intel_service::valid_id(&key.article_id)
+        })
+    {
+        return Err(TxError::Abort("article_snapshot_batch_limit".into()));
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for chunk in keys.chunks(32) {
+        let identities: std::collections::BTreeMap<_, _> = chunk
+            .iter()
+            .map(|key| (key.record_id(), key.clone()))
+            .collect();
+        let mut response = reader
+            .query(article_snapshot_sql(current))
+            .bind((
+                "keys",
+                identities
+                    .keys()
+                    .map(|key| super::jobs::rid("atlas_article", key))
+                    .collect::<Vec<_>>(),
+            ))
+            .bind(("taxonomy", crate::atlas_taxonomy::TAXONOMY_VERSION))
+            .bind((
+                "publication",
+                super::classifier_admission::PUBLICATION_VERSION,
+            ))
+            .await?
+            .check()?;
+        let rows: Vec<OriginalArticleWire> = response.take(0)?;
+        for row in rows {
+            let value = match row.article.map(AtlasArticleRow::from) {
+                Some(article)
+                    if super::classifier_admission::bounded_json(
+                        &article,
+                        65536,
+                        "original_article",
+                    )
+                    .is_ok() =>
+                {
+                    OriginalArticle::Present(Box::new(article))
+                }
+                _ => OriginalArticle::Oversized,
+            };
+            let key = identities
+                .get(&row.key)
+                .ok_or_else(|| TxError::Abort("retained_article_correlation".into()))?;
+            if out.insert(key.clone(), value).is_some() {
+                return Err(TxError::Abort("duplicate_retained_article".into()));
+            }
+        }
+    }
+    Ok(out)
+}
+/// Bounded original-source outcomes for maintenance. Missing rows are absent;
+/// oversized rows remain explicit dispositions, never truncated text.
+pub(crate) async fn article_originals_many_in(
+    tx: &Tx,
+    keys: &[crate::atlas_classify::OccurrenceKey],
+) -> Result<
+    std::collections::BTreeMap<crate::atlas_classify::OccurrenceKey, OriginalArticle>,
+    TxError,
+> {
+    if keys.len() > 64 {
+        return Err(TxError::Abort("original_article_batch_limit".into()));
+    }
+    article_originals_many_read(ArticleSnapshotReader::Tx(tx), keys, false).await
+}
+pub(crate) async fn articles_many_in(
+    tx: &Tx,
+    keys: &[crate::atlas_classify::OccurrenceKey],
+) -> Result<
+    std::collections::BTreeMap<crate::atlas_classify::OccurrenceKey, AtlasArticleRow>,
+    TxError,
+> {
+    unwrap_original_articles(article_originals_many_in(tx, keys).await?)
+}
+fn unwrap_original_articles(
+    rows: std::collections::BTreeMap<crate::atlas_classify::OccurrenceKey, OriginalArticle>,
+) -> Result<
+    std::collections::BTreeMap<crate::atlas_classify::OccurrenceKey, AtlasArticleRow>,
+    TxError,
+> {
+    rows.into_iter()
+        .map(|(key, value)| match value {
+            OriginalArticle::Present(article) => Ok((key, *article)),
+            OriginalArticle::Oversized => {
+                Err(TxError::Abort("retained_article_exceeds_byte_bound".into()))
+            }
+        })
+        .collect()
+}
+/// Bounded grouped current discovery hydration. The shared receipt predicate is
+/// evaluated inside each <=32-row query before any source payload is returned.
+pub async fn current_articles_many(
+    db: &Surreal<Any>,
+    keys: &[crate::atlas_classify::OccurrenceKey],
+) -> Result<
+    std::collections::BTreeMap<crate::atlas_classify::OccurrenceKey, AtlasArticleRow>,
+    TxError,
+> {
+    unwrap_original_articles(
+        article_originals_many_read(ArticleSnapshotReader::Db(db), keys, true).await?,
+    )
+}
+
+#[derive(Debug, Clone, SurrealValue)]
+#[non_exhaustive]
+pub struct CurrentActorMention {
+    pub actor_id: String,
+    pub origin_scope: String,
+    pub origin_id: String,
+    pub origin_revision: String,
+}
+impl CurrentActorMention {
+    pub fn occurrence(&self) -> crate::atlas_classify::OccurrenceKey {
+        crate::atlas_classify::OccurrenceKey::new(&self.origin_scope, &self.origin_id)
+    }
+}
+/// Indexed actor discovery excludes legacy/rejected occurrences before its
+/// retrieval cap. UTF-8 byte lengths reproduce codec::encode exactly, including
+/// non-ASCII run/article IDs; current projections are checked inside storage.
+pub async fn current_actor_mentions(
+    repo: &super::repo::Repository,
+    actor_ids: &[String],
+    seed: &crate::atlas_classify::OccurrenceKey,
+    limit: usize,
+    after: Option<&[String; 3]>,
+) -> Result<Vec<CurrentActorMention>, TxError> {
+    if actor_ids.len() > 64
+        || actor_ids
+            .iter()
+            .any(|id| !crate::intel_service::valid_id(id))
+        || limit > 100
+        || after.is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|part| part.len() > 512 || part.chars().any(char::is_control))
+        })
+    {
+        return Err(TxError::Abort("actor_article_discovery_bounds".into()));
+    }
+    if actor_ids.is_empty() || limit == 0 {
+        return Ok(vec![]);
+    }
+    let occurrence="type::record('atlas_article',string::concat(<string>bytes::len(type::bytes($parent.origin_scope)),':',$parent.origin_scope,'|',<string>bytes::len(type::bytes($parent.origin_id)),':',$parent.origin_id))";
+    let sql=format!("SELECT actor_id,origin_scope,origin_id,origin_revision FROM brain_actor_mention WITH INDEX brain_actor_mention_actor WHERE actor_id INSIDE $actors AND origin_kind='article' AND !(origin_scope=$seed_run AND origin_id=$seed_article) AND bytes::len(type::bytes(origin_scope))<=512 AND bytes::len(type::bytes(origin_id))<=512 AND bytes::len(type::bytes(actor_id))<=512 AND bytes::len(type::bytes(origin_revision))<=512 AND ($first OR origin_scope<$after_run OR (origin_scope=$after_run AND origin_id>$after_article) OR (origin_scope=$after_run AND origin_id=$after_article AND actor_id>$after_actor)) AND count(SELECT id FROM atlas_article WHERE id={occurrence} AND ({CURRENT_ADMISSION_FILTER}) LIMIT 1)>0 ORDER BY origin_scope DESC,origin_id,actor_id LIMIT $limit");
+    let mut query = super::classifier_admission::db_query(repo.db(), sql)
+        .bind(("actors", actor_ids.to_vec()))
+        .bind(("seed_run", seed.run_id.clone()))
+        .bind(("seed_article", seed.article_id.clone()))
+        .bind(("first", after.is_none()))
+        .bind(("limit", limit as i64))
+        .bind(("taxonomy", crate::atlas_taxonomy::TAXONOMY_VERSION))
+        .bind((
+            "publication",
+            super::classifier_admission::PUBLICATION_VERSION,
+        ));
+    let empty = [String::new(), String::new(), String::new()];
+    let after = after.unwrap_or(&empty);
+    query = query
+        .bind(("after_run", after[0].clone()))
+        .bind(("after_article", after[1].clone()))
+        .bind(("after_actor", after[2].clone()));
+    let mut response = query.await?.check()?;
+    Ok(response.take(0)?)
+}
+
+/// Indexed thin current-occurrence paging for native refresh/backfill. Strong
+/// current admission applies before LIMIT, so history cannot starve new work.
+pub(crate) async fn current_occurrence_keys_page(
+    repo: &super::repo::Repository,
+    run: Option<&str>,
+    article: Option<&str>,
+    after: Option<&crate::atlas_classify::OccurrenceKey>,
+) -> Result<Vec<crate::atlas_classify::OccurrenceKey>, TxError> {
+    if run.is_none() && article.is_none() {
+        return Err(TxError::Abort("native_occurrence_scope_required".into()));
+    }
+    #[derive(SurrealValue)]
+    struct Key {
+        run_id: String,
+        article_id: String,
+    }
+    let index = if run.is_some() {
+        "atlas_article_occurrence"
+    } else {
+        "atlas_article_id"
+    };
+    let sql=format!("SELECT run_id,article_id FROM atlas_article WITH INDEX {index} WHERE ($run='' OR run_id=$run) AND ($article='' OR article_id=$article) AND ($first OR run_id>$after_run OR (run_id=$after_run AND article_id>$after_article)) AND ({CURRENT_ADMISSION_FILTER}) ORDER BY run_id,article_id LIMIT 64;");
+    let mut response = super::classifier_admission::db_query(repo.db(), sql)
+        .bind(("run", run.unwrap_or("").to_owned()))
+        .bind(("article", article.unwrap_or("").to_owned()))
+        .bind(("first", after.is_none()))
+        .bind((
+            "after_run",
+            after
+                .map(|key| key.run_id.as_str())
+                .unwrap_or("")
+                .to_owned(),
+        ))
+        .bind((
+            "after_article",
+            after
+                .map(|key| key.article_id.as_str())
+                .unwrap_or("")
+                .to_owned(),
+        ))
+        .bind(("taxonomy", crate::atlas_taxonomy::TAXONOMY_VERSION))
+        .bind((
+            "publication",
+            super::classifier_admission::PUBLICATION_VERSION,
+        ))
+        .await?
+        .check()?;
+    let rows: Vec<Key> = response.take(0)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| crate::atlas_classify::OccurrenceKey::new(row.run_id, row.article_id))
+        .collect())
 }

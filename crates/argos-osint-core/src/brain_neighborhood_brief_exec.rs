@@ -140,7 +140,16 @@ pub enum Delivery {
 /// Request identity. `fingerprint` summarizes the effective role
 /// configuration and route chain (no secrets).
 pub fn build_request(input: &NeighborhoodInput, fingerprint: &str) -> SummaryRequest {
+    let started = std::time::Instant::now();
     let text = serde_json::to_string(input).unwrap_or_default();
+    crate::intel_recon::brief_timing::note(
+        crate::intel_recon::brief_timing::Phase::Packet,
+        started.elapsed(),
+    );
+    crate::intel_recon::brief_timing::emit_observation(
+        "neighborhood_request",
+        serde_json::json!({"elapsed_us":started.elapsed().as_micros() as u64,"packet_bytes":text.len()}),
+    );
     SummaryRequest {
         mode: SummarizationMode::TopologyNeighborhood,
         sources: vec![crate::summarization::SummarySource {
@@ -209,7 +218,20 @@ pub(crate) fn fallback_result(req: &SummaryRequest, fallback: &NeighborhoodBrief
             .unwrap_or_default(),
         model: "deterministic".into(),
         prompt_version: req.prompt_version.clone(),
-        coverage: CoverageMeta::default(),
+        coverage: CoverageMeta {
+            partial: matches!(
+                fallback.coverage.status,
+                crate::brain_neighborhood_brief::CoverageStatus::Limited
+                    | crate::brain_neighborhood_brief::CoverageStatus::Missing
+            ),
+            omitted: vec![format!(
+                "{} nodes and {} relationships omitted; {} payload reads skipped",
+                fallback.coverage.omitted_nodes,
+                fallback.coverage.omitted_edges,
+                fallback.coverage.payload_reads_skipped
+            )],
+            notes: fallback.footer(),
+        },
         fallback: true,
         source_hashes: Vec::new(),
         provider: "local".into(),
@@ -236,6 +258,65 @@ pub(crate) fn delivered(result: &SummaryResult) -> Option<Generated> {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default(),
     })
+}
+
+/// Deliver only an upgrade bound to this exact frozen packet and contract.
+/// A retained cache row cannot authorize a different basis or foreign refs.
+pub(crate) fn delivered_for(req: &SummaryRequest, result: &SummaryResult) -> Option<Generated> {
+    if result.prompt_version != req.prompt_version
+        || result.source_hashes
+            != req
+                .sources
+                .iter()
+                .map(|source| source.hash.clone())
+                .collect::<Vec<_>>()
+    {
+        return None;
+    }
+    let input: NeighborhoodInput = serde_json::from_str(&req.sources.first()?.text).ok()?;
+    let generated = delivered(result)?;
+    if generated.brief.basis_key != input.basis_key || generated.brief.seed != input.seed {
+        return None;
+    }
+    // An explicit empty model answer retains the exact host fallback. Its
+    // references can cover records omitted only from the smaller model packet.
+    if generated.route == "deterministic"
+        && decode_request(req)
+            .ok()
+            .is_some_and(|(_, fallback)| fallback == generated.brief)
+    {
+        return Some(generated);
+    }
+    let nodes: std::collections::BTreeSet<_> = input
+        .nodes
+        .iter()
+        .map(|node| node.node.id.as_str())
+        .collect();
+    let edges: std::collections::BTreeSet<_> = input
+        .edges
+        .iter()
+        .map(|edge| edge.edge.id.as_str())
+        .collect();
+    if generated
+        .brief
+        .references
+        .iter()
+        .any(|reference| match &reference.target {
+            crate::brain_neighborhood_brief::BasisTarget::Node(id) => !nodes.contains(id.as_str()),
+            crate::brain_neighborhood_brief::BasisTarget::Edge(id) => !edges.contains(id.as_str()),
+        })
+        || generated.brief.items().any(|item| {
+            item.node_ids.iter().any(|id| !nodes.contains(id.as_str()))
+                || item.edge_ids.iter().any(|id| !edges.contains(id.as_str()))
+                || item
+                    .basis
+                    .iter()
+                    .any(|index| *index == 0 || *index > generated.brief.references.len())
+        })
+    {
+        return None;
+    }
+    Some(generated)
 }
 
 /// Decode what a worker needs from a stored flush request.
@@ -306,6 +387,33 @@ pub async fn generate(
     req: &SummaryRequest,
     cancel: &Arc<AtomicBool>,
 ) -> Result<Generated, GenerationFailure> {
+    let measured_at = std::time::Instant::now();
+    let clock = crate::intel_recon::brief_timing::StageClock::default();
+    let result = crate::intel_recon::brief_timing::with_clock(
+        clock.clone(),
+        generate_measured(runtime, db_path, operation_id, task, req, cancel),
+    )
+    .await;
+    let (outcome, requests) = match &result {
+        Ok(value) => ("generated", Some(value.requests)),
+        Err(_) => ("failed_or_cancelled", None),
+    };
+    crate::intel_recon::brief_timing::emit(&clock, measured_at.elapsed(), outcome, 0, OPERATION);
+    crate::intel_recon::brief_timing::emit_observation(
+        "neighborhood_provider",
+        serde_json::json!({"provider_calls":requests,"outcome":outcome}),
+    );
+    result
+}
+
+async fn generate_measured(
+    runtime: &RoleRuntime,
+    db_path: Option<&Path>,
+    operation_id: &str,
+    task: Option<(&str, i64)>,
+    req: &SummaryRequest,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Generated, GenerationFailure> {
     if !req
         .prompt_version
         .ends_with(crate::provider::structured_text::VERSION)
@@ -331,9 +439,9 @@ pub async fn generate(
         ChatMessage {
             role: "system".into(),
             content: format!(
-                "{} Use readable sections Overview, Connections, Interpretation, Limits, each as one or more complete text blocks. Text is prose and Basis lists packet references such as N1 or E2, never record IDs. Use the same fields for each section.\n{}",
+                "{} Use readable sections Current State, Significant Developments, Actor Relationships, Cross-Domain Implications, Emerging Signals, Conditional Outlook, Evidence, and Limitations. Omit unsupported sections; each supported section is one or two complete text blocks. Text is prose and Basis lists packet references such as N1 or E2, never record IDs. Use the same fields for each section.\n{}",
                 crate::summarization::system_prompt(SummarizationMode::TopologyNeighborhood),
-                crate::provider::structured_text::instructions("overview")
+                crate::provider::structured_text::instructions("current state")
             ),
             tool_call_id: None,
             tool_calls: vec![],
@@ -353,25 +461,28 @@ pub async fn generate(
     if let Some((id, epoch)) = task {
         scope = scope.with_task(id).with_task_epoch(epoch);
     }
-    let (raw, report) = execute_chat(
-        &runtime.auth,
-        &runtime.settings,
-        &scope,
-        &messages,
-        |raw| match summary_answer(raw) {
-            Ok(SummaryAnswer::Empty(_)) => Ok(()),
-            Ok(SummaryAnswer::Sections(value)) => {
-                validate_generated(&input, &fallback, &value.to_string())
-                    .map(|_| ())
-                    .map_err(|e| format!("brief rejected: {e}"))
-            }
-            Err(error) => Err(format!("brief rejected: {error}")),
-        },
-        cancel,
-        None,
-        None,
-        db_path,
-        false,
+    let (raw, report) = crate::intel_recon::brief_timing::timed(
+        crate::intel_recon::brief_timing::Phase::Model,
+        execute_chat(
+            &runtime.auth,
+            &runtime.settings,
+            &scope,
+            &messages,
+            |raw| match summary_answer(raw) {
+                Ok(SummaryAnswer::Empty(_)) => Ok(()),
+                Ok(SummaryAnswer::Sections(value)) => {
+                    validate_generated(&input, &fallback, &value.to_string())
+                        .map(|_| ())
+                        .map_err(|e| format!("brief rejected: {e}"))
+                }
+                Err(error) => Err(format!("brief rejected: {error}")),
+            },
+            cancel,
+            None,
+            None,
+            db_path,
+            false,
+        ),
     )
     .await
     .map_err(|e| classify(&e))?;
@@ -395,9 +506,14 @@ pub async fn generate(
             ))
         }
     };
+    let validation_at = std::time::Instant::now();
     let validated = validate_generated(&input, &fallback, &converted.to_string()).map_err(|e| {
         GenerationFailure::new(FailureKind::Rejected, format!("brief rejected: {e}"))
     })?;
+    crate::intel_recon::brief_timing::note(
+        crate::intel_recon::brief_timing::Phase::Validation,
+        validation_at.elapsed(),
+    );
     let route = report
         .effective_route
         .and_then(|i| routes.get(i as usize))

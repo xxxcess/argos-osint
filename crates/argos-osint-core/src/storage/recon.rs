@@ -408,6 +408,10 @@ pub async fn delete_thread_in(tx: &Tx, id: &str) -> Result<bool, TxError> {
     if found {
         super::insight::remove_nlp_owner_in(tx, "thread", id).await?;
     }
+    if found {
+        super::lifecycle::bump_support_epoch_in(tx, &super::lifecycle::SupportBatch::new(tx))
+            .await?;
+    }
     Ok(found)
 }
 

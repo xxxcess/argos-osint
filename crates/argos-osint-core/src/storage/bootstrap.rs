@@ -29,7 +29,7 @@ use super::tx::{run_tx, RetryPolicy, TxError};
 /// array, `admitted_at`, the `categories.*` membership index and the two
 /// article full-text indexes — all additive `IF NOT EXISTS` definitions, so
 /// opening a v1 database upgrades it in place without a wipe.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Module schemas in apply order: counters before the outbox; the graph
 /// before lifecycle (which indexes `brain_graph_node`); Atlas before its
@@ -37,7 +37,7 @@ pub const SCHEMA_VERSION: i64 = 2;
 /// before refresh. The event logs (`argos_event`, `investigation_event`)
 /// stand alone; telemetry writes use `profile_view`'s tables, with
 /// `telemetry_meta` after them.
-pub fn schemas() -> [(&'static str, &'static str); 37] {
+pub fn schemas() -> [(&'static str, &'static str); 40] {
     [
         ("counters", super::counters::SCHEMA),
         ("outbox", super::outbox::SCHEMA),
@@ -49,6 +49,15 @@ pub fn schemas() -> [(&'static str, &'static str); 37] {
         ("insight", super::insight::SCHEMA),
         ("atlas", super::atlas::SCHEMA),
         ("atlas_metadata", super::atlas_metadata::SCHEMA),
+        ("classifier_admission", super::classifier_admission::SCHEMA),
+        (
+            "classifier_calibration",
+            super::classifier_calibration::SCHEMA,
+        ),
+        (
+            "atlas_admission_maintenance",
+            super::atlas_admission_maintenance::SCHEMA,
+        ),
         ("intel", super::intel::SCHEMA),
         ("brief", super::brief::SCHEMA),
         ("lifecycle", super::lifecycle::SCHEMA),

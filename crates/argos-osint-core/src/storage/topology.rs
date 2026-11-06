@@ -197,8 +197,8 @@ struct ArticleMentionRow {
 struct RelatedRow {
     left_id: String,
     right_id: String,
-    left_revision: String,
-    right_revision: String,
+    left_native_revision: Option<String>,
+    right_native_revision: Option<String>,
     shared_json: String,
 }
 
@@ -1826,7 +1826,7 @@ impl Query<'_> {
         let mut r = stmt(
             self.tx
                 .query(
-                    "SELECT left_id, right_id, left_revision, right_revision, shared_json
+                    "SELECT left_id, right_id, left_native_revision, right_native_revision, shared_json
                  FROM atlas_related_article WHERE run_id = $r AND (left_id = $a OR right_id = $a)",
                 )
                 .bind(("r", n.run_id.clone()))
@@ -1835,21 +1835,32 @@ impl Query<'_> {
         .await?;
         let mut pairs: Vec<RelatedRow> = r.take(0)?;
         pairs.sort_by(|a, b| (&a.left_id, &a.right_id).cmp(&(&b.left_id, &b.right_id)));
-        for p in self.bound(pairs) {
-            let (Some(la), Some(ra)) = (
-                atlas::article_in(&self.tx, &n.run_id, &p.left_id).await?,
-                atlas::article_in(&self.tx, &n.run_id, &p.right_id).await?,
-            ) else {
-                continue;
-            };
-            let related_revision = |a: &crate::store::AtlasArticleRow| {
-                crate::nlp::cache::hash(&format!(
-                    "{}:{}",
-                    crate::atlas_metadata::input_hash(a),
-                    a.category
-                ))
-            };
-            if related_revision(&la) != p.left_revision || related_revision(&ra) != p.right_revision
+        let pairs = self.bound(pairs);
+        let keys: BTreeSet<_> = pairs
+            .iter()
+            .flat_map(|pair| {
+                [
+                    crate::atlas_classify::OccurrenceKey::new(&n.run_id, &pair.left_id),
+                    crate::atlas_classify::OccurrenceKey::new(&n.run_id, &pair.right_id),
+                ]
+            })
+            .collect();
+        let mut revisions = BTreeMap::new();
+        for chunk in keys.into_iter().collect::<Vec<_>>().chunks(64) {
+            revisions.extend(
+                super::classifier_admission::native_related_revisions_many_in(&self.tx, chunk)
+                    .await?,
+            );
+        }
+        for p in pairs {
+            let left = crate::atlas_classify::OccurrenceKey::new(&n.run_id, &p.left_id);
+            let right = crate::atlas_classify::OccurrenceKey::new(&n.run_id, &p.right_id);
+            if p.left_native_revision
+                .as_ref()
+                .is_none_or(|revision| revisions.get(&left) != Some(revision))
+                || p.right_native_revision
+                    .as_ref()
+                    .is_none_or(|revision| revisions.get(&right) != Some(revision))
             {
                 self.gaps.insert(format!(
                     "related:{}/{}: stale retained pair",
@@ -2594,10 +2605,12 @@ async fn snapshot_in(
             _ => {}
         }
     }
-    // The deterministic brief from the admitted records' payloads.
+    // Summary hydration uses its own hard ceiling before any payload reads;
+    // the explorer's larger admitted graph remains unchanged.
+    let summary_snapshot = brief::summary_projection(&snapshot);
     let mut payloads = BTreeMap::new();
     let mut skipped = 0;
-    let mut wanted: Vec<String> = snapshot
+    let mut wanted: Vec<String> = summary_snapshot
         .nodes
         .iter()
         .filter(|n| {
@@ -2609,7 +2622,7 @@ async fn snapshot_in(
         .map(|n| n.id.clone())
         .collect();
     wanted.extend(
-        snapshot
+        summary_snapshot
             .edges
             .iter()
             .filter(|e| matches!(e.kind, TopologyEdgeKind::Link | TopologyEdgeKind::Related))
@@ -2626,7 +2639,7 @@ async fn snapshot_in(
     }
     let (built, packet) = {
         let input = BriefInput {
-            snapshot: &snapshot,
+            snapshot: &summary_snapshot,
             seed,
             depth,
             cycle: &options.cycle_scope,

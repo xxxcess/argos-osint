@@ -7,12 +7,17 @@ use sha2::{Digest, Sha256};
 use crate::store::AtlasArticleRow;
 use crate::telemetry::{EventKind, TelemetryEvent, Trigger};
 
-/// Collection contract written by new cycles (v2 adds phase 6: index actors
-/// and articles through Brain). v1 cycles are the same collection model
-/// without phase 6; recognise both through [`is_collection_contract`].
-pub const COLLECTION_CONTRACT: &str = "atlas-collection-v2";
+/// New cycles use local six-domain admission (v3). Retained v2 cycles include
+/// actor/article indexing; v1 predates that phase. All three remain recognizable
+/// through [`is_collection_contract`] without rewriting their history.
+pub const COLLECTION_CONTRACT: &str = "atlas-collection-v3";
+pub const COLLECTION_CONTRACT_V2: &str = "atlas-collection-v2";
 pub const COLLECTION_CONTRACT_V1: &str = "atlas-collection-v1";
-pub const COLLECTION_CONTRACTS: [&str; 2] = [COLLECTION_CONTRACT_V1, COLLECTION_CONTRACT];
+pub const COLLECTION_CONTRACTS: [&str; 3] = [
+    COLLECTION_CONTRACT_V1,
+    COLLECTION_CONTRACT_V2,
+    COLLECTION_CONTRACT,
+];
 /// Phase 6 work units (one per retained article occurrence).
 pub const STAGE_ACTOR_ARTICLES: i32 = 12;
 

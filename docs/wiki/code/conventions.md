@@ -42,29 +42,11 @@ New figures follow [diagrams.md](../../diagrams.md): self-contained HTML + SVG, 
 
 ## Architecture and concepts
 
-When code introduces or significantly changes component ownership/boundaries,
-execution or data flow, persistence/state transitions, public contracts or domain
-concepts, update the relevant maintained docs and diagrams in the same change.
-For example, a new pipeline stage affects its flow description and figure; a new
-durable job state affects lifecycle docs and the state diagram; a changed role or
-binding model affects architecture, concepts and the matching model/data-flow figure.
+Update affected canonical docs, contracts, tags and diagrams when behavior, ownership, persistence or public interfaces change. Plan that scope with the implementation, review it before freeze, and repeat only for a changed relevant delta; see [finish-line policy](agent-workflow.md#scope-and-finish-line).
 
-During planning, identify affected paths using [the wiki](../../index.md) and the
-[diagram catalog](../../diagrams.md), and assign doc/figure ownership alongside code.
-Update [architecture](architecture.md), [glossary](../concepts/glossary.md), [usage](../concepts/usage.md), provider or component contracts
-only where affected. Update existing figures that become inaccurate; add a focused
-figure when a new structure, flow or state model needs visual explanation. Internal
-edits that preserve these contracts do not require new diagrams.
+Keep paired HTML/SVG labels and arrows consistent with final source; update indexes only for added, moved or retired pages. Internal edits that preserve contracts need no new diagram. Check links and inspect changed figures. Do not turn an implementation task into a general wiki refresh.
 
-Keep each figure's HTML/inline SVG and sibling SVG consistent. Update catalog,
-documentation index and prose links when adding, replacing or retiring figures.
-Before completion, compare documentation claims and figure labels/arrows with final
-code, including failure/retry paths, and check links. The parent handles docs outside
-an editor's assigned file set. Reviewers flag stale concepts or diagrams as incomplete
-work. Report updated docs/figures and actual validation, or a concrete reason no
-figure is affected; do not treat an index-only refresh as a maintained diagram update.
-
-TUI changes follow [the design contract](tui-design-spec.md) and [component catalog](tui-components.md). Name the components/preset before editing; preserve metric semantics, widget IDs and palette. Profile uses registered geometry and independent grid/report scrolling. React Native UI follows the [Argos look and feel](react-ui.md#argos-look--feel-reference): name the screen type and density, use theme tokens, design components creatively inside the Argos theme, and render topology graphs with the force-graph canvas.
+TUI and React changes follow their linked design/component/theme guidance; preserve metric semantics, widget identities and layout/interaction contracts.
 
 ## Rust style
 
@@ -86,4 +68,3 @@ Rules for asynchronous execution and process management:
 - **Concurrent child pipe I/O**: `crates/argos-osint-core/src/subscription.rs::complete` writes the prompt to the child's stdin and reads stdout JSONL lines concurrently in a `tokio::select!` loop. A broken pipe on the stdin write (`ErrorKind::BrokenPipe`, child closed stdin early) is tolerated: stdin is dropped and the stdout reader continues to drain the child's output instead of failing the whole completion.
 - **Non-blocking process liveness probing**: `crates/argos-osint-core/src/storage/server.rs::pid_alive` probes a process with non-blocking `libc::kill(pid, 0)` (signal 0, no signal delivered). `EPERM` means the process exists but is owned by another user (treated as alive); `ESRCH` means it does not exist. Non-positive or overflowing PIDs are strictly rejected.
 - **Bounded SIGTERM→SIGKILL escalation**: `storage/server.rs::stop_server_process` sends SIGTERM, waits an 8-second grace, then escalates to SIGKILL with a further 5-second kill grace, bailing if the server still does not stop. `cli.rs::dispatch` applies the same bounded escalation to a foreground child: SIGTERM on a shutdown signal, a 5-second graceful wait, then SIGKILL plus a 2-second reap timeout.
-

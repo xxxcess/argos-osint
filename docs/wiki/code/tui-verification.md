@@ -6,7 +6,7 @@ This is the repo standard for agents changing terminal presentation or interacti
 
 ## Plan the contract
 
-Start with the [interface map](interfaces.md), then inspect affected components and callers with scoped searches. Record a named plan under `.planning/<YYYY-MM-DD-slug>/`; one owner maintains phases and the next step. Preserve existing working-tree changes.
+Start with the [interface map](interfaces.md), then inspect affected components and callers with scoped searches. Scale planning to the task under the [planning format](planning-artifacts.md#working-format); multi-phase work uses a named plan, while small tasks need no separate planning files. Preserve existing working-tree changes and follow the [scope and finish line](agent-workflow.md#scope-and-finish-line).
 
 Identify components, layout preset, exact owned files, read-only references and acceptance checks before editing. For Profile, use AnalyticsCard, TimePlot, DetailTable, Meter and ScrollPane through `profile_components`, and Dashboard/Report geometry from `profile_layout::LayoutResult`. Other screens use their catalogued presets. Rectangles drive drawing, logical focus and pointer targets together. Keep selection keyed by identity rather than display position.
 

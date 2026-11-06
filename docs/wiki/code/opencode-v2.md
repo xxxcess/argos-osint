@@ -19,22 +19,13 @@ This page describes the explicitly selected OpenCode team profile. Its role/mode
 | `utility` | none | `agents.<role>.model` | Quick general non-code edits (documentation, configuration, instructions); leaf role with no source/test/CI edit rights |
 | `scribe` | none | `agents.<role>.model` | Review code deltas and maintain canonical documentation, tags, and diagrams |
 
-## Concise Interview, Customer Translation & Dynamic Team Selection
+## Scope and team selection
 
-Clear user requests and existing authorization are sufficient to proceed. The coordinator asks only for missing decisions that materially affect scope, risk or acceptance; an interview and second approval are not routine prerequisites. Use available ask tools, or a concise conversation question when none exist. Resolve routine team questions from existing contracts before escalating to the user.
+Follow the canonical [scope and finish line](agent-workflow.md#scope-and-finish-line); existing authorization is sufficient. Ask only for missing material decisions, defer independent improvements and stop new work at handoff.
 
-Select the leanest topology by dependencies, risk and available capacity. File counts are rough indicators, not mandatory fan-out thresholds. Keep tightly coupled source and test changes in one unit. Run independent units concurrently only with disjoint ownership and enough slots; avoid idle parent chains that consume all provider capacity.
+Choose the smallest useful team: direct specialist for a coherent task; focused architect consultation for an unresolved contract; orchestrator with disjoint specialists for independent areas. Delegate early when it shortens the critical path, with one build owner. Do not add a new approval ceremony or repeat the role chain for routine fixes.
 
-1. **Tier 1 — Direct Specialist (1 subagent)**:
-   - Plan/architecture spec $\to$ `architect`; diff review $\to$ `reviewer`; UI/TUI verification $\to$ `tester`; wiki maintenance $\to$ `scribe`; authorized commit $\to$ `rust-coder`/`react-coder`.
-2. **Tier 2 — Bounded implementation with known ownership**:
-   - `rust-coder`/`react-coder` implements and formats the coherent unit; the build owner gathers focused real-contract evidence as soon as it runs. Scribe updates affected contracts as they stabilize; final profile acceptance uses `reviewer` + `tester` + `auditor` in `INTEGRATION_ROOT`.
-3. **Tier 3 — Independent areas or cross-cutting integration contracts**:
-   - `coordinator` dispatches `orchestrator`, which runs parallel `architect` (`AUDIT_UNIT`) explorers, dispatches `rust-coder`/`react-coder` (implementing disjoint assignments directly), schedules `scribe` at phase checkpoints, and gates final integrated code acceptance on `reviewer: APPROVE`, `tester: PASS`, and `auditor: CLEAN`. Avoid repeating the whole role chain for routine fixes with established contracts.
-
-[Agent handoffs](../../diagrams/agent-team.html) follow one phase/milestone at a time. `orchestrator` owns shared plans and may call `architect` to investigate directly and produce a spec with exact files, contracts, performance/migration risks, and acceptance. `rust-coder`/`react-coder` investigates and implements assigned changes directly, formats them, and returns all verification, documentation, and CONSULT needs to the owning `orchestrator`/`coordinator` for dispatch. The owning role schedules `scribe`, `reviewer`, `tester`, and `auditor` at appropriate milestones. On any gate failure, `orchestrator`/`coordinator` synthesizes exact `file:line` remediation items and resumes `rust-coder`/`react-coder` for the next iteration. Plan-only requests stop before implementation. User exclusions override routine build/test defaults.
-
-`architect` uses `AUDIT_UNIT` for exploration and `CONSULT` for decisions. It investigates directly and cannot spawn children in any mode. Stack coders investigate and implement their assigned work directly and never spawn children. They return unresolved decisions and verification needs to their owning role. `auditor` and `scribe` are strict leaf roles. Every handoff carries `PLAN_ID`, exact scope, references, and acceptance; only the owning `orchestrator` or `coordinator` updates shared plan files during delegated work.
+[Agent handoffs](../../diagrams/agent-team.html) retain the profile's responsibilities: architects investigate directly using `AUDIT_UNIT` or advise through `CONSULT`; stack coders implement and return docs/review/verification needs without children. The owning coordinator/orchestrator integrates and dispatches scribe/reviewer/tester/auditor. Only the plan owner edits shared status during delegation. Final code acceptance remains `reviewer: APPROVE + tester: PASS + auditor: CLEAN`; demonstrated failures return to their owner. Plan-only requests stop before implementation; user exclusions override routine verification defaults.
 
 ## Models
 
@@ -52,11 +43,9 @@ Only `AUDIT_UNIT` exploration uses `.opencode/architect-worker.json`; stack code
 
 ## Delegation and continuation
 
-`experimental.subagent_depth: 4` supports nested specialist dispatch; `architect` and stack coders are leaf roles and cannot spawn children. Tester, reviewer, auditor, and architect CONSULT dispatch are owned by the parent; coders return those needs without spawning leaf roles. Leaf instructions prevent recursive workflow spawning.
+`experimental.subagent_depth: 4` supports nested dispatch within the table above; architects, coders, auditors and scribes retain their leaf restrictions. Use the [canonical workflow](agent-workflow.md) for ownership, useful parallel work, explicit worker wakeups, one build owner and unaffected evidence reuse.
 
-A `sessionID` belongs to the calling parent: resume only a child returned by your own successful subagent call, using the same role. Never copy sibling, ancestor or previous-root child IDs into a new parent. Keep the parent/child mapping in its own local ledger; it is runtime state, not a durable spec.
-
-If continuation returns unknown/foreign-session errors, confirm the old worker is no longer editing, then start a fresh child without `sessionID` and include the current spec, completed work and remaining scope. For model/permission/depth failures, report the exact diagnostic and stop that handoff for configuration repair. Do not claim success or fall back to direct edits/builds in the wrong role. Background children notify parents; avoid busy polling. A plain message to a completed child may not resume execution: inspect status, use the host-supported follow-up/resume/wake operation, and verify the worker is running. One build owner owns Cargo execution and log collection per integration tree. Record process/session ownership, command, log path and completion status in the plan so a replacement can inspect an existing run instead of launching a duplicate. Keep the compilation/configuration inputs for each run stable; independent guidance/docs edits do not invalidate code evidence unless they affect its behavior or tool inputs. Rerun only evidence invalidated by relevant source/config/fixture/renderer changes; do not repeat a passed full gate for reporting or handoff alone.
+A `sessionID` belongs to the calling parent: resume only a child returned by that parent's successful call, using the same role. Never copy sibling, ancestor or previous-root IDs. Keep the mapping in a local runtime ledger. For an unknown/foreign-session error, confirm the former worker stopped editing, then start a fresh child with current scope/evidence. Report model/permission/depth failures; do not claim success, substitute a model or bypass role boundaries through direct edits/builds.
 
 ## Permissions and tooling
 
@@ -70,9 +59,9 @@ References: [official V2 agents](https://opencode.ai/v2/docs/agents), [config](h
 
 Any Rust edit or review under `crates/` loads `argos-rust-style` (Google's Rust Style Guide, with Argos overrides). `argos-osint-core` and `argos-osint-api` follow the library rules; `argos-osint-bin` and `argos-api-host` follow the application rules. Tokio async and the existing crate layout stay in force. `orchestrator` passes the skill into Rust phases; `architect` identifies it in the spec, `rust-coder` applies it directly, and `reviewer`/`tester` review diffs against it. The canonical file is `.opencode/skills/argos-rust-style/SKILL.md`; `.agents/skills/argos-rust-style` is the same skill. `cargo fmt` remains the formatter.
 
-## UI/TUI visual verification and fix cycles
+## UI/TUI visual verification
 
-Capture affected UI/TUI fixtures early as labelled previews and inspect the images before investing in a full gate. Track output source, fixture and renderer identity separately from final gate evidence. Repeated attempts without new information require a different diagnostic or implementation approach; keep the defect visible and continue independent work. Escalate only a concrete blocker or material user decision. Final approval still requires matching inspected output and all required integration evidence; accessibility, functionality and integrity failures remain open.
+Follow the [canonical evidence workflow](agent-workflow.md) and [TUI verification](tui-verification.md): inspect actual previews and retain matching provenance; missing visual, accessibility, functionality or integration evidence remains open.
 
 ## React UI skills
 
@@ -81,8 +70,6 @@ React work uses [React UI rules](react-ui.md), including the [Argos look and fee
 `/react-ui-review <scope>` selects `tester` for a read-only review (default: current UI delta). Frontend verification uses the pinned Node/pnpm, offline Playwright fixtures and inspected screenshots; shell Playwright does not require enabling the denied browser tool. Missing image/tool evidence remains pending.
 
 ## React test workflow
-
-Use the same dependency-based topology for React tests as production changes. A small cohesive test change does not need a fresh architecture survey or nested coder layer. Keep real component/hook imports and network-boundary fixtures; update documentation only when its contract changes.
 
 Use the canonical [React component testing contract](react-ui.md#react-component-testing-real-component-pattern) for component imports, isolated offline fixtures, React update handling, token assertions and browser screenshots. Run `pnpm test` in addition to typecheck, lint, compiled build and relevant Playwright checks. A unit-suite pass does not replace browser interaction or inspected visual evidence. Record failures and skips honestly in the named plan; do not institutionalize known flaky tests as accepted exceptions.
 
@@ -111,20 +98,14 @@ RETURN: COMPLETE | NEEDS_DECISION | FAILED | APPROVE | REJECT | PASS | FAIL | BL
 
 ## Worktree integration
 
-1. The dispatching role records the main checkout as `INTEGRATION_ROOT`, its revision and existing dirty paths. Assign coders disjoint file ownership; shared contracts/lockfiles have one owner. Small sequential edits can use the integration tree; parallel feature units use task-owned worktrees under `.agent-scratch/worktrees/`.
-2. Create each worktree from the agreed baseline (`git worktree add --detach <absolute-path> <base>`). Include any required uncommitted phase baseline with a scoped patch; never silently omit dirty prerequisites or copy unrelated edits.
-3. Pass absolute `WORKTREE` and `PLAN_DIR` to each coder. Read the shared plan in the integration tree; never create a competing plan in a worker.
-4. Each coder implements and formats its assigned changes directly, then returns owned paths, diff and unresolved decisions. The dispatching role waits for all coders and integrates only each unit's delta.
-5. Have coders resolve integration conflicts; consult `architect` when contracts change, format the combined tree, and at scheduled documentation checkpoints give `scribe` exclusive ownership of the affected docs while it reviews the integrated delta. Run focused integration smoke checks immediately when the relevant code is ready; complete affected documentation before final acceptance. Final profile review/test/audit uses `INTEGRATION_ROOT`. Never build/test in feature worktrees.
-
-Build owners follow [cache retention and disk budgets](contributing.md#build-cache-hygiene) before builds, between large checks and at handoff. Dispatchers include the retained cache and free-space budget in handoffs; only the execution owner performs safe cleanup of obsolete artifacts.
+Record `INTEGRATION_ROOT`, base revision and dirty prerequisites before dispatch. Give coders disjoint ownership; use task-owned worktrees under `.agent-scratch/worktrees/` only when isolation helps. Carry required uncommitted prerequisites through a scoped patch, preserve unrelated edits and integrate only the assigned delta. Coders resolve conflicts; consult architect for changed contracts. Keep one shared-plan owner and one build owner. Worktrees are edit-only; final review/test/audit runs in `INTEGRATION_ROOT` under the [canonical workflow](agent-workflow.md) and [cache policy](contributing.md#build-cache-hygiene).
 
 ## Verification
 
 Map each phase to [CI contracts](ci.md) and the affected `.github/workflows/` before choosing commands. Frontend phases include strict compiler/export and development browser checks; Rust phases start with targeted checks and use the embedded local gate when broad integration acceptance requires it. Respect Code Architect ownership for workflow edits and report hosted Actions separately from local evidence.
 
-Follow the [canonical workflow](agent-workflow.md) and [contributor commands](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration). One build owner records host, feature graph, profile, target, jobs and relevant test scope. Choose concurrency from RAM/pressure, keep Cargo's feature graph stable, and smoke one real affected fixture before long suites. A package-only run that changes feature unification is an intentional build change, not automatically a faster check.
+Follow the [canonical workflow](agent-workflow.md) and [contributor commands](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration) for the stable build graph, resource limits, focused fixtures and evidence reuse. One build owner records the execution recipe; missing or skipped checks are not passes.
 
 Rust verification targets the native host and embedded storage with `ARGOS_EMBED` unset. The required final `scripts/local_matrix.sh --storage embedded` gate runs in `INTEGRATION_ROOT` after relevant inputs stabilize. Fix demonstrated failures with focused reruns before another broad run; an arbitrary attempt cap never waives required acceptance. Local mutation tests/baselines, server storage and all-platform matrices remain excluded; hosted evidence is reported separately.
 
-Config-only changes use the relevant `node --test .opencode/tests/*.test.mjs` and runtime checks without a Rust rebuild. Guidance-only changes use scoped link/policy checks. Suggest workflow improvements with concrete evidence and tradeoffs; implement reversible improvements already authorized within role/ownership boundaries.
+Config-only changes use the relevant `node --test .opencode/tests/*.test.mjs` and runtime checks without a Rust rebuild. Guidance-only changes use scoped link/policy checks. Keep improvements within the agreed scope and role ownership.

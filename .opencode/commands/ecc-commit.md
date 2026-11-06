@@ -3,6 +3,6 @@ description: Prepare or create a scoped Conventional Commit for authorized Argos
 agent: rust-coder
 ---
 
-Follow the canonical [agent workflow](../../docs/wiki/code/agent-workflow.md) for execution, evidence reuse and improvement suggestions. Preserve this command's configured OpenCode role when selected; other hosts retain their active instructions.
+Follow the canonical [scope and finish-line policy](../../docs/wiki/code/agent-workflow.md#scope-and-finish-line) and this command’s configured role/permissions.
 
-Use argos-commit for $ARGUMENTS. Apply existing authorization; otherwise prepare the message/scope only. React-UI-only commits may be prepared by `react-coder` when dispatched instead. This command grants no push/merge/release permission.
+Use `argos-commit` for $ARGUMENTS. Apply existing authorization; otherwise prepare only the scope/message. React-only commits may be prepared by a dispatched `react-coder`. This command grants no push/merge/release permission.

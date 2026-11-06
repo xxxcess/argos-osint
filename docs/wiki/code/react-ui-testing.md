@@ -33,6 +33,8 @@ credentials or user datastore are needed.
 ## Running and maintaining the suite
 
 Ask before running verification unless the user has already authorized its scope.
+Select affected contracts under the [scope and finish line](agent-workflow.md#scope-and-finish-line)
+and [CI requirements](ci.md); reuse passing evidence whose relevant inputs are unchanged.
 `pnpm test` discovers the complete offline component, hook and adapter suite.
 `pnpm typecheck` and `pnpm lint` are separate requirements. Vitest does not compile
 components with React Compiler, so browser verification is needed after component

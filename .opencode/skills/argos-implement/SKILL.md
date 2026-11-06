@@ -3,14 +3,8 @@ name: argos-implement
 description: Implement one assigned phase directly and return verification needs
 ---
 
-Use the canonical [agent workflow](../../../docs/wiki/code/agent-workflow.md) with the active host's roles and existing authorization. OpenCode-only restrictions apply when that profile is explicitly selected.
+Follow the canonical [scope and finish-line policy](../../../docs/wiki/code/agent-workflow.md#scope-and-finish-line) and the active host’s permissions; OpenCode roles apply only when selected.
 
-When an OpenCode stack role is selected, follow its assigned `.opencode/agents/rust-coder.md` or `.opencode/agents/react-coder.md` and `docs/wiki/code/opencode-v2.md`. Rust work loads `argos-rust-style`. Investigate and implement the authorized unit directly. Delegate only when the active host/profile permits it and ownership is disjoint. Integrate/format one unit, smoke-test the real affected contract through the build owner, and return incremental evidence plus documentation and final verification needs to the task owner. Include affected wiki/tags/diagrams; report completed checklist items promptly. Request architecture input only for material unresolved contracts. Honor user overrides/exclusions. Failed delegation is not permission to bypass roles.
+Follow the selected stack coder role and [OpenCode workflow](../../../docs/wiki/code/opencode-v2.md). Implement and format the assigned unit directly; Rust work loads `argos-rust-style`. Respect disjoint ownership and delegation permissions.
 
-## Rust mutation execution restriction
-
-Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Local mutation execution is deliberately skipped, not passed; ordinary targeted checks and the embedded gate remain required.
-
-## Build cache hygiene
-
-Follow [cache retention and disk budgets](../../../docs/wiki/code/contributing.md#build-cache-hygiene) before builds, between large checks and at handoff. The build owner proactively removes verified obsolete inactive artifacts, preserves the selected reusable cache and executable, and records free space. Roles without build ownership report cleanup needs to the owner; do not bypass role permissions or use blanket/global cache cleanup.
+Prove the critical contract early through the build owner, update affected docs/tags/diagrams, then freeze the implementation for agreed final checks. Return changed paths, acceptance evidence and concrete blockers. Follow [contributor restrictions](../../../docs/wiki/code/contributing.md), including hosted-only Rust mutation execution and build-cache ownership.

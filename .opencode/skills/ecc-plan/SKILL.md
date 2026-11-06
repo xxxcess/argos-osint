@@ -3,6 +3,6 @@ name: ecc-plan
 description: Plan a bounded Argos implementation from graph and source evidence.
 ---
 
-Use the canonical [agent workflow](../../../docs/wiki/code/agent-workflow.md) with the active host's roles and existing authorization. OpenCode-only restrictions apply when that profile is explicitly selected.
+Follow the canonical [scope and finish-line policy](../../../docs/wiki/code/agent-workflow.md#scope-and-finish-line) and the active host’s permissions; OpenCode roles apply only when selected.
 
-Follow docs/index.md and tags, verify current source/callers, and return the smallest coherent scope: ordered steps, exact files, risks and acceptance. Include affected docs/diagrams for architecture/contract changes. Use argos-plan for multi-phase state; simple tasks need no phase boilerplate.
+Follow [docs/index.md](../../../docs/index.md), tags and relevant source/callers. Return the smallest coherent scope: requested outcome, non-goals, acceptance, verification, ordered steps, owned files and material risks. Resolve critical proof/contract questions before implementation. Use `argos-plan` only when multi-phase state helps; plan-only requests stop at the plan.

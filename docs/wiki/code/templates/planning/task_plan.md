@@ -4,7 +4,10 @@
 <Observable outcome.>
 
 ## Scope
-<Owned paths, constraints and non-goals; preserve unrelated work.>
+<Owned paths, constraints and explicit non-goals; preserve unrelated work.>
+
+## Finish line
+<Finite acceptance and authorized checks. Review risky paths early; freeze before final verification. Defer independent findings. Late changes require a demonstrated acceptance blocker or user direction.>
 
 ## Phases
 
@@ -23,7 +26,7 @@ Acceptance: <Observable behavior or artifact.>
 ### Phase 3 — Verify and hand off
 Status: pending
 - [ ] Run relevant checks; record commands, results and limitations in progress.md.
-- [ ] Review final diff, links, tags and diagrams against acceptance.
+- [ ] Review the scoped final delta against acceptance; reuse unchanged review/evidence.
 - [ ] Promote durable conclusions per planning-artifacts.md and record remaining work.
 Acceptance: <Required evidence, including any explicit scope exclusions.>
 

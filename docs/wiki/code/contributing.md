@@ -23,80 +23,48 @@ Rust 1.95.0 pinned. Agents always build through `python3 scripts/agent_cargo.py 
 
 ### Verification ownership and host resources
 
-Follow the [shared ownership, handoff and resource policy](agent-workflow.md#coordinate-work-that-can-actually-run-in-parallel). Finish assigned production edits before build handoff; do not make last-minute edits to files under compilation. Report a necessary later change to the build owner so its affected evidence is identified.
-
-The binary's test dependency enables core `fixtures`, so alternating core-only and workspace tests can rebuild/link a different core. Preserve activating targets when matching the workspace graph; use package-only commands when their alternate graph genuinely saves work. Inspect RAM with `sysctl -n hw.memsize`/`vm_stat` on macOS or `free -h` on Linux, then record `CARGO_BUILD_JOBS` and test concurrency under the [build-graph policy](agent-workflow.md#keep-one-reusable-build-graph).
+One integration/build owner uses a stable feature graph and resource-based concurrency; see [execution policy](agent-workflow.md#coordinate-work-that-can-actually-run-in-parallel). Freeze edits before builds and reuse unaffected evidence. Workspace bin tests activate core fixtures; switching to core-only commands may rebuild dependencies.
 
 ### Build cache hygiene
 
-Agents must manage disk space proactively before builds, between large verification phases and at handoff. Check `df -h .` and inspect the relevant target/profile sizes with scoped `du -sh` calls. Do not wait for an out-of-space failure. Avoid repeatedly scanning the entire target tree while cleanup or compilation is running.
+Check `df -h .` and scoped `du -sh` before builds, between large phases and at handoff.
 
-- Name the build cache to retain before deleting anything: profile, target triple, feature mode and the latest useful Argos executable. Preserve its dependency artifacts, fingerprints, build-script outputs and incremental cache together, so the next matching build can reuse them. Keeping only the executable does not preserve a reusable build.
-- `target/debug` is the user's cache and is protected by default. Agents reuse the single `target/agents` integration cache; never create per-worker/per-task Cargo targets. Keep the current useful agent cache across tasks instead of cleaning it at every handoff. Explicit user cleanup instructions may select a different retained cache.
-- Routinely remove known superseded agent caches: obsolete profiles/target triples, abandoned check trees such as inactive `target/flycheck*`, completed temporary build trees and identified stale test/linker artifacts. Verify ownership and that they are unrelated to the retained build or any pending verification. Age alone does not establish obsolescence. Do not indiscriminately prune files from the retained `deps`, `build`, `.fingerprint` or `incremental` directories.
-- Check active processes and lock holders (`ps`, `lsof -nP <target>/<profile>/.cargo-lock`) before deleting a candidate. Serialize cleanup with builds and other cleanup owners. Never delete an in-use directory, remove a lock to bypass contention, or kill an unrelated process. A missing lock holder alone is not proof that a cache is safe to remove.
-- Budget free space from the next phase: recent artifact growth, the largest observed link/test temporary footprint, binaries/evidence intentionally retained, and a stated safety margin. Use recent comparable measurements; when none exist, start with a conservative estimate and measure a focused build first. Recheck before the next large phase. Do not impose an arbitrary universal free-space floor or repeatedly stop useful work to restore one.
-- Cleanup of clearly obsolete repo-local agent build artifacts is routine authorized maintenance; do it without repeated permission requests. Stay inside verified artifact roots, avoid symlink traversal and delete exact candidates. Never run blanket `cargo clean`, wipe all of `target`, delete the kept user cache, or clean global Cargo/pnpm/model caches or other repositories as a space shortcut. Preserve source, dependencies needed by running services, data, plans and unresolved evidence.
-- If safe cleanup cannot provide enough space, report the measured shortfall and retained cache rather than starting a likely failing build or deleting protected material. Do not trade the required verification scope for disk space silently.
-- At handoff, remove superseded artifacts created during the task, retain the selected reusable cache and binary, and report free space, removed paths and remaining constraints. Verify the retained binary still exists. Hash it when immutable benchmark/release provenance or an explicit preservation check requires byte identity; routine exact-path cache cleanup does not require hashing whole files or the repository. Do not rebuild merely to verify cleanup.
+- Retain the selected native/embedded `target/agents` profile, useful binary and reusable dependencies/fingerprints/incremental cache. Protect the user's `target/debug` by default.
+- Remove only proven obsolete repo-local agent artifacts. Check exact ownership, path and active processes/locks first; age or an unused lock alone is insufficient proof.
+- Never clean active builds, remove locks to bypass contention, run blanket `cargo clean`, or erase global caches, source, user data or unresolved evidence.
+- Budget growth plus a reserve from a comparable build. If space is insufficient, report the shortfall instead of starting a likely failed build or silently reducing required checks.
+- Cleanup proof must be proportional: do not hash whole caches. At handoff report removed paths/free space and confirm the retained binary exists; hash it only for required immutable provenance.
 
 ### Targeted local Rust builds and tests (fast iteration)
 
-Choose the stable package/feature graph first, then scope execution with target (`--lib`, `--bin`, `--test`) flags. Package (`-p`) flags are useful when their smaller graph saves work; avoid switching graphs solely because a command looks narrower. Run focused targets before the full embedded matrix:
+Detect the native host with `uname -ms` and `rustc -vV | grep '^host:'`. Reuse the selected feature graph, default `embedded,nlp,classifier`, and `target/agents`; set `CARGO_BUILD_JOBS` from memory pressure. Scope by package/target/filter without changing graphs unnecessarily.
 
 ```sh
-# 1. Detect the native host; choose jobs from RAM/pressure as described above
-uname -ms
-rustc -vV | grep '^host:'
-
-# Workspace-compatible focused example: retain the activating bin/API targets.
-# The filter limits execution; zero-match companion targets are not test passes.
+python3 scripts/agent_cargo.py check --locked -p argos-osint-core
+python3 scripts/agent_cargo.py clippy --workspace --all-targets --locked -- -D warnings
 ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
   python3 scripts/agent_cargo.py test --locked --workspace \
-  --test storage_jobs --test stack_cli --test api_contract <filter> -- --nocapture
-
-# Package-only examples below intentionally use an alternate Cargo graph.
-# Choose them when that smaller graph saves work; do not alternate by habit.
-# 2. Scoped compile check and Clippy by crate (argos-osint-core | argos-osint-bin | argos-osint-api | argos-api-host)
-python3 scripts/agent_cargo.py check --locked -p argos-osint-core
-python3 scripts/agent_cargo.py clippy --locked -p argos-osint-core --all-targets -- -D warnings
-
-# 3. Scoped unit tests (--lib / --bin) with optional test name filter
-python3 scripts/agent_cargo.py test --locked -p argos-osint-core --lib <filter>
-python3 scripts/agent_cargo.py test --locked -p argos-osint-bin --bin argos <filter>
-python3 scripts/agent_cargo.py test --locked -p argos-api-host <filter>
-
-# 4. Scoped integration test binary (--test <name>)
-python3 scripts/agent_cargo.py test --locked -p argos-osint-api --test api_contract
-python3 scripts/agent_cargo.py test --locked -p argos-osint-bin --test stack_cli
-
-# 5. Scoped embedded storage contract test (single storage_* binary instead of all 60+ binaries)
-ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
-  python3 scripts/agent_cargo.py test --locked -p argos-osint-core --test storage_jobs <filter> -- --nocapture
-
-# 6. Full embedded storage contract suite (when broad storage/schema contracts change)
-python3 scripts/test_surreal.py --mode embedded --no-fail-fast
-
-# 7. Composer-launch PTY regression (POSIX only; only `argos` must be built)
-python3 scripts/test_web_stack.py --composer-smoke
+  --test storage_jobs <filter> -- --nocapture
 ```
+
+Use `--lib`, `--bin <bin>` or `--test <name>` for the relevant target. Preserve activating targets when matching workspace features; zero-match targets are not passes. `python3 scripts/test_surreal.py --mode embedded --no-fail-fast` runs required embedded contracts. CLI/API/PTY checks follow the affected contract in [CI](ci.md).
 
 ### Fail early, then run the gate
 
-Apply the shared [early-smoke](agent-workflow.md#establish-the-critical-path) and [diagnosis](agent-workflow.md#diagnose-before-repeating) policy before the final gate. Native Atlas fixtures must use real admission, seeded catalogs and current metadata/body/NLP receipts where required; follow the [testing guidelines](../../../.opencode/skills/argos-testing/SKILL.md#31-native-fixture-prerequisites-and-diagnostic-output). Opt-in fixtures must actually execute before their results are used as acceptance evidence.
+Follow the [scope/freeze policy](agent-workflow.md#scope-and-finish-line). Exercise the decisive realistic fixture before the broad gate; see [native fixture prerequisites](../../../.opencode/skills/argos-testing/SKILL.md#31-native-fixture-prerequisites-and-diagnostic-output). Fix demonstrated in-scope failures and rerun affected checks; defer unrelated findings.
 
 ### Full local embedded gate & GitHub CI monitoring
 
+After targeted stability, run:
+
 ```sh
-# Leave mode selection to the gate's dedicated storage phase.
 env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURREAL_REQUIRED \
   scripts/local_matrix.sh --storage embedded
-# fmt → clippy -D warnings → workspace tests/CLI smoke → required embedded contracts
 ```
 
-With the parent storage mode unset, the plain workspace phase honestly skips mode-selected storage tests and the dedicated `test_surreal.py` phase runs them once with required embedded mode. Targeted storage commands still set `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1`. Do not export that mode around the whole gate and accidentally run storage twice.
+The gate runs format, Clippy, workspace tests, CLI smoke and required embedded storage. Parent mode variables stay unset so mode-selected storage runs once; targeted storage tests set mode/required explicitly. Some native-only fixtures execute in both phases: inspect their mode contracts before estimating work.
 
-Never attempt to run the full multi-platform / server-mode CI matrix (`ci.yml` across `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-14`, `macos-15-intel` and `--storage server`) locally. Agents must **get the local host-platform embedded build and tests to a stable, passing state first**, then rely on hosted GitHub Actions for non-host platforms and `server` storage mode ([docs/wiki/code/ci.md](ci.md)). When git/GitHub CLI access is available, monitor hosted PR/branch checks (`gh pr checks`, `gh run list --branch "$(git branch --show-current)"`, `gh run view <run-id> --log-failed`) to diagnose and fix issues on other platforms. Serialize Cargo jobs sharing `target/agents`; never delete locks or kill unrelated Cargo processes (diagnose with `lsof -nP target/agents/debug/.cargo-lock`). MiniLM tests are `#[ignore]` and need `ARGOS_EMBED=1`.
+Never run the local all-platform, server storage or Rust mutation matrix/baselines. Once changes are published, inspect hosted checks when available (`gh pr checks`, `gh run list`, `gh run view --log-failed`); no hosted pass is implied by local results. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in and is not part of ordinary checks.
 
 ## Storage facts
 
@@ -134,7 +102,7 @@ The seed corpus resolution order for the classifier is:
 ## Workflow rules
 
 - **Worktrees are edit-only:** in a feature worktree run only `cargo fmt`. One combined integration tree runs the gate (`local_matrix.sh --storage embedded`).
-- **Incremental verification:** plan one final full gate after focused closure. On failure, diagnose and rerun the affected target, then repeat the full gate only when the repaired inputs justify it. Record the reason; do not loop unchanged runs or stop incomplete work because a numerical repeat count was reached.
+- **Scope and verification:** follow the [finish-line policy](agent-workflow.md#scope-and-finish-line); no unrequested cleanup, late broad audits or unchanged full-suite retries.
 - **Commits:** Conventional Commits (`feat` minor, `fix`/`perf` patch; breaking = `!` + `BREAKING CHANGE:` footer). Check with `node scripts/release_check.mjs message --file <path>` and `… versions`. Release Please owns version bumps; never hand-bump or invent `Release-As`. Stage exact paths; preserve unrelated changes.
 - **`.github`** changes go through Code Architect.
 - **Planning:** multi-phase work uses `.planning/<YYYY-MM-DD-slug>/` (`task_plan.md`, `findings.md`, `progress.md`); see [planning-artifacts](planning-artifacts.md).
@@ -143,4 +111,4 @@ The seed corpus resolution order for the classifier is:
 
 ## Evidence, estimates and workflow improvements
 
-The [shared execution policy](agent-workflow.md#separate-evidence-by-what-it-proves) owns proportionate provenance and evidence reuse; its [communication and improvement guidance](agent-workflow.md#communicate-and-improve-the-workflow) owns honest estimates and reversible improvements within the authorized scope. Keep technical command recipes here and update the shared policy rather than creating another competing workflow.
+The [execution policy](agent-workflow.md) owns scope, delegation, evidence reuse and honest estimates. Keep commands here and link shared rules instead of duplicating them. Documentation-only work uses static checks, not Rust builds.

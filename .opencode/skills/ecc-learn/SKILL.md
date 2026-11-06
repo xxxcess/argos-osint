@@ -3,6 +3,8 @@ name: ecc-learn
 description: Propose reusable Argos practices from verified work.
 ---
 
-Use the canonical [agent workflow](../../../docs/wiki/code/agent-workflow.md) with the active host's roles and existing authorization. OpenCode-only restrictions apply when that profile is explicitly selected.
+Follow the canonical [scope and finish-line policy](../../../docs/wiki/code/agent-workflow.md#scope-and-finish-line) and the active host’s permissions; OpenCode roles apply only when selected.
 
-Propose a reusable practice grounded in observed work: name the delay/defect, evidence, exact wording, target file and tradeoffs. Apply reversible instruction/process improvements already authorized by the user within assigned ownership; do not add another approval pause. For persistent changes outside current authorization, present the concrete proposal for the appropriate owner/user decision. Keep task facts local; curate lasting decisions per `docs/wiki/code/planning-artifacts.md`.
+When learning/process work is requested, propose a reusable practice from observed evidence: problem, exact wording, target file and tradeoff. Apply only improvements already authorized within assigned ownership; otherwise defer the concrete proposal.
+
+Do not turn task completion into an instruction audit or broaden product work to collect examples. Keep task facts local under [planning retention](../../../docs/wiki/code/planning-artifacts.md).

@@ -30,16 +30,7 @@ Cache: `Swatinem/rust-cache` keyed per OS × storage, covering `target/agents` (
 
 ## Efficient local verification before CI
 
-Follow the [shared agent execution policy](agent-workflow.md) for build ownership, stable Cargo features, resource budgets, early smoke, failure diagnosis and evidence reuse. The [contributor recipes](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration) illustrate workspace-compatible selectors and intentional package-only alternatives. Finish assigned production edits before build handoff; later edits to compiled inputs must be reported to the owner.
-
-Start the normal gate with parent storage selection unset:
-
-```sh
-env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURREAL_REQUIRED \
-  scripts/local_matrix.sh --storage embedded
-```
-
-The workspace phase then skips mode-selected storage contracts, and `test_surreal.py` runs them once in required embedded mode. For targeted storage tests, explicitly set `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1`. Those intentional workspace skips are not a storage pass. The shared policy preserves mandatory native verification and local mutation/server/all-platform restrictions; `.github` edits remain Code Architect-owned. See the [testing guidelines](../../../.opencode/skills/argos-testing/SKILL.md) for contract-specific evidence rules.
+Follow the [scope/freeze policy](agent-workflow.md#scope-and-finish-line) and [contributor commands](contributing.md). Use one shared-cache build owner, stable features and affected checks; reuse unchanged evidence. After targeted stability, run the required native embedded gate with parent storage-mode variables unset. Server/all-platform/mutation execution stays hosted. Preserve `.github` ownership and user services; report local, skipped and hosted evidence separately.
 
 ## `datasets.yml` — LFS dataset integrity
 

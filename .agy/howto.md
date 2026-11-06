@@ -1,28 +1,20 @@
 # Antigravity teamwork
 
-Use this guide only for Antigravity `/teamwork`; follow the canonical [agent workflow](../docs/wiki/code/agent-workflow.md) for execution and evidence. Do not import OpenCode-only orchestrator or editor restrictions into this host. The host's current model catalog and configured role assignments are authoritative; do not copy model IDs from another host or silently substitute unavailable models.
+Use this guide only for Antigravity `/teamwork`; the [canonical agent workflow](../docs/wiki/code/agent-workflow.md) owns execution, scope control and evidence. Do not import OpenCode-only role restrictions. Use this host's configured roles/models; never copy another host's model IDs or silently substitute unavailable models.
 
-## Choose the smallest useful team
+## Scope and team
 
-Use [lite](lite-team.md) for bounded changes with known ownership. Use [heavy](heavy-team.md) for independent implementation areas or cross-cutting contracts. File count alone does not justify another delegation layer. Reuse explicit customer authorization; ask only for missing decisions that prevent safe progress.
+Follow the canonical [scope and finish line](../docs/wiki/code/agent-workflow.md#scope-and-finish-line): agree outcome/non-goals/acceptance, review risk early, freeze after required changes and limit late work to demonstrated in-scope blockers. Defer independent improvements; wrap-up stops new work with an honest handoff. Existing authorization remains valid; no extra approval gate.
 
-## Shared contracts
+Use [lite](lite-team.md) for bounded changes and [heavy](heavy-team.md) for independent areas or cross-cutting contracts. Delegate early only when useful, with disjoint ownership and one build owner; follow the canonical workflow for worker wakeups, resources and evidence reuse.
 
-- Start at [the wiki](../docs/index.md), then [contributing](../docs/wiki/code/contributing.md) and [testing](../.opencode/skills/argos-testing/SKILL.md).
-- One owner maintains `.planning/<date-slug>/task_plan.md`, findings and progress. These are local working memory; only curated design/decision/acceptance/handoff documents are eligible for Git. Follow [retention](../docs/wiki/code/planning-artifacts.md).
-- Temporary artifacts belong in `.agent-scratch/`. Cargo artifacts are the deliberate exception: `python3 scripts/agent_cargo.py` owns `target/agents`. Never override it or create per-worker build caches.
-- Follow [build cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene): the build owner checks disk budgets before/between builds and at handoff, removes verified obsolete inactive agent artifacts, and retains the selected binary and reusable cache. Never wipe active or global caches.
-- One build owner serializes Cargo in the integration tree, keeps the selected feature graph/profile stable and sets jobs from measured RAM/pressure. Worktrees are edit-only. Run a real-contract fixture smoke before long suites; docs-only work needs document/policy checks, not a full Rust build.
-- Agents must not run Rust mutation tests or baselines locally until further notice. Execution belongs to GitHub Actions `mutation.yml`; report absent hosted evidence honestly.
-- Preserve unrelated work, locks, servers, retained reusable caches and unresolved evidence; reclaim verified obsolete build caches under the linked hygiene policy. Remove only clean, integrated, task-owned worktrees; never force cleanup to make status look clean.
-- Keep existing source conventions, React Compiler, accessible 3D topology/list twin, offline fixtures and host-native embedded constraints. Hosted runners own server/non-host verification.
+## Host-specific contracts
 
-## Continuation and workflow improvements
-
-Inspect the host's agent status before waiting for more work. A message to a completed agent does not necessarily restart it; use the explicit supported follow-up/resume/wake operation, then verify running status. Preserve the existing task/evidence when resuming.
-
-Suggest concrete workflow improvements with observed evidence and tradeoffs. Implement reversible process changes already authorized within owned paths without an approval pause; route changes outside the active role or authorization to the owner. Use early visual previews and incremental contract evidence under the canonical workflow; final Rust acceptance still needs the required native embedded gate. No arbitrary gate-attempt cap converts missing evidence into a pass.
+- Start at [the wiki](../docs/index.md), then [contributing](../docs/wiki/code/contributing.md) and [testing](../.opencode/skills/argos-testing/SKILL.md). Preserve unrelated work, locks and services; `.github` changes remain Code Architect-owned.
+- One owner maintains `.planning/<date-slug>/` under the [planning/retention contract](../docs/wiki/code/planning-artifacts.md). Scratch belongs in `.agent-scratch/`; Cargo uses `python3 scripts/agent_cargo.py` and its shared `target/agents` cache. Worktrees are edit-only; the build owner follows [cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene).
+- Respect the user's approved verification scope. Rust runs target the native host with embedded storage; the required final embedded gate remains required for applicable Rust changes. Server/all-platform and mutation execution belong to hosted CI, never local agents. Missing evidence stays unverified.
+- Keep existing source/UI conventions, React Compiler, accessible topology/list twin and offline fixtures. Use canonical instructions for visual previews and final evidence.
 
 ## Handoff
 
-Every assignment states task/phase, integration root and base revision, owned paths, read-only references, contract, acceptance checks, and existing evidence. Return changed paths, command/exit/test counts, skips, artifact locations, blockers and next action. A queued command or a generated screenshot is not verification. After interruption, inspect existing process/log/artifact state before starting another build.
+Assignments include scope/non-goals, integration root/base, owned paths, references, acceptance and existing evidence. Return changed paths, actual checks/exits/counts, skips, artifacts and blockers. On continuation, inspect existing processes/logs before starting another build; use the host's explicit wake/resume operation for idle workers. Commits/pushes require the customer's authorization.

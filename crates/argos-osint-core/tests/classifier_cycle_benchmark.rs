@@ -174,6 +174,8 @@ async fn offline_fixed_whole_cycle_benchmark() {
         ..Default::default()
     };
     let db = home.join("argos.db");
+    let mut latest_coverage = core::atlas::CoverageStats::default();
+    let mut stage_coverage = BTreeMap::new();
     let started = Instant::now();
     let stop = core::atlas::run_atlas(
         core::atlas::RunInput {
@@ -189,7 +191,13 @@ async fn offline_fixed_whole_cycle_benchmark() {
             synthesizer_fallbacks: &[],
             run_id: None,
         },
-        |_| {},
+        |event| match event {
+            core::atlas::AtlasEvent::Stats(stats) => latest_coverage = stats.coverage,
+            core::atlas::AtlasEvent::Status(status) if status.starts_with("Processing ") => {
+                stage_coverage.insert(status, latest_coverage.clone());
+            }
+            _ => {}
+        },
         fetch,
     )
     .await
@@ -227,6 +235,36 @@ async fn offline_fixed_whole_cycle_benchmark() {
     let stats: core::atlas::RunStats = serde_json::from_str(&run.stats_json).unwrap();
     assert_eq!(stats.coverage.admitted, 4);
     assert_eq!(stats.coverage.actor_index_failed, 0);
+    let before_metadata = stage_coverage
+        .get("Processing metadata")
+        .expect("metadata stage");
+    assert_eq!(
+        (before_metadata.classified, before_metadata.articles),
+        (4, 4),
+        "committed admission must reach observers before native processing"
+    );
+    let before_actors = stage_coverage
+        .get("Processing actors")
+        .expect("actor stage");
+    assert_eq!((before_actors.classified, before_actors.articles), (4, 4));
+    #[cfg(feature = "nlp")]
+    assert!(
+        before_actors.entities_available > 0,
+        "completed native metadata must be visible while actors are processing"
+    );
+    assert_eq!(
+        before_actors.entities_available,
+        stats.coverage.entities_available
+    );
+    assert_eq!(
+        before_actors.publishers_available,
+        stats.coverage.publishers_available
+    );
+    assert_eq!(before_actors.related_pairs, stats.coverage.related_pairs);
+    assert_eq!(
+        before_actors.publishers_unavailable,
+        stats.coverage.publishers_unavailable
+    );
     let monitoring_rows = match monitoring_worker {
         Some(worker) => Some(worker.await.unwrap()),
         None => None,

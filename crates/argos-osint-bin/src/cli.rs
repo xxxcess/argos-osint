@@ -21,6 +21,18 @@ struct Cli {
     command: Option<Command>,
 }
 
+impl Cli {
+    fn echo_child_stderr(&self, stderr_is_terminal: bool) -> bool {
+        let uses_terminal_ui = match &self.command {
+            Some(Command::Stack {
+                command: crate::stack::StackCommand::Up(up),
+            }) => up.platform.tui || up.terminal == crate::stack::TerminalDisplay::Tui,
+            _ => false,
+        };
+        !uses_terminal_ui || !stderr_is_terminal
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Inspect, train, evaluate or roll back the local article classifier.
@@ -417,7 +429,7 @@ pub async fn dispatch() -> Result<()> {
             return Ok(());
         };
         notice = None;
-        Cli::try_parse_from(&selection.args)?;
+        let session = Cli::try_parse_from(&selection.args)?;
         // Refresh readiness again before starting storage or service children.
         // A removed/corrupt model between the menu probe and selection cannot
         // bypass Venture's initial classifier setup.
@@ -452,6 +464,10 @@ pub async fn dispatch() -> Result<()> {
         // process exit releases embedded storage before Venture can launch again.
         let started = std::time::Instant::now();
         use std::io::IsTerminal as _;
+        // The child owns the alternate screen. Its redirected tracing output
+        // must not be echoed onto that screen by Venture. Keep file redirection
+        // and the captured failure detail available.
+        let echo_stderr = session.echo_child_stderr(io::stderr().is_terminal());
         let classifier_tty = selection.args.get(1).is_some_and(|v| v == "classifier")
             && selection.args.get(2).is_some_and(|v| v == "train")
             && io::stdin().is_terminal()
@@ -467,21 +483,11 @@ pub async fn dispatch() -> Result<()> {
             .spawn()?;
         let last_err: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
         let last_err_clone = Arc::clone(&last_err);
-        if let Some(err_reader) = child.stderr.take() {
+        let stderr_task = child.stderr.take().map(|err_reader| {
             tokio::spawn(async move {
-                use tokio::io::AsyncBufReadExt;
-                let mut reader = tokio::io::BufReader::new(err_reader).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    eprintln!("{line}");
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        if let Ok(mut guard) = last_err_clone.lock() {
-                            *guard = Some(trimmed.to_string());
-                        }
-                    }
-                }
-            });
-        }
+                forward_session_stderr(err_reader, io::stderr(), echo_stderr, last_err_clone).await;
+            })
+        });
         #[cfg(unix)]
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
@@ -543,6 +549,17 @@ pub async fn dispatch() -> Result<()> {
                 }
             }
         };
+        // Finish the reader before another menu/session acquires the terminal;
+        // it also guarantees launch errors have reached last_err before notice.
+        if let Some(mut reader) = stderr_task {
+            if tokio::time::timeout(std::time::Duration::from_secs(2), &mut reader)
+                .await
+                .is_err()
+            {
+                reader.abort();
+                let _ = reader.await;
+            }
+        }
         if term_received {
             return Ok(());
         }
@@ -561,6 +578,26 @@ pub async fn dispatch() -> Result<()> {
             } else {
                 notice = Some(format!("Session ended with failure ({status})"));
             }
+        }
+    }
+}
+
+async fn forward_session_stderr(
+    reader: impl tokio::io::AsyncRead + Unpin,
+    mut output: impl Write,
+    echo: bool,
+    last_error: Arc<std::sync::Mutex<Option<String>>>,
+) {
+    use tokio::io::AsyncBufReadExt;
+
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if echo {
+            let _ = writeln!(output, "{line}");
+        }
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            *last_error.lock().expect("session error capture lock") = Some(trimmed.to_string());
         }
     }
 }
@@ -1634,6 +1671,60 @@ fn write_turn_event(event: &recon::TurnEvent, out: &mut impl std::io::Write) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn child_stderr_respects_terminal_ownership_and_keeps_failure_details() {
+        let cases = [
+            (vec!["argos", "stack", "up", "--tui"], true),
+            (
+                vec!["argos", "stack", "up", "--web", "--terminal", "tui"],
+                true,
+            ),
+            (
+                vec!["argos", "stack", "up", "--server", "--terminal", "tui"],
+                true,
+            ),
+            (
+                vec!["argos", "stack", "up", "--web", "--terminal", "logs"],
+                false,
+            ),
+            (vec!["argos", "stack", "up", "--server"], false),
+            (vec!["argos", "classifier", "train"], false),
+            (vec!["argos", "classifier", "status"], false),
+            #[cfg(feature = "surreal")]
+            (vec!["argos", "storage", "seed-actors"], false),
+        ];
+        for (arguments, owns_terminal) in cases {
+            let session = Cli::try_parse_from(arguments).expect("valid session");
+            for stderr_is_terminal in [false, true] {
+                let last_error = Arc::new(std::sync::Mutex::new(None));
+                let mut output = Vec::new();
+                forward_session_stderr(
+                    b"WARN memory publish batch failed\n\nlaunch failed\n".as_slice(),
+                    &mut output,
+                    session.echo_child_stderr(stderr_is_terminal),
+                    last_error.clone(),
+                )
+                .await;
+                assert_eq!(
+                    output.is_empty(),
+                    owns_terminal && stderr_is_terminal,
+                    "only an interactive child screen suppresses forwarding"
+                );
+                assert_eq!(
+                    last_error.lock().expect("capture lock").as_deref(),
+                    Some("launch failed"),
+                    "hidden output still supplies Venture's failure notice"
+                );
+                if !output.is_empty() {
+                    assert_eq!(
+                        output,
+                        b"WARN memory publish batch failed\n\nlaunch failed\n"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn classifier_command_grammar_requires_explicit_activation_and_named_rollback() {

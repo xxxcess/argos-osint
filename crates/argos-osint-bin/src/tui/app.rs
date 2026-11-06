@@ -11326,7 +11326,6 @@ pub fn run_with_shutdown(
     struct Restore;
     impl Drop for Restore {
         fn drop(&mut self) {
-            crate::logging::TUI_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = crossterm::execute!(
                 std::io::stdout(),
@@ -11334,11 +11333,12 @@ pub fn run_with_shutdown(
                 crossterm::terminal::LeaveAlternateScreen,
                 crossterm::cursor::Show
             );
+            crate::logging::TUI_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
         }
     }
     crate::logging::TUI_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
-    enable_raw_mode()?;
     let _restore = Restore;
+    enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(
         stdout,
@@ -16365,17 +16365,61 @@ mod tests {
         let mut app = app();
         app.select(ModuleId::Atlas.index());
         app.atlas_page = AtlasPage::Live;
-        app.atlas_status = "Classifying batch".into();
-        app.atlas_stats.coverage.articles = 12;
-        app.atlas_stats.coverage.classified = 8;
-        app.atlas_stats.coverage.entities_available = 12;
-        let painted = buffer_text(&render(&mut app, 140, 44));
-        assert!(painted.contains("Classifications 8/12"), "{painted}");
-        assert!(painted.contains("Classifying batch"), "{painted}");
-        assert!(
-            !painted.contains("Indexed") && !painted.contains("Extracting insights"),
-            "{painted}"
-        );
+        let mut stats = atlas::RunStats::default();
+        stats.coverage.articles = 12;
+        stats.coverage.classified = 8;
+        app.on_atlas(atlas::AtlasEvent::Stats(Box::new(stats.clone())));
+        app.on_atlas(atlas::AtlasEvent::Status("Classifying batch".into()));
+        for (width, height) in [(140, 44), (100, 36)] {
+            let painted = buffer_text(&render(&mut app, width, height));
+            assert!(painted.contains("Classifications 8/12"), "{painted}");
+            assert!(painted.contains("Classifying batch"), "{painted}");
+            if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
+                dump_cells(
+                    &mut app,
+                    &dir,
+                    &format!("atlas-live-coverage-classification-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+        }
+
+        // Later committed snapshots must reach Coverage while the cycle is
+        // still running, before the final completion/reload path.
+        stats.coverage.classified = 12;
+        stats.coverage.entities_available = 9;
+        stats.coverage.entities_unavailable = 3;
+        stats.coverage.publishers_available = 10;
+        stats.coverage.publishers_unavailable = 2;
+        stats.coverage.related_pairs = 4;
+        app.on_atlas(atlas::AtlasEvent::Stats(Box::new(stats)));
+        app.on_atlas(atlas::AtlasEvent::Status("Processing actors".into()));
+        for (width, height) in [(140, 44), (100, 36)] {
+            let painted = buffer_text(&render(&mut app, width, height));
+            for expected in [
+                "Classifications 12/12",
+                "Entities 9 available · 3 unavailable",
+                "Publisher priors 10 available · 2 unavailable",
+                "Related 4 pairs",
+                "Processing actors",
+            ] {
+                assert!(painted.contains(expected), "missing {expected}: {painted}");
+            }
+            assert!(
+                !painted.contains("Indexed") && !painted.contains("Extracting insights"),
+                "{painted}"
+            );
+            if let Ok(dir) = std::env::var("ARGOS_SCREEN_DIR") {
+                dump_cells(
+                    &mut app,
+                    &dir,
+                    &format!("atlas-live-coverage-actors-{width}x{height}"),
+                    width,
+                    height,
+                );
+            }
+        }
     }
 
     fn sample_headline(index: usize) -> atlas::FeedArticle {

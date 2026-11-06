@@ -676,6 +676,42 @@ pub struct CoverageStats {
     pub admission_failed: u32,
 }
 
+impl CoverageStats {
+    // Reconcile exact run-local counts rather than accumulating attempts:
+    // retries/replaced receipts and resume must not inflate live coverage.
+    fn apply_admission_summary(
+        &mut self,
+        summary: &crate::storage::classifier_admission::RunAdmissionSummary,
+    ) {
+        let count = |value: u64| u32::try_from(value).unwrap_or(u32::MAX);
+        self.articles = count(summary.retained);
+        self.classified = count(summary.admitted);
+        self.admitted = count(summary.admitted);
+        self.discarded = count(summary.rejected);
+        self.admission_pending = count(summary.staged.saturating_sub(summary.failed));
+        self.admission_failed = count(summary.failed);
+        self.legacy_unknown = count(summary.legacy);
+    }
+
+    fn apply_native_summary(
+        &mut self,
+        summary: &crate::storage::classifier_admission::NativeRunSummary,
+    ) {
+        let count = |value: u64| u32::try_from(value).unwrap_or(u32::MAX);
+        self.entities_available = count(summary.entities);
+        self.publishers_available = count(summary.publishers);
+        // Pending metadata has no unavailable verdict yet. Once it settles,
+        // use the same retained cohort as terminal publisher coverage.
+        self.publishers_unavailable = if summary.earliest_phase.is_none_or(|phase| phase > 4) {
+            self.articles.saturating_sub(self.publishers_available)
+        } else {
+            0
+        };
+        self.actor_indexed = count(summary.actors);
+        self.related_pairs = count(summary.related);
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct RunStats {
     #[serde(default)]
@@ -2902,15 +2938,24 @@ where
         }
     }
     let native_cancel = NativeCancel(Arc::new(AtomicBool::new(false)));
-    if cursor.phase == 3 {
+    let admission_paused = if cursor.phase == 3 {
         track(3);
         tel.enter_stage(crate::atlas_work::stage_label(crate::atlas_work::STAGE_CLASSIFICATION),"article",&stats);
         let pinned=permit.pinned().cloned().ok_or_else(||anyhow!("admission requires its preflighted classifier"))?;
         let path=classifier_home.home().to_path_buf();
         let context=tokio::task::spawn_blocking(move ||crate::atlas_classify::AdmissionContext::load(&path,pinned)).await??;
-        if run_local_admission(LocalAdmission {store:&store,context:&context,resumed:resume,tracker,pause},&mut stats,&mut emit,&mut tel).await? {
-            return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;
-        }
+        run_local_admission(LocalAdmission {store:&store,context:&context,resumed:resume,tracker,pause},&mut stats,&mut emit,&mut tel).await?
+    } else { false };
+    // Admission is finished (or paused after a committed chunk). Publish its
+    // authoritative denominator before the next native-stage status. This is
+    // the same run-local aggregate formerly deferred until cycle completion.
+    let summary=crate::storage::classifier_admission::run_summary(repo,&run_id).await?;
+    stats.coverage.apply_admission_summary(&summary);
+    emit(AtlasEvent::Stats(Box::new(stats.clone())));
+    if admission_paused {
+        return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;
+    }
+    if cursor.phase == 3 {
         cursor.phase=4;cursor.leg="metadata".into();
         save(&store,&run_id,&cursor,&stats).await?;
     }
@@ -2918,12 +2963,26 @@ where
     // output and derivative checkpoint commit under the same publication fence.
     use crate::storage::classifier_admission::{self as native,DerivativeFence,DerivativeStage};
     let native_fence=DerivativeFence::Cycle(store.run_claim().cloned().ok_or_else(||anyhow!("native stages require the cycle lease"))?);
+    // Older saved phase-5/6 runs may already have durable metadata while their
+    // checkpoint still reports zero coverage. Repair the restored snapshot
+    // before announcing the first resumed native stage.
+    let mut native_summary = if resume && cursor.phase > 4 {
+        let committed=native::native_run_summary(repo,&run_id).await?;
+        stats.coverage.apply_native_summary(&committed);
+        emit(AtlasEvent::Stats(Box::new(stats.clone())));
+        Some(committed)
+    } else { None };
     for (phase,stage,label,unit) in [(4,DerivativeStage::Metadata,"metadata","article"),(5,DerivativeStage::Related,"related","pair"),(6,DerivativeStage::Actors,"actors","article"),(6,DerivativeStage::Reconcile,"reconcile","identity")] {
         if cursor.phase>phase {continue;}
         track(phase);tel.enter_stage(label,unit,&stats);
         emit(AtlasEvent::Status(format!("Processing {label}")));
         loop {
-            if cycle_paused(tracker,pause){native_cancel.0.store(true,Ordering::Release);return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;}
+            if cycle_paused(tracker,pause){
+                native_cancel.0.store(true,Ordering::Release);
+                let committed=native::native_run_summary(repo,&run_id).await?;
+                stats.coverage.apply_native_summary(&committed);
+                return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;
+            }
             let batch=native::cycle_derivative_work(&db_owner,&claim,stage).await?;
             if batch.is_empty(){break;}
             let mut pending =
@@ -2932,30 +2991,33 @@ where
                 result=&mut pending=>break result?,
                 _=tokio::time::sleep(std::time::Duration::from_millis(25))=>{if cycle_paused(tracker,pause){native_cancel.0.store(true,Ordering::Release);}},
             }};
-            if native_cancel.0.load(Ordering::Acquire){return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;}
+            if native_cancel.0.load(Ordering::Acquire){
+                let committed=native::native_run_summary(repo,&run_id).await?;
+                stats.coverage.apply_native_summary(&committed);
+                return park(&store,&run_id,&cursor,&stats,&mut emit,&mut tel).await;
+            }
             if report.items.is_empty(){break;}
         }
+        // The bounded work report carries dispositions, not entity/article or
+        // Related-pair counts. Reconcile once per stage, never once per item,
+        // and expose only committed output before announcing the next stage.
+        let committed=native::native_run_summary(repo,&run_id).await?;
+        stats.coverage.apply_native_summary(&committed);
+        native_summary=Some(committed);
         cursor.phase=phase;cursor.leg=label.into();save(&store,&run_id,&cursor,&stats).await?;
+        emit(AtlasEvent::Stats(Box::new(stats.clone())));
     }
-    let native_summary=native::native_run_summary(store.repository().ok_or_else(||anyhow!("native repository missing"))?,&run_id).await?;
-    stats.coverage.entities_available=u32::try_from(native_summary.entities).unwrap_or(u32::MAX);
-    stats.coverage.publishers_available=u32::try_from(native_summary.publishers).unwrap_or(u32::MAX);
-    stats.coverage.actor_indexed=u32::try_from(native_summary.actors).unwrap_or(u32::MAX);
-    stats.coverage.related_pairs=u32::try_from(native_summary.related).unwrap_or(u32::MAX);
+    let native_summary=match native_summary {
+        Some(summary)=>summary,
+        None=>native::native_run_summary(repo,&run_id).await?,
+    };
+    stats.coverage.apply_native_summary(&native_summary);
     let actor_index_incomplete=native_summary.pending>0;
     if let Some(baseline)=tel.classifier_db_start {tel.classifier_metrics["atlas.db"]=ClassifierDbSample::read(&db_owner.metrics()).delta(baseline);}
     // Completion depends on admission, never on Brain indexing. Staged work
     // counts as the fetched set; canonical rows are the admitted set.
-    let repo=store.repository().ok_or_else(||anyhow!("SurrealDB storage is not configured"))?;
     let summary=crate::storage::classifier_admission::run_summary(repo,&run_id).await?;
-    let bounded_count=|count:u64|u32::try_from(count).unwrap_or(u32::MAX);
-    stats.coverage.articles=bounded_count(summary.retained);
-    stats.coverage.classified=bounded_count(summary.admitted);
-    stats.coverage.admitted=bounded_count(summary.admitted);
-    stats.coverage.discarded=bounded_count(summary.rejected);
-    stats.coverage.admission_pending=bounded_count(summary.staged.saturating_sub(summary.failed));
-    stats.coverage.admission_failed=bounded_count(summary.failed);
-    stats.coverage.legacy_unknown=bounded_count(summary.legacy);
+    stats.coverage.apply_admission_summary(&summary);
     stats.coverage.publishers_unavailable = stats
         .coverage
         .articles
@@ -3706,6 +3768,95 @@ mod telemetry_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_coverage_reconciles_committed_cohorts_without_counting_retries() {
+        use crate::storage::classifier_admission::{NativeRunSummary, RunAdmissionSummary};
+
+        let mut coverage = CoverageStats {
+            acquisition_failures: 2,
+            classification_blocked: 1,
+            oversized_inputs: 3,
+            quota_skipped: 4,
+            staged: 12,
+            ..CoverageStats::default()
+        };
+        let admitted = RunAdmissionSummary {
+            retained: 12,
+            admitted: 6,
+            rejected: 2,
+            staged: 3,
+            failed: 1,
+            legacy: 1,
+        };
+        coverage.apply_admission_summary(&admitted);
+        assert_eq!(
+            (coverage.classified, coverage.articles),
+            (6, 12),
+            "the retained denominator includes unresolved/rejected/legacy work"
+        );
+        assert_eq!(coverage.admission_pending, 2);
+        assert_eq!(coverage.admission_failed, 1);
+        assert_eq!(coverage.discarded, 2);
+        assert_eq!(coverage.legacy_unknown, 1);
+        assert_eq!(coverage.entities_available, 0);
+        assert_eq!(
+            coverage.entities_unavailable, 0,
+            "pending is not unavailable"
+        );
+
+        let metadata = NativeRunSummary {
+            entities: 5,
+            publishers: 4,
+            ..NativeRunSummary::default()
+        };
+        coverage.apply_native_summary(&NativeRunSummary {
+            earliest_phase: Some(4),
+            entities: 5,
+            publishers: 4,
+            ..NativeRunSummary::default()
+        });
+        assert_eq!(
+            coverage.publishers_unavailable, 0,
+            "metadata is still pending"
+        );
+        coverage.apply_native_summary(&metadata);
+        assert_eq!(
+            coverage.publishers_unavailable, 8,
+            "settled missing publisher coverage is visible before actors"
+        );
+        let checkpoint = coverage.clone();
+        // Restored older checkpoints can lack every native counter even
+        // though the current committed metadata is already available.
+        coverage.entities_available = 0;
+        coverage.publishers_available = 0;
+        coverage.apply_admission_summary(&admitted);
+        coverage.apply_native_summary(&metadata);
+        assert_eq!(
+            coverage, checkpoint,
+            "restored coverage uses committed receipts"
+        );
+        coverage.apply_admission_summary(&admitted);
+        coverage.apply_native_summary(&metadata);
+        assert_eq!(coverage, checkpoint, "replaying a checkpoint is idempotent");
+        assert_eq!(coverage.acquisition_failures, 2);
+        assert_eq!(coverage.classification_blocked, 1);
+        assert_eq!(coverage.oversized_inputs, 3);
+        assert_eq!(coverage.quota_skipped, 4);
+        assert_eq!(coverage.staged, 12);
+
+        coverage.apply_native_summary(&NativeRunSummary {
+            related: 7,
+            actors: 3,
+            ..metadata
+        });
+        assert_eq!(
+            (coverage.entities_available, coverage.publishers_available),
+            (5, 4)
+        );
+        assert_eq!((coverage.related_pairs, coverage.actor_indexed), (7, 3));
+        assert_eq!((coverage.classified, coverage.articles), (6, 12));
+    }
 
     #[test]
     fn an_all_unknown_cycle_completes_empty_but_failures_do_not() {

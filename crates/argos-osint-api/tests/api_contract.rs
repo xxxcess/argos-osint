@@ -553,7 +553,7 @@ async fn article_search_serves_the_discovery_page_contract() {
                 "2026-01-03T00:00:00Z",
             ),
         ],
-        ["Ballot patrol", "Harbor Union merger", "River sensor"],
+        ["Ballot patrol", "Harbor Union", "River sensor"],
     )
     .await;
     // New-looking tags and an admission timestamp cannot forge current authority.

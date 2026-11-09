@@ -12,7 +12,7 @@ cargo run -p argos-osint-bin
 cargo run -p argos-osint-bin -- stack up --tui
 ```
 
-With no arguments, Argos opens its centered **ARGOS VENTURE** Ratatui service launcher: **TUI**, **API Server**, or **Web**. Select with ↑/↓, Tab or a number and press Enter, or click a choice. The wizard asks for storage mode, ports and the selected service's options; Ctrl+U clears a field, PgUp/PgDn review settings, and Esc cancels. The final choice starts the stack with either the normal TUI or server logs visible. API/Web prerequisites are in the [stack guide](../code/intel-web.md#running-locally). Web opens the ready URL through the default browser; `--no-open` disables this. Explicit CLI commands bypass the wizard, and redirected input retains text prompts.
+With no arguments, Argos opens its centered **ARGOS VENTURE** Ratatui service launcher: **TUI**, **API Server**, or **Web**. Select with ↑/↓, Tab or a number and press Enter, or click a choice. The wizard asks for storage mode, ports and the selected service's options; Ctrl+U clears a field, PgUp/PgDn review settings, and Esc cancels. The final choice starts the stack with either the normal TUI or server logs visible. API/Web prerequisites are in the [stack guide](../code/intel-web.md#running-locally). Web opens the ready URL through the default browser; `--no-open` disables this. Key **5 · Check Atlas classifier** refreshes Rust-BERT readiness. Key **6 · Train legacy classifier** opens the CSV prompt for a synthetic Natural baseline. Choose `auto` for the configured or bundled dataset. Explicit CLI commands bypass the wizard, and redirected input retains text prompts.
 
 The TUI opens on **Home**. `↑↓` + Enter open an app. Keys `1`–`9` jump Intel → Profile. Esc or Home returns Home. `?` opens shortcuts.
 

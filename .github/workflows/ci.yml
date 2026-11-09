@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       atlas_bert_intel_only:
-        description: Check the Atlas BERT worker on Intel macOS only
+        description: Build and test only the Atlas BERT worker on Intel macOS with the pinned checkpoint
         type: boolean
         default: false
 
@@ -41,6 +41,7 @@ jobs:
     uses: ./.github/workflows/atlas-bert.yml
     with:
       intel_only: true
+      intel_runtime: true
   build:
     name: ${{ matrix.platform.name }} / ${{ matrix.storage }}
     strategy:

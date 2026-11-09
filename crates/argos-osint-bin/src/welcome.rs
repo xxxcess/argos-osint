@@ -193,7 +193,11 @@ fn configure_launcher(
     if needs_seed {
         choices.push_str("  4. Seed DB\n");
     }
-    choices.push_str("  5. Check Atlas classifier\n  q. Quit\n");
+    choices.push_str("  5. Check Atlas classifier\n");
+    if cfg!(feature = "classifier") {
+        choices.push_str("  6. Train legacy classifier\n");
+    }
+    choices.push_str("  q. Quit\n");
     ui.message(&choices)?;
     let service = prompt!("Choose a service", "", |value: &str| {
         let value = value.to_ascii_lowercase();
@@ -209,6 +213,11 @@ fn configure_launcher(
                 | "5"
                 | "check atlas classifier"
         ) || (needs_seed && matches!(value.as_str(), "4" | "seed" | "seed db"))
+            || (cfg!(feature = "classifier")
+                && matches!(
+                    value.as_str(),
+                    "6" | "train" | "train classifier" | "train legacy classifier"
+                ))
     });
     if matches!(
         service.to_ascii_lowercase().as_str(),
@@ -216,6 +225,30 @@ fn configure_launcher(
     ) {
         return Ok(Some(Selection {
             args: vec!["argos".into(), "classifier".into(), "status".into()],
+            storage_init: None,
+        }));
+    }
+    if matches!(
+        service.to_ascii_lowercase().as_str(),
+        "6" | "train" | "train classifier" | "train legacy classifier"
+    ) {
+        ui.message(
+            "Train and activate a synthetic Natural baseline for legacy classifier operations.",
+        )?;
+        let file = prompt!(
+            "Classifier CSV path (auto for configured/default)",
+            "auto",
+            |value: &str| dataset_path(value).is_some()
+        );
+        let mut args = vec![
+            "argos".into(),
+            "classifier".into(),
+            "train".into(),
+            "--activate-synthetic-baseline".into(),
+        ];
+        append_dataset_file(&mut args, &file);
+        return Ok(Some(Selection {
+            args,
             storage_init: None,
         }));
     }
@@ -385,6 +418,39 @@ mod tests {
                 assert!(output.contains(choice), "{output}");
             }
             assert!(!output.contains("CSV path"));
+        }
+    }
+
+    #[cfg(feature = "classifier")]
+    #[test]
+    fn legacy_training_uses_selected_csv_and_needs_no_storage_setup() {
+        for existing in [None, Some("embedded")] {
+            let automatic = choose("6\n\n", existing);
+            assert_eq!(
+                automatic.args,
+                [
+                    "argos",
+                    "classifier",
+                    "train",
+                    "--activate-synthetic-baseline"
+                ]
+            );
+            assert!(automatic.storage_init.is_none());
+            let explicit = choose("6\n\"/fixture data/articles.csv\"\n", existing);
+            assert_eq!(
+                &explicit.args[3..],
+                [
+                    "--activate-synthetic-baseline",
+                    "--file",
+                    "/fixture data/articles.csv"
+                ]
+            );
+            assert!(explicit.storage_init.is_none());
+        }
+        for input in ["6\nq\n", "6\n"] {
+            assert!(select(&mut input.as_bytes(), &mut Vec::new(), None)
+                .unwrap()
+                .is_none());
         }
     }
 

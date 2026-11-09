@@ -190,6 +190,7 @@ impl Question {
                 ("3", "Web"),
                 ("4", "Seed DB"),
                 ("5", "Check Atlas classifier"),
+                ("6", "Train legacy classifier"),
             ]
         } else if label.starts_with("Web profile") {
             vec![("dev", "Development"), ("installed", "Built static app")]
@@ -343,12 +344,19 @@ impl Question {
         let large = area.width >= logo.iter().map(Line::width).max().unwrap_or(0) as u16 + 4
             && area.height >= 38;
         let item_height = if area.height >= 30 { 2 } else { 1 };
+        let compact_service = self.stable_service_keys && area.height <= 16;
         let card_height = if self.choices.is_empty() {
             6
         } else {
-            self.choices.len() as u16 * item_height + 4
+            self.choices.len() as u16 * item_height + if compact_service { 3 } else { 4 }
         };
-        let brand_height = if large { 8 } else { 3 };
+        let brand_height = if large {
+            8
+        } else if compact_service {
+            2
+        } else {
+            3
+        };
         let lines = Self::summary_lines(
             history,
             notice,
@@ -356,7 +364,11 @@ impl Question {
         );
         let summary_height = lines.len().min(8) as u16;
         let content_height = brand_height + card_height + summary_height + 4;
-        let height = content_height.min(area.height.saturating_sub(2));
+        let height =
+            content_height.min(
+                area.height
+                    .saturating_sub(if compact_service { 0 } else { 2 }),
+            );
         let width = area.width.saturating_sub(4);
         let outer = Rect::new(
             area.x + (area.width - width) / 2,
@@ -646,8 +658,8 @@ mod tests {
     }
 
     #[test]
-    fn hidden_seed_does_not_renumber_classifier_check_five() {
-        let valid = |value: &str| matches!(value, "1" | "2" | "3" | "5");
+    fn hidden_seed_does_not_renumber_classifier_actions() {
+        let valid = |value: &str| matches!(value, "1" | "2" | "3" | "5" | "6");
         let mut question = Question::new("Choose a service", "1", &valid);
         assert_eq!(
             question
@@ -655,7 +667,7 @@ mod tests {
                 .iter()
                 .map(|(key, _)| key.as_str())
                 .collect::<Vec<_>>(),
-            vec!["1", "2", "3", "5"]
+            vec!["1", "2", "3", "5", "6"]
         );
         question.event(
             Event::Key(crossterm::event::KeyEvent::new(
@@ -682,6 +694,11 @@ mod tests {
                 &valid
             ),
             Some(Some("5".into()))
+        );
+        question.event(key(KeyCode::Char('6')), &valid);
+        assert_eq!(
+            question.event(key(KeyCode::Enter), &valid),
+            Some(Some("6".into()))
         );
         let dataset = Question::new("Actor CSV path", "auto", &|_| true);
         assert!(!dataset.stable_service_keys);
@@ -753,7 +770,15 @@ mod tests {
     #[test]
     fn launcher_cells_and_mouse_targets() {
         use ratatui::{backend::TestBackend, style::Modifier};
-        for (width, height) in [(160, 50), (120, 40), (80, 24), (60, 18), (40, 20), (30, 10)] {
+        for (width, height) in [
+            (160, 50),
+            (120, 40),
+            (80, 24),
+            (60, 18),
+            (40, 20),
+            (40, 14),
+            (30, 10),
+        ] {
             for (name, label, default, valid) in [
                 (
                     "service",
@@ -772,6 +797,12 @@ mod tests {
                     "Choose a service",
                     "5",
                     (|v: &str| matches!(v, "1" | "2" | "3" | "5")) as fn(&str) -> bool,
+                ),
+                (
+                    "service-classifier-training",
+                    "Choose a service",
+                    "6",
+                    (|v: &str| matches!(v, "1" | "2" | "3" | "4" | "5" | "6")) as fn(&str) -> bool,
                 ),
                 (
                     "actor-dataset",
@@ -820,15 +851,22 @@ mod tests {
                         .map(String::from),
                     );
                 }
-                let notice = if name == "service-classifier-check" {
-                    "Atlas classifier (Rust-BERT): unavailable\nSet the worker and model in zero-shot.json."
-                } else {
-                    ""
+                let notice = match name {
+                    "service-classifier-check" => "Atlas classifier (Rust-BERT): unavailable\nSet the worker and model in zero-shot.json.",
+                    "service-classifier-training" => "Legacy classifier dataset changed. Choose 6 to retrain.",
+                    _ => "",
                 };
                 terminal
                     .draw(|frame| question.draw(frame, &history, notice))
                     .unwrap();
-                if width >= 40 && matches!(name, "service-classifier-check" | "actor-dataset") {
+                if width >= 40
+                    && matches!(
+                        name,
+                        "service-classifier-check"
+                            | "service-classifier-training"
+                            | "actor-dataset"
+                    )
+                {
                     let buffer = terminal.backend().buffer();
                     let text = (0..height)
                         .map(|y| {
@@ -838,12 +876,15 @@ mod tests {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let label = if name == "actor-dataset" {
-                        "Actor CSV path"
-                    } else {
-                        "Check Atlas classifier"
+                    let label = match name {
+                        "actor-dataset" => "Actor CSV path",
+                        "service-classifier-training" => "Train legacy classifier",
+                        _ => "Check Atlas classifier",
                     };
                     assert!(text.contains(label), "Action must remain visible: {text}");
+                    if name == "service-classifier-training" && height >= 24 {
+                        assert!(text.contains("Choose 6 to retrain."), "{text}");
+                    }
                 }
                 for row in &question.rows {
                     assert!(row.right() <= width && row.bottom() <= height);
@@ -851,8 +892,13 @@ mod tests {
                         (i32::from(row.x) * 2 + i32::from(row.width) - i32::from(width)).abs() <= 1
                     );
                 }
-                if width >= 40 && name == "service" {
-                    let row = question.rows[1];
+                let mouse_choice = match (width >= 40, name) {
+                    (true, "service") => Some((1, "2")),
+                    (true, "service-classifier-training") => Some((5, "6")),
+                    _ => None,
+                };
+                if let Some((index, choice)) = mouse_choice {
+                    let row = question.rows[index];
                     for kind in [
                         MouseEventKind::Down(MouseButton::Left),
                         MouseEventKind::Up(MouseButton::Left),
@@ -867,7 +913,7 @@ mod tests {
                             &valid,
                         );
                         if matches!(kind, MouseEventKind::Up(_)) {
-                            assert_eq!(result, Some(Some("2".into())));
+                            assert_eq!(result, Some(Some(choice.into())));
                         }
                     }
                 }

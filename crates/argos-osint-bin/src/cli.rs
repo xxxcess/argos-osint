@@ -520,6 +520,30 @@ impl AtlasClassifierStatus {
     }
 }
 
+async fn legacy_classifier_dataset_notice() -> Option<String> {
+    use argos_osint_core::classifier::{dataset::DatasetRequest, readiness::ClassifierHome};
+
+    if !cfg!(feature = "classifier") {
+        return None;
+    }
+    let readiness = async {
+        let request = tokio::task::spawn_blocking(|| DatasetRequest::from_runtime(None)).await??;
+        let home = ClassifierHome::new(request.home.clone());
+        Ok::<_, anyhow::Error>(home.refresh_integrity(&request).await?)
+    }
+    .await;
+    match readiness {
+        Ok(status) if status.retraining_available && status.dataset.change == "changed" => {
+            Some("Legacy classifier dataset changed. Choose 6 to retrain.".into())
+        }
+        Ok(status) if status.can_infer && status.dataset.change == "unchanged" => {
+            Some("Legacy classifier ready. Dataset hash matches.".into())
+        }
+        Ok(_) => None,
+        Err(error) => Some(format!("Legacy classifier status unavailable: {error}")),
+    }
+}
+
 pub async fn dispatch() -> Result<()> {
     let command = Cli::parse().command;
     if command.is_some() {
@@ -530,10 +554,15 @@ pub async fn dispatch() -> Result<()> {
     let mut classifier_notice = AtlasClassifierStatus::probe().await.notice();
     let mut notice = None;
     loop {
-        let current_notice = notice.take().map_or_else(
-            || classifier_notice.clone(),
-            |notice| format!("{notice}\n{classifier_notice}"),
-        );
+        let current_notice = [
+            Some(classifier_notice.clone()),
+            legacy_classifier_dataset_notice().await,
+            notice.take(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
         let Some(selection) =
             tokio::task::spawn_blocking(move || crate::welcome::run_with_notice(&current_notice))
                 .await??
@@ -569,9 +598,21 @@ pub async fn dispatch() -> Result<()> {
         // must not be echoed onto that screen by Venture. Keep file redirection
         // and the captured failure detail available.
         let echo_stderr = session.echo_child_stderr(io::stderr().is_terminal());
+        let trains_classifier = matches!(
+            &session.command,
+            Some(Command::Classifier {
+                command: ClassifierCommand::Train { .. },
+            })
+        );
+        let classifier_tty =
+            trains_classifier && io::stdin().is_terminal() && io::stderr().is_terminal();
         let mut child = tokio::process::Command::new(std::env::current_exe()?)
             .args(selection.args.iter().skip(1))
-            .stderr(std::process::Stdio::piped())
+            .stderr(if classifier_tty {
+                std::process::Stdio::inherit()
+            } else {
+                std::process::Stdio::piped()
+            })
             .kill_on_drop(true)
             .spawn()?;
         let last_err: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));

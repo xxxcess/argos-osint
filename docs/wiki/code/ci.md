@@ -42,9 +42,9 @@ Rust, mutation, web and policy checkouts explicitly leave LFS objects unmaterial
 
 The workflow checks the standalone `tools/atlas-bert` workspace using Rust 1.95.0 and its committed lockfile. Pull requests trigger it when they change the worker workspace or its workflow file. Manual dispatch is available once the workflow is on the default branch.
 
-The Linux job checks formatting and uses `rust-bert/doc-only` to type-check all targets without compiling the LibTorch bindings. The `macos-15-intel` job checks the native bindings for `x86_64-apple-darwin` using the PyTorch 2.1.0 wheel for Intel macOS and Python 3.11. Both jobs are compile-only. Local setup and verification commands are in the [classifier guide](classifier.md).
+The Linux job checks formatting and uses `rust-bert/doc-only` to type-check all targets without compiling the LibTorch bindings. By default, the `macos-15-intel` job checks the native bindings for `x86_64-apple-darwin` using the PyTorch 2.1.0 wheel for Intel macOS and Python 3.11.
 
-To run the Intel job on a branch before `atlas-bert.yml` is registered for manual dispatch, use `gh workflow run ci.yml --ref <branch> -f atlas_bert_intel_only=true`. This dispatch skips the standard CI matrix and calls the same Intel job.
+For runtime verification, run `gh workflow run ci.yml --ref <branch> -f atlas_bert_intel_only=true`. This dispatch skips the standard matrix, links and tests the native Intel executable, prepares the pinned MNLI checkpoint with the same script as local setup, and compares its batched and repeated inference against one-item requests. Direct dispatch of `atlas-bert.yml` supports the same runtime checks with `-f intel_runtime=true`. Run the standard matrix separately for Argos app builds and storage tests. See the [classifier guide](classifier.md) for local setup.
 
 ## `commit-policy.yml`
 

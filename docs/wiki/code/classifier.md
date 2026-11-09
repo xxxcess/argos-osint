@@ -48,26 +48,14 @@ Install the worker and checkpoint on the machine that runs Atlas. The applicatio
 
    On Intel macOS, `rustc -vV` should report `host: x86_64-apple-darwin`. On Linux use the [PyTorch CPU wheel index](https://download.pytorch.org/whl/cpu) to install `torch==2.1.0` and set `LD_LIBRARY_PATH` in place of `DYLD_LIBRARY_PATH`. For a standalone CPU LibTorch 2.1.0 distribution, set `LIBTORCH` to its absolute root, omit `LIBTORCH_USE_PYTORCH`, and add its `lib` directory to the platform loader path. Keep the same loader environment when launching Argos or Venture.
 
-2. Download the three files from the pinned Typeform DistilBERT MNLI revision. Convert the original PyTorch weights with the utility from Rust-BERT 0.22.0. [Pinned model files](https://huggingface.co/typeform/distilbert-base-uncased-mnli/tree/cfa538a0fddbbd978fefe8966c1aeff7ad409c90) · [Rust-BERT conversion instructions](https://docs.rs/crate/rust-bert/0.22.0)
+2. From the repository root, prepare the [pinned Typeform DistilBERT MNLI checkpoint](https://huggingface.co/typeform/distilbert-base-uncased-mnli/tree/cfa538a0fddbbd978fefe8966c1aeff7ad409c90). Choose a new model directory.
 
    ```sh
    atlas_model_dir=/absolute/path/atlas-distilbert-mnli
-   atlas_model_url=https://huggingface.co/typeform/distilbert-base-uncased-mnli/resolve/cfa538a0fddbbd978fefe8966c1aeff7ad409c90
-   mkdir -p "$atlas_model_dir"
-   for atlas_file in config.json vocab.txt pytorch_model.bin; do
-       curl -fL "$atlas_model_url/$atlas_file" -o "$atlas_model_dir/$atlas_file" || exit 1
-   done
-
-   atlas_converter_dir=$(mktemp -d)
-   curl -fL https://static.crates.io/crates/rust-bert/rust-bert-0.22.0.crate \
-       -o "$atlas_converter_dir/rust-bert.crate"
-   tar -xzf "$atlas_converter_dir/rust-bert.crate" -C "$atlas_converter_dir"
-   python "$atlas_converter_dir/rust-bert-0.22.0/utils/convert_model.py" \
-       "$atlas_model_dir/pytorch_model.bin"
-   test -s "$atlas_model_dir/rust_model.ot"
+   bash tools/atlas-bert/scripts/prepare-model.sh "$atlas_model_dir"
    ```
 
-   Keep `config.json`, `vocab.txt` and `rust_model.ot` together in the model directory.
+   The script verifies the source files and converts the weights with the Rust-BERT 0.22.0 converter and the worker's Cargo lockfile. Keep the resulting `config.json`, `vocab.txt`, and `rust_model.ot` together in the model directory.
 
 3. From the Argos repository root, build the separate worker. Point Argos to this executable or copy it to a stable location.
 
@@ -164,7 +152,7 @@ Legacy status reports `classifier-readiness-v1` with `missing`, `ready`, `traini
 
 Manual training persists a bounded request before returning acceptance. Replaying the same ID/body returns the original operation, even if the CSV later changes or disappears; changed consent/file identity conflicts. Candidate-only completion is successful and distinct from activation, including when an existing pointer is invalid or incompatible. Explicit synthetic repair requires a strictly verified prior activation identity and preserves its history/generation; unreadable or malformed lineage is never treated as an absent prior. A durable terminal result precedes final owner/writer teardown. Readiness reports retryable `writer_busy` and disables new training until the existing writer is free; status observes that transition without creating a lock. Starting the next operation reaps its exact terminal monitor through a bounded retained join. Cancellation and shutdown retain owned worker handles, release only owned leases and preserve the prior model before commit. Evaluation pins once, scores deterministic Test-family representatives with frozen gates and does not fit, calibrate or activate.
 
-Venture checks live Rust-BERT readiness at entry. Key **5**, **Check Atlas classifier**, repeats the check after configuration or installation changes. TUI, API and Web remain available while Atlas reports a missing or invalid classifier before acquisition. Actor seeding remains optional key **4** with its CSV prompt. The launcher has no article training step.
+Venture checks live Rust-BERT readiness at entry. Key **5**, **Check Atlas classifier**, repeats the check after configuration or installation changes. TUI, API and Web remain available while Atlas reports a missing or invalid classifier before acquisition. Actor seeding remains optional key **4** with its CSV prompt. Key **6**, **Train legacy classifier**, opens the article CSV prompt and activates the resulting synthetic Natural baseline. The default `auto` resolves the configured or bundled CSV again when training starts. Venture offers retraining when the verified current dataset hash differs from the active Natural model's seed hash. After the training child exits, Venture returns to its menu and refreshes that comparison. Fresh Atlas cycles use the Rust-BERT readiness path.
 
 TUI Profile → Configs → Dataset paths edits the actor CSV, legacy article training CSV and shared classifier directory in `config.toml`. Blank values select automatic defaults. Relative saved paths use `ARGOS_HOME`, and `~/` uses the operating-system home. The directory selects both the live zero-shot configuration and the legacy Natural artifact store. The explicit Natural training command remains candidate-only by default. Its progress panel writes to stderr and leaves final JSON on stdout.
 

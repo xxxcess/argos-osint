@@ -6,9 +6,17 @@ on:
       - 'tools/atlas-bert/**'
       - '.github/workflows/atlas-bert.yml'
   workflow_dispatch:
+    inputs:
+      intel_runtime:
+        description: Build and test the Intel worker with the pinned MNLI checkpoint
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       intel_only:
+        type: boolean
+        default: false
+      intel_runtime:
         type: boolean
         default: false
 
@@ -43,7 +51,11 @@ jobs:
         run: cargo check --locked --manifest-path tools/atlas-bert/Cargo.toml --all-targets --features rust-bert/doc-only
   macos-intel:
     runs-on: macos-15-intel
-    timeout-minutes: 20
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_TARGET: x86_64-apple-darwin
+      CARGO_PROFILE_DEV_DEBUG: 0
+      LIBTORCH_USE_PYTORCH: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -60,6 +72,58 @@ jobs:
         run: >-
           python -m pip install --only-binary=:all: 'torch==2.1.0' 'numpy==1.26.4'
       - name: Check native worker types on Intel macOS
-        env:
-          LIBTORCH_USE_PYTORCH: '1'
+        if: ${{ !inputs.intel_runtime }}
         run: cargo check --locked --manifest-path tools/atlas-bert/Cargo.toml --all-targets --target x86_64-apple-darwin
+      - name: Build, link, and test the Intel worker
+        if: ${{ inputs.intel_runtime }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          cargo build --locked --manifest-path tools/atlas-bert/Cargo.toml --target x86_64-apple-darwin
+          file tools/atlas-bert/target/x86_64-apple-darwin/debug/argos-atlas-bert |
+            grep -F 'Mach-O 64-bit executable x86_64'
+          export DYLD_LIBRARY_PATH="$(python -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent / "lib")')"
+          cargo test --locked --manifest-path tools/atlas-bert/Cargo.toml --target x86_64-apple-darwin
+      - name: Prepare the pinned Typeform DistilBERT MNLI checkpoint
+        if: ${{ inputs.intel_runtime }}
+        run: bash tools/atlas-bert/scripts/prepare-model.sh "$RUNNER_TEMP/atlas-bert-model"
+      - name: Run real checkpoint inference on Intel macOS
+        if: ${{ inputs.intel_runtime }}
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(python -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent / "lib")')"
+          python - <<'PY'
+          import json
+          import math
+          import os
+          from pathlib import Path
+          import subprocess
+
+          worker = Path("tools/atlas-bert/target/x86_64-apple-darwin/debug/argos-atlas-bert").resolve()
+          model = Path(os.environ["RUNNER_TEMP"]) / "atlas-bert-model"
+          election = "Parliament voted to amend election law and the electoral commission updated the ballot rules."
+          research = "Researchers published an experiment improving error correction on a silicon quantum processor."
+          batches = [[election, research], [research], [election], [election, research]]
+          output = subprocess.run(
+              [worker, "serve", model],
+              input="".join(json.dumps({"texts": batch}) + "\n" for batch in batches),
+              stdout=subprocess.PIPE,
+              text=True,
+              timeout=180,
+              check=True,
+          ).stdout
+          ready, *responses = (json.loads(line) for line in output.splitlines())
+          assert ready == {"protocol": "argos-atlas-bert-v1"}, ready
+          assert len(responses) == len(batches), responses
+          for batch, response in zip(batches, responses):
+              assert len(response["scores"]) == len(batch), response
+              for row in response["scores"]:
+                  assert len(row) == 6 and all(math.isfinite(score) and 0 <= score <= 1 for score in row), row
+          first, research_only, election_only, repeated = (response["scores"] for response in responses)
+          for batch_row, single_row, repeated_row in zip(first, [election_only[0], research_only[0]], repeated):
+              for batch_score, single_score, repeated_score in zip(batch_row, single_row, repeated_row):
+                  assert math.isclose(batch_score, single_score, abs_tol=1e-5), (batch_row, single_row)
+                  assert math.isclose(batch_score, repeated_score, abs_tol=1e-5), (batch_row, repeated_row)
+          assert first[0][0] > first[1][0] and first[1][5] > first[0][5], first
+          print("Intel Atlas worker passed the handshake, six-domain score order, and batch/repeat checks.")
+          PY

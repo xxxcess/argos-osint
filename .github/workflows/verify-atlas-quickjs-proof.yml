@@ -1,0 +1,37 @@
+name: Atlas QuickJS proof verification
+on:
+  push:
+    branches: [verify/atlas-zero-shot-intel]
+    paths: ['.github/workflows/verify-atlas-quickjs-proof.yml']
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+jobs:
+  heap-proof:
+    if: github.event.head_commit.message == 'Run native classifier heap proof'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: embedded
+          workspaces: . -> target/agents
+          save-if: false
+      - name: Run native classifier runtime-limit test
+        run: >-
+          python3 scripts/agent_cargo.py test --locked -p argos-osint-core --lib
+          classifier::runtime_proof::tests::actual_native_limits_produce_proof_and_cancel_does_not
+          -- --exact

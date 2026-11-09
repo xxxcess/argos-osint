@@ -1,0 +1,21 @@
+name: Dispatch Atlas verification
+on:
+  push:
+    branches: [verify/atlas-zero-shot-intel]
+    paths: ['.github/workflows/atlas-verify-dispatch-once.yml']
+permissions:
+  actions: write
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Dispatch the Intel runtime, full matrix, and Intel web workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=0
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f atlas_bert_intel_only=true || status=1
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" || status=1
+          gh workflow run intel-web.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" || status=1
+          exit "$status"

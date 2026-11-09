@@ -1973,7 +1973,7 @@ fn lock_held(path: &Path) -> Result<bool, HomeError> {
 fn job_detail_sync(home: &Path, id: &str, settle: bool) -> Result<TrainingJob, HomeError> {
     validate_job_id(id)?;
     let path = artifact::root_for(home)?.join("manual-jobs").join(id);
-    let mut job = read_job(&path, id)?;
+    let job = read_job(&path, id)?;
     if job.state.terminal() {
         return Ok(job);
     }
@@ -1981,9 +1981,22 @@ fn job_detail_sync(home: &Path, id: &str, settle: bool) -> Result<TrainingJob, H
         return Ok(job);
     }
     if settle {
-        let store = ArtifactStore::new(home)?;
-        match store.try_writer() {
-            Ok(_lease) => {
+        settle_unowned_job(home, &path, job)
+    } else {
+        Ok(job)
+    }
+}
+fn settle_unowned_job(
+    home: &Path,
+    path: &Path,
+    mut job: TrainingJob,
+) -> Result<TrainingJob, HomeError> {
+    let store = ArtifactStore::new(home)?;
+    match store.try_writer() {
+        Ok(_lease) => {
+            // The prior writer may have finished after the ownership probe.
+            job = read_job(path, &job.job_id)?;
+            if !job.state.terminal() {
                 job.state = TrainingJobState::Interrupted;
                 job.advance()?;
                 job.diagnostic = Some(diagnostic(
@@ -1991,26 +2004,25 @@ fn job_detail_sync(home: &Path, id: &str, settle: bool) -> Result<TrainingJob, H
                     "Training owner stopped; use a new request ID to rebuild",
                     true,
                 ));
-                write_job(&path, &job)?;
+                write_job(path, &job)?;
             }
-            Err(ClassifierError::Busy) => {
-                job.diagnostic = Some(diagnostic(
-                    "ownership_unverified",
-                    "Training ownership cannot currently be verified",
-                    true,
-                ));
-            }
-            Err(error) => return Err(error.into()),
         }
+        Err(ClassifierError::Busy) => {
+            job.diagnostic = Some(diagnostic(
+                "ownership_unverified",
+                "Training ownership cannot currently be verified",
+                true,
+            ));
+        }
+        Err(error) => return Err(error.into()),
     }
     Ok(job)
 }
 fn read_job(path: &Path, id: &str) -> Result<TrainingJob, HomeError> {
+    // A terminal progress pointer is published after its result.
+    let progress = read_optional_json::<TrainingJob>(&path.join("progress.json"), 64 * 1024)?;
     let job = read_optional_json::<TrainingJob>(&path.join("result.json"), 1024 * 1024)?
-        .or(read_optional_json::<TrainingJob>(
-            &path.join("progress.json"),
-            64 * 1024,
-        )?)
+        .or(progress)
         .ok_or_else(|| HomeError::NotFound { job_id: id.into() })?;
     if job.job_id != id
         || job.schema_version != "classifier-training-job-v1"
@@ -2245,6 +2257,53 @@ mod ownership_tests {
             "owned task storage must not retain the home"
         );
         assert!(cancel.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn orphan_settlement_preserves_result_published_after_the_poll() {
+        let root = tempfile::tempdir().expect("isolated classifier home");
+        let store = ArtifactStore::new(root.path()).expect("classifier store");
+        let writer = store.try_writer().expect("original writer");
+        let request_id = "finishes-during-poll";
+        let id = job_id(request_id);
+        let path = store.root().join("manual-jobs").join(&id);
+        fs::create_dir_all(&path).expect("job directory");
+        let mut job = TrainingJob {
+            schema_version: "classifier-training-job-v1".into(),
+            job_id: id.clone(),
+            request_id: request_id.into(),
+            state: TrainingJobState::Running,
+            revision: 1,
+            dataset_path: None,
+            progress: None,
+            active_model: None,
+            candidate_model_id: None,
+            provenance: None,
+            cancel_requested: false,
+            outcome: None,
+            diagnostic: None,
+        };
+        write_job(&path, &job).expect("running progress");
+        let stale = read_job(&path, &id).expect("poll before completion");
+        assert_eq!(stale.state, TrainingJobState::Running);
+        job.state = TrainingJobState::Failed;
+        job.diagnostic = Some(diagnostic(
+            "fixture_parser_failed",
+            "Invalid fixture CSV",
+            false,
+        ));
+        job.advance().expect("terminal revision");
+        write_json(&path.join("result.json"), &job, 1024 * 1024).expect("terminal result");
+        write_job(&path, &job).expect("terminal progress");
+        drop(writer);
+
+        let settled =
+            settle_unowned_job(root.path(), &path, stale).expect("settle after writer release");
+        assert_eq!(settled, job, "the terminal result owns the final state");
+        let progress = read_optional_json::<TrainingJob>(&path.join("progress.json"), 64 * 1024)
+            .expect("terminal progress is readable")
+            .expect("terminal progress still exists");
+        assert_eq!(progress, job, "settlement must not rewrite progress");
     }
 
     #[tokio::test]

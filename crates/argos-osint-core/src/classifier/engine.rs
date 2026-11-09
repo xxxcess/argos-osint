@@ -1462,6 +1462,7 @@ pub fn from_snapshot(
         pinned: Some(snapshot),
         engine: Mutex::new(Some(Box::new(engine))),
         metrics: Mutex::new(InferenceMetrics::default()),
+        zero_shot_policy: None,
     })
 }
 

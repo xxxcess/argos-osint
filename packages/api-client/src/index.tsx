@@ -600,12 +600,12 @@ export const INTEL_CATEGORIES = [
 ] as const;
 export type StrategicDomain = (typeof INTEL_CATEGORIES)[number];
 export const INTEL_DOMAIN_NAMES: Record<StrategicDomain, string> = {
-  governance: "Governance & Political Stability",
-  security: "Security & Threat Environment",
-  economic: "Economic & Supply Chain Resilience",
-  human: "Human Security & Public Welfare",
-  environmental: "Environmental & Resource Security",
-  scientific: "Scientific & Technological Capability",
+  governance: "Politics & Governance",
+  security: "Security & Conflict",
+  economic: "Economy & Supply Chains",
+  human: "Health & Public Welfare",
+  environmental: "Environment & Resources",
+  scientific: "Science & Technology",
 };
 // Native "all" uses this same stream: the server owns order and opaque cursors.
 export function useArticles(

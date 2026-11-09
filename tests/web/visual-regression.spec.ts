@@ -14,7 +14,11 @@ const article = {
   source_name: "Fixture Wire",
   source_domain: "example.test",
   published_at: "2026-10-25T12:00:00Z",
-  category: "geopolitical",
+  category: "governance",
+  categories: ["governance"],
+  taxonomy_version: "strategic-domains-v1",
+  admission_state: "admitted",
+  publication_version: "atlas-admission-publication-v4",
   image_url: "",
   url: "https://example.test/news",
   author: "Fixture reporter",
@@ -43,12 +47,12 @@ for (const width of [1440, 768, 390, 320]) {
         else if (path === "articles/counts")
           body = {
             counts: {
-              geopolitical: 1,
+              governance: 1,
+              security: 0,
               economic: 0,
-              military: 0,
-              information: 0,
-              stability: 0,
-              technology: 0,
+              human: 0,
+              environmental: 0,
+              scientific: 0,
             },
           };
         else if (path === "articles")
@@ -98,12 +102,12 @@ for (const width of [1440, 768, 390, 320]) {
       threshold: 0.2,
     });
     await page.keyboard.press("Tab");
-    await page
-      .getByRole("button", { name: "Geopolitical", exact: true })
-      .focus();
-    await expect(
-      page.getByRole("button", { name: "Geopolitical", exact: true }),
-    ).toBeFocused();
+    const politics = page.getByRole("button", {
+      name: "Politics & Governance",
+      exact: true,
+    });
+    await politics.focus();
+    await expect(politics).toBeFocused();
     const interactionColors = await page.evaluate(() => ({
       focus: getComputedStyle(document.activeElement!).outlineColor,
       selection: getComputedStyle(document.body, "::selection").backgroundColor,

@@ -2376,10 +2376,21 @@ where
         chrono::Utc::now(),
     )
     .await?;
-    let deadline = tokio::time::Instant::now()
-        + std::time::Duration::from_secs(
-            crate::storage::classifier_admission::FOREGROUND_HANDOFF_SECS,
-        );
+    let handoff = std::time::Duration::from_secs(
+        crate::storage::classifier_admission::FOREGROUND_HANDOFF_SECS,
+    );
+    // A fresh CPU worker can spend longer loading the checkpoint than the
+    // legacy QuickJS handoff. The foreground intent still renews every second.
+    #[cfg(feature = "classifier")]
+    let handoff = if !resume
+        || stats.classifier_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.algorithm_version == crate::classifier::ZERO_SHOT_ALGORITHM_VERSION
+        }) {
+        handoff + crate::classifier::bert::STARTUP_TIMEOUT
+    } else {
+        handoff
+    };
+    let deadline = tokio::time::Instant::now() + handoff;
     let startup: Result<(CyclePermit, crate::storage::classifier_admission::RunClaim)> = async {
         for attempt in 0..3 {
             let revision =
@@ -3841,10 +3852,7 @@ mod tests {
         assert_eq!(normalize_category(" Governance "), "governance");
         assert_eq!(normalize_category("science"), "unk");
         assert_eq!(normalize_category("military"), "unk");
-        assert_eq!(
-            category_name("scientific"),
-            "Scientific & Technological Capability"
-        );
+        assert_eq!(category_name("scientific"), "Science & Technology");
     }
 
     #[test]
@@ -4023,7 +4031,7 @@ mod tests {
         assert!(card.contains("Author: Joel Schlesinger; Laurie"));
         assert!(card
             .lines()
-            .any(|line| line == "Category: Economic & Supply Chain Resilience"));
+            .any(|line| line == "Category: Economy & Supply Chains"));
         assert!(card.contains(&format!(
             "Published: {}",
             friendly_date("2026-10-03 07:01:24 +0000")

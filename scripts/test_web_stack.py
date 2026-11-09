@@ -6,7 +6,6 @@ adoption tests) through scripts/agent_cargo.py first. Build the
 web export with pnpm build. All state lives in a temporary ARGOS_HOME.
 """
 import argparse
-import csv
 import json
 import os
 from pathlib import Path
@@ -182,27 +181,23 @@ class TerminalScreen:
 
 
 def verify_terminal_screen(capture):
-    prompt = b"Classifier CSV path (auto for configured/default)"
-    initial = b"\x1b[2J\x1b[2;3HClassifier CSV path (auto for configured/default)"
-    repaint = b"\x1b[2;3HClassifier CSV pat\x1b[2;22H (auto\x1b[2;29Hfo\x1b[2;32H configured/default)"
+    prompt = b"Check Atlas classifier"
+    initial = b"\x1b[2J\x1b[2;3H" + prompt
+    repaint = b"\x1b[2;3HCheck Atlas cl\x1b[2;17Hassif\x1b[2;22Hier"
     assert TerminalScreen(initial + repaint).contains(prompt, len(initial)), "retained cells must complete the exact prompt"
     next_prompt = initial + repaint + b"\x1b[2;3HAPI port\x1b[K"
     assert not TerminalScreen(next_prompt).contains(prompt), "replaced prompts must not match historical output"
     unchanged = next_prompt + b"\x1b[4;1Hstatus"
     assert not TerminalScreen(unchanged).contains(b"API port", len(next_prompt)), "unrelated fresh cells cannot freshen an old match"
     raw = capture.read_bytes()
-    mark = raw.rfind(b"Classifier CSV pat")
-    end = raw.find(b"\x1b[?25h", mark)
-    frame = raw[:end + len(b"\x1b[?25h")] if end >= 0 else raw
-    assert mark >= 0 and TerminalScreen(frame).contains(prompt, mark), "captured cursor diff must reconstruct the exact CSV prompt"
-    assert prompt not in TerminalScreen.CSI.sub(b"", frame), "captured regression must exercise retained cells"
-    if b"Intel" in raw and b"Recon" in raw:
-        leave = raw.rfind(b"\x1b[?1049l")
-        enter = raw.rfind(b"\x1b[?1049h", 0, leave)
-        returned = TerminalScreen(raw[:leave])
-        assert enter >= 0 and returned.contains(b"Choose a service", enter)
-        assert returned.contains(b"2  API Server", enter), "captured TUI exit must return to a fresh, ready Venture menu"
-    print("PASS: retained-cell repaint, replaced/stale prompt guards and captured CSV prompt reconstruction")
+    leave = raw.rfind(b"\x1b[?1049l")
+    enter = raw.rfind(b"\x1b[?1049h", 0, leave)
+    returned = TerminalScreen(raw[:leave])
+    assert enter >= 0 and returned.contains(b"Choose a service", enter)
+    assert returned.contains(prompt, enter), "fresh Venture menu must expose the classifier check"
+    assert returned.contains(b"Atlas classifier (Rust-BERT): ready", enter), "fresh Venture menu must show successful readiness"
+    assert returned.contains(b"2  API Server", enter), "captured TUI exit must return to a fresh, ready Venture menu"
+    print("PASS: retained-cell repaint, replaced/stale prompt guards and ready Venture menu reconstruction")
 
 
 def service_row_position(screen, title):
@@ -223,28 +218,16 @@ def service_row_position(screen, title):
     return matches[0] if matches else None
 
 
-def classifier_fixture(path):
-    """Independent synthetic CSV for first-run setup; never production evidence."""
-    fields = ["sample_id", "title", "description", "domain_labels", "primary_domain",
-              "secondary_domain", "subcategories", "source_kind", "difficulty",
-              "dataset_version", "annotation_notes", "split", "scenario_group",
-              "language", "synthetic", "labels_complete", "expected_admission",
-              "rejection_reason"]
-    with path.open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fields)
-        writer.writeheader()
-        for split in ("train", "calibration", "test"):
-            for domain in ("governance", "security", "economic", "human", "environmental", "scientific"):
-                writer.writerow(dict.fromkeys(fields, "") | {
-                    "sample_id": f"{split}-{domain}", "title": f"Fictional {domain} bulletin {split}",
-                    "description": f"Synthetic {domain} development example.",
-                    "domain_labels": domain, "primary_domain": domain,
-                    "source_kind": "synthetic", "difficulty": "single_domain_boundary",
-                    "dataset_version": "synthetic-launcher-smoke-v1", "split": split,
-                    "scenario_group": f"family-{split}-{domain}", "language": "en",
-                    "synthetic": "true", "labels_complete": "true",
-                    "expected_admission": "reject", "rejection_reason": "insufficient_domains",
-                })
+def install_classifier_fixture(config):
+    """Install a test-only worker and model in the isolated Argos home."""
+    config.parent.mkdir(parents=True, exist_ok=True)
+    model = config.parent / "fixture-model"
+    model.mkdir()
+    (model / "config.json").write_text("{}")
+    for name in ("vocab.txt", "rust_model.ot"):
+        (model / name).write_text("test fixture")
+    worker = ROOT / "scripts" / "fixtures" / "atlas_bert"
+    config.write_text(json.dumps({"worker_path": str(worker), "model_dir": str(model)}))
 
 
 def free_port():
@@ -407,7 +390,7 @@ def main():
     parser.add_argument("--argos", type=Path, default=ROOT / "target/agents/debug/argos")
     parser.add_argument("--terminal-captures", type=Path, help="retain PTY lifecycle output for review")
     parser.add_argument("--tui-only", action="store_true", help="run just embedded API/Web terminal-display checks")
-    parser.add_argument("--tui-case", choices=("all", "tui", "api", "web", "web-quit"), help="run one isolated terminal case; api/web cases train through the real classifier CLI")
+    parser.add_argument("--tui-case", choices=("all", "tui", "api", "web", "web-quit"), help="run one isolated terminal case")
     parser.add_argument("--tui-web-profile", choices=("dev", "installed"), default="dev", help="Web profile for terminal-display checks; installed avoids another dev server's workspace lock")
     parser.add_argument("--composer-smoke", action="store_true", help="regression: a TUI composer launch must not abort the Tokio worker runtime")
     parser.add_argument("--verify-terminal-screen", type=Path, help="check retained-cell and fresh-prompt matching against a failed PTY capture without launching services")
@@ -425,8 +408,7 @@ def main():
     assert binary.is_file() and host.is_file(), "build argos and argos-api-host first"
     with tempfile.TemporaryDirectory(prefix="argos-web-stack-") as tmp:
         env = {**os.environ, "ARGOS_HOME": tmp}
-        training_csv = Path(tmp) / "article training fixture.csv"
-        classifier_fixture(training_csv)
+        classifier_config = Path(tmp) / "classifier" / "zero-shot.json"
         env.pop("ARGOS_EMBED", None)
         env.pop("ARGOS_STORAGE_MODE", None)
         # Stub the OS URL handler: verify browser dispatch without opening tabs
@@ -515,22 +497,19 @@ def main():
             try:
                 if wizard:
                     eventually(lambda: sees(b"Choose a service"), process)
-                    if not (Path(tmp) / "classifier/active.json").is_file():
-                        assert sees(b"Train and save classifier"), "missing model must expose initial setup"
+                    if not classifier_config.is_file():
+                        assert sees(b"Check Atlas classifier"), "the launcher must expose readiness checks"
+                        assert sees(b"Atlas classifier (Rust-BERT): unavailable")
+                        assert sees(b"2  API Server"), "classifier setup must leave other services available"
+                        missing = json.loads(run("classifier", "status", "--json").stdout)
+                        assert missing["can_infer"] is False and missing["diagnostic"]
+                        install_classifier_fixture(classifier_config)
                         mark = len(capture)
                         os.write(master, b"5\r")
-                        eventually(lambda: sees(b"Classifier CSV path", mark), process)
-                        os.write(master, b"\x15" + str(training_csv).encode() + b"\r")
-                        def trained_service_menu():
-                            # Match the fresh service option itself; training
-                            # notices/history can also mention API Server.
-                            return ((Path(tmp) / "classifier/active.json").is_file()
-                                    and sees(b"Choose a service", mark)
-                                    and sees(b"2  API Server", mark))
-
-                        eventually(trained_service_menu, process, seconds=60)
-                        assert (Path(tmp) / "classifier/active.json").is_file(), "setup must save before enabling services"
-                        training_csv.unlink()  # Later sessions restore the saved model without its CSV.
+                        eventually(lambda: sees(b"Atlas classifier (Rust-BERT): ready", mark), process)
+                        assert sees(b"Choose a service", mark)
+                        status = json.loads(run("classifier", "status", "--json").stdout)
+                        assert status["can_infer"] is True and status["model"]
                     if target == "--tui":
                         os.write(master, b"3\r")
                         eventually(lambda: sees(b"Web port"), process)
@@ -695,8 +674,6 @@ def main():
             if args.tui_only:
                 run("storage", "init", "--mode", "embedded")
                 if args.tui_case in ("api", "web", "web-quit"):
-                    run("classifier", "train", "--file", str(training_csv), "--activate-synthetic-baseline")
-                    training_csv.unlink()  # Selected cases must restore the saved artifact.
                     exercise_tui("--server" if args.tui_case == "api" else "--web",
                                  quit_from_tui=args.tui_case == "web-quit")
                 elif args.tui_case == "tui":

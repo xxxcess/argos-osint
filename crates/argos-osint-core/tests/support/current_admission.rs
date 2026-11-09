@@ -1,4 +1,4 @@
-//! Current authority for discovery/index fixtures, through the real learner.
+//! Current authority for discovery/index fixtures, through the live admission path.
 use std::sync::OnceLock;
 
 use argos_osint_core::storage::atlas;
@@ -10,7 +10,7 @@ mod fixture;
 #[path = "../fixtures/classifier/admission-publication.rs"]
 mod publication;
 
-/// Fictional vocabulary selects a real fitted pair without forged receipts.
+/// Fictional vocabulary selects a deterministic score pair through the worker protocol.
 /// Reusing one persisted model also exercises restore and same-run resumption.
 pub async fn admit(repo: &Repository, row: &mut AtlasArticleRow, vocabulary: &str) {
     static MODEL: OnceLock<tempfile::TempDir> = OnceLock::new();
@@ -21,10 +21,7 @@ pub async fn admit(repo: &Repository, row: &mut AtlasArticleRow, vocabulary: &st
         MODEL.set(installed.directory).expect("one fixture model");
     }
     let cue = vocabulary.to_ascii_lowercase();
-    assert!(
-        !cue.is_empty(),
-        "fixture admission needs its fitted vocabulary"
-    );
+    assert!(!cue.is_empty(), "fixture admission needs its worker cue");
     // Cloned occurrences must retain exactly the same metadata. Reappending a
     // fixture cue would change their source revision and body acquisition key.
     if row.description != cue && !row.description.ends_with(&format!(" {cue}")) {

@@ -432,6 +432,25 @@ async fn explicit_activation_enables_pinning_and_evaluation_does_not_write_model
     );
     assert_eq!(job.outcome.expect("outcome").state, "manual_seed_activated");
     let pinned = home.pin(None).await.expect("pin actual activated model");
+    use argos_osint_core::classifier::readiness::{
+        preflight_cycle, CyclePreflightError, CycleRequirement,
+    };
+    assert!(
+        matches!(
+            preflight_cycle(&home, CycleRequirement::FreshAcquisition, None).await,
+            Err(CyclePreflightError::Classifier { .. })
+        ),
+        "fresh Atlas runs require zero-shot setup even when Natural is installed"
+    );
+    let resumed = preflight_cycle(
+        &home,
+        CycleRequirement::AcquisitionAndAdmission,
+        Some(&pinned.snapshot),
+    )
+    .await
+    .expect("saved Natural revision remains available to its run");
+    assert_eq!(resumed.pinned().unwrap().snapshot, pinned.snapshot);
+
     let pointer = selected.home.join("classifier/active.json");
     let before = fs::read(&pointer).expect("active pointer");
     let report = home

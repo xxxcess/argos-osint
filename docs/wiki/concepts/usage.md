@@ -108,11 +108,11 @@ and all other record spacing remain unchanged.
 
 Automatic news cycles run every **30 minutes**. A manual start resets an armed timer to 30 minutes. Restoring an older schedule shortens a later deadline while preserving due triggers and Auto off. An active cycle is never overlapped.
 
-Classification-only news cycle:
+Set up the [local Rust-BERT classifier](../code/classifier.md#set-up-the-live-rust-bert-classifier) before starting an Atlas news cycle.
 
 1. GNews + NewsData, 48 h, score countries
 2. NewsAPI + Currents headlines for kept bands
-3. Classifier batches overlap local entities and publisher priors; Related matches shared title/description mentions
+3. Rust-BERT scores the six strategic domains in batches. Local entities and publisher priors overlap classification, and Related matches shared title/description mentions
 
 Pause preserves article receipts. Resume retries unresolved Classifier/native metadata work. History and the Braille map follow the selected cycle. Coverage shows classification, entities, publisher priors and Related leads. Atlas alone creates no Brain insights; article analysis begins in Intel. See [classification and Related](atlas-classification-and-related-articles.md).
 

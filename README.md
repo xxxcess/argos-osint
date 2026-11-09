@@ -56,9 +56,11 @@ cargo build --locked -p argos-osint-bin
 
 Running `argos` without arguments opens a Ratatui service launcher with a centered ARGOS VENTURE banner and the same theme as the main TUI. Use ↑/↓, Tab or the numbered choices, then Enter; mouse clicks also select choices. Settings cover storage mode, API/web ports, the web profile, and starting or connecting to an API. Enter accepts a default, Ctrl+U clears a text field, and Esc returns to the previous question with its saved value (Esc at the service root exits). Ctrl+Q exits the wizard. PgUp/PgDn review the selected settings. The final choice starts the stack with either the normal TUI or server logs visible. When a session launched from Venture ends, its owned services stop and Venture reopens. Explicit `stack up` commands remain one-shot.
 
+Atlas news cycles require the [local Rust-BERT classifier setup](docs/wiki/code/classifier.md#set-up-the-live-rust-bert-classifier). Choose **5 · Check Atlas classifier** in Venture to refresh readiness. Other applications remain available while classifier setup is pending.
+
 Explicit `stack up` commands skip the launcher. The main TUI opens on Home: ↑/↓ and Enter open an app, keys `1`–`9` jump between apps, Esc returns Home, and `?` opens shortcuts. API Server and Web use the build prerequisites below.
 
-A default build uses embedded SurrealDB: RocksDB on disk under `~/.argos/storage/surreal` (`ARGOS_HOME` moves it), in-process. To use a per-home SurrealDB 3.3.4 server on loopback, build with `--no-default-features --features server,nlp` and select `argos storage init --mode server` (or `ARGOS_STORAGE_MODE=server`).
+A default build uses embedded SurrealDB: RocksDB on disk under `~/.argos/storage/surreal` (`ARGOS_HOME` moves it), in-process. To use a per-home SurrealDB 3.3.4 server on loopback, build with `--no-default-features --features server,nlp,classifier` and select `argos storage init --mode server` (or `ARGOS_STORAGE_MODE=server`).
 
 ### Intel web development
 

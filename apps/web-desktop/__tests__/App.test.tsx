@@ -174,7 +174,9 @@ describe("Web Desktop App (real IntelApp)", () => {
       screen.getByRole("textbox", { name: "Search articles" }),
       "shipping",
     );
-    await user.click(screen.getByRole("button", { name: /^Economic$/ }));
+    await user.click(
+      screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),
+    );
     await user.click(screen.getByRole("button", { name: /^server$/ }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Open Intel" })).toBeVisible(),
@@ -189,10 +191,9 @@ describe("Web Desktop App (real IntelApp)", () => {
     expect(
       screen.getByRole("textbox", { name: "Search articles" }),
     ).toHaveValue("shipping");
-    expect(screen.getByRole("button", { name: /^Economic$/ })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(
+      screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),
+    ).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByLabelText("API connected")).toHaveTextContent("API_OK");
   });
 });

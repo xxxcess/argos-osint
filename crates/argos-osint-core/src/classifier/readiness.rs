@@ -80,6 +80,16 @@ pub struct ProvenanceSummary {
 impl From<&Provenance> for ProvenanceSummary {
     fn from(value: &Provenance) -> Self {
         let (kind, version, hash, review) = match value {
+            Provenance::ZeroShot => {
+                return Self {
+                    kind: "zero_shot".into(),
+                    label: value.label().into(),
+                    dataset_version: String::new(),
+                    dataset_sha256: String::new(),
+                    review_reference: None,
+                    seed_dataset_sha256: None,
+                }
+            }
             Provenance::SyntheticBaseline {
                 dataset_version,
                 dataset_sha256,
@@ -493,7 +503,14 @@ impl ClassifierHome {
         let snapshot = snapshot.clone();
         let expected = expected_manifest_sha256.to_owned();
         blocking(move || {
-            let (_, _, _, actual) = load_pin(&root, Some(snapshot))?;
+            #[cfg(feature = "classifier")]
+            let actual = if snapshot.algorithm_version == super::ZERO_SHOT_ALGORITHM_VERSION {
+                super::bert::Bundle::load(&root, Some(snapshot))?.manifest_sha256
+            } else {
+                load_pin(&root, Some(snapshot))?.3
+            };
+            #[cfg(not(feature = "classifier"))]
+            let actual = load_pin(&root, Some(snapshot))?.3;
             if actual != expected {
                 return Err(invalid_artifact("saved_manifest_hash_mismatch"));
             }
@@ -596,6 +613,94 @@ impl ClassifierHome {
     /// Pins the current or exact saved immutable model. No fallback is allowed
     /// when a requested identity is absent or incompatible.
     pub async fn pin(
+        &self,
+        requested: Option<&ModelSnapshot>,
+    ) -> Result<PinnedClassifier, ClassifierError> {
+        if requested.is_some_and(|snapshot| {
+            snapshot.algorithm_version == super::ZERO_SHOT_ALGORITHM_VERSION
+        }) {
+            return self.pin_atlas(requested).await;
+        }
+        self.pin_natural(requested).await
+    }
+
+    /// Pins live Atlas inference, or the exact saved backend for a resumed run.
+    pub async fn pin_atlas(
+        &self,
+        requested: Option<&ModelSnapshot>,
+    ) -> Result<PinnedClassifier, ClassifierError> {
+        if requested.is_some_and(|snapshot| {
+            snapshot.algorithm_version != super::ZERO_SHOT_ALGORITHM_VERSION
+        }) {
+            return self.pin_natural(requested).await;
+        }
+        #[cfg(not(feature = "classifier"))]
+        return Err(ClassifierError::Unavailable);
+        #[cfg(feature = "classifier")]
+        {
+            let _serial = self.inner.pin_operation.lock().await;
+            let control = super::WorkControl {
+                cancel: self.inner.cancel.clone(),
+                ..super::WorkControl::new()
+            };
+            control.check_active()?;
+            let home = self.inner.home.clone();
+            let current = requested.is_none();
+            let requested = requested.cloned();
+            let bundle = blocking(move || Ok(super::bert::Bundle::load(&home, requested)?))
+                .await
+                .map_err(classifier_error)?;
+            let snapshot = bundle.snapshot.clone();
+            let manifest_sha256 = bundle.manifest_sha256.clone();
+            let key = format!(
+                "{}:{}:{}",
+                snapshot.model_id, snapshot.artifact_sha256, manifest_sha256
+            );
+            {
+                let mut pins = self.inner.pins.lock().map_err(|_| ClassifierError::Busy)?;
+                if let Some(service) = pins.get(&key).and_then(Weak::upgrade) {
+                    let snapshot = if current {
+                        service
+                            .pinned_model()
+                            .cloned()
+                            .ok_or(ClassifierError::Unavailable)?
+                    } else {
+                        snapshot
+                    };
+                    return Ok(PinnedClassifier {
+                        snapshot,
+                        manifest_sha256,
+                        service,
+                    });
+                }
+                pins.retain(|_, value| value.strong_count() > 0);
+                if pins.len() >= 3 {
+                    return Err(ClassifierError::Busy);
+                }
+            }
+            let runtime = tokio::runtime::Handle::current();
+            let service = blocking(move || Ok(Arc::new(bundle.start(runtime, &control)?)))
+                .await
+                .map_err(classifier_error)?;
+            self.inner
+                .pins
+                .lock()
+                .map_err(|_| ClassifierError::Busy)?
+                .insert(key, Arc::downgrade(&service));
+            *self
+                .inner
+                .active_pin
+                .lock()
+                .map_err(|_| ClassifierError::Busy)? = Some(service.clone());
+            Ok(PinnedClassifier {
+                snapshot,
+                manifest_sha256,
+                service,
+            })
+        }
+    }
+
+    async fn pin_natural(
         &self,
         requested: Option<&ModelSnapshot>,
     ) -> Result<PinnedClassifier, ClassifierError> {
@@ -2051,7 +2156,14 @@ pub enum CyclePreflightError {
 impl fmt::Display for CyclePreflightError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Classifier { status, code, source } => write!(f, "Atlas classifier blocked ({}; {code}): {source}. Train or restore a compatible classifier; historical pins require explicit re-evaluation under a new revision.", status.as_str()),
+            Self::Classifier { status, code, source } => {
+                write!(f, "Atlas classifier blocked ({}; {code}): {source}.", status.as_str())?;
+                match code.as_str() {
+                    "classifier_unavailable" => f.write_str(" Run argos classifier status to check the local Rust-BERT setup."),
+                    "pinned_classifier_unavailable" => f.write_str(" Restore the saved classifier revision to resume, or explicitly reclassify under a new revision."),
+                    _ => Ok(()),
+                }
+            }
             Self::MissingPinnedRevision => f.write_str("Atlas classifier blocked: resumed acquisition/admission has no saved model revision. Explicitly re-evaluate under a new revision; the current active model cannot replace a missing pin."),
             Self::InvalidRunState { code } => write!(f, "Atlas classifier preflight cannot verify the saved run: {code}"),
         }
@@ -2085,7 +2197,7 @@ pub async fn preflight_cycle(
         }
         CycleRequirement::PostAdmissionOnly => None,
     };
-    let pinned = home.pin(selected).await.map_err(|source| {
+    let pinned = home.pin_atlas(selected).await.map_err(|source| {
         let status = match &source {
             ClassifierError::Unavailable if cfg!(feature = "classifier") => {
                 ClassifierStatus::Missing

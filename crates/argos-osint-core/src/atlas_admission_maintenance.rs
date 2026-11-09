@@ -319,7 +319,7 @@ pub async fn start(
         return Ok(existing.checkpoint.job_id);
     }
     let pinned = home
-        .pin(request.requested_model.as_ref())
+        .pin_atlas(request.requested_model.as_ref())
         .await
         .map_err(AdmissionError::Classifier)?;
     let path = home.home().to_path_buf();

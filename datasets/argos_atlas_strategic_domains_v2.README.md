@@ -54,12 +54,12 @@ The UTF-8 CSV retains the original 18 field names. Quoted commas and apostrophes
 
 Stable domains:
 
-- `governance`: Governance & Political Stability.
-- `security`: Security & Threat Environment.
-- `economic`: Economic & Supply Chain Resilience.
-- `human`: Human Security & Public Welfare.
-- `environmental`: Environmental & Resource Security.
-- `scientific`: Scientific & Technological Capability.
+- `governance`: Politics & Governance.
+- `security`: Security & Conflict.
+- `economic`: Economy & Supply Chains.
+- `human`: Health & Public Welfare.
+- `environmental`: Environment & Resources.
+- `scientific`: Science & Technology.
 
 Membership is separate from truth or stance: a report denying an armed strike remains Security, but the classifier does not establish that the strike occurred. Fictional game/film metaphors are negatives because they report no actual strategic development. For test triads, any accepted subset of the ground-truth set is label-valid; assess omissions and primary ranking separately.
 

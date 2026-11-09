@@ -2,7 +2,7 @@
 
 [Concept route](index.md) · [Wiki](../../index.md)
 
-Atlas's `atlas-collection-v3` cycle retains native news discovery, country heat bands, regional coverage and article deduplication. Article admission uses the local six-model classifier; it does not call a remote classifier role. Retained v1/v2 history remains explicitly versioned. Cycles do not extract claims, assess fidelity, generate briefs, publish Brain claim memories or require vector indexing. Intel and Recon retain their independent on-demand investigative workflows and publication services.
+Atlas's `atlas-collection-v3` cycle retains native news discovery, country heat bands, regional coverage and article deduplication. Article admission scores the six strategic domains with the local Rust-BERT zero-shot worker. Retained v1/v2 history remains explicitly versioned. Cycles do not extract claims, assess fidelity, generate briefs, publish Brain claim memories or require vector indexing. Intel and Recon retain their independent on-demand investigative workflows and publication services.
 
 The figure describes the local-admission contract. The [classifier code map](../code/classifier.md) separates model setup, foreground admission, historical work and provider monitoring. Verification and measured throughput are separate evidence.
 

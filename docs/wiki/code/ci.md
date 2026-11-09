@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Shared agent execution policy](agent-workflow.md) · [Wiki](../../index.md)
 
-Six workflows live in `.github/workflows/` (owned by Code Architect; CI changes are scoped separately from product edits).
+Workflows live in `.github/workflows/` (owned by Code Architect).
 
 ![CI matrix](../../img/ci-matrix.svg)
 
@@ -38,6 +38,14 @@ Runs for dataset, `.gitattributes` or its own workflow changes on `main` and pul
 
 Rust, mutation, web and policy checkouts explicitly leave LFS objects unmaterialized. Their tests use isolated synthetic catalogs; the large dataset is not embedded in Rust binaries. This avoids downloading the same catalog in every platform/storage leg. Checkout credentials are not persisted, and the Rust matrix has read-only contents permission.
 
+## `atlas-bert.yml` — classifier worker checks
+
+The workflow checks the standalone `tools/atlas-bert` workspace using Rust 1.95.0 and its committed lockfile. Pull requests trigger it when they change the worker workspace or its workflow file. Manual dispatch is available once the workflow is on the default branch.
+
+The Linux job checks formatting and uses `rust-bert/doc-only` to type-check all targets without compiling the LibTorch bindings. The `macos-15-intel` job checks the native bindings for `x86_64-apple-darwin` using the PyTorch 2.1.0 wheel for Intel macOS and Python 3.11. Both jobs are compile-only. Local setup and verification commands are in the [classifier guide](classifier.md).
+
+To run the Intel job on a branch before `atlas-bert.yml` is registered for manual dispatch, use `gh workflow run ci.yml --ref <branch> -f atlas_bert_intel_only=true`. This dispatch skips the standard CI matrix and calls the same Intel job.
+
 ## `commit-policy.yml`
 
 On PRs (including title/body edits) and pushes to `main`: `node scripts/release_check.mjs event` enforces Conventional Commits on the PR title/body or new `main` commits, `release_check.mjs versions` checks workspace/lockfile/manifest versions agree, and the `.opencode/tests` release/tool/planning tests run.
@@ -48,7 +56,7 @@ On pushes to `main` (or manual dispatch): Release Please opens/updates the relea
 
 ## `intel-web.yml` — local web client checks
 
-The web workflow runs on matching web/config/build-check changes on `main` and pull requests (including PR pushes), plus manual dispatch. Node comes from `.node-version`; pnpm is pinned to 12.15.0. The first-party checkout/setup/artifact actions are pinned to their verified v7 commit SHAs. Existing Rust, commit-policy and release workflows are unchanged. Agents start here and inspect the affected workflow files before selecting checks; workflow edits remain Code Architect-owned.
+The web workflow runs on matching web, configuration, build check, or `scripts/fixtures/atlas_bert` changes on `main` and pull requests (including PR pushes), plus manual dispatch. Node comes from `.node-version`; pnpm is pinned to 12.15.0. The first-party checkout/setup/artifact actions are pinned to their verified v7 commit SHAs. Existing Rust, commit-policy and release workflows are unchanged. Agents start here and inspect the affected workflow files before selecting checks; workflow edits remain Code Architect-owned.
 
 | Check | Enforced behavior |
 | --- | --- |
@@ -57,7 +65,7 @@ The web workflow runs on matching web/config/build-check changes on `main` and p
 | `pnpm typecheck` / `pnpm lint` | Type checking and recommended Hooks/compiler diagnostics with zero warnings |
 | `pnpm build` | Next server build using the strict React Compiler pipeline; the upstream need not run at build time |
 | `pnpm check:web-build` | Built Next configuration retains strict compiler options and RN Web/shared transpilation; compiled **application** chunks contain compiler memoization (framework runtime alone is insufficient) |
-| `pnpm test:live` | Offline raw-relay, production runtime/restart and isolated development/HMR lifecycle contracts; runs after the Next build and browser installation |
+| `pnpm test:live` | Offline raw-relay, production runtime/restart and isolated development/HMR lifecycle contracts using the Atlas BERT worker fixture. Runs after the Next build and browser installation. |
 | Offline Playwright | The same Chromium fixtures run against the production Next server and the Next development server; both exercise RN Web UI, compilation, hydration, connection/actions and responsive layout. Production nonce CSP and same-origin API assertions apply to the production server. |
 | Retained evidence | Export/dev test results and screenshots use separate directories under `test-results/`; HTML reports use `playwright-report/export` and `playwright-report/dev`. Uploaded with `always()` and seven-day retention. |
 

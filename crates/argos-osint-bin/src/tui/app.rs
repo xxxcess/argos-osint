@@ -182,12 +182,12 @@ pub const INTEL_CATEGORIES: &[&str] = &argos_osint_core::atlas_taxonomy::DOMAIN_
 /// Short tab label for an Intel classification id.
 pub fn intel_category_short(id: &str) -> &'static str {
     match id {
-        "governance" => "Governance",
+        "governance" => "Politics",
         "security" => "Security",
-        "economic" => "Economic",
-        "human" => "Human",
+        "economic" => "Economy",
+        "human" => "Health",
         "environmental" => "Environment",
-        "scientific" => "Scientific",
+        "scientific" => "Science",
         _ => "Unk",
     }
 }

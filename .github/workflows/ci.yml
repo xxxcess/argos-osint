@@ -12,11 +12,16 @@ on:
   # Manual full-matrix run on any branch: `gh workflow run ci.yml --ref <branch>`.
   # Runs on a branch only; they don't appear in a PR's checks, so PRs use `ci:full`.
   workflow_dispatch:
+    inputs:
+      atlas_bert_intel_only:
+        description: Check the Atlas BERT worker on Intel macOS only
+        type: boolean
+        default: false
 
 # A newer PR event or dispatch on the same PR/branch cancels the older run (main pushes always complete).
 concurrency:
   # Adding any other label gets its own group, so it never cancels a real run.
-  group: ci-${{ github.workflow }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'ci:full') && format('skip-{0}', github.run_id) || github.event.pull_request.number || (github.event_name == 'workflow_dispatch' && github.ref_name) || github.sha }}
+  group: ci-${{ github.workflow }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'ci:full') && format('skip-{0}', github.run_id) || github.event.pull_request.number || (github.event_name == 'workflow_dispatch' && github.ref_name) || github.sha }}${{ inputs.atlas_bert_intel_only && '-atlas-bert' || '' }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
@@ -31,6 +36,11 @@ permissions:
   contents: read
 
 jobs:
+  atlas-bert-intel:
+    if: github.event_name == 'workflow_dispatch' && inputs.atlas_bert_intel_only
+    uses: ./.github/workflows/atlas-bert.yml
+    with:
+      intel_only: true
   build:
     name: ${{ matrix.platform.name }} / ${{ matrix.storage }}
     strategy:
@@ -43,9 +53,10 @@ jobs:
           - { name: macOS Intel, os: macos-15-intel }
         storage: [embedded, server]
     if: >-
-      github.event_name != 'pull_request' ||
-      (!github.event.pull_request.draft &&
-       (github.event.action != 'labeled' || github.event.label.name == 'ci:full'))
+      !(github.event_name == 'workflow_dispatch' && inputs.atlas_bert_intel_only) &&
+      (github.event_name != 'pull_request' ||
+       (!github.event.pull_request.draft &&
+        (github.event.action != 'labeled' || github.event.label.name == 'ci:full')))
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 90
     steps:

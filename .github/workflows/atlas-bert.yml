@@ -1,0 +1,65 @@
+name: Atlas BERT worker checks
+
+on:
+  pull_request:
+    paths:
+      - 'tools/atlas-bert/**'
+      - '.github/workflows/atlas-bert.yml'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      intel_only:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-bert-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    if: ${{ !inputs.intel_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          lfs: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+      - name: Check worker formatting
+        run: cargo fmt --manifest-path tools/atlas-bert/Cargo.toml --check
+      - name: Check worker types
+        # doc-only checks the Rust API without linking LibTorch or loading a model.
+        run: cargo check --locked --manifest-path tools/atlas-bert/Cargo.toml --all-targets --features rust-bert/doc-only
+  macos-intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          lfs: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-apple-darwin
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Install Intel macOS PyTorch wheel
+        run: >-
+          python -m pip install --only-binary=:all: 'torch==2.1.0' 'numpy==1.26.4'
+      - name: Check native worker types on Intel macOS
+        env:
+          LIBTORCH_USE_PYTORCH: '1'
+        run: cargo check --locked --manifest-path tools/atlas-bert/Cargo.toml --all-targets --target x86_64-apple-darwin

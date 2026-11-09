@@ -2,26 +2,26 @@
 
 [Concept route](index.md) · [Classifier implementation](../code/classifier.md) · [Wiki](../../index.md)
 
-Atlas foreground admission uses this taxonomy through a pinned local classifier and current receipt projections. Historical reclassification and provider monitoring are separate durable jobs; Focus Brief and neighborhood summaries use captured evidence revisions on demand. Implementation contracts and verification results are separate; a trained synthetic model does not establish production quality.
+Atlas foreground admission uses this taxonomy through a pinned local Rust-BERT worker and current receipt projections. Historical reclassification and provider monitoring are separate durable jobs; Focus Brief and neighborhood summaries use captured evidence revisions on demand. Implementation contracts and verification results are separate; a trained synthetic model does not establish production quality.
 
-## Official IDs and names
+## Canonical IDs and display names
 
 Taxonomy version: `strategic-domains-v1`.
 
-| ID | Official name |
+| ID | Display name |
 | --- | --- |
-| `governance` | Governance & Political Stability |
-| `security` | Security & Threat Environment |
-| `economic` | Economic & Supply Chain Resilience |
-| `human` | Human Security & Public Welfare |
-| `environmental` | Environmental & Resource Security |
-| `scientific` | Scientific & Technological Capability |
+| `governance` | Politics & Governance |
+| `security` | Security & Conflict |
+| `economic` | Economy & Supply Chains |
+| `human` | Health & Public Welfare |
+| `environmental` | Environment & Resources |
+| `scientific` | Science & Technology |
 
-The feature-independent `atlas_taxonomy` module owns these exact IDs. Domains are attributes and filters, not six permanent Brain nodes. A domain is not a reliability grade, actor threat rating, event probability or proof of a relationship.
+The feature-independent `atlas_taxonomy` module owns the IDs, display names, and domain definitions. Use the display names in article labels and category controls. Compact terminal tabs use Politics, Security, Economy, Health, Environment, and Science. Store and query by ID, and use the full definitions to guide classification and evidence selection. Domains are article attributes and filters. A domain is not a reliability grade, actor threat rating, event probability or proof of a relationship.
 
 ## Primary and optional secondary policy
 
-The engine records all six independent scores. It applies independent relevance and discriminative-support gates first, then publishes one primary and an optional second eligible domain. Equal scores are recorded as ambiguous rather than evidence of primary dominance. Exactly two tied eligible domains preserve both; competing second-slot ties retain an unambiguous primary only, and an ambiguous primary among more than two candidates abstains. A strong first domain never manufactures a weak second domain. Synthetic activation does not bypass the gates.
+The live engine records all six independent entailment scores. Each domain must clear the configured threshold before Atlas selects a primary and an optional second eligible domain. The legacy Natural engine additionally requires discriminative support. Equal scores are recorded as ambiguous rather than evidence of primary dominance. Exactly two tied eligible domains preserve both; competing second-slot ties retain an unambiguous primary only, and an ambiguous primary among more than two candidates abstains. A strong first domain never manufactures a weak second domain. Synthetic activation does not bypass the gates.
 
 | Input/result | Classifier outcome |
 | --- | --- |
@@ -29,11 +29,11 @@ The engine records all six independent scores. It applies independent relevance 
 | Three or more qualifying domains | Select at most two; record ties and abstain when primary ranking is ambiguous |
 | One supported qualifying domain | Admit that primary domain |
 | No supported qualifying domain | Reject for insufficient domains |
-| Blank, unsupported-language or wholly OOV input | Explicit corresponding rejection receipt |
+| Blank, unsupported-language or wholly OOV input (Natural only for OOV) | Explicit corresponding rejection receipt |
 | Missing/broken model, queue or storage fault | Operational failure, not an article label |
-| Unknown provider membership | Omit that example from the affected binary model's fit |
+| Unknown provider membership | Keep the membership unknown in monitoring and any legacy binary fit |
 
-Raw log odds are not probabilities and scores do not sum to one. Annotation primary/secondary order is editorial metadata, not live ranking authority. `unk` is neither a seventh domain nor a successful six-domain classifier result.
+Independent entailment scores need not sum to one. Natural model raw log odds are separate from calibrated scores. Annotation primary/secondary order is editorial metadata, not live ranking authority. `unk` is neither a seventh domain nor a successful six-domain classifier result.
 
 ## Legacy history and reclassification
 
@@ -53,7 +53,7 @@ Only title and description are model features. The frozen v1 version contains 1,
 
 Rows with no labels are explicit negatives for all six binary models; single-domain examples can be admitted under the current policy; the frozen v1 annotation contract retains its original exact-two expectations. Partial provider labels use a separate masked typed pipeline. A CSV claiming `reviewed_real` is rejected; an unverified text field cannot confer independent review approval.
 
-The seed supports development and explicit **Synthetic baseline** activation. Its correlated row count does not prove production accuracy, and it cannot authorize automatic promotion. See [dataset resolution and validation](../code/classifier.md#dataset-resolution-and-validation).
+The seed supports development and explicit **Synthetic baseline** activation. Its correlated row count does not prove production accuracy, and it cannot authorize automatic promotion. See [dataset resolution and validation](../code/classifier.md#legacy-dataset-resolution-and-validation).
 
 ## Versioned v2 dataset and policy
 

@@ -8,6 +8,7 @@ on:
       - 'packages/**'
       - 'tests/web/**'
       - 'crates/argos-osint-bin/src/stack/**'
+      - 'scripts/fixtures/atlas_bert'
       - 'scripts/test_web_stack.py'
       - 'scripts/serve_web.mjs'
       - 'scripts/check_web_build.mjs'

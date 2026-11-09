@@ -9,10 +9,19 @@ import {
   StyleSheet,
   Animated,
 } from "react-native";
+import { INTEL_CATEGORIES, INTEL_DOMAIN_NAMES } from "@argos/api-client";
 import { useReducedMotion } from "../../shell/motion";
 import { moveCategoryFocus } from "../category-keyboard.web";
 import { intelColors as c } from "../../shell/intel-theme";
 import { intelFonts } from "../../shell/intel-fonts";
+
+function categoryLabel(category: string) {
+  const domain = INTEL_CATEGORIES.find((id) => id === category);
+  return domain
+    ? INTEL_DOMAIN_NAMES[domain]
+    : category.slice(0, 1).toUpperCase() + category.slice(1);
+}
+
 export function CategoryRail({
   categories,
   category,
@@ -66,7 +75,7 @@ export function CategoryRail({
         <Pressable
           key={category}
           accessibilityRole="button"
-          accessibilityLabel={category[0].toUpperCase() + category.slice(1)}
+          accessibilityLabel={categoryLabel(category)}
           accessibilityState={{ selected: p.category === category }}
           aria-pressed={p.category === category}
           onPress={() => p.onCategory(category)}
@@ -83,10 +92,10 @@ export function CategoryRail({
               p.category === category && { color: c.accent, fontWeight: "700" },
             ]}
           >
-            {category[0].toUpperCase() + category.slice(1)}
+            {categoryLabel(category)}
           </Text>
           <Text
-            accessibilityLabel={`Article count for ${category}`}
+            accessibilityLabel={`Article count for ${categoryLabel(category)}`}
             style={[
               s.countBadge,
               p.category === category && {

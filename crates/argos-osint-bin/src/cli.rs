@@ -35,7 +35,7 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Inspect, train, evaluate or roll back the local article classifier.
+    /// Inspect live Atlas classification or manage legacy classifier artifacts.
     Classifier {
         #[command(subcommand)]
         command: ClassifierCommand,
@@ -137,7 +137,7 @@ enum ClassifierCommand {
         #[command(subcommand)]
         command: ClassifierReviewCommand,
     },
-    /// Explain the saved model's behavior; feature contributions are not evidence.
+    /// Explain the live Rust-BERT classifier's admission decision.
     Explain {
         #[arg(long)]
         title: String,
@@ -146,12 +146,15 @@ enum ClassifierCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Show truthful local readiness without opening storage.
+    /// Verify local Rust-BERT readiness without opening storage.
     Status {
         #[arg(long)]
         json: bool,
+        /// Show the retained Natural classifier and dataset status instead.
+        #[arg(long)]
+        legacy: bool,
     },
-    /// Train a synthetic candidate; activation requires separate explicit consent.
+    /// Train a legacy Natural candidate; activation requires explicit consent.
     Train {
         #[arg(long)]
         file: Option<std::path::PathBuf>,
@@ -160,12 +163,12 @@ enum ClassifierCommand {
         #[arg(long, action = clap::ArgAction::SetTrue)]
         activate_synthetic_baseline: bool,
     },
-    /// Evaluate test families without training or changing the active model.
+    /// Evaluate the legacy Natural classifier on held-out test families.
     Evaluate {
         #[arg(long)]
         file: Option<std::path::PathBuf>,
     },
-    /// Restore a named model that was previously activated.
+    /// Restore a previously activated legacy Natural model.
     Rollback {
         #[arg(long)]
         model: String,
@@ -446,6 +449,77 @@ enum AtlasCommand {
     },
 }
 
+struct AtlasClassifierStatus {
+    config_path: Option<std::path::PathBuf>,
+    model: Result<
+        argos_osint_core::classifier::ModelSnapshot,
+        argos_osint_core::classifier::ClassifierError,
+    >,
+}
+
+impl AtlasClassifierStatus {
+    async fn probe() -> Self {
+        use argos_osint_core::classifier::{artifact, readiness::ClassifierHome};
+        let home = paths::home_dir();
+        let config_home = home.clone();
+        let config_path = tokio::task::spawn_blocking(move || {
+            artifact::root_for(&config_home)
+                .ok()
+                .map(|root| root.join("zero-shot.json"))
+        });
+        let model = ClassifierHome::new(home)
+            .pin_atlas(None)
+            .await
+            .map(|pinned| pinned.snapshot);
+        Self {
+            config_path: config_path.await.ok().flatten(),
+            model,
+        }
+    }
+
+    fn diagnostic(&self) -> Option<String> {
+        use argos_osint_core::classifier::ClassifierError;
+        let error = self.model.as_ref().err()?;
+        Some(match error {
+            ClassifierError::WorkerStopped => format!(
+                "{error}. Run the configured worker directly to check LibTorch and the model files."
+            ),
+            _ => error.to_string(),
+        })
+    }
+
+    fn notice(&self) -> String {
+        match self.diagnostic() {
+            None => "Atlas classifier (Rust-BERT): ready".into(),
+            Some(error) => {
+                let setup = self.config_path.as_ref().map_or_else(
+                    || "Check classifier path settings in config.toml.".into(),
+                    |path| format!("Set the worker and model in {}.", path.display()),
+                );
+                format!("Atlas classifier (Rust-BERT): unavailable · {error}\n{setup}")
+            }
+        }
+    }
+
+    fn print(&self, json: bool) -> Result<()> {
+        if json {
+            return print_json(&serde_json::json!({
+                "schema_version": "atlas-zero-shot-readiness-v1",
+                "state": if self.model.is_ok() { "ready" } else { "unavailable" },
+                "can_infer": self.model.is_ok(),
+                "config_path": self.config_path,
+                "model": self.model.as_ref().ok(),
+                "diagnostic": self.diagnostic(),
+            }));
+        }
+        println!("{}", self.notice());
+        if let Ok(model) = &self.model {
+            println!("Model: {}", model.model_id);
+        }
+        Ok(())
+    }
+}
+
 pub async fn dispatch() -> Result<()> {
     let command = Cli::parse().command;
     if command.is_some() {
@@ -453,53 +527,28 @@ pub async fn dispatch() -> Result<()> {
     }
     // Venture owns the session; child TUI/stack guards restore the terminal
     // and stop owned services before the next menu is presented.
-    let classifier_request =
-        argos_osint_core::classifier::dataset::DatasetRequest::from_runtime(None)?;
-    let classifier_home = argos_osint_core::classifier::readiness::ClassifierHome::new(
-        classifier_request.home.clone(),
-    );
+    let mut classifier_notice = AtlasClassifierStatus::probe().await.notice();
     let mut notice = None;
     loop {
-        // Profile may have changed dataset/save paths in the previous child
-        // session. Capture them again before drawing or launching a service.
-        let classifier_request =
-            argos_osint_core::classifier::dataset::DatasetRequest::from_runtime(None)?;
-        let classifier = match classifier_home.refresh_integrity(&classifier_request).await {
-            Ok(status) => Some(status),
-            Err(error) => {
-                notice = Some(format!("Classifier status unavailable: {error}"));
-                None
-            }
-        };
-        let current_notice = notice.clone();
-        let Some(selection) = tokio::task::spawn_blocking(move || {
-            crate::welcome::run_with_notice(current_notice.as_deref(), classifier.as_ref())
-        })
-        .await??
+        let current_notice = notice.take().map_or_else(
+            || classifier_notice.clone(),
+            |notice| format!("{notice}\n{classifier_notice}"),
+        );
+        let Some(selection) =
+            tokio::task::spawn_blocking(move || crate::welcome::run_with_notice(&current_notice))
+                .await??
         else {
-            classifier_home.shutdown().await?;
             return Ok(());
         };
-        notice = None;
         let session = Cli::try_parse_from(&selection.args)?;
-        // Refresh readiness again before starting storage or service children.
-        // A removed/corrupt model between the menu probe and selection cannot
-        // bypass Venture's initial classifier setup.
-        if selection
-            .args
-            .get(1)
-            .is_some_and(|argument| argument == "stack")
-        {
-            match classifier_home.refresh_integrity(&classifier_request).await {
-                Ok(status) if status.can_infer => {}
-                _ => {
-                    notice = Some(
-                        "Train the initial classifier before launching TUI, API Server or Web."
-                            .into(),
-                    );
-                    continue;
-                }
-            }
+        if matches!(
+            &session.command,
+            Some(Command::Classifier {
+                command: ClassifierCommand::Status { legacy: false, .. },
+            })
+        ) {
+            classifier_notice = AtlasClassifierStatus::probe().await.notice();
+            continue;
         }
         if let Some(args) = selection.storage_init {
             let status = tokio::process::Command::new(std::env::current_exe()?)
@@ -520,17 +569,9 @@ pub async fn dispatch() -> Result<()> {
         // must not be echoed onto that screen by Venture. Keep file redirection
         // and the captured failure detail available.
         let echo_stderr = session.echo_child_stderr(io::stderr().is_terminal());
-        let classifier_tty = selection.args.get(1).is_some_and(|v| v == "classifier")
-            && selection.args.get(2).is_some_and(|v| v == "train")
-            && io::stdin().is_terminal()
-            && io::stderr().is_terminal();
         let mut child = tokio::process::Command::new(std::env::current_exe()?)
             .args(selection.args.iter().skip(1))
-            .stderr(if classifier_tty {
-                std::process::Stdio::inherit()
-            } else {
-                std::process::Stdio::piped()
-            })
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
         let last_err: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
@@ -754,6 +795,16 @@ async fn classifier_command(command: ClassifierCommand) -> Result<()> {
         ClassifierHome, EvaluateRequest, ManualTrainRequest,
     };
     use argos_osint_core::classifier::training::SyntheticActivation;
+    let command = match command {
+        ClassifierCommand::Status {
+            json,
+            legacy: false,
+        } => return AtlasClassifierStatus::probe().await.print(json),
+        ClassifierCommand::Explain {
+            title, description, ..
+        } => return explain_atlas_classifier(title, description).await,
+        command => command,
+    };
     let explicit = match &command {
         ClassifierCommand::Train { file, .. } | ClassifierCommand::Evaluate { file } => {
             file.clone()
@@ -830,21 +881,12 @@ async fn classifier_command(command: ClassifierCommand) -> Result<()> {
                     }
                 })).await?
             }
-            ClassifierCommand::Explain {title,description,json:_} => {
-                let pinned=home.pin(None).await?;
-                let mut input=argos_osint_core::classifier::ClassifyInput::new("explain",title,description,Some("en".into()));
-                input.explain=true;
-                let snapshot=pinned.snapshot.clone();
-                let manifest_sha256=pinned.manifest_sha256.clone();
-                let receipts=tokio::task::spawn_blocking(move ||pinned.service.classify_batch(vec![input])).await??;
-                print_json(&serde_json::json!({"schema_version":"classifier-explanation-v2","interpretation":"Model behavior, not proof or causality.","model":snapshot,"manifest_sha256":manifest_sha256,"ranking_reasons":receipts.iter().map(|receipt|receipt.ranking_reason()).collect::<Vec<_>>(),"receipts":receipts}))
-            }
-            ClassifierCommand::Status { json } => {
+            ClassifierCommand::Status { json, .. } => {
                 let status = home.refresh_integrity(&request).await?;
                 if json {
                     print_json(&status)
                 } else {
-                    println!("Classifier: {}", status.state.as_str());
+                    println!("Legacy Natural classifier: {}", status.state.as_str());
                     if let Some(model) = &status.active_model {
                         println!("Model: {} · {}", model.model_id, model.provenance.label);
                     }
@@ -902,8 +944,8 @@ async fn classifier_command(command: ClassifierCommand) -> Result<()> {
                 }
                 print_json(&maintenance::result(&repo, &job_id).await?)
             }
-            ClassifierCommand::Train { .. } => {
-                anyhow::bail!("unexpected classifier training dispatch")
+            ClassifierCommand::Train { .. } | ClassifierCommand::Explain { .. } => {
+                anyhow::bail!("unexpected classifier command dispatch")
             }
         }
     }
@@ -912,6 +954,27 @@ async fn classifier_command(command: ClassifierCommand) -> Result<()> {
     result?;
     shutdown?;
     Ok(())
+}
+
+async fn explain_atlas_classifier(title: String, description: String) -> Result<()> {
+    use argos_osint_core::classifier::{readiness::ClassifierHome, ClassifyInput};
+
+    let home = ClassifierHome::new(paths::home_dir());
+    let pinned = home.pin_atlas(None).await?;
+    let mut input = ClassifyInput::new("explain", title, description, Some("en".into()));
+    input.explain = true;
+    let snapshot = pinned.snapshot.clone();
+    let manifest_sha256 = pinned.manifest_sha256.clone();
+    let receipts =
+        tokio::task::spawn_blocking(move || pinned.service.classify_batch(vec![input])).await??;
+    print_json(&serde_json::json!({
+        "schema_version": "classifier-explanation-v2",
+        "interpretation": "Scores describe model behavior and do not establish evidence.",
+        "model": snapshot,
+        "manifest_sha256": manifest_sha256,
+        "ranking_reasons": receipts.iter().map(|receipt| receipt.ranking_reason()).collect::<Vec<_>>(),
+        "receipts": receipts,
+    }))
 }
 
 #[cfg(feature = "surreal")]
@@ -1871,7 +1934,19 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(arguments).is_err());
         }
-        assert!(Cli::try_parse_from(["argos", "classifier", "status", "--json"]).is_ok());
+        for legacy in [false, true] {
+            let mut arguments = vec!["argos", "classifier", "status", "--json"];
+            if legacy {
+                arguments.push("--legacy");
+            }
+            let parsed = Cli::try_parse_from(arguments).expect("status grammar");
+            assert!(matches!(
+                parsed.command,
+                Some(Command::Classifier {
+                    command: ClassifierCommand::Status { json: true, legacy: actual },
+                }) if actual == legacy
+            ));
+        }
         assert!(Cli::try_parse_from([
             "argos",
             "classifier",

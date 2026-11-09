@@ -429,7 +429,9 @@ describe("server-backed global All", () => {
       search: "ports",
       cursor: null,
     });
-    await user.click(screen.getByRole("button", { name: /^Economic$/ }));
+    await user.click(
+      screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),
+    );
     await waitFor(() =>
       expect(reads.at(-1)).toEqual({
         category: "economic",
@@ -486,7 +488,9 @@ describe("server-backed global All", () => {
     await waitFor(() => expect(signals).toHaveLength(2));
     expect(signals[0].aborted).toBe(true);
     expect(signals[1].aborted).toBe(false);
-    await user.click(screen.getByRole("button", { name: /^Economic$/ }));
+    await user.click(
+      screen.getByRole("button", { name: /^Economy & Supply Chains$/ }),
+    );
     await screen.findByRole("button", { name: `Open Focus Brief: ${a.title}` });
     await waitFor(() =>
       expect(signals.every((signal) => signal.aborted)).toBe(true),

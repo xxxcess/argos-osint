@@ -4,14 +4,15 @@
 
 @tag:classifier
 
-Atlas uses the local primary/optional-secondary classifier and current-taxonomy readers. Historical admission and provider monitoring have separate durable jobs; Focus Brief and generated neighborhood summaries run on demand. The synthetic seed is development evidence, not independent production-quality approval. Verification results and empirical timing are reported separately from these source contracts.
+New Atlas cycles use a local Rust-BERT zero-shot worker. The worker evaluates each article against the six canonical domain definitions and returns independent relevance scores. Atlas admits up to two qualifying domains. Historical admission and provider monitoring have separate durable jobs. The retained Natural engine supports explicit legacy management and exact-pin replay of Natural runs.
 
 ## Ownership and public entry points
 
-The feature-independent [taxonomy](../../../crates/argos-osint-core/src/atlas_taxonomy.rs) owns the six stable IDs and official names. The optional `classifier` Cargo feature adds QuickJS independently of `nlp`; supported default builds enable `embedded,nlp,classifier`. Management commands remain parseable without the feature and report unavailable rather than initializing an engine.
+The feature-independent [taxonomy](../../../crates/argos-osint-core/src/atlas_taxonomy.rs) owns the six stable IDs, display names and domain definitions. The standalone Rust-BERT executable keeps LibTorch separate from the main Argos build. The optional `classifier` Cargo feature adds QuickJS for legacy management and replay independently of `nlp`. Supported default Argos builds enable `embedded,nlp,classifier`.
 
 | Source | Responsibility |
 | --- | --- |
+| [tools/atlas-bert](../../../tools/atlas-bert) | Native CPU worker for zero-shot inference with local DistilBERT MNLI assets |
 | [classifier/mod.rs](../../../crates/argos-osint-core/src/classifier/mod.rs) | Typed errors, receipts, snapshots, inference facade, worker controls and compiled identity |
 | [engine.rs](../../../crates/argos-osint-core/src/classifier/engine.rs) | Worker-owned QuickJS runtime, fixed-code integrity checks, bounded queues, cancellation and restore |
 | [artifact.rs](../../../crates/argos-osint-core/src/classifier/artifact.rs) | Immutable model files, active pointer, writer lease, checksum validation and activation history |
@@ -28,7 +29,75 @@ The feature-independent [taxonomy](../../../crates/argos-osint-core/src/atlas_ta
 
 The neutral [runtime budget](../../../crates/argos-osint-core/src/js_runtime_budget.rs) enforces classifier reservations without importing NLP policy. No JavaScript values cross worker threads. Runtime errors, queue contention, cancellation and file failures remain operational faults; they never become an article `unk` label or a fabricated successful rejection.
 
-## Model, bundle and receipt contract
+## Set up the live Rust-BERT classifier
+
+Install the worker and checkpoint on the machine that runs Atlas. The application uses a local CPU worker and a pre-trained English NLI checkpoint. The worker runs offline after installation.
+
+1. Set up CPU LibTorch 2.1.0 and Python 3.11. The pinned PyTorch wheel supplies both the worker's LibTorch and the one-time model converter. On Intel macOS, install the Xcode Command Line Tools (`xcode-select --install`) and use an x86_64 Python and Rust toolchain. PyTorch 2.1.0 publishes an Intel macOS wheel. [PyTorch release files](https://pypi.org/project/torch/2.1.0/#files) · [tch 0.14.0 setup](https://docs.rs/crate/tch/0.14.0/source/README.md)
+
+   On macOS, run the following in the shell you will use to build the worker and start Argos.
+
+   ```sh
+   python3.11 -m venv /absolute/path/atlas-bert-venv
+   . /absolute/path/atlas-bert-venv/bin/activate
+   python -m pip install 'numpy==1.26.4' 'torch==2.1.0'
+   export LIBTORCH_USE_PYTORCH=1
+   atlas_torch_lib=$(python -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent / "lib")')
+   export DYLD_LIBRARY_PATH="$atlas_torch_lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+   ```
+
+   On Intel macOS, `rustc -vV` should report `host: x86_64-apple-darwin`. On Linux use the [PyTorch CPU wheel index](https://download.pytorch.org/whl/cpu) to install `torch==2.1.0` and set `LD_LIBRARY_PATH` in place of `DYLD_LIBRARY_PATH`. For a standalone CPU LibTorch 2.1.0 distribution, set `LIBTORCH` to its absolute root, omit `LIBTORCH_USE_PYTORCH`, and add its `lib` directory to the platform loader path. Keep the same loader environment when launching Argos or Venture.
+
+2. Download the three files from the pinned Typeform DistilBERT MNLI revision. Convert the original PyTorch weights with the utility from Rust-BERT 0.22.0. [Pinned model files](https://huggingface.co/typeform/distilbert-base-uncased-mnli/tree/cfa538a0fddbbd978fefe8966c1aeff7ad409c90) · [Rust-BERT conversion instructions](https://docs.rs/crate/rust-bert/0.22.0)
+
+   ```sh
+   atlas_model_dir=/absolute/path/atlas-distilbert-mnli
+   atlas_model_url=https://huggingface.co/typeform/distilbert-base-uncased-mnli/resolve/cfa538a0fddbbd978fefe8966c1aeff7ad409c90
+   mkdir -p "$atlas_model_dir"
+   for atlas_file in config.json vocab.txt pytorch_model.bin; do
+       curl -fL "$atlas_model_url/$atlas_file" -o "$atlas_model_dir/$atlas_file" || exit 1
+   done
+
+   atlas_converter_dir=$(mktemp -d)
+   curl -fL https://static.crates.io/crates/rust-bert/rust-bert-0.22.0.crate \
+       -o "$atlas_converter_dir/rust-bert.crate"
+   tar -xzf "$atlas_converter_dir/rust-bert.crate" -C "$atlas_converter_dir"
+   python "$atlas_converter_dir/rust-bert-0.22.0/utils/convert_model.py" \
+       "$atlas_model_dir/pytorch_model.bin"
+   test -s "$atlas_model_dir/rust_model.ot"
+   ```
+
+   Keep `config.json`, `vocab.txt` and `rust_model.ot` together in the model directory.
+
+3. From the Argos repository root, build the separate worker. Point Argos to this executable or copy it to a stable location.
+
+   ```sh
+   cargo build --release --locked --manifest-path tools/atlas-bert/Cargo.toml \
+       --target-dir "$PWD/target/atlas-bert"
+   ```
+
+4. Create `zero-shot.json` in the configured `[data_paths].classifier_dir`. The default is `<ARGOS_HOME>/classifier/`, with `~/.argos` as the default Argos home. Use absolute paths and set `worker_path` to the executable file.
+
+   ```json
+   {
+     "worker_path": "/absolute/path/to/argos-osint/target/atlas-bert/release/argos-atlas-bert",
+     "model_dir": "/absolute/path/atlas-distilbert-mnli",
+     "threshold": 0.8
+   }
+   ```
+
+   The optional threshold defaults to `0.8` and accepts values in `[0.5, 1)`. Both slots use the same threshold. Scores rank the eligible domains before the existing one-primary/optional-secondary policy resolves the top two. Keep the checkpoint, worker and threshold stable while a run is paused or resumable.
+
+5. Run `argos classifier status` or choose **5 · Check Atlas classifier** in Venture. A successful worker startup reports **ready**. For a loader or checkpoint error, run the worker directly with the same environment to see its startup diagnostics.
+
+   ```sh
+   printf '%s\n' '{"texts":["A ministry signed a diplomatic agreement."]}' |
+     /absolute/path/to/argos-atlas-bert serve /absolute/path/atlas-distilbert-mnli
+   ```
+
+The status check starts and closes a short-lived worker and does not open storage. Atlas preflight verifies the worker again before a new cycle. A run pins the executable and model bytes and its admission threshold. If a saved zero-shot run requires a superseded pin, restore its original configuration and files before resuming acquisition or admission. Post-admission-only work can resume without loading a classifier once Atlas verifies the completed admission outcomes. A retained Natural run still uses its exact historical Natural artifact.
+
+## Legacy Natural model, bundle and receipt contract
 
 Six independent Natural binary Bayes models classify `present` versus `absent`, one model per domain. The JavaScript bridge tokenizes title/description once and shares that token array across models. Features use binary unigram/bigram presence; TF-IDF and document frequency are frozen Train-only selection/diagnostic statistics. `Unknown` membership omits a provider example from that binary model; missing provider labels do not establish negatives. Vocabulary fitting uses training representatives only. The shared versioned feature extractor preserves original UTF-8 spans, protects identifiers/acronyms, and forms adjacent bigrams before filtering grammatical noise. Field and punctuation boundaries break phrases. Sparse inference reads active feature indices rather than allocating six dense vocabulary vectors. Discriminative support counts nonoverlapping positive-evidence spans; vocabulary matches and class priors alone are insufficient support.
 
@@ -42,7 +111,7 @@ Runtime limits begin at 128 MiB heap and 1 MiB stack per worker, with a 512 MiB 
 
 A receipt retains six scores/raw diagnostics and publishes one or two independently qualifying domains. Informative-feature and domain thresholds still apply to a manually activated seed. Eligible domains are ranked after gating. Exactly two tied eligible domains preserve both with ambiguous-primary telemetry. An unambiguous primary survives competing second-slot ties; a tied primary among more than two candidates abstains. Blank, unsupported-language, OOV and insufficient-domain inputs have explicit rejection reasons; model failures propagate as errors. Receipt schema, taxonomy, preprocessing, model and admission-policy identities are validated when persisted results are consumed.
 
-## Immutable storage and activation
+## Legacy Natural storage and activation
 
 Files live in the configured `[data_paths].classifier_dir` directory, defaulting to `<ARGOS_HOME>/classifier/`, independently of SurrealDB:
 
@@ -56,7 +125,7 @@ Validation binds all compiled identities, the six domains and binary label suppo
 
 Synthetic installs retain candidates by default. Explicit synthetic activation has visible **Synthetic baseline** provenance and does not grant production approval. Automatic promotion needs independent reviewed-real calibration/development families, sufficient accepted family counts, complete pair evidence, nonregression and measured runtime budgets. Seed row counts or provider/model agreement cannot satisfy those requirements.
 
-## Dataset resolution and validation
+## Legacy dataset resolution and validation
 
 Resolution order is explicit `--file` → captured `ARGOS_CLASSIFIER_CSV` → saved `[data_paths].article_csv` → runtime repository `dataset/` → repository `datasets/` → `<ARGOS_HOME>/dataset/`, using the exact filename `argos_atlas_strategic_domains_v2.csv`. Explicit/env/saved selections are authoritative, including an explicitly empty invalid value. Only an absent automatic candidate permits fallback; a malformed selected CSV never silently selects a different corpus.
 
@@ -72,6 +141,7 @@ The frozen v1 seed's 55 positive calibration rows per domain represent eight ind
 
 ```sh
 argos classifier status --json
+argos classifier status --legacy --json
 argos classifier explain --title "Headline" --description "Summary" --json
 argos classifier review export --run retained-run --file review.json
 argos classifier review import --file review.json --review-reference reviewed-batch-1
@@ -88,17 +158,17 @@ argos classifier history-job --job-id returned-job-id --action resume
 argos classifier history-job --job-id returned-job-id --action cancel
 ```
 
-Status uses one `classifier-readiness-v1` DTO with `missing`, `ready`, `training`, `invalid`, `incompatible`, `unavailable`. Dataset state, integrity and active-model state are orthogonal. Training may retain a usable prior model; missing CSV does not invalidate an existing one. A cold or changed artifact is unavailable/verification-pending until its real integrity check completes. Probes do not parse CSV, initialize QuickJS, train, open storage or scan all models. Dataset hashes are cached by actual file fingerprints; explicit train/evaluate and pin revalidate independently.
+Live status reports `atlas-zero-shot-readiness-v1` with `state`, `can_infer`, the resolved configuration path, the pinned model identity when ready and a diagnostic when unavailable. `classifier explain` uses the same live model and gates.
+
+Legacy status reports `classifier-readiness-v1` with `missing`, `ready`, `training`, `invalid`, `incompatible`, `unavailable`. Dataset state, integrity and active-model state are orthogonal. Training may retain a usable prior model; missing CSV does not invalidate an existing one. A cold or changed artifact is unavailable/verification-pending until its real integrity check completes. Probes do not parse CSV, initialize QuickJS, train, open storage or scan all models. Dataset hashes are cached by actual file fingerprints; explicit train/evaluate and pin revalidate independently.
 
 Manual training persists a bounded request before returning acceptance. Replaying the same ID/body returns the original operation, even if the CSV later changes or disappears; changed consent/file identity conflicts. Candidate-only completion is successful and distinct from activation, including when an existing pointer is invalid or incompatible. Explicit synthetic repair requires a strictly verified prior activation identity and preserves its history/generation; unreadable or malformed lineage is never treated as an absent prior. A durable terminal result precedes final owner/writer teardown. Readiness reports retryable `writer_busy` and disables new training until the existing writer is free; status observes that transition without creating a lock. Starting the next operation reaps its exact terminal monitor through a bounded retained join. Cancellation and shutdown retain owned worker handles, release only owned leases and preserve the prior model before commit. Evaluation pins once, scores deterministic Test-family representatives with frozen gates and does not fit, calibrate or activate.
 
-Venture checks the saved classifier directory before presenting service choices. When no usable saved classifier exists, stable key **5**, **Train and save classifier**, prompts for the article training CSV. `auto` uses the configured/default dataset. Selecting this initial setup action explicitly trains, saves and activates a synthetic baseline, identified as development evidence. A successful return triggers a fresh integrity check before TUI, API or Web becomes available. A failed or cancelled setup leaves the services unavailable. When integrity verification proves the selected dataset bytes differ from the active model’s dataset hash, Venture prompts **Retrain classifier now? [yes/no]**, defaulting to no. Keeping the saved model leaves services available. Metadata-only changes and a missing CSV do not invalidate a usable artifact. Actor seeding remains optional key **4** and also prompts for its CSV path. Explicit CLI training retains its candidate-only default.
+Venture checks live Rust-BERT readiness at entry. Key **5**, **Check Atlas classifier**, repeats the check after configuration or installation changes. TUI, API and Web remain available while Atlas reports a missing or invalid classifier before acquisition. Actor seeding remains optional key **4** with its CSV prompt. The launcher has no article training step.
 
-TUI Profile → Configs → Dataset paths edits the actor CSV, article training CSV and classifier save directory in `config.toml`. Blank values select automatic defaults; relative saved paths use `ARGOS_HOME`, and `~/` uses the operating-system home. Explicit `--file` and dataset environment variables take precedence over saved CSV paths. A configured missing/invalid CSV never falls back silently. Changing the save directory selects a different artifact store; it does not move or delete existing models. All model, pointer, writer-lock and journal operations use that store. Saved Natural classifier JSON restores without the training CSV. These local machine paths remain separate from portable credential export/import.
+TUI Profile → Configs → Dataset paths edits the actor CSV, legacy article training CSV and shared classifier directory in `config.toml`. Blank values select automatic defaults. Relative saved paths use `ARGOS_HOME`, and `~/` uses the operating-system home. The directory selects both the live zero-shot configuration and the legacy Natural artifact store. The explicit Natural training command remains candidate-only by default. Its progress panel writes to stderr and leaves final JSON on stdout.
 
-The classifier progress panel shares terminal restoration/cancellation mechanics with actor seeding and writes progress to stderr, leaving final JSON on stdout. Classifier setup has no React panel or HTTP management routes.
-
-The `preflight_cycle` API supplies a private permit retaining a real model pin. Fresh acquisition pins active; resumed acquisition/admission requires the exact saved snapshot; proven post-admission-only work needs no classifier. Atlas consumes this permit before run mutation, inventory or acquisition. Its run-scoped adapter batches local computation at 64 observations and persists occurrence/source/model receipts through fenced outcome transactions. The pin also binds the immutable manifest hash, so a changed gate/report cannot reuse a cached worker or replace a saved cycle revision.
+The `preflight_cycle` API supplies a private permit retaining a real model pin. Fresh acquisition pins Rust-BERT. Resumed acquisition or admission requires the exact saved pin. Atlas consumes the permit before run mutation, inventory or acquisition. The run-scoped adapter batches inference and persists occurrence/source/model receipts through fenced outcome transactions.
 
 [Admission storage](../../../crates/argos-osint-core/src/storage/classifier_admission.rs) reads at most 512 thin headers per page, then reserves claims in transactions of at most 64 rows under the run/source/epoch fences. Reservation does not advance the durable page cursor. Outcome publication advances it for published work; pages with no claims use a guarded empty-page checkpoint. If a later reservation fails, the reserved prefix remains leased and recoverable after expiry under a new activation. Payload hydration and local inference remain bounded to 64 items. Foreground outcome batches publish in transactions of at most 16 items so their independent heartbeat can renew between commits. A fair gate shared by one admission owner gives heartbeat and foreground write transactions separate turns; database guards still fence other owners and processes. Each receipt/outcome/projection remains atomic; a later subgroup failure preserves earlier receipts and cursor progress for immutable replay. See the [admission contracts](../../../crates/argos-osint-core/tests/storage_classifier_admission.rs) for paging, reopen and ownership behavior.
 
@@ -114,7 +184,7 @@ Historical requests are idempotent by request ID, scope and exact model pin. The
 
 NewsData v1 and Currents v1 categories are captured from existing responses before country, time, duplicate and admission filters. Metadata observations are deduplicated independently of exact per-fetch/cycle origins. Capture uses 64-row pages and bounded JSON; credentials, full article bodies and unknown extra fields are excluded. Excluded category labels are filtered individually, not treated as article rejection. Unknown vocabularies abstain; AI tags never become category labels.
 
-Terminal cycle publication and one calibration job/outbox keyed by cycle and observation watermark commit together. Pause does not enqueue. Empty cohorts complete as `no_new_data`; a missing saved model blocks the monitoring job. The separate scheduler pool processes at most 512 observations per activation and yields between 64-row pages when foreground work appears. Observation dispositions and counters checkpoint atomically; replay and restart do not count the same origin twice. Story families retain permanent partitions, indexed bounded candidate discovery, and conservative quarantine for ambiguous merges or exhausted retention capacity. The page checks retained-family capacity once under its shared writer guard and accounts for each new family in that transaction.
+Terminal cycle publication and one calibration job/outbox keyed by cycle and observation watermark commit together. Pause does not enqueue. Empty cohorts complete as `no_new_data`. A zero-shot cohort records provider monitoring and completes as `zero_shot_provider_monitoring_only` without queuing Natural training or promotion. A retained Natural cohort follows its legacy monitoring and training contract. The separate scheduler pool processes at most 512 observations per activation and yields between 64-row pages when foreground work appears. Observation dispositions and counters checkpoint atomically; replay and restart do not count the same origin twice. Story families retain permanent partitions, indexed bounded candidate discovery, and conservative quarantine for ambiguous merges or exhausted retention capacity. The page checks retained-family capacity once under its shared writer guard and accounts for each new family in that transaction.
 
 The provider mapping currently has **no independently reviewed precision certificate**. Its partial labels remain monitoring/review material; no provider-only candidate fitting, threshold adjustment or automatic promotion is authorized. The existing masked learner and promotion validator require independently reviewed complete calibration/development evidence, sufficient families, pair quality and latency/memory comparisons before they can authorize replacement. Synthetic installs retain their active model. Runtime observation storage remains separate from the seed CSV.
 
@@ -132,13 +202,13 @@ Run snapshots expose separate current-receipt actor and reconciliation readiness
 
 Bounded exports contain captured observations, source hashes, permanent family/split ownership and explicit sampling bias; ground truth starts unreviewed. Imports require actual reviewer references, complete zero-to-six memberships or abstention, and matching source/revision/partition. Atomic replay is idempotent; conflicts roll back the exchange. Mapping approval derives precision counts from complete reviewed Development families. Missing provider categories remain Unknown. Approval alone neither activates a model nor proves production quality.
 
-## Durable learning inputs
+## Legacy Natural learning inputs
 
 After terminal-cycle monitoring, an approved mapping and at least 100 newly eligible families can queue a separate `classifier_learn` job. Its bounded immutable capture contains seed and actual reviewed rows plus approved partial provider rows. Source provenance remains distinct; provider examples never become reviewed ground truth, and permanent holdouts cannot enter weak training. The captured fit excludes Test text. Identical input hashes create one root job. The capture binds a compiled pipeline hash (bundle/source manifest and learning, calibration, report and admission policy versions). Captures from an incompatible pipeline are retained with an explicit incompatibility result instead of replaying under changed code.
 
 Fitting uses the shared writer lease and manifest builder, with an independent task lease and asynchronous heartbeats. Foreground work cooperatively cancels fitting and schedules a checkpoint retry; the owned fit handle joins before the writer is released. Successful candidate creation marks its eligible families consumed for the trigger. The worker requires complete reviewed Calibration and independent Development evidence before comparative promotion. It measures one fixed reviewed cohort against the pinned baseline, including warm single-request latency and foreground requests overlapping actual training. Candidate and baseline use the same inputs; insufficient overlap or unavailable measurements retain the candidate. Fixed-code native heap/stack checks use the same configured ceilings as the worker. Review import and approval share the artifact writer through COMMIT, preventing review revisions from changing between capture validation and atomic activation. Quality and resource failures retain the prior model; an uncertain filesystem activation is resolved by durable readback and reported honestly.
 
-Review exports include a bounded diagnostics sidecar replayed with the exact saved run pin, never the currently active replacement model. It records raw/calibrated scores, support/OOV, ranking reasons, bounded feature spans and immutable hashes while leaving reviewer labels blank. Test partitions are excluded from diagnostic replay. Duplicate-review leads use exact URL/content identity first, then at most a small indexed candidate set reranked with pinned Natural Dice/Jaro-Winkler. Cross-partition candidates are flagged for review; lexical similarity cannot merge families or copy labels. Routine logs omit article prose.
+Review exports include a bounded diagnostics sidecar replayed with the exact saved run pin, never the currently active replacement model. It records scores, ranking reasons and immutable hashes while leaving reviewer labels blank. Natural replays can also record lexical support, OOV counts and bounded feature spans. Test partitions are excluded from diagnostic replay. Duplicate-review leads use exact URL/content identity first, then at most a small indexed candidate set reranked with pinned Natural Dice/Jaro-Winkler. Cross-partition candidates are flagged for review; lexical similarity cannot merge families or copy labels. Routine logs omit article prose.
 
 Phrase eligibility uses the original normalized grammatical-noise flag, before stemming: “are the” cannot become support through `ar`. Hard line/paragraph boundaries break phrases as punctuation does; unigrams retain their original field spans. Generation-zero lifecycle frontiers query the six current-priority prefixes only, because the protocol creates nonnegative generations. Positive generations retain all twelve current/older probes for lazy reset; source/support/lease fences and actual cleanup traversal are unchanged.
 

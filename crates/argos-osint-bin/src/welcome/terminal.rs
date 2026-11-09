@@ -32,10 +32,8 @@ impl Drop for Restore {
 
 pub(super) fn run(
     existing: Option<&str>,
-    notice: Option<&str>,
+    notice: &str,
     needs_seed: bool,
-    needs_classifier: bool,
-    retrain_changed: bool,
 ) -> anyhow::Result<Option<Selection>> {
     enable_raw_mode()?;
     let _restore = Restore;
@@ -46,7 +44,7 @@ pub(super) fn run(
         event::EnableBracketedPaste
     )?;
     let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let initial_notice = notice.unwrap_or_default().to_string();
+    let initial_notice = notice.to_owned();
     let mut prompts = Screen {
         terminal,
         history: vec![format!(
@@ -62,13 +60,7 @@ pub(super) fn run(
         if prompts.notice.is_empty() {
             prompts.notice = initial_notice.clone();
         }
-        let selection = configure_launcher(
-            &mut prompts,
-            existing,
-            needs_seed,
-            needs_classifier,
-            retrain_changed,
-        )?;
+        let selection = configure_launcher(&mut prompts, existing, needs_seed)?;
         if !prompts.navigation.back_requested {
             return Ok(selection);
         }
@@ -197,12 +189,7 @@ impl Question {
                 ("2", "API Server"),
                 ("3", "Web"),
                 ("4", "Seed DB"),
-                ("5", "Train and save classifier"),
-            ]
-        } else if label.starts_with("Retrain classifier now?") {
-            vec![
-                ("no", "Keep saved classifier"),
-                ("yes", "Retrain and save classifier"),
+                ("5", "Check Atlas classifier"),
             ]
         } else if label.starts_with("Web profile") {
             vec![("dev", "Development"), ("installed", "Built static app")]
@@ -659,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_seed_does_not_renumber_classifier_service_five() {
+    fn hidden_seed_does_not_renumber_classifier_check_five() {
         let valid = |value: &str| matches!(value, "1" | "2" | "3" | "5");
         let mut question = Question::new("Choose a service", "1", &valid);
         assert_eq!(
@@ -696,7 +683,7 @@ mod tests {
             ),
             Some(Some("5".into()))
         );
-        let dataset = Question::new("Classifier CSV path", "auto", &|_| true);
+        let dataset = Question::new("Actor CSV path", "auto", &|_| true);
         assert!(!dataset.stable_service_keys);
     }
 
@@ -781,22 +768,10 @@ mod tests {
                     (|v: &str| matches!(v, "1" | "2" | "3" | "4")) as fn(&str) -> bool,
                 ),
                 (
-                    "service-setup",
+                    "service-classifier-check",
                     "Choose a service",
                     "5",
-                    (|v: &str| matches!(v, "4" | "5")) as fn(&str) -> bool,
-                ),
-                (
-                    "dataset-changed",
-                    "Retrain classifier now? [yes/no]",
-                    "no",
-                    (|v: &str| matches!(v, "yes" | "no")) as fn(&str) -> bool,
-                ),
-                (
-                    "dataset",
-                    "Classifier CSV path (auto for configured/default)",
-                    "/data/article training.csv",
-                    (|v: &str| super::super::dataset_path(v).is_some()) as fn(&str) -> bool,
+                    (|v: &str| matches!(v, "1" | "2" | "3" | "5")) as fn(&str) -> bool,
                 ),
                 (
                     "actor-dataset",
@@ -833,9 +808,6 @@ mod tests {
                 if name != "service" {
                     history.push("Service: Web".into());
                 }
-                if name == "dataset-changed" {
-                    history.push("The selected classifier dataset has changed since the active model was trained. Keep the saved model or retrain a synthetic baseline.".into());
-                }
                 if name == "terminal" {
                     history.extend(
                         [
@@ -848,30 +820,15 @@ mod tests {
                         .map(String::from),
                     );
                 }
+                let notice = if name == "service-classifier-check" {
+                    "Atlas classifier (Rust-BERT): unavailable\nSet the worker and model in zero-shot.json."
+                } else {
+                    ""
+                };
                 terminal
-                    .draw(|frame| question.draw(frame, &history, ""))
+                    .draw(|frame| question.draw(frame, &history, notice))
                     .unwrap();
-                if width >= 40 && name == "dataset-changed" {
-                    let buffer = terminal.backend().buffer();
-                    let visible = (0..height)
-                        .map(|y| {
-                            (0..width)
-                                .map(|x| buffer[(x, y)].symbol())
-                                .collect::<String>()
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    let visible = visible.split_whitespace().collect::<Vec<_>>().join(" ");
-                    assert!(
-                        visible.contains("dataset has changed since the active model was trained."),
-                        "{width}x{height}: {visible}"
-                    );
-                    assert!(
-                        visible.contains("retrain a synthetic baseline."),
-                        "{width}x{height}: {visible}"
-                    );
-                }
-                if width >= 40 && matches!(name, "dataset" | "actor-dataset") {
+                if width >= 40 && matches!(name, "service-classifier-check" | "actor-dataset") {
                     let buffer = terminal.backend().buffer();
                     let text = (0..height)
                         .map(|y| {
@@ -881,15 +838,12 @@ mod tests {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let label = if name == "dataset" {
-                        "Classifier CSV path"
-                    } else {
+                    let label = if name == "actor-dataset" {
                         "Actor CSV path"
+                    } else {
+                        "Check Atlas classifier"
                     };
-                    assert!(
-                        text.contains(label),
-                        "CSV purpose must remain visible: {text}"
-                    );
+                    assert!(text.contains(label), "Action must remain visible: {text}");
                 }
                 for row in &question.rows {
                     assert!(row.right() <= width && row.bottom() <= height);

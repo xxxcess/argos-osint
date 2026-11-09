@@ -14,7 +14,7 @@ Runs on pushes to `main` and when a PR is opened, reopened or marked ready for r
 |---|---|---|
 | Linux x86_64 | `ubuntu-24.04` | embedded, server |
 | Linux aarch64 | `ubuntu-24.04-arm` | embedded, server |
-| macOS arm64 | `macos-14` | embedded, server |
+| macOS arm64 | `macos-15` | embedded, server |
 | macOS Intel | `macos-15-intel` | embedded, server |
 
 Every leg calls the same entry point you run locally, `scripts/local_matrix.sh`:

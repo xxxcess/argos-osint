@@ -4460,10 +4460,21 @@ mod classifier_preflight_tests {
                 AtlasStore::from_repository(repo.clone()),
             )
             .await;
-            assert!(result
-                .unwrap_err()
-                .downcast_ref::<CyclePreflightError>()
-                .is_some());
+            let error = result.unwrap_err();
+            let preflight = error.downcast_ref::<CyclePreflightError>().unwrap();
+            if !resume && cfg!(feature = "classifier") {
+                use crate::classifier::{ClassifierError, ClassifierStatus};
+                let expected = temp.path().join("classifier/zero-shot.json");
+                assert!(matches!(
+                    preflight,
+                    CyclePreflightError::Classifier {
+                        status: ClassifierStatus::Missing,
+                        code,
+                        source: ClassifierError::MissingZeroShotConfig(path),
+                    } if code == "classifier_unavailable" && path == &expected
+                ));
+                assert!(preflight.to_string().contains("worker_path and model_dir"));
+            }
             assert_eq!(calls.load(Ordering::SeqCst), 0);
             assert!(tracker.lock().unwrap().run_id.is_empty());
             let after = crate::storage::atlas::list_runs(repo.db()).await.unwrap();

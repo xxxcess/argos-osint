@@ -83,6 +83,8 @@ Install the worker and checkpoint on the machine that runs Atlas. The applicatio
      /absolute/path/to/argos-atlas-bert serve /absolute/path/atlas-distilbert-mnli
    ```
 
+   If Atlas reports a missing configuration, run `argos classifier status --json` from the same shell and Argos home. Its `config_path` is where Atlas looks for `zero-shot.json`, including when a custom classifier directory is configured. Check for `can_infer: true` before starting a fresh cycle.
+
 The status check starts and closes a short-lived worker and does not open storage. Atlas preflight verifies the worker again before a new cycle. A run pins the executable and model bytes and its admission threshold. If a saved zero-shot run requires a superseded pin, restore its original configuration and files before resuming acquisition or admission. Post-admission-only work can resume without loading a classifier once Atlas verifies the completed admission outcomes. A retained Natural run still uses its exact historical Natural artifact.
 
 ## Legacy Natural model, bundle and receipt contract

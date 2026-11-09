@@ -318,16 +318,12 @@ async fn historical_job_reopens_with_64_row_activations_originals_and_policy_der
         assert!(payload["atlas.host.rss_reason"].is_string());
         if payload["stage"] == "classification" {
             actual_scoring += 1;
+            let worker = &payload["atlas.classifier.worker"];
             assert_eq!(
-                payload["atlas.classifier.worker"]["atlas.classifier.latency_unit"],
-                "batch"
+                worker["atlas.classifier.unavailable_reason"],
+                "worker_performance_unavailable"
             );
-            assert!(
-                payload["atlas.classifier.worker"]["atlas.classifier.samples"]
-                    .as_u64()
-                    .unwrap()
-                    > 0
-            );
+            assert!(worker["atlas.classifier.samples"].is_null());
             assert!(
                 payload["atlas.classifier.page"]["computations"]
                     .as_u64()

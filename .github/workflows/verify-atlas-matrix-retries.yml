@@ -1,0 +1,57 @@
+name: Atlas matrix leg retries
+on:
+  push:
+    branches: [verify/atlas-zero-shot-intel]
+    paths: ['.github/workflows/verify-atlas-matrix-retries.yml']
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    if: github.event.head_commit.message == 'Retry failed Atlas matrix legs'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: 'Linux x86_64 / server', os: ubuntu-24.04, storage: server }
+          - { name: 'macOS arm64 / embedded', os: macos-15, storage: embedded }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.storage }}
+          workspaces: . -> target/agents
+          save-if: false
+      - uses: actions/cache@v4
+        if: matrix.storage == 'server'
+        with:
+          path: ~/.cache/argos-surreal
+          key: surreal-3.3.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test_surreal.py') }}
+      - name: Install pinned SurrealDB
+        if: matrix.storage == 'server'
+        run: python3 scripts/test_surreal.py --mode server --fetch-only
+      - name: Local matrix leg
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.storage }}" = server ]; then
+            bin=$(find ~/.cache/argos-surreal -path '*3.3.4-*' -type f -name surreal | head -n1)
+            test -x "$bin"
+            bash scripts/local_matrix.sh --storage server --surreal-bin "$bin"
+          else
+            bash scripts/local_matrix.sh --storage embedded
+          fi

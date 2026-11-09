@@ -2170,9 +2170,10 @@ impl fmt::Display for CyclePreflightError {
         match self {
             Self::Classifier { status, code, source } => {
                 write!(f, "Atlas classifier blocked ({}; {code}): {source}.", status.as_str())?;
-                match code.as_str() {
-                    "classifier_unavailable" => f.write_str(" Run argos classifier status to check the local Rust-BERT setup."),
-                    "pinned_classifier_unavailable" => f.write_str(" Restore the saved classifier revision to resume, or explicitly reclassify under a new revision."),
+                match (code.as_str(), source) {
+                    ("classifier_unavailable", ClassifierError::MissingZeroShotConfig(_)) => f.write_str(" Set worker_path and model_dir there, then check Atlas classifier in Venture (5)."),
+                    ("classifier_unavailable", _) => f.write_str(" Run argos classifier status to check the local Rust-BERT setup."),
+                    ("pinned_classifier_unavailable", _) => f.write_str(" Restore the saved classifier revision to resume, or explicitly reclassify under a new revision."),
                     _ => Ok(()),
                 }
             }
@@ -2211,6 +2212,7 @@ pub async fn preflight_cycle(
     };
     let pinned = home.pin_atlas(selected).await.map_err(|source| {
         let status = match &source {
+            ClassifierError::MissingZeroShotConfig(_) => ClassifierStatus::Missing,
             ClassifierError::Unavailable if cfg!(feature = "classifier") => {
                 ClassifierStatus::Missing
             }

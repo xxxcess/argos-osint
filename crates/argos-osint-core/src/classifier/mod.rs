@@ -156,6 +156,8 @@ pub enum ClassifierError {
     /// No usable classifier: the `classifier` feature is disabled, or no
     /// engine is installed in this home.
     Unavailable,
+    /// Atlas has no Rust-BERT configuration at the resolved path.
+    MissingZeroShotConfig(std::path::PathBuf),
     /// An artifact or manifest is missing, corrupt, or fails validation.
     InvalidArtifact(String),
     /// An artifact was built for other versions (algorithm, preprocessing,
@@ -227,6 +229,13 @@ impl fmt::Display for ClassifierError {
         match self {
             ClassifierError::Unavailable => {
                 write!(f, "classifier engine unavailable in this build or home")
+            }
+            ClassifierError::MissingZeroShotConfig(path) => {
+                write!(
+                    f,
+                    "Rust-BERT configuration is missing at {}",
+                    path.display()
+                )
             }
             ClassifierError::InvalidArtifact(why) => {
                 write!(f, "invalid classifier artifact: {why}")

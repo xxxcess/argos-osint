@@ -51,7 +51,12 @@ fn welcome_setup_can_be_cancelled_without_initializing_storage() {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    for input in ["q\n", "3\n4000\ninstalled\nstart\n9000\nembedded\ncancel\n"] {
+    let web_cancel = if cfg!(feature = "embedded") {
+        "3\n4000\ninstalled\nstart\n9000\nembedded\ncancel\n"
+    } else {
+        "3\n4000\ninstalled\nstart\n9000\nserver\nauto\ncancel\n"
+    };
+    for (input, reaches_storage_prompt) in [("q\n", false), (web_cancel, true)] {
         let home = tempfile::tempdir().unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_argos"))
             .env("ARGOS_HOME", home.path())
@@ -75,9 +80,14 @@ fn welcome_setup_can_be_cancelled_without_initializing_storage() {
         );
         let output = String::from_utf8(result.stdout).unwrap();
         assert!(output.contains("Welcome to Argos Venture!"));
-        assert!(output.contains("5. Train and save classifier"));
-        assert!(!output.contains("2. API Server"));
-        assert!(!output.contains("Storage mode"));
+        assert!(output.contains("5. Check Atlas classifier"));
+        assert_eq!(
+            output.contains("6. Train legacy classifier"),
+            cfg!(feature = "classifier")
+        );
+        assert!(output.contains("2. API Server"));
+        assert_eq!(output.contains("Storage mode"), reaches_storage_prompt);
+        assert_eq!(output.contains("Terminal display"), reaches_storage_prompt);
         assert!(!home.path().join("storage/config.json").exists());
         assert!(!home.path().join("stack.json").exists());
     }

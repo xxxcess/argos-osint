@@ -52,7 +52,7 @@ impl Bundle {
         let path = artifact::root_for(home)?.join("zero-shot.json");
         let file = File::open(&path).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
-                ClassifierError::Unavailable
+                ClassifierError::MissingZeroShotConfig(path.clone())
             } else {
                 file_error(&path, error)
             }

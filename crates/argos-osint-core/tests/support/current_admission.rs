@@ -6,9 +6,9 @@ use argos_osint_core::storage::repo::Repository;
 use argos_osint_core::store::AtlasArticleRow;
 
 #[path = "../fixtures/classifier/admission-support.rs"]
-mod fixture;
+pub(super) mod fixture;
 #[path = "../fixtures/classifier/admission-publication.rs"]
-mod publication;
+pub(super) mod publication;
 
 /// Fictional vocabulary selects a deterministic score pair through the worker protocol.
 /// Reusing one persisted model also exercises restore and same-run resumption.

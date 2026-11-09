@@ -1,10 +1,5 @@
 //! Independent derivative lease/readiness regression on isolated embedded storage.
 #![cfg(all(feature = "embedded", feature = "classifier"))]
-#[path = "fixtures/classifier/admission-support.rs"]
-mod admission_fixture;
-#[allow(dead_code)]
-#[path = "fixtures/classifier/admission-publication.rs"]
-mod admission_publication;
 #[path = "support/actor_catalog.rs"]
 mod catalog;
 #[path = "support/current_admission.rs"]
@@ -13,6 +8,7 @@ mod support;
 use argos_osint_core::atlas_derivative_worker as worker;
 use argos_osint_core::storage::{atlas, repo::Repository};
 use argos_osint_core::store::AtlasArticleRow;
+use current_admission::{fixture as admission_fixture, publication as admission_publication};
 use std::sync::{atomic::AtomicBool, Arc};
 
 static DERIVATIVE_TEST_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

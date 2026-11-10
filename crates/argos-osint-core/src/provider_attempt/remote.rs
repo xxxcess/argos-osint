@@ -1,4 +1,4 @@
-//! Private one-attempt execution transport for retained Focus Brief chat.
+//! Private one-attempt execution transport for retained API-key model calls.
 
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -130,8 +130,8 @@ impl ChatAttempt {
             self.deadlines.model_inactivity,
         ];
         self.version == VERSION
-            && alias.role == "atlas_analyst"
-            && supports_operation(alias.operation.as_deref())
+            && retained_role(&alias.role)
+            && retained_operation(alias.operation.as_deref())
             && alias.index < 32
             && valid_label(&alias.provider)
             && valid_label(&alias.account)
@@ -152,15 +152,16 @@ impl ChatAttempt {
     }
 }
 
-pub(crate) fn supports_operation(operation: Option<&str>) -> bool {
-    matches!(
-        operation,
-        Some(
-            provider::OP_CLAIMS_GENERATE
-                | provider::OP_INFERENCES_GENERATE
-                | provider::OP_LINKS_GENERATE
+fn retained_role(role: &str) -> bool {
+    provider::CANONICAL_ROLE_KEYS.contains(&role)
+        || matches!(
+            role,
+            "entity_resolver" | "evidence_curator" | "claim_assessor"
         )
-    )
+}
+
+fn retained_operation(operation: Option<&str>) -> bool {
+    operation.is_none_or(|value| valid_label(value) && !value.chars().any(char::is_whitespace))
 }
 
 fn valid_label(label: &str) -> bool {
@@ -502,7 +503,74 @@ fn transport_error(error: reqwest::Error) -> ProviderFailure {
 }
 
 pub(crate) fn configured() -> bool {
-    std::env::var_os("FLEETWORKS_EXECUTION_ORIGIN").is_some()
+    provider::execution_holds_provider_credentials()
+}
+
+/// Send one API-key attempt for a caller that only has the resolved secret.
+/// The account label is recovered from the workspace registry. The request
+/// carries no credential.
+pub(crate) async fn delegated_attempt(
+    role: &str,
+    operation: Option<&str>,
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    transport: Transport,
+    deadlines: Deadlines,
+    policy: &RequestPolicy,
+) -> AttemptReport {
+    let unavailable = || failed(transport, configuration("execution route unavailable"));
+    let auth = match tokio::task::spawn_blocking(AuthFile::load).await {
+        Ok(Ok(auth)) => auth,
+        _ => return unavailable(),
+    };
+    let Some(account) = account_label(&auth, secret) else {
+        return unavailable();
+    };
+    let route = crate::provider_chain::Route {
+        provider: provider::effective_kind(secret),
+        account,
+        model: secret.model.clone(),
+        skip_reason: None,
+        admission_key: None,
+    };
+    routed_attempt(
+        role,
+        operation,
+        0,
+        &route,
+        secret,
+        messages,
+        transport,
+        deadlines,
+        policy,
+        AttemptSpec::default(),
+    )
+    .await
+}
+
+fn account_label(auth: &AuthFile, secret: &ProviderSecret) -> Option<String> {
+    let kind = provider::effective_kind(secret);
+    let endpoint = provider_diag::sanitize_endpoint(&secret.base_url);
+    let mut exact = Vec::new();
+    let mut same_endpoint = Vec::new();
+    for (key, saved) in &auth.accounts {
+        if provider::effective_kind(saved) != kind
+            || provider_diag::sanitize_endpoint(&saved.base_url) != endpoint
+        {
+            continue;
+        }
+        same_endpoint.push(key.clone());
+        if saved.model == secret.model {
+            exact.push(key.clone());
+        }
+    }
+    if exact.len() == 1 {
+        return exact.into_iter().next();
+    }
+    if exact.is_empty() && same_endpoint.len() == 1 {
+        return same_endpoint.into_iter().next();
+    }
+    None
 }
 
 fn client_from_environment() -> Result<Client, ProviderFailure> {
@@ -664,6 +732,45 @@ mod tests {
             request.alias.resolve(root).unwrap_err().category,
             Category::Configuration
         );
+    }
+
+    #[test]
+    fn retained_evaluator_and_resolver_attempts_are_admitted_without_credentials() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut request = setup(workspace.path(), "http://127.0.0.1:9/v1");
+        request.alias.role = "atlas_evaluator".into();
+        request.alias.operation = Some(provider::OP_INFERENCES_ASSESS.into());
+        assert!(request.validate());
+        assert!(!serde_json::to_string(&request)
+            .unwrap()
+            .contains(FIXTURE_KEY));
+        request.alias.role = "entity_resolver".into();
+        request.alias.operation = None;
+        assert!(request.validate());
+        request.messages[0].tool_call_id = Some("call-1".into());
+        assert!(!request.validate());
+        request.messages[0].tool_call_id = None;
+        request.alias.role = "recon_agent".into();
+        assert!(request.validate());
+        request.alias.role = "not-a-role".into();
+        assert!(!request.validate());
+    }
+
+    #[test]
+    fn account_label_follows_one_endpoint_and_refuses_an_ambiguous_pair() {
+        let secret = ProviderSecret {
+            kind: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: "route-model".into(),
+            api_key: None,
+            stt_model: None,
+            device: None,
+        };
+        let mut auth = AuthFile::default();
+        auth.set_account_keyed("desk", secret.clone());
+        assert_eq!(account_label(&auth, &secret).as_deref(), Some("desk"));
+        auth.set_account_keyed("spare", secret.clone());
+        assert!(account_label(&auth, &secret).is_none());
     }
 
     #[tokio::test]

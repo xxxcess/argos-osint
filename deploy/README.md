@@ -15,7 +15,7 @@ venture --workspace "$FLEETWORKS_HOST_WORKSPACE" init
 
 Choose a distinct Compose project name and separate web and API ports for each concurrently running workspace.
 
-The API uses `secrets/api-token` for clients. Private Brain, Tools, Control and Jobs use separate bearer files. The brief worker and private execution service share a fifth private bearer. Venture creates `api-token`, `brain-token`, `tools-token`, `control-token`, `jobs-token` and `execution-token` under `secrets/` when it starts the stack. Bootstrap needs `secrets/storage-root-password` and `secrets/storage-password`. Use the existing files when restarting the same database. For a fresh managed database, generate each password file once.
+The API uses `secrets/api-token` for clients. Private Brain, Tools, Control and Jobs use separate bearer files. The worker, Brain, brief worker and private execution service share the execution bearer. Venture creates `api-token`, `brain-token`, `tools-token`, `control-token`, `jobs-token` and `execution-token` under `secrets/` when it starts the stack. Bootstrap needs `secrets/storage-root-password` and `secrets/storage-password`. Use the existing files when restarting the same database. For a fresh managed database, generate each password file once.
 
 ```sh
 (

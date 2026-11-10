@@ -1669,9 +1669,45 @@ pub fn detect_kind_from_url(url: &str) -> String {
     }
 }
 
+/// This process sends API-key model calls to the private execution service.
+///
+/// An empty `FLEETWORKS_EXECUTION_ORIGIN` is unset. The execution service does
+/// not set the variable, so it keeps the credentials it resolves.
+pub fn execution_holds_provider_credentials() -> bool {
+    std::env::var("FLEETWORKS_EXECUTION_ORIGIN")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// API-key transports belong to the execution service. A local endpoint and
+/// the ChatGPT subscription stay in the calling process.
+pub fn delegate_to_execution(secret: &ProviderSecret) -> bool {
+    if !execution_holds_provider_credentials() {
+        return false;
+    }
+    let kind = effective_kind(secret);
+    kind != "local" && kind != "openai-chatgpt"
+}
+
+/// A route can be admitted. While this process delegates, the execution
+/// service holds the API key, so an empty local copy is not a missing key.
+pub fn route_can_authenticate(secret: &ProviderSecret) -> bool {
+    if effective_kind(secret) == "local" || execution_holds_provider_credentials() {
+        return true;
+    }
+    secret
+        .api_key
+        .as_deref()
+        .is_some_and(|key| !key.trim().is_empty())
+}
+
 /// Stored key first, then the vendor environment variable. The environment
-/// value is not written back into `auth.json`.
+/// value is not written back into `auth.json`. A delegated process returns no
+/// key, including a vendor environment variable.
 pub fn resolved_key(secret: &ProviderSecret) -> Option<String> {
+    if delegate_to_execution(secret) {
+        return None;
+    }
     resolved_key_with(secret, |name| std::env::var(name).ok())
 }
 
@@ -1796,6 +1832,9 @@ async fn complete_inner(
 ) -> Result<Completion> {
     if effective_kind(secret) == "openai-chatgpt" {
         return crate::subscription::complete(secret, messages, tools, on_delta).await;
+    }
+    if delegate_to_execution(secret) {
+        anyhow::bail!("provider credentials are held by the execution service");
     }
     let compiled = compile_wrapper(secret, messages, tools, true)?;
     let client = http()?;

@@ -118,6 +118,12 @@ Verification caught two web CI failures, a queued brief losing its captured mode
 
 The [task plan](task_plan.md#follow-up-work) carries the remaining provider transports and credential scoping, retained parity and compatibility retirement, and registry publication. This closes the implementation thread at the verified candidate.
 
+## 2026-11-10 — Retained provider transports
+
+API-key model attempts from the worker, Brain and brief worker now go through the private execution service. Those processes load route metadata without provider API keys and refuse to save `auth.json`. Local endpoints and the ChatGPT subscription stay in the calling process. The Atlas collector clears the execution origin because it uses news credentials. Bind addresses, Host and origin policy, and web reconnection were already present in the tree.
+
+Compatibility Recon retirement, the full embedded parity suite, retained interactive review and registry publication remain open.
+
 ## Retention
 
 This already-tracked plan records the shared cutover and its remaining acceptance work. Keep raw logs, fixtures and intermediate notes out of Git.

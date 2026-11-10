@@ -245,7 +245,27 @@ pub async fn complete_summary_report(
         number += 1;
         observe(AttemptEvent::Started { number, transport });
         let started = Instant::now();
-        let attempt = provider_attempt::attempt(secret, messages, transport, opts.deadlines);
+        let policy = crate::request_policy::RequestPolicy::default();
+        let attempt: std::pin::Pin<
+            Box<dyn std::future::Future<Output = provider_attempt::AttemptReport> + Send>,
+        > = if crate::provider::delegate_to_execution(secret) {
+            Box::pin(provider_attempt::remote::delegated_attempt(
+                "brain_summary",
+                None,
+                secret,
+                messages,
+                transport,
+                opts.deadlines,
+                &policy,
+            ))
+        } else {
+            Box::pin(provider_attempt::attempt(
+                secret,
+                messages,
+                transport,
+                opts.deadlines,
+            ))
+        };
         let report = if let Some(lease) = &shared_lease {
             match lease.run(attempt, opts.cancel.as_deref()).await {
                 Ok(report) => report,

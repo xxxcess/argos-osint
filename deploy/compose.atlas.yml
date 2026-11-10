@@ -22,6 +22,8 @@ services:
       FLEETWORKS_NLP_ORIGIN: http://nlp:8080
       FLEETWORKS_CLASSIFIER_ORIGIN: http://classifier:8080
       FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/internal_token
+      # Collection uses news credentials, not the model execution service.
+      FLEETWORKS_EXECUTION_ORIGIN: ""
     volumes:
       - *atlas-entrypoint
     secrets:

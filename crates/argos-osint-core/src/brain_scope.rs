@@ -11,6 +11,30 @@ use crate::memory_metadata::{EndpointRef, MemoryKind};
 use crate::provider::{self, ChatMessage, SettingsFile};
 use crate::secrets::{AuthFile, ProviderSecret};
 
+async fn complete_retained(
+    role: &str,
+    operation: &str,
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+) -> Result<provider::Completion> {
+    if provider::delegate_to_execution(secret) {
+        let report = crate::provider_attempt::remote::delegated_attempt(
+            role,
+            Some(operation),
+            secret,
+            messages,
+            crate::provider_attempt::Transport::NonStream,
+            crate::provider_attempt::Deadlines::default(),
+            &crate::request_policy::RequestPolicy::default(),
+        )
+        .await;
+        return report
+            .outcome
+            .map_err(|failure| anyhow::anyhow!(failure.message));
+    }
+    provider::complete(secret, messages, &[], |_| {}).await
+}
+
 fn strip_json_fences(raw: &str) -> String {
     let trimmed = raw.trim();
     if let Some(rest) = trimmed.strip_prefix("```json") {
@@ -129,7 +153,13 @@ pub(crate) async fn generate_inferences_with_model(
         },
     ];
 
-    let resp = provider::complete(secret, &messages, &[], |_| {}).await?;
+    let resp = complete_retained(
+        "recon_analyst",
+        SCOPE_INFERENCES_GENERATE,
+        secret,
+        &messages,
+    )
+    .await?;
     parse_inferences_response(&resp.content)
 }
 
@@ -204,7 +234,7 @@ pub(crate) async fn generate_links_with_model(
         },
     ];
 
-    let resp = provider::complete(secret, &messages, &[], |_| {}).await?;
+    let resp = complete_retained("recon_analyst", SCOPE_LINKS_GENERATE, secret, &messages).await?;
     #[derive(Deserialize)]
     struct RawLink {
         source_id: String,

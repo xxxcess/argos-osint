@@ -27,6 +27,10 @@ pub struct AuthFile {
     /// longer supports them. Never serialized.
     #[serde(skip)]
     pub dropped_providers: Vec<String>,
+    /// The loaded copy dropped API keys because this process delegates model
+    /// calls. Saving it would erase the execution service's credentials.
+    #[serde(skip)]
+    pub(crate) credentials_withheld: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -228,7 +232,31 @@ impl AuthFile {
         if legacy {
             auth.save_to(path)?;
         }
+        if crate::provider::execution_holds_provider_credentials() {
+            auth.withhold_delegated_keys();
+        }
         Ok(auth)
+    }
+
+    /// Drop API keys for transports the execution service owns. Local and
+    /// subscription connections stay intact.
+    pub fn withhold_delegated_keys(&mut self) {
+        let clear = |secret: &mut ProviderSecret| {
+            let kind = crate::provider::effective_kind(secret);
+            if kind != "local" && kind != "openai-chatgpt" {
+                secret.api_key = None;
+            }
+        };
+        if let Some(secret) = &mut self.text {
+            clear(secret);
+        }
+        if let Some(secret) = &mut self.voice {
+            clear(secret);
+        }
+        for secret in self.accounts.values_mut() {
+            clear(secret);
+        }
+        self.credentials_withheld = true;
     }
 
     /// Commits ONLY the `auth` slot, serialised behind the app-wide configuration
@@ -236,6 +264,7 @@ impl AuthFile {
     /// needs all three files to move together uses the combined transfer entry
     /// point on `SettingsFile`.
     pub fn save(&self) -> Result<()> {
+        self.refuse_withheld_write()?;
         ensure_home()?;
         let lock = crate::config_commit::ConfigLock::acquire()?;
         lock.commit_files(&[crate::config_commit::CommitFile::new(
@@ -251,7 +280,15 @@ impl AuthFile {
     /// created 0600, written, flushed, fsynced, atomically renamed) and bypasses
     /// the cross-file lock by design.
     pub fn save_to(&self, path: &Path) -> Result<()> {
+        self.refuse_withheld_write()?;
         write_private(path, &serde_json::to_string_pretty(self)?)
+    }
+
+    fn refuse_withheld_write(&self) -> Result<()> {
+        if self.credentials_withheld {
+            anyhow::bail!("provider credentials are held by the execution service");
+        }
+        Ok(())
     }
 }
 
@@ -432,6 +469,28 @@ mod tests {
         assert!(!dir.path().join("config.toml").exists());
         assert!(!dir.path().join("quota.json").exists());
         assert_no_staged_files(dir.path());
+    }
+
+    #[test]
+    fn withheld_api_keys_stay_out_of_a_worker_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut auth = AuthFile::default();
+        let mut remote = crate::provider::account_secret(&auth, "openrouter");
+        remote.api_key = Some("router-secret".into());
+        remote.model = "router-model".into();
+        auth.set_account(remote);
+        let mut local = crate::provider::account_secret(&auth, "local");
+        local.api_key = Some("local-secret".into());
+        auth.set_account(local);
+        auth.withhold_delegated_keys();
+        assert!(auth.account("openrouter").unwrap().api_key.is_none());
+        assert_eq!(
+            auth.account("local").unwrap().api_key.as_deref(),
+            Some("local-secret")
+        );
+        assert!(auth.save_to(&path).is_err());
+        assert!(!path.exists());
     }
 
     /// Asserts the directory holds no `*.tmp` or `*.staged` leftovers.

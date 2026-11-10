@@ -53,7 +53,7 @@ Status: in implementation
 - [x] Wire private Atlas, NLP, classifier, Brain and Tools roles, with brief execution in its own worker.
 - [x] Separate private Control configuration and Jobs operations from the gateway.
 - [x] Run Focus Brief claims, inferences and links chat attempts in the private execution service.
-- [ ] Move remaining retained provider transports and narrow worker access to provider credentials.
+- [x] Move remaining retained provider transports and narrow worker access to provider credentials.
 - [x] Admit Focus Brief jobs, runnable tasks, captured inputs and the retained run fence in one transaction before splitting the worker.
 - [x] Commit each brief stage output, metadata, task state and final retained run fence together.
 - [x] Persist and replay brief display, Brain and index publication from completed stages.
@@ -69,7 +69,7 @@ Status: in implementation
 - [x] Add the Compose baseline, disk profile, development override and no-build startup for preloaded images.
 - [x] Verify downloaded CLI archives on four native targets and downloaded images on Linux AMD64 and ARM64.
 - [ ] Publish registry artifacts and verify their published digests and startup.
-- [ ] Configure API/web bind addresses, Host/origin policy and service reconnection.
+- [x] Configure API/web bind addresses, Host/origin policy and service reconnection.
 Acceptance: Venture launches every client and web mode; client exit leaves services running; explicit stop respects service ownership.
 
 ### Phase 6 — Verification automation and repository reorganization
@@ -116,6 +116,5 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
 
 ## Follow-up work
-- Move the remaining provider transports through the execution service and narrow worker credential access.
 - Complete retained parity and full embedded verification before retiring compatibility Recon and embedded application storage.
 - Publish the registry artifacts and verify the exact published digests.

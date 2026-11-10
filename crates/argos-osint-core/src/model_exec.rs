@@ -693,13 +693,7 @@ pub fn resolve_operation_routes(
             format!("{}:{}:{}", provider_name, host, account_name)
         };
 
-        let missing_key = secret
-            .api_key
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("")
-            .is_empty()
-            && provider::effective_kind(&secret) != "local";
+        let missing_key = !provider::route_can_authenticate(&secret);
         let missing_model = secret.model.trim().is_empty()
             || (provider::CANONICAL_ROLE_KEYS.contains(&canonical)
                 && model_route.model.trim().is_empty());
@@ -1750,15 +1744,19 @@ where
             } else {
                 &default_policy
             };
+            let delegate = provider::delegate_to_execution(&secret);
+            let caps = if delegate {
+                None
+            } else {
+                explicit_policy.then_some(admitted.get(route_idx)).flatten()
+            };
             let spec = provider_attempt::AttemptSpec {
                 observer: Some(observer.as_ref() as &(dyn Fn(&str) + Send + Sync)),
                 progress: progress_sink.as_deref(),
                 contract: explicit_policy.then_some(contract.as_ref()).flatten(),
-                caps: explicit_policy.then_some(admitted.get(route_idx)).flatten(),
+                caps,
             };
-            let rep = if provider_attempt::remote::supports_operation(scope.operation_key)
-                && provider_attempt::remote::configured()
-            {
+            let rep = if delegate {
                 let attempt = provider_attempt::remote::routed_attempt(
                     &role,
                     scope.operation_key,

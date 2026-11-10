@@ -384,6 +384,21 @@ async fn attempt_spec_inner(
     policy: &RequestPolicy,
     spec: AttemptSpec<'_>,
 ) -> AttemptReport {
+    if provider::delegate_to_execution(secret) {
+        return AttemptReport {
+            transport,
+            endpoint: crate::provider_diag::sanitize_endpoint(&secret.base_url),
+            elapsed_ms: 0,
+            outcome: Err(ProviderFailure::new(
+                Stage::Configuration,
+                Category::Configuration,
+                "provider credentials are held by the execution service",
+            )),
+            policy_diagnostics: Vec::new(),
+            effective: None,
+            recovery: None,
+        };
+    }
     let AttemptSpec {
         observer,
         progress,

@@ -1060,13 +1060,7 @@ fn secret_route(secret: &crate::secrets::ProviderSecret) -> Route {
     } else {
         format!("{}:{}:{}", kind, host, account)
     };
-    let missing_key = secret
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or("")
-        .is_empty()
-        && crate::provider::effective_kind(secret) != "local";
+    let missing_key = !crate::provider::route_can_authenticate(secret);
     let missing_model = secret.model.trim().is_empty();
     let skip = if missing_model {
         Some("model is not configured".into())

@@ -118,8 +118,8 @@ release PR authorizes its `vX.Y.Z` tag and GitHub Release on the next run.
 Release Please publishes the tag and release notes. The
 [Fleetworks workflow](ci.md#fleetworksyml--scoped-branch-checks) separately
 verifies native builds and Venture-managed Compose startup from an exact
-source revision. Distribution of native binaries and container images remains
-part of the Fleetworks cutover plan. [Deployment guide](../../../deploy/README.md)
+source revision. The separate [candidate workflow](../../../.github/workflows/fleetworks-candidate.yml)
+produces downloadable native bundles and Linux image archives for release review. [Deployment guide](../../../deploy/README.md)
 
 The release PR updates:
 
@@ -147,6 +147,37 @@ WIP commits because their final squash commit is the release input. Agents
 still use Conventional Commits for their own commits. Historical commits before
 the workflow are not rewritten. Workflow actions added here are pinned to full
 SHAs; review pins when updating them.
+
+## Release candidates
+
+Dispatch the candidate workflow against a published ref and its exact local commit.
+
+```sh
+branch=$(git branch --show-current)
+gh workflow run fleetworks-candidate.yml --ref "$branch" -f head="$(git rev-parse HEAD)"
+```
+
+The workflow packages Venture and the six CLI binaries on native Linux AMD64,
+Linux ARM64, macOS Intel, and macOS ARM64. Each Actions artifact contains a
+tarball and its SHA-256 sidecar. The archive carries the source revision,
+version, target, license, and per-file checksums. A separate job on each target
+downloads the exact artifact ID, verifies the archive against the packaging
+job's digest, and executes the extracted binaries. Review all four jobs for the
+requested commit before using their candidates.
+
+On both native Linux targets, a separate archive carries the runtime, web,
+SurrealDB and pinned RabbitMQ images. The image manifest records the archive
+checksum and exact Docker image IDs. A fresh job loads the archive and uses the
+downloaded Venture binary to start the stack without building or pulling. The
+smoke checks each Compose container against the expected loaded image ID.
+
+Candidate artifacts expire after 14 days. The workflow creates Actions
+artifacts only. Public tag and release automation remain under Release Please.
+During cutover, pushes that change candidate packaging on `feat/atlas-zero-shot`
+also run this workflow so the feature branch can verify its first bundles.
+Docker archive identity covers the downloaded bytes and the images that run
+from them. Registry publication and OCI manifest digest verification are
+separate release requirements.
 
 ## GitHub setup and first release
 

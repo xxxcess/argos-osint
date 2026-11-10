@@ -74,6 +74,14 @@ The full service cutover remains open. In particular, Brain and Intel integratio
 
 - Retained Atlas, Brain and Intel callers now import the shared model executor directly. The old Recon import forwards to the same implementation. Local server-mode checks passed 29 model routing and format tests, the real storage runtime fixture, and 19 API and host tests. Process isolation and shared model admission remain open.
 
+## Service cutover and candidate verification
+
+- Brief completion now persists publication work. A separate brief worker publishes saved output without rerunning models. A receipt fault fixture proved transaction rollback, replay from a fresh connection and no duplicate index work. The brief and curated-link suites passed. The curated-link performance benchmark stayed ignored.
+- The network workspace now shares a provider RPM and cooldown clock. The cross-connection storage fixture and seven pacing unit tests passed. Account concurrency and interactive priority are still process-local.
+- The private Tools process uses its own token. Manual calls keep durable request IDs, and an interrupted paid call retains its estimated charge. Tools, saved role defaults, owner-only Profile export, Brain, the brief worker, NLP and the classifier passed the disposable network smoke on pinned SurrealDB. All 21 API/host tests and 15 native client/Venture tests passed.
+- Venture offers six interactive clients, a Compose development profile and startup with preloaded candidate images. The minimum Compose parser accepted the base, Atlas, development and external configurations. Docker startup and image identity verification are hosted.
+- Scoped verification, scheduled full runs, candidate archives, and independent artifact verification are wired. All 21 offline fixtures, 22 policy checks, workflow lint and documentation checks passed. Hosted candidate and full outcomes remain separate evidence.
+
 ## Retention
 
 This already-tracked plan records the shared cutover and its remaining acceptance work. Keep raw logs, fixtures and intermediate notes out of Git.

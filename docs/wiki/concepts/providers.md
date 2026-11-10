@@ -180,7 +180,7 @@ At stage admission, each route's capabilities are resolved once (`provider_capab
 
 [![Provider request scheduling](../../diagrams/model-request-scheduling.svg)](../../diagrams/model-request-scheduling.html)
 
-Every model HTTP send passes through `provider_rate_limit`, including streamed and non-streamed completions, native Decisions, transcription when configured on a paced provider, chat fallbacks, output repairs and unsupported-option recovery. The scheduler shares one FIFO queue and monotonic clock per provider across all roles, models, endpoints and accounts in the running Argos process:
+Every model HTTP send passes through `provider_rate_limit`, including streamed and non-streamed completions, native Decisions, transcription when configured on a paced provider, chat fallbacks, output repairs and unsupported-option recovery. The scheduler uses one FIFO queue per provider in each process. Network workers also reserve sends against a shared SurrealDB clock per provider across all processes, roles, models and accounts.
 
 | Provider | Fleetworks RPM ceiling | Minimum interval between sends |
 | --- | --- | --- |
@@ -194,13 +194,13 @@ The first request can start immediately. Idle time earns no burst, and a delayed
 
 HTTP 429 and 503 responses delay all queued sends for that provider, including when the failed request was the route's last attempt. `Retry-After` (seconds or HTTP date) is honored without the diagnostic display cap; absent a header, 429 waits 60 seconds and 503 waits 10 seconds. Stream-delivered rate-limit/server errors feed the same clock. Cooldowns only extend existing waits. The retry executor remains the only retry owner: its retry budget and backoff still apply, and transport pacing may delay the next send further. See [OpenRouter retry guidance](https://openrouter.ai/docs/api_reference/errors-and-debugging).
 
-Queue residence is recorded separately from retry backoff and starts no network/output deadline. The `Dispatched` wire mark is emitted only after transport admission, and native Decisions records its send time at the same boundary. Pacing is process-local: separate service processes and other applications do not share this clock. It cannot prevent token/day quotas or provider outages.
+Queue residence is recorded separately from retry backoff and starts no network/output deadline. The `Dispatched` wire mark is emitted only after transport admission, and native Decisions records its send time at the same boundary. A network worker needs a shared reservation before transport. Standalone compatibility execution uses its local clock. The two-active-request cap and interactive priority per account still apply within each process.
 
 `StageBudget` rows are retained as legacy sizing metadata for core API compatibility; their `policy()` no longer transmits output or reasoning restrictions. Claims, Inferences and Links still send their `brief_contracts` schema: a strict schema where confirmed, otherwise the forced `submit_result` output tool, otherwise JSON mode or validated text. Compact item/field limits describe the brief's data contract rather than a provider token budget. Output-tool arguments are validated exactly like content.
 
 ## Atlas news provider admission
 
-Atlas workers reserve a logical fetch in a shared SurrealDB counter for the provider, configured account slot and UTC day. Storage-backed NewsAPI tools share the same NewsAPI counters. A rate or quota response can move a reservation to a configured fallback when its bucket has capacity. Transport retries and same-host redirects stay within the logical reservation. An interrupted request keeps its reservation because the remote provider may have received it. Direct tool execution without a repository uses the existing process-local behavior. Model cooldowns and concurrent-account admission use the process-local policy above. See [Atlas execution](../code/architecture.md#atlas).
+Atlas workers reserve a logical fetch in a shared SurrealDB counter for the provider, configured account slot and UTC day. Storage-backed NewsAPI tools share the same NewsAPI counters. A rate or quota response can move a reservation to a configured fallback when its bucket has capacity. Transport retries and same-host redirects stay within the logical reservation. An interrupted request keeps its reservation because the remote provider may have received it. Direct tool execution without a repository uses the existing process-local behavior. Model RPM and cooldowns use the shared network clock described above. Account concurrency still applies within each process. See [Atlas execution](../code/architecture.md#atlas).
 
 ## Canonical Jev decisions
 

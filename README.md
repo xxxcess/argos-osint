@@ -48,7 +48,7 @@ Venture defaults to disk-backed SurrealDB in Compose. It can also manage a host 
 | Atlas | Submit a cycle, check its job, and page through collected articles. |
 | Brain | Read actor, brief, and topology details through the authenticated API. |
 | Jobs and Logs | Review stages and events. Retry or cancel jobs through the terminal client. |
-| Tools, Models, and Profile | Read the tool catalog, role defaults, workspace information, and health. |
+| Tools, Models, and Profile | Run a catalog tool, check its result, and view role defaults, workspace information, and health. |
 
 [![Fleetworks service boundaries](docs/diagrams/fleetworks.svg)](docs/diagrams/fleetworks.html)
 

@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Contributor commands](contributing.md) · [Testing](../../../.opencode/skills/argos-testing/SKILL.md)
 
-Canonical execution policy for repository agents. Host instructions and user authorization take precedence; role-specific workflows apply only when selected.
+Canonical execution policy for repository agents. Host instructions and user authorization take precedence. Role-specific workflows apply only when selected.
 
 ## Scope and finish line
 
@@ -42,7 +42,9 @@ Record actual commands, exits, executed/skipped counts and limitations. Queued/i
 
 Bind performance evidence to the relevant corpus/model, workload, binary and environment. Do not repeat measurements or hash large unrelated artifacts merely because prose or another independent file changed. Capture affected UI states early; reuse inspected evidence only when relevant inputs match.
 
-Run required native embedded verification after focused stability; leave storage-mode variables unset for the full gate so its required storage phase runs once. Inspect target mode contracts: some native tests still execute in the workspace phase. Keep server/all-platform/mutation execution hosted; see [CI](ci.md).
+Select Fleetworks checks with the [shared scope planner](ci.md#fleetworksyml--scoped-branch-checks). Run affected local checks in the integration checkout and record selected hosted results separately. Use an isolated pinned server or broker fixture for an authorized targeted network contract. Full server, all-platform and mutation matrices run in hosted CI.
+
+For changes to embedded or compatibility behavior, run the applicable [native embedded gate](contributing.md#full-local-embedded-gate--github-ci-monitoring) after the focused check passes. Leave storage-mode variables unset so its required storage phase runs once. Inspect companion target contracts because some native tests also execute in the workspace phase.
 
 ## Communicate and improve the workflow
 

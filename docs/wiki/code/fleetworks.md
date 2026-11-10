@@ -30,11 +30,13 @@ See the [CLI command reference](../../../apps/fleetworks-cli/README.md) for rout
 
 ## Launch the Compose stack
 
-From the repository root, run `target/debug/venture --workspace ./review-workspace up` with a local Docker engine and Docker Compose installed. Venture builds and starts the API, private Brain service, background worker, production web relay and disk-backed SurrealDB. The launcher creates private local credentials and records the Compose project it owns.
+From the repository root, run `target/debug/venture --workspace ./review-workspace up` with a local Docker engine and Docker Compose installed. Venture builds and starts the API, private Brain and Tools services, brief worker, other background workers, production web relay and disk-backed SurrealDB. The launcher creates private local credentials and records the Compose project it owns.
 
 Open the web address Venture prints. The default is `http://127.0.0.1:3000`. Set `FLEETWORKS_WEB_PORT` or `FLEETWORKS_API_PORT` to remap the loopback ports. Use `venture status`, `venture logs --follow`, and `venture stop` with the same workspace. Stop retains the database directory.
 
 Use `venture web` to start the web stack and open the interactive Jobs and Logs client. `venture web --terminal logs` follows Compose output instead. The same storage, Compose file and Atlas options apply as for `up`. To attach Jobs and Logs to an existing stack, use `venture client jobs tui`. The line-oriented session refreshes jobs, opens details and logs, and confirms retry or cancel commands. Exiting either terminal presentation leaves the stack running.
+
+Use `up --dev` or `web --dev` to run Next development mode from this checkout. Venture remembers the selected profile for status, logs and stop. Use `up --no-build` for preloaded candidate images. [Development profile](../../../deploy/README.md)
 
 Add `--atlas` to start the private RabbitMQ, Compromise NLP, and Rust-BERT classifier services. Submit a durable cycle with `venture client atlas start --request-id <id>`. Use a new request ID for each new collection. The [Atlas deployment guide](../../../deploy/atlas-dispatch.md) explains the provider and model files required for a live cycle.
 
@@ -52,9 +54,11 @@ Set `FLEETWORKS_WORKSPACE` and `ARGOS_HOME` to the same absolute workspace path.
 
 Run `argos-api-host --role bootstrap` before serving against the authenticated datastore. It applies the schema and creates the database-scoped Editor account. Set `FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE` and `FLEETWORKS_STORAGE_PASSWORD_FILE` to files containing the bootstrap and runtime passwords. The root username defaults to `root` and can be set with `FLEETWORKS_STORAGE_ROOT_USERNAME`. Use a randomly generated 32–256 character runtime password with letters, digits, or `-._~`. Keep the runtime password file across restarts. A new in-memory server starts with a new database identity.
 
-Then run `argos-api-host --role api` and `argos-api-host --role worker` with the runtime credentials. The API additionally needs `FLEETWORKS_API_TOKEN_FILE` and `FLEETWORKS_API_ALLOWED_HOSTS`. The latter is a comma-separated list of exact Host authorities, such as `127.0.0.1:8080,localhost:8080`. Set `FLEETWORKS_API_ALLOWED_ORIGINS` to the allowed browser origins. The API binds to loopback unless `FLEETWORKS_API_BIND` is set explicitly. The worker runs the background pools without an HTTP listener.
+Then run the host with `--role api`, `--role worker` and `--role brief-worker` using the runtime credentials. The API additionally needs `FLEETWORKS_API_TOKEN_FILE` and `FLEETWORKS_API_ALLOWED_HOSTS`. The latter is a comma-separated list of exact Host authorities, such as `127.0.0.1:8080,localhost:8080`. Set `FLEETWORKS_API_ALLOWED_ORIGINS` to the allowed browser origins. The API binds to loopback unless `FLEETWORKS_API_BIND` is set explicitly. Both worker roles run without an HTTP listener.
 
-For a standalone private Brain process, use `argos-api-host --role brain` with the same network storage settings and set `FLEETWORKS_BRAIN_BIND` and `FLEETWORKS_BRAIN_ALLOWED_HOSTS` as needed. Provide a shared `FLEETWORKS_INTERNAL_TOKEN_FILE` to Brain and the gateway API, and set `FLEETWORKS_BRAIN_ORIGIN` on the gateway to the private service origin. The Compose base stack provisions a separate `brain-token` for this connection. Brain handles actor dossiers, retained brief details and actions, Related articles, and topology operations. The existing worker owns background brief execution and the gateway retains live event streams.
+For a standalone private Brain process, use `argos-api-host --role brain` with the same network storage settings and set `FLEETWORKS_BRAIN_BIND` and `FLEETWORKS_BRAIN_ALLOWED_HOSTS` as needed. Provide a shared `FLEETWORKS_INTERNAL_TOKEN_FILE` to Brain and the gateway API, and set `FLEETWORKS_BRAIN_ORIGIN` on the gateway to the private service origin. The Compose base stack provisions a separate `brain-token` for this connection. Brain handles actor dossiers, retained brief details and actions, Related articles, and topology operations. The brief worker owns execution and publication. The gateway owns live event streams.
+
+The private Tools role serves the catalog, submission and result routes. In a standalone deployment, set `FLEETWORKS_TOOLS_ORIGIN` on the gateway and point its `FLEETWORKS_TOOLS_TOKEN_FILE` and the Tools process at the same private bearer file. Venture provisions this automatically.
 
 With the Atlas overlay, the private `atlas-worker` consumes durable RabbitMQ deliveries. A transaction in SurrealDB records the job and outbox state before dispatch. Cancellation, retries, and replay of a completed run follow the stored job revision and database identity. The broker carries delivery references and never owns the application records. The private `nlp` and `classifier` roles accept bounded authenticated requests. Use `venture train-legacy` for a separate Natural classifier training run against a snapshot of the selected CSV.
 
@@ -64,10 +68,10 @@ With the Atlas overlay, the private `atlas-worker` consumes durable RabbitMQ del
 | --- | --- |
 | Venture and workspace | Workspace initialization, explicit key/default import, owned lifecycle and client launch |
 | Atlas | Durable submission, worker dispatch, cancellation, retry and completed-run replay. The overlay serves NLP and Rust-BERT separately. Storage-backed NewsAPI tools share Atlas's daily NewsAPI quota in SurrealDB. |
-| Brain and Intel | Private Brain owns retained actor, article brief, Related and topology HTTP operations. Background brief execution and live streams still use the existing worker and gateway. |
-| Tools, Models and Profile | Catalog, role-default and workspace/health reads through the client suite. Tool execution and full configuration/export parity remain open. |
-| Interactive terminal | Line-oriented Jobs and Logs session with details, retry and cancellation. Other clients expose commands. Additional interactive client views remain open. |
-| Service cutover | Further domain extraction, cross-worker model admission and cooldowns, packaged release verification and Recon retirement remain open. |
+| Brain and Intel | Private Brain owns retained actor, article brief, Related and topology HTTP operations. The dedicated brief worker runs the stages and replays their stored publication work. The gateway owns live streams. |
+| Tools, Models and Profile | The private Tools service runs authenticated manual calls and records durable results. Models reads and saves role defaults. Profile reports workspace and health and writes portable configuration exports on the server. |
+| Interactive terminal | All six clients open a line-oriented session from `venture client <app>`. Use an explicit subcommand for one-shot output. Jobs and Logs supports details, retry and cancellation. |
+| Service cutover | Network workers share model RPM and cooldowns per provider. Shared account concurrency, broader service extraction, published image verification and compatibility Recon retirement remain open. |
 
 The [integrated checkpoint at `4038049`](https://github.com/xxxcess/argos-osint/actions/runs/42781577487) passed native Linux and Intel macOS clients, real Intel Rust-BERT inference, ARM64 server verification, the private Brain relay, the Atlas quota contract, native RabbitMQ dispatch and packaged Compose on Linux ARM64 and AMD64. The [implementation plan](../../../.planning/2026-11-09-fleetworks-overhaul/task_plan.md) tracks the remaining acceptance work.
 

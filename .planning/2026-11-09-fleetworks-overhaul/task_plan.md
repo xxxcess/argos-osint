@@ -31,8 +31,8 @@ Acceptance: user can review scope and implementation order without relying on ch
 ### Phase 2 — Baseline, guidance transition and contracts
 Status: in implementation
 - [x] Record current tree and retained-function acceptance map; preserve dirty files.
-- [ ] Inventory all planning/docs/agent surfaces; assign retain, update, supersede or remove dispositions, preserving unresolved work.
-- [ ] Update canonical execution/testing guidance to distinguish legacy checks from approved Fleetworks checks; do not claim unbuilt features exist.
+- [x] Inventory planning, archives and agent surfaces and record retention decisions. See [dispositions](decisions.md).
+- [x] Update canonical execution and testing guidance for scoped Fleetworks checks and compatibility coverage.
 - [x] Establish lightweight versioned HTTP contracts, clients and workspace configuration. Service ownership continues in Phase 4.
 - [x] Move the legacy SurrealDB CI archive pins to a maintained release manifest with an offline validation fixture.
 Acceptance: no cleanup destroys a runtime/CI dependency; guidance and scope selection have a single source of truth.
@@ -42,34 +42,38 @@ Status: in implementation
 - [x] Implement workspace resolution, configuration/secrets loading and explicit API-key/model-default import.
 - [x] Implement managed host memory/disk SurrealDB and external disk-server configuration, authentication and TLS.
 - [x] Move shared model execution out of Recon and update retained consumers to use the shared module.
-- [ ] Extract the remaining shared graph, jobs and cancellation primitives from Recon.
+- [x] Extract shared Brain graph types from Recon and move retained storage selection to the common runtime.
+- [ ] Remove remaining retained job, tool-binding and historical record dependencies from Recon.
 - [ ] Split contracts/client/UI crates from RocksDB, ONNX and QuickJS dependencies.
 Acceptance: all three storage selections work through a network endpoint; original .argos state remains untouched.
 
 ### Phase 4 — Services and durable execution
 Status: in implementation
 - [x] Separate API serving, schema bootstrap and background workers. Dedicated domain entrypoints and their actions continue below.
-- [ ] Complete service boundaries. Atlas, NLP and classifier roles are wired. The private Brain role serves retained actor, topology and Intel brief HTTP operations. Separate brief execution and live progress, model execution and tool execution remain in scope.
+- [x] Wire private Atlas, NLP, classifier, Brain and Tools roles, with brief execution in its own worker.
+- [ ] Finish separate model execution, control and job service ownership.
 - [x] Admit Focus Brief jobs, runnable tasks, captured inputs and the retained run fence in one transaction before splitting the worker.
 - [x] Commit each brief stage output, metadata, task state and final retained run fence together.
-- [ ] Make post-commit display, Brain and index publication durable and replayable before splitting the brief worker.
+- [x] Persist and replay brief display, Brain and index publication from completed stages.
 - [x] Introduce the Atlas RabbitMQ outbox and durable dependency, cancellation and completion fences. Expansion to the remaining service pools is pending.
-- [ ] Centralize provider quota and cooldown admission. Atlas daily collection and storage-backed NewsAPI tools use atomic shared reservations. Shared model/account RPM and cooldowns remain in scope.
+- [ ] Centralize provider quota and cooldown admission. Atlas daily collection and storage-backed NewsAPI tools use atomic shared reservations. Network model workers share per-provider RPM and cooldowns. Cross-process account concurrency and priority remain open.
 Acceptance: retained pipeline fixture completes across processes; duplicate delivery cannot duplicate committed effects.
 
 ### Phase 5 — Venture, clients and Compose
 Status: in implementation
-- [ ] Convert terminal screens to API clients and expose the agreed CLI suite. The six clients expose command entrypoints, and Venture can attach the web stack terminal to the network Jobs view or service logs. Interactive parity for the other clients remains open.
+- [x] Expose interactive and one-shot network modes for all six terminal clients. Venture can attach the web stack terminal to Jobs or service logs.
+- [ ] Verify full retained interactive parity, including actor discovery and configuration edge cases.
 - [x] Add Venture service reconciliation, configuration, visible workspace, health and logs for the managed disk and external Compose profiles.
-- [ ] Add Compose baseline, optional disk SurrealDB profile, development overrides and multi-architecture image outputs.
+- [x] Add the Compose baseline, disk profile, development override and no-build startup for preloaded images.
+- [ ] Complete hosted candidate image verification and registry release acceptance.
 - [ ] Configure API/web bind addresses, Host/origin policy and service reconnection.
 Acceptance: Venture launches every client and web mode; client exit leaves services running; explicit stop respects service ownership.
 
 ### Phase 6 — Verification automation and repository reorganization
 Status: in implementation
-- [ ] Implement scope planner plus local/pr/full execution using shared scope definitions. Local planning and hosted scope selection use the same script. Unified execution modes are still open.
-- [ ] Add dependency-aware selection, always-reporting aggregate check and phase timing artifacts.
-- [ ] Introduce Linux ARM64 primary service lane, scoped web/TUI lanes and platform compatibility coverage.
+- [x] Implement plan, local, pr and full modes around the shared scope planner and explicit hosted dispatch.
+- [x] Add dependency-aware selection, a required aggregate check and phase timing artifacts.
+- [x] Add ARM64 primary service verification, scoped web and native lanes, and a scheduled full workflow.
 - [ ] Reorganize into apps, services, shared crates/packages and deployment assets; rename product outputs.
 - [ ] Remove Recon only after retained dependencies are extracted; retire embedded application storage after parity.
 Acceptance: scope fixtures prove narrow changes stay narrow and shared changes widen correctly.
@@ -77,9 +81,9 @@ Acceptance: scope fixtures prove narrow changes stay narrow and shared changes w
 ### Phase 7 — Documentation and planning reconciliation
 Status: in implementation
 - [x] Rebrand active product documentation as Fleetworks and replace old launcher instructions with Venture setup.
-- [ ] Complete the remaining contributor and planning dispositions in acceptance.md.
-- [ ] Reconcile every existing plan: retain active work, promote lasting decisions, mark superseded direction, remove reviewed obsolete artifacts and repair links.
-- [ ] Retire old SQL migration/cleanup instructions; retain live SurrealQL and useful dependency guards.
+- [x] Reconcile current contributor guidance and record older plan and archive dispositions.
+- [x] Audit existing plans and archive references. Preserve live compatibility contracts and historical records.
+- [x] Audit old SQL and migration references. Keep the active SurrealQL, compile-time dependencies and dependency guards.
 - [x] Replace stale active diagram pairs, remove the old CI matrix and archive historical figures. Update current tags, indexes, onboarding and release guidance.
 Acceptance: maintained instructions consistently describe Fleetworks and scoped verification; historical evidence is not rewritten as current behavior.
 
@@ -87,7 +91,7 @@ Acceptance: maintained instructions consistently describe Fleetworks and scoped 
 Status: pending
 - [ ] Freeze and run agreed affected checks plus full migration parity/recovery suite.
 - [x] Verify Venture-owned packaged Compose from source on native Linux AMD64 and ARM64.
-- [ ] Verify published native CLI and container release artifacts and the remaining storage/recovery matrix.
+- [ ] Verify the new hosted CLI and image candidate workflows, published registry artifacts and the remaining storage/recovery matrix.
 - [ ] Inspect UI/TUI captures and changed diagram pairs; check documentation links.
 - [ ] Record timing comparison, failures, skips, evidence revision and remaining limitations.
 Acceptance: no unrun test is presented as passed; independent findings are deferred.
@@ -107,4 +111,4 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
 
 ## Next Step
-Make retained brief publication replayable before splitting the brief worker. Separate service-level model and tool execution before retiring Recon. Advance terminal parity and published artifact verification.
+Review the candidate and full workflow results. Finish shared account admission and remaining service boundaries, then remove the compatibility Recon entrypoints after retained parity is verified.

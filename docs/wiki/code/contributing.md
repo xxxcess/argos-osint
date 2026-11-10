@@ -19,9 +19,9 @@ ARGOS_WEB_TEST_DEV=1 pnpm check:web-build
 
 Without that setting, both retain the normal launcher `.next` behavior. The isolated build/check pair does not establish a production browser pass or the full frontend gate. After that pair, `ARGOS_WEB_TEST_DEV=1 pnpm test:e2e` runs the repository’s default production browser profile against the same isolated output. Development uses `ARGOS_WEB_PROFILE=dev pnpm test:e2e` and always isolates output. Never stop the user’s launcher or remove its lock to make verification run.
 
-Rust 1.95.0 pinned. Agents always build through `python3 scripts/agent_cargo.py … --locked` (artifacts in `target/agents`; `target/debug` is the user's), with `ARGOS_EMBED` unset (the wrapper removes inherited values). `cargo fmt` runs directly. Local Rust builds and tests target the **host machine's native platform** (`uname -ms`, `rustc -vV | grep '^host:'`) and **embedded storage mode** (`--storage embedded`, default features `embedded,nlp,classifier`).
+Rust 1.95.0 is pinned. Agents build through `python3 scripts/agent_cargo.py … --locked`, which writes to `target/agents`. Leave `ARGOS_EMBED` unset. The wrapper also removes inherited values. Use `cargo fmt` directly. Keep `target/debug` for the user's builds. Local checks use the host's native architecture.
 
-Use the [Fleetworks scopes](ci.md#fleetworksyml--scoped-branch-checks) for network-client, deployment and service changes. The targeted Venture and client tests do not start a datastore. Run hosted Fleetworks checks for network-service or packaged Compose evidence and the embedded gate for affected compatibility runtime paths. Keep local and hosted results separate.
+For Fleetworks client, service, deployment or web work, start with the [scope planner](ci.md#fleetworksyml--scoped-branch-checks). `local` runs the selected host-native iteration checks and includes working-tree paths. Venture and client unit tests need no datastore. Run the selected hosted checks for platform, server and packaged evidence. Use the embedded gate for affected compatibility and embedded-storage behavior.
 
 ### Verification ownership and host resources
 
@@ -31,7 +31,7 @@ One integration/build owner uses a stable feature graph and resource-based concu
 
 Check `df -h .` and scoped `du -sh` before builds, between large phases and at handoff.
 
-- Retain the selected native/embedded `target/agents` profile, useful binary and reusable dependencies/fingerprints/incremental cache. Protect the user's `target/debug` by default.
+- Retain the selected native `target/agents` profile, useful binary and reusable dependencies, fingerprints and incremental cache. Protect the user's `target/debug` by default.
 - Remove only proven obsolete repo-local agent artifacts. Check exact ownership, path and active processes/locks first; age or an unused lock alone is insufficient proof.
 - Never clean active builds, remove locks to bypass contention, run blanket `cargo clean`, or erase global caches, source, user data or unresolved evidence.
 - Budget growth plus a reserve from a comparable build. If space is insufficient, report the shortfall instead of starting a likely failed build or silently reducing required checks.
@@ -39,7 +39,7 @@ Check `df -h .` and scoped `du -sh` before builds, between large phases and at h
 
 ### Targeted local Rust builds and tests (fast iteration)
 
-Detect the native host with `uname -ms` and `rustc -vV | grep '^host:'`. Reuse the selected feature graph, default `embedded,nlp,classifier`, and `target/agents`; set `CARGO_BUILD_JOBS` from memory pressure. Scope by package/target/filter without changing graphs unnecessarily.
+Detect the native host with `uname -ms` and `rustc -vV | grep '^host:'`. Reuse one feature graph and `target/agents`. Set `CARGO_BUILD_JOBS` from memory pressure. For an affected embedded contract, keep the workspace's compatibility features `embedded,nlp,classifier`.
 
 ```sh
 python3 scripts/agent_cargo.py check --locked -p argos-osint-core
@@ -49,7 +49,15 @@ ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 \
   --test storage_jobs <filter> -- --nocapture
 ```
 
-Use `--lib`, `--bin <bin>` or `--test <name>` for the relevant target. Preserve activating targets when matching workspace features; zero-match targets are not passes. `python3 scripts/test_surreal.py --mode embedded --no-fail-fast` runs required embedded contracts. CLI/API/PTY checks follow the affected contract in [CI](ci.md).
+Use `--lib`, `--bin <bin>` or `--test <name>` for the relevant target. Preserve activating targets when matching workspace features. Confirm that tests ran. `python3 scripts/test_surreal.py --mode embedded --no-fail-fast` runs required embedded contracts. CLI, API and PTY checks follow the affected contract in [CI](ci.md).
+
+For an authorized focused Fleetworks storage contract, use an isolated pinned server and the network service feature graph. Resolve the checksum-verified executable with `python3 scripts/test_surreal.py --mode server --fetch-only`.
+
+```sh
+ARGOS_SURREAL_MODE=server ARGOS_SURREAL_REQUIRED=1 ARGOS_SURREAL_BIN=/absolute/path/to/surreal \
+  python3 scripts/agent_cargo.py test --locked -p argos-osint-core \
+  --no-default-features --features server,nlp,classifier --test storage_brief
+```
 
 ### Fail early, then run the gate
 
@@ -57,16 +65,16 @@ Follow the [scope/freeze policy](agent-workflow.md#scope-and-finish-line). Exerc
 
 ### Full local embedded gate & GitHub CI monitoring
 
-After targeted stability, run:
+For affected embedded and compatibility changes, run the native gate after focused stability.
 
 ```sh
 env -u ARGOS_SURREAL_MODE -u ARGOS_SURREAL_BIN -u ARGOS_SURREAL_REQUIRED \
   scripts/local_matrix.sh --storage embedded
 ```
 
-The gate runs format, Clippy, workspace tests, CLI smoke and required embedded storage. Parent mode variables stay unset so mode-selected storage runs once; targeted storage tests set mode/required explicitly. Some native-only fixtures execute in both phases: inspect their mode contracts before estimating work.
+The gate runs format, Clippy, workspace tests, CLI smoke and required embedded storage. Parent mode variables stay unset so mode-selected storage runs once. Targeted storage tests set mode and required execution explicitly. Some native-only fixtures execute in both phases.
 
-Never run the local all-platform, server storage or Rust mutation matrix/baselines. Once changes are published, inspect hosted checks when available (`gh pr checks`, `gh run list`, `gh run view --log-failed`); no hosted pass is implied by local results. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in and is not part of ordinary checks.
+Run full server, all-platform and Rust mutation checks in hosted CI. Once changes are published, inspect the checks for the exact revision with `gh pr checks`, `gh run list` or `gh run view --log-failed`. `.github` remains Code Architect-owned. MiniLM requires explicit opt-in.
 
 ## Storage facts
 
@@ -104,7 +112,7 @@ The seed corpus resolution order for the classifier is:
 
 ## Workflow rules
 
-- **Worktrees are edit-only:** in a feature worktree run only `cargo fmt`. One combined integration tree runs the gate (`local_matrix.sh --storage embedded`).
+- **Worktrees are edit-only:** run only `cargo fmt` there. The integration checkout owns scoped verification and any affected compatibility gate.
 - **Scope and verification:** follow the [finish-line policy](agent-workflow.md#scope-and-finish-line); no unrequested cleanup, late broad audits or unchanged full-suite retries.
 - **Commits:** Conventional Commits (`feat` minor, `fix`/`perf` patch; breaking = `!` + `BREAKING CHANGE:` footer). Check with `node scripts/release_check.mjs message --file <path>` and `… versions`. Release Please owns version bumps; never hand-bump or invent `Release-As`. Stage exact paths; preserve unrelated changes.
 - **`.github`** changes go through Code Architect.

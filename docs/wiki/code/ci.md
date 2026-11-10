@@ -8,7 +8,7 @@ Workflows live in `.github/workflows/` (owned by Code Architect).
 
 ## `ci.yml` — build and test matrix
 
-Runs on pushes to `main` and when a PR is opened, reopened or marked ready for review (drafts skipped). PR pushes do not build. Adding the `ci:full` label to a PR runs the full matrix in that PR's checks; Code Architect adds it at the end of a feature, fix or review-fix round (remove and re-add it to run again). A manual dispatch (`gh workflow run ci.yml --ref <branch>`) runs it on a branch with no PR, but those runs don't show in PR checks. All 8 legs run every time. `fail-fast: false`, 90-minute timeout, Rust 1.95.0, no debuginfo.
+The compatibility matrix covers the existing `argos` executable and embedded and server storage contracts. It runs on pushes to `main` and when a non-draft PR is opened, reopened or marked ready. Use the `ci:full` label for an explicit full run on a PR. A manual dispatch (`gh workflow run ci.yml --ref <branch>`) runs the matrix on a branch. The eight legs use Rust 1.95.0, run without debuginfo and have a 90-minute timeout. Fleetworks PR updates use the scoped workflow below.
 
 | Platform | Runner | Legs |
 |---|---|---|
@@ -26,32 +26,47 @@ Storage tests are selected by `ARGOS_SURREAL_MODE`; with no mode and no `ARGOS_S
 
 Cache: `Swatinem/rust-cache` keyed per OS × storage, covering `target/agents` (where `scripts/agent_cargo.py` builds).
 
-**Local vs. hosted rule:** never run the all-platform or `server` storage stack from `.github/workflows/ci.yml` locally. Agents must **stabilize the local host machine build and embedded storage tests first** (`uname -ms`, `rustc -vV | grep '^host:'`), using [workspace-compatible targeted commands or intentional package-only alternatives](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration) during iteration before running `scripts/local_matrix.sh --storage embedded`. Once local builds are stable and changes are pushed, monitor GitHub Actions checks/runs for issues on other platforms and `server` storage mode when CLI access is available (`gh pr checks`, `gh run list --branch "$(git branch --show-current)"`, `gh run view <run-id> --log-failed`).
+The native embedded leg is the [local compatibility gate](contributing.md#full-local-embedded-gate--github-ci-monitoring) for affected embedded or legacy runtime changes. Keep the full server, all-platform and mutation matrices in hosted CI. Use the [focused recipes](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration) for an authorized isolated network fixture.
 
 ## `fleetworks.yml` — scoped branch checks
 
-The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) runs on pushes to `feat/atlas-zero-shot`, PR updates and manual dispatch. The [scope planner](../../../scripts/fleetworks_verify.py) selects checks from the event commit and changed paths. Docs-only changes skip runtime scopes. Known shared files select the native, server, Compose and broker scopes. Unknown paths, planner changes, a manual dispatch and unavailable diffs select every scope, including Intel Rust-BERT. The aggregate check requires selected jobs to succeed and records the event revision.
+The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) runs on pushes to `main` and `feat/atlas-zero-shot`, PR updates and manual dispatch. It runs the full selection on the default branch once the scheduled workflow is present there. The nightly cron is `17 6 * * *`. The [shared planner](../../../scripts/fleetworks_verify.py) selects jobs from the event commit and changed paths. Markdown and documentation figures skip runtime scopes. Shared Rust contracts widen selection. Unknown paths, planner edits and unavailable comparisons select all scopes. The workflow cancels stale PR runs.
 
 | Scope | Hosted evidence |
 | --- | --- |
-| Native clients | Linux x86-64 and Intel macOS tests and executable smoke for Venture and its sibling clients |
-| Server and broker | Linux ARM64 build/test, network bootstrap and service smoke, plus native RabbitMQ Atlas dispatch when selected |
-| Packaged Compose | Disk and external configuration validation on ARM64. The Compose scope requires Venture-owned image startup, authenticated readiness, relay and Atlas smoke on both Linux ARM64 and Linux AMD64. |
-| Intel Rust-BERT | Native worker build, link, and real checkpoint inference for selected classifier changes or manual dispatch |
+| Native clients | Linux x86-64, Apple silicon macOS and Intel macOS tests and executable smoke for Venture and its sibling clients |
+| Server | Linux ARM64 service check, build, unit tests and network bootstrap and readiness smoke |
+| Storage and broker | Affected disk storage and brief recovery contracts, plus RabbitMQ-backed Atlas dispatch when selected |
+| Packaged Compose | Venture-owned image startup, authenticated readiness, relay and Atlas smoke on Linux ARM64 and AMD64 |
+| Intel Rust-BERT | Intel macOS worker build, link and real checkpoint inference |
+| Web | Locked install, static and unit checks, production build, relay lifecycle and production Chromium contracts. The development browser profile also runs for selected runtime changes. |
 
-Preview the checks selected for a committed local revision.
+The `Fleetworks required` job runs after scope planning and reports the exact event revision. A selected job must succeed. An unselected job is expected to skip. Failed scope planning and missing, failed, cancelled or unexpectedly skipped selected jobs fail the aggregate. Storage and broker checks depend on the server job. The development browser check depends on the web job.
+
+Full mode adds the pinned server storage suite and an AMD64 packaged development readiness check. The native, server and Compose jobs retain timed-phase JSONL and available Cargo timing HTML for seven days. Each record gives the phase, elapsed time, exit status, revision and machine. Use comparable completed runs for timing comparisons.
+
+Preview the scopes selected for the checked-out revision or run the affected local checks.
 
 ```sh
-python3 scripts/fleetworks_verify.py plan --base "$(git rev-parse HEAD^)" --head "$(git rev-parse HEAD)"
+base="$(git rev-parse HEAD^)"
+python3 scripts/fleetworks_verify.py plan --base "$base" --head "$(git rev-parse HEAD)"
+python3 scripts/fleetworks_verify.py local --base "$base"
 ```
 
-Push planning compares the given base directly with HEAD. Use `--event pull_request` for a merge-base comparison. Omitting `--base` plans all scopes. The command prints the plan without executing checks and rejects an expected head that differs from the checkout.
+Push selection compares the two commits directly. Add `--event pull_request` to compare against the merge base. Omitting `--base` selects all scopes. `--head` rejects a mismatched checkout. Local mode also includes working-tree paths and runs static checks plus selected native and web unit checks. It reports the hosted checks still needed.
 
-A configuration check confirms the Compose model resolves. The packaged smoke runs the actual containers. Review the job steps and exact revision when reporting either result. The scoped Fleetworks workflow verifies the network stack. The full matrix covers affected compatibility code and storage engine contracts.
+`pr --base <sha>` and `full` select hosted scopes without starting a workflow. Actions can read those selections via `--github-output`. An explicit dispatch needs an authenticated `gh` and a remote ref at the checked-out commit.
+
+```sh
+python3 scripts/fleetworks_verify.py dispatch pr --ref <branch> --base <sha>
+python3 scripts/fleetworks_verify.py dispatch full --ref <branch>
+```
+
+A Compose configuration check confirms the merged model resolves. The packaged smoke starts the actual containers. Report both by revision and distinguish source-built smoke evidence from published release-artifact verification.
 
 ## Efficient local verification before CI
 
-Follow the [scope/freeze policy](agent-workflow.md#scope-and-finish-line) and [contributor commands](contributing.md). Use one shared-cache build owner, stable features and affected checks; reuse unchanged evidence. After targeted stability, run the required native embedded gate with parent storage-mode variables unset. Server/all-platform/mutation execution stays hosted. Preserve `.github` ownership and user services; report local, skipped and hosted evidence separately.
+Follow the [scope and freeze policy](agent-workflow.md#scope-and-finish-line) and [contributor commands](contributing.md). Use one shared-cache build owner and stable features. For Fleetworks, use the scoped local and hosted checks. For affected compatibility code, run the native embedded gate with parent storage-mode variables unset. Record local, hosted and skipped evidence separately.
 
 ## `datasets.yml` — LFS dataset integrity
 
@@ -63,7 +78,7 @@ Rust, mutation, web and policy checkouts explicitly leave LFS objects unmaterial
 
 The workflow checks the standalone `tools/atlas-bert` workspace using Rust 1.95.0 and its committed lockfile. Direct worker pull requests run formatting and `rust-bert/doc-only` type checks on Linux.
 
-The Fleetworks workflow calls the Intel runtime job for classifier changes and manual Fleetworks dispatches. It verifies the event commit and uses the PyTorch 2.1.0 wheel for Intel macOS and Python 3.11. The job builds, links, tests, and exercises the real checkpoint on `x86_64-apple-darwin`. The native Venture and client executables have their own Intel lane.
+The Fleetworks workflow calls the Intel runtime job for selected classifier changes and full dispatches. It verifies the event commit and uses the PyTorch 2.1.0 wheel for Intel macOS and Python 3.11. The job builds, links, tests, and exercises the real checkpoint on `x86_64-apple-darwin`. The native Venture and client executables have their own Intel lane.
 
 For runtime verification, run `gh workflow run ci.yml --ref <branch> -f atlas_bert_intel_only=true`. This dispatch skips the standard matrix, links and tests the native Intel executable, prepares the pinned MNLI checkpoint with the same script as local setup, and compares its batched and repeated inference against one-item requests. Direct dispatch of `atlas-bert.yml` supports the same runtime checks with `-f intel_runtime=true`. Run the standard matrix separately for application compatibility builds and storage tests. See the [classifier guide](classifier.md) for local setup.
 
@@ -75,9 +90,15 @@ On PRs (including title/body edits) and pushes to `main`: `node scripts/release_
 
 On pushes to `main` (or manual dispatch): Release Please opens/updates the release PR and tags from Conventional Commits (`release-please-config.json`, `.release-please-manifest.json`). Uses a GitHub App token or `RELEASE_PLEASE_TOKEN` so release PRs trigger CI; see [versioning.md](versioning.md).
 
+## `fleetworks-candidate.yml` — native CLI release candidates
+
+The [candidate workflow](../../../.github/workflows/fleetworks-candidate.yml) builds release binaries for Linux AMD64 and ARM64 and Intel and Apple silicon macOS. Start a run on a remote ref with `gh workflow run fleetworks-candidate.yml --ref <branch> -f head=<sha>` to pin the exact commit. The workflow uploads one archive and its SHA-256 for each target and retains them for 14 days.
+
+A separate native job downloads the exact artifact by ID, verifies its archive and file hashes, checks the revision, version and executable architecture, and runs the installed Venture and client binaries. These Actions artifacts are release candidates. Public release distribution and published OCI image acceptance are separate from this workflow.
+
 ## `intel-web.yml` — local web client checks
 
-The web workflow runs on matching web, configuration, build check, or `scripts/fixtures/atlas_bert` changes on `main` and pull requests (including PR pushes), plus manual dispatch. Node comes from `.node-version`; pnpm is pinned to 12.15.0. The first-party checkout/setup/artifact actions are pinned to their verified v7 commit SHAs. Existing Rust, commit-policy and release workflows are unchanged. Agents start here and inspect the affected workflow files before selecting checks; workflow edits remain Code Architect-owned.
+The web workflow runs directly for matching pushes and PR updates, and by manual dispatch. The Fleetworks aggregate also calls it with the exact revision and a development-browser selection. The direct and aggregate jobs can both run on a web PR while compatibility checks remain configured. Node comes from `.node-version` and pnpm is pinned to 12.15.0.
 
 | Check | Enforced behavior |
 | --- | --- |
@@ -87,7 +108,7 @@ The web workflow runs on matching web, configuration, build check, or `scripts/f
 | `pnpm build` | Next server build using the strict React Compiler pipeline; the upstream need not run at build time |
 | `pnpm check:web-build` | Built Next configuration retains strict compiler options and RN Web/shared transpilation; compiled **application** chunks contain compiler memoization (framework runtime alone is insufficient) |
 | `pnpm test:live` | Offline raw-relay, production runtime/restart and isolated development/HMR lifecycle contracts using the Atlas BERT worker fixture. Runs after the Next build and browser installation. |
-| Offline Playwright | The same Chromium fixtures run against the production Next server and the Next development server; both exercise RN Web UI, compilation, hydration, connection/actions and responsive layout. Production nonce CSP and same-origin API assertions apply to the production server. |
+| Offline Playwright | Chromium exercises the RN Web UI, compilation, hydration, connection and actions, and responsive layout against the production Next server. Direct workflow runs and selected aggregate runs also run the same fixtures against the development server. Production nonce CSP and same-origin API assertions apply to the production server. |
 | Retained evidence | Export/dev test results and screenshots use separate directories under `test-results/`; HTML reports use `playwright-report/export` and `playwright-report/dev`. Uploaded with `always()` and seven-day retention. |
 
 Local agents can isolate the production build/check pair with `ARGOS_WEB_TEST_DEV=1 pnpm build` followed by `ARGOS_WEB_TEST_DEV=1 pnpm check:web-build`. Both use the existing `.agent-scratch/next-web-tests` mapping and preserve launcher `.next`; omitting the setting keeps default build behavior. This pair verifies compiled output. Follow with `ARGOS_WEB_TEST_DEV=1 pnpm test:e2e` for the default production browser profile using that same isolated build; development remains `ARGOS_WEB_PROFILE=dev pnpm test:e2e`. Browser results and the full frontend gate remain separate evidence. Follow the [contributor isolation rules](contributing.md#build-and-test) and keep the user’s frontend running.
@@ -95,10 +116,6 @@ Local agents can isolate the production build/check pair with `ARGOS_WEB_TEST_DE
 New PR web runs cancel stale runs for the same PR; main runs are not cancelled. The web job has a 25-minute limit for the build, live lifecycle tests and both browser profiles.
 
 The evidence upload ignores absent files when an earlier step fails; it does not turn a missing build/test into a pass. Captures are review evidence, not automatic visual approval. No public deployment, live provider keys, secrets or native builds are involved. Path filters mean a docs-only PR does not run this job; configure required checks with that behavior in mind rather than assuming a workflow run for every PR.
-
-The user authorized the original web workflow addition and this follow-up CI update under Code Architect ownership. Workflow/action validation, the real build guard (including rejection cases), peer/type/lint/build/browser commands and artifact generation are checked locally. Hosted Actions execution requires publication and is not claimed as local evidence.
-
-Local build owners apply [build cache hygiene](contributing.md#build-cache-hygiene) before verification, between large phases and at handoff. Preserve the reusable host/embedded cache, reclaim verified obsolete artifacts and measure disk headroom before launching the next gate.
 
 Chromium browser fixtures disable LCD subpixel text and font hinting so the shared screenshot baselines use grayscale text on Linux and macOS. Keep the screenshot pixel threshold unchanged; inspect real layout or state differences rather than accepting them as rasterization noise.
 
@@ -108,7 +125,9 @@ Worker lifecycle and ordered-queue fixtures own isolated test processes, private
 
 ## Supplemental process checks
 
-Launcher/stack lifecycle changes also run `python3 scripts/test_web_stack.py --terminal-captures .agent-scratch/stack-review` after building `argos` and `argos-api-host` through the isolated Cargo wrapper and building the Next server. `--tui-only --tui-web-profile installed` narrows this to Venture back/value restoration, TUI return, same-parent storage reuse, shared API/Web TUI and terminal cleanup. These PTY/process checks are local supplemental evidence; the workflows above do not execute this script. Keep actual hosted results separate.
+For the Fleetworks packaged stack, use [Venture's Compose smoke](../../../deploy/verify.py). Its `--dev` option checks development readiness and shutdown. Browser reload is covered separately by the web fixtures.
+
+For changes to the compatibility launcher, run `python3 scripts/test_web_stack.py --terminal-captures .agent-scratch/stack-review` after building `argos` and `argos-api-host` through the isolated Cargo wrapper and building the Next server. `--tui-only --tui-web-profile installed` narrows this to Venture back/value restoration, TUI return, same-parent storage reuse, shared API/Web TUI and terminal cleanup. These PTY/process checks are local supplemental evidence; the workflows above do not execute this script. Keep actual hosted results separate.
 
 The composer-launch regression `python3 scripts/test_web_stack.py --composer-smoke`
 runs the same PTY harness in its own temp `ARGOS_HOME`: `storage init --mode
@@ -131,4 +150,4 @@ The runner keeps the unmutated baseline check, fails on missed or timed-out muta
 
 ## Rust mutation execution restriction
 
-Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Local mutation execution is deliberately skipped, not passed; ordinary targeted checks and the embedded gate remain required.
+Until further notice, agents must not run Rust mutation tests or mutation baselines locally, including `cargo mutants` and cargo-mutants runner invocations. Use the GitHub Actions `mutation.yml` workflow for execution and inspect its hosted results. Report local mutation execution as skipped. Run the ordinary targeted checks and any affected compatibility gate.

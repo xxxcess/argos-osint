@@ -1,7 +1,7 @@
 //! The async SurrealDB repository (P4 consumer port, Option B).
 //!
 //! A [`Repository`] is a cheap-to-clone handle on one bootstrapped store.
-//! Every constructor goes through `ensure_schema`. Consumers get one from
+//! Every constructor applies or verifies the schema. Consumers get one from
 //! [`super::runtime::repository`] (the single process entry point) and call
 //! the storage modules with [`Repository::db`]. The legacy `Store` stays
 //! untouched beside it until phase 5.
@@ -65,7 +65,7 @@ impl Repository {
         ))
     }
 
-    /// A store at an explicit target (tests, tools).
+    /// A store at an explicit target, with no local process ownership lease.
     pub async fn connect(target: &Target, ns: &str, database: &str) -> Result<Self> {
         let opened = open::open(target, ns, database)
             .await

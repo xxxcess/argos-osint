@@ -21,6 +21,8 @@ serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
 sysinfo.workspace = true
+sha2.workspace = true
+subtle = "2.6"
 
 [dev-dependencies]
 tempfile.workspace = true

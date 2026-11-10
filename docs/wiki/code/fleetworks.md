@@ -26,4 +26,20 @@ The clients default to `http://127.0.0.1:8080`. Pass `--api-origin` or set `FLEE
 
 See the [CLI command reference](../../../apps/fleetworks-cli/README.md) for route-specific commands and their API requirements. Use `venture status` for storage-backed readiness and `venture client <app> --help` for an individual CLI.
 
-Compose orchestration, durable dispatch, separately runnable domain services, and terminal parity are tracked in the implementation plan.
+## Run the network API and workers
+
+Build the service host with network storage enabled.
+
+```sh
+cargo build --locked -p argos-api-host --no-default-features --features server,nlp,classifier
+```
+
+Set `FLEETWORKS_WORKSPACE` and `ARGOS_HOME` to the same absolute workspace path. Set `FLEETWORKS_STORAGE_URL` to the SurrealDB `ws://` origin on a private network or `wss://` origin for TLS. The namespace, database, and runtime username default to `fleetworks`. Use `FLEETWORKS_STORAGE_NAMESPACE`, `FLEETWORKS_STORAGE_DATABASE`, and `FLEETWORKS_STORAGE_USERNAME` to override them.
+
+Run `argos-api-host --role bootstrap` once against an authenticated server. It applies the schema and creates the database-scoped Editor account. Set `FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE` and `FLEETWORKS_STORAGE_PASSWORD_FILE` to files containing the bootstrap and runtime passwords. The root username defaults to `root` and can be set with `FLEETWORKS_STORAGE_ROOT_USERNAME`. Use a randomly generated 32–256 character runtime password with letters, digits, or `-._~`. Keep the runtime password file across restarts. A new in-memory server starts with a new database identity.
+
+Then run `argos-api-host --role api` and `argos-api-host --role worker` with the runtime credentials. The API additionally needs `FLEETWORKS_API_TOKEN_FILE` and `FLEETWORKS_API_ALLOWED_HOSTS`. The latter is a comma-separated list of exact Host authorities, such as `127.0.0.1:8080,localhost:8080`. Set `FLEETWORKS_API_ALLOWED_ORIGINS` to the allowed browser origins. The API binds to loopback unless `FLEETWORKS_API_BIND` is set explicitly. The worker runs the background pools without an HTTP listener.
+
+The default combined role preserves the local Argos API and worker behavior. Durable dispatch, dedicated domain roles, and terminal parity are tracked in the implementation plan.
+
+Use [the network smoke](../../../scripts/fleetworks_network_smoke.py) with the built host and the repository-pinned SurrealDB 3.3.4 binary. It creates isolated memory and disk fixtures and checks authenticated startup, retained routes and restart behavior.

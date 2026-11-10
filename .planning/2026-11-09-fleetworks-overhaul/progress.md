@@ -26,5 +26,11 @@ Venture initializes the workspace and its private API token, imports a safe subs
 
 Linux x86-64 Rust 1.95.0 checks passed for the four new packages. All 12 focused Rust tests and nine release policy tests passed. A native smoke test exercised the built binaries through workspace initialization, JSON Profile output, six sibling launches, and an authenticated readiness request to a local fixture. The server roles, Compose and hosted platform gates are pending.
 
+## Rebuild checkpoint 2
+
+The API host now has distinct bootstrap, authenticated API and background worker roles. The legacy combined role stays available. Network storage uses separate bootstrap and database-scoped credentials. The runtime verifies the exact schema version and supports verified TLS. Tools, Models, Profile and Logs use retained API reads.
+
+The network-enabled build and 13 focused Rust tests passed. The native smoke passed against SurrealDB 3.3.4 in memory and disk modes. It verified privileged bootstrap, scoped runtime login, the API ingress policy, retained reads, worker lifetime, identity reset for memory, and identity retention for disk. Hosted Linux ARM64 and Intel macOS results will be recorded separately. Compose runtime verification remains pending.
+
 ## Retention
 Working task_plan/findings/progress are ignored local planning memory. design.md and acceptance.md are curated review artifacts eligible for Git, not staged or committed here.

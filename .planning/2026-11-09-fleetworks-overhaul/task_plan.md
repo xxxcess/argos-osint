@@ -47,7 +47,7 @@ Acceptance: all three storage selections work through a network endpoint; origin
 
 ### Phase 4 — Services and durable execution
 Status: pending
-- [ ] Separate API serving and domain workers; implement service entrypoints and missing APIs.
+- [x] Separate API serving, schema bootstrap and background workers. Dedicated domain entrypoints and their actions continue below.
 - [ ] Extract NLP, classifier, Atlas, Brain/Intel, model execution and tool execution boundaries.
 - [ ] Introduce RabbitMQ outbox dispatch and preserve durable dependency/cancellation/completion fences.
 - [ ] Centralize provider quota/cooldown admission; preserve warm engines and bounded batches.
@@ -101,4 +101,4 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
 
 ## Next Step
-Wire retained service routes and isolate API, bootstrap and background execution roles. Verify the scoped network storage path before enabling orchestration.
+Wire the Compose lifecycle and authenticated web relay. Register the transactional Atlas outbox and connect the collection worker after the broker checks.

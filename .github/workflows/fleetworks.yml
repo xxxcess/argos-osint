@@ -1,0 +1,228 @@
+name: Fleetworks
+
+on:
+  push:
+    branches: [feat/atlas-zero-shot]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fleetworks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLEETWORKS_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  scope:
+    name: Select verification scopes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      native: ${{ steps.plan.outputs.native }}
+      server: ${{ steps.plan.outputs.server }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.FLEETWORKS_HEAD }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify changes at the event head
+        id: plan
+        env:
+          FLEETWORKS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          head = os.environ["FLEETWORKS_HEAD"]
+          base = os.environ.get("FLEETWORKS_BASE", "")
+          actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if actual != head:
+              raise SystemExit("Checkout does not match the event head")
+
+          event = os.environ["GITHUB_EVENT_NAME"]
+          selected = set()
+          all_scopes = {"native", "server"}
+          if event not in {"push", "pull_request"} or not re.fullmatch("[0-9a-f]{40}", base) or base == "0" * 40:
+              selected.update(all_scopes)
+          else:
+              comparison = f"{base}...{head}" if event == "pull_request" else f"{base}..{head}"
+              diff = subprocess.run(
+                  ["git", "diff", "--name-only", "--no-renames", "-z", comparison, "--"],
+                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+              )
+              if diff.returncode:
+                  print("Diff unavailable. Selecting both scopes.")
+                  selected.update(all_scopes)
+              else:
+                  for path in map(os.fsdecode, diff.stdout.split(b"\0")):
+                      if not path or path in {"README.md", "CHANGELOG.md"}:
+                          continue
+                      if path.startswith(("docs/", ".planning/")) and path.endswith((".md", ".svg", ".html")):
+                          continue
+                      if path.startswith(("apps/venture/", "apps/fleetworks-cli/")):
+                          selected.add("native")
+                      elif path.startswith(("crates/argos-api-host/", "crates/argos-osint-api/",
+                                            "crates/argos-osint-core/", "crates/fleetworks-broker/", "deploy/")):
+                          selected.add("server")
+                      else:
+                          selected.update(all_scopes)
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              for scope in sorted(all_scopes):
+                  print(f"{scope}={str(scope in selected).lower()}", file=output)
+          print(f"{head}: {', '.join(sorted(selected)) or 'no runtime scopes selected'}")
+          PY
+
+  native:
+    name: Native clients / ${{ matrix.runner }}
+    needs: scope
+    if: needs.scope.outputs.native == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            host: x86_64-unknown-linux-gnu
+            executable: 'ELF 64-bit.*x86-64'
+          - runner: macos-15-intel
+            host: x86_64-apple-darwin
+            executable: 'Mach-O 64-bit.*x86_64'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.FLEETWORKS_HEAD }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+      - name: Check native host and run scoped tests
+        env:
+          EXPECTED_HOST: ${{ matrix.host }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
+          test "$(uname -m)" = x86_64
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_HOST"
+          rustc --version | grep -q '^rustc 1\.95\.0 '
+          packages=(-p fleetworks-workspace -p fleetworks-contracts -p fleetworks-cli -p fleetworks-venture)
+          cargo fmt "${packages[@]}" -- --check
+          python3 scripts/agent_cargo.py test --locked "${packages[@]}"
+          python3 scripts/agent_cargo.py build --locked --bins -p fleetworks-cli -p fleetworks-venture
+      - name: Smoke the actual native executables
+        env:
+          EXECUTABLE_PATTERN: ${{ matrix.executable }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bins=target/agents/debug
+          scratch="$(mktemp -d "$RUNNER_TEMP/fleetworks-native.XXXXXX")"
+          workspace="$(cd "$scratch" && pwd -P)/review workspace"
+          for binary in venture fleetworks-{atlas,brain,jobs,tools,models,profile}; do
+            file "$bins/$binary" | grep -E "$EXECUTABLE_PATTERN"
+            "$bins/$binary" --help >/dev/null
+          done
+          "$bins/venture" --workspace "$workspace" init
+          "$bins/venture" --workspace "$workspace" client profile workspace --json |
+            python3 -c 'import json, sys; assert json.load(sys.stdin) == {"workspace": sys.argv[1]}' "$workspace"
+
+  server:
+    name: Server build / Linux ARM64
+    needs: scope
+    if: needs.scope.outputs.server == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.FLEETWORKS_HEAD }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+      - name: Check and build the ARM64 server
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
+          test "$(uname -m)" = aarch64
+          test "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-unknown-linux-gnu
+          rustc --version | grep -q '^rustc 1\.95\.0 '
+          cargo fmt --all -- --check
+          features=(--no-default-features --features server,nlp,classifier)
+          python3 scripts/agent_cargo.py check --locked -p argos-api-host "${features[@]}"
+          python3 scripts/agent_cargo.py build --locked -p argos-api-host --bin argos-api-host "${features[@]}"
+          file target/agents/debug/argos-api-host | grep -Ei 'ELF 64-bit.*(aarch64|ARM aarch64)'
+      - name: Exercise bootstrap and network service roles on loopback
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$(python3 scripts/test_surreal.py --mode server --fetch-only |
+            sed -n 's/^test-surreal: server binary //p')"
+          test -x "$binary"
+          python3 scripts/fleetworks_network_smoke.py \
+            --host target/agents/debug/argos-api-host --surreal "$binary"
+      - name: Validate disk and external Compose configurations
+        if: hashFiles('deploy/compose.yml') != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          export FLEETWORKS_HOST_WORKSPACE="$(mktemp -d "$RUNNER_TEMP/fleetworks-compose.XXXXXX")"
+          export FLEETWORKS_UID="$(id -u)" FLEETWORKS_GID="$(id -g)"
+          umask 077
+          mkdir -p "$FLEETWORKS_HOST_WORKSPACE"/{secrets,storage/surrealdb}
+          for secret in api-token storage-password storage-root-password; do
+            printf '%064d\n' 0 > "$FLEETWORKS_HOST_WORKSPACE/secrets/$secret"
+          done
+          docker compose -f deploy/compose.yml --profile disk config --quiet
+          FLEETWORKS_STORAGE_URL=ws://host.docker.internal:8000 docker compose -f deploy/compose.yml config --quiet
+
+  required:
+    name: Fleetworks required
+    needs: [scope, native, server]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require success for every selected scope
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          NATIVE_SELECTED: ${{ needs.scope.outputs.native }}
+          SERVER_SELECTED: ${{ needs.scope.outputs.server }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          SERVER_RESULT: ${{ needs.server.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$SCOPE_RESULT" != success ]]; then
+            echo "::error::Scope planning finished with $SCOPE_RESULT"
+            exit 1
+          fi
+          verify() {
+            case "$2:$3" in
+              true:success) echo "$1 passed" ;;
+              false:skipped) echo "$1 outside selected scope" ;;
+              *) echo "::error::$1 selected=$2 result=$3"; return 1 ;;
+            esac
+          }
+          failed=0
+          verify native "$NATIVE_SELECTED" "$NATIVE_RESULT" || failed=1
+          verify server "$SERVER_SELECTED" "$SERVER_RESULT" || failed=1
+          echo "Fleetworks revision `$FLEETWORKS_HEAD`" >> "$GITHUB_STEP_SUMMARY"
+          exit "$failed"

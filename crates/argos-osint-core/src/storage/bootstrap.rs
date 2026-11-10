@@ -120,6 +120,53 @@ pub struct Bootstrap {
     pub version: i64,
 }
 
+/// Check the schema version using a database-scoped runtime session.
+///
+/// The runtime process does not write metadata or apply schema definitions.
+pub async fn verify_schema(db: &Surreal<Any>) -> Result<Bootstrap, TxError> {
+    let failed = |_| TxError::Abort("could not read the network storage schema".into());
+    let mut result = db
+        .query("SELECT VALUE version FROM ONLY storage_meta:schema")
+        .await
+        .and_then(|result| result.check())
+        .map_err(failed)?;
+    let version: Option<i64> = result.take(0).map_err(failed)?;
+    match version {
+        Some(version) if version == SCHEMA_VERSION => Ok(Bootstrap {
+            previous: version,
+            version,
+        }),
+        Some(version) => Err(TxError::Abort(format!(
+            "network storage schema version {version} does not match this build ({SCHEMA_VERSION})"
+        ))),
+        None => Err(TxError::Abort(
+            "network storage schema is missing. Run the storage bootstrap".into(),
+        )),
+    }
+}
+
+/// Retain the database identity across restarts. A fresh in-memory server
+/// receives a new identity, which fences work enqueued for the previous store.
+pub(crate) async fn ensure_network_identity(db: &Surreal<Any>) -> Result<(), TxError> {
+    let identity = crate::store::new_id();
+    run_tx(db, RetryPolicy::default(), |tx| {
+        let identity = identity.clone();
+        async move {
+            run(
+                &tx,
+                tx.query(
+                    "UPSERT storage_meta:identity SET instance_id = instance_id ?? $new RETURN NONE",
+                )
+                .bind(("new", identity)),
+            )
+            .await?;
+            Ok(())
+        }
+    })
+    .await?;
+    Ok(())
+}
+
 /// Apply every schema and record [`SCHEMA_VERSION`] in one transaction.
 ///
 /// Analyzer definitions run before that transaction (see the module docs):

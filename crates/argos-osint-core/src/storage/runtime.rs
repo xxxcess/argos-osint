@@ -16,11 +16,23 @@ use tokio::runtime::Handle;
 use tokio::sync::OnceCell;
 
 use super::home::Layout;
+use super::open::Target;
 use super::repo::Repository;
+
+#[derive(PartialEq, Eq)]
+enum Selection {
+    Home,
+    Network {
+        target: Target,
+        namespace: String,
+        database: String,
+    },
+}
 
 struct Entry {
     handle: Handle,
     layout: Layout,
+    selection: Selection,
     repo: OnceCell<Repository>,
 }
 
@@ -29,33 +41,70 @@ static ENTRY: OnceLock<Entry> = OnceLock::new();
 /// Record the runtime and home. Must run inside the runtime; a second call
 /// with the same home is a no-op, with another home an error.
 pub fn init(layout: Layout) -> Result<()> {
+    initialize(layout, Selection::Home)
+}
+
+/// Record an explicit network target without taking a local storage lease.
+/// Repeated initialization must agree on both the workspace and target.
+pub fn init_target(
+    layout: Layout,
+    target: Target,
+    namespace: String,
+    database: String,
+) -> Result<()> {
+    if !matches!(target, Target::Network(_)) {
+        bail!("storage::runtime::init_target needs a network target");
+    }
+    initialize(
+        layout,
+        Selection::Network {
+            target,
+            namespace,
+            database,
+        },
+    )
+}
+
+fn initialize(layout: Layout, selection: Selection) -> Result<()> {
     let handle = Handle::try_current()
         .map_err(|_| anyhow!("storage::runtime::init needs the Tokio runtime"))?;
-    let entry = ENTRY.get_or_init(|| Entry {
+    if let Err(proposed) = ENTRY.set(Entry {
         handle,
-        layout: layout.clone(),
+        layout,
+        selection,
         repo: OnceCell::new(),
-    });
-    if entry.layout.home != layout.home {
-        bail!(
-            "storage runtime already initialized for {}",
-            entry.layout.home.display()
-        );
+    }) {
+        let active = ENTRY
+            .get()
+            .expect("failed set means runtime already initialized");
+        if active.layout.home != proposed.layout.home {
+            bail!(
+                "storage runtime already initialized for {}",
+                active.layout.home.display()
+            );
+        }
+        if active.selection != proposed.selection {
+            bail!("storage runtime already initialized with a different target");
+        }
     }
     Ok(())
 }
 
-/// Whether the process selected SurrealDB: [`init`] ran and the home has a
-/// storage config (an unreadable config counts as configured, so a broken
-/// file fails loudly instead of silently falling back to the legacy store). Cached
-/// after the first call. Without [`init`] (core tests, embedders) this is
+/// Whether the process selected SurrealDB. An explicit network target is
+/// configured immediately. A local home is configured when it has a storage
+/// config, even if the file is unreadable. Without initialization this is
 /// `false` and callers stay on the legacy store.
 pub fn configured() -> bool {
     static CONFIGURED: OnceLock<bool> = OnceLock::new();
     let Some(entry) = ENTRY.get() else {
         return false;
     };
-    *CONFIGURED.get_or_init(|| !matches!(super::home::load_config(&entry.layout), Ok(None)))
+    match &entry.selection {
+        Selection::Home => {
+            *CONFIGURED.get_or_init(|| !matches!(super::home::load_config(&entry.layout), Ok(None)))
+        }
+        Selection::Network { .. } => true,
+    }
 }
 
 fn entry() -> Result<&'static Entry> {
@@ -69,7 +118,16 @@ pub async fn repository() -> Result<Repository> {
     let entry = entry()?;
     entry
         .repo
-        .get_or_try_init(|| Repository::open_home(&entry.layout))
+        .get_or_try_init(|| async {
+            match &entry.selection {
+                Selection::Home => Repository::open_home(&entry.layout).await,
+                Selection::Network {
+                    target,
+                    namespace,
+                    database,
+                } => Repository::connect(target, namespace, database).await,
+            }
+        })
         .await
         .cloned()
 }

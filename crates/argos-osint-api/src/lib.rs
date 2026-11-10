@@ -2,6 +2,8 @@
 mod actor_dossier;
 mod host_metrics;
 mod live;
+mod network;
+mod operations;
 mod topology_summary;
 mod topology_web;
 
@@ -11,7 +13,7 @@ use argos_osint_core::{
 };
 use axum::{
     extract::{DefaultBodyLimit, Query, Request, State},
-    http::{HeaderValue, Method, StatusCode},
+    http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -20,6 +22,10 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
+
+pub use network::{network_origin, NetworkPolicy};
+
+use network::{AccessMode, AccessPolicy};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -44,7 +50,27 @@ pub fn loopback_url(raw: &str) -> anyhow::Result<url::Url> {
     Ok(u)
 }
 
+/// Serves the existing unauthenticated loopback API.
 pub fn router(state: ApiState) -> Router {
+    router_with_access(state, None)
+}
+
+/// Serves the same routes with explicit host, origin and bearer restrictions.
+pub fn network_router(state: ApiState, policy: NetworkPolicy) -> Router {
+    router_with_access(state, Some(policy))
+}
+
+fn router_with_access(state: ApiState, network: Option<NetworkPolicy>) -> Router {
+    let mode = if network.is_some() {
+        AccessMode::Bearer
+    } else {
+        AccessMode::Loopback
+    };
+    let access = AccessPolicy {
+        port: state.port,
+        origins: state.origins.clone(),
+        network,
+    };
     let sampler = Arc::new(std::sync::Mutex::new(host_metrics::HostSampler::default()));
     let feed = Arc::new(host_metrics::HostFeed::new(sampler.clone()));
     Router::new()
@@ -63,6 +89,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/brief/reload", post(reload))
         .route("/api/v1/brief/stages", get(stages))
         .route("/api/v1/jobs", get(jobs))
+        .route("/api/v1/logs", get(operations::logs))
+        .route("/api/v1/tools", get(operations::tools))
+        .route("/api/v1/models/defaults", get(operations::model_defaults))
+        .route("/api/v1/profile", get(operations::profile))
         .route("/api/v1/jobs/detail", get(job))
         .route("/api/v1/jobs/retry", post(retry))
         .route("/api/v1/topology", get(topology_web::read).post(topology))
@@ -74,9 +104,10 @@ pub fn router(state: ApiState) -> Router {
         )
         .layer(axum::Extension(sampler))
         .layer(axum::Extension(feed))
+        .layer(axum::Extension(mode))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn(request_timeout))
-        .layer(middleware::from_fn_with_state(state.clone(), protect))
+        .layer(middleware::from_fn_with_state(access, network::protect))
         .with_state(state)
 }
 
@@ -118,79 +149,16 @@ fn missing() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "Resource not found")
 }
 
-async fn protect(State(s): State<ApiState>, request: Request, next: Next) -> Response {
-    let host = request
-        .headers()
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if host != format!("127.0.0.1:{}", s.port)
-        && host != format!("localhost:{}", s.port)
-        && !(s.port == 80 && matches!(host, "127.0.0.1" | "localhost"))
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "Host refused"})),
-        )
-            .into_response();
-    }
-    let origin = request.headers().get("origin").cloned();
-    if let Some(o) = &origin {
-        if !s
-            .origins
-            .iter()
-            .any(|allowed| o.as_bytes() == allowed.as_bytes())
-        {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({"error": "Origin refused"})),
-            )
-                .into_response();
-        }
-    }
-    if request
-        .headers()
-        .get("sec-fetch-site")
-        .is_some_and(|v| v == "cross-site")
-        && origin.is_none()
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "Origin required"})),
-        )
-            .into_response();
-    }
-
-    let mut response = if request.method() == Method::OPTIONS {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        next.run(request).await
-    };
-    let h = response.headers_mut();
-    h.insert("cache-control", HeaderValue::from_static("no-store"));
-    h.insert(
-        "x-content-type-options",
-        HeaderValue::from_static("nosniff"),
-    );
-    h.insert("vary", HeaderValue::from_static("Origin"));
-    if let Some(o) = origin {
-        h.insert("access-control-allow-origin", o);
-        h.insert(
-            "access-control-allow-methods",
-            HeaderValue::from_static("GET, POST, OPTIONS"),
-        );
-        h.insert(
-            "access-control-allow-headers",
-            HeaderValue::from_static("content-type"),
-        );
-    }
-    response
+async fn ready(State(s): State<ApiState>) -> ApiResult {
+    storage_ready(&s.repo).await?;
+    Ok(Json(
+        json!({"service":"argos-intel","api_version":1,"ready":true,"storage":true,"instance_id":s.instance_id}),
+    ))
 }
 
-async fn ready(State(s): State<ApiState>) -> ApiResult {
+async fn storage_ready(repo: &Repository) -> Result<(), ApiError> {
     // Each probe reaches storage, including after startup. TCP alone is insufficient.
-    let mut response = s
-        .repo
+    let mut response = repo
         .db()
         .query("SELECT VALUE version FROM ONLY storage_meta:schema")
         .await
@@ -201,13 +169,11 @@ async fn ready(State(s): State<ApiState>) -> ApiResult {
     if version != Some(storage::bootstrap::SCHEMA_VERSION) {
         return Err(internal("schema readiness failed"));
     }
-    Ok(Json(
-        json!({"service":"argos-intel","api_version":1,"ready":true,"storage":true,"instance_id":s.instance_id}),
-    ))
+    Ok(())
 }
-async fn capabilities() -> Json<Value> {
+async fn capabilities(axum::Extension(mode): axum::Extension<AccessMode>) -> Json<Value> {
     Json(
-        json!({"api_version":1,"categories":intel::CATEGORIES,"auth":false,"features":["bulletin","brief","related","jobs","topology","live","article-search"],"live":{"path":"/api/v1/live","channels":["metrics","brief"],"version":1}}),
+        json!({"api_version":1,"categories":intel::CATEGORIES,"auth":mode == AccessMode::Bearer,"features":["bulletin","brief","related","jobs","topology","live","article-search","logs","tools","model-defaults","profile"],"live":{"path":"/api/v1/live","channels":["metrics","brief"],"version":1}}),
     )
 }
 async fn days(State(s): State<ApiState>) -> ApiResult {

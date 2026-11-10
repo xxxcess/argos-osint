@@ -1,9 +1,11 @@
-use anyhow::Result;
+mod fleetworks;
+
+use anyhow::{ensure, Result};
 use argos_osint_core::storage::{self, home::Layout};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::{
     future::IntoFuture,
-    net::{Ipv4Addr, SocketAddrV4},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -18,6 +20,20 @@ struct Args {
         value_delimiter = ','
     )]
     origins: Vec<String>,
+    #[arg(long, value_enum, default_value_t = Role::Combined)]
+    role: Role,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Role {
+    /// Existing local API host with its background workers.
+    Combined,
+    /// Authenticated Fleetworks API process.
+    Api,
+    /// Fleetworks background domain workers.
+    Worker,
+    /// Initialize storage and provision the runtime database account.
+    Bootstrap,
 }
 
 fn init_tracing() {
@@ -37,20 +53,111 @@ fn init_tracing() {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
-    let args = Args::parse();
-    let origins = args
-        .origins
-        .iter()
-        .map(|raw| argos_osint_api::loopback_url(raw).map(|url| url.origin().ascii_serialization()))
-        .collect::<Result<Vec<_>>>()?;
-    storage::runtime::init(Layout::new(argos_osint_core::paths::ensure_home()?))?;
-    // Only this process opens storage; startup fails rather than taking a second lock.
+    let Args {
+        role,
+        port,
+        origins,
+    } = Args::parse();
+    let (layout, network, access) = tokio::task::spawn_blocking(move || {
+        let access = if matches!(role, Role::Combined | Role::Api) {
+            Some(fleetworks::ApiAccess::from_environment(role, &origins)?)
+        } else {
+            None
+        };
+        if role == Role::Combined {
+            Ok::<_, anyhow::Error>((
+                Layout::new(argos_osint_core::paths::ensure_home()?),
+                None,
+                access,
+            ))
+        } else {
+            let network = fleetworks::NetworkStorage::from_environment(role)?;
+            Ok((
+                Layout::new(network.workspace.clone()),
+                Some(network),
+                access,
+            ))
+        }
+    })
+    .await??;
+    let runtime_user = if let Some(network) = network {
+        storage::runtime::init_target(layout, network.target, network.namespace, network.database)?;
+        network.runtime_user
+    } else {
+        storage::runtime::init(layout)?;
+        None
+    };
     let repo = storage::runtime::repository().await?;
-    argos_osint_core::provider::SettingsFile::load()?;
-    let listener =
-        tokio::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, args.port)).await?;
-    let port = listener.local_addr()?.port();
-    let instance_id = format!("{}-{}", std::process::id(), chrono_id());
+    if role == Role::Bootstrap {
+        fleetworks::provision_user(
+            &repo,
+            runtime_user.expect("bootstrap always supplies a runtime user"),
+        )
+        .await?;
+        println!("Fleetworks storage ready");
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(argos_osint_core::provider::SettingsFile::load).await??;
+    let http = if let Some(api) = access {
+        let listener = tokio::net::TcpListener::bind(SocketAddr::new(api.bind, port)).await?;
+        let port = listener.local_addr()?.port();
+        let state = argos_osint_api::ApiState {
+            repo,
+            instance_id: format!("{}-{}", std::process::id(), chrono_id()),
+            port,
+            origins: Arc::new(api.origins),
+        };
+        let router = if let Some(policy) = api.policy {
+            argos_osint_api::network_router(state, policy)
+        } else {
+            ensure!(
+                api.bind == IpAddr::V4(Ipv4Addr::LOCALHOST),
+                "legacy API must bind to loopback"
+            );
+            argos_osint_api::router(state)
+        };
+        println!("Argos API http://{}:{port}", api.bind);
+        Some((listener, router))
+    } else {
+        None
+    };
+    let workers = if matches!(role, Role::Combined | Role::Worker) {
+        Some(start_workers().await?)
+    } else {
+        None
+    };
+    let served = if let Some((listener, router)) = http {
+        serve_with_graceful_shutdown_timeout(
+            listener,
+            router,
+            shutdown_signal(),
+            Duration::from_secs(15),
+        )
+        .await
+    } else {
+        shutdown_signal().await;
+        Ok(())
+    };
+    if let Some((beat, workers)) = workers {
+        tokio::task::spawn_blocking(move || {
+            argos_osint_core::scheduler::WorkerPool::shutdown_all(workers);
+            drop(beat);
+        })
+        .await?;
+    }
+    if tokio::time::timeout(Duration::from_secs(6), storage::runtime::drain())
+        .await
+        .is_err()
+    {
+        eprintln!("Core worker shutdown deadline reached; durable leases will recover on restart");
+    }
+    served
+}
+
+async fn start_workers() -> Result<(
+    argos_osint_core::job_registry::ProcessBeat,
+    Vec<argos_osint_core::scheduler::WorkerPool>,
+)> {
     // Start the existing elected core pools (brief, indexing, summaries and
     // durable recovery) rather than creating an HTTP-specific executor.
     // runtime::blocking requires a plain thread outside Tokio's entered
@@ -67,29 +174,7 @@ async fn main() -> Result<()> {
     let beat = beat_rx.await??;
     let workers =
         argos_osint_core::scheduler::WorkerPool::spawn_default(argos_osint_core::paths::db_path());
-    let state = argos_osint_api::ApiState {
-        repo,
-        instance_id,
-        port,
-        origins: Arc::new(origins),
-    };
-    println!("Argos API http://127.0.0.1:{port}");
-    serve_with_graceful_shutdown_timeout(
-        listener,
-        argos_osint_api::router(state),
-        shutdown_signal(),
-        Duration::from_secs(15),
-    )
-    .await?;
-    argos_osint_core::scheduler::WorkerPool::shutdown_all(workers);
-    drop(beat);
-    if tokio::time::timeout(Duration::from_secs(6), storage::runtime::drain())
-        .await
-        .is_err()
-    {
-        eprintln!("Core worker shutdown deadline reached; durable leases will recover on restart");
-    }
-    Ok(())
+    Ok((beat, workers))
 }
 
 async fn serve_with_graceful_shutdown_timeout<F>(

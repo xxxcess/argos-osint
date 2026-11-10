@@ -130,6 +130,27 @@ async fn storage_api_contracts() {
         port: 8080,
         origins: Arc::new(vec!["http://localhost:3000".into()]),
     });
+    let (status, tools) = call(&app, "GET", "/api/v1/tools", None, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(tools["tools"]
+        .as_array()
+        .is_some_and(|tools| !tools.is_empty()));
+    let (status, models) = call(&app, "GET", "/api/v1/models/defaults", None, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(models["defaults"].is_object());
+    assert!(models.get("auth").is_none());
+    let (status, profile) = call(&app, "GET", "/api/v1/profile", None, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        profile["workspace"],
+        dir.path().join("home").to_string_lossy().as_ref()
+    );
+    assert_eq!(profile["access_mode"], "loopback");
+    let (status, logs) = call(&app, "GET", "/api/v1/logs?limit=1", None, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(logs["rows"].as_array().is_some_and(|rows| rows.len() <= 1));
+    let (status, _) = call(&app, "GET", "/api/v1/logs?limit=101", None, Value::Null).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     repo.db().query("CREATE memory:routeactor SET text = 'Route actor', memory_kind = 'actor'; CREATE brain_actor:routeactor SET display_name = 'Route actor', created_at = '', updated_at = ''; CREATE memory:routeclaim SET text = 'Route claim', memory_kind = 'claim'; CREATE memory:routeinference SET text = 'Route inference', memory_kind = 'inference';").await.unwrap().check().unwrap();
     actor_dossier_contracts(&app, &repo).await;
     for (id, kind) in [

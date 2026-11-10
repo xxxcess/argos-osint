@@ -360,6 +360,70 @@ async fn atlas_tui_pages_reads_occurrences_and_confirms_collection() -> Result<(
 }
 
 #[tokio::test]
+async fn brain_tui_reports_empty_discovery_and_rejects_a_missing_row() -> Result<()> {
+    let stdout = run_session(
+        env!("CARGO_BIN_EXE_fleetworks-brain"),
+        b"find nobody\nfind quiet\nactor #4\nquit\n",
+        &[
+            (
+                "GET /api/v1/actors/search",
+                &["limit=10", "mode=name", "query=nobody"],
+                None,
+                json!({
+                    "rows": [],
+                    "diagnostic": "catalog unavailable",
+                    "catalog_revision": "fixture-revision",
+                    "truncated": false,
+                }),
+            ),
+            (
+                "GET /api/v1/actors/search",
+                &["limit=10", "mode=name", "query=quiet"],
+                None,
+                json!({
+                    "rows": [],
+                    "diagnostic": "",
+                    "catalog_revision": "fixture-revision",
+                    "truncated": false,
+                }),
+            ),
+        ],
+    )
+    .await?;
+    assert!(stdout.contains("Actor discovery  catalog unavailable"));
+    assert!(stdout.contains("No matching retained actors."));
+    assert!(stdout.contains("no such row in the last actor search"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn models_tui_reports_an_unknown_role_without_writing() -> Result<()> {
+    let stdout = run_session(
+        env!("CARGO_BIN_EXE_fleetworks-models"),
+        b"defaults missing\nquit\n",
+        &[
+            (
+                "GET /api/v1/models/defaults",
+                &[],
+                None,
+                json!({"defaults":{"atlas_analyst":{"model":"primary","provider":"fixture"}}}),
+            ),
+            (
+                "GET /api/v1/models/defaults",
+                &[],
+                None,
+                json!({"defaults":{"atlas_analyst":{"model":"primary","provider":"fixture"}}}),
+            ),
+        ],
+    )
+    .await?;
+    assert!(stdout.contains("atlas_analyst"));
+    assert!(stdout.contains("No matching saved role defaults."));
+    assert!(!stdout.contains("Saved model defaults."));
+    Ok(())
+}
+
+#[tokio::test]
 async fn brain_tui_renders_retained_dossier_brief_and_topology() -> Result<()> {
     let expected: &[SessionRequest<'_>] = &[
         (

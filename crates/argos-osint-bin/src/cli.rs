@@ -1406,12 +1406,16 @@ async fn osint_command(command: OsintCommand) -> Result<()> {
     }
 }
 
+fn research_retired() -> Result<()> {
+    anyhow::bail!("Research turns are retired. Use Fleetworks.")
+}
+
 async fn recon_command(command: ReconCommand) -> Result<()> {
     match command {
         ReconCommand::List { search } => {
             print_json(&recon_store().await?.list_threads(&search).await?)
         }
-        ReconCommand::New { title } => print_json(&recon_store().await?.new_thread(&title).await?),
+        ReconCommand::New { .. } => research_retired(),
         ReconCommand::Show { thread_id } => {
             let store = recon_store().await?;
             let thread = store
@@ -1453,50 +1457,11 @@ async fn recon_command(command: ReconCommand) -> Result<()> {
             let deleted = store.delete_thread(&thread_id, with_insights).await?;
             print_json(&serde_json::json!({"deleted":deleted,"memories_removed":removed}))
         }
-        ReconCommand::AskNew { question, title } => {
-            let thread = recon_store().await?.new_thread(&title).await?;
-            ask_thread(&thread.id, &question).await
-        }
-        ReconCommand::Ask {
-            thread_id,
-            question,
-        } => ask_thread(&thread_id, &question).await,
-        ReconCommand::Retry { run_id } => {
-            let store = recon_store().await?;
-            let run = store
-                .get_run(&run_id)
-                .await?
-                .ok_or_else(|| anyhow!("run not found"))?;
-            let question = store
-                .list_messages(&run.thread_id)
-                .await?
-                .into_iter()
-                .find(|m| m.id == run.turn_id)
-                .ok_or_else(|| anyhow!("original turn unavailable"))?
-                .content;
-            drop(store);
-            ask_thread(&run.thread_id, &question).await
-        }
-        ReconCommand::Resume { run_id } => {
-            recon_store().await?.recover_runs().await?;
-            let service =
-                recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
-            let run = service
-                .resume(&run_id, Arc::new(AtomicBool::new(false)), |event| {
-                    write_turn_event(&event, &mut std::io::stderr());
-                })
-                .await?;
-            let store = recon_store().await?;
-            print_json(
-                &serde_json::json!({"run":run,"messages":store.list_messages(&run.thread_id).await?,"calls":store.calls_for_run(&run.id).await?}),
-            )
-        }
-        ReconCommand::RetryInsights { answer_id } => {
-            let service =
-                recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
-            service.retry_insights(&answer_id).await?;
-            print_json(&serde_json::json!({"answer_id":answer_id,"insight_job":"completed"}))
-        }
+        ReconCommand::AskNew { .. }
+        | ReconCommand::Ask { .. }
+        | ReconCommand::Retry { .. }
+        | ReconCommand::Resume { .. }
+        | ReconCommand::RetryInsights { .. } => research_retired(),
         ReconCommand::Limits {
             max_rounds,
             max_calls,
@@ -1829,23 +1794,6 @@ async fn atlas_command(command: AtlasCommand) -> Result<()> {
             }))
         }
     }
-}
-async fn ask_thread(thread_id: &str, question: &str) -> Result<()> {
-    let service = recon::Service::new(&paths::db_path(), AuthFile::load()?, SettingsFile::load()?)?;
-    let run = service
-        .ask(
-            thread_id,
-            question,
-            Arc::new(AtomicBool::new(false)),
-            |event| {
-                write_turn_event(&event, &mut std::io::stderr());
-            },
-        )
-        .await?;
-    let store = recon_store().await?;
-    print_json(
-        &serde_json::json!({"run":run,"messages":store.list_messages(thread_id).await?,"calls":store.calls_for_run(&run.id).await?}),
-    )
 }
 
 /// Synthesis tokens go to stderr as they arrive. Stdout stays the final JSON from `print_json`.

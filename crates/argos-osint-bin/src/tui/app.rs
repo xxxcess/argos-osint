@@ -2746,30 +2746,10 @@ impl App {
 
     /// Launches a new investigation from the Home composer
     pub fn launch_home_investigation(&mut self) -> Result<()> {
-        if self.home_draft_submitting {
+        if self.input.trim().is_empty() {
             return Ok(());
         }
-        let question = self.input.trim().to_string();
-        if question.is_empty() {
-            return Ok(());
-        }
-        self.home_draft_submitting = true;
-        self.launch_state = LaunchState::Accepting;
-
-        // Generate deterministic title from first non-empty line of prompt (up to 80 chars)
-        let title_line = question
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("New investigation");
-        let title: String = title_line.trim().chars().take(80).collect();
-        let title = if title.is_empty() {
-            "New investigation".to_string()
-        } else {
-            title
-        };
-
-        // Atomic persistence: create thread
-        self.spawn_new_thread(title, None, surreal_recon::Then::Launch { question });
+        self.status = "Research turns are retired. Use Fleetworks.".into();
         Ok(())
     }
 
@@ -4016,80 +3996,21 @@ impl App {
     }
 
     fn new_thread(&mut self) -> Result<()> {
-        self.spawn_new_thread("New investigation".into(), None, surreal_recon::Then::Open);
+        self.status = "Research turns are retired. Use Fleetworks.".into();
         Ok(())
     }
 
-    fn send_recon_query(&mut self, tid: &str, question: &str) -> Result<()> {
-        anyhow::ensure!(
-            !self.running.contains_key(tid),
-            "This thread already has a running turn"
-        );
-        // A turn must be scheduled on the shared runtime to ever finish, so a
-        // missing handle has to fail loudly here — before registering the turn
-        // or clearing the input — instead of parking the composer forever.
-        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
-            anyhow::anyhow!("Background runtime is unavailable; the question was not sent")
-        })?;
-        if self.selected_thread.as_deref() == Some(tid) {
-            self.input.clear();
-            self.cursor = 0;
-            self.save_thread_draft(tid, String::new())?;
-            self.live_answers.remove(tid);
-            self.chat_follow = true;
-        }
-        let service =
-            recon::Service::new(&paths::db_path(), self.auth.clone(), self.settings.clone())?;
-        let tx = self.work_tx.clone();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let tid_owned = tid.to_string();
-        self.running.insert(tid_owned.clone(), cancel.clone());
-        self.recon_stage = "starting".into();
-        let question_owned = question.to_string();
-        handle.spawn(async move {
-            let progress_tx = tx.clone();
-            let thread_id = tid_owned.clone();
-            let outcome = service
-                .ask(&tid_owned, &question_owned, cancel, move |event| {
-                    let _ = progress_tx.send(work_event(&thread_id, event));
-                })
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string());
-            let _ = tx.send(WorkEvent::ReconDone {
-                thread_id: tid_owned,
-                outcome,
-            });
-        });
-        Ok(())
+    fn send_recon_query(&mut self, _tid: &str, _question: &str) -> Result<()> {
+        self.status = "Research turns are retired. Use Fleetworks.".into();
+        anyhow::bail!("Research turns are retired. Use Fleetworks.")
     }
 
     fn send_recon(&mut self) -> Result<()> {
-        let question = self.input.trim().to_string();
-        if question.is_empty() {
+        if self.input.trim().is_empty() {
             return Ok(());
         }
-        if let Some(tid) = self.selected_thread.clone() {
-            self.send_recon_query(&tid, &question)
-        } else {
-            if self.home_draft_submitting {
-                return Ok(());
-            }
-            self.home_draft_submitting = true;
-            self.launch_state = LaunchState::Accepting;
-            let title_line = question
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("New investigation");
-            let title: String = title_line.trim().chars().take(80).collect();
-            let title = if title.is_empty() {
-                "New investigation".to_string()
-            } else {
-                title
-            };
-            self.spawn_new_thread(title, None, surreal_recon::Then::Launch { question });
-            Ok(())
-        }
+        self.status = "Research turns are retired. Use Fleetworks.".into();
+        Ok(())
     }
 
     pub fn can_stop_recon(&self) -> bool {
@@ -4125,44 +4046,8 @@ impl App {
     }
 
     fn resume_recon(&mut self) -> Result<()> {
-        let tid = self
-            .selected_thread
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No thread selected"))?;
-        anyhow::ensure!(
-            !self.running.contains_key(&tid),
-            "This thread already has a running turn"
-        );
-        let lookup = tid.clone();
-        let run = argos_osint_core::storage::runtime::blocking(move |repo| async move {
-            argos_osint_core::storage::recon_runs::latest_resumable_run(&repo, &lookup).await
-        })?
-        .ok_or_else(|| anyhow::anyhow!("No interrupted or failed run to resume"))?;
-        let service =
-            recon::Service::new(&paths::db_path(), self.auth.clone(), self.settings.clone())?;
-        let tx = self.work_tx.clone();
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.live_answers.remove(&tid);
-        self.running.insert(tid.clone(), cancel.clone());
-        self.recon_resumable = false;
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::spawn(async move {
-                let progress_tx = tx.clone();
-                let thread_id = tid.clone();
-                let outcome = service
-                    .resume(&run.id, cancel, move |event| {
-                        let _ = progress_tx.send(work_event(&thread_id, event));
-                    })
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(WorkEvent::ReconDone {
-                    thread_id: tid,
-                    outcome,
-                });
-            });
-        }
-        Ok(())
+        self.status = "Research turns are retired. Use Fleetworks.".into();
+        anyhow::bail!("Research turns are retired. Use Fleetworks.")
     }
 
     fn toggle_recall(&mut self) -> Result<String> {
@@ -9913,8 +9798,11 @@ impl App {
             self.input.clear();
             return Ok("Cancellation requested".into());
         }
+        if self.input.trim().is_empty() {
+            return Ok(String::new());
+        }
         self.send_recon()?;
-        Ok("Recon started".into())
+        Ok(self.status.clone())
     }
 
     fn request_thread_delete(&mut self) -> Result<String> {
@@ -20964,11 +20852,9 @@ mod tests {
 
         let res = app.send_recon();
         assert!(res.is_ok(), "send_recon must not error or panic");
-        assert!(
-            app.home_draft_submitting,
-            "launch submission must be active"
-        );
-        assert_eq!(app.launch_state, LaunchState::Accepting);
+        assert!(!app.home_draft_submitting);
+        assert!(app.running.is_empty());
+        assert!(app.status.contains("retired"));
     }
 
     #[test]
@@ -21014,7 +20900,9 @@ mod tests {
             assert_eq!(app.selected_thread.as_deref(), Some("t-recon-1"));
             assert_eq!(app.tab_ids, vec!["t-recon-1"]);
             assert_eq!(app.tab_sel, 1);
-            assert_eq!(app.launch_state, LaunchState::Accepted);
+            assert_eq!(app.launch_state, LaunchState::RecoverableFailure);
+            assert!(app.running.is_empty());
+            assert!(app.status.contains("retired"));
             assert_eq!(app.focus, Target::Field(FieldId::Composer));
         });
     }
@@ -21050,7 +20938,7 @@ mod tests {
 
         assert_eq!(app.launch_state, LaunchState::RecoverableFailure);
         assert!(
-            app.status.contains("already has a running turn"),
+            app.status.contains("retired"),
             "Status line must capture query dispatch failure message: {}",
             app.status
         );
@@ -21101,13 +20989,10 @@ mod tests {
                 LaunchState::Editable,
                 "Launch state must remain Idle"
             );
-            assert_eq!(app.input, "", "Input must be cleared upon query dispatch");
-            assert_eq!(app.cursor, 0, "Cursor must reset to 0");
-            assert!(
-                app.running.contains_key(tid),
-                "Thread must be marked running"
-            );
-            assert_eq!(app.recon_stage, "starting");
+            assert_eq!(app.input, "Follow-up question on existing thread");
+            assert_eq!(app.cursor, 10);
+            assert!(app.running.is_empty(), "A retired turn must not start");
+            assert!(app.status.contains("retired"));
         });
     }
 
@@ -21123,13 +21008,10 @@ mod tests {
         app.input = "New question during active turn".into();
 
         let res = app.send_recon();
-        assert!(res.is_err(), "Must return Err when turn is already active");
-        let err_msg = res.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("already has a running turn"),
-            "Error must describe turn collision: {err_msg}"
-        );
+        assert!(res.is_ok());
+        assert!(app.status.contains("retired"));
         assert_eq!(app.input, "New question during active turn");
+        assert!(app.running.contains_key(tid));
     }
 
     #[test]
@@ -21161,15 +21043,15 @@ mod tests {
 
         let res1 = app.send_recon();
         assert!(res1.is_ok());
-        assert!(app.home_draft_submitting);
-        assert_eq!(app.launch_state, LaunchState::Accepting);
+        assert!(!app.home_draft_submitting);
+        assert!(app.status.contains("retired"));
 
         for _ in 0..1000 {
             let res = app.send_recon();
             assert!(res.is_ok());
-            assert!(app.home_draft_submitting);
-            assert_eq!(app.launch_state, LaunchState::Accepting);
+            assert!(!app.home_draft_submitting);
             assert!(app.selected_thread.is_none());
+            assert!(app.running.is_empty());
         }
     }
 
@@ -21183,7 +21065,8 @@ mod tests {
         app.input = "\n\n  Investigate domain example.com  \nDetails follow...".into();
         let res = app.send_recon();
         assert!(res.is_ok());
-        assert!(app.home_draft_submitting);
+        assert!(!app.home_draft_submitting);
+        assert!(app.status.contains("retired"));
 
         app.home_draft_submitting = false;
 
@@ -21202,18 +21085,18 @@ mod tests {
         app.input = "investigate test".into();
 
         app.submit();
-        assert!(app.home_draft_submitting);
-        assert_eq!(app.launch_state, LaunchState::Accepting);
-        assert_eq!(app.status, "Recon started");
+        assert!(!app.home_draft_submitting);
+        assert!(app.running.is_empty());
+        assert!(app.status.contains("retired"));
 
         app.home_draft_submitting = false;
         app.launch_state = LaunchState::Editable;
         app.input = "button send test".into();
 
         app.activate_button(ButtonId::Send);
-        assert!(app.home_draft_submitting);
-        assert_eq!(app.launch_state, LaunchState::Accepting);
-        assert_eq!(app.status, "Recon started");
+        assert!(!app.home_draft_submitting);
+        assert!(app.running.is_empty());
+        assert!(app.status.contains("retired"));
     }
 
     #[test]
@@ -21227,8 +21110,9 @@ mod tests {
 
             let res = app.send_recon();
             assert!(res.is_ok());
-            assert!(app.home_draft_submitting);
-            assert_eq!(app.launch_state, LaunchState::Accepting);
+            assert!(!app.home_draft_submitting);
+            assert!(app.running.is_empty());
+            assert!(app.status.contains("retired"));
 
             let thread = recon::Thread {
                 id: "thread-lifecycle-1".into(),
@@ -21252,28 +21136,17 @@ mod tests {
                 !app.home_draft_submitting,
                 "Submitting flag must be cleared"
             );
-            assert_eq!(app.launch_state, LaunchState::Accepted);
-            assert_eq!(app.input, "", "Input cleared by send_recon_query");
-            assert!(
-                app.running.contains_key("thread-lifecycle-1"),
-                "Turn 1 is running"
-            );
-
-            app.running.remove("thread-lifecycle-1");
+            assert_eq!(app.launch_state, LaunchState::RecoverableFailure);
+            assert!(app.running.is_empty(), "Turn 1 must not start");
+            assert!(app.status.contains("retired"));
 
             app.input = "Second turn prompt".into();
             let res2 = app.send_recon();
             assert!(res2.is_ok());
-            assert!(
-                !app.home_draft_submitting,
-                "Subsequent prompt must not set home_draft_submitting"
-            );
+            assert!(!app.home_draft_submitting);
             assert_eq!(app.selected_thread.as_deref(), Some("thread-lifecycle-1"));
-            assert_eq!(app.input, "");
-            assert!(
-                app.running.contains_key("thread-lifecycle-1"),
-                "Turn 2 is running"
-            );
+            assert_eq!(app.input, "Second turn prompt");
+            assert!(app.running.is_empty(), "Turn 2 must not start");
         });
     }
 
@@ -21303,15 +21176,10 @@ mod tests {
         );
 
         let retry_res = app.send_recon();
-        assert!(
-            retry_res.is_ok(),
-            "Retry must succeed without getting blocked"
-        );
-        assert!(
-            app.home_draft_submitting,
-            "Submission flag must activate on retry"
-        );
-        assert_eq!(app.launch_state, LaunchState::Accepting);
+        assert!(retry_res.is_ok(), "A retired composer must not panic");
+        assert!(!app.home_draft_submitting);
+        assert!(app.running.is_empty());
+        assert!(app.status.contains("retired"));
     }
 
     // =========================================================================
@@ -21645,8 +21513,9 @@ mod tests {
             // 1. Cold launch recon from composer (F11: no panic)
             let res = app.send_recon();
             assert!(res.is_ok(), "Cold launch recon must not panic");
-            assert!(app.home_draft_submitting);
-            assert_eq!(app.launch_state, LaunchState::Accepting);
+            assert!(!app.home_draft_submitting);
+            assert!(app.running.is_empty());
+            assert!(app.status.contains("retired"));
 
             // 2. Thread creation completes via Then::Launch (F12: surface navigation unification)
             let thread_id = "recon-thread-e2e-cold";
@@ -21669,7 +21538,9 @@ mod tests {
 
             assert_eq!(app.selected_thread.as_deref(), Some(thread_id));
             assert_eq!(app.tab_ids, vec![thread_id]);
-            assert_eq!(app.launch_state, LaunchState::Accepted);
+            assert_eq!(app.launch_state, LaunchState::RecoverableFailure);
+            assert!(app.running.is_empty());
+            assert!(app.status.contains("retired"));
             assert_eq!(app.focus, Target::Field(FieldId::Composer));
             assert_eq!(app.input, "", "Composer input cleared after launch");
 

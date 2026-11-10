@@ -75,7 +75,7 @@ jobs:
           pnpm typecheck
           pnpm lint
       - name: Run offline unit and hook contracts
-        run: pnpm test
+        run: env -u ARGOS_WEB_TEST_DEV pnpm test
       - name: Build static export without API
         run: pnpm build
       - name: Verify compiled RN Web export

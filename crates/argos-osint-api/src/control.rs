@@ -13,20 +13,56 @@ use argos_osint_core::provider::ModelAssignment;
 use argos_osint_core::provider::ModelRoute;
 use argos_osint_core::provider::SettingsFile;
 use argos_osint_core::secrets::AuthFile;
+use axum::extract::{Request, State};
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::middleware::Next;
+use axum::response::Response;
+use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use serde::Deserialize;
 use serde_json::json;
 use serde_json::Value;
 
+use crate::private_relay::{PrivateClient, Service};
 use crate::{bad, internal, ApiError, ApiResult, ApiState};
 
-pub(crate) fn routes() -> Router<ApiState> {
+pub(crate) fn read_routes() -> Router<ApiState> {
     Router::new()
+        .route("/api/v1/profile", get(crate::operations::profile))
+        .route(
+            "/api/v1/models/defaults",
+            get(crate::operations::model_defaults),
+        )
+}
+
+pub(crate) fn routes() -> Router<ApiState> {
+    read_routes()
         .route("/api/v1/profile/export", post(export))
         .route("/api/v1/models/defaults/set", post(set_default))
+}
+
+pub(crate) async fn ready(State(state): State<ApiState>) -> ApiResult {
+    crate::private_ready(state, "fleetworks-control").await
+}
+
+/// Authenticated connection to the private workspace Control process.
+#[derive(Clone)]
+pub struct ControlClient(PrivateClient);
+
+impl ControlClient {
+    /// Configures an exact HTTP(S) origin and its dedicated bearer token.
+    pub fn new(origin: &str, token: &str) -> anyhow::Result<Self> {
+        Ok(Self(PrivateClient::new(origin, token, Service::Control)?))
+    }
+}
+
+pub(crate) async fn forward(
+    State(client): State<ControlClient>,
+    request: Request,
+    _next: Next,
+) -> Result<Response, Response> {
+    client.0.forward(request).await
 }
 
 #[derive(Deserialize)]

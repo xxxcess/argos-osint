@@ -10,7 +10,16 @@ Brain actors come from the local `datasets/argos_actors.csv` catalog after its f
 
 ## Catalog ingestion contract
 
-The datastore importer validates the CSV before writing. The catalog is tracked through Git LFS and stored outside the executable. The current Venture client suite exposes actor reads. The [catalog source](../../../crates/argos-osint-core/src/actor_catalog.rs) and [storage contract](../../../crates/argos-osint-core/tests/storage_actor_catalog.rs) cover ingestion and retry.
+Start the workspace with `venture up`. From the repository root, fetch the catalog through Git LFS and copy it into that workspace. Run the import explicitly and then search the seeded catalog.
+
+```sh
+git lfs pull --include=datasets/argos_actors.csv
+cp datasets/argos_actors.csv "$FLEETWORKS_HOST_WORKSPACE/datasets/"
+venture --workspace "$FLEETWORKS_HOST_WORKSPACE" seed-actors --file datasets/argos_actors.csv
+venture --workspace "$FLEETWORKS_HOST_WORKSPACE" client brain search "United Nations"
+```
+
+Venture stages an owner-only snapshot of the selected workspace CSV. The one-shot worker verifies its SHA-256, imports those bytes into the workspace database and reports the hash and counts. Supply a regular file outside workspace secrets and storage, up to 256 MiB. A retry must use the same CSV bytes as the existing seed receipt. The [catalog source](../../../crates/argos-osint-core/src/actor_catalog.rs) and [storage contract](../../../crates/argos-osint-core/tests/storage_actor_catalog.rs) cover ingestion and retry.
 
 The complete CSV is parsed and validated before writes. Empty inputs, missing columns, duplicate IDs, malformed CSV and malformed alias arrays fail rather than marking a partial import complete. Ingestion commits batches of 128 actors, aliases, typed memories, graph nodes and progress together. Stable record keys and insert-if-absent writes make a retry idempotent. A leased `brain_actor_seed:catalog` receipt prevents competing seed writers; interrupted processes become retryable after the five-minute lease. The receipt becomes `complete` only after all batches commit. This is an initial static catalog import; updating existing catalog identities requires an explicit reset/reseed, not a silent overwrite of analyst state.
 

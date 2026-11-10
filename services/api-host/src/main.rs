@@ -1,3 +1,4 @@
+mod actor_seed;
 mod atlas_worker;
 mod classifier_service;
 mod classifier_train;
@@ -26,10 +27,10 @@ struct Args {
     origins: Vec<String>,
     #[arg(long, value_enum, default_value_t = Role::Combined)]
     role: Role,
-    /// Private workspace CSV snapshot selected by Venture for one-shot training.
-    #[arg(long, required_if_eq("role", "train-classifier"))]
+    /// Private workspace CSV snapshot selected by Venture.
+    #[arg(long, required_if_eq_any([("role", "train-classifier"), ("role", "seed-actors")]))]
     file: Option<std::path::PathBuf>,
-    #[arg(long, required_if_eq("role", "train-classifier"))]
+    #[arg(long, required_if_eq_any([("role", "train-classifier"), ("role", "seed-actors")]))]
     expected_sha256: Option<String>,
     /// Activate the synthetic Natural baseline after successful training.
     #[arg(long)]
@@ -46,6 +47,10 @@ enum Role {
     Brain,
     /// Execute manual tools on the private network.
     Tools,
+    /// Read and update workspace configuration on the private network.
+    Control,
+    /// Serve Jobs and Logs REST operations on the private network.
+    Jobs,
     /// Fleetworks background domain workers.
     Worker,
     /// Execute and publish durable Focus Brief stages.
@@ -58,6 +63,8 @@ enum Role {
     Classifier,
     /// Train the optional Natural classifier from a workspace dataset.
     TrainClassifier,
+    /// Seed the Brain actor catalog from a pinned workspace CSV.
+    SeedActors,
     /// Initialize storage and provision the runtime database account.
     Bootstrap,
 }
@@ -97,9 +104,18 @@ async fn main() -> Result<()> {
         )
         .await;
     }
+    if role == Role::SeedActors {
+        ensure!(!activate, "--activate requires --role train-classifier");
+        return actor_seed::run(
+            file.expect("required for actor catalog seeding"),
+            expected_sha256.expect("required for actor catalog seeding"),
+            shutdown_signal(),
+        )
+        .await;
+    }
     ensure!(
         file.is_none() && expected_sha256.is_none() && !activate,
-        "classifier training options require --role train-classifier"
+        "CSV worker options require --role train-classifier or --role seed-actors"
     );
     if matches!(role, Role::Nlp | Role::Classifier) {
         let (bind, policy, router) = tokio::task::spawn_blocking(move || {
@@ -130,24 +146,26 @@ async fn main() -> Result<()> {
         )
         .await;
     }
-    let (layout, network, access, brain, tools) = tokio::task::spawn_blocking(move || {
-        let access = if matches!(role, Role::Combined | Role::Api | Role::Brain | Role::Tools) {
+    let (layout, network, access, services) = tokio::task::spawn_blocking(move || {
+        let access = if matches!(
+            role,
+            Role::Combined | Role::Api | Role::Brain | Role::Tools | Role::Control | Role::Jobs
+        ) {
             Some(fleetworks::ApiAccess::from_environment(role, &origins)?)
         } else {
             None
         };
-        let (brain, tools) = if role == Role::Api {
-            (fleetworks::brain_client()?, fleetworks::tools_client()?)
+        let services = if role == Role::Api {
+            fleetworks::private_services()?
         } else {
-            (None, None)
+            argos_osint_api::PrivateServices::default()
         };
         if role == Role::Combined {
             Ok::<_, anyhow::Error>((
                 Layout::new(argos_osint_core::paths::ensure_home()?),
                 None,
                 access,
-                brain,
-                tools,
+                services,
             ))
         } else {
             let network = fleetworks::NetworkStorage::from_environment(role)?;
@@ -155,8 +173,7 @@ async fn main() -> Result<()> {
                 Layout::new(network.workspace.clone()),
                 Some(network),
                 access,
-                brain,
-                tools,
+                services,
             ))
         }
     })
@@ -209,7 +226,9 @@ async fn main() -> Result<()> {
             match role {
                 Role::Brain => argos_osint_api::brain_router(state, policy),
                 Role::Tools => argos_osint_api::tools_router(state, policy),
-                _ => argos_osint_api::network_router_with_services(state, policy, brain, tools),
+                Role::Control => argos_osint_api::control_router(state, policy),
+                Role::Jobs => argos_osint_api::jobs_router(state, policy),
+                _ => argos_osint_api::network_router_with_private_services(state, policy, services),
             }
         } else {
             ensure!(
@@ -221,6 +240,8 @@ async fn main() -> Result<()> {
         let service = match role {
             Role::Brain => "Brain",
             Role::Tools => "Tools",
+            Role::Control => "Control",
+            Role::Jobs => "Jobs",
             _ => "API",
         };
         println!("Argos {service} http://{}:{port}", api.bind);

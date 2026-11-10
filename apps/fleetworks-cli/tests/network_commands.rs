@@ -363,6 +363,21 @@ async fn atlas_tui_pages_reads_occurrences_and_confirms_collection() -> Result<(
 async fn brain_tui_renders_retained_dossier_brief_and_topology() -> Result<()> {
     let expected: &[SessionRequest<'_>] = &[
         (
+            "GET /api/v1/actors/search",
+            &["limit=10", "mode=alias", "query=Harbor+Union"],
+            None,
+            json!({
+                "rows":[{
+                    "actor_id":"actor-1","label":"Harbor Union","kind":"prefix_alias",
+                    "reason":"catalog","ambiguous":true,
+                    "alias_provenance":{"catalog_id":"fixture:1"},
+                }],
+                "diagnostic":"",
+                "catalog_revision":"fixture-revision",
+                "truncated":false,
+            }),
+        ),
+        (
             "GET /api/v1/actors/detail",
             &["id=actor-1"],
             None,
@@ -402,11 +417,14 @@ async fn brain_tui_renders_retained_dossier_brief_and_topology() -> Result<()> {
     ];
     let stdout = run_session(
         env!("CARGO_BIN_EXE_fleetworks-brain"),
-        b"actor actor-1\nbrief run-1 article-1\ntopology brief:run-1/article-1\nquit\n",
+        b"aliases Harbor Union\nactor #1\nbrief run-1 article-1\ntopology brief:run-1/article-1\nquit\n",
         expected,
     )
     .await?;
     for expected in [
+        "#1  Harbor Union  [prefix_alias · catalog · ambiguous]  (actor-1)",
+        "Catalog revision  fixture-revision",
+        "Alias catalog ID  fixture:1",
         "Actor actor-1",
         "Aliases  Example alias",
         "brief run-1 article-1",

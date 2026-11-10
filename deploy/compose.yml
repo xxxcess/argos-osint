@@ -76,17 +76,27 @@ services:
       FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/brain_token
       FLEETWORKS_TOOLS_ORIGIN: http://tools:8080
       FLEETWORKS_TOOLS_TOKEN_FILE: /run/secrets/tools_token
+      FLEETWORKS_CONTROL_ORIGIN: http://control:8080
+      FLEETWORKS_CONTROL_TOKEN_FILE: /run/secrets/control_token
+      FLEETWORKS_JOBS_ORIGIN: http://jobs:8080
+      FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
     secrets:
       - storage_password
       - api_token
       - brain_token
       - tools_token
+      - control_token
+      - jobs_token
     depends_on:
       bootstrap:
         condition: service_completed_successfully
       brain:
         condition: service_healthy
       tools:
+        condition: service_healthy
+      control:
+        condition: service_healthy
+      jobs:
         condition: service_healthy
     ports:
       - target: 8080
@@ -138,15 +148,49 @@ services:
     secrets:
       - storage_password
       - tools_token
-    depends_on:
+    depends_on: &private-api-startup
       bootstrap:
         condition: service_completed_successfully
-    healthcheck:
+    healthcheck: &private-api-healthcheck
       test: [CMD, /usr/local/bin/check-fleetworks-api]
       interval: 5s
       timeout: 4s
       start_period: 15s
       retries: 6
+
+  control:
+    <<: *runtime
+    command: [--role, control, --port, "8080"]
+    restart: unless-stopped
+    environment:
+      <<: *runtime-environment
+      FLEETWORKS_CONTROL_BIND: 0.0.0.0
+      FLEETWORKS_CONTROL_ALLOWED_HOSTS: control:8080
+      FLEETWORKS_CONTROL_TOKEN_FILE: /run/secrets/control_token
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/control_token
+      FLEETWORKS_API_HEALTH_HOST: control:8080
+    secrets:
+      - storage_password
+      - control_token
+    depends_on: *private-api-startup
+    healthcheck: *private-api-healthcheck
+
+  jobs:
+    <<: *runtime
+    command: [--role, jobs, --port, "8080"]
+    restart: unless-stopped
+    environment:
+      <<: *runtime-environment
+      FLEETWORKS_JOBS_BIND: 0.0.0.0
+      FLEETWORKS_JOBS_ALLOWED_HOSTS: jobs:8080
+      FLEETWORKS_JOBS_TOKEN_FILE: /run/secrets/jobs_token
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/jobs_token
+      FLEETWORKS_API_HEALTH_HOST: jobs:8080
+    secrets:
+      - storage_password
+      - jobs_token
+    depends_on: *private-api-startup
+    healthcheck: *private-api-healthcheck
 
   worker:
     <<: *runtime
@@ -246,6 +290,10 @@ secrets:
     file: ${FLEETWORKS_BRAIN_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/brain-token}
   tools_token:
     file: ${FLEETWORKS_TOOLS_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/tools-token}
+  control_token:
+    file: ${FLEETWORKS_CONTROL_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/control-token}
+  jobs_token:
+    file: ${FLEETWORKS_JOBS_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/jobs-token}
   storage_password:
     file: ${FLEETWORKS_STORAGE_PASSWORD_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/storage-password}
   storage_root_password:

@@ -6,7 +6,7 @@ These terminal commands use the v1 HTTP API. Build them alongside Venture with
 | Executable | Commands |
 | --- | --- |
 | `fleetworks-atlas` | `tui`, `start --request-id ID`, `days`, `articles DAY [--category CATEGORY] [--limit N] [--cursor CURSOR]` |
-| `fleetworks-brain` | `tui`, `actor ID`, `brief RUN ID`, `topology SEED` |
+| `fleetworks-brain` | `tui`, `search QUERY [--alias] [--limit N]`, `actor ID`, `brief RUN ID`, `topology SEED` |
 | `fleetworks-jobs` | `tui`, `list`, `detail ID`, `retry ID`, `cancel ID`, `logs [--job-id ID] [--limit N]` |
 | `fleetworks-tools` | `tui`, `list`, `run TOOL_ID --request-id ID --input JSON`, `result CALL_ID` |
 | `fleetworks-models` | `tui`, `defaults`, `set ROLE PROVIDER MODEL [--account ID] [--fallbacks JSON]`, `clear ROLE` |
@@ -42,9 +42,12 @@ categories, `articles` to show the newest retained day, or
 to read the first article on the current page. `start REQUEST_ID` prompts
 before submitting a collection cycle.
 
-Open Brain with `venture client brain tui`. Use `actor ID` for a known actor
-and its recorded associations, `brief RUN ID` for an article's retained brief,
-and `topology SEED` for its recorded nodes and edges. The actor dossier prints
+Open Brain with `venture client brain tui`. Use `find NAME` for an exact actor
+name or `aliases PREFIX` for indexed aliases, then `actor #1` to open a
+selected result. Shared names and aliases are marked ambiguous. Discovery
+requires a seeded actor catalog and includes its revision. Use `actor ID`
+for a known actor, `brief RUN ID` for an article's retained brief, and
+`topology SEED` for its recorded nodes and edges. The actor dossier prints
 brief commands for associated article occurrences.
 
 Use `venture client tools run dork_generate --request-id example-1 --input '{"objective":"Find public annual reports"}'`

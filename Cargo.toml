@@ -4,13 +4,15 @@ members = [
     "crates/argos-osint-core",
     "crates/argos-osint-bin",
     "crates/argos-osint-api",
-    "crates/argos-api-host",
+    "services/api-host",
     "crates/fleetworks-contracts",
     "crates/fleetworks-workspace",
     "crates/fleetworks-broker",
     "apps/venture",
     "apps/fleetworks-cli",
 ]
+
+default-members = ["apps/venture", "apps/fleetworks-cli"]
 
 [workspace.package]
 edition = "2021"

@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::ensure;
 use axum::body::Bytes;
 use axum::extract::{FromRequest, Request};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use url::Url;
 
@@ -18,6 +18,8 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) enum Service {
     Brain,
     Tools,
+    Control,
+    Jobs,
 }
 
 impl Service {
@@ -25,6 +27,40 @@ impl Service {
         match self {
             Self::Brain => "Brain query exceeds the size limit",
             Self::Tools => "Tools query exceeds the size limit",
+            Self::Control => "Control query exceeds the size limit",
+            Self::Jobs => "Jobs query exceeds the size limit",
+        }
+    }
+
+    fn allows(self, method: &Method, path: &str) -> bool {
+        use fleetworks_contracts::{
+            JOBS_PATH, JOB_CANCEL_PATH, JOB_DETAIL_PATH, JOB_RETRY_PATH, TOOL_RESULT_PATH,
+            TOOL_RUN_PATH,
+        };
+        match self {
+            // The Brain router has already selected the operation.
+            Self::Brain => true,
+            Self::Tools => matches!(
+                (method, path),
+                (&Method::GET, "/api/v1/tools" | TOOL_RESULT_PATH) | (&Method::POST, TOOL_RUN_PATH)
+            ),
+            Self::Control => matches!(
+                (method, path),
+                (
+                    &Method::GET | &Method::HEAD,
+                    "/api/v1/profile" | "/api/v1/models/defaults"
+                ) | (
+                    &Method::POST,
+                    "/api/v1/profile/export" | "/api/v1/models/defaults/set"
+                )
+            ),
+            Self::Jobs => matches!(
+                (method, path),
+                (
+                    &Method::GET | &Method::HEAD,
+                    JOBS_PATH | JOB_DETAIL_PATH | "/api/v1/logs"
+                ) | (&Method::POST, JOB_RETRY_PATH | JOB_CANCEL_PATH)
+            ),
         }
     }
 
@@ -33,6 +69,8 @@ impl Service {
         let message = match self {
             Self::Brain => "Brain service unavailable",
             Self::Tools => "Tools service unavailable",
+            Self::Control => "Control service unavailable",
+            Self::Jobs => "Jobs service unavailable",
         };
         ApiError(StatusCode::BAD_GATEWAY, message).into_response()
     }
@@ -73,6 +111,9 @@ impl PrivateClient {
         // The service router selects the operation. Request data cannot
         // change the upstream origin.
         let uri = request.uri();
+        if !self.service.allows(request.method(), uri.path()) {
+            return Err(StatusCode::METHOD_NOT_ALLOWED.into_response());
+        }
         if uri
             .query()
             .is_some_and(|query| query.len() > MAX_QUERY_BYTES)

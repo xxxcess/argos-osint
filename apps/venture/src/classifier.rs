@@ -1,4 +1,4 @@
-//! Prepare the exact workspace dataset and launch a one-shot training worker.
+//! Pin workspace CSVs before starting one-shot training or actor seed workers.
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -15,8 +15,10 @@ use crate::compose::{self, Owner};
 
 const DATASET: &str = "argos_atlas_strategic_domains_v2.csv";
 const MAX_CSV_BYTES: u64 = 128 * 1024 * 1024;
+// The tracked actor catalog exceeds the Natural training limit.
+const MAX_ACTOR_CSV_BYTES: u64 = 256 * 1024 * 1024;
 
-struct TrainingInput {
+struct PinnedCsv {
     snapshot: NamedTempFile,
     source: PathBuf,
     hash: String,
@@ -27,11 +29,34 @@ pub(crate) async fn train(
     file: Option<PathBuf>,
     activate: bool,
 ) -> Result<()> {
+    run_csv_worker(workspace, file, "train-classifier", MAX_CSV_BYTES, activate).await
+}
+
+pub(crate) async fn seed_actors(workspace: &Workspace, file: PathBuf) -> Result<()> {
+    run_csv_worker(
+        workspace,
+        Some(file),
+        "seed-actors",
+        MAX_ACTOR_CSV_BYTES,
+        false,
+    )
+    .await
+}
+
+async fn run_csv_worker(
+    workspace: &Workspace,
+    file: Option<PathBuf>,
+    role: &str,
+    max_csv_bytes: u64,
+    activate: bool,
+) -> Result<()> {
     let owner = Owner::load(workspace)
         .await?
-        .context("start the workspace with venture up before training")?;
+        .context("start the workspace with venture up before running a CSV worker")?;
     let workspace_for_input = workspace.clone();
-    let input = tokio::task::spawn_blocking(move || snapshot(&workspace_for_input, file)).await??;
+    let input =
+        tokio::task::spawn_blocking(move || snapshot(&workspace_for_input, file, max_csv_bytes))
+            .await??;
     let relative = input.snapshot.path().strip_prefix(workspace.root())?;
     let container_csv = Path::new("/workspace").join(relative);
     eprintln!(
@@ -48,7 +73,7 @@ pub(crate) async fn train(
             "-T",
             "worker",
             "--role",
-            "train-classifier",
+            role,
             "--file",
         ])
         .arg(container_csv)
@@ -59,7 +84,7 @@ pub(crate) async fn train(
     }
     let mut child = command
         .spawn()
-        .context("launch the Natural classifier training worker")?;
+        .with_context(|| format!("launch the {role} worker"))?;
     let status = tokio::select! {
         status = child.wait() => status?,
         _ = compose::shutdown_signal() => {
@@ -77,21 +102,18 @@ pub(crate) async fn train(
                 Ok(status) => status?,
                 Err(_) => {
                     child.kill().await?;
-                    anyhow::bail!("classifier launcher did not acknowledge shutdown");
+                    anyhow::bail!("{role} launcher did not acknowledge shutdown");
                 }
             }
         }
     };
     // Keep the exact mounted bytes available until the one-shot worker exits.
     drop(input);
-    ensure!(
-        status.success(),
-        "Natural classifier training worker exited with {status}"
-    );
+    ensure!(status.success(), "{role} worker exited with {status}");
     Ok(())
 }
 
-fn snapshot(workspace: &Workspace, file: Option<PathBuf>) -> Result<TrainingInput> {
+fn snapshot(workspace: &Workspace, file: Option<PathBuf>, max_csv_bytes: u64) -> Result<PinnedCsv> {
     let selected = match file {
         Some(path) => workspace.resolve_path(&path),
         None => {
@@ -111,15 +133,13 @@ fn snapshot(workspace: &Workspace, file: Option<PathBuf>) -> Result<TrainingInpu
             }
         }
     };
-    let source = selected
-        .canonicalize()
-        .context("resolve workspace classifier CSV")?;
+    let source = selected.canonicalize().context("resolve workspace CSV")?;
     let relative = source
         .strip_prefix(workspace.root())
-        .context("classifier CSV must be in the workspace")?;
+        .context("CSV must be in the workspace")?;
     ensure!(
         !relative.starts_with("secrets") && !relative.starts_with("storage"),
-        "classifier CSV must be outside workspace secrets and storage"
+        "CSV must be outside workspace secrets and storage"
     );
     let datasets = workspace.root().join("datasets");
     ensure!(
@@ -128,16 +148,16 @@ fn snapshot(workspace: &Workspace, file: Option<PathBuf>) -> Result<TrainingInpu
     );
     ensure!(
         fs::metadata(&source)?.is_file(),
-        "classifier CSV must be a regular file"
+        "CSV must be a regular file"
     );
-    let mut source_file = File::open(&source).context("open workspace classifier CSV")?;
+    let mut source_file = File::open(&source).context("open workspace CSV")?;
     let metadata = source_file.metadata()?;
     ensure!(
-        metadata.is_file() && (1..=MAX_CSV_BYTES).contains(&metadata.len()),
-        "classifier CSV must be a regular file within the training size limit"
+        metadata.is_file() && (1..=max_csv_bytes).contains(&metadata.len()),
+        "CSV must be a regular file within the size limit"
     );
     let mut staged = tempfile::Builder::new()
-        .prefix(".venture-training-")
+        .prefix(".venture-csv-")
         .suffix(".csv")
         .tempfile_in(&datasets)?;
     let mut hash = Sha256::new();
@@ -149,10 +169,7 @@ fn snapshot(workspace: &Workspace, file: Option<PathBuf>) -> Result<TrainingInpu
             break;
         }
         length += read as u64;
-        ensure!(
-            length <= MAX_CSV_BYTES,
-            "classifier CSV exceeds the training size limit"
-        );
+        ensure!(length <= max_csv_bytes, "CSV exceeds the size limit");
         staged.write_all(&buffer[..read])?;
         hash.update(&buffer[..read]);
     }
@@ -162,7 +179,7 @@ fn snapshot(workspace: &Workspace, file: Option<PathBuf>) -> Result<TrainingInpu
             && metadata.len() == length
             && after.len() == length
             && metadata.modified()? == after.modified()?,
-        "classifier CSV changed while creating its training snapshot"
+        "CSV changed while creating its workspace snapshot"
     );
     #[cfg(unix)]
     {
@@ -172,7 +189,7 @@ fn snapshot(workspace: &Workspace, file: Option<PathBuf>) -> Result<TrainingInpu
             .set_permissions(fs::Permissions::from_mode(0o400))?;
     }
     staged.as_file().sync_all()?;
-    Ok(TrainingInput {
+    Ok(PinnedCsv {
         snapshot: staged,
         source,
         hash: format!("{:x}", hash.finalize()),
@@ -186,7 +203,7 @@ mod tests {
     use fleetworks_workspace::Workspace;
     use sha2::{Digest, Sha256};
 
-    use super::{snapshot, DATASET};
+    use super::{snapshot, DATASET, MAX_CSV_BYTES};
 
     #[test]
     fn each_training_snapshot_pins_the_current_workspace_csv_bytes() {
@@ -195,14 +212,14 @@ mod tests {
         workspace.initialize().unwrap();
         let file = workspace.root().join("datasets").join(DATASET);
         fs::write(&file, b"title\nfirst\n").unwrap();
-        let first = snapshot(&workspace, Some(file.clone())).unwrap();
+        let first = snapshot(&workspace, Some(file.clone()), MAX_CSV_BYTES).unwrap();
         assert_eq!(
             first.hash,
             format!("{:x}", Sha256::digest(b"title\nfirst\n"))
         );
 
         fs::write(&file, b"title\nnext\n").unwrap();
-        let second = snapshot(&workspace, Some(file)).unwrap();
+        let second = snapshot(&workspace, Some(file), MAX_CSV_BYTES).unwrap();
         assert_ne!(first.hash, second.hash);
         assert_eq!(fs::read(first.snapshot.path()).unwrap(), b"title\nfirst\n");
         assert_eq!(fs::read(second.snapshot.path()).unwrap(), b"title\nnext\n");

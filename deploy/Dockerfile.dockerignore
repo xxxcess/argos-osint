@@ -9,6 +9,8 @@
 !patches/**
 !crates/
 !crates/**
+!services/
+!services/**
 !apps/
 !apps/fleetworks-cli/
 !apps/fleetworks-cli/**

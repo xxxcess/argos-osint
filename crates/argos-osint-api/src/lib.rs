@@ -3,6 +3,7 @@ mod actor_dossier;
 mod brain;
 mod control;
 mod host_metrics;
+mod jobs_api;
 mod live;
 mod network;
 mod operations;
@@ -23,12 +24,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use fleetworks_contracts::{AtlasCycleReceipt, ATLAS_CYCLES_PATH, JOB_CANCEL_PATH, JOB_RETRY_PATH};
+use fleetworks_contracts::{AtlasCycleReceipt, ATLAS_CYCLES_PATH};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
 
 pub use brain::BrainClient;
+pub use control::ControlClient;
+pub use jobs_api::JobsClient;
 pub use network::{network_origin, NetworkPolicy};
 pub use tools::ToolsClient;
 
@@ -61,12 +64,12 @@ pub fn loopback_url(raw: &str) -> anyhow::Result<url::Url> {
 
 /// Serves the existing unauthenticated loopback API.
 pub fn router(state: ApiState) -> Router {
-    router_with_access(state, None, None, None)
+    router_with_access(state, None, PrivateServices::default())
 }
 
 /// Serves public routes and authenticated job controls with explicit ingress restrictions.
 pub fn network_router(state: ApiState, policy: NetworkPolicy) -> Router {
-    router_with_access(state, Some(policy), None, None)
+    router_with_access(state, Some(policy), PrivateServices::default())
 }
 
 /// Serves the public API and sends Brain and Intel HTTP operations to a private service.
@@ -85,25 +88,88 @@ pub fn network_router_with_services(
     brain: Option<BrainClient>,
     tools: Option<ToolsClient>,
 ) -> Router {
-    router_with_access(state, Some(policy), brain, tools)
+    network_router_with_private_services(
+        state,
+        policy,
+        PrivateServices::new(brain, tools, None, None),
+    )
+}
+
+/// Optional private service clients for the authenticated gateway.
+#[derive(Default)]
+pub struct PrivateServices {
+    brain: Option<BrainClient>,
+    tools: Option<ToolsClient>,
+    control: Option<ControlClient>,
+    jobs: Option<JobsClient>,
+}
+
+impl PrivateServices {
+    /// Construct a gateway service map. Absent clients use local route handlers.
+    pub fn new(
+        brain: Option<BrainClient>,
+        tools: Option<ToolsClient>,
+        control: Option<ControlClient>,
+        jobs: Option<JobsClient>,
+    ) -> Self {
+        Self {
+            brain,
+            tools,
+            control,
+            jobs,
+        }
+    }
+}
+
+/// Serve public REST routes and forward configured private service operations.
+pub fn network_router_with_private_services(
+    state: ApiState,
+    policy: NetworkPolicy,
+    services: PrivateServices,
+) -> Router {
+    router_with_access(state, Some(policy), services)
 }
 
 /// Serves the private Brain and Intel HTTP operations with storage-backed readiness.
 pub fn brain_router(state: ApiState, policy: NetworkPolicy) -> Router {
-    let port = state.port;
-    let router = brain::routes()
-        .route("/api/v1/health/ready", get(brain::ready))
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
-        .layer(middleware::from_fn(request_timeout))
-        .with_state(state);
-    guard_network(router, policy, Arc::new(Vec::new()), port)
+    private_router(
+        state,
+        policy,
+        brain::routes().route("/api/v1/health/ready", get(brain::ready)),
+    )
 }
 
 /// Serve private Tools operations with storage-backed readiness.
 pub fn tools_router(state: ApiState, policy: NetworkPolicy) -> Router {
+    private_router(
+        state,
+        policy,
+        tools::routes().route("/api/v1/health/ready", get(tools::ready)),
+    )
+}
+
+/// Serve the private workspace Control operations.
+pub fn control_router(state: ApiState, policy: NetworkPolicy) -> Router {
+    private_router(
+        state,
+        policy,
+        control::routes().route("/api/v1/health/ready", get(control::ready)),
+    )
+}
+
+/// Serve the private Jobs REST operations.
+pub fn jobs_router(state: ApiState, policy: NetworkPolicy) -> Router {
+    private_router(
+        state,
+        policy,
+        jobs_api::routes().route("/api/v1/health/ready", get(jobs_api::ready)),
+    )
+}
+
+fn private_router(state: ApiState, policy: NetworkPolicy, routes: Router<ApiState>) -> Router {
     let port = state.port;
-    let router = tools::routes()
-        .route("/api/v1/health/ready", get(tools::ready))
+    let router = routes
+        .layer(axum::Extension(AccessMode::Bearer))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn(request_timeout))
         .with_state(state);
@@ -130,8 +196,7 @@ pub fn guard_network(
 fn router_with_access(
     state: ApiState,
     network: Option<NetworkPolicy>,
-    brain: Option<BrainClient>,
-    tools: Option<ToolsClient>,
+    services: PrivateServices,
 ) -> Router {
     let mode = if network.is_some() {
         AccessMode::Bearer
@@ -146,7 +211,7 @@ fn router_with_access(
     let sampler = Arc::new(std::sync::Mutex::new(host_metrics::HostSampler::default()));
     let feed = Arc::new(host_metrics::HostFeed::new(sampler.clone()));
     let brain_routes = brain::routes();
-    let brain_routes = if let Some(brain) = brain {
+    let brain_routes = if let Some(brain) = services.brain {
         brain_routes.route_layer(middleware::from_fn_with_state(brain, brain::forward))
     } else {
         brain_routes
@@ -160,27 +225,36 @@ fn router_with_access(
         .route("/api/v1/articles", get(articles))
         .route("/api/v1/articles/search", get(article_search))
         .route("/api/v1/articles/counts", get(article_counts))
-        .route("/api/v1/jobs", get(jobs))
-        .route("/api/v1/logs", get(operations::logs))
-        .route("/api/v1/models/defaults", get(operations::model_defaults))
-        .route("/api/v1/profile", get(operations::profile))
-        .route("/api/v1/jobs/detail", get(job))
-        .route(JOB_RETRY_PATH, post(retry))
         .merge(brain_routes);
     let router = if mode == AccessMode::Bearer {
         let tools_routes = tools::routes();
-        let tools_routes = if let Some(tools) = tools {
+        let tools_routes = if let Some(tools) = services.tools {
             tools_routes.route_layer(middleware::from_fn_with_state(tools, tools::forward))
         } else {
             tools_routes
         };
+        let control_routes = control::routes();
+        let control_routes = if let Some(control) = services.control {
+            control_routes.route_layer(middleware::from_fn_with_state(control, control::forward))
+        } else {
+            control_routes
+        };
+        let jobs_routes = jobs_api::routes();
+        let jobs_routes = if let Some(jobs) = services.jobs {
+            jobs_routes.route_layer(middleware::from_fn_with_state(jobs, jobs_api::forward))
+        } else {
+            jobs_routes
+        };
         router
             .route(ATLAS_CYCLES_PATH, post(operations::submit_atlas_cycle))
-            .route(JOB_CANCEL_PATH, post(cancel))
             .merge(tools_routes)
-            .merge(control::routes())
+            .merge(control_routes)
+            .merge(jobs_routes)
     } else {
-        router.route("/api/v1/tools", get(operations::tools))
+        router
+            .route("/api/v1/tools", get(operations::tools))
+            .merge(control::read_routes())
+            .merge(jobs_api::read_and_retry_routes())
     };
     router
         .layer(axum::Extension(sampler))
@@ -235,6 +309,14 @@ async fn ready(State(s): State<ApiState>) -> ApiResult {
     Ok(Json(
         json!({"service":"argos-intel","api_version":1,"ready":true,"storage":true,"instance_id":s.instance_id}),
     ))
+}
+
+async fn private_ready(state: ApiState, service: &'static str) -> ApiResult {
+    storage_ready(&state.repo).await?;
+    Ok(Json(json!({
+        "service": service, "api_version": 1, "ready": true,
+        "storage": true, "instance_id": state.instance_id,
+    })))
 }
 
 async fn storage_ready(repo: &Repository) -> Result<(), ApiError> {

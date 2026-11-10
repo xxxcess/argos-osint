@@ -62,6 +62,7 @@ ENV CARGO_INCREMENTAL=0
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY services ./services
 COPY apps/fleetworks-cli ./apps/fleetworks-cli
 COPY apps/venture ./apps/venture
 RUN --mount=type=cache,id=fleetworks-registry-${TARGETARCH},target=/usr/local/cargo/registry \

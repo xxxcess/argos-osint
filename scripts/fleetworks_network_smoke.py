@@ -3,6 +3,7 @@
 import argparse
 import base64
 import contextlib
+import hashlib
 import http.client
 import json
 import os
@@ -214,6 +215,7 @@ def exercise(mode, tmp, binary, surreal):
             if attempt == 1 and mode == "memory":
                 exercise_brain(workspace, binary, env, api_port, headers)
                 exercise_private_tools(workspace, binary, env, api_port, headers)
+                exercise_control_jobs(workspace, binary, env, api_port, headers)
     assert (generations[0] == generations[1]) == (mode == "disk")
     print(f"{mode}: privileged bootstrap, scoped API and worker roles, ingress, retained reads, durable tool execution and database generation passed", flush=True)
 
@@ -230,6 +232,24 @@ def exercise_brain(workspace, binary, env, api_port, public_headers):
     auth = {"Authorization": "Bearer " + token}
     ready = "/api/v1/health/ready"
     detail = "/api/v1/articles/detail?run=missing-run&id=missing-article"
+    datasets = workspace / "datasets"
+    datasets.mkdir(exist_ok=True)
+    snapshot = datasets / "actors-fixture.csv"
+    contents = (
+        'actor_id,actor_name,actor_type,aliases,name_normalized\n'
+        'fixture:harbor,Harbor Council,organization,"[""Port Council""]",harbor council\n'
+    ).encode()
+    snapshot.write_bytes(contents)
+    digest = hashlib.sha256(contents).hexdigest()
+    command = [binary, "--role", "seed-actors", "--file", snapshot, "--expected-sha256"]
+    invalid = subprocess.run(
+        [*command, "0" * 64], env=env, capture_output=True, timeout=30,
+    )
+    assert invalid.returncode and b"SHA-256" in invalid.stderr, invalid.stderr
+    for _ in range(2):
+        receipt = subprocess.check_output([*command, digest], env=env, timeout=30)
+        data = json.loads(receipt)
+        assert data["dataset_sha256"] == digest and data["complete"] and data["actors"] == 1, data
     with process([binary, "--role", "api", "--port", str(api_port)], api_env, workspace / "api-brain.log") as api:
         wait_for(api, api_port, ready, public_headers)
         with process([binary, "--role", "brain", "--port", str(brain_port)], brain_env, workspace / "brain.log") as brain:
@@ -239,9 +259,19 @@ def exercise_brain(workspace, binary, env, api_port, public_headers):
             private = request(brain_port, detail, auth)
             assert private[0] == 404, private
             assert request(api_port, detail, public_headers) == private
+            path = "/api/v1/actors/search?query=Harbor%20Council"
+            status, names = request(api_port, path, public_headers)
+            assert (status, names) == request(brain_port, path, auth)
+            assert status == 200 and len(names["rows"]) == 1, names
+            actor = names["rows"][0]
+            assert actor["catalog_id"] == "fixture:harbor", actor
+            status, aliases = request(
+                api_port, "/api/v1/actors/search?query=Port%20Council&mode=alias", public_headers,
+            )
+            assert status == 200 and [row["actor_id"] for row in aliases["rows"]] == [actor["actor_id"]], aliases
         assert request(api_port, detail, public_headers)[0] == 502
         assert request(api_port, "/api/v1/tools", public_headers)[0] == 200
-    print("Brain: private readiness, bearer isolation, retained route relay and outage isolation passed", flush=True)
+    print("Brain: pinned actor seed and replay, private search, retained route relay and outage isolation passed", flush=True)
 
 
 def exercise_private_tools(workspace, binary, env, api_port, public_headers):
@@ -275,6 +305,78 @@ def exercise_private_tools(workspace, binary, env, api_port, public_headers):
         assert request(api_port, path, public_headers)[0] == 502
         assert request(api_port, "/api/v1/jobs", public_headers)[0] == 200
     print("Tools: private readiness, bearer isolation, execution relay and outage isolation passed", flush=True)
+
+
+def exercise_control_jobs(workspace, binary, env, api_port, public_headers):
+    control_port, jobs_port = free_ports(2)
+    control_token, jobs_token = (secrets.token_hex(32) for _ in range(2))
+    control_env = {
+        **env,
+        "FLEETWORKS_CONTROL_TOKEN": control_token,
+        "FLEETWORKS_CONTROL_ALLOWED_HOSTS": f"127.0.0.1:{control_port}",
+    }
+    jobs_env = {
+        **env,
+        "FLEETWORKS_JOBS_TOKEN": jobs_token,
+        "FLEETWORKS_JOBS_ALLOWED_HOSTS": f"127.0.0.1:{jobs_port}",
+    }
+    gateway_env = {
+        **env,
+        "FLEETWORKS_CONTROL_TOKEN": control_token,
+        "FLEETWORKS_CONTROL_ORIGIN": f"http://127.0.0.1:{control_port}",
+        "FLEETWORKS_JOBS_TOKEN": jobs_token,
+        "FLEETWORKS_JOBS_ORIGIN": f"http://127.0.0.1:{jobs_port}",
+    }
+    control_auth = {"Authorization": f"Bearer {control_token}"}
+    jobs_auth = {"Authorization": f"Bearer {jobs_token}"}
+    ready = "/api/v1/health/ready"
+    profile = "/api/v1/profile"
+    defaults = "/api/v1/models/defaults"
+    jobs_path = "/api/v1/jobs"
+    (workspace / "exports").mkdir(exist_ok=True)
+    with process([binary, "--role", "api", "--port", str(api_port)], gateway_env, workspace / "api-control-jobs.log") as api:
+        wait_for(api, api_port, ready, public_headers)
+        with process([binary, "--role", "jobs", "--port", str(jobs_port)], jobs_env, workspace / "jobs.log") as jobs:
+            assert wait_for(jobs, jobs_port, ready, jobs_auth)["service"] == "fleetworks-jobs"
+            with process([binary, "--role", "control", "--port", str(control_port)], control_env, workspace / "control.log") as control:
+                assert wait_for(control, control_port, ready, control_auth)["service"] == "fleetworks-control"
+                assert request(control_port, profile, public_headers)[0] == 401
+                assert request(jobs_port, jobs_path, public_headers)[0] == 401
+                assert request(control_port, profile, jobs_auth)[0] == 401
+                assert request(jobs_port, jobs_path, control_auth)[0] == 401
+                assert request(api_port, profile, control_auth)[0] == 401
+                assert request(api_port, jobs_path, jobs_auth)[0] == 401
+                assert request(control_port, jobs_path, control_auth)[0] == 404
+                assert request(jobs_port, profile, jobs_auth)[0] == 404
+                assert request(jobs_port, "/api/v1/live", jobs_auth)[0] == 404
+                direct_profile = request(control_port, profile, control_auth)
+                assert direct_profile[0] == 200 and direct_profile[1]["access_mode"] == "bearer"
+                assert request(api_port, profile, public_headers) == direct_profile
+                for path in (jobs_path, "/api/v1/logs?limit=1"):
+                    direct = request(jobs_port, path, jobs_auth)
+                    assert direct[0] == 200 and isinstance(direct[1]["rows"], list)
+                    assert request(api_port, path, public_headers) == direct
+                missing = "/api/v1/jobs/detail?id=missing-control-jobs-fixture"
+                assert request(api_port, missing, public_headers)[0] == 404
+                auth = {**public_headers, "Content-Type": "application/json"}
+                assert request(api_port, "/api/v1/jobs/cancel", auth, '{"id":"missing-control-jobs-fixture"}')[0] == 404
+                change = json.dumps({
+                    "role": "atlas_analyst",
+                    "primary": {"provider": "local", "model": "offline-control-fixture"},
+                })
+                assert request(api_port, defaults + "/set", auth, change) == (200, {"saved": True})
+                observed = request(control_port, defaults, control_auth)
+                assert observed[0] == 200 and "offline-control-fixture" in json.dumps(observed[1])
+                assert request(api_port, defaults, public_headers) == observed
+                status, export = request(api_port, profile + "/export", auth, '{"name":"private-control-fixture"}')
+                assert status == 200 and export["path"] == "exports/private-control-fixture.json"
+                assert (workspace / export["path"]).stat().st_mode & 0o777 == 0o600
+            assert request(api_port, profile, public_headers)[0] == 502
+            assert request(api_port, defaults, public_headers)[0] == 502
+            assert request(api_port, jobs_path, public_headers)[0] == 200
+        assert request(api_port, jobs_path, public_headers)[0] == 502
+        assert request(api_port, "/api/v1/tools", public_headers)[0] == 200
+    print("Control and Jobs: dedicated credentials, retained route relay, workspace writes and independent outages passed", flush=True)
 
 
 def exercise_nlp(tmp, binary):

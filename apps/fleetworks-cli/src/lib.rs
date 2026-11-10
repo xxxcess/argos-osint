@@ -209,6 +209,15 @@ impl From<AtlasCommand> for Operation {
 enum BrainCommand {
     /// Open an interactive Brain session.
     Tui,
+    /// Find retained actors by exact name or by alias prefix.
+    Search {
+        query: String,
+        /// Search exact and prefix aliases.
+        #[arg(long)]
+        alias: bool,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=25), default_value_t = 10)]
+        limit: u16,
+    },
     /// Read an actor dossier by ID.
     Actor { id: String },
     /// Read the retained Intel brief for an article.
@@ -221,6 +230,14 @@ impl From<BrainCommand> for Operation {
     fn from(command: BrainCommand) -> Self {
         match command {
             BrainCommand::Tui => Self::Interactive(Interactive::Brain),
+            BrainCommand::Search {
+                query,
+                alias,
+                limit,
+            } => Self::query(
+                "/api/v1/actors/search",
+                json!({"query":query,"mode":if alias {"alias"} else {"name"},"limit":limit}),
+            ),
             BrainCommand::Actor { id } => Self::query("/api/v1/actors/detail", json!({"id": id})),
             BrainCommand::Brief { run, id } => {
                 Self::query("/api/v1/articles/detail", json!({"run": run, "id": id}))

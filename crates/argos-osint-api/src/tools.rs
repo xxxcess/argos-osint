@@ -2,14 +2,13 @@
 
 use argos_osint_core::osint::manual::{self, Receipt, SubmitError, Tools};
 use axum::extract::{Query, Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::StatusCode;
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use fleetworks_contracts::{ToolRunRequest, TOOL_RESULT_PATH, TOOL_RUN_PATH};
 use serde::Deserialize;
-use serde_json::json;
 
 use crate::private_relay::{PrivateClient, Service};
 use crate::{bad, internal, missing, ApiError, ApiResult, ApiState};
@@ -23,11 +22,7 @@ pub(crate) fn routes() -> Router<ApiState> {
 }
 
 pub(crate) async fn ready(State(state): State<ApiState>) -> ApiResult {
-    crate::storage_ready(&state.repo).await?;
-    Ok(Json(json!({
-        "service": "fleetworks-tools", "api_version": 1, "ready": true,
-        "storage": true, "instance_id": state.instance_id,
-    })))
+    crate::private_ready(state, "fleetworks-tools").await
 }
 
 /// Authenticated connection to the private Tools process.
@@ -46,13 +41,6 @@ pub(crate) async fn forward(
     request: Request,
     _next: Next,
 ) -> Result<Response, Response> {
-    let allowed = matches!(
-        (request.method(), request.uri().path()),
-        (&Method::GET, "/api/v1/tools" | TOOL_RESULT_PATH) | (&Method::POST, TOOL_RUN_PATH)
-    );
-    if !allowed {
-        return Err(StatusCode::METHOD_NOT_ALLOWED.into_response());
-    }
     client.0.forward(request).await
 }
 

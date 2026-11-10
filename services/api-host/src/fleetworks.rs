@@ -5,7 +5,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, ensure, Context, Result};
-use argos_osint_api::{BrainClient, NetworkPolicy, ToolsClient};
+use argos_osint_api::{
+    BrainClient, ControlClient, JobsClient, NetworkPolicy, PrivateServices, ToolsClient,
+};
 use argos_osint_core::storage::open::{NetworkAccess, Target};
 use argos_osint_core::storage::repo::Repository;
 
@@ -99,6 +101,11 @@ impl ApiAccess {
                 "TOOLS",
                 "FLEETWORKS_TOOLS_TOKEN",
             )?),
+            Role::Control => Some(internal_access_with_token(
+                "CONTROL",
+                "FLEETWORKS_CONTROL_TOKEN",
+            )?),
+            Role::Jobs => Some(internal_access_with_token("JOBS", "FLEETWORKS_JOBS_TOKEN")?),
             _ => None,
         };
         if let Some((bind, policy)) = private {
@@ -134,25 +141,40 @@ impl ApiAccess {
     }
 }
 
-pub(crate) fn brain_client() -> Result<Option<BrainClient>> {
-    match env::var("FLEETWORKS_BRAIN_ORIGIN") {
-        Ok(origin) => Ok(Some(BrainClient::new(
-            &origin,
-            &read_secret("FLEETWORKS_INTERNAL_TOKEN")?,
-        )?)),
-        Err(env::VarError::NotPresent) => Ok(None),
-        Err(_) => Err(anyhow!("invalid encoding in FLEETWORKS_BRAIN_ORIGIN")),
-    }
+pub(crate) fn private_services() -> Result<PrivateServices> {
+    Ok(PrivateServices::new(
+        private_client(
+            "FLEETWORKS_BRAIN_ORIGIN",
+            "FLEETWORKS_INTERNAL_TOKEN",
+            BrainClient::new,
+        )?,
+        private_client(
+            "FLEETWORKS_TOOLS_ORIGIN",
+            "FLEETWORKS_TOOLS_TOKEN",
+            ToolsClient::new,
+        )?,
+        private_client(
+            "FLEETWORKS_CONTROL_ORIGIN",
+            "FLEETWORKS_CONTROL_TOKEN",
+            ControlClient::new,
+        )?,
+        private_client(
+            "FLEETWORKS_JOBS_ORIGIN",
+            "FLEETWORKS_JOBS_TOKEN",
+            JobsClient::new,
+        )?,
+    ))
 }
 
-pub(crate) fn tools_client() -> Result<Option<ToolsClient>> {
-    match env::var("FLEETWORKS_TOOLS_ORIGIN") {
-        Ok(origin) => Ok(Some(ToolsClient::new(
-            &origin,
-            &read_secret("FLEETWORKS_TOOLS_TOKEN")?,
-        )?)),
+fn private_client<T>(
+    origin_key: &str,
+    token_key: &str,
+    connect: impl FnOnce(&str, &str) -> Result<T>,
+) -> Result<Option<T>> {
+    match env::var(origin_key) {
+        Ok(origin) => Ok(Some(connect(&origin, &read_secret(token_key)?)?)),
         Err(env::VarError::NotPresent) => Ok(None),
-        Err(_) => Err(anyhow!("invalid encoding in FLEETWORKS_TOOLS_ORIGIN")),
+        Err(_) => Err(anyhow!("invalid encoding in {origin_key}")),
     }
 }
 

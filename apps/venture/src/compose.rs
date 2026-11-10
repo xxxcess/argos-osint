@@ -28,10 +28,12 @@ const ROOT_PASSWORD_FILE: &str = "FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE";
 const RUNTIME_PASSWORD_FILE: &str = "FLEETWORKS_STORAGE_PASSWORD_FILE";
 const BROKER_PASSWORD_FILE: &str = "FLEETWORKS_BROKER_PASSWORD_FILE";
 const INTERNAL_TOKEN_FILE: &str = "FLEETWORKS_INTERNAL_TOKEN_FILE";
-const BRAIN_TOKEN_FILE: &str = "FLEETWORKS_BRAIN_TOKEN_FILE";
-const BRAIN_TOKEN_NAME: &str = "brain-token";
-const TOOLS_TOKEN_FILE: &str = "FLEETWORKS_TOOLS_TOKEN_FILE";
-const TOOLS_TOKEN_NAME: &str = "tools-token";
+const PRIVATE_TOKEN_FILES: &[(&str, &str)] = &[
+    ("FLEETWORKS_BRAIN_TOKEN_FILE", "brain-token"),
+    ("FLEETWORKS_TOOLS_TOKEN_FILE", "tools-token"),
+    ("FLEETWORKS_CONTROL_TOKEN_FILE", "control-token"),
+    ("FLEETWORKS_JOBS_TOKEN_FILE", "jobs-token"),
+];
 const SETTINGS: &[(&str, Option<&str>)] = &[
     ("FLEETWORKS_STORAGE_NAMESPACE", Some("fleetworks")),
     ("FLEETWORKS_STORAGE_DATABASE", Some("fleetworks")),
@@ -247,6 +249,8 @@ impl Owner {
             .env_remove("COMPOSE_ENV_FILES")
             .env_remove("FLEETWORKS_API_TOKEN")
             .env_remove("FLEETWORKS_TOOLS_TOKEN")
+            .env_remove("FLEETWORKS_CONTROL_TOKEN")
+            .env_remove("FLEETWORKS_JOBS_TOKEN")
             .env_remove("FLEETWORKS_STORAGE_ROOT_PASSWORD")
             .env_remove("FLEETWORKS_STORAGE_PASSWORD")
             .env("FLEETWORKS_HOST_WORKSPACE", &self.workspace)
@@ -256,16 +260,11 @@ impl Owner {
             .env(WEB_PORT, self.web_port.to_string())
             .env(STORAGE_URL, &self.endpoint)
             .env(API_TOKEN_FILE, &self.token)
-            .env(
-                BRAIN_TOKEN_FILE,
-                self.workspace.join("secrets").join(BRAIN_TOKEN_NAME),
-            )
-            .env(
-                TOOLS_TOKEN_FILE,
-                self.workspace.join("secrets").join(TOOLS_TOKEN_NAME),
-            )
             .env(ROOT_PASSWORD_FILE, &self.root_password)
             .env(RUNTIME_PASSWORD_FILE, &self.runtime_password);
+        for (variable, name) in PRIVATE_TOKEN_FILES {
+            command.env(variable, self.workspace.join("secrets").join(name));
+        }
         for (key, _) in SETTINGS {
             command.env_remove(key);
         }
@@ -524,8 +523,9 @@ fn prepare(
         Some("api-token"),
     )?;
     workspace.read_api_token_file(&token)?;
-    workspace.initialize_secret_file(BRAIN_TOKEN_NAME)?;
-    workspace.initialize_secret_file(TOOLS_TOKEN_NAME)?;
+    for (_, name) in PRIVATE_TOKEN_FILES {
+        workspace.initialize_secret_file(name)?;
+    }
     let root_password = secret(
         workspace,
         &environment,

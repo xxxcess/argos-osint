@@ -861,6 +861,28 @@ pub async fn seed_actors(
     cancel: &AtomicBool,
     report: impl Fn(Progress),
 ) -> Result<Progress> {
+    seed_actors_with_source_policy(repo, actors, fingerprint, cancel, report, true).await
+}
+
+/// Seed a new catalog or retry its pinned source without mixing datasets.
+pub async fn seed_actors_pinned(
+    repo: &Repository,
+    actors: Vec<Actor>,
+    fingerprint: &str,
+    cancel: &AtomicBool,
+    report: impl Fn(Progress),
+) -> Result<Progress> {
+    seed_actors_with_source_policy(repo, actors, fingerprint, cancel, report, false).await
+}
+
+async fn seed_actors_with_source_policy(
+    repo: &Repository,
+    actors: Vec<Actor>,
+    fingerprint: &str,
+    cancel: &AtomicBool,
+    report: impl Fn(Progress),
+    allow_different_source: bool,
+) -> Result<Progress> {
     if actors.is_empty() {
         bail!("actor catalog cannot be empty");
     }
@@ -871,7 +893,21 @@ pub async fn seed_actors(
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
     );
     let now = chrono::Utc::now().to_rfc3339();
-    repo.db().query("BEGIN; IF (SELECT VALUE status FROM ONLY brain_actor_seed:catalog) = 'running' AND (SELECT VALUE lease_until FROM ONLY brain_actor_seed:catalog) > $now { THROW 'actor seed is already running'; }; UPSERT brain_actor_seed:catalog SET status = 'running', fingerprint = $hash, processed = 0, total = $total, aliases = 0, owner = $owner, lease_until = $lease, updated_at = $now; COMMIT;")
+    repo.db().query(
+        "BEGIN;
+         LET $previous = (SELECT status, lease_until, fingerprint FROM ONLY brain_actor_seed:catalog);
+         IF $previous.status = 'running' AND $previous.lease_until > $now {
+             THROW 'actor seed is already running';
+         };
+         IF $allow_different_source = false AND $previous != NONE AND $previous.fingerprint != $hash {
+             THROW 'actor catalog already has a different source fingerprint';
+         };
+         UPSERT brain_actor_seed:catalog SET status = 'running', fingerprint = $hash,
+             processed = 0, total = $total, aliases = 0, owner = $owner,
+             lease_until = $lease, updated_at = $now;
+         COMMIT;",
+    )
+        .bind(("allow_different_source", allow_different_source))
         .bind(("now", now.clone())).bind(("hash", fingerprint.clone())).bind(("total", actors.len())).bind(("owner", owner.clone()))
         .bind(("lease", (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339())).await?.check()?;
     let result = ingest(repo, &actors, &owner, cancel, &report).await;

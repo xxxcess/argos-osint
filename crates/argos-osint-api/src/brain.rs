@@ -13,6 +13,7 @@ use crate::{ApiResult, ApiState};
 pub(crate) fn routes() -> Router<ApiState> {
     Router::new()
         .route("/api/v1/actors/detail", get(crate::actor_dossier::read))
+        .route("/api/v1/actors/search", get(crate::actor_dossier::search))
         .route("/api/v1/articles/detail", get(crate::detail))
         .route("/api/v1/articles/related", get(crate::related))
         .route("/api/v1/brief/ensure", post(crate::ensure))

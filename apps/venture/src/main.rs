@@ -70,6 +70,11 @@ enum Action {
         #[arg(long, visible_alias = "activate-synthetic-baseline")]
         activate: bool,
     },
+    /// Seed the local Brain actor catalog from an explicit workspace CSV.
+    SeedActors {
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+    },
     /// Launch a sibling client. Use `venture help client` for launcher help.
     #[command(disable_help_flag = true)]
     Client {
@@ -179,6 +184,7 @@ async fn main() -> Result<()> {
         Action::TrainLegacy { file, activate } => {
             classifier::train(&workspace, file, activate).await
         }
+        Action::SeedActors { file } => classifier::seed_actors(&workspace, file).await,
         Action::Client {
             kind,
             mut arguments,
@@ -285,6 +291,18 @@ mod tests {
     use clap::Parser;
 
     use super::{Action, Args, ClientKind};
+
+    #[test]
+    fn actor_seed_requires_an_explicit_csv() {
+        assert!(Args::try_parse_from(["venture", "seed-actors"]).is_err());
+        let args =
+            Args::try_parse_from(["venture", "seed-actors", "--file", "datasets/actors.csv"])
+                .unwrap();
+        let Action::SeedActors { file } = args.action else {
+            panic!("expected an actor catalog seed");
+        };
+        assert_eq!(file, Path::new("datasets/actors.csv"));
+    }
 
     #[test]
     fn up_and_web_can_use_preloaded_images() {

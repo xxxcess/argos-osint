@@ -4,6 +4,7 @@ use std::io::BufRead;
 use std::io::Write;
 
 use anyhow::bail;
+use anyhow::Context;
 use anyhow::Result;
 use fleetworks_contracts::Client;
 use serde_json::Value;
@@ -14,7 +15,9 @@ use crate::terminal::write_field;
 use crate::terminal::Session;
 use crate::BrainCommand;
 
-const HELP: &str = "actor ID             Show a retained actor dossier and associations
+const HELP: &str = "find NAME            Look up an exact retained actor name
+aliases PREFIX       Look up exact and prefix aliases
+actor ID | #N        Show an actor dossier by ID or from the last result
 brief RUN ID         Show a retained article brief
 topology SEED        Show recorded nodes and edges for a memory ID or brief:RUN/ARTICLE
 help | quit          Show commands or close this session";
@@ -27,12 +30,30 @@ pub(crate) fn run(
     mut output: impl Write,
 ) -> Result<()> {
     let session = Session { client, runtime };
+    let mut actor_results = Vec::new();
     writeln!(output, "Fleetworks Brain\n{HELP}")?;
     terminal::run(input, output, "brain> ", |words, _, output| {
         match words {
             ["help"] => writeln!(output, "{HELP}")?,
+            [command @ ("find" | "aliases"), terms @ ..] if !terms.is_empty() => {
+                actor_results.clear();
+                let reply = session.request(BrainCommand::Search {
+                    query: terms.join(" "),
+                    alias: *command == "aliases",
+                    limit: 10,
+                })?;
+                actor_results = write_search(&reply, output)?;
+            }
             ["actor", id] => {
-                let reply = session.request(BrainCommand::Actor { id: (*id).into() })?;
+                let id = if id.starts_with('#') {
+                    terminal::row_index(id)
+                        .and_then(|index| actor_results.get(index))
+                        .map(String::as_str)
+                        .context("no such row in the last actor search")?
+                } else {
+                    *id
+                };
+                let reply = session.request(BrainCommand::Actor { id: id.into() })?;
                 write_actor(&reply, output)?;
             }
             ["brief", run, id] => {
@@ -52,6 +73,54 @@ pub(crate) fn run(
         }
         Ok(())
     })
+}
+
+fn write_search(reply: &Value, output: &mut impl Write) -> Result<Vec<String>> {
+    let rows = terminal::rows(reply, "rows")?;
+    let diagnostic = terminal::field(reply, "diagnostic");
+    if !diagnostic.is_empty() {
+        writeln!(
+            output,
+            "Actor discovery  {}",
+            terminal::text(diagnostic, 128)
+        )?;
+    } else if rows.is_empty() {
+        writeln!(output, "No matching retained actors.")?;
+    }
+    write_field(output, "Catalog revision", reply, "catalog_revision", 160)?;
+    let mut ids = Vec::new();
+    for row in rows {
+        let id = terminal::field(row, "actor_id");
+        if id.is_empty() {
+            bail!("invalid actor search result");
+        }
+        ids.push(id.to_owned());
+        let label = terminal::text(terminal::field(row, "label"), 240);
+        let kind = terminal::text(terminal::field(row, "kind"), 80);
+        let reason = terminal::text(terminal::field(row, "reason"), 80);
+        let ambiguity = if row["ambiguous"] == true {
+            " · ambiguous"
+        } else {
+            ""
+        };
+        writeln!(
+            output,
+            "#{}  {label}  [{kind} · {reason}{ambiguity}]  ({})",
+            ids.len(),
+            terminal::text(id, 256),
+        )?;
+        write_field(output, "Catalog ID", row, "catalog_id", 256)?;
+        let provenance = &row["alias_provenance"];
+        write_field(output, "Alias catalog ID", provenance, "catalog_id", 256)?;
+        write_field(output, "Alias source ID", provenance, "source_id", 256)?;
+    }
+    if reply["truncated"] == true {
+        writeln!(
+            output,
+            "Use the one-shot search limit to request more candidates."
+        )?;
+    }
+    Ok(ids)
 }
 
 pub(crate) fn write_brief(brief: &Value, output: &mut impl Write) -> Result<()> {

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 484" role="img" aria-labelledby="fleetworks-title fleetworks-desc">
 <title id="fleetworks-title">Fleetworks service boundaries</title>
-<desc id="fleetworks-desc">Venture manages the local Compose stack. Terminal clients and the Intel web relay call the authenticated API. The API relays retained intel and tool operations to private Brain and Tools. SurrealDB holds domain records and durable job state. The optional Atlas worker publishes and consumes RabbitMQ deliveries and calls the private NLP and classifier services.</desc>
+<desc id="fleetworks-desc">Venture manages the local Compose stack. Terminal clients and the Intel web relay call the authenticated API. The API relays retained operations to private Brain, Tools, Control and Jobs. SurrealDB holds domain records and durable job state. The optional Atlas worker publishes and consumes RabbitMQ deliveries and calls the private NLP and classifier services.</desc>
 <defs>
   <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
 </defs>
@@ -44,8 +44,8 @@
 <text x="440" y="250" text-anchor="middle" class="label">Fleetworks API</text>
 <text x="440" y="272" text-anchor="middle" class="note">Bearer and readiness</text>
 <rect x="692" y="76" width="200" height="72" rx="6" class="node"/>
-<text x="792" y="106" text-anchor="middle" class="label">Private Brain and Tools</text>
-<text x="792" y="128" text-anchor="middle" class="note">Retained intel and tool execution</text>
+<text x="792" y="106" text-anchor="middle" class="label">Private services</text>
+<text x="792" y="128" text-anchor="middle" class="note">Brain · Tools · Control · Jobs</text>
 <rect x="692" y="220" width="200" height="72" rx="6" class="node"/>
 <text x="792" y="250" text-anchor="middle" class="label">SurrealDB</text>
 <text x="792" y="272" text-anchor="middle" class="note">Records, jobs and outbox</text>

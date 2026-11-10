@@ -15,20 +15,20 @@ venture --workspace "$FLEETWORKS_HOST_WORKSPACE" init
 
 Choose a distinct Compose project name and separate web and API ports for each concurrently running workspace.
 
-The API uses `secrets/api-token` for clients. The private Brain and Tools roles use `secrets/brain-token` and `secrets/tools-token`, respectively. Venture creates all three when it starts the stack. Bootstrap needs `secrets/storage-root-password` and `secrets/storage-password`. Use the existing files when restarting the same database. For a fresh managed database, generate each password file once.
+The API uses `secrets/api-token` for clients. Private Brain, Tools, Control and Jobs use separate bearer files. Venture creates `api-token`, `brain-token`, `tools-token`, `control-token` and `jobs-token` under `secrets/` when it starts the stack. Bootstrap needs `secrets/storage-root-password` and `secrets/storage-password`. Use the existing files when restarting the same database. For a fresh managed database, generate each password file once.
 
 ```sh
 (
   umask 077
   set -C
-  for name in brain-token tools-token storage-root-password storage-password; do
+  for name in brain-token tools-token control-token jobs-token storage-root-password storage-password; do
     file="$FLEETWORKS_HOST_WORKSPACE/secrets/$name"
     [ -e "$file" ] || openssl rand -hex 32 >"$file" || exit
   done
 )
 ```
 
-The `FLEETWORKS_API_TOKEN_FILE`, `FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE`, and `FLEETWORKS_STORAGE_PASSWORD_FILE` settings accept absolute host-side paths. The runtime database password must be 32–256 characters using ASCII letters, digits, or `-._~`. Each container receives its required credentials as files under `/run/secrets`. Bootstrap gets the root and runtime passwords, the API gets the runtime password and all three bearer tokens, Brain and Tools each get the runtime password and their own private token, and the workers get the runtime password. For direct Compose use, `FLEETWORKS_BRAIN_TOKEN_FILE` and `FLEETWORKS_TOOLS_TOKEN_FILE` override the private token paths. Venture uses the workspace path. The managed database reads the root password at startup. The web desktop receives the API token for its server-side HTTP and WebSocket relay.
+The `FLEETWORKS_API_TOKEN_FILE`, `FLEETWORKS_STORAGE_ROOT_PASSWORD_FILE`, and `FLEETWORKS_STORAGE_PASSWORD_FILE` settings accept absolute host-side paths. The runtime database password must be 32–256 characters using ASCII letters, digits, or `-._~`. Each container receives its required credentials as files under `/run/secrets`. Bootstrap gets the root and runtime passwords, the API gets the runtime password and the bearer tokens it needs to relay. Each private role gets the runtime password and its own bearer. The workers get the runtime password. For direct Compose use, `FLEETWORKS_BRAIN_TOKEN_FILE`, `FLEETWORKS_TOOLS_TOKEN_FILE`, `FLEETWORKS_CONTROL_TOKEN_FILE` and `FLEETWORKS_JOBS_TOKEN_FILE` override the private token paths. Venture uses the workspace path. The managed database reads the root password at startup. The web desktop receives the API token for its server-side HTTP and WebSocket relay.
 
 ## Managed disk database
 
@@ -91,6 +91,8 @@ The [Fleetworks Compose checks](../docs/wiki/code/ci.md#fleetworksyml--scoped-br
 Load the images for every selected service into the local Docker engine, then use `venture up --no-build` or `venture web --no-build`. Venture passes `--no-build --pull never` to Compose, so the selected tags must already exist locally. The ordinary startup still builds images. Repeat `--no-build` on subsequent starts when using those images.
 
 Set `FLEETWORKS_RUNTIME_IMAGE`, `FLEETWORKS_WEB_IMAGE`, and `FLEETWORKS_SURREAL_IMAGE` to select preloaded tags. With `--atlas`, also preload the pinned RabbitMQ image or set `FLEETWORKS_RABBITMQ_IMAGE` to its preloaded tag. For an artifact smoke, run `python3 deploy/verify.py --venture path/to/venture --no-build --image-ids path/to/service-images.json`. The JSON object maps each Compose service, including `bootstrap`, to its expected Docker image ID. The smoke checks the actual containers against those IDs before shutdown.
+
+To exercise Venture-managed host storage with the same images, add `--storage host-memory --surreal /path/to/surreal` or `--storage host-disk --surreal /path/to/surreal`. Use the checksum-verified SurrealDB 3.3.4 executable. Each smoke uses a fresh workspace and a temporary host-gateway database port. It omits the Compose `surrealdb` service from the expected image IDs and verifies that a completed Tools result disappears in memory mode or survives in disk mode after a Venture stop and restart.
 
 ## Train the optional Natural classifier
 

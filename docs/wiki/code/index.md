@@ -7,7 +7,7 @@ Start with the [workspace manifest](../../../Cargo.toml) and [service diagram](.
 | Branch | What to inspect | Next page |
 | --- | --- | --- |
 | [Core](../../../crates/argos-osint-core/src) | Atlas, Intel, Brain, providers and NLP | [Core map](core.md) |
-| [HTTP adapter](../../../crates/argos-osint-api) · [Service host](../../../crates/argos-api-host) | Versioned API, authenticated gateway, private Brain, readiness and worker roles | [Intel web](intel-web.md) |
+| [HTTP adapter](../../../crates/argos-osint-api) · [Service host](../../../services/api-host) | Versioned API, authenticated gateway, private Brain, readiness and worker roles | [Intel web](intel-web.md) |
 | [Venture](../../../apps/venture) · [Terminal clients](../../../apps/fleetworks-cli) | Workspace setup, service lifecycle and versioned HTTP clients | [Interfaces](interfaces.md) |
 | [Compose](../../../deploy) · [Broker](../../../crates/fleetworks-broker) | Local service graph and Atlas RabbitMQ delivery | [Deployment](../../../deploy/README.md) |
 | [Storage](../../../crates/argos-osint-core/src/storage) | Open/bootstrap, repositories, publication, jobs and recall | [Storage map](storage.md) |

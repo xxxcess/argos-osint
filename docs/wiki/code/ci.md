@@ -90,11 +90,13 @@ On PRs (including title/body edits) and pushes to `main`: `node scripts/release_
 
 On pushes to `main` (or manual dispatch): Release Please opens/updates the release PR and tags from Conventional Commits (`release-please-config.json`, `.release-please-manifest.json`). Uses a GitHub App token or `RELEASE_PLEASE_TOKEN` so release PRs trigger CI; see [versioning.md](versioning.md).
 
-## `fleetworks-candidate.yml` — native CLI release candidates
+## `fleetworks-candidate.yml` — release candidates
 
-The [candidate workflow](../../../.github/workflows/fleetworks-candidate.yml) builds release binaries for Linux AMD64 and ARM64 and Intel and Apple silicon macOS. Start a run on a remote ref with `gh workflow run fleetworks-candidate.yml --ref <branch> -f head=<sha>` to pin the exact commit. The workflow uploads one archive and its SHA-256 for each target and retains them for 14 days.
+The [candidate workflow](../../../.github/workflows/fleetworks-candidate.yml) builds release binaries for Linux AMD64 and ARM64 and Intel and Apple silicon macOS. Start a run on a remote ref with `gh workflow run fleetworks-candidate.yml --ref <branch> -f head=<sha>` to pin the exact commit. The workflow uploads a CLI archive and its SHA-256 for each target and retains them for 14 days.
 
-A separate native job downloads the exact artifact by ID, verifies its archive and file hashes, checks the revision, version and executable architecture, and runs the installed Venture and client binaries. These Actions artifacts are release candidates. Public release distribution and published OCI image acceptance are separate from this workflow.
+A separate native job downloads the exact CLI artifact by ID, verifies its archive and file hashes, checks the revision, version and executable architecture, and runs the installed Venture and client binaries.
+
+Each Linux target also exports the runtime, web, SurrealDB and pinned RabbitMQ images. Verification downloads the exact image artifact and CLI artifact by ID, checks archive digests and native image IDs, then starts the downloaded Venture and images with `--no-build`. The smoke checks the image ID of every created service. The image archive is limited to 1 GiB compressed and 3 GiB uncompressed. The AMD64 job also starts both host storage modes with the pinned SurrealDB executable and checks restart behavior. These Actions artifacts verify release candidates. Public release distribution and registry manifest digest verification are separate. [Release policy](versioning.md#release-candidates)
 
 ## `intel-web.yml` — local web client checks
 

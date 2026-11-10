@@ -44,19 +44,20 @@ Status: in implementation
 - [x] Move shared model execution out of Recon and update retained consumers to use the shared module.
 - [x] Extract shared Brain graph types from Recon and move retained storage selection to the common runtime.
 - [ ] Remove remaining retained job, tool-binding and historical record dependencies from Recon.
-- [ ] Split contracts/client/UI crates from RocksDB, ONNX and QuickJS dependencies.
+- [x] Split the default Venture and terminal client build graph from RocksDB, ONNX and QuickJS.
 Acceptance: all three storage selections work through a network endpoint; original .argos state remains untouched.
 
 ### Phase 4 — Services and durable execution
 Status: in implementation
 - [x] Separate API serving, schema bootstrap and background workers. Dedicated domain entrypoints and their actions continue below.
 - [x] Wire private Atlas, NLP, classifier, Brain and Tools roles, with brief execution in its own worker.
-- [ ] Finish separate model execution, control and job service ownership.
+- [x] Separate private Control configuration and Jobs operations from the gateway.
+- [ ] Move retained provider transport into the dedicated model execution service.
 - [x] Admit Focus Brief jobs, runnable tasks, captured inputs and the retained run fence in one transaction before splitting the worker.
 - [x] Commit each brief stage output, metadata, task state and final retained run fence together.
 - [x] Persist and replay brief display, Brain and index publication from completed stages.
 - [x] Introduce the Atlas RabbitMQ outbox and durable dependency, cancellation and completion fences. Expansion to the remaining service pools is pending.
-- [ ] Centralize provider quota and cooldown admission. Atlas daily collection and storage-backed NewsAPI tools use atomic shared reservations. Network model workers share per-provider RPM and cooldowns. Cross-process account concurrency and priority remain open.
+- [x] Centralize daily news quota reservations, model provider pacing and configured model account admission across network workers.
 Acceptance: retained pipeline fixture completes across processes; duplicate delivery cannot duplicate committed effects.
 
 ### Phase 5 — Venture, clients and Compose
@@ -74,7 +75,7 @@ Status: in implementation
 - [x] Implement plan, local, pr and full modes around the shared scope planner and explicit hosted dispatch.
 - [x] Add dependency-aware selection, a required aggregate check and phase timing artifacts.
 - [x] Add ARM64 primary service verification, scoped web and native lanes, and a scheduled full workflow.
-- [ ] Reorganize into apps, services, shared crates/packages and deployment assets; rename product outputs.
+- [x] Reorganize active entrypoints into apps and services, shared crates/packages and deployment assets. Name the Venture and Fleetworks product binaries.
 - [ ] Remove Recon only after retained dependencies are extracted; retire embedded application storage after parity.
 Acceptance: scope fixtures prove narrow changes stay narrow and shared changes widen correctly.
 
@@ -111,4 +112,4 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
 
 ## Next Step
-Review the candidate and full workflow results. Finish shared account admission and remaining service boundaries, then remove the compatibility Recon entrypoints after retained parity is verified.
+Review the exact candidate and scoped workflow results. Finish the dedicated model service and retained dependency extraction before retiring the compatibility Recon entrypoints.

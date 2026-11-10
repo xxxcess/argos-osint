@@ -6,7 +6,7 @@ Fleetworks collects public-source intelligence, connects evidence to actors and 
 
 ## Quick start
 
-Install Rust **1.95.0**, Docker, and Docker Compose **v2.20 or newer**. Run from the repository root.
+Install Rust **1.95.0**, Docker, and Docker Compose **v2.20 or newer**. Run from the repository root. The workspace defaults build Venture and its network clients.
 
 ```sh
 cargo build --locked -p fleetworks-venture -p fleetworks-cli --bins
@@ -48,7 +48,7 @@ Venture defaults to disk-backed SurrealDB in Compose. It can also manage a host 
 | Atlas | Submit a cycle, check its job, and page through collected articles. |
 | Brain | Read actor, brief, and topology details through the authenticated API. |
 | Jobs and Logs | Review stages and events. Retry or cancel jobs through the terminal client. |
-| Tools, Models, and Profile | Run a catalog tool, check its result, and view role defaults, workspace information, and health. |
+| Tools, Models, and Profile | Run a catalog tool, check its result, manage role defaults, and view workspace information and health. |
 
 [![Fleetworks service boundaries](docs/diagrams/fleetworks.svg)](docs/diagrams/fleetworks.html)
 

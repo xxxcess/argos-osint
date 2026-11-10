@@ -30,7 +30,7 @@ See the [CLI command reference](../../../apps/fleetworks-cli/README.md) for rout
 
 ## Launch the Compose stack
 
-From the repository root, run `target/debug/venture --workspace ./review-workspace up` with a local Docker engine and Docker Compose installed. Venture builds and starts the API, private Brain and Tools services, brief worker, other background workers, production web relay and disk-backed SurrealDB. The launcher creates private local credentials and records the Compose project it owns.
+From the repository root, run `target/debug/venture --workspace ./review-workspace up` with a local Docker engine and Docker Compose installed. Venture builds and starts the API, private Brain, Tools, Control and Jobs services, brief worker, other background workers, production web relay and disk-backed SurrealDB. The launcher creates private local credentials and records the Compose project it owns.
 
 Open the web address Venture prints. The default is `http://127.0.0.1:3000`. Set `FLEETWORKS_WEB_PORT` or `FLEETWORKS_API_PORT` to remap the loopback ports. Use `venture status`, `venture logs --follow`, and `venture stop` with the same workspace. Stop retains the database directory.
 
@@ -58,7 +58,7 @@ Then run the host with `--role api`, `--role worker` and `--role brief-worker` u
 
 For a standalone private Brain process, use `argos-api-host --role brain` with the same network storage settings and set `FLEETWORKS_BRAIN_BIND` and `FLEETWORKS_BRAIN_ALLOWED_HOSTS` as needed. Provide a shared `FLEETWORKS_INTERNAL_TOKEN_FILE` to Brain and the gateway API, and set `FLEETWORKS_BRAIN_ORIGIN` on the gateway to the private service origin. The Compose base stack provisions a separate `brain-token` for this connection. Brain handles actor dossiers, retained brief details and actions, Related articles, and topology operations. The brief worker owns execution and publication. The gateway owns live event streams.
 
-The private Tools role serves the catalog, submission and result routes. In a standalone deployment, set `FLEETWORKS_TOOLS_ORIGIN` on the gateway and point its `FLEETWORKS_TOOLS_TOKEN_FILE` and the Tools process at the same private bearer file. Venture provisions this automatically.
+The private Tools role serves the catalog, submission and result routes. In a standalone deployment, set `FLEETWORKS_TOOLS_ORIGIN` on the gateway and point its `FLEETWORKS_TOOLS_TOKEN_FILE` and the Tools process at the same private bearer file. Venture provisions this automatically. Private Control owns the Model defaults and Profile routes. Private Jobs owns job and log reads, retry and cancellation. Each has a separate origin and bearer. Profile reports the Control process instance, while gateway readiness reports the gateway instance.
 
 With the Atlas overlay, the private `atlas-worker` consumes durable RabbitMQ deliveries. A transaction in SurrealDB records the job and outbox state before dispatch. Cancellation, retries, and replay of a completed run follow the stored job revision and database identity. The broker carries delivery references and never owns the application records. The private `nlp` and `classifier` roles accept bounded authenticated requests. Use `venture train-legacy` for a separate Natural classifier training run against a snapshot of the selected CSV.
 
@@ -68,10 +68,10 @@ With the Atlas overlay, the private `atlas-worker` consumes durable RabbitMQ del
 | --- | --- |
 | Venture and workspace | Workspace initialization, explicit key/default import, owned lifecycle and client launch |
 | Atlas | Durable submission, worker dispatch, cancellation, retry and completed-run replay. The overlay serves NLP and Rust-BERT separately. Storage-backed NewsAPI tools share Atlas's daily NewsAPI quota in SurrealDB. |
-| Brain and Intel | Private Brain owns retained actor, article brief, Related and topology HTTP operations. The dedicated brief worker runs the stages and replays their stored publication work. The gateway owns live streams. |
+| Brain and Intel | Private Brain owns retained actor, article brief, Related and topology HTTP operations. The dedicated brief worker runs the stages and replays their stored publication work. The gateway owns live streams. Brain supports actor search by exact name or indexed alias. Seed a fresh workspace with `venture seed-actors --file <workspace CSV>`. [Actor catalog guide](actor-catalog.md) |
 | Tools, Models and Profile | The private Tools service runs authenticated manual calls and records durable results. Models reads and saves role defaults. Profile reports workspace and health and writes portable configuration exports on the server. |
 | Interactive terminal | All six clients open a line-oriented session from `venture client <app>`. Use an explicit subcommand for one-shot output. Jobs and Logs supports details, retry and cancellation. |
-| Service cutover | Network workers share model RPM and cooldowns per provider. Shared account concurrency, broader service extraction, published image verification and compatibility Recon retirement remain open. |
+| Service cutover | Network workers share per-provider model pacing and per-account admission. Dedicated model execution, published image verification and compatibility Recon retirement remain open. |
 
 The [integrated checkpoint at `4038049`](https://github.com/xxxcess/argos-osint/actions/runs/42781577487) passed native Linux and Intel macOS clients, real Intel Rust-BERT inference, ARM64 server verification, the private Brain relay, the Atlas quota contract, native RabbitMQ dispatch and packaged Compose on Linux ARM64 and AMD64. The [implementation plan](../../../.planning/2026-11-09-fleetworks-overhaul/task_plan.md) tracks the remaining acceptance work.
 

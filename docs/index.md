@@ -21,7 +21,7 @@ Understand the product, then follow its implementation. This is the maintained e
 | [Core crate](../crates/argos-osint-core) | Domain pipelines and storage; [module map](wiki/code/core.md) |
 | [Venture](../apps/venture) and [terminal clients](../apps/fleetworks-cli) | Workspace lifecycle and versioned API clients. [Fleetworks guide](wiki/code/fleetworks.md) |
 | [Deployment](../deploy/README.md) | Local Compose, database profiles and the [Atlas overlay](../deploy/atlas-dispatch.md) |
-| [API adapter](../crates/argos-osint-api) / [host](../crates/argos-api-host) | Versioned HTTP contracts and authenticated service roles. [API contract](wiki/code/intel-web.md) |
+| [API adapter](../crates/argos-osint-api) / [host](../services/api-host) | Versioned HTTP contracts and authenticated service roles. [API contract](wiki/code/intel-web.md) |
 | [Web app](../apps/web-desktop) / [shared packages](../packages) | Next server/stateless API relay, React Native primitives and typed Query client |
 | [scripts/](../scripts) | Builds, storage tests, releases and verification; [workflow](wiki/code/contributing.md) |
 | [.opencode/](../.opencode) | Role/command/skill configuration; [guide](wiki/code/opencode-v2.md) |

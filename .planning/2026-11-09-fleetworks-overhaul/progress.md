@@ -82,6 +82,15 @@ The full service cutover remains open. In particular, Brain and Intel integratio
 - Venture offers six interactive clients, a Compose development profile and startup with preloaded candidate images. The minimum Compose parser accepted the base, Atlas, development and external configurations. Docker startup and image identity verification are hosted.
 - Scoped verification, scheduled full runs, candidate archives, and independent artifact verification are wired. All 21 offline fixtures, 22 policy checks, workflow lint and documentation checks passed. Hosted candidate and full outcomes remain separate evidence.
 
+## Shared account admission and private operations
+
+- The network store now shares per-account tickets with interactive priority, FIFO ordering and lease expiry. Calls without a configured alias use the default provider account. The pinned SurrealDB account contract verified capacity, priority, renewal and stale ticket rejection across connections.
+- Control and Jobs now have separate private roles, credentials and route allowlists. The host entrypoint moved to `services/api-host`. Default workspace builds select Venture and the terminal clients.
+- Venture can seed the Brain actor catalog from a pinned workspace CSV. Brain supports exact-name and indexed alias discovery. The disposable smoke rejected a wrong hash, replayed the same seed, searched both routes through the gateway and exercised outages for Brain, Tools, Control and Jobs.
+- Brief publication now shares a retention fence with Atlas removal. The pinned server suite covered publication replay, removal, schema upgrade and actor catalog behavior. All 19 storage tests, 24 API and host tests, and 16 native client and Venture tests passed. The same binary passed the network smoke in memory and disk modes, including database identity on restart.
+- The [scoped run at `9af6e50`](https://github.com/xxxcess/argos-osint/actions/runs/42798161278) passed native clients on Linux and both macOS architectures, real Intel Rust-BERT, and the ARM64 server lane. The web unit job exposed inherited browser isolation settings. The correction is pushed separately at `616a82f`.
+- The [candidate run at `9af6e50`](https://github.com/xxxcess/argos-osint/actions/runs/42798161375) independently verified downloaded CLI packages on all four architectures. Container artifact verification and the additional packaged host-storage restart checks require hosted results.
+
 ## Retention
 
 This already-tracked plan records the shared cutover and its remaining acceptance work. Keep raw logs, fixtures and intermediate notes out of Git.

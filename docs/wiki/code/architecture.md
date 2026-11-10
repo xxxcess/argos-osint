@@ -10,13 +10,13 @@
 | --- | --- |
 | [Venture](../../../apps/venture) and [workspace library](../../../crates/fleetworks-workspace) | Workspace settings and explicit configuration import, Compose and host database lifecycle, client launch |
 | [Terminal clients](../../../apps/fleetworks-cli) and [contracts](../../../crates/fleetworks-contracts) | Versioned request/response contracts and API access |
-| [API adapter](../../../crates/argos-osint-api) and [host](../../../crates/argos-api-host) | Authenticated gateway and live streams, schema bootstrap, private Brain and worker roles |
+| [API adapter](../../../crates/argos-osint-api) and [host](../../../services/api-host) | Authenticated gateway and live streams, schema bootstrap, private Brain and worker roles |
 | [Web app](../../../apps/web-desktop) | React Native Web presentation and same-origin relay to the API |
 | [Core](../../../crates/argos-osint-core) | Domain workflows, storage and provider routing |
 | [Broker](../../../crates/fleetworks-broker) | Durable RabbitMQ delivery for Atlas dispatch |
 | [Classifier](classifier.md) | Taxonomy, pinned Rust-BERT inference and separately managed Natural training |
 
-The Compose stack publishes the web relay and authenticated API on loopback by default. The API forwards actor dossiers, retained Intel brief operations and topology to private Brain. Manual tool catalog, execution and result routes are forwarded to private Tools. A dedicated brief worker claims brief stages and drains stored publication work. Atlas dispatch adds RabbitMQ, a collection worker and private NLP and classifier services. SurrealDB owns job state and domain records. See [service startup and rollout status](fleetworks.md).
+The Compose stack publishes the web relay and authenticated API on loopback by default. The API forwards actor dossiers, retained Intel brief operations and topology to private Brain. Manual tool catalog, execution and result routes are forwarded to private Tools. Private Control serves role defaults and Profile. Private Jobs handles job and log reads, retry and cancellation. The gateway keeps live event streaming. A dedicated brief worker claims brief stages and drains stored publication work. Atlas dispatch adds RabbitMQ, a collection worker and private NLP and classifier services. SurrealDB owns job state and domain records. See [service startup and rollout status](fleetworks.md).
 
 ## Persistence
 
@@ -33,7 +33,7 @@ SurrealDB is the persistence backend. Venture selects a managed Compose disk dat
 
 [![Model roles](../../diagrams/model-roles.svg)](../../diagrams/model-roles.html)
 
-The Models client reads and saves configured role defaults. The [shared provider executor](../concepts/providers.md) resolves primary and fallback routes, tracks attempts and keeps provider credentials server-side. Model scheduling uses process-local FIFO queues and shared database-clock pacing and cooldowns for OpenRouter, Google and Nvidia in network workspaces. Atlas's daily news provider admission uses shared datastore reservations instead. [Model scheduling](../../diagrams/model-request-scheduling.html)
+The Models client reads and saves configured role defaults. The [shared provider executor](../concepts/providers.md) resolves primary and fallback routes, tracks attempts and keeps provider credentials server-side. Network model scheduling uses database-clock pacing and cooldowns for OpenRouter, Google and Nvidia, plus shared account tickets with interactive priority and lease expiry. Atlas's daily news provider admission uses shared datastore reservations instead. [Model scheduling](../../diagrams/model-request-scheduling.html)
 
 Profile reads workspace and service health and can export portable configuration into the service workspace. Venture imports selected provider configuration and model defaults into a new workspace on request. [Workspace configuration](fleetworks.md#try-the-workspace-and-clients)
 

@@ -10,7 +10,7 @@ Venture owns the local workspace and stack lifecycle. The terminal clients call 
 | Terminal clients | [CLI suite](../../../apps/fleetworks-cli) · [API contracts](../../../crates/fleetworks-contracts) | [CLI command reference](../../../apps/fleetworks-cli/README.md) |
 | Jobs and Logs | [CLI suite](../../../apps/fleetworks-cli) · [API router](../../../crates/argos-osint-api/src/lib.rs) | [Interactive commands](../concepts/usage.md#jobs-and-logs) |
 | Intel web | [Web server](../../../apps/web-desktop) · [Intel UI](../../../packages/intel) · [API client](../../../packages/api-client) | [Intel web contract](intel-web.md) |
-| Brain and worker roles | [Service host](../../../crates/argos-api-host/src/main.rs) | [Service boundaries](architecture.md#fleetworks-service-boundaries) |
+| Brain and worker roles | [Service host](../../../services/api-host/src/main.rs) | [Service boundaries](architecture.md#fleetworks-service-boundaries) |
 
 [![Fleetworks workspace](../../diagrams/workspace.svg)](../../diagrams/workspace.html)
 

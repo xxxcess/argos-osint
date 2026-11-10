@@ -1,5 +1,7 @@
 //! Terminal commands over the versioned Fleetworks HTTP API.
 
+mod jobs_ui;
+
 use std::io;
 use std::io::Write;
 use std::path::PathBuf;
@@ -14,7 +16,9 @@ use clap::Subcommand;
 use fleetworks_contracts::API_ORIGIN_ENV;
 use fleetworks_contracts::ATLAS_CYCLES_PATH;
 use fleetworks_contracts::DEFAULT_API_ORIGIN;
+use fleetworks_contracts::JOBS_PATH;
 use fleetworks_contracts::JOB_CANCEL_PATH;
+use fleetworks_contracts::JOB_DETAIL_PATH;
 use fleetworks_contracts::JOB_RETRY_PATH;
 use fleetworks_contracts::{AtlasCycleRequest, Client};
 use fleetworks_workspace::Workspace;
@@ -48,6 +52,7 @@ struct Cli<C: Subcommand> {
 
 enum Operation {
     Workspace,
+    JobsTui,
     Get(&'static str, Option<Value>),
     Post(&'static str, Value),
 }
@@ -61,11 +66,17 @@ impl Operation {
         Self::Get(route, Some(query))
     }
 
-    fn execute(self, connection: &Connection) -> Result<Value> {
+    fn execute(self, connection: &Connection) -> Result<Option<Value>> {
         let workspace = Workspace::resolve(connection.workspace.as_deref())?;
         if matches!(self, Self::Workspace) {
-            return Ok(json!({"workspace": workspace.root().display().to_string()}));
+            return Ok(Some(
+                json!({"workspace": workspace.root().display().to_string()}),
+            ));
         }
+        anyhow::ensure!(
+            !(matches!(self, Self::JobsTui) && connection.json),
+            "the interactive Jobs & Logs view does not support --json"
+        );
         let environment = workspace.environment()?;
         let origin = match &connection.api_origin {
             Some(origin) => origin.clone(),
@@ -82,24 +93,32 @@ impl Operation {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        runtime.block_on(async {
-            let client = Client::new(&origin, token.as_deref())?;
-            match self {
-                Self::Get(route, None) => Ok(client.get(route).await?),
-                Self::Get(route, Some(query)) => Ok(client.get_with_query(route, &query).await?),
-                Self::Post(route, body) => Ok(client.post(route, &body).await?),
-                Self::Workspace => {
-                    unreachable!("workspace resolution returned before the HTTP call")
-                }
+        let client = Client::new(&origin, token.as_deref())?;
+        if matches!(self, Self::JobsTui) {
+            jobs_ui::run(&client, &runtime, io::stdin().lock(), io::stdout().lock())?;
+            return Ok(None);
+        }
+        Ok(Some(runtime.block_on(self.request(&client))?))
+    }
+
+    async fn request(self, client: &Client) -> Result<Value> {
+        match self {
+            Self::Get(route, None) => Ok(client.get(route).await?),
+            Self::Get(route, Some(query)) => Ok(client.get_with_query(route, &query).await?),
+            Self::Post(route, body) => Ok(client.post(route, &body).await?),
+            Self::Workspace | Self::JobsTui => {
+                unreachable!("local and interactive commands are handled before an HTTP request")
             }
-        })
+        }
     }
 }
 
 fn run<C: Subcommand + Into<Operation>>(name: &'static str) -> Result<()> {
     let matches = Cli::<C>::command().name(name).get_matches();
     let args = Cli::<C>::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
-    let value = args.command.into().execute(&args.connection)?;
+    let Some(value) = args.command.into().execute(&args.connection)? else {
+        return Ok(());
+    };
     let mut output = io::stdout().lock();
     if args.connection.json {
         serde_json::to_writer(&mut output, &value)?;
@@ -183,6 +202,8 @@ impl From<BrainCommand> for Operation {
 
 #[derive(Subcommand)]
 enum JobsCommand {
+    /// Open an interactive Jobs & Logs session.
+    Tui,
     /// List recent jobs.
     List,
     /// Read job details and stage status.
@@ -203,8 +224,9 @@ enum JobsCommand {
 impl From<JobsCommand> for Operation {
     fn from(command: JobsCommand) -> Self {
         match command {
-            JobsCommand::List => Self::read("/api/v1/jobs"),
-            JobsCommand::Detail { id } => Self::query("/api/v1/jobs/detail", json!({"id": id})),
+            JobsCommand::Tui => Self::JobsTui,
+            JobsCommand::List => Self::read(JOBS_PATH),
+            JobsCommand::Detail { id } => Self::query(JOB_DETAIL_PATH, json!({"id": id})),
             JobsCommand::Retry { id } => Self::Post(JOB_RETRY_PATH, json!({"id": id})),
             JobsCommand::Cancel { id } => Self::Post(JOB_CANCEL_PATH, json!({"id": id})),
             JobsCommand::Logs { job_id, limit } => {

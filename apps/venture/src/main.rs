@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, ensure, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use fleetworks_contracts::{
     Client, API_ORIGIN_ENV, API_TOKEN_ENV, API_TOKEN_FILE_ENV, DEFAULT_API_ORIGIN,
 };
@@ -37,14 +37,13 @@ enum Action {
         from: PathBuf,
     },
     /// Start or reconcile this workspace's local Compose stack.
-    Up {
-        #[arg(long, value_enum)]
-        storage: Option<StorageMode>,
-        #[arg(long, value_name = "PATH")]
-        compose_file: Option<PathBuf>,
-        /// Start the private Atlas, classifier, NLP and broker services too.
-        #[arg(long)]
-        atlas: bool,
+    Up(StackOptions),
+    /// Start the web stack and attach this terminal to Jobs or service logs.
+    Web {
+        #[command(flatten)]
+        stack: StackOptions,
+        #[arg(long, value_enum, default_value = "jobs")]
+        terminal: WebTerminal,
     },
     /// Check readiness against the configured Fleetworks HTTP API.
     Status {
@@ -81,6 +80,35 @@ enum Action {
     },
     #[command(name = "__host-storage-supervisor", hide = true)]
     HostStorageSupervisor { generation: String },
+}
+
+#[derive(ClapArgs)]
+struct StackOptions {
+    #[arg(long, value_enum)]
+    storage: Option<StorageMode>,
+    #[arg(long, value_name = "PATH")]
+    compose_file: Option<PathBuf>,
+    /// Start the private Atlas, classifier, NLP and broker services too.
+    #[arg(long)]
+    atlas: bool,
+}
+
+impl StackOptions {
+    async fn up(self, workspace: &Workspace) -> Result<()> {
+        compose::up(
+            workspace,
+            self.storage,
+            self.compose_file.as_deref(),
+            self.atlas,
+        )
+        .await
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum WebTerminal {
+    Jobs,
+    Logs,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -125,11 +153,14 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Action::Up {
-            storage,
-            compose_file,
-            atlas,
-        } => compose::up(&workspace, storage, compose_file.as_deref(), atlas).await,
+        Action::Up(stack) => stack.up(&workspace).await,
+        Action::Web { stack, terminal } => {
+            stack.up(&workspace).await?;
+            match terminal {
+                WebTerminal::Jobs => launch(&workspace, ClientKind::Jobs, vec!["tui".into()]).await,
+                WebTerminal::Logs => compose::logs(&workspace, true).await,
+            }
+        }
         Action::Status {
             api_origin,
             api_token_file,

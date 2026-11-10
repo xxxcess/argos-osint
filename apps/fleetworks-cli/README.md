@@ -7,7 +7,7 @@ These terminal commands use the v1 HTTP API. Build them alongside Venture with
 | --- | --- |
 | `fleetworks-atlas` | `start --request-id ID`, `days`, `articles DAY [--category CATEGORY] [--limit N] [--cursor CURSOR]` |
 | `fleetworks-brain` | `actor ID`, `brief RUN ID`, `topology SEED` |
-| `fleetworks-jobs` | `list`, `detail ID`, `retry ID`, `cancel ID`, `logs [--job-id ID] [--limit N]` |
+| `fleetworks-jobs` | `tui`, `list`, `detail ID`, `retry ID`, `cancel ID`, `logs [--job-id ID] [--limit N]` |
 | `fleetworks-tools` | `list` |
 | `fleetworks-models` | `defaults` |
 | `fleetworks-profile` | `workspace`, `health`, `show` |
@@ -29,8 +29,14 @@ first and workspace configuration second, then checks `secrets/api-token`.
 Relative token paths start at the workspace root. The unauthenticated legacy
 host is available on loopback.
 
-Successful commands write JSON to stdout. Use `--json` for compact output and
-`--help` for command arguments. Atlas article dates use `YYYY-MM-DD`. Pass
+One-shot commands write JSON to stdout. Use `--json` for compact output and
+`--help` for command arguments. Open the line-oriented Jobs & Logs session
+with `venture client jobs tui` or `fleetworks-jobs tui`. Use `list` to refresh
+the jobs, `detail #1` to open the first job, and `logs #1` to read its recent
+events. Retry and cancel require explicit confirmation in this session.
+Enter `quit` to close the session.
+
+Atlas article dates use `YYYY-MM-DD`. Pass
 the returned `next_cursor` into the next request unchanged. Brain topology
 accepts a canonical memory ID or a `brief:RUN/ARTICLE` seed. Tools, model
 defaults, Profile show, and Jobs logs require their corresponding Fleetworks

@@ -3,8 +3,8 @@
 ## Goal
 Replace the Terminal OSINT research desk with Fleetworks: a Venture-managed collection of isolated network services, terminal clients and React Native Web, with scope-based fast verification.
 
-## Current Phase
-Implementation in progress on `feat/atlas-zero-shot`. Keep shipping verified slices from the approved plan and record hosted outcomes by revision.
+## Closeout status
+This implementation thread is closed at the verified candidate `37b9250` on `feat/atlas-zero-shot`. The Intel Mac bundle is ready for local testing. The [closeout record](progress.md#2026-11-10--closeout-at-37b9250) links the exact hosted checks and records the remaining cutover work.
 
 ## Scope
 Docker images, Compose, Venture and the CLI suite, workspace/storage configuration, retained Atlas/Brain/Intel/tool/model functionality, RabbitMQ dispatch, repository reorganization, obsolete Recon removal, documentation/planning reconciliation and agent guidance updates.
@@ -67,7 +67,8 @@ Status: in implementation
 - [ ] Verify full retained interactive parity, including actor discovery and configuration edge cases.
 - [x] Add Venture service reconciliation, configuration, visible workspace, health and logs for the managed disk and external Compose profiles.
 - [x] Add the Compose baseline, disk profile, development override and no-build startup for preloaded images.
-- [ ] Complete hosted candidate image verification and registry release acceptance.
+- [x] Verify downloaded CLI archives on four native targets and downloaded images on Linux AMD64 and ARM64.
+- [ ] Publish registry artifacts and verify their published digests and startup.
 - [ ] Configure API/web bind addresses, Host/origin policy and service reconnection.
 Acceptance: Venture launches every client and web mode; client exit leaves services running; explicit stop respects service ownership.
 
@@ -90,12 +91,14 @@ Status: in implementation
 Acceptance: maintained instructions consistently describe Fleetworks and scoped verification; historical evidence is not rewritten as current behavior.
 
 ### Phase 8 — Verification and handoff (separate from implementation)
-Status: pending
-- [ ] Freeze and run agreed affected checks plus full migration parity/recovery suite.
+Status: candidate verified. Full cutover acceptance is open.
+- [x] Verify the scoped required workflow on the candidate revision and run the full local server-mode storage suite.
+- [ ] Complete the full embedded migration parity suite. The local run was interrupted.
 - [x] Verify Venture-owned packaged Compose from source on native Linux AMD64 and ARM64.
-- [ ] Verify the new hosted CLI and image candidate workflows, published registry artifacts and the remaining storage/recovery matrix.
-- [ ] Inspect UI/TUI captures and changed diagram pairs; check documentation links.
-- [ ] Record timing comparison, failures, skips, evidence revision and remaining limitations.
+- [x] Verify the hosted CLI and image candidates, Venture training with two exact CSV hashes, and all four packaged storage configurations.
+- [x] Render and inspect the changed diagram pairs and check documentation links.
+- [x] Record the candidate revision, results, failures and remaining limitations.
+- [ ] Complete the retained interactive UI/TUI review and comparable timing analysis.
 Acceptance: no unrun test is presented as passed; independent findings are deferred.
 
 ## Ownership
@@ -112,5 +115,7 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 ## Errors Encountered
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
 
-## Next Step
-Review the exact candidate, scoped web and compatibility results. Finish the remaining model transport cutover and verify retained parity before retiring the compatibility Recon entrypoints.
+## Follow-up work
+- Move the remaining provider transports through the execution service and narrow worker credential access.
+- Complete retained parity and full embedded verification before retiring compatibility Recon and embedded application storage.
+- Publish the registry artifacts and verify the exact published digests.

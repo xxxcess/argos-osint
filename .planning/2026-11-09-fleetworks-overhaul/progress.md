@@ -102,6 +102,22 @@ The full service cutover remains open. In particular, Brain and Intel integratio
 - The captured route fixture reproduced a queued brief being refused after a defaults edit. The private execution service now resolves the pinned account and model and rejects an endpoint change. A full core run also exposed concurrent configuration writers interfering with a commit. A stable advisory guard now serializes stale-owner takeovers and writes.
 - The corrected server-mode core suite passed 930 tests with six ignored. All 25 host and API unit tests and the pinned memory and disk network smoke passed again. The AMD64 candidate includes a separate launcher-level check for training and activating against two exact CSV hashes.
 
+## 2026-11-10 — Closeout at `37b9250`
+
+The candidate at `37b92505684a7b7c84e0bfb16bc4e74a674f9189` on `feat/atlas-zero-shot` is ready for Intel Mac testing. [Intel Mac bundle](https://github.com/xxxcess/argos-osint/actions/runs/42803840842/artifacts/13757521645)
+
+| Check | Result |
+| --- | --- |
+| Required hosted workflow | Passed native clients on Linux and both macOS architectures, real Intel Rust-BERT inference, ARM64 server and RabbitMQ dispatch, both Linux Compose lanes, and production and development web suites. [Run](https://github.com/xxxcess/argos-osint/actions/runs/42803840885) |
+| Hosted candidate workflow | Passed independent checks of the downloaded CLI bundles for four targets and smoke tests of the exact downloaded images on Linux AMD64 and ARM64. AMD64 covered Compose disk, Venture-managed host memory reset, host disk retention, and persistence on an independently owned external disk server. [Run](https://github.com/xxxcess/argos-osint/actions/runs/42803840842) |
+| Packaged Venture classifier training | `venture train-legacy --activate` ran twice against the same CSV path. The active artifact changed with the SHA-256 from `625f10150ba413f2fcae49ef425f9829004daaf9e69e49eecf66f7598de80d93` to `2762ab90f63f0ffe11a96c6ba97e0e2a690af30b68e958bf2960885262976ceb`. Atlas selected Rust-BERT. [Job](https://github.com/xxxcess/argos-osint/actions/runs/42803840842/job/129795157352) |
+| Local Rust core and server storage | 930 core tests passed with six ignored. The full server-mode storage suite passed 261 tests with one ignored benchmark. |
+| Local embedded compatibility | The native compatibility build and 21 focused embedded storage tests passed. The workspace disconnected during the full embedded storage suite, leaving its result unconfirmed. |
+
+Verification caught two web CI failures, a queued brief losing its captured model route after a defaults edit, and a configuration write race. The final hosted workflow passed after the fixes. The README, maintained wiki, deployment guides, and architecture diagrams describe the delivered Fleetworks setup.
+
+The [task plan](task_plan.md#follow-up-work) carries the remaining provider transports and credential scoping, retained parity and compatibility retirement, and registry publication. This closes the implementation thread at the verified candidate.
+
 ## Retention
 
 This already-tracked plan records the shared cutover and its remaining acceptance work. Keep raw logs, fixtures and intermediate notes out of Git.

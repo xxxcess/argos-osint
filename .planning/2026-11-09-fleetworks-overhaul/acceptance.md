@@ -1,6 +1,6 @@
 # Verification and documentation acceptance plan
 
-Status: acceptance criteria. The progress log records executed checks and their scope.
+Status: candidate accepted for Intel Mac testing at `37b9250`. The [closeout record](progress.md#2026-11-10--closeout-at-37b9250) records checks run and their scope. Full cutover acceptance is open.
 
 ## Verification interface
 Introduce a shared scope-aware entrypoint with plan, local, pr and full modes. plan prints selected checks without executing. Select changed files plus dependents; take the union of scopes. Shared contracts, manifests, lockfiles and build tooling widen coverage; unknown paths fail safe to broad coverage. Required aggregate status must report for every revision and distinguish irrelevant, skipped, failed, cancelled and missing checks.
@@ -28,12 +28,15 @@ Record queue/setup/cache/compile/test/image/upload timings, SHA, runner, feature
 ## Functional acceptance
 - [ ] Venture displays resolved workspace and launches all CLI/web modes.
 - [ ] API-key/model-default import preserves originals and redacts secrets.
-- [ ] Host memory, host disk and external disk storage pass; memory reset rejects old broker jobs.
+- [x] Packaged smoke passes for Compose disk, host memory, host disk and external disk. The restart checks verify host-memory reset and disk retention.
+- [ ] Confirm full storage and recovery parity, including the full embedded suite and rejection of stale broker jobs after a memory reset.
 - [ ] Atlas→NLP/classifier→Brain/Intel and retained brief generation pass offline fixtures.
 - [ ] Jobs survive worker/broker restart; cancel/retry/dependency/idempotency behavior holds.
 - [ ] Tools/Models/Profile/export behavior is preserved without Recon orchestration.
 - [ ] Client exit preserves running services; explicit shutdown respects ownership.
-- [ ] Both container architectures and supported CLI targets pass packaged-artifact smoke.
+- [x] Both Linux container architectures and all four supported CLI targets pass downloaded-candidate smoke.
+- [x] Packaged Venture activates Natural models for two exact CSV hashes while Atlas selects Rust-BERT.
+- [ ] Verify the published registry artifacts after release.
 - [ ] Scope-selection fixtures cover docs, UI, TUI, DB, API, lockfiles, shared contracts and unknown paths.
 - [ ] No stale revision or unexecuted check is reported as passed.
 

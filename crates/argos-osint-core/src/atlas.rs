@@ -1285,38 +1285,54 @@ fn phase2_call(provider: &str, country: &str, key: &str) -> Result<CallSpec> {
     })
 }
 
-/// Primary account while its local daily cap is open and the key is not exhausted.
-/// Otherwise the fallback account, when that cap is still open.
-async fn open_key<'a>(
-    store: &AtlasStore,
-    provider: &str,
-    primary: &'a str,
-    fallback: &'a str,
-) -> Result<Option<&'a str>> {
-    let primary = primary.trim();
-    let fallback = fallback.trim();
-    if !primary.is_empty()
-        && !crate::osint::key_exhausted(primary)
-        && quota_open(store, provider).await?
-    {
-        return Ok(Some(primary));
-    }
-    if !fallback.is_empty()
-        && fallback != primary
-        && !crate::osint::key_exhausted(fallback)
-        && quota_open(store, &format!("{provider}:fallback")).await?
-    {
-        return Ok(Some(fallback));
-    }
-    Ok(None)
+struct ReservedProvider<'a> {
+    store: &'a AtlasStore,
+    provider: &'a str,
+    key: &'a str,
+    day: String,
+    spare: Option<&'a str>,
 }
 
-fn quota_bucket(provider: &str, active: &str, primary: &str) -> String {
-    if active.trim() == primary.trim() {
-        provider.to_string()
-    } else {
-        format!("{provider}:fallback")
+/// Reserve the primary account or, if it cannot send, the distinct fallback.
+/// One reservation covers transport retries and same-host redirects.
+async fn reserve_provider<'a>(
+    store: &'a AtlasStore,
+    provider: &'a str,
+    primary: &'a str,
+    fallback: &'a str,
+) -> Result<Option<ReservedProvider<'a>>> {
+    let primary = primary.trim();
+    let fallback = fallback.trim();
+    let spare =
+        (!fallback.is_empty() && fallback != primary && !crate::osint::key_exhausted(fallback))
+            .then_some(fallback);
+    let day = utc_day();
+    let cap = daily_cap(provider);
+    if !primary.is_empty()
+        && !crate::osint::key_exhausted(primary)
+        && store.reserve_quota(provider, &day, cap, None).await?
+    {
+        return Ok(Some(ReservedProvider {
+            store,
+            provider,
+            key: primary,
+            day,
+            spare,
+        }));
     }
+    if let Some(key) = spare {
+        let bucket = format!("{provider}:fallback");
+        if store.reserve_quota(&bucket, &day, cap, None).await? {
+            return Ok(Some(ReservedProvider {
+                store,
+                provider,
+                key,
+                day,
+                spare: None,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 fn quota_fault(fault: &ProviderFault) -> bool {
@@ -1326,66 +1342,74 @@ fn quota_fault(fault: &ProviderFault) -> bool {
 struct SpareFetch {
     body: Option<serde_json::Value>,
     fault: Option<ProviderFault>,
-    bucket: String,
     metrics: ProviderCallCounts,
 }
 
-/// One provider call. A rate or quota fault retries once with `spare` when it differs.
+/// One logical provider call. A rate or quota fault can move the reservation
+/// to the fallback before the fallback's first send.
 async fn fetch_with_spare_key<F>(
     fetch: &mut F,
     user_agent: &str,
-    provider: &str,
-    primary: &str,
-    key: &str,
-    spare: &str,
+    reservation: ReservedProvider<'_>,
     mut spec_for: impl FnMut(&str) -> Result<CallSpec>,
-) -> SpareFetch
+) -> Result<SpareFetch>
 where
     F: FnMut(HttpCall) -> FetchFut,
 {
-    let mut active = key.to_string();
-    let mut tried_spare = false;
+    let ReservedProvider {
+        store,
+        provider,
+        key: mut active,
+        day,
+        mut spare,
+    } = reservation;
     let mut metrics = ProviderCallCounts::default();
     loop {
-        let spec = match spec_for(&active) {
+        let spec = match spec_for(active) {
             Ok(spec) => spec,
             Err(_) => {
-                return SpareFetch {
+                return Ok(SpareFetch {
                     body: None,
                     fault: Some(ProviderFault {
                         summary: format!("{provider} request configuration invalid"),
                         body: String::new(),
                     }),
-                    bucket: quota_bucket(provider, &active, primary),
                     metrics,
-                };
+                });
             }
         };
         match dispatch_counted(fetch, spec, user_agent, &mut metrics).await {
             Ok(body) => {
-                return SpareFetch {
+                return Ok(SpareFetch {
                     body: Some(body),
                     fault: None,
-                    bucket: quota_bucket(provider, &active, primary),
                     metrics,
-                };
-            }
-            Err(fault)
-                if !tried_spare && quota_fault(&fault) && !spare.is_empty() && spare != active =>
-            {
-                crate::osint::note_key_exhausted(&active);
-                active = spare.to_string();
-                tried_spare = true;
-                metrics.fallbacks += 1;
-                continue;
+                });
             }
             Err(fault) => {
-                return SpareFetch {
+                if let Some(next) = spare.take().filter(|_| quota_fault(&fault)) {
+                    crate::osint::note_key_exhausted(active);
+                    let bucket = format!("{provider}:fallback");
+                    if !crate::osint::key_exhausted(next)
+                        && store
+                            .reserve_quota(
+                                &bucket,
+                                &utc_day(),
+                                daily_cap(provider),
+                                Some((provider, &day)),
+                            )
+                            .await?
+                    {
+                        active = next;
+                        metrics.fallbacks += 1;
+                        continue;
+                    }
+                }
+                return Ok(SpareFetch {
                     body: None,
                     fault: Some(fault),
-                    bucket: quota_bucket(provider, &active, primary),
                     metrics,
-                };
+                });
             }
         }
     }
@@ -2628,15 +2652,6 @@ where
                     continue;
                 }
                 let (primary, fallback) = keys.pair(provider);
-                let Some(key) = open_key(&store, provider, primary, fallback).await? else {
-                    emit(AtlasEvent::Note(format!("{provider} daily quota is spent")));
-                    break;
-                };
-                let spare = if key == primary.trim() {
-                    fallback.trim()
-                } else {
-                    ""
-                };
                 if pace && provider == "gnews" {
                     if let Some(last) = last_gnews {
                         let wait = std::time::Duration::from_secs(1).saturating_sub(last.elapsed());
@@ -2645,6 +2660,10 @@ where
                         }
                     }
                 }
+                let Some(reservation) = reserve_provider(&store, provider, primary, fallback).await? else {
+                    emit(AtlasEvent::Note(format!("{provider} daily quota is spent")));
+                    break;
+                };
                 emit(AtlasEvent::Status(format!(
                     "Latest {provider} page {} · {kept}/{PHASE1_TARGET}",
                     page + 1
@@ -2654,15 +2673,11 @@ where
                 let fetched = fetch_with_spare_key(
                     &mut fetch,
                     &user_agent,
-                    provider,
-                    primary,
-                    key,
-                    spare,
+                    reservation,
                     |active| phase1_call(provider, page, &token, active),
                 )
-                .await;
+                .await?;
                 tel.provider_calls(&fetched.metrics);
-                let bucket = fetched.bucket;
                 match fetched.body {
                     Some(body) => {
                         if provider == "gnews" {
@@ -2730,7 +2745,6 @@ where
                         &serde_json::json!({"kept":kept,"token":token,"stop":stop_provider || kept>=PHASE1_TARGET || page+1>=PHASE1_MAX_PAGES}),
                     ).await?;
                 }
-                let _ = store.quota_bump(&bucket, &utc_day()).await?;
                 page += 1;
                 emit(AtlasEvent::Stats(Box::new(stats.clone())));
                 if stop_provider || kept >= PHASE1_TARGET || page >= PHASE1_MAX_PAGES {
@@ -2870,17 +2884,12 @@ where
                 continue;
             }
             let (primary, fallback) = keys.pair(job.provider);
-            let Some(key) = open_key(&store, job.provider, primary, fallback).await? else {
+            let Some(reservation) = reserve_provider(&store, job.provider, primary, fallback).await? else {
                 emit(AtlasEvent::Note(format!(
                     "{} daily quota is spent",
                     job.provider
                 )));
                 continue;
-            };
-            let spare = if key == primary.trim() {
-                fallback.trim()
-            } else {
-                ""
             };
             emit(AtlasEvent::Status(format!(
                 "Headlines {} · {}",
@@ -2890,15 +2899,11 @@ where
             let fetched = fetch_with_spare_key(
                 &mut fetch,
                 &user_agent,
-                job.provider,
-                primary,
-                key,
-                spare,
+                reservation,
                 |active| phase2_call(job.provider, country, active),
             )
-            .await;
+            .await?;
             tel.provider_calls(&fetched.metrics);
-            let bucket = fetched.bucket;
             match fetched.body {
                 Some(body) => {
                     let observations = capture_provider_observations(&store, &run_id, job.provider, &receipt_key, &body, &mut emit).await;
@@ -2950,7 +2955,6 @@ where
                     }
                 }
             }
-            let _ = store.quota_bump(&bucket, &utc_day()).await?;
             let next = next_after_phase2(job, countries.len());
             save(&store, &run_id, &cursor_at(&next, &cursor.from), &stats).await?;
             emit(AtlasEvent::Stats(Box::new(stats.clone())));
@@ -3474,11 +3478,6 @@ fn published_in_window(published: &str, from: &str) -> bool {
     chrono::NaiveDateTime::parse_from_str(published, "%Y-%m-%d %H:%M:%S")
         .map(|naive| naive.and_utc() >= from)
         .unwrap_or(true)
-}
-
-async fn quota_open(store: &AtlasStore, provider: &str) -> Result<bool> {
-    let used = store.quota_used(provider, &utc_day()).await?;
-    Ok(used < daily_cap(provider))
 }
 
 async fn save(store: &AtlasStore, id: &str, cursor: &Cursor, stats: &RunStats) -> Result<()> {

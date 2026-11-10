@@ -123,6 +123,60 @@ async fn articles_upsert_list_and_latest() {
 }
 
 #[tokio::test]
+async fn quota_reservations_share_daily_account_caps() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let first = fresh(&server, "atlas_quota_reservations").await;
+    let second = server.root("argos", "atlas_quota_reservations").await;
+    let day = "2026-01-01";
+    let mut workers = Vec::new();
+    for db in [&first, &second].into_iter().cycle().take(8) {
+        let db = Surreal::clone(db);
+        workers.push(tokio::spawn(async move {
+            atlas::quota_reserve(&db, "newsapi", day, 3, None)
+                .await
+                .unwrap()
+        }));
+    }
+    let mut admitted = 0;
+    for worker in workers {
+        admitted += u32::from(worker.await.unwrap());
+    }
+    assert_eq!(admitted, 3, "both workers use one cap");
+    assert_eq!(atlas::quota_used(&second, "newsapi", day).await.unwrap(), 3);
+
+    let fallback = "newsapi:fallback";
+    assert!(atlas::quota_reserve(&second, fallback, day, 1, None)
+        .await
+        .unwrap());
+    assert!(
+        !atlas::quota_reserve(&first, fallback, day, 1, Some(("newsapi", day)))
+            .await
+            .unwrap()
+    );
+    assert_eq!(atlas::quota_used(&second, "newsapi", day).await.unwrap(), 3);
+    assert_eq!(atlas::quota_used(&first, fallback, day).await.unwrap(), 1);
+
+    let next_day = "2026-01-02";
+    assert!(
+        atlas::quota_reserve(&first, fallback, next_day, 1, Some(("newsapi", day)))
+            .await
+            .unwrap()
+    );
+    assert_eq!(atlas::quota_used(&second, "newsapi", day).await.unwrap(), 2);
+    assert_eq!(
+        atlas::quota_used(&second, fallback, next_day)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(atlas::quota_reserve(&second, "newsapi", day, 3, None)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
 async fn quota_checkpoints_and_repairs() {
     let Some(server) = Server::start() else {
         return;

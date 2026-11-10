@@ -337,6 +337,18 @@ impl AtlasStore {
                 .await
                 .map_err(tx("atlas quota")))
     }
+    pub(crate) async fn reserve_quota(
+        &self,
+        provider: &str,
+        day: &str,
+        cap: u32,
+        previous: Option<(&str, &str)>,
+    ) -> Result<bool> {
+        dispatch!(self,
+            r => crate::storage::atlas::quota_reserve(r.db(), provider, day, cap, previous)
+                .await
+                .map_err(tx("atlas reserve quota")))
+    }
     pub async fn quota_bump(&self, provider: &str, day: &str) -> Result<u32> {
         dispatch!(self,
             r => crate::storage::atlas::quota_bump(r.db(), provider, day)

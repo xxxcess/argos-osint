@@ -81,6 +81,8 @@ pub(crate) struct Owner {
     host_storage: Option<HostStorage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     atlas: Option<AtlasStack>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dev_file: Option<PathBuf>,
     endpoint: String,
     api_port: u16,
     web_port: u16,
@@ -120,6 +122,7 @@ impl Owner {
                 && owner.workspace == workspace.root()
                 && owner.project == project_name(workspace.root())
                 && owner.file.is_absolute()
+                && owner.dev_file.as_deref().is_none_or(Path::is_absolute)
                 && owner.token.is_absolute()
                 && owner.root_password.is_absolute()
                 && owner.runtime_password.is_absolute()
@@ -274,6 +277,9 @@ impl Owner {
                 .arg("--file")
                 .arg(&atlas.file);
         }
+        if let Some(file) = &self.dev_file {
+            command.arg("--file").arg(file);
+        }
         if self.storage == StorageMode::ComposeDisk {
             command.args(["--profile", "disk"]);
         }
@@ -309,6 +315,7 @@ pub(crate) async fn up(
     storage: Option<StorageMode>,
     compose_file: Option<&Path>,
     atlas: bool,
+    dev: bool,
 ) -> Result<()> {
     let docker_host = docker_host().await?;
     let owned_workspace = workspace.clone();
@@ -320,6 +327,7 @@ pub(crate) async fn up(
             compose_file.as_deref(),
             docker_host,
             atlas,
+            dev,
         )
     })
     .await??;
@@ -363,6 +371,7 @@ fn prepare(
     compose_file: Option<&Path>,
     docker_host: String,
     atlas: bool,
+    dev: bool,
 ) -> Result<(File, Owner, bool)> {
     let environment = workspace.environment()?;
     workspace.initialize()?;
@@ -383,6 +392,17 @@ fn prepare(
     }
     .context("resolve Compose file (use --compose-file from outside the checkout)")?;
     ensure!(file.is_file(), "Compose file must be a regular file");
+    let dev_file = if dev || prior.as_ref().is_some_and(|owner| owner.dev_file.is_some()) {
+        let overlay = fs::canonicalize(file.with_file_name("compose.dev.yml"))
+            .context("resolve the development Compose overlay beside the base file")?;
+        ensure!(
+            overlay.is_file(),
+            "development Compose overlay must be a regular file"
+        );
+        Some(overlay)
+    } else {
+        None
+    };
     let prior_atlas = prior.as_ref().and_then(|owner| owner.atlas.as_ref());
     let atlas = if atlas || prior_atlas.is_some() {
         let overlay = fs::canonicalize(file.with_file_name("compose.atlas.yml"))
@@ -544,6 +564,7 @@ fn prepare(
         storage,
         host_storage,
         atlas,
+        dev_file,
         endpoint,
         api_port,
         web_port,
@@ -901,7 +922,7 @@ mod tests {
         drop(lock);
         assert!(lifecycle_lock(&first).is_ok());
 
-        let owner = Owner {
+        let mut owner = Owner {
             version: super::OWNER_VERSION,
             project: project_name(first.root()),
             workspace: first.root().to_owned(),
@@ -910,6 +931,7 @@ mod tests {
             storage: StorageMode::ComposeDisk,
             host_storage: None,
             atlas: None,
+            dev_file: None,
             endpoint: super::DISK_URL.into(),
             api_port: 18080,
             web_port: 13000,
@@ -928,6 +950,22 @@ mod tests {
             .as_std()
             .get_args()
             .any(|arg| arg == OsStr::new("disk")));
+
+        fs::remove_file(owner_path(&first)).unwrap();
+        let dev_file = owner.file.with_file_name("compose.dev.yml");
+        owner.dev_file = Some(dev_file.clone());
+        owner.save(&first).unwrap();
+        let saved = Owner::read(&first).unwrap().unwrap();
+        let command = saved.compose();
+        let args: Vec<_> = command.as_std().get_args().collect();
+        assert!(args.windows(4).any(|pair| pair
+            == [
+                OsStr::new("--file"),
+                owner.file.as_os_str(),
+                OsStr::new("--file"),
+                dev_file.as_os_str()
+            ]));
+
         fs::copy(owner_path(&first), owner_path(&second)).unwrap();
         assert!(Owner::read(&second).is_err());
     }

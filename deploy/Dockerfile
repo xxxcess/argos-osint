@@ -18,14 +18,29 @@ COPY patches ./patches
 COPY apps/web-desktop ./apps/web-desktop
 COPY packages ./packages
 
-FROM web_source AS web_build
+FROM web_source AS web_deps
 ARG TARGETARCH
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN --mount=type=cache,id=fleetworks-pnpm-${TARGETARCH},target=/pnpm/store,sharing=locked \
     pnpm install --frozen-lockfile --store-dir /pnpm/store
+
+FROM web_deps AS web_build
 RUN pnpm --dir apps/web-desktop build \
     && rm -rf apps/web-desktop/.next/cache \
     && mkdir apps/web-desktop/.next/cache
+
+FROM web_deps AS web_dev
+ARG FLEETWORKS_UID
+ARG FLEETWORKS_GID
+# Next updates its TypeScript setup and writes generated files in the app directory.
+RUN mkdir -p apps/web-desktop/.next/cache \
+    && chown "${FLEETWORKS_UID}:${FLEETWORKS_GID}" \
+       apps/web-desktop apps/web-desktop/.next \
+       apps/web-desktop/tsconfig.json apps/web-desktop/AGENTS.md
+COPY deploy/check-web.mjs /usr/local/lib/fleetworks/check-web.mjs
+WORKDIR /opt/fleetworks-web/apps/web-desktop
+USER node
+ENTRYPOINT ["node", "server.mjs", "--dev"]
 
 FROM web_source AS web_prod_deps
 ARG TARGETARCH

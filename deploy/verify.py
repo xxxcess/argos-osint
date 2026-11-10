@@ -55,7 +55,7 @@ def exercise_atlas(port, token):
     raise RuntimeError("Packaged Atlas worker did not settle the fixture delivery")
 
 
-def verify(venture, compose):
+def verify(venture, compose, dev=False):
     api_port, web_port = loopback_ports()
     environment = {
         name: value for name, value in os.environ.items()
@@ -77,8 +77,12 @@ def verify(venture, compose):
 
         try:
             atlas = compose.with_name("compose.atlas.yml").is_file()
-            overlay = ("--atlas",) if atlas else ()
-            run("up", "--storage", "compose-disk", "--compose-file", compose, *overlay, timeout=2400)
+            overlays = []
+            if atlas:
+                overlays.append("--atlas")
+            if dev:
+                overlays.append("--dev")
+            run("up", "--storage", "compose-disk", "--compose-file", compose, *overlays, timeout=2400)
             run("status", "--json")
             ready = "/api/v1/health/ready"
             assert request(api_port, ready)[0] == 401, "direct API accepted a request without a bearer"
@@ -103,15 +107,17 @@ def verify(venture, compose):
                 print(f"Could not collect Compose logs: {error}", file=sys.stderr)
             finally:
                 run("stop", check=not failed, timeout=150)
-        print("Venture Compose startup, bearer isolation, web relay and owned shutdown passed")
+        mode = "development" if dev else "production"
+        print(f"Venture {mode} Compose startup, bearer isolation, web relay and owned shutdown passed")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--venture", type=Path, required=True)
     parser.add_argument("--compose", type=Path, default=Path(__file__).with_name("compose.yml"))
+    parser.add_argument("--dev", action="store_true", help="verify the development web override")
     args = parser.parse_args()
-    verify(args.venture.resolve(strict=True), args.compose.resolve(strict=True))
+    verify(args.venture.resolve(strict=True), args.compose.resolve(strict=True), args.dev)
 
 
 if __name__ == "__main__":

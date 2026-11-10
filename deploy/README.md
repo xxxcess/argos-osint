@@ -42,6 +42,16 @@ Open `http://127.0.0.1:3000` in a browser after readiness completes.
 
 The `disk` profile uses the official SurrealDB 3.3.4 image pinned to its multi-platform digest. The database starts with authentication on the private network at `ws://surrealdb:8000`. It persists RocksDB data under `storage/surrealdb/` and syncs every transaction commit. Keep `FLEETWORKS_STORAGE_URL` unset or set to that origin when using the disk profile. `docker compose -f deploy/compose.yml --profile disk down` stops the stack and preserves its workspace data.
 
+## Web development
+
+From a source checkout, run `venture --workspace "$FLEETWORKS_HOST_WORKSPACE" up --dev`. Use `web --dev` to start the same stack with a Jobs or logs session. Venture records the development override for subsequent status, logs, and shutdown operations. Stop the workspace stack before switching between development and production.
+
+The development image runs Next in development mode with pinned dependencies inside the container. Changes in `apps/web-desktop/app/` and the three shared `packages/*/src/` directories reload from read-only source mounts. Restart the stack to rebuild the image after changing dependency manifests, the relay, or Next configuration. Generated Next files stay in the container.
+
+When running Compose directly, append `-f deploy/compose.dev.yml` after `-f deploy/compose.yml`. Keep both files in the command for the lifetime of the project.
+
+Run `python3 deploy/verify.py --venture path/to/venture --dev` for a packaged development readiness and shutdown smoke check. The separate [browser development fixtures](../docs/wiki/code/react-ui-testing.md) exercise reload and live updates.
+
 ## Venture-managed host database
 
 Set `FLEETWORKS_SURREAL_BIN` to an installed SurrealDB 3.3.4 executable or make `surreal` available on `PATH`. Venture launches the authenticated server, waits for readiness, and points the Compose services at the Docker host gateway.

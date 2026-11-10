@@ -91,6 +91,9 @@ struct StackOptions {
     /// Start the private Atlas, classifier, NLP and broker services too.
     #[arg(long)]
     atlas: bool,
+    /// Serve web sources from the checkout with live reload.
+    #[arg(long)]
+    dev: bool,
 }
 
 impl StackOptions {
@@ -100,6 +103,7 @@ impl StackOptions {
             self.storage,
             self.compose_file.as_deref(),
             self.atlas,
+            self.dev,
         )
         .await
     }

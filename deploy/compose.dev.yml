@@ -1,0 +1,40 @@
+services:
+  web:
+    image: ${FLEETWORKS_WEB_DEV_IMAGE:-fleetworks-web:dev}
+    build:
+      target: web_dev
+      args:
+        FLEETWORKS_UID: ${FLEETWORKS_UID}
+        FLEETWORKS_GID: ${FLEETWORKS_GID}
+    environment:
+      NODE_ENV: development
+      WATCHPACK_POLLING: "true"
+    # Generated files stay in this container. Host source mounts are read-only.
+    read_only: false
+    healthcheck:
+      start_period: 30s
+    volumes:
+      - type: bind
+        source: ../apps/web-desktop/app
+        target: /opt/fleetworks-web/apps/web-desktop/app
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../packages/api-client/src
+        target: /opt/fleetworks-web/packages/api-client/src
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../packages/intel/src
+        target: /opt/fleetworks-web/packages/intel/src
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../packages/ui/src
+        target: /opt/fleetworks-web/packages/ui/src
+        read_only: true
+        bind:
+          create_host_path: false

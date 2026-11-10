@@ -36,7 +36,7 @@ The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) runs on pus
 | --- | --- |
 | Native clients | Linux x86-64 and Intel macOS tests and executable smoke for Venture and its sibling clients |
 | Server and broker | Linux ARM64 build/test, network bootstrap and service smoke, plus native RabbitMQ Atlas dispatch when selected |
-| Packaged Compose | Disk and external configuration validation on ARM64, then Venture-owned image startup, authenticated readiness, relay and Atlas smoke when selected |
+| Packaged Compose | Disk and external configuration validation on ARM64. The Compose scope requires Venture-owned image startup, authenticated readiness, relay and Atlas smoke on both Linux ARM64 and Linux AMD64. |
 | Intel Rust-BERT | Native worker build, link, and real checkpoint inference for selected classifier changes or manual dispatch |
 
 Preview the checks selected for a committed local revision.

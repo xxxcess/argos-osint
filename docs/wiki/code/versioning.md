@@ -4,9 +4,10 @@
 
 Argos uses [Semantic Versioning 2.0.0](https://semver.org/) and
 [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
-One version covers the CLI/TUI and core crate. `Cargo.toml`'s
-`workspace.package.version` is the application version; all workspace crates inherit it
-with `version.workspace = true`, and `argos --version` uses that package version.
+One version covers the main Rust workspace, including the legacy CLI/TUI, the
+Fleetworks host, Venture, the native clients and the shared crates. Each member
+inherits `workspace.package.version` from `Cargo.toml` with
+`version.workspace = true`.
 Database schema numbers and provider/API/model versions are separate contracts.
 
 The initial baseline is **0.1.0**. No historical tag or release is implied.
@@ -114,13 +115,16 @@ tasks may change them together and must pass the checker.
 pushes to `main`, or manual dispatch on `main`. It collects eligible commits
 since the last release and maintains a release PR. Merging a reviewed, green
 release PR authorizes its `vX.Y.Z` tag and GitHub Release on the next run.
-There is no automatic merge and no crates.io publishing or binary distribution
-in this workflow. Existing Rust CI remains the build/test gate.
+Release Please publishes the tag and release notes. The
+[Fleetworks workflow](ci.md#fleetworksyml--scoped-branch-checks) separately
+verifies native builds and Venture-managed Compose startup from an exact
+source revision. Distribution of native binaries and container images remains
+part of the Fleetworks cutover plan. [Deployment guide](../../../deploy/README.md)
 
 The release PR updates:
 
 - The canonical workspace version in `Cargo.toml`.
-- Only the two local workspace package versions in `Cargo.lock`.
+- The local workspace package versions in `Cargo.lock`. Dependency versions stay pinned.
 - `version.txt`, the simple strategy's synchronized mirror.
 - `.release-please-manifest.json`, the automation's synchronized release state.
 - `CHANGELOG.md` and GitHub release notes.
@@ -151,8 +155,8 @@ change them. Configure them once:
 
 1. Enable squash merging. Set the squash title default to **PR title** and the
    message default to **PR body**. Protect `main` with required reviews, the
-   **Conventional commits and shared version** check and all four existing
-   platform CI checks. Prefer disabling merge/rebase merging to keep the
+   **Conventional commits and shared version** check and the repository's
+   required CI gates. Prefer disabling merge/rebase merging to keep the
    inspected PR title/body as the release input. If another merge mode is used,
    every commit reaching `main` must follow this policy; merge-generated subjects
    are intentionally rejected.

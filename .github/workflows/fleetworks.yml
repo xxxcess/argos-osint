@@ -255,6 +255,37 @@ jobs:
           python3 scripts/agent_cargo.py build --locked -p fleetworks-venture --bin venture
           python3 deploy/verify.py --venture target/agents/debug/venture
 
+  compose_amd64:
+    name: Packaged Compose / Linux AMD64
+    needs: scope
+    if: needs.scope.outputs.compose == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.FLEETWORKS_HEAD }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Exercise packaged Compose through native AMD64 Venture
+        env:
+          DOCKER_DEFAULT_PLATFORM: linux/amd64
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
+          test "$(uname -m)" = x86_64
+          test "$(rustc -vV | sed -n 's/^host: //p')" = x86_64-unknown-linux-gnu
+          rustc --version | grep -q '^rustc 1\.95\.0 '
+          test "$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" = linux/amd64
+          if [[ ! -f deploy/verify.py ]]; then
+            echo "::error file=deploy/verify.py::Missing selected Compose smoke script"
+            exit 1
+          fi
+          python3 scripts/agent_cargo.py build --locked -p fleetworks-venture --bin venture
+          file target/agents/debug/venture | grep -E 'ELF 64-bit.*x86-64'
+          python3 deploy/verify.py --venture target/agents/debug/venture
+
   bert:
     name: Atlas BERT runtime / Intel macOS
     needs: scope
@@ -267,7 +298,7 @@ jobs:
 
   required:
     name: Fleetworks required
-    needs: [scope, native, server, bert]
+    needs: [scope, native, server, compose_amd64, bert]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -277,9 +308,11 @@ jobs:
           SCOPE_RESULT: ${{ needs.scope.result }}
           NATIVE_SELECTED: ${{ needs.scope.outputs.native }}
           SERVER_SELECTED: ${{ needs.scope.outputs.server }}
+          COMPOSE_SELECTED: ${{ needs.scope.outputs.compose }}
           BERT_SELECTED: ${{ needs.scope.outputs.bert }}
           NATIVE_RESULT: ${{ needs.native.result }}
           SERVER_RESULT: ${{ needs.server.result }}
+          COMPOSE_AMD64_RESULT: ${{ needs.compose_amd64.result }}
           BERT_RESULT: ${{ needs.bert.result }}
         shell: bash
         run: |
@@ -298,6 +331,7 @@ jobs:
           failed=0
           verify native "$NATIVE_SELECTED" "$NATIVE_RESULT" || failed=1
           verify server "$SERVER_SELECTED" "$SERVER_RESULT" || failed=1
+          verify compose-amd64 "$COMPOSE_SELECTED" "$COMPOSE_AMD64_RESULT" || failed=1
           verify bert "$BERT_SELECTED" "$BERT_RESULT" || failed=1
           printf 'Fleetworks revision `%s`\n' "$FLEETWORKS_HEAD" >> "$GITHUB_STEP_SUMMARY"
           exit "$failed"

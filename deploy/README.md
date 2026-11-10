@@ -74,6 +74,8 @@ Set `FLEETWORKS_API_PORT` to change the published API port and `FLEETWORKS_API_O
 
 The Dockerfile supports `linux/amd64` and `linux/arm64`. Build on the target architecture or use a Buildx builder with both platforms available. Select `--target web` for the production Next build on Node 24 and pnpm 12, `--target runtime` for the locked service host for the API, Brain, worker, and bootstrap roles, or `--target surrealdb` for the managed database image. The Rust runtime includes the current in-process NLP and classifier support. A separate Rust-BERT model/runtime bundle is outside this image.
 
+The [Fleetworks Compose checks](../docs/wiki/code/ci.md#fleetworksyml--scoped-branch-checks) exercise the local images on native Linux ARM64 and AMD64 runners. Check the result for the source revision you plan to build.
+
 ## Train the optional Natural classifier
 
 After `venture up`, place the current CSV under workspace `datasets/` and run

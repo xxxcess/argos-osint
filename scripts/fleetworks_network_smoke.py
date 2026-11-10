@@ -102,10 +102,61 @@ def instance_identity(port, password):
     return identity
 
 
+def exercise_tools(api, port, headers, request_id="local-dork-fixture"):
+    start = "/api/v1/tools/run"
+    body = json.dumps({
+        "request_id": request_id,
+        "tool_id": "dork_generate",
+        "inputs": {"objective": "Find public annual reports"},
+    })
+    auth = {**headers, "Content-Type": "application/json"}
+    assert request(port, start, {"Content-Type": "application/json"}, body)[0] == 401
+    assert request(port, start, {**auth, "Origin": "http://other.test:3000"}, body)[0] == 403
+    status, accepted = request(port, start, auth, body)
+    assert (status, accepted) == (202, {"call_id": f"fleet-tool-{request_id}"})
+    assert request(port, start, auth, body) == (202, accepted)
+    assert request(port, start, auth, body.replace("annual", "quarterly"))[0] == 409
+    result = "/api/v1/tools/result?id=" + accepted["call_id"]
+    assert request(port, result)[0] == 401
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        assert api.poll() is None, "API exited before tool publication"
+        status, value = request(port, result, headers)
+        assert status == 200, (status, value)
+        if value["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert value["status"] == "completed", value
+    tool_result = value["result"]
+    assert tool_result["observations"] and tool_result["raw"] == ""
+    assert tool_result["credits_charged"] == 0
+    return result, value
+
+
+def exercise_control(port, headers, workspace):
+    auth = {**headers, "Content-Type": "application/json"}
+    path = "/api/v1/models/defaults/set"
+    body = json.dumps({"role": "brain_summary", "primary": {
+        "provider": "openrouter", "model": "example/offline-fixture",
+    }})
+    assert request(port, path, {"Content-Type": "application/json"}, body)[0] == 401
+    assert request(port, path, auth, body) == (200, {"saved": True})
+    status, value = request(port, "/api/v1/models/defaults", headers)
+    assert status == 200 and value["defaults"]["brain_summary"]["model"] == "example/offline-fixture"
+    export = "/api/v1/profile/export"
+    body = json.dumps({"name": "offline-fixture"})
+    status, value = request(port, export, auth, body)
+    assert status == 200 and set(value) == {"path", "schema_version"}, (status, value)
+    assert value["path"] == "exports/offline-fixture.json"
+    assert (workspace / value["path"]).stat().st_mode & 0o777 == 0o600
+    assert request(port, export, auth, body)[0] == 409
+
+
 def exercise(mode, tmp, binary, surreal):
     workspace = tmp / mode
     workspace.mkdir()
-    db_port, api_port, worker_port = free_ports(3)
+    (workspace / "exports").mkdir(mode=0o700)
+    db_port, api_port, worker_port, brief_port = free_ports(4)
     root_key, runtime_key, token = (secrets.token_hex(32) for _ in range(3))
     db_env = {**safe_env, "SURREAL_USER": "root", "SURREAL_PASS": root_key}
     db_path = "memory" if mode == "memory" else f'rocksdb://{workspace / "db"}?versioned=false&sync=every'
@@ -121,6 +172,7 @@ def exercise(mode, tmp, binary, surreal):
     }
     headers = {"Authorization": "Bearer " + token}
     generations = []
+    saved_tool = None
     for attempt in (1, 2):
         with process(db, db_env, workspace / f"surreal-{attempt}.log") as database:
             wait_for(database, db_port, "/health")
@@ -142,15 +194,28 @@ def exercise(mode, tmp, binary, surreal):
                     status, value = request(api_port, f"/api/v1/{path}", {**headers, "Origin": origins})
                     assert status == 200 and key in value, (path, status, value)
                 if attempt == 1:
-                    with process([binary, "--role", "worker", "--port", str(worker_port)], env, workspace / "worker.log") as worker:
+                    saved_tool = exercise_tools(api, api_port, headers)
+                    exercise_control(api_port, headers, workspace)
+                elif mode == "disk":
+                    path, value = saved_tool
+                    assert request(api_port, path, headers) == (200, value)
+                if attempt == 1:
+                    with contextlib.ExitStack() as workers:
+                        roles = (("worker", worker_port), ("brief-worker", brief_port))
+                        children = [(role, port, workers.enter_context(process(
+                            [binary, "--role", role, "--port", str(port)], env,
+                            workspace / f"{role}.log",
+                        ))) for role, port in roles]
                         time.sleep(1)
-                        assert worker.poll() is None, "background process did not stay up"
-                        with socket.socket() as probe:
-                            assert probe.connect_ex(("127.0.0.1", worker_port)) != 0, "worker published an HTTP listener"
+                        for role, port, child in children:
+                            assert child.poll() is None, f"{role} did not stay up"
+                            with socket.socket() as probe:
+                                assert probe.connect_ex(("127.0.0.1", port)) != 0, f"{role} published an HTTP listener"
             if attempt == 1 and mode == "memory":
                 exercise_brain(workspace, binary, env, api_port, headers)
+                exercise_private_tools(workspace, binary, env, api_port, headers)
     assert (generations[0] == generations[1]) == (mode == "disk")
-    print(f"{mode}: privileged bootstrap, scoped API and worker roles, ingress, retained reads and database generation passed", flush=True)
+    print(f"{mode}: privileged bootstrap, scoped API and worker roles, ingress, retained reads, durable tool execution and database generation passed", flush=True)
 
 
 def exercise_brain(workspace, binary, env, api_port, public_headers):
@@ -177,6 +242,39 @@ def exercise_brain(workspace, binary, env, api_port, public_headers):
         assert request(api_port, detail, public_headers)[0] == 502
         assert request(api_port, "/api/v1/tools", public_headers)[0] == 200
     print("Brain: private readiness, bearer isolation, retained route relay and outage isolation passed", flush=True)
+
+
+def exercise_private_tools(workspace, binary, env, api_port, public_headers):
+    port = free_ports(1)[0]
+    token = secrets.token_hex(32)
+    private_env = {
+        **env,
+        "FLEETWORKS_TOOLS_TOKEN": token,
+        "FLEETWORKS_TOOLS_ALLOWED_HOSTS": f"127.0.0.1:{port}",
+    }
+    gateway_env = {
+        **private_env,
+        "FLEETWORKS_TOOLS_ORIGIN": f"http://127.0.0.1:{port}",
+    }
+    auth = {"Authorization": "Bearer " + token}
+    ready = "/api/v1/health/ready"
+    catalog = "/api/v1/tools"
+    with process([binary, "--role", "api", "--port", str(api_port)], gateway_env, workspace / "api-tools.log") as api:
+        wait_for(api, api_port, ready, public_headers)
+        with process([binary, "--role", "tools", "--port", str(port)], private_env, workspace / "tools.log") as tools:
+            health = wait_for(tools, port, ready, auth)
+            assert health["service"] == "fleetworks-tools" and health["storage"]
+            assert request(port, catalog, public_headers)[0] == 401
+            assert request(api_port, catalog, auth)[0] == 401
+            assert request(port, ready, {**auth, "Host": "other.test"})[0] == 403
+            assert request(port, "/api/v1/jobs", auth)[0] == 404
+            assert request(api_port, catalog, public_headers) == request(port, catalog, auth)
+            path, result = exercise_tools(api, api_port, public_headers, "private-dork-fixture")
+            assert request(port, path, auth) == (200, result)
+        assert request(api_port, catalog, public_headers)[0] == 502
+        assert request(api_port, path, public_headers)[0] == 502
+        assert request(api_port, "/api/v1/jobs", public_headers)[0] == 200
+    print("Tools: private readiness, bearer isolation, execution relay and outage isolation passed", flush=True)
 
 
 def exercise_nlp(tmp, binary):

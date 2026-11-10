@@ -13,8 +13,9 @@ pub mod diversity;
 pub(crate) mod investigation;
 pub use crate::model_exec;
 mod orchestrate;
+pub(crate) use orchestrate::BudgetedOutcome;
 mod picker;
-pub mod tool_runner;
+pub use crate::osint::tool_runner;
 
 use crate::{
     osint::{self, Executor, ToolResult},
@@ -169,7 +170,7 @@ fn snapshot_secret(auth: &AuthFile, snapshot: &str) -> Result<crate::secrets::Pr
     secret.model = model.into();
     Ok(secret)
 }
-fn explicit_entities(text: &str) -> Vec<(String, String)> {
+pub(crate) fn explicit_entities(text: &str) -> Vec<(String, String)> {
     let mut found = HashSet::new();
     for token in
         text.split(|c: char| c.is_whitespace() || [',', ';', '(', ')', '[', ']'].contains(&c))

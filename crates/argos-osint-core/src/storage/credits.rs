@@ -12,7 +12,7 @@ use surrealdb::engine::any::Any;
 use surrealdb::types::SurrealValue;
 use surrealdb::Surreal;
 
-use super::jobs::{rid, run, take};
+use super::jobs::{bump, rid, run, take};
 use super::tx::{run_tx, RetryPolicy, Tx, TxError};
 use crate::provider::ReconLimits;
 use crate::recon::CreditHold;
@@ -152,6 +152,32 @@ pub async fn reserve_credits(
     cost: u32,
     limits: &ReconLimits,
 ) -> Result<Option<CreditHold>> {
+    reserve_named_credits(db, provider, cost, limits, crate::recon::id("hold"), false).await
+}
+
+/// A tool call owns its credit hold independently of Recon recovery.
+pub(crate) async fn reserve_manual_credits(
+    db: &Surreal<Any>,
+    provider: &str,
+    cost: u32,
+    limits: &ReconLimits,
+    call_id: &str,
+) -> Result<Option<CreditHold>> {
+    anyhow::ensure!(
+        crate::osint::manual::valid_call_id(call_id),
+        "invalid manual call id"
+    );
+    reserve_named_credits(db, provider, cost, limits, call_id.to_owned(), true).await
+}
+
+async fn reserve_named_credits(
+    db: &Surreal<Any>,
+    provider: &str,
+    cost: u32,
+    limits: &ReconLimits,
+    hold_id: String,
+    manual: bool,
+) -> Result<Option<CreditHold>> {
     if cost == 0 {
         return Ok(Some(CreditHold {
             id: String::new(),
@@ -160,10 +186,25 @@ pub async fn reserve_credits(
             allowance_credits: 0,
         }));
     }
-    let hold_id = crate::recon::id("hold");
     let hold = run_tx(db, RetryPolicy::default(), |tx| {
         let hold_id = hold_id.clone();
         async move {
+            if manual {
+                bump(&tx, "job_guard", &hold_id).await?;
+                let mut reply = run(
+                    &tx,
+                    tx.query(
+                        "SELECT VALUE status FROM ONLY $call WHERE origin=$origin",
+                    )
+                    .bind(("call", rid("osint_call", &hold_id)))
+                    .bind(("origin", crate::osint::manual::ORIGIN)),
+                )
+                .await?;
+                let status: Option<String> = take(&mut reply, 0)?;
+                if status.as_deref() != Some("running") {
+                    return Err(TxError::Abort("manual tool call is no longer running".into()));
+                }
+            }
             let q = touch_in(&tx, provider, limits).await?;
             let trial_left = u32::try_from(q.trial_remaining.max(0)).unwrap_or(0);
             let allowance = u32::try_from(allowance_left(&q)).unwrap_or(0);
@@ -273,7 +314,40 @@ pub async fn release_credits(db: &Surreal<Any>, hold: &CreditHold) -> Result<()>
     Ok(())
 }
 
-/// `release_held_credits` (run recovery): release every held hold.
+/// Conservatively settle an abandoned manual call at its held estimate.
+pub(crate) async fn settle_abandoned_manual_call(db: &Surreal<Any>, id: &str) -> Result<()> {
+    #[derive(SurrealValue)]
+    struct Row {
+        provider: String,
+        trial_credits: i64,
+        allowance_credits: i64,
+    }
+    let mut reply = db
+        .query(
+            "SELECT provider, trial_credits, allowance_credits FROM ONLY $hold WHERE state='held'",
+        )
+        .bind(("hold", rid("credit_reservation", id)))
+        .await?
+        .check()?;
+    let row: Option<Row> = reply.take(0usize)?;
+    if let Some(row) = row {
+        let hold = CreditHold {
+            id: id.to_owned(),
+            provider: row.provider,
+            trial_credits: row.trial_credits.max(0) as u32,
+            allowance_credits: row.allowance_credits.max(0) as u32,
+        };
+        reconcile_credits(
+            db,
+            &hold,
+            hold.trial_credits.saturating_add(hold.allowance_credits),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Run recovery releases old Recon holds, never a Fleetworks manual hold.
 pub async fn release_held_credits(db: &Surreal<Any>) -> Result<usize> {
     #[derive(SurrealValue)]
     struct Row {
@@ -285,8 +359,10 @@ pub async fn release_held_credits(db: &Surreal<Any>) -> Result<usize> {
     let mut r = db
         .query(
             "SELECT record::id(id) AS id, provider, trial_credits, allowance_credits
-             FROM credit_reservation WHERE state = 'held'",
+             FROM credit_reservation WHERE state='held'
+               AND !string::starts_with(record::id(id), $manual_prefix)",
         )
+        .bind(("manual_prefix", crate::osint::manual::PREFIX))
         .await?
         .check()?;
     let rows: Vec<Row> = r.take(0usize)?;

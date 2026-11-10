@@ -1,10 +1,13 @@
 //! Versioned local Intel HTTP adapter. @tag:intel-brief
 mod actor_dossier;
 mod brain;
+mod control;
 mod host_metrics;
 mod live;
 mod network;
 mod operations;
+mod private_relay;
+mod tools;
 mod topology_summary;
 mod topology_web;
 
@@ -27,6 +30,7 @@ use std::{sync::Arc, time::Duration};
 
 pub use brain::BrainClient;
 pub use network::{network_origin, NetworkPolicy};
+pub use tools::ToolsClient;
 
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 
@@ -57,12 +61,12 @@ pub fn loopback_url(raw: &str) -> anyhow::Result<url::Url> {
 
 /// Serves the existing unauthenticated loopback API.
 pub fn router(state: ApiState) -> Router {
-    router_with_access(state, None, None)
+    router_with_access(state, None, None, None)
 }
 
 /// Serves public routes and authenticated job controls with explicit ingress restrictions.
 pub fn network_router(state: ApiState, policy: NetworkPolicy) -> Router {
-    router_with_access(state, Some(policy), None)
+    router_with_access(state, Some(policy), None, None)
 }
 
 /// Serves the public API and sends Brain and Intel HTTP operations to a private service.
@@ -71,7 +75,17 @@ pub fn network_router_with_brain(
     policy: NetworkPolicy,
     brain: BrainClient,
 ) -> Router {
-    router_with_access(state, Some(policy), Some(brain))
+    network_router_with_services(state, policy, Some(brain), None)
+}
+
+/// Serve public routes and forward configured service operations privately.
+pub fn network_router_with_services(
+    state: ApiState,
+    policy: NetworkPolicy,
+    brain: Option<BrainClient>,
+    tools: Option<ToolsClient>,
+) -> Router {
+    router_with_access(state, Some(policy), brain, tools)
 }
 
 /// Serves the private Brain and Intel HTTP operations with storage-backed readiness.
@@ -79,6 +93,17 @@ pub fn brain_router(state: ApiState, policy: NetworkPolicy) -> Router {
     let port = state.port;
     let router = brain::routes()
         .route("/api/v1/health/ready", get(brain::ready))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .layer(middleware::from_fn(request_timeout))
+        .with_state(state);
+    guard_network(router, policy, Arc::new(Vec::new()), port)
+}
+
+/// Serve private Tools operations with storage-backed readiness.
+pub fn tools_router(state: ApiState, policy: NetworkPolicy) -> Router {
+    let port = state.port;
+    let router = tools::routes()
+        .route("/api/v1/health/ready", get(tools::ready))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn(request_timeout))
         .with_state(state);
@@ -106,6 +131,7 @@ fn router_with_access(
     state: ApiState,
     network: Option<NetworkPolicy>,
     brain: Option<BrainClient>,
+    tools: Option<ToolsClient>,
 ) -> Router {
     let mode = if network.is_some() {
         AccessMode::Bearer
@@ -136,18 +162,25 @@ fn router_with_access(
         .route("/api/v1/articles/counts", get(article_counts))
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/logs", get(operations::logs))
-        .route("/api/v1/tools", get(operations::tools))
         .route("/api/v1/models/defaults", get(operations::model_defaults))
         .route("/api/v1/profile", get(operations::profile))
         .route("/api/v1/jobs/detail", get(job))
         .route(JOB_RETRY_PATH, post(retry))
         .merge(brain_routes);
     let router = if mode == AccessMode::Bearer {
+        let tools_routes = tools::routes();
+        let tools_routes = if let Some(tools) = tools {
+            tools_routes.route_layer(middleware::from_fn_with_state(tools, tools::forward))
+        } else {
+            tools_routes
+        };
         router
             .route(ATLAS_CYCLES_PATH, post(operations::submit_atlas_cycle))
             .route(JOB_CANCEL_PATH, post(cancel))
+            .merge(tools_routes)
+            .merge(control::routes())
     } else {
-        router
+        router.route("/api/v1/tools", get(operations::tools))
     };
     router
         .layer(axum::Extension(sampler))
@@ -234,7 +267,7 @@ async fn capabilities(axum::Extension(mode): axum::Extension<AccessMode>) -> Jso
         "profile",
     ];
     if mode == AccessMode::Bearer {
-        features.extend(["atlas-cycles", "job-cancel"]);
+        features.extend(["atlas-cycles", "job-cancel", "tool-execution"]);
     }
     Json(
         json!({"api_version":1,"categories":intel::CATEGORIES,"auth":mode == AccessMode::Bearer,"features":features,"live":{"path":"/api/v1/live","channels":["metrics","brief"],"version":1}}),

@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, ensure, Context, Result};
-use argos_osint_api::{BrainClient, NetworkPolicy};
+use argos_osint_api::{BrainClient, NetworkPolicy, ToolsClient};
 use argos_osint_core::storage::open::{NetworkAccess, Target};
 use argos_osint_core::storage::repo::Repository;
 
@@ -93,8 +93,15 @@ impl ApiAccess {
                 policy: None,
             });
         }
-        if role == Role::Brain {
-            let (bind, policy) = internal_access("BRAIN")?;
+        let private = match role {
+            Role::Brain => Some(internal_access("BRAIN")?),
+            Role::Tools => Some(internal_access_with_token(
+                "TOOLS",
+                "FLEETWORKS_TOOLS_TOKEN",
+            )?),
+            _ => None,
+        };
+        if let Some((bind, policy)) = private {
             return Ok(Self {
                 bind,
                 origins: Vec::new(),
@@ -138,14 +145,29 @@ pub(crate) fn brain_client() -> Result<Option<BrainClient>> {
     }
 }
 
+pub(crate) fn tools_client() -> Result<Option<ToolsClient>> {
+    match env::var("FLEETWORKS_TOOLS_ORIGIN") {
+        Ok(origin) => Ok(Some(ToolsClient::new(
+            &origin,
+            &read_secret("FLEETWORKS_TOOLS_TOKEN")?,
+        )?)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err(anyhow!("invalid encoding in FLEETWORKS_TOOLS_ORIGIN")),
+    }
+}
+
 pub(crate) fn internal_access(service: &str) -> Result<(IpAddr, NetworkPolicy)> {
+    internal_access_with_token(service, "FLEETWORKS_INTERNAL_TOKEN")
+}
+
+fn internal_access_with_token(service: &str, token_key: &str) -> Result<(IpAddr, NetworkPolicy)> {
     let bind_key = format!("FLEETWORKS_{service}_BIND");
     let host_key = format!("FLEETWORKS_{service}_ALLOWED_HOSTS");
     let bind = value(&bind_key, "127.0.0.1")?
         .parse()
         .with_context(|| format!("invalid {bind_key}"))?;
     let hosts = split_csv(&env::var(&host_key).with_context(|| format!("{host_key} is required"))?);
-    let token = read_secret("FLEETWORKS_INTERNAL_TOKEN")?;
+    let token = read_secret(token_key)?;
     Ok((bind, NetworkPolicy::new(&hosts, &token)?))
 }
 

@@ -21,11 +21,13 @@ pub mod contracts;
 pub mod dataset;
 pub mod dork_generator;
 pub mod holehe;
+pub mod manual;
 mod news_legal;
 mod providers;
 pub mod results;
 pub mod search_engines;
 pub mod source_eval;
+pub mod tool_runner;
 pub mod whatsmyname;
 pub mod whoxy;
 pub mod wikipedia_rsp;
@@ -2667,6 +2669,50 @@ fn redact_key(result: &mut ToolResult, credential: &Option<(reqwest::header::Hea
     result.raw = redact(std::mem::take(&mut result.raw), credential);
     if let Some(error) = result.error.take() {
         result.error = Some(redact(error, credential));
+    }
+}
+
+// Manual API results carry structured observations and omit raw provider bytes.
+fn redact_manual_result(result: &mut ToolResult, tool: &str, keys: &ProviderKeys) {
+    fn scrub(value: &mut Value, secret: &str) {
+        match value {
+            Value::String(text) => *text = text.replace(secret, "[redacted]"),
+            Value::Array(values) => values.iter_mut().for_each(|value| scrub(value, secret)),
+            Value::Object(values) => {
+                *values = std::mem::take(values)
+                    .into_iter()
+                    .map(|(name, mut value)| {
+                        scrub(&mut value, secret);
+                        (name.replace(secret, "[redacted]"), value)
+                    })
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+
+    result.raw.clear();
+    if let Some(provider) = keyed_provider(tool) {
+        let (primary, fallback) = keys.pair(provider);
+        for secret in [primary.trim(), fallback.trim()] {
+            if secret.is_empty() {
+                continue;
+            }
+            result.source_url = result.source_url.replace(secret, "[redacted]");
+            if let Some(error) = &mut result.error {
+                *error = error.replace(secret, "[redacted]");
+            }
+            scrub(&mut result.inputs, secret);
+            scrub(&mut result.observations, secret);
+        }
+    }
+    if let Some(error) = &mut result.error {
+        *error = crate::provider_diag::sanitize(error);
+    }
+    // Keep the response comfortably within the 4 MiB client body limit.
+    if result.observations.to_string().len() > 3 * 1024 * 1024 {
+        result.observations = Value::Null;
+        result.truncated = true;
     }
 }
 

@@ -1,6 +1,12 @@
 //! Terminal commands over the versioned Fleetworks HTTP API.
 
+mod atlas_ui;
+mod brain_ui;
 mod jobs_ui;
+mod models_ui;
+mod profile_ui;
+mod terminal;
+mod tools_ui;
 
 use std::io;
 use std::io::Write;
@@ -52,9 +58,18 @@ struct Cli<C: Subcommand> {
 
 enum Operation {
     Workspace,
-    JobsTui,
+    Interactive(Interactive),
     Get(&'static str, Option<Value>),
     Post(&'static str, Value),
+}
+
+enum Interactive {
+    Atlas,
+    Brain,
+    Jobs,
+    Tools,
+    Models,
+    Profile,
 }
 
 impl Operation {
@@ -74,8 +89,8 @@ impl Operation {
             ));
         }
         anyhow::ensure!(
-            !(matches!(self, Self::JobsTui) && connection.json),
-            "the interactive Jobs & Logs view does not support --json"
+            !(matches!(self, Self::Interactive(_)) && connection.json),
+            "interactive views do not support --json"
         );
         let environment = workspace.environment()?;
         let origin = match &connection.api_origin {
@@ -94,8 +109,19 @@ impl Operation {
             .enable_all()
             .build()?;
         let client = Client::new(&origin, token.as_deref())?;
-        if matches!(self, Self::JobsTui) {
-            jobs_ui::run(&client, &runtime, io::stdin().lock(), io::stdout().lock())?;
+        if let Self::Interactive(view) = self {
+            let input = io::stdin().lock();
+            let output = io::stdout().lock();
+            match view {
+                Interactive::Atlas => atlas_ui::run(&client, &runtime, input, output)?,
+                Interactive::Brain => brain_ui::run(&client, &runtime, input, output)?,
+                Interactive::Jobs => jobs_ui::run(&client, &runtime, input, output)?,
+                Interactive::Tools => tools_ui::run(&client, &runtime, input, output)?,
+                Interactive::Models => models_ui::run(&client, &runtime, input, output)?,
+                Interactive::Profile => {
+                    profile_ui::run(&client, &runtime, workspace.root(), input, output)?
+                }
+            }
             return Ok(None);
         }
         Ok(Some(runtime.block_on(self.request(&client))?))
@@ -106,7 +132,7 @@ impl Operation {
             Self::Get(route, None) => Ok(client.get(route).await?),
             Self::Get(route, Some(query)) => Ok(client.get_with_query(route, &query).await?),
             Self::Post(route, body) => Ok(client.post(route, &body).await?),
-            Self::Workspace | Self::JobsTui => {
+            Self::Workspace | Self::Interactive(_) => {
                 unreachable!("local and interactive commands are handled before an HTTP request")
             }
         }
@@ -131,6 +157,8 @@ fn run<C: Subcommand + Into<Operation>>(name: &'static str) -> Result<()> {
 
 #[derive(Subcommand)]
 enum AtlasCommand {
+    /// Open an interactive Atlas session.
+    Tui,
     /// Queue a collection cycle. Reuse the request ID when retrying submission.
     Start {
         #[arg(long = "request-id", value_parser = parse_cycle_request)]
@@ -158,6 +186,7 @@ fn parse_cycle_request(value: &str) -> Result<AtlasCycleRequest, String> {
 impl From<AtlasCommand> for Operation {
     fn from(command: AtlasCommand) -> Self {
         match command {
+            AtlasCommand::Tui => Self::Interactive(Interactive::Atlas),
             AtlasCommand::Start { request } => Self::Post(ATLAS_CYCLES_PATH, json!(request)),
             AtlasCommand::Days => Self::read("/api/v1/days"),
             AtlasCommand::Articles {
@@ -178,6 +207,8 @@ impl From<AtlasCommand> for Operation {
 
 #[derive(Subcommand)]
 enum BrainCommand {
+    /// Open an interactive Brain session.
+    Tui,
     /// Read an actor dossier by ID.
     Actor { id: String },
     /// Read the retained Intel brief for an article.
@@ -189,6 +220,7 @@ enum BrainCommand {
 impl From<BrainCommand> for Operation {
     fn from(command: BrainCommand) -> Self {
         match command {
+            BrainCommand::Tui => Self::Interactive(Interactive::Brain),
             BrainCommand::Actor { id } => Self::query("/api/v1/actors/detail", json!({"id": id})),
             BrainCommand::Brief { run, id } => {
                 Self::query("/api/v1/articles/detail", json!({"run": run, "id": id}))
@@ -224,7 +256,7 @@ enum JobsCommand {
 impl From<JobsCommand> for Operation {
     fn from(command: JobsCommand) -> Self {
         match command {
-            JobsCommand::Tui => Self::JobsTui,
+            JobsCommand::Tui => Self::Interactive(Interactive::Jobs),
             JobsCommand::List => Self::read(JOBS_PATH),
             JobsCommand::Detail { id } => Self::query(JOB_DETAIL_PATH, json!({"id": id})),
             JobsCommand::Retry { id } => Self::Post(JOB_RETRY_PATH, json!({"id": id})),
@@ -242,48 +274,133 @@ impl From<JobsCommand> for Operation {
 
 #[derive(Subcommand)]
 enum ToolsCommand {
+    /// Open an interactive Tools session.
+    Tui,
     /// Read the service tool catalog.
     List,
+    /// Accept a standalone tool call on the server.
+    Run {
+        tool_id: String,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long, value_parser = parse_tool_input)]
+        input: Value,
+    },
+    /// Read the status and result of an accepted call.
+    Result { id: String },
+}
+
+fn parse_tool_input(value: &str) -> Result<Value, String> {
+    let input: Value =
+        serde_json::from_str(value).map_err(|_| "expected a JSON object".to_owned())?;
+    if input.is_object() {
+        Ok(input)
+    } else {
+        Err("expected a JSON object".to_owned())
+    }
 }
 
 impl From<ToolsCommand> for Operation {
     fn from(command: ToolsCommand) -> Self {
         match command {
+            ToolsCommand::Tui => Self::Interactive(Interactive::Tools),
             ToolsCommand::List => Self::read("/api/v1/tools"),
+            ToolsCommand::Run {
+                tool_id,
+                request_id,
+                input,
+            } => Self::Post(
+                fleetworks_contracts::TOOL_RUN_PATH,
+                json!(fleetworks_contracts::ToolRunRequest::new(
+                    request_id, tool_id, input
+                )),
+            ),
+            ToolsCommand::Result { id } => {
+                Self::query(fleetworks_contracts::TOOL_RESULT_PATH, json!({"id": id}))
+            }
         }
     }
 }
 
 #[derive(Subcommand)]
 enum ModelsCommand {
+    /// Open an interactive Models session.
+    Tui,
     /// Read configured model defaults.
     Defaults,
+    /// Save the primary route for one canonical pipeline role.
+    Set {
+        role: String,
+        provider: String,
+        model: String,
+        #[arg(long)]
+        account: Option<String>,
+        /// Replace fallbacks with a JSON array of routes.
+        #[arg(long, value_parser = parse_fallbacks)]
+        fallbacks: Option<Value>,
+    },
+    /// Clear the primary and fallbacks for one canonical pipeline role.
+    Clear { role: String },
+}
+
+fn parse_fallbacks(value: &str) -> Result<Value, String> {
+    match serde_json::from_str(value) {
+        Ok(array @ Value::Array(_)) => Ok(array),
+        _ => Err("expected a JSON array of model routes".to_owned()),
+    }
 }
 
 impl From<ModelsCommand> for Operation {
     fn from(command: ModelsCommand) -> Self {
         match command {
+            ModelsCommand::Tui => Self::Interactive(Interactive::Models),
             ModelsCommand::Defaults => Self::read("/api/v1/models/defaults"),
+            ModelsCommand::Set {
+                role,
+                provider,
+                model,
+                account,
+                fallbacks,
+            } => Self::Post(
+                "/api/v1/models/defaults/set",
+                json!({
+                    "role":role,
+                    "primary":{"provider":provider,"model":model,"account":account.unwrap_or_default()},
+                    "fallbacks":fallbacks,
+                }),
+            ),
+            ModelsCommand::Clear { role } => Self::Post(
+                "/api/v1/models/defaults/set",
+                json!({"role":role,"primary":null}),
+            ),
         }
     }
 }
 
 #[derive(Subcommand)]
 enum ProfileCommand {
+    /// Open an interactive Profile session.
+    Tui,
     /// Print the resolved local workspace without opening a connection.
     Workspace,
     /// Check API and database readiness.
     Health,
     /// Read service profile information.
     Show,
+    /// Save an owner-only portable configuration in the service workspace.
+    Export { name: String },
 }
 
 impl From<ProfileCommand> for Operation {
     fn from(command: ProfileCommand) -> Self {
         match command {
+            ProfileCommand::Tui => Self::Interactive(Interactive::Profile),
             ProfileCommand::Workspace => Self::Workspace,
             ProfileCommand::Health => Self::read("/api/v1/health/ready"),
             ProfileCommand::Show => Self::read("/api/v1/profile"),
+            ProfileCommand::Export { name } => {
+                Self::Post("/api/v1/profile/export", json!({"name":name}))
+            }
         }
     }
 }

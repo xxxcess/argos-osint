@@ -30,6 +30,32 @@ pub const JOB_DETAIL_PATH: &str = "/api/v1/jobs/detail";
 pub const JOB_RETRY_PATH: &str = "/api/v1/jobs/retry";
 /// Cancel a durable job.
 pub const JOB_CANCEL_PATH: &str = "/api/v1/jobs/cancel";
+/// Start a manual tool call on the authenticated API.
+pub const TOOL_RUN_PATH: &str = "/api/v1/tools/run";
+/// Read a previously accepted manual tool call by ID.
+pub const TOOL_RESULT_PATH: &str = "/api/v1/tools/result";
+
+/// Request identity and validated input for a single manual tool call.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ToolRunRequest {
+    pub request_id: String,
+    pub tool_id: String,
+    pub inputs: serde_json::Value,
+}
+
+impl ToolRunRequest {
+    /// Construct a request. The API validates identity and tool-specific inputs.
+    pub fn new(request_id: String, tool_id: String, inputs: serde_json::Value) -> Self {
+        Self {
+            request_id,
+            tool_id,
+            inputs,
+        }
+    }
+}
+
 /// Submit an Atlas collection cycle.
 pub const ATLAS_CYCLES_PATH: &str = "/api/v1/atlas/cycles";
 /// Durable operation name for Atlas collection.

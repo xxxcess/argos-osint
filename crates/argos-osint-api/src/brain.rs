@@ -1,24 +1,14 @@
 //! Private Brain and Intel HTTP operations and the public API relay.
 
-use std::time::Duration;
-
-use anyhow::ensure;
-use axum::body::Bytes;
-use axum::extract::{FromRequest, Request, State};
-use axum::http::header;
-use axum::http::{HeaderValue, StatusCode};
+use axum::extract::{Request, State};
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
-use url::Url;
 
-use crate::network;
-use crate::{ApiError, ApiResult, ApiState};
-
-const MAX_QUERY_BYTES: usize = 8 * 1024;
-const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+use crate::private_relay::{PrivateClient, Service};
+use crate::{ApiResult, ApiState};
 
 pub(crate) fn routes() -> Router<ApiState> {
     Router::new()
@@ -56,33 +46,12 @@ pub(crate) async fn ready(State(state): State<ApiState>) -> ApiResult {
 
 /// An authenticated connection pool to a single private Brain service.
 #[derive(Clone)]
-pub struct BrainClient {
-    origin: Url,
-    authorization: HeaderValue,
-    http: reqwest::Client,
-}
+pub struct BrainClient(PrivateClient);
 
 impl BrainClient {
     /// Configures an exact HTTP(S) origin and a dedicated internal bearer token.
     pub fn new(origin: &str, token: &str) -> anyhow::Result<Self> {
-        let origin = network::validate_origin(origin)?;
-        ensure!(
-            network::valid_token(token.as_bytes()),
-            "invalid Brain bearer token"
-        );
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))?;
-        authorization.set_sensitive(true);
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(50))
-            .build()?;
-        Ok(Self {
-            origin,
-            authorization,
-            http,
-        })
+        Ok(Self(PrivateClient::new(origin, token, Service::Brain)?))
     }
 }
 
@@ -91,73 +60,13 @@ pub(crate) async fn forward(
     request: Request,
     _next: Next,
 ) -> Result<Response, Response> {
-    // The router selects the operation. Only the path and query from the
-    // request are applied to the configured origin.
-    let uri = request.uri();
-    if uri
-        .query()
-        .is_some_and(|query| query.len() > MAX_QUERY_BYTES)
-    {
-        return Err(ApiError(
-            StatusCode::URI_TOO_LONG,
-            "Brain query exceeds the size limit",
-        )
-        .into_response());
-    }
-    let mut url = client.origin.clone();
-    url.set_path(uri.path());
-    url.set_query(uri.query());
-    let method = request.method().clone();
-    let content_type = request.headers().get(header::CONTENT_TYPE).cloned();
-    let payload = Bytes::from_request(request, &())
-        .await
-        .map_err(IntoResponse::into_response)?;
-    // Public Authorization, Host, Origin and cookies never leave the gateway.
-    let mut upstream = client
-        .http
-        .request(method, url)
-        .header(header::AUTHORIZATION, client.authorization)
-        .body(payload);
-    if let Some(value) = content_type {
-        upstream = upstream.header(header::CONTENT_TYPE, value);
-    }
-    let mut upstream = upstream
-        .send()
-        .await
-        .map_err(|_| unavailable("request failed"))?;
-    let status = upstream.status();
-    if status.is_redirection() || matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
-    {
-        return Err(unavailable("Brain service refused the internal request"));
-    }
-    let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = upstream
-        .chunk()
-        .await
-        .map_err(|_| unavailable("response interrupted"))?
-    {
-        if chunk.len() > MAX_RESPONSE_BYTES - bytes.len() {
-            return Err(unavailable("Brain response exceeds the size limit"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let mut response = (status, bytes).into_response();
-    if let Some(value) = content_type {
-        response.headers_mut().insert(header::CONTENT_TYPE, value);
-    }
-    Ok(response)
-}
-
-fn unavailable(reason: &'static str) -> Response {
-    eprintln!("Brain service relay failed: {reason}");
-    ApiError(StatusCode::BAD_GATEWAY, "Brain service unavailable").into_response()
+    client.0.forward(request).await
 }
 
 #[cfg(test)]
 mod tests {
     use axum::body::{to_bytes, Body};
-    use axum::http::Request;
+    use axum::http::{header, Request, StatusCode};
     use axum::middleware;
     use tower::ServiceExt;
 

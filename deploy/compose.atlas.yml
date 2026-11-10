@@ -94,7 +94,7 @@ services:
 
 
   rabbitmq:
-    image: rabbitmq:4.2.6@sha256:0f0eeaba114a94a9e4aae6a5bde40de85e0ab3b9ae7fe715a25cac19c4253643
+    image: "${FLEETWORKS_RABBITMQ_IMAGE:-rabbitmq:4.2.6@sha256:0f0eeaba114a94a9e4aae6a5bde40de85e0ab3b9ae7fe715a25cac19c4253643}"
     user: "${FLEETWORKS_UID:?Set FLEETWORKS_UID}:${FLEETWORKS_GID:?Set FLEETWORKS_GID}"
     hostname: rabbitmq
     working_dir: /var/lib/rabbitmq

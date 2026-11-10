@@ -30,6 +30,8 @@ const BROKER_PASSWORD_FILE: &str = "FLEETWORKS_BROKER_PASSWORD_FILE";
 const INTERNAL_TOKEN_FILE: &str = "FLEETWORKS_INTERNAL_TOKEN_FILE";
 const BRAIN_TOKEN_FILE: &str = "FLEETWORKS_BRAIN_TOKEN_FILE";
 const BRAIN_TOKEN_NAME: &str = "brain-token";
+const TOOLS_TOKEN_FILE: &str = "FLEETWORKS_TOOLS_TOKEN_FILE";
+const TOOLS_TOKEN_NAME: &str = "tools-token";
 const SETTINGS: &[(&str, Option<&str>)] = &[
     ("FLEETWORKS_STORAGE_NAMESPACE", Some("fleetworks")),
     ("FLEETWORKS_STORAGE_DATABASE", Some("fleetworks")),
@@ -244,6 +246,7 @@ impl Owner {
             .env_remove("COMPOSE_PROFILES")
             .env_remove("COMPOSE_ENV_FILES")
             .env_remove("FLEETWORKS_API_TOKEN")
+            .env_remove("FLEETWORKS_TOOLS_TOKEN")
             .env_remove("FLEETWORKS_STORAGE_ROOT_PASSWORD")
             .env_remove("FLEETWORKS_STORAGE_PASSWORD")
             .env("FLEETWORKS_HOST_WORKSPACE", &self.workspace)
@@ -256,6 +259,10 @@ impl Owner {
             .env(
                 BRAIN_TOKEN_FILE,
                 self.workspace.join("secrets").join(BRAIN_TOKEN_NAME),
+            )
+            .env(
+                TOOLS_TOKEN_FILE,
+                self.workspace.join("secrets").join(TOOLS_TOKEN_NAME),
             )
             .env(ROOT_PASSWORD_FILE, &self.root_password)
             .env(RUNTIME_PASSWORD_FILE, &self.runtime_password);
@@ -316,6 +323,7 @@ pub(crate) async fn up(
     compose_file: Option<&Path>,
     atlas: bool,
     dev: bool,
+    no_build: bool,
 ) -> Result<()> {
     let docker_host = docker_host().await?;
     let owned_workspace = workspace.clone();
@@ -348,15 +356,17 @@ pub(crate) async fn up(
     if let Some(config) = &requested.host_storage {
         host_storage::start(workspace, config).await?;
     }
+    let image_policy: &[&str] = if no_build {
+        &["--no-build", "--pull", "never"]
+    } else {
+        &["--build"]
+    };
     run(
-        requested.compose().args([
-            "up",
-            "--detach",
-            "--build",
-            "--wait",
-            "--wait-timeout",
-            "120",
-        ]),
+        requested
+            .compose()
+            .args(["up", "--detach"])
+            .args(image_policy)
+            .args(["--wait", "--wait-timeout", "120"]),
         "start services",
     )
     .await?;
@@ -515,6 +525,7 @@ fn prepare(
     )?;
     workspace.read_api_token_file(&token)?;
     workspace.initialize_secret_file(BRAIN_TOKEN_NAME)?;
+    workspace.initialize_secret_file(TOOLS_TOKEN_NAME)?;
     let root_password = secret(
         workspace,
         &environment,

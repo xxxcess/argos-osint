@@ -74,14 +74,19 @@ services:
       FLEETWORKS_API_HEALTH_HOST: "127.0.0.1:${FLEETWORKS_API_PORT:-8080}"
       FLEETWORKS_BRAIN_ORIGIN: http://brain:8080
       FLEETWORKS_INTERNAL_TOKEN_FILE: /run/secrets/brain_token
+      FLEETWORKS_TOOLS_ORIGIN: http://tools:8080
+      FLEETWORKS_TOOLS_TOKEN_FILE: /run/secrets/tools_token
     secrets:
       - storage_password
       - api_token
       - brain_token
+      - tools_token
     depends_on:
       bootstrap:
         condition: service_completed_successfully
       brain:
+        condition: service_healthy
+      tools:
         condition: service_healthy
     ports:
       - target: 8080
@@ -119,9 +124,41 @@ services:
       start_period: 15s
       retries: 6
 
+  tools:
+    <<: *runtime
+    command: [--role, tools, --port, "8080"]
+    restart: unless-stopped
+    environment:
+      <<: *runtime-environment
+      FLEETWORKS_TOOLS_BIND: 0.0.0.0
+      FLEETWORKS_TOOLS_ALLOWED_HOSTS: tools:8080
+      FLEETWORKS_TOOLS_TOKEN_FILE: /run/secrets/tools_token
+      FLEETWORKS_API_TOKEN_FILE: /run/secrets/tools_token
+      FLEETWORKS_API_HEALTH_HOST: tools:8080
+    secrets:
+      - storage_password
+      - tools_token
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, /usr/local/bin/check-fleetworks-api]
+      interval: 5s
+      timeout: 4s
+      start_period: 15s
+      retries: 6
+
   worker:
     <<: *runtime
     command: [--role, worker]
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  brief-worker:
+    <<: *runtime
+    command: [--role, brief-worker]
     restart: unless-stopped
     depends_on:
       bootstrap:
@@ -207,6 +244,8 @@ secrets:
     file: ${FLEETWORKS_API_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/api-token}
   brain_token:
     file: ${FLEETWORKS_BRAIN_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/brain-token}
+  tools_token:
+    file: ${FLEETWORKS_TOOLS_TOKEN_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/tools-token}
   storage_password:
     file: ${FLEETWORKS_STORAGE_PASSWORD_FILE:-${FLEETWORKS_HOST_WORKSPACE}/secrets/storage-password}
   storage_root_password:

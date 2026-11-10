@@ -4,10 +4,10 @@ use std::io::{BufRead, Write};
 
 use anyhow::{bail, Context, Result};
 use fleetworks_contracts::{Client, JobSummary, Jobs, JOBS_PATH};
-use serde_json::Value;
 use tokio::runtime::Runtime;
 
-use crate::{JobsCommand, Operation};
+use crate::terminal::{self, field, rows, Session};
+use crate::JobsCommand;
 
 const HELP: &str = "list                  Refresh recent jobs
 detail ID             Show a job and its stages
@@ -19,41 +19,33 @@ Use a job ID or a row number such as #1 from the last list.";
 pub(crate) fn run(
     client: &Client,
     runtime: &Runtime,
-    mut input: impl BufRead,
+    input: impl BufRead,
     mut output: impl Write,
 ) -> Result<()> {
     let mut dashboard = Dashboard {
-        client,
-        runtime,
+        session: Session { client, runtime },
         rows: Vec::new(),
     };
     writeln!(output, "Fleetworks Jobs & Logs\n{HELP}")?;
     if let Err(error) = dashboard.refresh(&mut output) {
         writeln!(output, "{error}")?;
     }
-    loop {
-        let Some(line) = prompt(&mut input, &mut output, "jobs> ")? else {
-            return Ok(());
-        };
-        let words: Vec<&str> = line.split_whitespace().collect();
-        if words.as_slice() == ["quit"] {
-            return Ok(());
-        }
-        if let Err(error) = dashboard.execute(&words, &mut input, &mut output) {
-            writeln!(output, "{error}")?;
-        }
-    }
+    terminal::run(input, output, "jobs> ", |words, input, output| {
+        dashboard.execute(words, input, output)
+    })
 }
 
 struct Dashboard<'a> {
-    client: &'a Client,
-    runtime: &'a Runtime,
+    session: Session<'a>,
     rows: Vec<JobSummary>,
 }
 
 impl Dashboard<'_> {
     fn refresh(&mut self, output: &mut impl Write) -> Result<()> {
-        let jobs: Jobs = self.runtime.block_on(self.client.get(JOBS_PATH))?;
+        let jobs: Jobs = self
+            .session
+            .runtime
+            .block_on(self.session.client.get(JOBS_PATH))?;
         self.rows = jobs.rows;
         if self.rows.is_empty() {
             writeln!(output, "No recent jobs.")?;
@@ -72,21 +64,13 @@ impl Dashboard<'_> {
     }
 
     fn job_id(&self, selector: &str) -> Result<String> {
-        let Some(number) = selector.strip_prefix('#') else {
+        if !selector.starts_with('#') {
             return Ok(selector.to_owned());
-        };
-        let row = number
-            .parse::<usize>()
-            .ok()
-            .and_then(|row| row.checked_sub(1))
+        }
+        let row = terminal::row_index(selector)
             .and_then(|index| self.rows.get(index))
             .context("no such row in the last job list")?;
         Ok(row.id.clone())
-    }
-
-    fn request(&self, command: JobsCommand) -> Result<Value> {
-        let operation: Operation = command.into();
-        self.runtime.block_on(operation.request(self.client))
     }
 
     fn execute(
@@ -96,12 +80,11 @@ impl Dashboard<'_> {
         output: &mut impl Write,
     ) -> Result<()> {
         match words {
-            [] => (),
             ["help"] => writeln!(output, "{HELP}")?,
             ["list"] => self.refresh(output)?,
             ["detail", selector] => {
                 let id = self.job_id(selector)?;
-                let reply = self.request(JobsCommand::Detail { id })?;
+                let reply = self.session.request(JobsCommand::Detail { id })?;
                 let job: JobSummary = serde_json::from_value(reply["job"].clone())
                     .context("invalid job detail response")?;
                 writeln!(
@@ -121,7 +104,7 @@ impl Dashboard<'_> {
                 if !job.error_summary.is_empty() {
                     writeln!(output, "  {}", job.error_summary.escape_debug())?;
                 }
-                for stage in response_rows(&reply, "stages")? {
+                for stage in rows(&reply, "stages")? {
                     writeln!(
                         output,
                         "  {}  {}",
@@ -139,8 +122,10 @@ impl Dashboard<'_> {
                     .get(1)
                     .map(|selector| self.job_id(selector))
                     .transpose()?;
-                let reply = self.request(JobsCommand::Logs { job_id, limit: 50 })?;
-                let rows = response_rows(&reply, "rows")?;
+                let reply = self
+                    .session
+                    .request(JobsCommand::Logs { job_id, limit: 50 })?;
+                let rows = rows(&reply, "rows")?;
                 if rows.is_empty() {
                     writeln!(output, "No recent log events.")?;
                 }
@@ -158,18 +143,18 @@ impl Dashboard<'_> {
             [action @ ("retry" | "cancel"), selector] => {
                 let id = self.job_id(selector)?;
                 let question = format!("Confirm {action} for {} [yes/no] ", id.escape_debug());
-                if prompt(input, output, &question)?.as_deref().map(str::trim) != Some("yes") {
+                if !terminal::confirmed(input, output, &question)? {
                     writeln!(output, "No action sent.")?;
                     return Ok(());
                 }
                 if *action == "retry" {
-                    let reply = self.request(JobsCommand::Retry { id })?;
+                    let reply = self.session.request(JobsCommand::Retry { id })?;
                     let count = reply["requeued"]
                         .as_u64()
                         .context("invalid retry response")?;
                     writeln!(output, "Requeued {count} task(s).")?;
                 } else {
-                    let reply = self.request(JobsCommand::Cancel { id })?;
+                    let reply = self.session.request(JobsCommand::Cancel { id })?;
                     if reply["done"].as_bool() != Some(true) {
                         bail!("invalid cancellation response");
                     }
@@ -180,26 +165,4 @@ impl Dashboard<'_> {
         }
         Ok(())
     }
-}
-
-fn prompt(
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-    label: &str,
-) -> Result<Option<String>> {
-    write!(output, "{label}")?;
-    output.flush()?;
-    let mut line = String::new();
-    Ok((input.read_line(&mut line)? != 0).then_some(line))
-}
-
-fn response_rows<'a>(reply: &'a Value, key: &str) -> Result<&'a [Value]> {
-    reply[key]
-        .as_array()
-        .map(Vec::as_slice)
-        .context("invalid API row response")
-}
-
-fn field<'a>(row: &'a Value, key: &str) -> &'a str {
-    row[key].as_str().unwrap_or_default()
 }

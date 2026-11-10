@@ -44,8 +44,12 @@ enum Role {
     Api,
     /// Serve retained Brain and Intel HTTP operations on the private network.
     Brain,
+    /// Execute manual tools on the private network.
+    Tools,
     /// Fleetworks background domain workers.
     Worker,
+    /// Execute and publish durable Focus Brief stages.
+    BriefWorker,
     /// Claim and execute durable Atlas dispatches.
     AtlasWorker,
     /// Warm, private Compromise inference without a database session.
@@ -126,16 +130,16 @@ async fn main() -> Result<()> {
         )
         .await;
     }
-    let (layout, network, access, brain) = tokio::task::spawn_blocking(move || {
-        let access = if matches!(role, Role::Combined | Role::Api | Role::Brain) {
+    let (layout, network, access, brain, tools) = tokio::task::spawn_blocking(move || {
+        let access = if matches!(role, Role::Combined | Role::Api | Role::Brain | Role::Tools) {
             Some(fleetworks::ApiAccess::from_environment(role, &origins)?)
         } else {
             None
         };
-        let brain = if role == Role::Api {
-            fleetworks::brain_client()?
+        let (brain, tools) = if role == Role::Api {
+            (fleetworks::brain_client()?, fleetworks::tools_client()?)
         } else {
-            None
+            (None, None)
         };
         if role == Role::Combined {
             Ok::<_, anyhow::Error>((
@@ -143,6 +147,7 @@ async fn main() -> Result<()> {
                 None,
                 access,
                 brain,
+                tools,
             ))
         } else {
             let network = fleetworks::NetworkStorage::from_environment(role)?;
@@ -151,6 +156,7 @@ async fn main() -> Result<()> {
                 Some(network),
                 access,
                 brain,
+                tools,
             ))
         }
     })
@@ -200,12 +206,10 @@ async fn main() -> Result<()> {
             origins: Arc::new(api.origins),
         };
         let router = if let Some(policy) = api.policy {
-            match (role, brain) {
-                (Role::Brain, _) => argos_osint_api::brain_router(state, policy),
-                (_, Some(brain)) => {
-                    argos_osint_api::network_router_with_brain(state, policy, brain)
-                }
-                (_, None) => argos_osint_api::network_router(state, policy),
+            match role {
+                Role::Brain => argos_osint_api::brain_router(state, policy),
+                Role::Tools => argos_osint_api::tools_router(state, policy),
+                _ => argos_osint_api::network_router_with_services(state, policy, brain, tools),
             }
         } else {
             ensure!(
@@ -214,14 +218,18 @@ async fn main() -> Result<()> {
             );
             argos_osint_api::router(state)
         };
-        let service = if role == Role::Brain { "Brain" } else { "API" };
+        let service = match role {
+            Role::Brain => "Brain",
+            Role::Tools => "Tools",
+            _ => "API",
+        };
         println!("Argos {service} http://{}:{port}", api.bind);
         Some((listener, router))
     } else {
         None
     };
-    let workers = if matches!(role, Role::Combined | Role::Worker) {
-        Some(start_workers().await?)
+    let workers = if matches!(role, Role::Combined | Role::Worker | Role::BriefWorker) {
+        Some(start_workers(role).await?)
     } else {
         None
     };
@@ -257,13 +265,20 @@ async fn drain_storage() {
     }
 }
 
-async fn start_workers() -> Result<(
+async fn start_workers(
+    role: Role,
+) -> Result<(
     argos_osint_core::job_registry::ProcessBeat,
     Vec<argos_osint_core::scheduler::WorkerPool>,
 )> {
     let beat = start_process_beat().await?;
-    let workers =
-        argos_osint_core::scheduler::WorkerPool::spawn_default(argos_osint_core::paths::db_path());
+    use argos_osint_core::scheduler::{process_owner, WorkerPool};
+    let path = argos_osint_core::paths::db_path();
+    let workers = match role {
+        Role::BriefWorker => vec![WorkerPool::spawn_intel_brief_drainer(path, process_owner())],
+        Role::Worker => WorkerPool::spawn_network_pools(path),
+        _ => WorkerPool::spawn_default(path),
+    };
     Ok((beat, workers))
 }
 

@@ -94,6 +94,9 @@ struct StackOptions {
     /// Serve web sources from the checkout with live reload.
     #[arg(long)]
     dev: bool,
+    /// Use preloaded Compose images without building or pulling them.
+    #[arg(long)]
+    no_build: bool,
 }
 
 impl StackOptions {
@@ -104,6 +107,7 @@ impl StackOptions {
             self.compose_file.as_deref(),
             self.atlas,
             self.dev,
+            self.no_build,
         )
         .await
     }
@@ -175,7 +179,15 @@ async fn main() -> Result<()> {
         Action::TrainLegacy { file, activate } => {
             classifier::train(&workspace, file, activate).await
         }
-        Action::Client { kind, arguments } => launch(&workspace, kind, arguments).await,
+        Action::Client {
+            kind,
+            mut arguments,
+        } => {
+            if arguments.is_empty() {
+                arguments.push("tui".into());
+            }
+            launch(&workspace, kind, arguments).await
+        }
         Action::HostStorageSupervisor { generation } => {
             let owner = Owner::load(&workspace)
                 .await?
@@ -273,6 +285,23 @@ mod tests {
     use clap::Parser;
 
     use super::{Action, Args, ClientKind};
+
+    #[test]
+    fn up_and_web_can_use_preloaded_images() {
+        for command in ["up", "web"] {
+            for (arguments, expected) in [
+                (vec!["venture", command], false),
+                (vec!["venture", command, "--no-build"], true),
+            ] {
+                let args = Args::try_parse_from(arguments).unwrap();
+                let stack = match args.action {
+                    Action::Up(stack) | Action::Web { stack, .. } => stack,
+                    _ => panic!("expected a stack launch"),
+                };
+                assert_eq!(stack.no_build, expected);
+            }
+        }
+    }
 
     #[test]
     fn launcher_keeps_client_options_in_order() {

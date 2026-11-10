@@ -19,8 +19,9 @@ use crate::osint::contracts::IntelligenceCategory;
 use crate::osint::{self, ProviderKeys, ToolDefinition, ToolResult};
 use crate::provider::SettingsFile;
 use crate::recon::backend::ReconStore;
-use crate::recon::orchestrate::BudgetedOutcome;
-use crate::recon::{CreditHold, PlanCall, Run};
+use crate::recon::{BudgetedOutcome, CreditHold, PlanCall, Run};
+use crate::storage::repo::Repository;
+use crate::storage::{credits, recon_runs, recon_threads, runtime};
 use crate::telemetry::{self, EventKind, TelemetryEvent, ToolOutcome, Trigger};
 
 /// Who asked for a tool run. Attribution is passed down by the caller and is
@@ -117,6 +118,7 @@ impl Drop for InflightGuard {
 /// Shared tool execution runner with concurrency bounding and deduplication.
 #[derive(Clone)]
 pub struct ToolRunner {
+    repository: Option<Repository>,
     pub db_path: PathBuf,
     pub settings: SettingsFile,
     pub keys: ProviderKeys,
@@ -138,6 +140,7 @@ impl ToolRunner {
 
     pub fn new(db_path: impl AsRef<Path>, settings: SettingsFile, keys: ProviderKeys) -> Self {
         Self {
+            repository: None,
             db_path: db_path.as_ref().to_path_buf(),
             settings,
             keys,
@@ -155,12 +158,32 @@ impl ToolRunner {
         inflight: Arc<Mutex<HashMap<String, watch::Receiver<Option<ToolResult>>>>>,
     ) -> Self {
         Self {
+            repository: None,
             db_path: db_path.as_ref().to_path_buf(),
             settings,
             keys,
             concurrency,
             inflight,
             attribution: ToolAttribution::recon(),
+        }
+    }
+
+    pub(super) fn for_repository(&self, repository: Repository, settings: SettingsFile) -> Self {
+        Self {
+            repository: Some(repository),
+            db_path: PathBuf::new(),
+            keys: ProviderKeys::from_settings(&settings),
+            settings,
+            concurrency: self.concurrency.clone(),
+            inflight: self.inflight.clone(),
+            attribution: ToolAttribution::manual(),
+        }
+    }
+
+    async fn repository(&self) -> Result<Repository> {
+        match &self.repository {
+            Some(repo) => Ok(repo.clone()),
+            None => runtime::repository().await,
         }
     }
 
@@ -250,8 +273,9 @@ impl ToolRunner {
 
         // 1. Cache hit check
         if !refresh {
-            if let Ok(store) = ReconStore::open(&self.db_path).await {
-                if let Ok(Some(cached)) = store.cache_get(&cache_key).await {
+            if let Ok(repo) = self.repository().await {
+                if let Ok(Some(cached)) = recon_runs::cache_get_fresh(&repo, &cache_key, None).await
+                {
                     let projected = osint::project_cached_result(canonical, &inputs, &cached);
                     // A cache hit is served locally: it is not a remote request and
                     // a cache miss shape never counts as zero results.
@@ -327,25 +351,19 @@ impl ToolRunner {
         };
 
         // 3. Check enabled status
-        let newsapi_quota = {
-            let store = ReconStore::open(&self.db_path).await?;
-            if !store.tool_enabled(canonical).await? {
-                self.note_failure(
-                    canonical,
-                    def,
-                    attribution,
-                    &cache_key,
-                    "tool_disabled",
-                    &clock,
-                );
-                return Err(anyhow!("tool disabled in catalog: {canonical}"));
-            }
-            if osint::NEWS_TOOLS.contains(&canonical) {
-                store.repository().cloned()
-            } else {
-                None
-            }
-        };
+        let repo = self.repository().await?;
+        if !recon_threads::tool_enabled(&repo, canonical).await? {
+            self.note_failure(
+                canonical,
+                def,
+                attribution,
+                &cache_key,
+                "tool_disabled",
+                &clock,
+            );
+            return Err(anyhow!("tool disabled in catalog: {canonical}"));
+        }
+        let newsapi_quota = osint::NEWS_TOOLS.contains(&canonical).then(|| repo.clone());
 
         // 4. Reserve credits if needed
         let limits = &self.settings.recon_limits;
@@ -354,10 +372,21 @@ impl ToolRunner {
         if reserve_credits {
             if let Some((provider_name, cost)) = cost_info {
                 if cost > 0 {
-                    let store = ReconStore::open(&self.db_path).await?;
-                    credit_hold = store.reserve_credits(provider_name, cost, limits).await?;
+                    credit_hold = if self.repository.is_some() {
+                        credits::reserve_manual_credits(
+                            repo.db(),
+                            provider_name,
+                            cost,
+                            limits,
+                            &attribution.call_id,
+                        )
+                        .await?
+                    } else {
+                        credits::reserve_credits(repo.db(), provider_name, cost, limits).await?
+                    };
                     if credit_hold.is_none() {
-                        let available = store.credits_available(provider_name, limits).await?;
+                        let available =
+                            credits::credits_available(repo.db(), provider_name, limits).await?;
                         self.note_failure(
                             canonical,
                             def,
@@ -380,9 +409,7 @@ impl ToolRunner {
             _ = wait_cancellation(cancel) => {
                 if reserve_credits {
                     if let (Some((_provider, _)), Some(hold)) = (cost_info, &credit_hold) {
-                        if let Ok(s) = ReconStore::open(&self.db_path).await {
-                            let _ = s.release_credits(hold).await;
-                        }
+                        let _ = credits::release_credits(repo.db(), hold).await;
                     }
                 }
                 self.note_cancelled(canonical, attribution, &clock);
@@ -427,9 +454,7 @@ impl ToolRunner {
             _ = wait_cancellation(cancel) => {
                 if reserve_credits {
                     if let (Some((_provider, _)), Some(hold)) = (cost_info, &credit_hold) {
-                        if let Ok(s) = ReconStore::open(&self.db_path).await {
-                            let _ = s.release_credits(hold).await;
-                        }
+                        let _ = credits::release_credits(repo.db(), hold).await;
                     }
                 }
                 self.note_cancelled(canonical, attribution, &clock);
@@ -443,9 +468,7 @@ impl ToolRunner {
             Err(err) => {
                 if reserve_credits {
                     if let (Some((_provider, _)), Some(hold)) = (cost_info, &credit_hold) {
-                        if let Ok(s) = ReconStore::open(&self.db_path).await {
-                            let _ = s.release_credits(hold).await;
-                        }
+                        let _ = credits::release_credits(repo.db(), hold).await;
                     }
                 }
                 self.note_failure(canonical, def, attribution, &cache_key, "transport", &clock);
@@ -456,25 +479,23 @@ impl ToolRunner {
         // 6. Settle or release credit hold
         if reserve_credits {
             if let (Some((_provider_name, _)), Some(hold)) = (cost_info, &credit_hold) {
-                if let Ok(store) = ReconStore::open(&self.db_path).await {
-                    let spend = matches!(result.status.as_str(), "completed" | "no_results")
-                        && !result.cached;
-                    let uncertain_whoxy = canonical == crate::osint::whoxy::TOOL_ID
-                        && result.status == "failed"
-                        && result.error.as_deref().is_some_and(|err| {
-                            let lower = err.to_ascii_lowercase();
-                            lower.contains("timeout")
-                                || lower.contains("timed out")
-                                || lower.contains("connection")
-                                || lower.contains("error sending")
-                        });
-                    if spend || uncertain_whoxy {
-                        let estimate = hold.trial_credits + hold.allowance_credits;
-                        let actual = result.credits_reported.unwrap_or(estimate);
-                        let _ = store.reconcile_credits(hold, actual).await;
-                    } else {
-                        let _ = store.release_credits(hold).await;
-                    }
+                let spend =
+                    matches!(result.status.as_str(), "completed" | "no_results") && !result.cached;
+                let uncertain_whoxy = canonical == crate::osint::whoxy::TOOL_ID
+                    && result.status == "failed"
+                    && result.error.as_deref().is_some_and(|err| {
+                        let lower = err.to_ascii_lowercase();
+                        lower.contains("timeout")
+                            || lower.contains("timed out")
+                            || lower.contains("connection")
+                            || lower.contains("error sending")
+                    });
+                if spend || uncertain_whoxy {
+                    let estimate = hold.trial_credits + hold.allowance_credits;
+                    let actual = result.credits_reported.unwrap_or(estimate);
+                    let _ = credits::reconcile_credits(repo.db(), hold, actual).await;
+                } else {
+                    let _ = credits::release_credits(repo.db(), hold).await;
                 }
             }
         }
@@ -484,9 +505,7 @@ impl ToolRunner {
         let outcome = tool_outcome(&result, timed_out);
         if osint_cacheable(&result) {
             if let Some(ttl) = cache_ttl_for(def, &outcome) {
-                if let Ok(store) = ReconStore::open(&self.db_path).await {
-                    let _ = store.cache_put(&cache_key, &result, ttl).await;
-                }
+                let _ = recon_runs::cache_put(&repo, &cache_key, &result, ttl).await;
             }
         }
 
@@ -723,7 +742,7 @@ async fn wait_cancellation(cancel: &Arc<AtomicBool>) {
     if cancel.load(Ordering::Relaxed) {
         return;
     }
-    let guard = super::register_cancellation_notifier(cancel);
+    let guard = crate::recon::register_cancellation_notifier(cancel);
     while !cancel.load(Ordering::Relaxed) {
         tokio::select! {
             _ = guard.notified() => {},
@@ -908,8 +927,14 @@ struct InvocationFact<'a> {
 impl ToolRunner {
     /// Best-effort telemetry write; never fails a tool run.
     fn note(&self, event: &TelemetryEvent) {
-        // `telemetry::record` writes to the repository under SurrealDB.
-        let _ = telemetry::record(&self.db_path, event);
+        if let Some(repo) = self.repository.clone() {
+            let event = event.clone();
+            tokio::spawn(async move {
+                let _ = crate::storage::telemetry::record(repo.db(), &event).await;
+            });
+        } else {
+            let _ = telemetry::record(&self.db_path, event);
+        }
     }
 
     /// Stable id for one logical invocation. The durable call id wins so a

@@ -433,6 +433,23 @@ async fn put_state(
     Ok(())
 }
 
+pub(super) async fn put_publication_state_in(
+    tx: &Tx,
+    article: &str,
+    job: &str,
+    operation: &str,
+    state: &crate::intel_recon::brief_canonical::IndexState,
+) -> Result<(), TxError> {
+    run(tx, tx.query(
+        "UPSERT type::record('intel_brief_stage_receipt', [$job, $op]) SET state_json = $state, updated_at = $now RETURN NONE;
+         UPSERT type::record('intel_brief_index_state', $article) SET state_json = $state, updated_at = $now RETURN NONE;",
+    ).bind(("job", job.to_owned())).bind(("op", operation.to_owned()))
+        .bind(("article", article.to_owned()))
+        .bind(("state", serde_json::to_string(state).map_err(|error| TxError::Abort(error.to_string()))?))
+        .bind(("now", chrono::Utc::now().to_rfc3339()))).await?;
+    Ok(())
+}
+
 /// legacy store `retained_canonical_state`: the article's index state when it is
 /// `indexed` for exactly `job_id`, else that job's `kind` stage receipt
 /// (earlier completed kinds stay canonical while later stages run or fail).

@@ -108,6 +108,14 @@ pub fn configured() -> bool {
     }
 }
 
+/// Whether wire admission uses the shared workspace repository.
+#[cfg(not(test))]
+pub(crate) fn uses_network_storage() -> bool {
+    ENTRY
+        .get()
+        .is_some_and(|entry| matches!(&entry.selection, Selection::Network { .. }))
+}
+
 /// Keep optional side-store writes out of a configured SurrealDB runtime.
 pub fn legacy_side_store_path(db_path: &Path) -> Option<&Path> {
     (!configured()).then_some(db_path)

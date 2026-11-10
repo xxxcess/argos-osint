@@ -1724,6 +1724,7 @@ async fn purge_tree_in(tx: &Tx, root: &str, reason: &str, now: &str) -> Result<(
              DELETE job_event WHERE job_id IN $jids;
              DELETE attempt WHERE root = $r;
              DELETE stage_output WHERE root = $r;
+             DELETE brief_publication_work WHERE job_id IN $jids;
              DELETE neighborhood_brief WHERE task.root = $r;
              DELETE task WHERE root = $r;
              DELETE brief_run WHERE job.root = $r;

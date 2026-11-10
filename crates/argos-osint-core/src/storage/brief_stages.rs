@@ -39,6 +39,9 @@ use crate::intel_recon::brief_stages::{
 use crate::store::AtlasArticleRow;
 use crate::tasks::ClaimedTask;
 
+mod publication;
+pub use publication::drain_publications;
+
 pub const SCHEMA: &str = "
 DEFINE TABLE IF NOT EXISTS brief_stage_input SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS input_json ON brief_stage_input TYPE string;
@@ -57,6 +60,13 @@ DEFINE FIELD IF NOT EXISTS updated_at ON brief_activity TYPE string;
 DEFINE TABLE IF NOT EXISTS brief_stage_meta SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS item_count ON brief_stage_meta TYPE int;
 DEFINE FIELD IF NOT EXISTS empty_reason ON brief_stage_meta TYPE string;
+DEFINE TABLE IF NOT EXISTS brief_publication_work SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS job_id ON brief_publication_work TYPE string;
+DEFINE FIELD IF NOT EXISTS operation ON brief_publication_work TYPE string;
+DEFINE FIELD IF NOT EXISTS epoch ON brief_publication_work TYPE int;
+DEFINE FIELD IF NOT EXISTS due_at ON brief_publication_work TYPE datetime;
+DEFINE INDEX IF NOT EXISTS brief_publication_work_due ON brief_publication_work FIELDS due_at;
+DEFINE INDEX IF NOT EXISTS brief_publication_work_job ON brief_publication_work FIELDS job_id;
 ";
 
 /// Task id of one stage in a SurrealDB chain (`jobs::ensure_chain`).
@@ -476,6 +486,7 @@ pub async fn commit(
             match jobs::commit_stage_in(&tx, leased, json, hash, now, op_key).await? {
                 StageCommit::Applied => {
                     finish_stage_in(&tx, leased, items, reason).await?;
+                    publication::enqueue_in(&tx, leased).await?;
                     Ok(true)
                 }
                 StageCommit::Replayed => Ok(true),
@@ -488,8 +499,11 @@ pub async fn commit(
     if !committed.value {
         return Ok(false);
     }
-    let run = run_of(repo, &leased.job_id).await?;
-    publish_stage(repo, &leased.job_id, &leased.operation, &run).await?;
+    // The durable row is authoritative. A transient publication error cannot
+    // uncommit an extraction or require the model stage to execute again.
+    if let Err(error) = publication::publish_task(repo, &leased.id, leased.lease_epoch).await {
+        tracing::warn!(task = %leased.id, error = %crate::provider_diag::sanitize(&error.to_string()), "brief publication deferred");
+    }
     Ok(true)
 }
 
@@ -537,153 +551,6 @@ async fn finish_stage_in(
         )
         .await?;
     }
-    Ok(())
-}
-
-/// `brief_pipeline::publish_completed_stage`: merge a completed Claims,
-/// Inferences or Links stage into the displayed brief while its run is the
-/// article's newest live one, replace the links-stage leads, and bind the
-/// stage's canonical index state.
-///
-/// Canonical Brain publication runs through [`super::brief_publish`]; its
-/// failure is recorded in the bound state and never fails the stage.
-async fn publish_stage(repo: &Repository, job_id: &str, operation: &str, run: &Run) -> Result<()> {
-    let stage = super::brief::Stage::from_operation(operation);
-    if stage == super::brief::Stage::Other && operation != "intel_brief_body" {
-        return Ok(());
-    }
-    let mut r = repo
-        .db()
-        .query(
-            "RETURN count(SELECT 1 FROM brief_run WHERE article_id = $a AND generation > $g);
-             SELECT VALUE state FROM brief_run WHERE job = $j;",
-        )
-        .bind(("a", run.article_id.clone()))
-        .bind(("g", run.generation))
-        .bind(("j", rid("job", job_id)))
-        .await?
-        .check()?;
-    let newer: Option<i64> = r.take(0)?;
-    let states: Vec<String> = r.take(1)?;
-    let live = states
-        .first()
-        .is_some_and(|s| matches!(s.as_str(), "active" | "completed" | "failed"));
-    if newer.unwrap_or(0) > 0 || !live {
-        return Ok(());
-    }
-    if operation == "intel_brief_body" {
-        crate::atlas_actor_index::surreal::index_article_occurrences(repo, &run.article_id).await?;
-        return Ok(());
-    }
-    let stages = SurrealStages::new(repo);
-    let output = |op: &'static str| {
-        let stages = &stages;
-        async move {
-            stages
-                .stage_output(job_id, op)
-                .await
-                .unwrap_or_else(|_| json!({}))
-        }
-    };
-    let body = output("intel_brief_body").await;
-    let claims = output("intel_brief_claims").await;
-    let inferences = output("intel_brief_inferences").await;
-    let links = output("intel_brief_links").await;
-    let own = stages.stage_output(job_id, operation).await?;
-    let snapshot_hash = crate::nlp::cache::hash(&json!([operation, own]).to_string());
-    let captured = input(repo, &task_id(job_id, "intel_brief_claims"))
-        .await?
-        .and_then(|input| serde_json::from_str::<Value>(&input.input_json).ok())
-        .map(|input| input["metadata"].clone())
-        .unwrap_or(Value::Null);
-    let prepared = super::brief_publish::prepare_captured(
-        repo,
-        &run.article_id,
-        &captured,
-        &body,
-        &claims,
-        &inferences,
-        operation,
-    )
-    .await?;
-    if prepared
-        .as_ref()
-        .err()
-        .is_some_and(|reason| reason == super::brief_publish::CAPTURED_SOURCE_CHANGED)
-    {
-        return Ok(());
-    }
-    let written = super::brief::publish(
-        repo,
-        &super::brief::Publication {
-            article_id: run.article_id.clone(),
-            job_id: job_id.to_string(),
-            generation: run.generation,
-            contract: brief_pipeline::CONTRACT.to_string(),
-            body_hash: body["content_hash"].as_str().unwrap_or("").to_string(),
-            snapshot_hash: snapshot_hash.clone(),
-            claims: claims.clone(),
-            inferences: inferences.clone(),
-            leads: links["leads"].clone(),
-            stage,
-        },
-    )
-    .await?;
-    if !written {
-        return Ok(());
-    }
-    if stage == super::brief::Stage::Links {
-        let texts: std::collections::HashMap<&str, &str> = inferences["inferences"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|i| Some((i["id"].as_str()?, i["text"].as_str()?)))
-            .collect();
-        let leads: Vec<super::brief::Lead> = links["leads"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|lead| {
-                let inference = lead["inference_id"].as_str().unwrap_or("");
-                let candidate = lead["article_id"].as_str().unwrap_or("");
-                super::brief::Lead {
-                    id: format!(
-                        "{}:{}:{inference}:{}:{candidate}:{}",
-                        run.article_id,
-                        run.generation,
-                        lead["article_run_id"].as_str().unwrap_or(""),
-                        lead["metadata_revision"].as_str().unwrap_or("")
-                    ),
-                    inference_id: inference.to_string(),
-                    inference_text: texts.get(inference).copied().unwrap_or("").to_string(),
-                    candidate_article_id: candidate.to_string(),
-                    candidate_run_id: lead["article_run_id"].as_str().unwrap_or("").to_string(),
-                    candidate_metadata_revision: lead["metadata_revision"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string(),
-                    interpretation: lead["why"].as_str().unwrap_or("").to_string(),
-                    verification_needed: lead["verification_needed"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string(),
-                    citations_json: lead["metadata_evidence"].to_string(),
-                }
-            })
-            .collect();
-        super::brief::replace_leads(repo, &run.article_id, job_id, run.generation, &leads).await?;
-    }
-    let state = super::brief_publish::publish_stage(
-        repo,
-        &run.article_id,
-        job_id,
-        operation,
-        &prepared,
-        &snapshot_hash,
-    )
-    .await?;
-    super::brief::put_stage_receipt(repo, job_id, operation, &state).await?;
-    super::brief::put_index_state(repo, &run.article_id, &state).await?;
     Ok(())
 }
 
@@ -1238,6 +1105,9 @@ pub async fn drain_parallel(
 ) -> Result<usize> {
     let mut ran = 0;
     loop {
+        if !cancel.load(Ordering::Acquire) {
+            drain_publications(repo, 8).await?;
+        }
         let mut set = tokio::task::JoinSet::new();
         for _ in 0..slots.max(1) {
             if cancel.load(Ordering::Acquire) {

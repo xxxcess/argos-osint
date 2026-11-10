@@ -80,6 +80,7 @@ pub mod pipeline_inputs;
 pub mod processes;
 pub mod profile_view;
 pub mod provenance;
+pub mod provider_pacer;
 pub mod publisher;
 pub mod recall;
 pub mod recon;

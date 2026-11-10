@@ -474,6 +474,15 @@ impl WorkerPool {
 
     /// Spawn the default local pools (index + summary) for one state root.
     pub fn spawn_default(db_path: std::path::PathBuf) -> Vec<WorkerPool> {
+        Self::spawn_pools(db_path, true)
+    }
+
+    /// The network stack runs brief work in its own process.
+    pub fn spawn_network_pools(db_path: std::path::PathBuf) -> Vec<WorkerPool> {
+        Self::spawn_pools(db_path, false)
+    }
+
+    fn spawn_pools(db_path: std::path::PathBuf, include_brief: bool) -> Vec<WorkerPool> {
         let owner = process_owner();
         let home = Arc::new(crate::classifier::readiness::ClassifierHome::new(
             db_path
@@ -484,18 +493,24 @@ impl WorkerPool {
         // Under a storage config nothing may open the legacy store: each pool below
         // has a repository drainer.
         #[cfg(feature = "surreal")]
-        return vec![
+        let mut pools = vec![
             Self::spawn_surreal_index_drainer(db_path.clone(), owner.clone()),
             Self::spawn_atlas_derivative_drainer(db_path.clone(), owner.clone()),
             Self::spawn_summary_flush_drainer(db_path.clone(), owner.clone()),
             Self::spawn_insight_refresh_drainer(db_path.clone(), owner.clone()),
             Self::spawn_brain_backfill_drainer(db_path.clone(), owner.clone()),
             Self::spawn_actor_dedup_drainer(db_path.clone(), owner.clone()),
-            Self::spawn_intel_brief_drainer(db_path.clone(), owner.clone()),
             Self::spawn_admission_maintenance_drainer(db_path.clone(), owner.clone(), home.clone()),
             Self::spawn_classifier_calibration_drainer(db_path.clone(), owner.clone(), home),
-            Self::spawn_brain_scope_drainer(db_path, owner),
+            Self::spawn_brain_scope_drainer(db_path.clone(), owner.clone()),
         ];
+        #[cfg(feature = "surreal")]
+        {
+            if include_brief {
+                pools.push(Self::spawn_intel_brief_drainer(db_path, owner));
+            }
+            pools
+        }
         #[cfg(not(feature = "surreal"))]
         vec![Self::spawn_insight_refresh_drainer(db_path, owner)]
     }
@@ -673,50 +688,50 @@ impl WorkerPool {
                     }
                 };
                 let config = crate::intel_recon::brief_stages::ExecConfig::default();
+                let mut swept_at: Option<std::time::Instant> = None;
                 while !flag.load(Ordering::Acquire) {
-                    // SurrealDB: elect on the repository's scheduler lease and
-                    // drain the repository's brief chains; never the legacy store file.
+                    // Briefs own their task leases independently of the main scheduler.
+                    let sweep = swept_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(10));
                     let (drain_owner, drain_flag, drain_config) =
                         (owner.clone(), flag.clone(), config.clone());
-                    report_drainer(
-                        &db_path,
-                        "intel-brief",
-                        crate::storage::runtime::blocking(move |repo| async move {
-                            let elected = crate::storage::jobs::try_elect(
+                    let result = crate::storage::runtime::blocking(move |repo| async move {
+                        if sweep {
+                            crate::storage::tx::run_tx(
                                 repo.db(),
-                                &drain_owner,
-                                DEFAULT_LEASE_SECS,
-                                chrono::Utc::now(),
-                            )
-                            .await
-                            .map_err(|e| anyhow::anyhow!("elect: {e}"))?
-                            .value
-                            .elected;
-                            if !elected {
-                                return Ok(0);
-                            }
-                            let r = repo.clone();
-                            crate::storage::brief_stages::drain_parallel(
-                                &repo,
-                                &format!("{drain_owner}:intel-brief"),
-                                move || {
-                                    Box::new(
-                                        crate::storage::brief_stages::SurrealRuntimeBackend::load(
-                                            r.clone(),
-                                        ),
+                                Default::default(),
+                                |tx| async move {
+                                    crate::storage::jobs::interrupt_expired_pool_in(
+                                        &tx,
+                                        crate::storage::jobs::POOL_INTEL_BRIEF,
+                                        chrono::Utc::now(),
                                     )
-                                        as Box<
-                                            dyn crate::intel_recon::brief_stages::StageBackend
-                                                + Send,
-                                        >
+                                    .await
                                 },
-                                &drain_flag,
-                                &drain_config,
-                                crate::intel_recon::brief_stages::STAGE_SLOTS,
                             )
-                            .await
-                        }),
-                    );
+                            .await?;
+                        }
+                        let r = repo.clone();
+                        crate::storage::brief_stages::drain_parallel(
+                            &repo,
+                            &format!("{drain_owner}:intel-brief"),
+                            move || {
+                                Box::new(crate::storage::brief_stages::SurrealRuntimeBackend::load(
+                                    r.clone(),
+                                ))
+                                    as Box<
+                                        dyn crate::intel_recon::brief_stages::StageBackend + Send,
+                                    >
+                            },
+                            &drain_flag,
+                            &drain_config,
+                            crate::intel_recon::brief_stages::STAGE_SLOTS,
+                        )
+                        .await
+                    });
+                    if sweep && result.is_ok() {
+                        swept_at = Some(std::time::Instant::now());
+                    }
+                    report_drainer(&db_path, "intel-brief", result);
                     for _ in 0..3 {
                         if flag.load(Ordering::Acquire) {
                             break;

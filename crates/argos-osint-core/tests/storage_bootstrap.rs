@@ -68,13 +68,15 @@ async fn ensure_schema_defines_everything_once_and_refuses_newer_databases() {
         "atlas_reclassification_job",
         "classifier_calibration_job",
         "storage_meta",
+        "model_provider_pacer",
+        "brief_publication_work",
     ] {
         assert!(info.contains(&format!("\"{table}\"")), "missing {table}");
     }
     // Idempotent re-run.
     let again = ensure_schema(&db).await.unwrap();
     assert_eq!(again.previous, SCHEMA_VERSION);
-    assert_eq!(bootstrap::schemas().len(), 46);
+    assert_eq!(bootstrap::schemas().len(), 47);
 
     // A newer database is refused and left untouched.
     db.query("UPDATE storage_meta:schema SET version = 99")

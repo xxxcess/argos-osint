@@ -422,7 +422,7 @@ pub async fn attempt_spec(
     )
     .await;
     if let Err(failure) = &outcome {
-        crate::provider_rate_limit::failure(secret, failure);
+        crate::provider_rate_limit::failure(secret, failure).await;
     }
     let elapsed_ms = started.elapsed().as_millis() as u64;
     AttemptReport {
@@ -560,7 +560,7 @@ async fn send_once(
             }
             f
         })?;
-    crate::provider_rate_limit::wait(secret).await;
+    crate::provider_rate_limit::wait(secret).await?;
     // Queue time must not consume the provider's response/output deadlines.
     let started = Instant::now();
     let first_deadline = deadlines.first_response.min(deadlines.total);
@@ -587,7 +587,7 @@ async fn send_once(
     };
     *first_ms = Some(started.elapsed().as_millis() as u64);
     let status = resp.status();
-    crate::provider_rate_limit::response(secret, status.as_u16(), resp.headers());
+    crate::provider_rate_limit::response(secret, status.as_u16(), resp.headers()).await;
     if let Some(p) = progress {
         p(AttemptProgress::HeadersReceived {
             status: status.as_u16(),

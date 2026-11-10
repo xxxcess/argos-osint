@@ -59,6 +59,10 @@ The full service cutover remains open. In particular, Brain and Intel integratio
 - The shared scope planner has six passing offline cases, including 28 path cases. The hosted workflow owns the real quota reservation test. Nine targeted native tests and 19 service-host/API unit tests passed locally. Local Compose configuration passed for disk, external and Atlas profiles. Packaged and real datastore acceptance for this continuation use the hosted run.
 - Updated the README, deployment, active wiki, diagrams, agent guidance and current plan. The historical records remain available as evidence.
 
+- Intel macOS native clients and real Rust-BERT inference passed on `43e2725`. [Hosted run](https://github.com/xxxcess/argos-osint/actions/runs/42778990451)
+- Moved the SurrealDB release version and four archive pins to the maintained harness manifest. All four offline provenance and resolver tests passed. This change still needs hosted coverage.
+- Reconciled OpenCode role and verification guidance with its existing policy. All 22 local policy tests passed with no skips. The prior five failures no longer reproduce.
+
 ## Retention
 
 This already-tracked plan records the shared cutover and its remaining acceptance work. Keep raw logs, fixtures and intermediate notes out of Git.

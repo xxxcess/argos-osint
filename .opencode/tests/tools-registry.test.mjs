@@ -71,6 +71,7 @@ test("coordinator is the default agent with configured models and teamwork catal
 test("utility agent performs quick non-code edits only", () => {
   const doc = readFileSync(join(root, "agents/utility.md"), "utf8");
   assert.match(doc, /Never edit source code, tests, or CI workflows/);
+  assert.match(doc, /do not run Rust or web builds/i);
   assert.match(doc, /do not spawn children/i);
   assert.equal(effect("utility", "edit", "*"), "deny");
   for (const resource of ["docs/**", "**/docs/**", "README.md", "**/README.md", ".planning/**", "**/.planning/**", ".opencode/**", ".agy/**", ".agent-scratch/**"]) {
@@ -89,10 +90,14 @@ test("commands map to catalog specialists and verify uses the embedded integrati
   const review = readFileSync(join(root, "commands/ecc-review.md"), "utf8");
   assert.match(command, /agent: tester/);
   assert.match(review, /agent: reviewer/);
-  assert.match(verify, /local_matrix\.sh --storage embedded/);
+  const contributor = readFileSync(join(root, "../docs/wiki/code/contributing.md"), "utf8");
+  assert.match(verify, /^agent: tester$/m);
+  assert.match(verify, /`ecc-verify`/);
+  assert.match(verify, /contributing\.md#full-local-embedded-gate--github-ci-monitoring/);
+  assert.match(contributor, /scripts\/local_matrix\.sh --storage embedded/);
   assert.doesNotMatch(verify, /--no-default-features/);
-  assert.match(verify, /ARGOS_EMBED.*unset/);
-  assert.match(verify, /no Rust build for docs\/config-only/);
+  assert.match(contributor, /ARGOS_EMBED.*unset/);
+  assert.match(verify, /no Rust build for docs\/config-only/i);
 });
 
 test("teamwork prompts enforce interview triage, leaf modes, and caller-owned continuation", () => {
@@ -101,24 +106,24 @@ test("teamwork prompts enforce interview triage, leaf modes, and caller-owned co
   const architect = readFileSync(join(root, "agents/architect.md"), "utf8");
   const reviewer = readFileSync(join(root, "agents/reviewer.md"), "utf8");
   const auditor = readFileSync(join(root, "agents/auditor.md"), "utf8");
-  assert.match(coordinator, /Concise Pre-Execution Interview/);
-  assert.match(coordinator, /question/);
-  assert.match(coordinator, /existing session authorization/);
-  assert.match(coordinator, /no ask tool exists/);
-  assert.match(coordinator, /Translating Team Needs/);
-  assert.match(coordinator, /Dynamic Team Selection from Catalog/);
+  assert.match(coordinator, /ask 1[–-]3 questions only for unresolved material decisions/i);
+  assert.match(coordinator, /proceed from clear requests and existing authorization/i);
+  assert.match(coordinator, /if the question tool is unavailable, ask in your reply/i);
+  assert.match(coordinator, /never infer approval from silence/i);
+  assert.match(coordinator, /pass configured models .* acceptance, non-goals, owned paths and verification scope/i);
+  assert.match(coordinator, /select the smallest permitted catalog team/i);
   assert.match(orchestrator, /INTEGRITY_VIOLATION/);
-  assert.match(architect, /Do not spawn children/);
+  assert.match(architect, /do not spawn children/i);
   const rustCoder = readFileSync(join(root, "agents/rust-coder.md"), "utf8");
   const reactCoder = readFileSync(join(root, "agents/react-coder.md"), "utf8");
-  assert.match(rustCoder, /Do not spawn children/);
-  assert.match(reactCoder, /Do not spawn children/);
+  assert.match(rustCoder, /do not spawn children/i);
+  assert.match(reactCoder, /do not spawn children/i);
   assert.match(reviewer, /APPROVE \| REJECT/);
   assert.match(auditor, /CLEAN/);
   assert.match(auditor, /INTEGRITY_VIOLATION/);
-  assert.match(auditor, /do not delegate/i);
+  assert.match(auditor, /read-only leaf: no delegation, edits or commits/i);
   for (const id of ["coordinator", "orchestrator", "reviewer", "tester"]) {
-    assert.match(readFileSync(join(root, "agents", `${id}.md`), "utf8"), /Resume only your own child sessionID/);
+    assert.match(readFileSync(join(root, "agents", `${id}.md`), "utf8"), /Resume only your own child session IDs/);
   }
 });
 
@@ -147,13 +152,13 @@ test("Scribe and Auditor preserve leaf non-delegation and strict edit scopes", (
   }
   for (const id of ["rust-coder", "react-coder"]) {
     const coderDoc = readFileSync(join(root, `agents/${id}.md`), "utf8");
-    assert.match(coderDoc, /parent.*delegate.*scribe/);
-    assert.match(coderDoc, /documentation updates must precede verification/);
+    assert.match(coderDoc, /parent.*delegates affected documentation to `scribe`/i);
+    assert.match(coderDoc, /scribe` before final verification/i);
     assert.match(coderDoc, /fixes affecting documented behavior/);
-    assert.match(coderDoc, /implement and format the assigned changes yourself/);
+    assert.match(coderDoc, /implement and format the assigned unit/i);
     assert.doesNotMatch(coderDoc, /Fan-out mandate/);
   }
   const scribe = readFileSync(join(root, "agents/scribe.md"), "utf8");
-  assert.match(scribe, /do not delegate/i);
-  assert.match(scribe, /no-op review/i);
+  assert.match(scribe, /scribe is a leaf: no delegation/i);
+  assert.match(scribe, /a no-op names the scope and rationale/i);
 });

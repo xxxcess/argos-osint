@@ -4,6 +4,8 @@
 
 `@tag:tui-components`
 
+The [standalone Venture and Fleetworks clients](fleetworks.md) use versioned HTTP. This map describes the retained `argos` binary, including its no-argument Venture wizard.
+
 | Layer | Source | Contract |
 | --- | --- | --- |
 | CLI | [cli.rs](../../../crates/argos-osint-bin/src/cli.rs) | [Commands](../concepts/usage.md) |
@@ -18,6 +20,6 @@
 
 For UI work, load `argos-tui-verify`. Follow [verification](tui-verification.md): deterministic TestBackend captures, actual PNG inspection, and separate action/metric checks. Shared layout must govern rendering, hit-testing and focus order. See [contributor workflow](contributing.md) for isolated builds and worktree constraints.
 
-The separate [local Intel web interface and stack launcher](intel-web.md) use an HTTP adapter over core. See the [web lifecycle figure](../../diagrams/intel-web.html); the terminal remains independent of HTTP.
+The separate [local Intel web interface and stack launcher](intel-web.md) use an HTTP adapter over core. See the [web lifecycle figure](../../diagrams/intel-web.html); the legacy terminal calls the core directly.
 
 Models role defaults open a Variant view after choosing a model. Confirmed provider/model capability values determine the choices; unknown models offer only the default. Save role persists exact role/provider/model effort selections in `defaults.model_variants`. Dispatch applies the chosen intent through the normal adapter and includes it in the audit declaration. Provider / operation default removes the override.

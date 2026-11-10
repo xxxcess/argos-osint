@@ -2,7 +2,7 @@
 
 [Wiki](../../index.md) · [Explore code](../code/index.md)
 
-Argos combines interactive investigations, article analysis, headline collection and shared memory. Begin with [usage](usage.md) for interaction and the [glossary](glossary.md) for app labels, internal IDs and model roles.
+Argos combines article analysis, headline collection, shared memory and legacy interactive investigations. Start with [Fleetworks](../code/fleetworks.md) for Venture and the network clients, [usage](usage.md) for the legacy terminal controls, or the [glossary](glossary.md) for app labels, internal IDs and model roles.
 
 ## 1. Follow the work
 

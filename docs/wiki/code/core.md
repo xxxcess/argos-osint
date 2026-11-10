@@ -2,7 +2,7 @@
 
 [Code route](index.md) · [Concept route](../concepts/index.md)
 
-All paths below belong to [argos-osint-core/src](../../../crates/argos-osint-core/src). Read [architecture](architecture.md) alongside source; use [storage](storage.md) for durable state.
+All paths below belong to [argos-osint-core/src](../../../crates/argos-osint-core/src). Read [architecture](architecture.md) alongside source; use [storage](storage.md) for durable state. The [Fleetworks architecture](architecture.md#fleetworks-service-boundaries) maps these core workflows to the API host and its worker roles.
 
 ## Recon
 

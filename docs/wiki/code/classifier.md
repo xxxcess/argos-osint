@@ -29,6 +29,12 @@ The feature-independent [taxonomy](../../../crates/argos-osint-core/src/atlas_ta
 
 The neutral [runtime budget](../../../crates/argos-osint-core/src/js_runtime_budget.rs) enforces classifier reservations without importing NLP policy. No JavaScript values cross worker threads. Runtime errors, queue contention, cancellation and file failures remain operational faults; they never become an article `unk` label or a fabricated successful rejection.
 
+## Fleetworks classifier service
+
+The [Atlas Compose overlay](../../../deploy/atlas-dispatch.md) runs an authenticated private classifier role. The service keeps the pinned Rust-BERT worker warm and checks exact inference receipts. Supply the Linux worker and checkpoint files under the workspace using paths visible inside the container. The service can report transport readiness before model assets are available. Atlas reports a pin failure on the durable cycle job.
+
+`venture train-legacy` snapshots the selected dataset for one-shot Natural training. Use `--activate` to activate the trained artifact for legacy use. Fresh Atlas cycles use Rust-BERT. The installation steps below are for the local executable used by the legacy `argos` workflow.
+
 ## Set up the live Rust-BERT classifier
 
 Install the worker and checkpoint on the machine that runs Atlas. The application uses a local CPU worker and a pre-trained English NLI checkpoint. The worker runs offline after installation.

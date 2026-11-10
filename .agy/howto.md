@@ -12,7 +12,7 @@ Use [lite](lite-team.md) for bounded changes and [heavy](heavy-team.md) for inde
 
 - Start at [the wiki](../docs/index.md), then [contributing](../docs/wiki/code/contributing.md) and [testing](../.opencode/skills/argos-testing/SKILL.md). Preserve unrelated work, locks and services; `.github` changes remain Code Architect-owned.
 - One owner maintains `.planning/<date-slug>/` under the [planning/retention contract](../docs/wiki/code/planning-artifacts.md). Scratch belongs in `.agent-scratch/`; Cargo uses `python3 scripts/agent_cargo.py` and its shared `target/agents` cache. Worktrees are edit-only; the build owner follows [cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene).
-- Respect the user's approved verification scope. Rust runs target the native host with embedded storage; the required final embedded gate remains required for applicable Rust changes. Server/all-platform and mutation execution belong to hosted CI, never local agents. Missing evidence stays unverified.
+- Respect the user's approved verification scope. Use scoped Fleetworks checks for its clients and services. Use native embedded storage and its final gate for affected legacy paths. Hosted CI owns server and platform matrices and mutation execution. Missing evidence stays unverified.
 - Keep existing source/UI conventions, React Compiler, accessible topology/list twin and offline fixtures. Use canonical instructions for visual previews and final evidence.
 
 ## Handoff

@@ -2,13 +2,14 @@
 
 [Wiki](../../index.md) · [Explore concepts](../concepts/index.md)
 
-Start with the [workspace manifest](../../../Cargo.toml) and [workspace diagram](../../diagrams/workspace.html). The core crate owns domain behavior; the binary crate exposes it through CLI/TUI, and the API adapter/host serve the local Intel web client. SurrealDB is the current persistence backend.
+Start with the [workspace manifest](../../../Cargo.toml) and [Fleetworks service diagram](../../diagrams/fleetworks.html). The core crate owns domain behavior. Venture manages the network stack and launches its clients. The legacy binary also exposes the core through its direct CLI and TUI. SurrealDB is the persistence backend for both.
 
 | Branch | What to inspect | Next page |
 | --- | --- | --- |
 | [argos-osint-core](../../../crates/argos-osint-core/src) | Recon, Atlas, Intel, Brain, providers and NLP | [Core map](core.md) |
-| [Intel HTTP API / host](../../../crates/argos-osint-api) | Local web adapter and readiness-gated process lifecycle | [Intel web](intel-web.md) |
+| [Intel HTTP API / host](../../../crates/argos-osint-api) | Versioned routes, readiness and network ingress | [Intel web](intel-web.md) |
 | [Venture](../../../apps/venture) and [Fleetworks CLI](../../../apps/fleetworks-cli) | Workspace setup and network-only terminal clients | [Fleetworks](fleetworks.md) |
+| [Compose deployment](../../../deploy) and [broker](../../../crates/fleetworks-broker) | Local service graph and Atlas RabbitMQ delivery | [Deployment](../../../deploy/README.md) |
 | [storage](../../../crates/argos-osint-core/src/storage) | Open/bootstrap, repositories, publication, jobs and recall | [Storage map](storage.md) |
 | [argos-osint-bin](../../../crates/argos-osint-bin/src) | CLI, state, rendering and shared components | [Interfaces](interfaces.md) |
 | [core tests](../../../crates/argos-osint-core/tests) and [scripts](../../../scripts) | Offline contracts and verification entry points | [Contributor workflow](contributing.md) |

@@ -54,7 +54,7 @@ Use the canonical workflow for explicit worker wakeups, continuation and evidenc
 
 - **Navigate:** [wiki](../docs/index.md) → concepts/code → source; use [tags](../docs/wiki/tags.md) and scoped search
 - **Disk/cache:** The build owner follows [cache hygiene](../docs/wiki/code/contributing.md#build-cache-hygiene); other roles return cleanup needs to that owner.
-- **CI:** Inspect [contracts](../docs/wiki/code/ci.md) and affected `.github/workflows/`; stabilize host-native embedded build first; monitor Actions for other platforms
+- **CI:** Inspect [contracts](../docs/wiki/code/ci.md) and affected `.github/workflows/`; select Fleetworks scopes for its network stack and use the embedded gate for affected legacy paths. Monitor hosted service and platform results
 - **Plan:** Pin one named task; use [planning format](../docs/wiki/code/planning-artifacts.md#working-format); update phase checkboxes with evidence and Next Step
 - **Test:** Load [Argos testing guidelines](skills/argos-testing/SKILL.md) for Rust/React test rules
 - **Rust:** Load `argos-rust-style` for `crates/`; follow async conventions (Tokio); ignore Chromium/Fuchsia bans

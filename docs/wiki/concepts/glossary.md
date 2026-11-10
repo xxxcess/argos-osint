@@ -6,9 +6,9 @@ Short names used across the TUI, CLI, and store. Source of truth for investigati
 
 ## Apps and internal IDs
 
-Home launches nine surfaces. Labels on screen differ from `ModuleId` values; keep the IDs unless a migration requires otherwise.
+The legacy TUI Home launches nine surfaces. Labels on screen differ from `ModuleId` values. See the [Fleetworks guide](../code/fleetworks.md) for network client coverage.
 
-[![Argos workspace](../../diagrams/workspace.svg)](../../diagrams/workspace.html)
+[![Legacy Argos terminal workspace](../../diagrams/workspace.svg)](../../diagrams/workspace.html)
 
 | Label | `ModuleId` | Kind |
 | --- | --- | --- |
@@ -75,7 +75,7 @@ history. Retained-source entries remain truthful when canonical indexing is abse
 
 ## Persistence
 
-- SurrealDB is the current backend: embedded RocksDB under `<ARGOS_HOME>/storage/surreal` by default; server mode is opt-in.
+- Fleetworks uses a [workspace-scoped network SurrealDB endpoint](../code/fleetworks.md#launch-the-compose-stack). Legacy Argos defaults to embedded RocksDB under `<ARGOS_HOME>/storage/surreal` and can use a loopback server.
 - Memory, provenance, graph edges and vector indexes live behind the [storage boundary](../code/storage.md).
 - Schema bootstrap and recall behavior are defined by current storage modules; legacy SQL files are historical migration context.
 

@@ -4,7 +4,7 @@
 
 `@tag:surreal-storage`
 
-SurrealDB is the only current backend. Default `embedded,nlp` features use RocksDB in-process under `<ARGOS_HOME>/storage/surreal`; `ARGOS_HOME` defaults to `~/.argos`. Server mode is opt-in. Read [build/storage rules](contributing.md#storage-facts) before running anything.
+SurrealDB is the application datastore. Fleetworks uses the [Venture-selected network endpoint](fleetworks.md#launch-the-compose-stack) and keeps the browser and terminal clients outside the storage layer. Legacy Argos uses `embedded,nlp,classifier` by default and opens RocksDB under `<ARGOS_HOME>/storage/surreal`. `ARGOS_HOME` defaults to `~/.argos`. See the [build and storage rules](contributing.md#storage-facts).
 
 | Responsibility | Source entry |
 | --- | --- |
@@ -14,12 +14,17 @@ SurrealDB is the only current backend. Default `embedded,nlp` features use Rocks
 | Memory publication and graph projection | [publisher.rs](../../../crates/argos-osint-core/src/storage/publisher.rs), [memory.rs](../../../crates/argos-osint-core/src/storage/memory.rs), [graph.rs](../../../crates/argos-osint-core/src/storage/graph.rs) |
 | Vector and lexical recall | [embeddings.rs](../../../crates/argos-osint-core/src/storage/embeddings.rs), [recall.rs](../../../crates/argos-osint-core/src/storage/recall.rs) |
 | Durable jobs | [jobs.rs](../../../crates/argos-osint-core/src/storage/jobs.rs) |
+| Atlas dispatch outbox | [job_dispatch.rs](../../../crates/argos-osint-core/src/storage/job_dispatch.rs) |
 | Jobs dashboard page | [jobs_view.rs](../../../crates/argos-osint-core/src/storage/jobs_view.rs), [jobs view contracts](../../../crates/argos-osint-core/tests/storage_jobs_view.rs) |
 | Contract verification | [tests/](../../../crates/argos-osint-core/tests), [shared harness](../../../crates/argos-osint-core/tests/support), [test_surreal.py](../../../scripts/test_surreal.py) |
 
 [![Current persistence](../../diagrams/persistence.svg)](../../diagrams/persistence.html)
 
 Run storage contracts through the harness; a skipped test is not a pass. Agents run only the embedded matrix locally; server checks belong to CI. Legacy `schema_*.sql` files are migration context, not the current schema authority.
+
+## Fleetworks network storage
+
+Bootstrap authenticates as the database root, applies the schema and provisions a database-scoped Editor account for API and worker processes. Runtime processes verify the exact schema version. Disk modes retain the database identity across restarts. A fresh memory store has a new identity, so Atlas rejects deliveries tied to a previous store. The outbox is transactional with job submission, while RabbitMQ transports wake-up messages. See the [network startup instructions](fleetworks.md#run-the-network-api-and-workers) and the [Atlas deployment guide](../../../deploy/atlas-dispatch.md).
 
 ## Recall and source lifecycle
 
@@ -29,7 +34,7 @@ Run storage contracts through the harness; a skipped test is not a pass. Agents 
 
 ## Schema and runtime authority
 
-[Bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs) first applies module `ANALYZER` constants as an idempotent `IF NOT EXISTS` batch outside the retryable transaction (resolving FULLTEXT analyzers against committed catalog state — SurrealDB 3.3.4), then applies all tables/fields/indexes plus schema version read/refusal/write within one retryable transaction. It records `storage_meta:schema.version` and refuses a database newer than the build. The current constant is `storage::bootstrap::SCHEMA_VERSION` (currently 3, additive upgrades), independent of the old `store::SCHEMA_VERSION` (43). The SurrealDB bootstrap does not import a legacy SQLite/LanceDB database or run its numbered migration ladder. See [bootstrap contracts](../../../crates/argos-osint-core/tests/storage_bootstrap.rs).
+[Bootstrap](../../../crates/argos-osint-core/src/storage/bootstrap.rs) first applies module `ANALYZER` constants as an idempotent `IF NOT EXISTS` batch outside the retryable transaction (resolving FULLTEXT analyzers against committed catalog state — SurrealDB 3.3.4), then applies all tables/fields/indexes plus schema version read/refusal/write within one retryable transaction. It records `storage_meta:schema.version` and refuses a database newer than the build. The current constant is `storage::bootstrap::SCHEMA_VERSION` (currently 4, additive upgrades), independent of the old `store::SCHEMA_VERSION` (43). The SurrealDB bootstrap does not import a legacy SQLite/LanceDB database or run its numbered migration ladder. See [bootstrap contracts](../../../crates/argos-osint-core/tests/storage_bootstrap.rs).
 
 Schema v2 (SCHEMA_VERSION 1→2, additive, no wipe) added these SurrealDB tables/indices:
 - `atlas_admission` — bounded private staging (state pending|evaluating|admitted|discarded|failed, terminal rows pruned)
@@ -37,6 +42,8 @@ Schema v2 (SCHEMA_VERSION 1→2, additive, no wipe) added these SurrealDB tables
 - `atlas_article_categories` — categories.* non-unique (additive membership)
 - `atlas_article_title_search` + `atlas_article_description_search` — FULLTEXT BM25, analyzer `atlas_article_text`
 Schema v3 additionally stores classifier run/admission/derivative receipts, foreground intent leases, retained reclassification jobs/origins/items/conflict counters, and provider observation origins, calibration jobs and story-family indexes. Upgrades are additive; published legacy rows keep their historical identity. Exact model and manifest pins survive resumable jobs. Historical derivative activations renew their parent lease between bounded groups as well as during work. Legacy work-manifest updates preserve ownership/revision fields and reject manifests owned by a native writer.
+
+Schema v4 adds the durable dispatch outbox for opt-in worker pools. Atlas workers also reserve daily fetch slots against the existing quota records before sending requests. The same transaction can move a reserved slot to a distinct fallback bucket when the destination has capacity.
 
 [`Store`](../../../crates/argos-osint-core/src/store.rs) is a lightweight handle onto the process [runtime](../../../crates/argos-osint-core/src/storage/runtime.rs). `open_ui`, `open_light` and `open_profile_reader` do not establish separate SQLite or read-only database connections. The legacy `argos.db` path accepted by `Store::open` supplies its parent directory; the method does not open that file. Engine ownership and configuration belong to [open.rs](../../../crates/argos-osint-core/src/storage/open.rs).
 

@@ -28,6 +28,27 @@ Cache: `Swatinem/rust-cache` keyed per OS × storage, covering `target/agents` (
 
 **Local vs. hosted rule:** never run the all-platform or `server` storage stack from `.github/workflows/ci.yml` locally. Agents must **stabilize the local host machine build and embedded storage tests first** (`uname -ms`, `rustc -vV | grep '^host:'`), using [workspace-compatible targeted commands or intentional package-only alternatives](contributing.md#targeted-local-rust-builds-and-tests-fast-iteration) during iteration before running `scripts/local_matrix.sh --storage embedded`. Once local builds are stable and changes are pushed, monitor GitHub Actions checks/runs for issues on other platforms and `server` storage mode when CLI access is available (`gh pr checks`, `gh run list --branch "$(git branch --show-current)"`, `gh run view <run-id> --log-failed`).
 
+## `fleetworks.yml` — scoped branch checks
+
+The [Fleetworks workflow](../../../.github/workflows/fleetworks.yml) runs on pushes to `feat/atlas-zero-shot`, PR updates and manual dispatch. The [scope planner](../../../scripts/fleetworks_verify.py) selects checks from the event commit and changed paths. Docs-only changes skip runtime scopes. Known shared files select the native, server, Compose and broker scopes. Unknown paths, planner changes, a manual dispatch and unavailable diffs select every scope, including Intel Rust-BERT. The aggregate check requires selected jobs to succeed and records the event revision.
+
+| Scope | Hosted evidence |
+| --- | --- |
+| Native clients | Linux x86-64 and Intel macOS tests and executable smoke for Venture and its sibling clients |
+| Server and broker | Linux ARM64 build/test, network bootstrap and service smoke, plus native RabbitMQ Atlas dispatch when selected |
+| Packaged Compose | Disk and external configuration validation on ARM64, then Venture-owned image startup, authenticated readiness, relay and Atlas smoke when selected |
+| Intel Rust-BERT | Native worker build, link, and real checkpoint inference for selected classifier changes or manual dispatch |
+
+Preview the checks selected for a committed local revision.
+
+```sh
+python3 scripts/fleetworks_verify.py plan --base "$(git rev-parse HEAD^)" --head "$(git rev-parse HEAD)"
+```
+
+Push planning compares the given base directly with HEAD. Use `--event pull_request` for a merge-base comparison. Omitting `--base` plans all scopes. The command prints the plan without executing checks and rejects an expected head that differs from the checkout.
+
+A configuration check confirms the Compose model resolves. The packaged smoke runs the actual containers. Review the job steps and exact revision when reporting either result. Fleetworks scopes and the legacy full matrix have separate acceptance responsibilities.
+
 ## Efficient local verification before CI
 
 Follow the [scope/freeze policy](agent-workflow.md#scope-and-finish-line) and [contributor commands](contributing.md). Use one shared-cache build owner, stable features and affected checks; reuse unchanged evidence. After targeted stability, run the required native embedded gate with parent storage-mode variables unset. Server/all-platform/mutation execution stays hosted. Preserve `.github` ownership and user services; report local, skipped and hosted evidence separately.

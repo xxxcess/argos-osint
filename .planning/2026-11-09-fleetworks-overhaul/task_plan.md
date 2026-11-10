@@ -4,7 +4,7 @@
 Replace the Terminal OSINT research desk with Fleetworks: a Venture-managed collection of isolated network services, terminal clients and React Native Web, with scope-based fast verification.
 
 ## Current Phase
-Implementation authorized. Rebuild from the committed plan at `158774d` and publish verified slices on `feat/atlas-zero-shot`.
+Implementation in progress on `feat/atlas-zero-shot`. Keep shipping verified slices from the approved plan and record hosted outcomes by revision.
 
 ## Scope
 Docker images, Compose, Venture and the CLI suite, workspace/storage configuration, retained Atlas/Brain/Intel/tool/model functionality, RabbitMQ dispatch, repository reorganization, obsolete Recon removal, documentation/planning reconciliation and agent guidance updates.
@@ -48,22 +48,22 @@ Acceptance: all three storage selections work through a network endpoint; origin
 ### Phase 4 — Services and durable execution
 Status: in implementation
 - [x] Separate API serving, schema bootstrap and background workers. Dedicated domain entrypoints and their actions continue below.
-- [ ] Complete service boundaries. Atlas, NLP and classifier roles are wired. Brain/Intel, model execution and tool execution remain in scope.
+- [ ] Complete service boundaries. Atlas, NLP and classifier roles are wired. The private Brain role serves retained actor, topology and Intel brief HTTP operations. Separate brief execution and live progress, model execution and tool execution remain in scope.
 - [x] Introduce the Atlas RabbitMQ outbox and durable dependency, cancellation and completion fences. Expansion to the remaining service pools is pending.
-- [ ] Centralize provider quota/cooldown admission; preserve warm engines and bounded batches.
+- [ ] Centralize provider quota and cooldown admission. Atlas daily collection slots use atomic shared reservations. Standalone NewsAPI admission and shared model/account RPM and cooldowns remain in scope.
 Acceptance: retained pipeline fixture completes across processes; duplicate delivery cannot duplicate committed effects.
 
 ### Phase 5 — Venture, clients and Compose
 Status: in implementation
-- [ ] Convert terminal screens to API clients and expose the agreed CLI suite.
+- [ ] Convert terminal screens to API clients and expose the agreed CLI suite. The six clients expose command entrypoints, and Venture can attach the web stack terminal to the network Jobs view or service logs. Interactive parity for the other clients remains open.
 - [x] Add Venture service reconciliation, configuration, visible workspace, health and logs for the managed disk and external Compose profiles.
 - [ ] Add Compose baseline, optional disk SurrealDB profile, development overrides and multi-architecture image outputs.
 - [ ] Configure API/web bind addresses, Host/origin policy and service reconnection.
 Acceptance: Venture launches every client and web mode; client exit leaves services running; explicit stop respects service ownership.
 
 ### Phase 6 — Verification automation and repository reorganization
-Status: pending
-- [ ] Implement scope planner plus local/pr/full execution using shared scope definitions.
+Status: in implementation
+- [ ] Implement scope planner plus local/pr/full execution using shared scope definitions. Local planning and hosted scope selection use the same script. Unified execution modes are still open.
 - [ ] Add dependency-aware selection, always-reporting aggregate check and phase timing artifacts.
 - [ ] Introduce Linux ARM64 primary service lane, scoped web/TUI lanes and platform compatibility coverage.
 - [ ] Reorganize into apps, services, shared crates/packages and deployment assets; rename product outputs.
@@ -71,7 +71,7 @@ Status: pending
 Acceptance: scope fixtures prove narrow changes stay narrow and shared changes widen correctly.
 
 ### Phase 7 — Documentation and planning reconciliation
-Status: pending
+Status: in implementation
 - [ ] Execute the documentation/guidance inventory in acceptance.md; update all applicable maintained surfaces.
 - [ ] Reconcile every existing plan: retain active work, promote lasting decisions, mark superseded direction, remove reviewed obsolete artifacts and repair links.
 - [ ] Retire old SQL migration/cleanup instructions; retain live SurrealQL and useful dependency guards.
@@ -101,4 +101,4 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
 
 ## Next Step
-Register the transactional Atlas outbox and connect the collection worker. Monitor the hosted packaged Compose smoke and native platform results.
+Verify the packaged stack after the SurrealDB entrypoint fix and verify the new Brain relay and Atlas quota contracts on the selected hosted revision. Continue extracting retained brief, model, and tool execution before retiring Recon. Advance terminal parity and release verification while keeping maintained guidance aligned.

@@ -49,5 +49,16 @@ Eight scoped Venture and workspace Rust tests passed, and the native clients reb
 
 The full service cutover remains open. In particular, Brain and Intel integration, provider quotas, retained interactive terminal parity, release artifacts, and Recon retirement need implementation or acceptance evidence.
 
+## 2026-11-10 — Cutover continuation
+
+- GitHub Actions at `2934b1f` passed native Linux and Intel macOS, real Rust-BERT inference, the ARM64 server, and native RabbitMQ dispatch. Packaged Compose failed when the SurrealDB image invoked BusyBox under an unsupported executable name.
+- `fea751a` fixes the startup paths. A local fixture reproduced the old failure with the configured BusyBox image binary and exercised valid, empty, and oversized credentials through the corrected script. The [packaged rerun](https://github.com/xxxcess/argos-osint/actions/runs/42777729999) owns container startup evidence.
+- A private Brain role serves retained actor, topology and Intel brief HTTP operations. The gateway uses a separate bearer token. Background brief work and live streams still run in the existing worker and gateway.
+- The interactive Jobs client supports listing, details, logs, retry and cancellation. Venture's web mode attaches to Jobs or follows Compose logs. Exiting the terminal keeps the owned stack.
+- Atlas collection reserves daily per-account quota in SurrealDB before dispatch and transfers the slot to the fallback account when the transfer succeeds. Standalone NewsAPI and provider-wide model quotas and cooldowns remain open.
+- The shared scope planner has six passing offline cases, including 28 path cases. The hosted workflow owns the real quota reservation test. Nine targeted native tests and 19 service-host/API unit tests passed locally. Local Compose configuration passed for disk, external and Atlas profiles. Packaged and real datastore acceptance for this continuation use the hosted run.
+- Updated the README, deployment, active wiki, diagrams, agent guidance and current plan. The historical records remain available as evidence.
+
 ## Retention
-Working task_plan/findings/progress are ignored local planning memory. design.md and acceptance.md are curated review artifacts eligible for Git, not staged or committed here.
+
+This already-tracked plan records the shared cutover and its remaining acceptance work. Keep raw logs, fixtures and intermediate notes out of Git.

@@ -1,34 +1,59 @@
 # Argos OSINT
 
-Argos is a terminal investigation workspace. It gathers public sources, binds evidence, and writes cited answers.
+Argos collects public-source intelligence, organizes evidence, and prepares cited article briefs. On this branch, **Fleetworks** runs the Intel web app and network-only terminal clients against a local service stack managed by **Venture**.
 
-Home launches four applications — **Intel**, **Atlas**, **Brain**, **Recon** — and five system surfaces: **Jobs**, **Logs**, **Tools**, **Models**, **Profile**.
+[Fleetworks guide](docs/wiki/code/fleetworks.md) · [Deployment](deploy/README.md) · [Wiki](docs/index.md) · [Releases](docs/wiki/code/versioning.md) · [Changelog](CHANGELOG.md)
 
-Only Recon has a chat. Everything else is fields, lists, and buttons. Observations are retrieved data with a timestamp. They are not proof of identity or ownership.
+## Quick start with Fleetworks
 
-[Docs](docs/README.md) · [Usage](docs/wiki/concepts/usage.md) · [Figures](docs/diagrams.md) · [Releases](docs/wiki/code/versioning.md) · [Changelog](CHANGELOG.md)
+Use Rust **1.95.0** and Docker Compose **v2.20 or newer**. Run these commands from the repository root.
 
-The Fleetworks branch adds Venture, isolated workspace setup, and six terminal clients for the versioned Argos API. See the [Fleetworks guide](docs/wiki/code/fleetworks.md) for current commands and migration status.
+```sh
+cargo build --locked -p fleetworks-venture -p fleetworks-cli --bins
+./target/debug/venture --workspace ./.fleetworks init
+./target/debug/venture --workspace ./.fleetworks up
+./target/debug/venture --workspace ./.fleetworks status
+```
 
-[![Argos workspace](docs/diagrams/workspace.svg)](docs/diagrams/workspace.html)
+Open the printed web address after readiness. By default the web app uses `127.0.0.1:3000` and the API uses `127.0.0.1:8080`. Venture creates a fresh workspace with private credentials and manages the local Compose project. Use the same workspace for client commands, logs and shutdown.
+
+```sh
+./target/debug/venture --workspace ./.fleetworks client jobs tui
+./target/debug/venture --workspace ./.fleetworks logs --follow
+# Press Ctrl+C to leave the log view before stopping the stack.
+./target/debug/venture --workspace ./.fleetworks stop
+```
+
+Use `venture web` to start the stack and open Jobs and Logs in the terminal. Pass `--terminal logs` to follow service output instead. Closing the terminal client leaves the stack running.
+
+Add `--atlas` when starting a fresh or stopped stack to enable Atlas dispatch through RabbitMQ and the private NLP and classifier services. Live cycles require [provider keys and a compatible Rust-BERT worker and model](deploy/atlas-dispatch.md). The [CLI reference](apps/fleetworks-cli/README.md) lists all six clients.
+
+Venture supports a managed Compose database, a managed host database in disk or memory mode, and an authenticated external SurrealDB endpoint. Import existing API-key configuration and model defaults only through the explicit `venture import --from` command. Use the [workspace and storage guide](docs/wiki/code/fleetworks.md) for mode selection and setup.
+
+The service cutover is in progress. The [Fleetworks guide](docs/wiki/code/fleetworks.md#rollout-status) distinguishes the implemented slice, hosted verification, and remaining work. The legacy `argos` launcher and TUI below remain available.
 
 ## Tech stack
 
 | Layer | Current implementation |
 | --- | --- |
-| CLI and core | Rust 1.95.0, Tokio, Clap; shared core plus CLI/TUI and local API crates |
+| CLI and core | Rust 1.95.0, Tokio and Clap. Venture and six Fleetworks clients use the versioned API. The legacy CLI and TUI also use the shared core. |
 | Terminal UI | Ratatui 0.30 and Crossterm 0.28; shared theme, measured keyboard/mouse targets and deterministic terminal fixtures |
-| Persistence | SurrealDB 3.3.4; default in-process RocksDB storage, optional loopback SurrealDB server mode |
-| Local HTTP API | Axum 0.8 with typed `/api/v1` projections and storage-backed readiness; Rust owns data and workers |
-| Web UI | React 19.2.3, React Native 0.86.3 primitives mapped through React Native Web 0.21.4; Next.js 16.4.3 static export and development server |
+| Persistence | SurrealDB 3.3.4. Fleetworks uses a network endpoint and defaults to Compose disk storage. Legacy Argos defaults to embedded RocksDB. |
+| Local HTTP API | Axum 0.8, typed `/api/v1` contracts and storage-backed readiness. Fleetworks uses a same-origin web relay and a private Brain service for retained Intel operations. |
+| Atlas dispatch | RabbitMQ carries durable work notifications. SurrealDB owns job and delivery state. |
+| Web UI | React 19.2.3, React Native 0.86.3 primitives mapped through React Native Web 0.21.4; Next.js 16.4.3 server in the Compose stack and development and installed profiles in the legacy launcher |
 | React compilation and state | React Compiler 1.0.0; TanStack Query 5.104.5 for async/cache/cursor state, Context for connection/preferences, app adapters for browser settings |
 | JavaScript toolchain | Node 24.22.1, pnpm 12.15.0, TypeScript 5.9.3; pinned workspace manifests and frozen lockfile |
 | Providers and local NLP | Reqwest/rustls, QuickJS via rquickjs, tokenizers and tract-onnx; live provider/model execution is separate from offline tests |
 | Quality and CI | rustfmt, Clippy, Cargo/storage/process tests; ESLint 9 with Hooks/compiler rules; Playwright 1.64.1 export/dev browser fixtures; GitHub Actions |
 
-Versions and feature ownership are defined in [Cargo.toml](Cargo.toml), the [frontend manifests](package.json) and [web app manifest](apps/web-desktop/package.json). See the [architecture](docs/wiki/code/architecture.md), [React UI contract](docs/wiki/code/react-ui.md) and [CI guide](docs/wiki/code/ci.md). Expo mobile apps, Tauri desktop bundles and native-platform validation remain planned; the current native primitives do not imply shipped native clients.
+Versions and feature ownership are defined in [Cargo.toml](Cargo.toml), the [frontend manifests](package.json) and [web app manifest](apps/web-desktop/package.json). See the [architecture](docs/wiki/code/architecture.md), [React UI contract](docs/wiki/code/react-ui.md) and [CI guide](docs/wiki/code/ci.md). Expo and Tauri builds remain roadmap items. Fleetworks' native terminal binaries have separate platform checks.
 
-## Applications
+## Legacy terminal applications
+
+The `argos` TUI opens these applications and system surfaces from Home. Recon provides the investigation composer.
+
+[![Legacy Argos terminal workspace](docs/diagrams/workspace.svg)](docs/diagrams/workspace.html)
 
 | App | What it does | Read more |
 | --- | --- | --- |
@@ -41,9 +66,9 @@ Versions and feature ownership are defined in [Cargo.toml](Cargo.toml), the [fro
 | Jobs / Logs | Background work and durable events | [Usage](docs/wiki/concepts/usage.md#other-apps) · [Jobs](docs/diagrams/jobs-lifecycle.html) |
 | Profile | Host hardware and storage paths (`System`) | [Concepts](docs/wiki/concepts/glossary.md) |
 
-## Quick start
+## Run legacy Argos
 
-Rust **1.95.0** is pinned. The first build needs a C toolchain (`xcode-select --install` on macOS). Protoc is vendored. Run these commands from the repository root.
+The first build needs a C toolchain (`xcode-select --install` on macOS). Run these commands from the repository root.
 
 ### Terminal app
 
@@ -142,7 +167,7 @@ Stopping this web stack leaves the adopted API running. For a different web port
 
 See the [web/API guide](docs/wiki/code/intel-web.md) for backend selection, storage ownership and endpoint contracts, and the [living implementation specification](docs/argos-intel-living-spec.md) for verified milestones and the [branch-to-main delivery scope](docs/argos-intel-living-spec.md#branch-to-main-scope-2026-10-26), including the minimalist web UI based on the core TUI.
 
-### Development checks
+## Development checks
 
 Shared UI uses React Native primitives mapped to React Native Web. React Compiler is enabled for Next and the shared packages; lint includes Hooks/compiler diagnostics with zero warnings. Keep both integrations enabled. [React UI rules](docs/wiki/code/react-ui.md#react-native-and-compiler-baseline) describe the platform boundary and verification requirements. Visual work follows the [Argos look and feel](docs/wiki/code/react-ui.md#argos-look--feel-reference): the terminal-desk theme, with room to design components creatively inside it. Topology graphs use the force-graph canvas.
 
@@ -174,22 +199,9 @@ ARGOS_WEB_PROFILE=dev pnpm test:e2e  # Also verify Next development compilation
 
 Navigation, CLI, and state directory: [usage guide](docs/wiki/concepts/usage.md). Contributors and agents should follow the [contributor workflow](docs/wiki/code/contributing.md), including the agent Cargo wrapper and CI-only server storage gate. Agent guidance: [AGENTS.md](AGENTS.md).
 
-### Agent & CLI workflows (OpenCode & Google Antigravity CLI)
+## Agent workflows
 
-Contributors working with agentic coding CLIs follow the shared repository standards in [AGENTS.md](AGENTS.md), [contributor workflow](docs/wiki/code/contributing.md), and [planning artifacts](docs/wiki/code/planning-artifacts.md):
-
-- **Workspace & persistence standards:**
-  - **Temporary files & worktrees (`.agent-scratch/`):** Keep all scratch files, patches, diagnostic logs, isolated build caches, and feature worktrees (`.agent-scratch/worktrees/`) inside `.agent-scratch/` (unstaged and never committed).
-  - **Long-term planning (`.planning/`):** Record multi-phase plans, design specs, and decision ledgers in `.planning/<YYYY-MM-DD-slug>/` following the [planning format](docs/wiki/code/planning-artifacts.md#working-format).
-  - **Rust embedded storage, host-native platform & targeted builds (see `.github/workflows/ci.yml`):** Never run the all-platform or `server` storage stack from `.github/workflows/ci.yml` locally. Agents must **get the local host machine build and embedded storage tests to a stable state first** (`uname -ms`, `rustc -vV | grep '^host:'`, `--storage embedded`), preferring targeted crate and test commands (`python3 scripts/agent_cargo.py check|clippy|test --locked -p <crate> [--lib | --bin <bin> | --test <name>]`, and `ARGOS_SURREAL_MODE=embedded ARGOS_SURREAL_REQUIRED=1 python3 scripts/agent_cargo.py test --locked -p argos-osint-core --test storage_<name>`) during scoped iteration before running `scripts/local_matrix.sh --storage embedded`. When git/GitHub CLI access is available, monitor hosted GitHub Actions checks (`gh pr checks`, `gh run list --branch "$(git branch --show-current)"`, `gh run view <run-id> --log-failed`) for issues on other platforms or `server` storage mode. Reference [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/intel-web.yml`](.github/workflows/intel-web.yml), [`.github/workflows/commit-policy.yml`](.github/workflows/commit-policy.yml), and the [CI workflow guide](docs/wiki/code/ci.md), keep React Compiler/Hooks lint at zero warnings, and update affected `docs/wiki/` routes, `@tag:<slug>` entries, and diagrams in the same change.
-- **OpenCode setup (`.opencode/`):**
-  - Configured in [.opencode/opencode.json](.opencode/opencode.json) and [.opencode/AGENTS.md](.opencode/AGENTS.md) with the 4-agent team (`architect`, `coder`, `tester`, `scribe`), worker model overrides (`.opencode/architect-worker.json`, `.opencode/coder-worker.json`), and repository skills (`.opencode/skills/`). Rust work loads `argos-rust-style`.
-  - Follow the [OpenCode agent team guide](docs/wiki/code/opencode-v2.md) for role permissions, phase handoff envelopes, disjoint `EDIT_UNIT` worktree integration, and Scribe documentation checkpoints.
-- **Google Antigravity CLI `/teamwork` guidance (`.agy/`):**
-  - Users running the `/teamwork` command in Google Antigravity CLI should reference [.agy/howto.md](.agy/howto.md) to select the right workflow spec for their task scope:
-    - **Lite Team ([.agy/lite-team.md](.agy/lite-team.md)):** Fast-path 2-agent workflow (`coder` + `tester`) for scoped fixes and single-module updates ($\le 3$ files, no breaking contract/schema changes).
-    - **Heavy Team ([.agy/heavy-team.md](.agy/heavy-team.md)):** Full 4-agent orchestration (`architect`, `coder`, `tester`, `scribe`) with Phase 0 `.planning/` bootstrap, parallel `.agent-scratch/worktrees/` execution, and full host-native verification gates.
-    - **Scope-specific React Native UI `tester` (`anthropic/claude-sonnet-5.5#low`):** Both specs dispatch a dedicated `tester` agent on `anthropic/claude-sonnet-5.5#low` for React Native UI scope (`apps/web-desktop`, `packages/{ui,intel,api-client}`) to enforce repository design standards and conventions ([React UI rules](docs/wiki/code/react-ui.md), the [Argos look and feel](docs/wiki/code/react-ui.md#argos-look--feel-reference), [conventions](docs/wiki/code/conventions.md), React Compiler/Hooks lint, and Playwright fixture screenshot review), alongside `google/argon#low` for Rust/system verification.
+Start with [AGENTS.md](AGENTS.md), the [contributor workflow](docs/wiki/code/contributing.md), and the [CI guide](docs/wiki/code/ci.md). The host-specific handoffs live in the [OpenCode guide](docs/wiki/code/opencode-v2.md) and the [Antigravity team guide](.agy/howto.md).
 
 ## Figures
 

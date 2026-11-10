@@ -9,10 +9,11 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Aspect | Type | HTML | SVG |
 | --- | --- | --- | --- |
 | Local NLP | Data flow | — | [nlp-preprocessing.svg](diagrams/nlp-preprocessing.svg) |
-| Workspace | Architecture | [workspace.html](diagrams/workspace.html) | [workspace.svg](diagrams/workspace.svg) |
-| Local Intel web lifecycle | Process | [intel-web.html](diagrams/intel-web.html) | [intel-web.svg](diagrams/intel-web.svg) |
+| Fleetworks service boundaries | Architecture | [fleetworks.html](diagrams/fleetworks.html) | [fleetworks.svg](diagrams/fleetworks.svg) |
+| Legacy terminal workspace | Architecture | [workspace.html](diagrams/workspace.html) | [workspace.svg](diagrams/workspace.svg) |
+| Legacy Intel web lifecycle | Process | [intel-web.html](diagrams/intel-web.html) | [intel-web.svg](diagrams/intel-web.svg) |
 | Intel Focus Brief column order | Layout | [intel-focus-layout.html](diagrams/intel-focus-layout.html) | [intel-focus-layout.svg](diagrams/intel-focus-layout.svg) |
-| Venture navigation | Process | [venture-navigation.html](diagrams/venture-navigation.html) | [venture-navigation.svg](diagrams/venture-navigation.svg) |
+| Legacy Venture wizard navigation | Process | [venture-navigation.html](diagrams/venture-navigation.html) | [venture-navigation.svg](diagrams/venture-navigation.svg) |
 | TUI shell | Nested | [tui-shell.html](diagrams/tui-shell.html) | [tui-shell.svg](diagrams/tui-shell.svg) |
 | Recon turn | Process | [recon-turn.html](diagrams/recon-turn.html) | [recon-turn.svg](diagrams/recon-turn.svg) |
 | Bindings | Data flow | [recon-bindings.html](diagrams/recon-bindings.html) | [recon-bindings.svg](diagrams/recon-bindings.svg) |

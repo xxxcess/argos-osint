@@ -4,6 +4,7 @@ Understand the product, then follow its implementation. This is the maintained e
 
 | Route | Start here | Follow it to |
 | --- | --- | --- |
+| Start Fleetworks | [Venture and workspace guide](wiki/code/fleetworks.md) | Client commands, local Compose, storage modes and rollout status |
 | Explore concepts | [Concepts](wiki/concepts/index.md) | Apps, evidence, model roles, persistence and their diagrams |
 | Explore code | [Code](wiki/code/index.md) | Crates, module entry points, contracts and verification |
 
@@ -20,9 +21,11 @@ Understand the product, then follow its implementation. This is the maintained e
 | [docs/wiki/](wiki/index.md) | Two routes, searchable tags and wiki maintenance |
 | [docs/diagrams/](diagrams.md) | Diagram catalog; HTML pages and matching SVG figures |
 | [Core crate](../crates/argos-osint-core) | Domain pipelines and storage; [module map](wiki/code/core.md) |
-| [API adapter](../crates/argos-osint-api) / [host](../crates/argos-api-host) | Local Intel HTTP service; [contract](wiki/code/intel-web.md) |
+| [Venture](../apps/venture) and [terminal clients](../apps/fleetworks-cli) | Workspace lifecycle and versioned API clients. [Fleetworks guide](wiki/code/fleetworks.md) |
+| [Deployment](../deploy/README.md) | Local Compose, database profiles and the [Atlas overlay](../deploy/atlas-dispatch.md) |
+| [API adapter](../crates/argos-osint-api) / [host](../crates/argos-api-host) | Legacy Intel HTTP service and authenticated Fleetworks roles. [API contract](wiki/code/intel-web.md) |
 | [Web app](../apps/web-desktop) / [shared packages](../packages) | Next server/stateless API relay, React Native primitives and typed Query client |
-| [Binary crate](../crates/argos-osint-bin) | CLI/TUI; [interface map](wiki/code/interfaces.md) |
+| [Binary crate](../crates/argos-osint-bin) | Legacy CLI/TUI. [Interface map](wiki/code/interfaces.md) |
 | [scripts/](../scripts) | Builds, storage tests, releases and TUI captures; [workflow](wiki/code/contributing.md) |
 | [.opencode/](../.opencode) | Role/command/skill configuration; [guide](wiki/code/opencode-v2.md) |
 | [.agents/skills/](../.agents/skills) | Repository skills for other agent hosts |

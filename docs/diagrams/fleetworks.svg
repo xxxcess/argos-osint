@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 484" role="img" aria-labelledby="fleetworks-title fleetworks-desc">
+<title id="fleetworks-title">Fleetworks service boundaries</title>
+<desc id="fleetworks-desc">Venture manages the local Compose stack. Terminal clients and the Intel web relay call the authenticated API. The API relays retained operations to private Brain. SurrealDB holds domain records and durable job state. The optional Atlas worker publishes and consumes RabbitMQ deliveries and calls the private NLP and classifier services.</desc>
+<defs>
+  <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#4f5d75"/></marker>
+</defs>
+<style>
+  text{font-family:Geist,system-ui,sans-serif;fill:#2d3142}
+  .label{font-size:17px;font-weight:600}
+  .note{font-size:13px}
+  .zone{font-size:12px;font-weight:600;letter-spacing:1px}
+  .node{fill:white;stroke:#4f5d75}
+  .accent{fill:#fff6ed;stroke:#eb6c36}
+  .edge{fill:none;stroke:#4f5d75;stroke-width:2;marker-end:url(#arrow)}
+</style>
+<rect width="960" height="484" fill="#f5f5f5"/>
+<rect x="308" y="24" width="620" height="432" rx="6" fill="none" stroke="#a0a5b0"/>
+<rect x="320" y="332" width="596" height="108" rx="6" fill="#ebedf1"/>
+<text x="40" y="52" class="zone">HOST</text>
+<text x="340" y="52" class="zone">LOCAL COMPOSE STACK</text>
+<text x="336" y="352" class="zone">ATLAS OVERLAY</text>
+
+<path d="M240 112H308" class="edge"/>
+<path d="M240 256H340" class="edge"/>
+<path d="M440 148V220" class="edge"/>
+<path d="M540 256H692" class="edge"/>
+<path d="M540 236H620V112H692" class="edge"/>
+<path d="M792 148V220" class="edge"/>
+<path d="M592 368V312H792V292" class="edge"/>
+<path d="M512 398H488" class="edge"/>
+<path d="M672 398H696" class="edge"/>
+
+<rect x="40" y="76" width="200" height="72" rx="6" class="accent"/>
+<text x="140" y="106" text-anchor="middle" class="label">Venture</text>
+<text x="140" y="128" text-anchor="middle" class="note">Workspace and lifecycle</text>
+<rect x="40" y="220" width="200" height="72" rx="6" class="node"/>
+<text x="140" y="250" text-anchor="middle" class="label">Terminal clients</text>
+<text x="140" y="272" text-anchor="middle" class="note">Versioned HTTP</text>
+
+<rect x="340" y="76" width="200" height="72" rx="6" class="node"/>
+<text x="440" y="106" text-anchor="middle" class="label">Intel web</text>
+<text x="440" y="128" text-anchor="middle" class="note">Same-origin relay</text>
+<rect x="340" y="220" width="200" height="72" rx="6" class="accent"/>
+<text x="440" y="250" text-anchor="middle" class="label">Argos API</text>
+<text x="440" y="272" text-anchor="middle" class="note">Bearer and readiness</text>
+<rect x="692" y="76" width="200" height="72" rx="6" class="node"/>
+<text x="792" y="106" text-anchor="middle" class="label">Private Brain</text>
+<text x="792" y="128" text-anchor="middle" class="note">Actors, briefs and topology</text>
+<rect x="692" y="220" width="200" height="72" rx="6" class="node"/>
+<text x="792" y="250" text-anchor="middle" class="label">SurrealDB</text>
+<text x="792" y="272" text-anchor="middle" class="note">Records, jobs and outbox</text>
+
+<rect x="336" y="368" width="152" height="60" rx="6" class="node"/>
+<text x="412" y="393" text-anchor="middle" class="label">RabbitMQ</text>
+<text x="412" y="413" text-anchor="middle" class="note">Durable delivery</text>
+<rect x="512" y="368" width="160" height="60" rx="6" class="node"/>
+<text x="592" y="393" text-anchor="middle" class="label">Atlas worker</text>
+<text x="592" y="413" text-anchor="middle" class="note">Publish and consume</text>
+<rect x="696" y="368" width="200" height="60" rx="6" class="node"/>
+<text x="796" y="393" text-anchor="middle" class="label">Private inference</text>
+<text x="796" y="413" text-anchor="middle" class="note">Compromise and Rust-BERT</text>
+</svg>

@@ -2,7 +2,7 @@
 
 [Concept route](index.md) · [Wiki](../../index.md)
 
-How to run the terminal UI and CLI. Product tour in the [README](../../../README.md). Investigation mechanics in [architecture.md](../code/architecture.md). Keys and model roles in [providers.md](providers.md).
+Use the [Fleetworks guide](../code/fleetworks.md) for the standalone Venture executable, its workspace, and the network terminal clients. This page describes the retained `argos` command and Ratatui interface. The [README](../../../README.md) shows both startup paths. See [architecture](../code/architecture.md) for investigation mechanics and [providers](providers.md) for keys and model roles.
 
 ## Terminal UI
 

@@ -35,3 +35,14 @@ Lapin: https://docs.rs/lapin/latest/lapin/ — async AMQP client with Tokio supp
 
 ## User decisions
 Local storage means one managed host SurrealDB server, memory or disk. Remote storage must be disk-backed. Remote application stacks are out of v1. Retain Intel briefs. Start fresh data, preserve API-key configs and model defaults. Create plan first; user reviews before build.
+
+
+## Documentation disposition during the cutover
+
+| Surface | Disposition |
+| --- | --- |
+| Root README, deployment guide, docs indexes, Fleetworks wiki, active architecture, storage, web, CLI, classifier and CI guides | Update for shipped paths and current acceptance evidence. |
+| Root and host agent guides | Update navigation and verification scope. Keep host-specific role boundaries. |
+| SurrealDB, Atlas and classifier plans and their acceptance records | Retain historical evidence and live dependency provenance. Move required checksum provenance before removing its workflow dependency. |
+| Prior Intel, topology, terminal, navigation, and execution records | Retain history and unresolved parity requirements. Revisit superseded workflows when the replacement has acceptance evidence. |
+| Release and versioning plans, archives, screenshots, skill symlinks | Retain until a specific change needs reconciliation. Validate changed diagram pairs and links. |

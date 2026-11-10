@@ -234,6 +234,10 @@ Queue residence is recorded separately from retry backoff and starts no network/
 
 `StageBudget` rows are retained as legacy sizing metadata for core API compatibility; their `policy()` no longer transmits output or reasoning restrictions. Claims, Inferences and Links still send their `brief_contracts` schema: a strict schema where confirmed, otherwise the forced `submit_result` output tool, otherwise JSON mode or validated text. Compact item/field limits describe the brief's data contract rather than a provider token budget. Output-tool arguments are validated exactly like content.
 
+## Atlas news provider admission
+
+Atlas workers reserve a logical fetch in a shared SurrealDB counter for the provider, configured account slot and UTC day. A rate or quota response can move that reservation to a configured fallback when its bucket has capacity. Transport retries and same-host redirects stay within the logical reservation. An interrupted request keeps its reservation because the remote provider may have received it. This gate covers Atlas collection. The separate NewsAPI tool still accounts for its use through the legacy path. Model cooldowns and concurrent-account admission use the process-local policy above. See [Atlas execution](../code/architecture.md#atlas).
+
 ## Canonical Jev decisions
 
 `BlockDecisions` (cleanup) and `FidelityDecisions` (brief fidelity) build a canonical `DecisionContract` and `DecisionState` and compile through `investigation::decisions::compile_native`. State stays minimal: empty sections are omitted, and each item is addressed by field path, for example ``items.item_0``. Contracts are validated before any network access. A malformed contract fails with zero requests.

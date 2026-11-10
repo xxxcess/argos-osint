@@ -4,6 +4,8 @@
 > Repository baseline: [`xxxcess/argos-osint` `main` @ `1c847e8`](https://github.com/xxxcess/argos-osint/commit/1c847e89357f49ee23942f48a11d1a6af7b6bc9a)  
 > **One-file, incrementally maintained implementation contract.** The original baseline audit is retained below. Current implementation and evidence are tracked in section 9; later native-platform milestones remain Planned.
 
+For this branch's Venture startup, authenticated services and rollout status, see [Fleetworks](wiki/code/fleetworks.md). This specification retains the Intel web implementation history and platform roadmap.
+
 ## Current web boundary (2026-11-01)
 
 The user-approved web architecture is **React Native UI → same-origin Next.js API → Rust API → DB/system**. Next is a running server, not a static export; only `ARGOS_RUST_API_ORIGIN` in its environment selects Rust. Browser query parameters/storage cannot configure that address. Home, Bulletin, Brief and Topology have real routes, with reload/history support. Next is stateless: REST carries snapshots/actions, and one same-origin WebSocket relays host metrics and selected-brief progress to Rust-owned subscriptions. Completed briefs do not poll; only the visible Bulletin feed has a slow minute refresh. The Rust address remains private for both transports. The topology page uses kind-colored icon tiles, inference nodes, labeled dashed links and neighborhood controls, with no Pause/Filters/zoom toolbar. Source images fit without cropping; bulletin metadata has spaced category/date labels and one whole-row action.

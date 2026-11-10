@@ -2,18 +2,29 @@
 
 [Code route](index.md) · [Wiki](../../index.md)
 
-| Crate | Owns |
+## Fleetworks service boundaries
+
+[![Fleetworks service boundaries](../../diagrams/fleetworks.svg)](../../diagrams/fleetworks.html)
+
+| Component | Owns |
 | --- | --- |
-| `argos-osint-core` | Store, OSINT registry/executor, provider routing, Recon |
-| `argos-osint-bin` | CLI, ratatui TUI and local stack supervisor; optional shared-process API for TUI display |
+| [Venture](../../../apps/venture) and [workspace library](../../../crates/fleetworks-workspace) | Workspace settings and explicit legacy import, Compose and host database lifecycle, client launch |
+| [Terminal clients](../../../apps/fleetworks-cli) and [contracts](../../../crates/fleetworks-contracts) | Versioned request/response contracts and API access |
+| [API adapter](../../../crates/argos-osint-api) and [host](../../../crates/argos-api-host) | Authenticated gateway and live streams, schema bootstrap, private Brain and worker roles |
+| [Web app](../../../apps/web-desktop) | React Native Web presentation and same-origin relay to the API |
+| [Core](../../../crates/argos-osint-core) | Domain workflows, storage, provider routing and legacy Recon |
+| [Broker](../../../crates/fleetworks-broker) | Durable RabbitMQ delivery for Atlas dispatch |
+| [Classifier](classifier.md) | Taxonomy, pinned Rust-BERT inference and separately managed Natural training |
 
-| `classifier` module | Local Rust-BERT worker integration, taxonomy, immutable pinning and Venture readiness. Legacy QuickJS artifacts, datasets and manual jobs retain separate management — [map](classifier.md) |
+The Compose stack publishes the web relay and authenticated API on loopback by default. The API forwards actor dossiers, retained Intel brief operations and topology to the private Brain service. The existing worker runs brief jobs. Atlas dispatch adds RabbitMQ, a collection worker and private NLP and classifier services. SurrealDB owns job state and domain records. See [service startup and rollout status](fleetworks.md).
 
-Home launches Intel, Atlas, Brain, Recon. Tools / Models / Profile configure Argos (`Osint`, `Providers`, `System`). Jobs and Logs watch background work.
+## Legacy Argos application
 
-[![Argos workspace](../../diagrams/workspace.svg)](../../diagrams/workspace.html)
+The `argos-osint-bin` crate still provides the direct CLI, Ratatui TUI and local stack supervisor. Its Home launches Intel, Atlas, Brain and Recon. Tools, Models and Profile configure Argos. Jobs and Logs monitor background work.
 
-Index: [README.md](../../README.md) · Glossary: [concepts.md](../concepts/glossary.md) · Figures: [diagrams.md](../../diagrams.md)
+[![Legacy Argos terminal workspace](../../diagrams/workspace.svg)](../../diagrams/workspace.html)
+
+[README](../../../README.md) · [Glossary](../concepts/glossary.md) · [Figures](../../diagrams.md)
 
 ## Investigation flow
 
@@ -493,13 +504,13 @@ Article Recon report execution is historical. `create_report_job`, resume/retry 
 
 [![Atlas news cycle](../../diagrams/atlas-pipeline.svg)](../../diagrams/atlas-pipeline.html)
 
-`atlas-collection-v3` pins the local Rust-BERT worker, checkpoint and threshold before new acquisition and admission. Native discovery retains provider quotas, country heat bands and deduplication. Every evaluated occurrence has a durable outcome; admitted articles publish one primary and an optional supported secondary domain. Metadata, Related and actor/lifecycle indexing use scoped receipts under the same source and ownership fences. Cycles publish no claims or generated briefs and require no vector work.
+`atlas-collection-v3` pins the Rust-BERT worker, checkpoint and threshold before new acquisition and admission. Fleetworks delegates inference to the private classifier service. Legacy Argos invokes its local worker. Native discovery reserves the shared daily provider-account quota before fetching. Country heat bands and deduplication apply to acquisition. Every evaluated occurrence has a durable outcome; admitted articles publish one primary and an optional supported secondary domain. Metadata, Related and actor/lifecycle indexing use scoped receipts under the same source and ownership fences. Cycles publish no claims or generated briefs and require no vector work.
 
 | Stage | Execution | Unit |
 | --- | --- | --- |
-| Discovery and coverage | GNews/NewsData, then NewsAPI/Currents; existing quotas and heat bands | Article |
+| Discovery and coverage | GNews/NewsData, then NewsAPI/Currents, with transactional daily quota admission and heat bands | Article |
 | Local admission | Rust-BERT zero-shot scores for six domains in bounded batches. Resume uses the exact saved zero-shot or legacy Natural pin | Article occurrence and immutable outcome |
-| Entities | Complete original title/description, bounded local NLP; no model fallback | Article metadata |
+| Entities | Complete original title and description. Bounded NLP runs in the private service with the Atlas overlay or locally with legacy Argos. | Article metadata |
 | Publisher prior | Immutable native WP:RSP index per pass; domain suffix match | Article metadata |
 | Related | Local posting lists and verified spans; shared mentions are tentative leads | Canonical article pair |
 | Actor and lifecycle indexing (phase 6, `STAGE_ACTOR_ARTICLES=12`) | Brain Actor binding, `mentioned_in` Links, at most 20 tentative Related records and current occurrence receipts; bounded pages and conditional publication | Article occurrence |
@@ -524,7 +535,7 @@ API: `GET /api/v1/articles/search` → `ArticleSearchPage` {hits with article id
 
 Current domain filters use `governance`, `security`, `economic`, `human`, `environmental` and `scientific`. Historical seven-topic tags remain explicitly legacy; a matching string alone does not establish current membership. See [taxonomy](../concepts/strategic-domains-taxonomy.md).
 
-See [classification and Related articles](../concepts/atlas-classification-and-related-articles.md) for metadata storage, receipts, publisher scores, exact lineage, deletion and navigation. Country bands, native quotas, map, origins, history and retained headlines remain unchanged. Coverage replaces the current-cycle Insights pane.
+See [classification and Related articles](../concepts/atlas-classification-and-related-articles.md) for metadata storage, receipts, publisher scores, exact lineage, deletion and navigation. The Atlas view exposes country bands, map, origins, history and retained headlines. Coverage summarizes the current cycle.
 
 GNews, NewsData, Currents are catalog tools for manual runs and omitted from the Recon picker.
 

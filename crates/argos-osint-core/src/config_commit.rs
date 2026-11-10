@@ -10,8 +10,8 @@
 //! leaves `state: "pending"` behind; [`recover_at_startup`] finishes the rollback
 //! on the next boot.
 //!
-//! The lock is a `create_new` lockfile with a heartbeat and a stale takeover, so
-//! the dependency graph is unchanged (no `fs2`/`flock`). The journal stores paths
+//! A stable advisory guard serializes writers and stale takeovers. The lockfile
+//! retains heartbeat and owner metadata for compatibility. The journal stores paths
 //! and state only — never a body and never key material. A successful commit
 //! advances a process-wide generation id and notifies [`subscribe_reload`].
 
@@ -20,7 +20,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -31,6 +31,8 @@ use crate::paths;
 
 /// Lockfile name inside the configuration root.
 const LOCK_NAME: &str = ".argos-config.lock";
+/// Stable advisory guard inode. The owner record can be replaced independently.
+const GUARD_NAME: &str = ".argos-config.guard";
 /// Commit journal name inside the configuration root.
 const JOURNAL_NAME: &str = ".argos-config-journal.json";
 /// Prefix of the unique sibling temporary file [`write_secure`] creates.
@@ -110,11 +112,17 @@ impl CommitFile {
 #[derive(Clone, Debug)]
 pub struct ConfigLock {
     root: PathBuf,
+    guard: Arc<ConfigGuard>,
+    generation: u64,
+}
+
+#[derive(Debug)]
+struct ConfigGuard {
+    _file: fs::File,
     lock_path: PathBuf,
     pid: u64,
     /// Unique inside this process, so a sibling thread never releases it.
     holder: u64,
-    generation: u64,
 }
 
 impl ConfigLock {
@@ -135,35 +143,46 @@ impl ConfigLock {
         let lock_path = root.join(LOCK_NAME);
         let pid = std::process::id() as u64;
         let deadline = Instant::now() + LOCK_WAIT;
+        let guard_path = root.join(GUARD_NAME);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(SECURE_FILE_MODE);
+        }
+        let file = options
+            .open(&guard_path)
+            .context("open configuration guard")?;
         loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(LOCK_STEP);
+                }
+                Err(fs::TryLockError::WouldBlock) => {
+                    bail!("configuration is being written by another process");
+                }
+                Err(fs::TryLockError::Error(err)) => {
+                    return Err(err).context("lock configuration guard");
+                }
+            }
+        }
+        let holder = loop {
             let holder = next_holder();
             match write_lock(&lock_path, pid, holder, None) {
-                Ok(()) => {
-                    return Ok(Self {
-                        root: root.to_path_buf(),
-                        lock_path,
-                        pid,
-                        holder,
-                        generation: current_generation(),
-                    });
-                }
+                Ok(()) => break holder,
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                     match lock_takeover(&lock_path) {
                         Some(previous) => {
                             if Instant::now() >= deadline {
                                 bail!("configuration is being written by another process");
                             }
-                            // Drop the dead lockfile, then race to recreate it.
+                            // The advisory guard fences other takeover attempts.
                             remove_quietly(&lock_path);
                             let takeover = next_holder();
                             if write_lock(&lock_path, pid, takeover, Some(previous)).is_ok() {
-                                return Ok(Self {
-                                    root: root.to_path_buf(),
-                                    lock_path,
-                                    pid,
-                                    holder: takeover,
-                                    generation: current_generation(),
-                                });
+                                break takeover;
                             }
                         }
                         None => {
@@ -178,7 +197,17 @@ impl ConfigLock {
                     return Err(err).with_context(|| format!("create {}", lock_path.display()))
                 }
             }
-        }
+        };
+        Ok(Self {
+            root: root.to_path_buf(),
+            guard: Arc::new(ConfigGuard {
+                _file: file,
+                lock_path,
+                pid,
+                holder,
+            }),
+            generation: current_generation(),
+        })
     }
 
     /// The directory this lock guards.
@@ -266,11 +295,12 @@ impl ConfigLock {
     /// Keeps the lockfile heartbeat fresh while a long batch is published, so a
     /// live holder is never mistaken for a dead one.
     fn touch_heartbeat(&self) {
-        let _ = write_secure(&self.lock_path, &lock_body(self.pid, self.holder, None));
+        let guard = &self.guard;
+        let _ = write_secure(&guard.lock_path, &lock_body(guard.pid, guard.holder, None));
     }
 }
 
-impl Drop for ConfigLock {
+impl Drop for ConfigGuard {
     fn drop(&mut self) {
         if lock_is_ours(&self.lock_path, self.pid, self.holder) {
             remove_quietly(&self.lock_path);
@@ -501,8 +531,8 @@ fn lock_takeover(path: &Path) -> Option<LockOwner> {
 /// True when `path` has not been touched for at least [`LOCK_STALE_AFTER`].
 fn lock_file_is_older_than_stale(path: &Path) -> bool {
     let Ok(metadata) = fs::metadata(path) else {
-        // No metadata at all: the holder just released it, so retrying is correct.
-        return true;
+        // A disappeared record has no owner to take over.
+        return false;
     };
     let Ok(modified) = metadata.modified() else {
         return false;
@@ -988,6 +1018,14 @@ mod tests {
             lock_takeover(&lock_path).is_none(),
             "a truncated lockfile is a holder mid-acquire"
         );
+    }
+
+    #[test]
+    fn a_released_lockfile_is_not_a_stale_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = ConfigLock::acquire_at(dir.path()).unwrap();
+        drop(lock);
+        assert!(lock_takeover(&dir.path().join(LOCK_NAME)).is_none());
     }
 
     /// A lockfile that has sat unfinished past the stale window is abandoned, so

@@ -143,7 +143,7 @@ Warnings, which do not block: a keyless non-local, non-subscription route; an `e
 
 `config_transfer::commit_profile_config` takes `crate::config_commit::ConfigLock` and lands the three files as **one all-or-nothing revision**:
 
-- The lock is an app-wide `create_new` lockfile (`.argos-config.lock`) with a heartbeat and a stale takeover, so it serialises writers across processes without a new dependency.
+- An app-wide advisory file lock (`.argos-config.guard`) serializes writes and stale takeovers across processes. The owner record (`.argos-config.lock`) keeps its heartbeat and takeover history.
 - A sibling journal (`.argos-config-journal.json`) records paths and state only — never a body and never key material.
 - Each file is written through `config_commit::write_secure`: a unique sibling temporary file created **owner-only (0600) at creation**, written, flushed, fsynced and atomically renamed. A temporary file never survives an error path.
 - Any single failure rolls the whole batch back, restores the previous files and leaves a recoverable error state. **A failed import writes nothing.**

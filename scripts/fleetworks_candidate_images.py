@@ -186,7 +186,11 @@ def verify(directory, manifest_digest, cli_directory, cli_digest, revision, targ
             "--no-build", "--image-ids", str(id_file),
         ]
         environment = {**os.environ, **overrides}
-        subprocess.run(smoke, cwd=ROOT, env=environment, check=True)
+        disk_smoke = smoke
+        if target == "x86_64-unknown-linux-gnu":
+            dataset = ROOT / "datasets/argos_atlas_strategic_domains_v2.csv"
+            disk_smoke = [*smoke, "--train-legacy-dataset", str(dataset)]
+        subprocess.run(disk_smoke, cwd=ROOT, env=environment, check=True)
         if surreal is not None:
             for storage in ("host-memory", "host-disk", "external"):
                 subprocess.run(

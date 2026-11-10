@@ -102,9 +102,12 @@ class CandidateImageTests(unittest.TestCase):
             candidate.verify(self.directory, "manifest", self.directory, "cli", self.revision, self.target, surreal=surreal)
         [compose, memory, disk, external] = [call.args[0] for call in run.call_args_list]
         self.assertIn("--no-build", compose)
-        self.assertEqual(memory, [*compose, "--storage", "host-memory", "--surreal", str(surreal)])
-        self.assertEqual(disk, [*compose, "--storage", "host-disk", "--surreal", str(surreal)])
-        self.assertEqual(external, [*compose, "--storage", "external", "--surreal", str(surreal)])
+        self.assertEqual(compose[-2:], [
+            "--train-legacy-dataset", str(candidate.ROOT / "datasets/argos_atlas_strategic_domains_v2.csv"),
+        ])
+        self.assertEqual(memory, [*compose[:-2], "--storage", "host-memory", "--surreal", str(surreal)])
+        self.assertEqual(disk, [*compose[:-2], "--storage", "host-disk", "--surreal", str(surreal)])
+        self.assertEqual(external, [*compose[:-2], "--storage", "external", "--surreal", str(surreal)])
 
 
 if __name__ == "__main__":

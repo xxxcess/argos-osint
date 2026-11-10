@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import hashlib
 import http.client
 import json
 import os
@@ -111,6 +112,34 @@ def external_database(directory, environment, surreal, port):
                         database.wait()
 
 
+def exercise_legacy_training(workspace, source, run):
+    # Use Venture's default dataset discovery on both runs.
+    dataset = workspace / "datasets/argos_atlas_strategic_domains_v2.csv"
+    classifier = workspace / "classifier"
+    original = source.read_bytes()
+    previous_model = None
+    # The added empty record changes the hash without changing the training rows.
+    for content in (original, original + b"\r\n"):
+        dataset.write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        result = run("train-legacy", "--activate", timeout=180, stdout=subprocess.PIPE)
+        receipt = json.loads(result.stdout)
+        expected = {
+            "classifier": "natural", "atlas_backend": "rust_bert_zero_shot",
+            "dataset_sha256": digest, "state": "manual_seed_activated",
+            "synthetic_activation_requested": True, "admission_thresholds_enforced": True,
+        }
+        assert all(receipt.get(key) == value for key, value in expected.items()), receipt
+        model = receipt["candidate_model_id"]
+        assert model and model != previous_model and receipt["active_model_id"] == model, receipt
+        active = json.loads((classifier / "active.json").read_bytes())
+        assert (active["model_id"], active["dataset_sha256"], active["previous_model_id"]) == (
+            model, digest, previous_model,
+        ), "Natural activation did not persist the current dataset and prior model"
+        previous_model = model
+        print(f"Verified packaged Natural classifier activation {model} for CSV SHA-256 {digest}")
+
+
 def exercise_atlas(port, token):
     path = "/api/v1/atlas/cycles"
     payload = {"request_id": "compose-smoke"}
@@ -176,7 +205,13 @@ def check_container_images(workspace, environment, expected):
     print(f"Verified exact image IDs for {len(actual)} Compose services")
 
 
-def verify(venture, compose, dev=False, *, no_build=False, image_ids=None, storage="compose-disk", surreal=None):
+def verify(
+    venture, compose, dev=False, *, no_build=False, image_ids=None, storage="compose-disk",
+    surreal=None, train_legacy_dataset=None,
+):
+    atlas = compose.with_name("compose.atlas.yml").is_file()
+    if train_legacy_dataset is not None and not atlas:
+        raise ValueError("Natural training verification requires the Atlas Compose overlay")
     separate_database = storage != "compose-disk"
     api_port, web_port, *db_ports = fixture_ports(separate_database)
     environment = {
@@ -208,13 +243,12 @@ def verify(venture, compose, dev=False, *, no_build=False, image_ids=None, stora
             if database is not None and not external_ready(database, db_ports[0]):
                 raise RuntimeError("External SurrealDB did not stay ready after Venture stop")
 
-        def run(*args, check=True, timeout=60):
+        def run(*args, check=True, timeout=60, stdout=None):
             return subprocess.run(
                 [venture, "--workspace", workspace, *args],
-                env=environment, check=check, timeout=timeout,
+                env=environment, check=check, timeout=timeout, stdout=stdout,
             )
 
-        atlas = compose.with_name("compose.atlas.yml").is_file()
         options = []
         if atlas:
             options.append("--atlas")
@@ -246,6 +280,8 @@ def verify(venture, compose, dev=False, *, no_build=False, image_ids=None, stora
         try:
             token = start()
             result_path, completed = exercise_tools(api_port, token)
+            if train_legacy_dataset is not None:
+                exercise_legacy_training(workspace, train_legacy_dataset, run)
             if atlas:
                 assert (workspace / "storage/rabbitmq").is_dir(), "managed RabbitMQ store is missing"
                 exercise_atlas(api_port, token)
@@ -286,6 +322,7 @@ def main():
     parser.add_argument("--image-ids", type=Path, help="expected Docker image ID for each Compose service as JSON")
     parser.add_argument("--storage", choices=("compose-disk", "host-memory", "host-disk", "external"), default="compose-disk")
     parser.add_argument("--surreal", type=Path, help="pinned SurrealDB executable for host or external storage")
+    parser.add_argument("--train-legacy-dataset", type=Path, help="train and activate Natural twice from a disposable copy of the CSV")
     args = parser.parse_args()
     if args.storage == "compose-disk" and args.surreal is not None:
         parser.error("--surreal requires host or external storage")
@@ -308,6 +345,7 @@ def main():
         args.venture.resolve(strict=True), args.compose.resolve(strict=True), args.dev,
         no_build=args.no_build, image_ids=image_ids, storage=args.storage,
         surreal=args.surreal.resolve(strict=True) if args.surreal else None,
+        train_legacy_dataset=args.train_legacy_dataset.resolve(strict=True) if args.train_legacy_dataset else None,
     )
 
 

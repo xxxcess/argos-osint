@@ -14,6 +14,8 @@ use std::{
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 
+use crate::storage::repo::Repository;
+
 pub(crate) mod atlas_news;
 pub mod contracts;
 pub mod dataset;
@@ -2727,11 +2729,79 @@ fn request_headers(
     headers
 }
 
+const NEWSAPI_PRIMARY_BUCKET: &str = "newsapi";
+const NEWSAPI_FALLBACK_BUCKET: &str = "newsapi:fallback";
+
+struct NewsApiQuota<'a> {
+    repository: &'a Repository,
+    day: String,
+}
+
+impl NewsApiQuota<'_> {
+    async fn reserve(&self, bucket: &str) -> Result<bool> {
+        Ok(crate::storage::atlas::quota_reserve(
+            self.repository.db(),
+            bucket,
+            &self.day,
+            crate::atlas::daily_cap(NEWSAPI_PRIMARY_BUCKET),
+            None,
+        )
+        .await?)
+    }
+
+    async fn reserve_initial_key<'a>(
+        &self,
+        id: &str,
+        chosen: &'a str,
+        primary: &str,
+        fallback: &'a str,
+    ) -> Result<Option<&'a str>> {
+        header_for(id, chosen)?;
+        if chosen != primary {
+            return Ok(self
+                .reserve(NEWSAPI_FALLBACK_BUCKET)
+                .await?
+                .then_some(chosen));
+        }
+        if self.reserve(NEWSAPI_PRIMARY_BUCKET).await? {
+            return Ok(Some(chosen));
+        }
+        if fallback.is_empty() || fallback == primary {
+            return Ok(None);
+        }
+        header_for(id, fallback)?;
+        Ok(self
+            .reserve(NEWSAPI_FALLBACK_BUCKET)
+            .await?
+            .then_some(fallback))
+    }
+}
+
+async fn transfer_newsapi_quota(
+    quota: Option<&NewsApiQuota<'_>>,
+    id: &str,
+    fallback: &str,
+) -> Result<bool> {
+    let Some(quota) = quota else {
+        return Ok(true);
+    };
+    header_for(id, fallback)?;
+    Ok(crate::storage::atlas::quota_reserve(
+        quota.repository.db(),
+        NEWSAPI_FALLBACK_BUCKET,
+        &crate::atlas::utc_day(),
+        crate::atlas::daily_cap(NEWSAPI_PRIMARY_BUCKET),
+        Some((NEWSAPI_PRIMARY_BUCKET, &quota.day)),
+    )
+    .await?)
+}
+
 #[derive(Clone)]
 pub struct Executor {
     client: reqwest::Client,
     global: Arc<Semaphore>,
     hosts: HostSchedule,
+    newsapi_quota: Option<Repository>,
 }
 impl Executor {
     pub fn new() -> Result<Self> {
@@ -2752,8 +2822,16 @@ impl Executor {
             client: shared.0.clone(),
             global: shared.1.clone(),
             hosts: shared.2.clone(),
+            newsapi_quota: None,
         })
     }
+
+    /// Share Atlas' daily account buckets with storage-backed NewsAPI calls.
+    pub(crate) fn with_newsapi_quota(mut self, repository: Option<Repository>) -> Self {
+        self.newsapi_quota = repository;
+        self
+    }
+
     async fn pace_host(&self, host: &str, interval: Duration) {
         let delay = {
             let mut hosts = self.hosts.lock().await;
@@ -3047,6 +3125,38 @@ impl Executor {
         };
         self.pace_host(&host, interval).await;
         let chosen = select_key(&primary_key, &fallback_key);
+        let newsapi_quota = self
+            .newsapi_quota
+            .as_ref()
+            .filter(|_| news_legal::provider(id) == Some(NEWSAPI_PRIMARY_BUCKET))
+            .map(|repository| NewsApiQuota {
+                repository,
+                day: crate::atlas::utc_day(),
+            });
+        let chosen = if let Some(quota) = &newsapi_quota {
+            let Some(chosen) = quota
+                .reserve_initial_key(id, chosen, &primary_key, &fallback_key)
+                .await?
+            else {
+                return Ok(ToolResult {
+                    tool_id: id.into(),
+                    inputs,
+                    status: "rate_limited".into(),
+                    source_url: public_source_url(&req.url),
+                    retrieved_at: Utc::now().to_rfc3339(),
+                    observations: Value::Null,
+                    raw: String::new(),
+                    error: Some("NewsAPI local daily quota is exhausted".into()),
+                    cached: false,
+                    truncated: false,
+                    credits_charged: 0,
+                    credits_reported: None,
+                });
+            };
+            chosen
+        } else {
+            chosen
+        };
         let mut using_primary = !primary_key.is_empty() && chosen == primary_key;
         let mut switched = false;
         let (mut url, mut credential, mut send_credential) = if keyed_provider(id).is_some() {
@@ -3268,9 +3378,12 @@ impl Executor {
                     && fallback_key != primary_key
                     && quota_limited(&result.status, result.error.as_deref())
                 {
+                    note_key_exhausted(&primary_key);
+                    if !transfer_newsapi_quota(newsapi_quota.as_ref(), id, &fallback_key).await? {
+                        return Ok(result);
+                    }
                     switched = true;
                     using_primary = false;
-                    note_key_exhausted(&primary_key);
                     (url, credential, send_credential) = bind_request(id, &req.url, &fallback_key)?;
                     attempts = 0;
                     continue;
@@ -3381,9 +3494,14 @@ impl Executor {
                         && fallback_key != primary_key
                         && quota_limited(&result.status, result.error.as_deref())
                     {
+                        note_key_exhausted(&primary_key);
+                        if !transfer_newsapi_quota(newsapi_quota.as_ref(), id, &fallback_key)
+                            .await?
+                        {
+                            return Ok(result);
+                        }
                         switched = true;
                         using_primary = false;
-                        note_key_exhausted(&primary_key);
                         (url, credential, send_credential) =
                             bind_request(id, &req.url, &fallback_key)?;
                         attempts = 0;

@@ -51,7 +51,7 @@ Status: in implementation
 - [ ] Complete service boundaries. Atlas, NLP and classifier roles are wired. The private Brain role serves retained actor, topology and Intel brief HTTP operations. Separate brief execution and live progress, model execution and tool execution remain in scope.
 - [x] Admit Focus Brief jobs, runnable tasks, captured inputs and the retained run fence in one transaction before splitting the worker.
 - [x] Introduce the Atlas RabbitMQ outbox and durable dependency, cancellation and completion fences. Expansion to the remaining service pools is pending.
-- [ ] Centralize provider quota and cooldown admission. Atlas daily collection slots use atomic shared reservations. Standalone NewsAPI admission and shared model/account RPM and cooldowns remain in scope.
+- [ ] Centralize provider quota and cooldown admission. Atlas daily collection and storage-backed NewsAPI tools use atomic shared reservations. Shared model/account RPM and cooldowns remain in scope.
 Acceptance: retained pipeline fixture completes across processes; duplicate delivery cannot duplicate committed effects.
 
 ### Phase 5 — Venture, clients and Compose
@@ -102,4 +102,4 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
 
 ## Next Step
-Verify the packaged stack after the SurrealDB entrypoint fix and verify the new Brain relay and Atlas quota contracts on the selected hosted revision. Continue extracting retained brief, model, and tool execution before retiring Recon. Advance terminal parity and release verification while keeping maintained guidance aligned.
+Verify both packaged Compose architectures on the selected hosted revision. Make retained brief publication replayable before splitting the brief worker. Continue extracting model and tool execution before retiring Recon. Advance terminal parity and release verification while keeping maintained guidance aligned.

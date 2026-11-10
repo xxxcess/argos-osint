@@ -59,9 +59,12 @@ The full service cutover remains open. In particular, Brain and Intel integratio
 - The shared scope planner has six passing offline cases, including 28 path cases. The hosted workflow owns the real quota reservation test. Nine targeted native tests and 19 service-host/API unit tests passed locally. Local Compose configuration passed for disk, external and Atlas profiles. Packaged and real datastore acceptance for this continuation use the hosted run.
 - Updated the README, deployment, active wiki, diagrams, agent guidance and current plan. The historical records remain available as evidence.
 
-- Intel macOS native clients and real Rust-BERT inference passed on `43e2725`. [Hosted run](https://github.com/xxxcess/argos-osint/actions/runs/42778990451)
+- The required aggregate passed on `43e2725`. It included native Linux and Intel macOS, real Intel Rust-BERT, ARM64 server and private Brain network checks, the quota concurrency contract, native RabbitMQ dispatch and packaged ARM64 Compose. [Hosted run](https://github.com/xxxcess/argos-osint/actions/runs/42778990451)
 - Moved the SurrealDB release version and four archive pins to the maintained harness manifest. All four offline provenance and resolver tests passed. This change still needs hosted coverage.
 - Reconciled OpenCode role and verification guidance with its existing policy. All 22 local policy tests passed with no skips. The prior five failures no longer reproduce.
+- Brief admission now commits the job, runnable tasks, captured inputs and retained run fence together. All five brief storage tests passed against the pinned SurrealDB 3.3.4 disk server. The new fixture forced a rollback and verified retry, captured inputs, reload idempotency and stale lease rejection. Dedicated worker and replay of retained projections remain open.
+- Storage-backed NewsAPI tools now reserve the same daily quota as Atlas. Eleven NewsAPI/CourtListener adapter tests passed, including the new real-storage quota and loopback provider fixture. The two live-provider tests stayed ignored. The local embedded build stopped in RocksDB's bindgen setup because Clang could not find `stdbool.h`. The passing storage and adapter results used server mode.
+- The Compose scope now schedules the same packaged Venture smoke on native Linux AMD64 alongside ARM64. Offline workflow and aggregate fixtures passed. The first hosted AMD64 result is pending.
 
 ## Retention
 

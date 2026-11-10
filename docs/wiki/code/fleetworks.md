@@ -63,13 +63,13 @@ The default `combined` role supports the legacy local API and its worker pools. 
 | Area | Current branch |
 | --- | --- |
 | Venture and workspace | Workspace initialization, explicit key/default import, owned lifecycle and client launch |
-| Atlas | Durable submission, worker dispatch, cancellation, retry and completed-run replay. The overlay serves NLP and Rust-BERT separately. Workers share a daily news fetch counter in SurrealDB. |
+| Atlas | Durable submission, worker dispatch, cancellation, retry and completed-run replay. The overlay serves NLP and Rust-BERT separately. Storage-backed NewsAPI tools share Atlas's daily NewsAPI quota in SurrealDB. |
 | Brain and Intel | Private Brain owns retained actor, article brief, Related and topology HTTP operations. Background brief execution and live streams still use the existing worker and gateway. |
 | Tools, Models and Profile | Catalog, role-default and workspace/health reads through the client suite. Tool execution and full configuration/export parity remain open. |
 | Interactive terminal | Line-oriented Jobs and Logs session with details, retry and cancellation. Other clients expose commands. Full legacy TUI parity remains open. |
 | Service cutover | Further domain extraction, cross-worker model admission and cooldowns, packaged release verification and Recon retirement remain open. |
 
-The [hosted checkpoint at `2934b1f`](https://github.com/xxxcess/argos-osint/actions/runs/42763558953) passed native Linux and Intel macOS clients, real Intel Rust-BERT inference, ARM64 server verification, native RabbitMQ dispatch and Compose configuration checks. The packaged Compose smoke failed during managed database startup at that revision. The BusyBox entrypoint fix landed in `fea751a`, and [ARM64 packaged Compose passed at that revision](https://github.com/xxxcess/argos-osint/actions/runs/42777729999). Consult the [branch runs](https://github.com/xxxcess/argos-osint/actions?query=branch%3Afeat%2Fatlas-zero-shot) for the result on a newer revision. The [implementation plan](../../../.planning/2026-11-09-fleetworks-overhaul/task_plan.md) tracks the remaining acceptance work.
+The [integrated checkpoint at `43e2725`](https://github.com/xxxcess/argos-osint/actions/runs/42778990451) passed native Linux and Intel macOS clients, real Intel Rust-BERT inference, ARM64 server verification, the private Brain relay, the Atlas quota contract, native RabbitMQ dispatch and ARM64 packaged Compose. Consult the [branch runs](https://github.com/xxxcess/argos-osint/actions?query=branch%3Afeat%2Fatlas-zero-shot) for results on newer revisions, including the AMD64 packaged scope. The [implementation plan](../../../.planning/2026-11-09-fleetworks-overhaul/task_plan.md) tracks the remaining acceptance work.
 
 ## Verification
 

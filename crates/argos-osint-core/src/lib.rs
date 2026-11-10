@@ -19,6 +19,13 @@ compile_error!(
     "argos-osint-core needs the `embedded` or `server` feature: SurrealDB is its only storage"
 );
 
+#[cfg(all(test, feature = "server"))]
+extern crate self as argos_osint_core;
+
+#[cfg(all(test, feature = "server"))]
+#[path = "../tests/support/mod.rs"]
+mod storage_fixture;
+
 pub mod actor_catalog;
 pub mod async_bridge;
 pub mod atlas;

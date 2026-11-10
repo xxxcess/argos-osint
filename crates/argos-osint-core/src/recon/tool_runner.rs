@@ -327,7 +327,7 @@ impl ToolRunner {
         };
 
         // 3. Check enabled status
-        {
+        let newsapi_quota = {
             let store = ReconStore::open(&self.db_path).await?;
             if !store.tool_enabled(canonical).await? {
                 self.note_failure(
@@ -340,7 +340,12 @@ impl ToolRunner {
                 );
                 return Err(anyhow!("tool disabled in catalog: {canonical}"));
             }
-        }
+            if osint::NEWS_TOOLS.contains(&canonical) {
+                store.repository().cloned()
+            } else {
+                None
+            }
+        };
 
         // 4. Reserve credits if needed
         let limits = &self.settings.recon_limits;
@@ -385,7 +390,7 @@ impl ToolRunner {
             }
         };
 
-        let executor = crate::osint::Executor::new()?;
+        let executor = crate::osint::Executor::new()?.with_newsapi_quota(newsapi_quota);
         let ua = if self.settings.osint_user_agent.trim().is_empty() {
             None
         } else {
@@ -485,22 +490,7 @@ impl ToolRunner {
             }
         }
 
-        // 8. NewsAPI quota charge
-        if !result.cached && canonical.starts_with("newsapi_") {
-            // One store: the legacy `Store` or the repository, never both.
-            if let Ok(store) = ReconStore::open(&self.db_path).await {
-                let bucket = if osint::key_exhausted(&self.keys.newsapi)
-                    && !self.keys.newsapi_fallback.trim().is_empty()
-                {
-                    "newsapi:fallback"
-                } else {
-                    "newsapi"
-                };
-                let _ = store.charge_quota(bucket).await;
-            }
-        }
-
-        // 9. Notify in-flight waiters
+        // 8. Notify in-flight waiters
         if let Some(sender) = tx {
             let _ = sender.send(Some(result.clone()));
         }

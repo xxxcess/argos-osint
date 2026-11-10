@@ -236,7 +236,7 @@ Queue residence is recorded separately from retry backoff and starts no network/
 
 ## Atlas news provider admission
 
-Atlas workers reserve a logical fetch in a shared SurrealDB counter for the provider, configured account slot and UTC day. A rate or quota response can move that reservation to a configured fallback when its bucket has capacity. Transport retries and same-host redirects stay within the logical reservation. An interrupted request keeps its reservation because the remote provider may have received it. This gate covers Atlas collection. The separate NewsAPI tool still accounts for its use through the legacy path. Model cooldowns and concurrent-account admission use the process-local policy above. See [Atlas execution](../code/architecture.md#atlas).
+Atlas workers reserve a logical fetch in a shared SurrealDB counter for the provider, configured account slot and UTC day. Storage-backed NewsAPI tools share the same NewsAPI counters. A rate or quota response can move a reservation to a configured fallback when its bucket has capacity. Transport retries and same-host redirects stay within the logical reservation. An interrupted request keeps its reservation because the remote provider may have received it. Direct tool execution without a repository uses the existing process-local behavior. Model cooldowns and concurrent-account admission use the process-local policy above. See [Atlas execution](../code/architecture.md#atlas).
 
 ## Canonical Jev decisions
 

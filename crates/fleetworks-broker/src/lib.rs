@@ -273,9 +273,7 @@ fn validate_endpoint(endpoint: &str) -> Result<()> {
     if !matches!(parsed.scheme(), "amqp" | "amqps")
         || parsed.host_str().is_none()
         || parsed.username().is_empty()
-        || parsed
-            .password()
-            .is_none_or(|password| password.is_empty())
+        || parsed.password().is_none_or(|password| password.is_empty())
         || parsed.fragment().is_some()
         || endpoint.chars().any(char::is_whitespace)
         || endpoint.chars().any(char::is_control)

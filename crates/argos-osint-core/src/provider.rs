@@ -1782,6 +1782,16 @@ pub async fn complete(
     secret: &ProviderSecret,
     messages: &[ChatMessage],
     tools: &[ToolSpec],
+    on_delta: impl FnMut(&str),
+) -> Result<Completion> {
+    crate::provider_admission::direct(secret, complete_inner(secret, messages, tools, on_delta))
+        .await?
+}
+
+async fn complete_inner(
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    tools: &[ToolSpec],
     mut on_delta: impl FnMut(&str),
 ) -> Result<Completion> {
     if effective_kind(secret) == "openai-chatgpt" {
@@ -1857,7 +1867,7 @@ pub async fn complete_one(
     messages: &[ChatMessage],
     tools: &[ToolSpec],
 ) -> Result<Completion> {
-    complete_once(secret, messages, tools).await
+    crate::provider_admission::direct(secret, complete_once(secret, messages, tools)).await?
 }
 
 /// One Decisions answer. `choice` for choice questions, `score` for score questions,
@@ -1989,6 +1999,16 @@ pub async fn decide(
 }
 
 pub(crate) async fn decide_with_dispatch(
+    secret: &ProviderSecret,
+    state: &Value,
+    questions: &Value,
+    on_dispatch: impl FnOnce(),
+) -> Result<DecisionsResponse> {
+    crate::provider_admission::direct(secret, decide_inner(secret, state, questions, on_dispatch))
+        .await?
+}
+
+async fn decide_inner(
     secret: &ProviderSecret,
     state: &Value,
     questions: &Value,
@@ -2305,6 +2325,10 @@ pub async fn poll_device(endpoints: &DeviceEndpoints, device_code: &str) -> Resu
 }
 
 pub async fn transcribe(secret: &ProviderSecret, wav: &[u8]) -> Result<String> {
+    crate::provider_admission::direct(secret, transcribe_inner(secret, wav)).await?
+}
+
+async fn transcribe_inner(secret: &ProviderSecret, wav: &[u8]) -> Result<String> {
     let client = http()?;
     let model = secret
         .stt_model

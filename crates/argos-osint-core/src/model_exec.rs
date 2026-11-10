@@ -687,7 +687,11 @@ pub fn resolve_operation_routes(
                 }
             })
             .unwrap_or_else(|| "default".into());
-        let admission_key = format!("{}:{}:{}", provider_name, host, account_name);
+        let admission_key = if crate::provider_admission::shared() {
+            crate::provider_admission::account_key(&secret, &account_name)
+        } else {
+            format!("{}:{}:{}", provider_name, host, account_name)
+        };
 
         let missing_key = secret
             .api_key

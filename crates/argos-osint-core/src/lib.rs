@@ -90,6 +90,7 @@ pub mod pipeline;
 pub mod profile_stats;
 pub mod provider;
 pub mod provider_adapters;
+mod provider_admission;
 pub mod provider_attempt;
 pub mod provider_capabilities;
 pub mod provider_chain;

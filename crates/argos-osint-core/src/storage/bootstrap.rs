@@ -29,8 +29,8 @@ use super::tx::{run_tx, RetryPolicy, TxError};
 /// array, `admitted_at`, the `categories.*` membership index and the two
 /// article full-text indexes — all additive `IF NOT EXISTS` definitions, so
 /// opening a v1 database upgrades it in place without a wipe. v4 adds the
-/// durable dispatch outbox for opt-in worker pools.
-pub const SCHEMA_VERSION: i64 = 5;
+/// durable dispatch outbox for opt-in worker pools. v6 adds leased model account admission.
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Module schemas in apply order: counters before the outbox; the graph
 /// before lifecycle (which indexes `brain_graph_node`); Atlas before its
@@ -38,7 +38,7 @@ pub const SCHEMA_VERSION: i64 = 5;
 /// before refresh. The event logs (`argos_event`, `investigation_event`)
 /// stand alone; telemetry writes use `profile_view`'s tables, with
 /// `telemetry_meta` after them.
-pub fn schemas() -> [(&'static str, &'static str); 47] {
+pub fn schemas() -> [(&'static str, &'static str); 48] {
     [
         ("counters", super::counters::SCHEMA),
         ("outbox", super::outbox::SCHEMA),
@@ -88,6 +88,7 @@ pub fn schemas() -> [(&'static str, &'static str); 47] {
         ),
         ("pipeline_exec", super::pipeline_exec::SCHEMA),
         ("profile_view", super::profile_view::SCHEMA),
+        ("provider_account", super::provider_account::SCHEMA),
         ("provider_pacer", super::provider_pacer::SCHEMA),
         ("telemetry", super::telemetry::SCHEMA),
         ("investigation", super::investigation::SCHEMA),

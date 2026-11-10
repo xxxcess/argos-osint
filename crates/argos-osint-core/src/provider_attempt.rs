@@ -343,6 +343,41 @@ pub async fn attempt_spec(
     policy: &RequestPolicy,
     spec: AttemptSpec<'_>,
 ) -> AttemptReport {
+    let started = Instant::now();
+    match crate::provider_admission::direct(
+        secret,
+        Box::pin(attempt_spec_inner(
+            secret, messages, transport, deadlines, policy, spec,
+        )),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(failure) => AttemptReport {
+            effective: None,
+            transport,
+            endpoint: crate::provider_diag::sanitize_endpoint(&secret.base_url),
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            outcome: Err(failure.with_context(
+                &provider::effective_kind(secret),
+                &secret.model,
+                &secret.base_url,
+                transport.as_str(),
+            )),
+            policy_diagnostics: Vec::new(),
+            recovery: None,
+        },
+    }
+}
+
+async fn attempt_spec_inner(
+    secret: &ProviderSecret,
+    messages: &[ChatMessage],
+    transport: Transport,
+    deadlines: Deadlines,
+    policy: &RequestPolicy,
+    spec: AttemptSpec<'_>,
+) -> AttemptReport {
     let AttemptSpec {
         observer,
         progress,

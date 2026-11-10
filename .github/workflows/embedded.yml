@@ -1,0 +1,66 @@
+name: Embedded compatibility
+
+# Four platform builds of the compatibility suite. Merges into main run them.
+# Any other branch runs them only by dispatch:
+#   gh workflow run embedded.yml --ref <branch>
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: embedded-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # No debuginfo in CI: smaller target dirs, faster codegen, and cc builds librocksdb without -g.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+permissions:
+  contents: read
+
+jobs:
+  embedded:
+    name: ${{ matrix.platform.name }} / embedded
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: Linux x86_64, os: ubuntu-24.04 }
+          - { name: Linux aarch64, os: ubuntu-24.04-arm }
+          - { name: macOS arm64, os: macos-15 }
+          - { name: macOS Intel, os: macos-15-intel }
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          lfs: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: embedded
+          workspaces: . -> target/agents
+          cache-on-failure: true
+      - name: No SQLite or LanceDB in the dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          for c in rusqlite lancedb; do
+            if cargo tree --workspace --all-features -e normal,build -i "$c" --locked >/dev/null 2>&1; then
+              echo "::error::$c is still in the dependency graph"; exit 1
+            fi
+          done
+      - name: Install libclang (RocksDB bindgen)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - name: Local matrix leg (embedded)
+        run: bash scripts/local_matrix.sh --storage embedded

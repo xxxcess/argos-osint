@@ -1,30 +1,6 @@
 name: Intel web
 
 on:
-  push:
-    branches: [main]
-    paths: &web_paths
-      - 'apps/web-desktop/**'
-      - 'packages/**'
-      - 'tests/web/**'
-      - 'crates/argos-osint-bin/src/stack/**'
-      - 'scripts/fixtures/atlas_bert'
-      - 'scripts/test_web_stack.py'
-      - 'scripts/serve_web.mjs'
-      - 'scripts/check_web_build.mjs'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
-      - '.node-version'
-      - '.nvmrc'
-      - 'tsconfig.json'
-      - 'eslint.config.mjs'
-      - 'playwright.config.ts'
-      - 'vitest*.ts'
-      - 'vitest*.tsx'
-      - '.github/workflows/intel-web.yml'
-  pull_request:
-    paths: *web_paths
   workflow_dispatch:
   workflow_call:
     inputs:

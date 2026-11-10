@@ -479,7 +479,7 @@ jobs:
     uses: ./.github/workflows/atlas-bert.yml
     with:
       head: ${{ github.event.pull_request.head.sha || github.sha }}
-      intel_only: true
+      intel_only: false
       intel_runtime: true
 
   web:

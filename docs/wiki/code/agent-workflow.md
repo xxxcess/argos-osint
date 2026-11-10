@@ -42,7 +42,7 @@ Record actual commands, exits, executed/skipped counts and limitations. Queued/i
 
 Bind performance evidence to the relevant corpus/model, workload, binary and environment. Do not repeat measurements or hash large unrelated artifacts merely because prose or another independent file changed. Capture affected UI states early; reuse inspected evidence only when relevant inputs match.
 
-Select Fleetworks checks with the [shared scope planner](ci.md#fleetworksyml--scoped-branch-checks). Run affected local checks in the integration checkout and record selected hosted results separately. Use an isolated pinned server or broker fixture for an authorized targeted network contract. Full server, all-platform and mutation matrices run in hosted CI.
+Select Fleetworks checks with the [shared scope planner](ci.md#fleetworksyml--scoped-branch-checks). Run affected local checks in the integration checkout and record selected hosted results separately. Use an isolated pinned server or broker fixture for an authorized targeted network contract. Embedded compatibility runs on merges to `main` and can be dispatched on a branch. Dispatch mutation separately; do not run it locally.
 
 For changes to embedded or compatibility behavior, run the applicable [native embedded gate](contributing.md#full-local-embedded-gate--github-ci-monitoring) after the focused check passes. Leave storage-mode variables unset so its required storage phase runs once. Inspect companion target contracts because some native tests also execute in the workspace phase.
 

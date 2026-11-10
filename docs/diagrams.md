@@ -31,7 +31,7 @@ Open a file under `docs/diagrams/` in a browser for the HTML page. Matching `.sv
 | Network storage selections | Architecture | [persistence.html](diagrams/persistence.html) | [persistence.svg](diagrams/persistence.svg) |
 | Durable jobs and terminal operations | State machine | [jobs-lifecycle.html](diagrams/jobs-lifecycle.html) | [jobs-lifecycle.svg](diagrams/jobs-lifecycle.svg) |
 | Fleetworks documentation routes | Hierarchy | [wiki-navigation.html](diagrams/wiki-navigation.html) | [wiki-navigation.svg](diagrams/wiki-navigation.svg) |
-| Scoped CI verification | Data flow | [ci-scopes.html](diagrams/ci-scopes.html) | [ci-scopes.svg](diagrams/ci-scopes.svg) |
+| Fleetworks development scopes | Data flow | [ci-scopes.html](diagrams/ci-scopes.html) | [ci-scopes.svg](diagrams/ci-scopes.svg) |
 | Agent handoffs | Process | [agent-team.html](diagrams/agent-team.html) | [agent-team.svg](diagrams/agent-team.svg) |
 
 The catalog covers current Fleetworks contracts. Earlier design figures and dated verification evidence are collected in [the archive](archive/index.md).

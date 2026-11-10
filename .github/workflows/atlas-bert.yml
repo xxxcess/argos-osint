@@ -1,10 +1,6 @@
 name: Atlas BERT worker checks
 
 on:
-  pull_request:
-    paths:
-      - 'tools/atlas-bert/**'
-      - '.github/workflows/atlas-bert.yml'
   workflow_dispatch:
     inputs:
       intel_runtime:
@@ -57,7 +53,7 @@ jobs:
         # doc-only checks the Rust API without linking LibTorch or loading a model.
         run: cargo check --locked --manifest-path tools/atlas-bert/Cargo.toml --all-targets --features rust-bert/doc-only
   macos-intel:
-    # Fleetworks calls the full runtime on PRs. The direct PR run checks Linux types only.
+    # A direct dispatch always reaches this job. Fleetworks asks for the runtime build.
     if: ${{ github.event_name != 'pull_request' || inputs.intel_only || inputs.intel_runtime }}
     runs-on: macos-15-intel
     timeout-minutes: 35

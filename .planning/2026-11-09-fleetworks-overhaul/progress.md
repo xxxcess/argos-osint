@@ -128,6 +128,8 @@ The full embedded parity suite and registry publication remain open. Docker is n
 
 Two successful hosted Fleetworks runs are comparable. The run at `af20981` took about 16 minutes. The run at `37b9250` took about 15 minutes. Native client jobs stayed under 3 minutes on both. The ARM64 server job was about 11 minutes on both. Compose AMD64 was about 12 minutes, then about 15 minutes. The web job was about 11 minutes, then about 12 minutes. The docs-only run at `9273a02` finished in under a minute and is not part of that comparison. Screenshot review of the retained terminal and a measurement of the current tree are still open.
 
+The first full embedded suite on this tree stopped in Clippy. `fleetworks-broker` rejected a negated password check. The same check now uses `is_none_or`, and the broker tests and crate Clippy passed. The suite needs to be run again.
+
 ## Retention
 
 This already-tracked plan records the shared cutover and its remaining acceptance work. Keep raw logs, fixtures and intermediate notes out of Git.

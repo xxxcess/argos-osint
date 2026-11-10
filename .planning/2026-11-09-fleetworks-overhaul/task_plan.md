@@ -113,7 +113,7 @@ Root agent owns integration, plan summaries and shared build cache. Delegate dis
 - Preserve Intel brief generation and shared functionality while removing Recon research.
 
 ## Errors Encountered
-TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation.
+TinyFish CLI was unavailable during earlier research; used official RabbitMQ/Lapin pages through web fallback. GitHub connector omitted duration fields; read-only gh API supplied timestamps. No new execution failures during plan creation. The embedded suite on this tree stopped once in Clippy on a negated broker password check; that check was simplified and the crate was rechecked.
 
 ## Follow-up work
 - Rerun the full embedded parity suite. The earlier local run was interrupted.

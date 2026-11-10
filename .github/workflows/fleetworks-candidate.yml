@@ -1,0 +1,46 @@
+name: Fleetworks release candidates
+
+on:
+  push:
+    branches: [feat/atlas-zero-shot]
+    paths:
+      - '.github/workflows/fleetworks-candidate.yml'
+      - '.github/workflows/fleetworks-candidate-target.yml'
+      - 'scripts/fleetworks_candidate*.py'
+      - 'scripts/test_fleetworks_candidate*.py'
+      - 'scripts/agent_cargo.py'
+      - 'scripts/release_check.mjs'
+      - 'deploy/Dockerfile*'
+      - 'deploy/compose*.yml'
+      - 'deploy/*.sh'
+      - 'deploy/check-web.mjs'
+      - 'deploy/verify.py'
+  workflow_dispatch:
+    inputs:
+      head:
+        description: Optional exact commit expected at the selected ref
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+    uses: ./.github/workflows/fleetworks-candidate-target.yml
+    with:
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      expected-head: ${{ inputs.head || github.sha }}

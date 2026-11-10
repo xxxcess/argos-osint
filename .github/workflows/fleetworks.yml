@@ -2,10 +2,24 @@ name: Fleetworks
 
 on:
   push:
-    branches: [feat/atlas-zero-shot]
+    branches: [main, feat/atlas-zero-shot]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: '17 6 * * *'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Run every hosted check or compare an exact base
+        type: choice
+        options: [full, pr]
+        default: full
+      base:
+        description: Exact comparison commit for pr mode
+        type: string
+      head:
+        description: Expected checked-out commit for an exact dispatch
+        type: string
 
 permissions:
   contents: read
@@ -31,23 +45,56 @@ jobs:
       server: ${{ steps.plan.outputs.server }}
       compose: ${{ steps.plan.outputs.compose }}
       broker: ${{ steps.plan.outputs.broker }}
+      storage: ${{ steps.plan.outputs.storage }}
       bert: ${{ steps.plan.outputs.bert }}
+      web: ${{ steps.plan.outputs.web }}
+      web_dev: ${{ steps.plan.outputs.web_dev }}
+      full: ${{ steps.plan.outputs.full }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.FLEETWORKS_HEAD }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Check documentation and repository policy
+        run: |
+          python3 scripts/fleetworks_doc_links.py
+          node scripts/release_check.mjs versions
+          node --test .opencode/tests/*.test.mjs
       - name: Classify changes at the event head
         id: plan
         env:
           FLEETWORKS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          DISPATCH_MODE: ${{ inputs.mode }}
+          DISPATCH_BASE: ${{ inputs.base }}
+          DISPATCH_HEAD: ${{ inputs.head }}
         shell: bash
         run: |
           set -euo pipefail
-          python3 -B -m unittest discover -s scripts -p test_fleetworks_verify.py
-          python3 scripts/fleetworks_verify.py plan \
-            --event "$GITHUB_EVENT_NAME" --base "$FLEETWORKS_BASE" \
+          if [[ -n "$DISPATCH_HEAD" && "$DISPATCH_HEAD" != "$FLEETWORKS_HEAD" ]]; then
+            echo '::error::Dispatch ref moved away from the requested revision'
+            exit 1
+          fi
+          python3 -B -m unittest discover -s scripts -p 'test_fleetworks_*.py'
+          mode=pr
+          event="$GITHUB_EVENT_NAME"
+          base="$FLEETWORKS_BASE"
+          if [[ "$event" == schedule || ( "$event" == workflow_dispatch && "$DISPATCH_MODE" != pr ) ]]; then
+            mode=full
+          elif [[ "$event" == workflow_dispatch ]]; then
+            if [[ ! "$DISPATCH_BASE" =~ ^[0-9a-f]{40}$ || "$DISPATCH_BASE" =~ ^0+$ ]]; then
+              echo '::error::Scoped dispatch requires an exact comparison SHA'
+              exit 1
+            fi
+            event=pull_request
+            base="$DISPATCH_BASE"
+          fi
+          python3 scripts/fleetworks_verify.py "$mode" \
+            --event "$event" --base "$base" \
             --head "$FLEETWORKS_HEAD" --github-output "$GITHUB_OUTPUT"
 
   native:
@@ -60,10 +107,16 @@ jobs:
         include:
           - runner: ubuntu-24.04
             host: x86_64-unknown-linux-gnu
+            machine: x86_64
             executable: 'ELF 64-bit.*x86-64'
           - runner: macos-15-intel
             host: x86_64-apple-darwin
+            machine: x86_64
             executable: 'Mach-O 64-bit.*x86_64'
+          - runner: macos-15
+            host: aarch64-apple-darwin
+            machine: arm64
+            executable: 'Mach-O 64-bit.*arm64'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
@@ -77,17 +130,20 @@ jobs:
       - name: Check native host and run scoped tests
         env:
           EXPECTED_HOST: ${{ matrix.host }}
+          EXPECTED_MACHINE: ${{ matrix.machine }}
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
-          test "$(uname -m)" = x86_64
+          test "$(uname -m)" = "$EXPECTED_MACHINE"
           test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_HOST"
           rustc --version | grep -q '^rustc 1\.95\.0 '
           packages=(-p fleetworks-workspace -p fleetworks-contracts -p fleetworks-cli -p fleetworks-venture)
           cargo fmt "${packages[@]}" -- --check
-          python3 scripts/agent_cargo.py test --locked "${packages[@]}"
-          python3 scripts/agent_cargo.py build --locked --bins -p fleetworks-cli -p fleetworks-venture
+          python3 scripts/fleetworks_verify.py timed --phase native-test -- \
+            python3 scripts/agent_cargo.py test --timings --locked "${packages[@]}"
+          python3 scripts/fleetworks_verify.py timed --phase native-build -- \
+            python3 scripts/agent_cargo.py build --timings --locked --bins -p fleetworks-cli -p fleetworks-venture
       - name: Smoke the actual native executables
         env:
           EXECUTABLE_PATTERN: ${{ matrix.executable }}
@@ -104,6 +160,16 @@ jobs:
           "$bins/venture" --workspace "$workspace" init
           "$bins/venture" --workspace "$workspace" client profile workspace --json |
             python3 -c 'import json, sys; assert json.load(sys.stdin) == {"workspace": sys.argv[1]}' "$workspace"
+      - name: Retain native phase timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fleetworks-native-timings-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/fleetworks-timings.jsonl
+            target/agents/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
 
   server:
     name: Server build / Linux ARM64
@@ -129,11 +195,14 @@ jobs:
           rustc --version | grep -q '^rustc 1\.95\.0 '
           cargo fmt --all -- --check
           features=(--no-default-features --features server,nlp,classifier)
-          python3 scripts/agent_cargo.py check --locked -p argos-api-host "${features[@]}"
-          python3 scripts/agent_cargo.py build --locked -p argos-api-host --bin argos-api-host "${features[@]}"
+          python3 scripts/fleetworks_verify.py timed --phase server-check -- \
+            python3 scripts/agent_cargo.py check --timings --locked -p argos-api-host "${features[@]}"
+          python3 scripts/fleetworks_verify.py timed --phase server-build -- \
+            python3 scripts/agent_cargo.py build --timings --locked -p argos-api-host --bin argos-api-host "${features[@]}"
           file target/agents/debug/argos-api-host | grep -Ei 'ELF 64-bit.*(aarch64|ARM aarch64)'
-          python3 scripts/agent_cargo.py test --locked -p argos-api-host -p argos-osint-api \
-            "${features[@]}" --bin argos-api-host --lib
+          python3 scripts/fleetworks_verify.py timed --phase server-test -- \
+            python3 scripts/agent_cargo.py test --timings --locked -p argos-api-host -p argos-osint-api \
+              "${features[@]}" --bin argos-api-host --lib
       - name: Exercise bootstrap and network service roles on loopback
         id: surreal
         shell: bash
@@ -142,11 +211,34 @@ jobs:
           binary="$(python3 scripts/test_surreal.py --mode server --fetch-only |
             sed -n 's/^test-surreal: server binary //p')"
           test -x "$binary"
-          python3 scripts/fleetworks_network_smoke.py \
-            --host target/agents/debug/argos-api-host --surreal "$binary"
+          python3 scripts/fleetworks_verify.py timed --phase network-smoke -- \
+            python3 scripts/fleetworks_network_smoke.py --host target/agents/debug/argos-api-host --surreal "$binary"
           printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
+      - name: Run pinned disk storage contracts
+        if: needs.scope.outputs.full == 'true'
+        env:
+          SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
+        run: |
+          python3 scripts/fleetworks_verify.py timed --phase storage-contracts -- \
+            python3 scripts/test_surreal.py --mode server --bin "$SURREAL_BIN" --timings
+      - name: Test affected storage and brief recovery contracts
+        if: needs.scope.outputs.storage == 'true' && needs.scope.outputs.full != 'true'
+        env:
+          ARGOS_SURREAL_MODE: server
+          ARGOS_SURREAL_REQUIRED: "1"
+          ARGOS_SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset SURREAL_USER SURREAL_PASS
+          test -x "$ARGOS_SURREAL_BIN"
+          python3 scripts/fleetworks_verify.py timed --phase storage-affected -- \
+            python3 scripts/agent_cargo.py test --timings --locked -p argos-osint-core \
+              --no-default-features --features server,nlp,classifier \
+              --test storage_contracts --test storage_jobs --test storage_brief --test storage_brief_publish \
+              --test storage_provider_pacer --test storage_credits
       - name: Test shared Atlas provider quota reservations
-        if: needs.scope.outputs.broker == 'true'
+        if: needs.scope.outputs.broker == 'true' && needs.scope.outputs.full != 'true'
         env:
           ARGOS_SURREAL_MODE: server
           ARGOS_SURREAL_REQUIRED: "1"
@@ -221,8 +313,9 @@ jobs:
           printf 'amqp://fleetworks:%s@%s/fleetworks\n' \
             "$(<"$broker_tmp/broker-password")" "$address" > "$broker_tmp/amqp-url"
           export FLEETWORKS_BROKER_URL_FILE="$broker_tmp/amqp-url"
-          python3 scripts/fleetworks_atlas_smoke.py \
-            --host target/agents/debug/argos-api-host --surreal "$SURREAL_BIN"
+          python3 scripts/fleetworks_verify.py timed --phase broker-smoke -- \
+            python3 scripts/fleetworks_atlas_smoke.py \
+              --host target/agents/debug/argos-api-host --surreal "$SURREAL_BIN"
       - name: Validate disk and external Compose configurations
         if: hashFiles('deploy/compose.yml') != ''
         shell: bash
@@ -232,34 +325,49 @@ jobs:
           export FLEETWORKS_UID="$(id -u)" FLEETWORKS_GID="$(id -g)"
           umask 077
           mkdir -p "$FLEETWORKS_HOST_WORKSPACE"/{secrets,storage/surrealdb}
-          for secret in api-token brain-token storage-password storage-root-password; do
+          for secret in api-token brain-token tools-token storage-password storage-root-password; do
             printf '%064d\n' 0 > "$FLEETWORKS_HOST_WORKSPACE/secrets/$secret"
           done
           docker compose -f deploy/compose.yml --profile disk config --quiet
           FLEETWORKS_STORAGE_URL=ws://host.docker.internal:8000 docker compose -f deploy/compose.yml config --quiet
+          if [[ -f deploy/compose.dev.yml ]]; then
+            docker compose -f deploy/compose.yml -f deploy/compose.dev.yml --profile disk config --quiet
+          fi
           if [[ -f deploy/compose.atlas.yml ]]; then
             mkdir -p "$FLEETWORKS_HOST_WORKSPACE/storage/rabbitmq"
             printf '%064d\n' 0 > "$FLEETWORKS_HOST_WORKSPACE/secrets/broker-password"
             docker compose -f deploy/compose.yml -f deploy/compose.atlas.yml --profile disk config --quiet
           fi
-      - name: Exercise packaged Compose through Venture
-        if: needs.scope.outputs.compose == 'true'
-        timeout-minutes: 60
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! -f deploy/verify.py ]]; then
-            echo "::error file=deploy/verify.py::Missing selected Compose smoke script"
-            exit 1
-          fi
-          python3 scripts/agent_cargo.py build --locked -p fleetworks-venture --bin venture
-          python3 deploy/verify.py --venture target/agents/debug/venture
+      - name: Retain server phase timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fleetworks-server-timings
+          path: |
+            ${{ runner.temp }}/fleetworks-timings.jsonl
+            target/agents/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
 
-  compose_amd64:
-    name: Packaged Compose / Linux AMD64
+  compose:
+    name: Packaged Compose / ${{ matrix.name }}
     needs: scope
     if: needs.scope.outputs.compose == 'true'
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux AMD64
+            runner: ubuntu-24.04
+            arch: amd64
+            machine: x86_64
+            executable: 'ELF 64-bit.*x86-64'
+          - name: Linux ARM64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+            machine: aarch64
+            executable: 'ELF 64-bit.*(aarch64|ARM aarch64)'
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 65
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -267,24 +375,43 @@ jobs:
           ref: ${{ env.FLEETWORKS_HEAD }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Exercise packaged Compose through native AMD64 Venture
+      - name: Exercise packaged Compose through native Venture
         env:
-          DOCKER_DEFAULT_PLATFORM: linux/amd64
+          DOCKER_DEFAULT_PLATFORM: linux/${{ matrix.arch }}
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+          EXECUTABLE_PATTERN: ${{ matrix.executable }}
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$FLEETWORKS_HEAD"
-          test "$(uname -m)" = x86_64
-          test "$(rustc -vV | sed -n 's/^host: //p')" = x86_64-unknown-linux-gnu
+          test "$(uname -m)" = "$EXPECTED_MACHINE"
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_MACHINE-unknown-linux-gnu"
           rustc --version | grep -q '^rustc 1\.95\.0 '
-          test "$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" = linux/amd64
+          test "$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" = "$DOCKER_DEFAULT_PLATFORM"
           if [[ ! -f deploy/verify.py ]]; then
             echo "::error file=deploy/verify.py::Missing selected Compose smoke script"
             exit 1
           fi
-          python3 scripts/agent_cargo.py build --locked -p fleetworks-venture --bin venture
-          file target/agents/debug/venture | grep -E 'ELF 64-bit.*x86-64'
-          python3 deploy/verify.py --venture target/agents/debug/venture
+          python3 scripts/fleetworks_verify.py timed --phase compose-launcher-build -- \
+            python3 scripts/agent_cargo.py build --timings --locked -p fleetworks-venture --bin venture
+          file target/agents/debug/venture | grep -Ei "$EXECUTABLE_PATTERN"
+          python3 scripts/fleetworks_verify.py timed --phase compose-build-and-smoke -- \
+            python3 deploy/verify.py --venture target/agents/debug/venture
+      - name: Exercise packaged development readiness
+        if: needs.scope.outputs.full == 'true' && matrix.arch == 'amd64'
+        run: |
+          python3 scripts/fleetworks_verify.py timed --phase compose-dev-smoke -- \
+            python3 deploy/verify.py --venture target/agents/debug/venture --dev
+      - name: Retain Compose phase timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fleetworks-compose-timings-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/fleetworks-timings.jsonl
+            target/agents/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
 
   bert:
     name: Atlas BERT runtime / Intel macOS
@@ -296,9 +423,18 @@ jobs:
       intel_only: true
       intel_runtime: true
 
+  web:
+    name: Scoped web
+    needs: scope
+    if: needs.scope.outputs.web == 'true'
+    uses: ./.github/workflows/intel-web.yml
+    with:
+      head: ${{ github.event.pull_request.head.sha || github.sha }}
+      development: ${{ needs.scope.outputs.web_dev == 'true' }}
+
   required:
     name: Fleetworks required
-    needs: [scope, native, server, compose_amd64, bert]
+    needs: [scope, native, server, compose, bert, web]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -310,28 +446,48 @@ jobs:
           SERVER_SELECTED: ${{ needs.scope.outputs.server }}
           COMPOSE_SELECTED: ${{ needs.scope.outputs.compose }}
           BERT_SELECTED: ${{ needs.scope.outputs.bert }}
+          WEB_SELECTED: ${{ needs.scope.outputs.web }}
+          WEB_DEV_SELECTED: ${{ needs.scope.outputs.web_dev }}
+          BROKER_SELECTED: ${{ needs.scope.outputs.broker }}
+          STORAGE_SELECTED: ${{ needs.scope.outputs.storage }}
           NATIVE_RESULT: ${{ needs.native.result }}
           SERVER_RESULT: ${{ needs.server.result }}
-          COMPOSE_AMD64_RESULT: ${{ needs.compose_amd64.result }}
+          COMPOSE_RESULT: ${{ needs.compose.result }}
           BERT_RESULT: ${{ needs.bert.result }}
+          WEB_RESULT: ${{ needs.web.result }}
         shell: bash
         run: |
           set -euo pipefail
+          printf 'Fleetworks revision `%s`\n\n' "$FLEETWORKS_HEAD" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$SCOPE_RESULT" != success ]]; then
             echo "::error::Scope planning finished with $SCOPE_RESULT"
+            printf 'Scope planning: %s\n' "${SCOPE_RESULT:-missing}" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           verify() {
+            printf '%s: selected=%s result=%s\n' "$1" "${2:-missing}" "${3:-missing}" >> "$GITHUB_STEP_SUMMARY"
             case "$2:$3" in
-              true:success) echo "$1 passed" ;;
-              false:skipped) echo "$1 outside selected scope" ;;
-              *) echo "::error::$1 selected=$2 result=$3"; return 1 ;;
+              true:success|false:skipped) ;;
+              *) echo "::error::$1 selected=${2:-missing} result=${3:-missing}"; return 1 ;;
             esac
           }
           failed=0
+          for value in "$BROKER_SELECTED" "$STORAGE_SELECTED"; do
+            case "$value:$SERVER_SELECTED" in
+              true:true|false:true|false:false) ;;
+              *) echo '::error::Broker and storage scopes need the server gate'; failed=1 ;;
+            esac
+          done
+          case "$WEB_DEV_SELECTED:$WEB_SELECTED" in
+            true:true|false:true|false:false) ;;
+            *) echo '::error::Development browser scope needs the web gate'; failed=1 ;;
+          esac
           verify native "$NATIVE_SELECTED" "$NATIVE_RESULT" || failed=1
           verify server "$SERVER_SELECTED" "$SERVER_RESULT" || failed=1
-          verify compose-amd64 "$COMPOSE_SELECTED" "$COMPOSE_AMD64_RESULT" || failed=1
+          verify compose "$COMPOSE_SELECTED" "$COMPOSE_RESULT" || failed=1
           verify bert "$BERT_SELECTED" "$BERT_RESULT" || failed=1
-          printf 'Fleetworks revision `%s`\n' "$FLEETWORKS_HEAD" >> "$GITHUB_STEP_SUMMARY"
+          verify web "$WEB_SELECTED" "$WEB_RESULT" || failed=1
+          printf 'Broker selected: %s. Storage selected: %s. Development browser selected: %s.\n' \
+            "${BROKER_SELECTED:-missing}" "${STORAGE_SELECTED:-missing}" \
+            "${WEB_DEV_SELECTED:-missing}" >> "$GITHUB_STEP_SUMMARY"
           exit "$failed"

@@ -1011,59 +1011,70 @@ pub async fn commit_stage(
     now: DateTime<Utc>,
     op_key: &str,
 ) -> Result<Committed<Publish>, TxError> {
-    let now_s = ts(now);
-    run_tx(db, RetryPolicy::default(), |tx| {
-        let now_s = now_s.clone();
-        async move {
-            bump(&tx, "job_guard", &claimed.root_id).await?;
-            if let Some(r) = receipt(&tx, op_key).await? {
-                if r.kind == "stage" && r.task == claimed.id && r.epoch == claimed.lease_epoch {
-                    return Ok(Publish::Committed);
-                }
-                return Err(TxError::Abort(format!("operation key {op_key} reused")));
-            }
-            let Some(f) = fence(&tx, claimed, &now_s).await? else {
-                return Ok(Publish::LeaseLost);
-            };
-            if !holds(&f, claimed) {
-                return Ok(Publish::LeaseLost);
-            }
-            if f.cancelled {
-                return Ok(Publish::Cancelled);
-            }
-            run(
-                &tx,
-                tx.query(
-                    "UPSERT $o SET task = $t, root = $root, stage = $stage, \
-                     output_hash = $hash, output_json = $json, committed_at = <datetime>$now \
-                     RETURN NONE",
-                )
-                .bind(("o", rid("stage_output", &claimed.id)))
-                .bind(("t", rid("task", &claimed.id)))
-                .bind(("root", rid("job", &f.root_id)))
-                .bind(("stage", claimed.operation.clone()))
-                .bind(("hash", output_hash.to_string()))
-                .bind(("json", output_json.to_string()))
-                .bind(("now", now_s.clone())),
-            )
-            .await?;
-            complete_in(&tx, claimed, output_hash, &now_s).await?;
-            write_receipt(
-                &tx,
-                op_key,
-                "stage",
-                &claimed.id,
-                claimed.lease_epoch,
-                &now_s,
-            )
-            .await?;
-            // The job row is created as `running`. Close it once every stage
-            // is terminal so a finished brief is not still "running".
-            settle_finished_job_in(&tx, &claimed.job_id).await?;
-            Ok(Publish::Committed)
-        }
+    run_tx(db, RetryPolicy::default(), |tx| async move {
+        let commit = commit_stage_in(&tx, claimed, output_json, output_hash, now, op_key).await?;
+        Ok(match commit {
+            StageCommit::Applied | StageCommit::Replayed => Publish::Committed,
+            StageCommit::Rejected(outcome) => outcome,
+        })
     })
     .await
+}
+
+pub(super) enum StageCommit {
+    Applied,
+    Replayed,
+    Rejected(Publish),
+}
+
+/// Complete a stage inside the caller's transaction. Only a newly applied
+/// commit may write the stage metadata and retained completion fence.
+pub(super) async fn commit_stage_in(
+    tx: &Tx,
+    claimed: &ClaimedTask,
+    output_json: &str,
+    output_hash: &str,
+    now: DateTime<Utc>,
+    op_key: &str,
+) -> Result<StageCommit, TxError> {
+    let now = ts(now);
+    bump(tx, "job_guard", &claimed.root_id).await?;
+    if let Some(r) = receipt(tx, op_key).await? {
+        if r.kind == "stage" && r.task == claimed.id && r.epoch == claimed.lease_epoch {
+            return Ok(StageCommit::Replayed);
+        }
+        return Err(TxError::Abort(format!("operation key {op_key} reused")));
+    }
+    let Some(f) = fence(tx, claimed, &now).await? else {
+        return Ok(StageCommit::Rejected(Publish::LeaseLost));
+    };
+    if !holds(&f, claimed) {
+        return Ok(StageCommit::Rejected(Publish::LeaseLost));
+    }
+    if f.cancelled {
+        return Ok(StageCommit::Rejected(Publish::Cancelled));
+    }
+    run(
+        tx,
+        tx.query(
+            "UPSERT $o SET task = $t, root = $root, stage = $stage, \
+             output_hash = $hash, output_json = $json, committed_at = <datetime>$now \
+             RETURN NONE",
+        )
+        .bind(("o", rid("stage_output", &claimed.id)))
+        .bind(("t", rid("task", &claimed.id)))
+        .bind(("root", rid("job", &f.root_id)))
+        .bind(("stage", claimed.operation.clone()))
+        .bind(("hash", output_hash.to_string()))
+        .bind(("json", output_json.to_string()))
+        .bind(("now", now.clone())),
+    )
+    .await?;
+    complete_in(tx, claimed, output_hash, &now).await?;
+    write_receipt(tx, op_key, "stage", &claimed.id, claimed.lease_epoch, &now).await?;
+    // The job row is created as `running`. Close it once every stage is terminal.
+    settle_finished_job_in(tx, &claimed.job_id).await?;
+    Ok(StageCommit::Applied)
 }
 
 /// Fenced neighborhood-brief publication: lease check, cache write and task

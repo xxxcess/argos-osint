@@ -138,6 +138,91 @@ async fn brief_admission_commits_snapshots_and_fence_with_tasks() {
 }
 
 #[tokio::test]
+async fn brief_completion_rolls_back_with_its_retained_run_fence() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let repo = server.repo("argos", "brief_completion").await;
+    let chain = brief_stages::ensure(
+        &repo,
+        &BriefInputs {
+            article_id: "article".into(),
+            input_revision: "source-revision".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let config = ExecConfig::default();
+    let output = json!({});
+    let final_stage = loop {
+        let (leased, _) = brief_stages::claim(&repo, "brief-worker", &config)
+            .await
+            .unwrap()
+            .unwrap();
+        if leased.operation == "intel_brief_links" {
+            break leased;
+        }
+        assert!(brief_stages::commit(&repo, &leased, &output, 0, "")
+            .await
+            .unwrap());
+    };
+    let db = repo.db();
+    db.query(
+        "DEFINE FIELD OVERWRITE state ON intel_brief_run TYPE string ASSERT $value != 'completed'",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let error = brief_stages::commit(&repo, &final_stage, &output, 1, "warning: retry item")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("state"), "{error:#}");
+    assert!(brief_stages::stage_meta(&repo, &final_stage.id)
+        .await
+        .unwrap()
+        .is_none());
+    let outputs = brief_stages::stage_outputs(&repo, &chain.job_id)
+        .await
+        .unwrap();
+    assert!(!outputs.contains_key("intel_brief_links"));
+
+    db.query("DEFINE FIELD OVERWRITE state ON intel_brief_run TYPE string")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert!(
+        brief_stages::commit(&repo, &final_stage, &output, 1, "warning: retry item")
+            .await
+            .unwrap()
+    );
+    assert!(
+        brief_stages::commit(&repo, &final_stage, &output, 0, "different retry metadata")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        brief_stages::stage_meta(&repo, &final_stage.id)
+            .await
+            .unwrap(),
+        Some((1, "warning: retry item".into())),
+    );
+    let mut state = db
+        .query("SELECT VALUE state FROM ONLY type::record('intel_brief_run', $job)")
+        .bind(("job", chain.job_id))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        state.take::<Option<String>>(0).unwrap().as_deref(),
+        Some("completed")
+    );
+}
+
+#[tokio::test]
 async fn publications_keep_the_newest_generation_and_other_stages() {
     let Some(server) = Server::start() else {
         return;

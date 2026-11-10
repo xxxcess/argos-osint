@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 use surrealdb::types::SurrealValue;
 
 use super::codec;
-use super::jobs::{self, rid, ClaimedTask as Leased, Publish, StageSpec};
+use super::jobs::{self, rid, ClaimedTask as Leased, StageCommit, StageSpec};
 use super::repo::Repository;
 use super::tx::{run_tx, RetryPolicy, Tx, TxError};
 use crate::intel_recon::brief_context::ContextActor;
@@ -457,9 +457,8 @@ pub async fn claim(
     }
 }
 
-/// Fenced stage commit: output, completion and the stage's item count, once
-/// per task and epoch. False (nothing written) when the lease is lost or the
-/// chain was cancelled.
+/// Commit output, completion and the stage's metadata together, once per
+/// task and epoch. False when the lease is lost or the chain was cancelled.
 pub async fn commit(
     repo: &Repository,
     leased: &Leased,
@@ -470,41 +469,67 @@ pub async fn commit(
     let json = output.to_string();
     let hash = crate::nlp::cache::hash(&json);
     let op_key = format!("brief-commit:{}:{}", leased.id, leased.lease_epoch);
-    let published = jobs::commit_stage(repo.db(), leased, &json, &hash, Utc::now(), &op_key)
-        .await
-        .map_err(|e| anyhow!("commit {}: {e}", leased.id))?
-        .value;
-    if published != Publish::Committed {
+    let now = Utc::now();
+    let committed = run_tx(repo.db(), RetryPolicy::default(), |tx| {
+        let (json, hash, op_key) = (&json, &hash, &op_key);
+        async move {
+            match jobs::commit_stage_in(&tx, leased, json, hash, now, op_key).await? {
+                StageCommit::Applied => {
+                    finish_stage_in(&tx, leased, items, reason).await?;
+                    Ok(true)
+                }
+                StageCommit::Replayed => Ok(true),
+                StageCommit::Rejected(_) => Ok(false),
+            }
+        }
+    })
+    .await
+    .map_err(|e| anyhow!("commit {}: {e}", leased.id))?;
+    if !committed.value {
         return Ok(false);
     }
-    let last = brief_pipeline::STAGES.last().map(|(op, _)| *op) == Some(leased.operation.as_str());
+    let run = run_of(repo, &leased.job_id).await?;
+    publish_stage(repo, &leased.job_id, &leased.operation, &run).await?;
+    Ok(true)
+}
+
+async fn finish_stage_in(
+    tx: &Tx,
+    leased: &Leased,
+    items: usize,
+    reason: &str,
+) -> Result<(), TxError> {
     // A completed-with-warnings stage keeps its checkpoints so Retry re-asks
     // only the items that failed.
-    repo.db()
-        .query(
+    jobs::run(
+        tx,
+        tx.query(
             "UPSERT $m SET item_count = $n, empty_reason = $reason RETURN NONE;
              IF !string::starts_with($reason, 'warning:') {
                  DELETE brief_checkpoint WHERE job_id = $job AND stage = $stage;
-             };
-             IF $last {
-                 UPDATE brief_run SET state = 'completed', updated_at = time::now() WHERE job = $j AND state = 'active';
-                 UPDATE $j SET state = 'completed', finished_at = time::now(),
-                   updated_at = time::now() WHERE state IN ['active', 'queued', 'running'];
              };",
         )
         .bind(("m", rid("brief_stage_meta", &leased.id)))
         .bind(("n", items as i64))
         .bind(("reason", reason.to_string()))
         .bind(("job", leased.job_id.clone()))
-        .bind(("stage", leased.operation.clone()))
-        .bind(("last", last))
-        .bind(("j", rid("job", &leased.job_id)))
-        .await?
-        .check()?;
-    let run = run_of(repo, &leased.job_id).await?;
+        .bind(("stage", leased.operation.clone())),
+    )
+    .await?;
+    let last = brief_pipeline::STAGES.last().map(|(op, _)| *op) == Some(leased.operation.as_str());
     if last {
-        super::brief::record_run(
-            repo,
+        let mut result = jobs::run(
+            tx,
+            tx.query("SELECT article_id, generation FROM brief_run WHERE job = $j LIMIT 1")
+                .bind(("j", rid("job", &leased.job_id))),
+        )
+        .await?;
+        let runs: Vec<Run> = jobs::take(&mut result, 0)?;
+        let run = runs
+            .first()
+            .ok_or_else(|| TxError::Abort(format!("brief run for {} missing", leased.job_id)))?;
+        super::brief::record_run_in(
+            tx,
             &leased.job_id,
             &run.article_id,
             run.generation,
@@ -512,8 +537,7 @@ pub async fn commit(
         )
         .await?;
     }
-    publish_stage(repo, &leased.job_id, &leased.operation, &run).await?;
-    Ok(true)
+    Ok(())
 }
 
 /// `brief_pipeline::publish_completed_stage`: merge a completed Claims,

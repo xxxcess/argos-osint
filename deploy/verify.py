@@ -22,13 +22,18 @@ IMAGE_OVERRIDES = (
 )
 
 
-def loopback_ports():
+def fixture_ports(host_storage=False):
+    addresses = ["127.0.0.1", "127.0.0.1"]
+    if host_storage:
+        # A Linux container connects through the host gateway, beyond loopback.
+        addresses.append("0.0.0.0")
     with contextlib.ExitStack() as resources:
-        api = resources.enter_context(socket.socket())
-        web = resources.enter_context(socket.socket())
-        for listener in (api, web):
-            listener.bind(("127.0.0.1", 0))
-        return api.getsockname()[1], web.getsockname()[1]
+        ports = []
+        for address in addresses:
+            listener = resources.enter_context(socket.socket())
+            listener.bind((address, 0))
+            ports.append(listener.getsockname()[1])
+        return ports
 
 
 def request(port, path, token=None, payload=None):
@@ -78,7 +83,7 @@ def exercise_tools(port, token):
         if value["status"] != "running":
             assert value["status"] == "completed", value
             assert value["result"]["observations"] and value["result"]["credits_charged"] == 0
-            return
+            return result, value
         time.sleep(0.1)
     raise RuntimeError("Packaged Tools service did not complete the local fixture")
 
@@ -111,8 +116,9 @@ def check_container_images(workspace, environment, expected):
     print(f"Verified exact image IDs for {len(actual)} Compose services")
 
 
-def verify(venture, compose, dev=False, *, no_build=False, image_ids=None):
-    api_port, web_port = loopback_ports()
+def verify(venture, compose, dev=False, *, no_build=False, image_ids=None, storage="compose-disk", surreal=None):
+    host_storage = storage != "compose-disk"
+    api_port, web_port, *db_ports = fixture_ports(host_storage)
     environment = {
         name: value for name, value in os.environ.items()
         if not name.startswith(("ARGOS_", "FLEETWORKS_", "COMPOSE_"))
@@ -124,6 +130,13 @@ def verify(venture, compose, dev=False, *, no_build=False, image_ids=None):
     )
     if no_build:
         environment.update({name: os.environ[name] for name in IMAGE_OVERRIDES if name in os.environ})
+    if host_storage:
+        environment.update(
+            FLEETWORKS_HOST_DB_BIND=f"0.0.0.0:{db_ports[0]}",
+            FLEETWORKS_SURREAL_BIN=str(surreal),
+        )
+        if image_ids is not None:
+            image_ids = {service: image for service, image in image_ids.items() if service != "surrealdb"}
     with tempfile.TemporaryDirectory(prefix="fleetworks-compose-") as directory:
         workspace = Path(directory) / "workspace"
 
@@ -133,16 +146,17 @@ def verify(venture, compose, dev=False, *, no_build=False, image_ids=None):
                 env=environment, check=check, timeout=timeout,
             )
 
-        try:
-            atlas = compose.with_name("compose.atlas.yml").is_file()
-            options = []
-            if atlas:
-                options.append("--atlas")
-            if dev:
-                options.append("--dev")
-            if no_build:
-                options.append("--no-build")
-            run("up", "--storage", "compose-disk", "--compose-file", compose, *options, timeout=2400)
+        atlas = compose.with_name("compose.atlas.yml").is_file()
+        options = []
+        if atlas:
+            options.append("--atlas")
+        if dev:
+            options.append("--dev")
+        if no_build:
+            options.append("--no-build")
+
+        def start():
+            run("up", "--storage", storage, "--compose-file", compose, *options, timeout=2400)
             run("status", "--json")
             ready = "/api/v1/health/ready"
             assert request(api_port, ready)[0] == 401, "direct API accepted a request without a bearer"
@@ -153,14 +167,32 @@ def verify(venture, compose, dev=False, *, no_build=False, image_ids=None):
             assert direct == relay and direct.get("ready") and direct.get("storage"), (
                 "web readiness did not reach the same ready API"
             )
-            assert (workspace / "storage/surrealdb").is_dir(), "managed disk store is missing"
-            exercise_tools(api_port, token)
+            if storage == "compose-disk":
+                assert (workspace / "storage/surrealdb").is_dir(), "Compose disk store is missing"
+            if storage == "host-disk":
+                assert (workspace / "storage/host-surrealdb").is_dir(), "host disk store is missing"
+            if image_ids is not None:
+                check_container_images(workspace, environment, image_ids)
+            return token
+
+        try:
+            token = start()
+            result_path, completed = exercise_tools(api_port, token)
             if atlas:
                 assert (workspace / "storage/rabbitmq").is_dir(), "managed RabbitMQ store is missing"
                 exercise_atlas(api_port, token)
                 print("Packaged Atlas dispatch reached the private classifier service")
-            if image_ids is not None:
-                check_container_images(workspace, environment, image_ids)
+            if host_storage:
+                run("stop", timeout=150)
+                token = start()
+                status, value = request(api_port, result_path, token)
+                if storage == "host-memory":
+                    assert status == 404, "host memory retained a tool result after restart"
+                    exercise_tools(api_port, token)
+                    print("Host memory reset its tool result and accepted new work after restart")
+                else:
+                    assert (status, value) == (200, completed), "host disk lost its tool result after restart"
+                    print("Host disk retained its completed tool result after restart")
         finally:
             failed = sys.exc_info()[0] is not None
             try:
@@ -171,7 +203,7 @@ def verify(venture, compose, dev=False, *, no_build=False, image_ids=None):
             finally:
                 run("stop", check=not failed, timeout=150)
         mode = "development" if dev else "production"
-        print(f"Venture {mode} Compose startup, bearer isolation, web relay and owned shutdown passed")
+        print(f"Venture {mode} Compose startup, bearer isolation, web relay and owned shutdown passed ({storage})")
 
 
 def main():
@@ -181,7 +213,13 @@ def main():
     parser.add_argument("--dev", action="store_true", help="verify the development web override")
     parser.add_argument("--no-build", action="store_true", help="use preloaded images without building or pulling")
     parser.add_argument("--image-ids", type=Path, help="expected Docker image ID for each Compose service as JSON")
+    parser.add_argument("--storage", choices=("compose-disk", "host-memory", "host-disk"), default="compose-disk")
+    parser.add_argument("--surreal", type=Path, help="pinned SurrealDB executable for host storage modes")
     args = parser.parse_args()
+    if args.storage == "compose-disk" and args.surreal is not None:
+        parser.error("--surreal requires a host storage mode")
+    if args.storage != "compose-disk" and args.surreal is None:
+        parser.error("host storage modes require --surreal")
     image_ids = None
     if args.image_ids:
         if not args.no_build:
@@ -197,7 +235,8 @@ def main():
             parser.error("--image-ids must map service names to SHA-256 image IDs")
     verify(
         args.venture.resolve(strict=True), args.compose.resolve(strict=True), args.dev,
-        no_build=args.no_build, image_ids=image_ids,
+        no_build=args.no_build, image_ids=image_ids, storage=args.storage,
+        surreal=args.surreal.resolve(strict=True) if args.surreal else None,
     )
 
 

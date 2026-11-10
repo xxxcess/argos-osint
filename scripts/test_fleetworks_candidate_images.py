@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -83,6 +84,26 @@ class CandidateImageTests(unittest.TestCase):
         with patch.object(candidate, "docker", return_value=sample):
             with self.assertRaisesRegex(ValueError, "valid linux/amd64 image identity"):
                 candidate.inspect_images({"runtime": self.tags["runtime"]}, self.platform)
+
+    def test_host_modes_reuse_the_downloaded_launcher_and_loaded_images(self):
+        manifest = {"images": self.images}
+        image_ids = {role: item["id"] for role, item in self.images.items()}
+        surreal = self.directory / "surreal"
+        with ExitStack() as mocks:
+            mocks.enter_context(redirect_stdout(io.StringIO()))
+            for name, value in (
+                ("verify_daemon", self.platform),
+                ("read_manifest", (manifest, self.directory / "images.tar.gz")),
+                ("docker", None), ("inspect_images", self.images),
+                ("service_image_ids", image_ids), ("extract", None),
+            ):
+                mocks.enter_context(patch.object(candidate, name, return_value=value))
+            run = mocks.enter_context(patch.object(candidate.subprocess, "run"))
+            candidate.verify(self.directory, "manifest", self.directory, "cli", self.revision, self.target, surreal=surreal)
+        [compose, memory, disk] = [call.args[0] for call in run.call_args_list]
+        self.assertIn("--no-build", compose)
+        self.assertEqual(memory, [*compose, "--storage", "host-memory", "--surreal", str(surreal)])
+        self.assertEqual(disk, [*compose, "--storage", "host-disk", "--surreal", str(surreal)])
 
 
 if __name__ == "__main__":

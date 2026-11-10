@@ -236,7 +236,8 @@ jobs:
             python3 scripts/agent_cargo.py test --timings --locked -p argos-osint-core \
               --no-default-features --features server,nlp,classifier \
               --test storage_contracts --test storage_jobs --test storage_brief --test storage_brief_publish \
-              --test storage_provider_pacer --test storage_credits
+              --test storage_provider_pacer --test storage_provider_account --test storage_credits \
+              --test storage_actor_catalog --test storage_atlas_delete
       - name: Test shared Atlas provider quota reservations
         if: needs.scope.outputs.broker == 'true' && needs.scope.outputs.full != 'true'
         env:
@@ -325,7 +326,7 @@ jobs:
           export FLEETWORKS_UID="$(id -u)" FLEETWORKS_GID="$(id -g)"
           umask 077
           mkdir -p "$FLEETWORKS_HOST_WORKSPACE"/{secrets,storage/surrealdb}
-          for secret in api-token brain-token tools-token storage-password storage-root-password; do
+          for secret in api-token brain-token control-token jobs-token tools-token storage-password storage-root-password; do
             printf '%064d\n' 0 > "$FLEETWORKS_HOST_WORKSPACE/secrets/$secret"
           done
           docker compose -f deploy/compose.yml --profile disk config --quiet

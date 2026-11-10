@@ -10,11 +10,15 @@ on:
       - 'scripts/test_fleetworks_candidate*.py'
       - 'scripts/agent_cargo.py'
       - 'scripts/release_check.mjs'
-      - 'deploy/Dockerfile*'
+      - 'scripts/test_surreal.py'
+      - 'scripts/surrealdb-release.json'
+      - 'deploy/Dockerfile'
+      - 'deploy/Dockerfile.dockerignore'
       - 'deploy/compose*.yml'
       - 'deploy/*.sh'
       - 'deploy/check-web.mjs'
       - 'deploy/verify.py'
+      - 'services/api-host/**'
   workflow_dispatch:
     inputs:
       head:

@@ -166,12 +166,30 @@ jobs:
           artifact-ids: ${{ needs.package_images.outputs.artifact-id }}
           path: ${{ runner.temp }}/fleetworks-image-candidate
           digest-mismatch: error
+      - name: Resolve pinned SurrealDB for host storage checks
+        if: inputs.target == 'x86_64-unknown-linux-gnu'
+        id: surreal
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$(python3 scripts/test_surreal.py --mode server --fetch-only |
+            sed -n 's/^test-surreal: server binary //p')"
+          test -x "$binary"
+          printf 'binary=%s\n' "$binary" >> "$GITHUB_OUTPUT"
       - name: Verify archive identities and run Venture without builds or pulls
         env:
           CLI_SHA256: ${{ needs.package.outputs.sha256 }}
           MANIFEST_SHA256: ${{ needs.package_images.outputs.manifest-sha256 }}
+          SURREAL_BIN: ${{ steps.surreal.outputs.binary }}
+        shell: bash
         run: |
+          set -euo pipefail
+          host_checks=()
+          if [[ "$CANDIDATE_TARGET" == x86_64-unknown-linux-gnu ]]; then
+            test -x "$SURREAL_BIN"
+            host_checks=(--surreal "$SURREAL_BIN")
+          fi
           python3 scripts/fleetworks_candidate_images.py verify \
             --directory "$RUNNER_TEMP/fleetworks-image-candidate" --manifest-sha256 "$MANIFEST_SHA256" \
             --cli-directory "$RUNNER_TEMP/fleetworks-candidate" --cli-sha256 "$CLI_SHA256" \
-            --revision "$FLEETWORKS_HEAD" --target "$CANDIDATE_TARGET"
+            --revision "$FLEETWORKS_HEAD" --target "$CANDIDATE_TARGET" "${host_checks[@]}"

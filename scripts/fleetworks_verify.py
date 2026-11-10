@@ -17,6 +17,8 @@ ALL_SCOPES = PRIMARY_SCOPES | {"bert", "web", "web_dev"}
 BERT_ONLY_PATHS = {".github/workflows/atlas-bert.yml"}
 BERT_SHARED_PATHS = {
     "apps/venture/src/classifier.rs",
+    "services/api-host/src/classifier_service.rs",
+    "services/api-host/src/classifier_train.rs",
     "crates/argos-api-host/src/classifier_service.rs",
     "crates/argos-api-host/src/classifier_train.rs",
     "crates/argos-osint-core/tests/adversarial_classifier_runtime.rs",
@@ -38,12 +40,20 @@ WEB_BUILD_PATHS = {
     "scripts/serve_web.mjs", "scripts/test_web_stack.py",
 }
 SERVER_PREFIXES = (
+    "services/api-host/",
     "crates/argos-api-host/",
     "crates/argos-osint-api/",
     "crates/argos-osint-core/",
     "crates/fleetworks-broker/",
     "services/",
 )
+SERVER_STORAGE_PATHS = {
+    "services/api-host/Cargo.toml",
+    "services/api-host/src/main.rs",
+    "services/api-host/src/fleetworks.rs",
+    "services/api-host/src/actor_seed.rs",
+    "services/api-host/src/atlas_worker.rs",
+}
 NATIVE_PACKAGES = (
     "-p", "fleetworks-workspace", "-p", "fleetworks-contracts", "-p", "fleetworks-cli", "-p", "fleetworks-venture",
 )
@@ -83,7 +93,7 @@ def path_scopes(path):
         return {"web", "web_dev", "server", "compose"}
     if path.startswith("deploy/"):
         return scopes | {"server", "compose"}
-    if path.startswith((
+    if path in SERVER_STORAGE_PATHS or path.startswith((
         "crates/argos-osint-core/src/storage/", "crates/argos-osint-core/tests/storage_",
         "crates/argos-osint-core/src/intel_recon/brief_",
     )):

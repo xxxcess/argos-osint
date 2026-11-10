@@ -161,7 +161,7 @@ def service_image_ids(overrides, images):
     return {service: by_tag[tag] for service, tag in services.items()}
 
 
-def verify(directory, manifest_digest, cli_directory, cli_digest, revision, target):
+def verify(directory, manifest_digest, cli_directory, cli_digest, revision, target, *, surreal=None):
     platform = verify_daemon(target)
     manifest, archive = read_manifest(directory, manifest_digest, revision, target, platform)
     tags = image_tags(revision, platform)
@@ -181,10 +181,18 @@ def verify(directory, manifest_digest, cli_directory, cli_digest, revision, targ
         extract(cli_archive, install, cli_digest, version, target, revision)
         id_file = install / "service-image-ids.json"
         id_file.write_text(json.dumps(expected_ids), encoding="utf-8")
-        subprocess.run([
+        smoke = [
             sys.executable, str(ROOT / "deploy/verify.py"), "--venture", str(install / "bin/venture"),
             "--no-build", "--image-ids", str(id_file),
-        ], cwd=ROOT, env={**os.environ, **overrides}, check=True)
+        ]
+        environment = {**os.environ, **overrides}
+        subprocess.run(smoke, cwd=ROOT, env=environment, check=True)
+        if surreal is not None:
+            for storage in ("host-memory", "host-disk"):
+                subprocess.run(
+                    [*smoke, "--storage", storage, "--surreal", str(surreal)],
+                    cwd=ROOT, env=environment, check=True,
+                )
     print(f"Verified downloaded Docker image IDs for {revision} on {platform}")
 
 
@@ -201,6 +209,7 @@ def main():
     check.add_argument("--manifest-sha256", required=True)
     check.add_argument("--cli-directory", type=Path, required=True)
     check.add_argument("--cli-sha256", required=True)
+    check.add_argument("--surreal", type=Path, help="pinned SurrealDB for optional host-memory and host-disk smokes")
     args = parser.parse_args()
     try:
         if not re.fullmatch(r"[0-9a-f]{40}", args.revision):
@@ -210,7 +219,11 @@ def main():
             with args.github_output.open("a", encoding="utf-8") as output:
                 print(f"manifest-sha256={sha256(manifest)}", file=output)
         else:
-            verify(args.directory.resolve(), args.manifest_sha256, args.cli_directory.resolve(), args.cli_sha256, args.revision, args.target)
+            verify(
+                args.directory.resolve(), args.manifest_sha256, args.cli_directory.resolve(),
+                args.cli_sha256, args.revision, args.target,
+                surreal=args.surreal.resolve(strict=True) if args.surreal else None,
+            )
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print(f"fleetworks-candidate-images: {error}", file=sys.stderr)
         return 1
